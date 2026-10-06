@@ -7,7 +7,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{ColorOp, Copy, Draw, Font, Point};
 use crate::image::{GdFont, GdImage, gd, im, int, with_font};
@@ -816,7 +816,7 @@ fn imagecolorsforindex(
     req: &mut Request,
     image: Instance<GdImage>,
     color: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let im = im(req, image)?;
     let col = int(color);
     if col < 0 || (!im.true_color() && col >= im.colors_total()) {
@@ -1805,7 +1805,7 @@ fn imagesetclip(
 /// }
 /// ```
 #[php_function]
-fn imagegetclip(req: &mut Request, image: Instance<GdImage>) -> Result<PhpArray, Thrown> {
+fn imagegetclip(req: &mut Request, image: Instance<GdImage>) -> Result<Owner<PhpArray>, Thrown> {
     let clip = im(req, image)?.clip().map(|n| Value::int(i64::from(n)));
     crate::list(req, &clip)
 }

@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::decode::{
     Arg, CertParam, Origin, c_string, cert_from_param, certs_from_file, check_path, finish,
@@ -82,7 +82,7 @@ pub(crate) const HANDLERS: Refusals = crate::refusals("openssl_x509_read()");
 pub(crate) fn object_of(
     req: &mut Request,
     cert: Certificate,
-) -> Result<Instance<OpenSSLCertificate>, Thrown> {
+) -> Result<Owner<Instance<OpenSSLCertificate>>, Thrown> {
     let Some(class) = lookup_class(req, b"OpenSSLCertificate")? else {
         return Err(fatal(
             req,
@@ -93,7 +93,7 @@ pub(crate) fn object_of(
     if let Some(payload) = object.native_mut::<Cert>(req) {
         payload.cert = Some(cert);
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// The warning every native raises for a certificate it cannot read.
@@ -124,7 +124,7 @@ fn no_cert(req: &mut Request) {
 fn openssl_x509_read(
     req: &mut Request,
     certificate: CertParam,
-) -> Result<OrFalse<Instance<OpenSSLCertificate>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<OpenSSLCertificate>>>, Thrown> {
     finish(req, move |req| {
         let Some(cert) = cert_from_param(req, &certificate, Arg::new(1, "certificate"))? else {
             no_cert(req);
@@ -250,7 +250,7 @@ fn openssl_x509_export(
             return Ok(false);
         }
         let pem = PhpString::new(req, &out.contents())?;
-        output.set(req, Untyped(Value::string(pem)))?;
+        output.set(req, Untyped(Value::string(pem.hand_on_unmigrated())))?;
         Ok(true)
     })
 }
@@ -282,7 +282,7 @@ fn openssl_x509_fingerprint(
     certificate: CertParam,
     #[php(default = "sha1")] digest_algo: PhpString,
     #[php(default = false)] binary: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     finish(req, move |req| {
         let Some(cert) = cert_from_param(req, &certificate, Arg::new(1, "certificate"))? else {
             no_cert(req);
@@ -381,15 +381,16 @@ fn openssl_x509_verify(
 /// itself or into a new array under `key`.
 pub(crate) fn name_entries(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     key: Option<&[u8]>,
     name: &Name<'_>,
     short: bool,
 ) -> Result<(), Thrown> {
-    let mut inner = match key {
-        Some(_) => PhpArray::new(req)?,
-        None => *array,
+    let mut fresh = match key {
+        Some(_) => Some(PhpArray::new(req)?),
+        None => None,
     };
+    let inner = fresh.as_mut().unwrap_or(array);
     for entry in name.entries() {
         let label = if short {
             ffi::nid_short_name(entry.nid)
@@ -401,15 +402,16 @@ pub(crate) fn name_entries(
             store_errors(req);
             continue;
         };
-        let text = Value::string(PhpString::new(req, &text)?);
+        let text = PhpString::new(req, &text)?.into_value();
         let found = inner.find(&label);
         match found.as_ref().map(Value::as_ref) {
             Some(ValueRef::Array(list)) => {
                 let mut list = *list;
-                list.append(req, text)?;
+                list.append(req, text.hand_on_unmigrated())?;
             }
             Some(ValueRef::Str(_)) => {
                 let Some(first) = found else {
+                    text.give_up(req);
                     continue;
                 };
                 // `zend_string_copy`: the list holds the string as well,
@@ -417,20 +419,20 @@ pub(crate) fn name_entries(
                 req.addref(&first);
                 let mut list = PhpArray::new(req)?;
                 list.append(req, first)?;
-                list.append(req, text)?;
-                let label_key = Key::Str(PhpString::new(req, &label)?);
-                inner.set(req, label_key, Value::array(list))?;
+                list.append(req, text.hand_on_unmigrated())?;
+                let label_key = Key::Str(PhpString::new(req, &label)?.hand_on_unmigrated());
+                inner.set(req, label_key, list.into_value().hand_on_unmigrated())?;
             }
-            Some(_) => {}
+            Some(_) => text.give_up(req),
             None => {
-                let label = Key::from_string(PhpString::new(req, &label)?);
-                inner.set(req, label, text)?;
+                let label = Key::from_string(PhpString::new(req, &label)?.hand_on_unmigrated());
+                inner.set(req, label, text.hand_on_unmigrated())?;
             }
         }
     }
-    if let Some(key) = key {
-        let key = Key::Str(PhpString::new(req, key)?);
-        array.set(req, key, Value::array(inner))?;
+    if let (Some(key), Some(fresh)) = (key, fresh) {
+        let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+        array.set(req, key, fresh.into_value().hand_on_unmigrated())?;
     }
     Ok(())
 }
@@ -606,7 +608,7 @@ fn openssl_x509_parse(
     req: &mut Request,
     certificate: CertParam,
     #[php(default = true)] short_names: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     finish(req, move |req| {
         let Some(cert) = cert_from_param(req, &certificate, Arg::new(1, "certificate"))? else {
             return Ok(OrFalse::False);
@@ -661,11 +663,20 @@ fn openssl_x509_parse(
             } else {
                 purpose.long
             };
-            let label = Value::string(PhpString::new(req, &label)?);
+            let label = Value::string(PhpString::new(req, &label)?.hand_on_unmigrated());
             row.set(req, Key::Int(2), label)?;
-            purposes.set(req, Key::Int(i64::from(purpose.id)), Value::array(row))?;
+            purposes.set(
+                req,
+                Key::Int(i64::from(purpose.id)),
+                row.into_value().hand_on_unmigrated(),
+            )?;
         }
-        put(req, &mut out, b"purposes", Value::array(purposes))?;
+        put(
+            req,
+            &mut out,
+            b"purposes",
+            purposes.into_value().hand_on_unmigrated(),
+        )?;
 
         let Some(extensions) = cert.extensions() else {
             store_errors(req);
@@ -673,11 +684,16 @@ fn openssl_x509_parse(
         };
         let mut rows = PhpArray::new(req)?;
         for (name, value) in extensions {
-            let value = Value::string(PhpString::new(req, &value)?);
-            let name = Key::from_string(PhpString::new(req, &name)?);
+            let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
+            let name = Key::from_string(PhpString::new(req, &name)?.hand_on_unmigrated());
             rows.set(req, name, value)?;
         }
-        put(req, &mut out, b"extensions", Value::array(rows))?;
+        put(
+            req,
+            &mut out,
+            b"extensions",
+            rows.into_value().hand_on_unmigrated(),
+        )?;
         Ok(OrFalse::Value(out))
     })
 }
@@ -698,7 +714,9 @@ pub(crate) fn setup_verify(
     let (mut files, mut dirs) = (0, 0);
     for (_, item) in calist.map(|a| a.snapshot()).unwrap_or_default() {
         let text = to_string(req, &item)?;
-        let Some(path) = check_path(req, text.as_bytes(), Origin::Item(arg, None), false) else {
+        let path = check_path(req, text.as_bytes(), Origin::Item(arg, None), false);
+        text.give_up(req);
+        let Some(path) = path else {
             continue;
         };
         let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();
@@ -854,7 +872,7 @@ fn openssl_x509_checkpurpose(
 /// string(0) ""
 /// ```
 #[php_function]
-fn openssl_get_cert_locations(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn openssl_get_cert_locations(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     let names: [&[u8]; 6] = [
         b"default_cert_file",

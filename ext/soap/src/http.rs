@@ -15,7 +15,7 @@ use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{
     Handshake, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx, Streams as _, Xport,
 };
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::{UriParser, base64};
 use php_ext_uri::{Parser, UriStruct};
@@ -422,7 +422,7 @@ fn gets(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
         return Ok(None);
     };
     let bytes = line.as_bytes().to_vec();
-    req.release(Value::string(line));
+    line.give_up(req);
     Ok(Some(bytes))
 }
 
@@ -642,7 +642,7 @@ fn http_connect(
     use_ssl: bool,
     context: Option<StreamCtx>,
     use_proxy: &mut bool,
-) -> R<Option<Stream>> {
+) -> R<Option<Owner<Stream>>> {
     let proxy_host = client_slot(this, ClientSlot::ProxyHost);
     let proxy_port = client_slot(this, ClientSlot::ProxyPort);
     let (host, port) = match (proxy_host.as_str_bytes(), proxy_port.as_int()) {
@@ -690,9 +690,9 @@ fn http_connect(
         None => false,
     };
     if !given && let Some(own) = stream.ctx(req) {
-        let peer_name = Value::string(PhpString::new(req, host_of(uri))?);
+        let peer_name = PhpString::new(req, host_of(uri))?.into_value();
         let set = own.set_option(req, b"ssl", b"peer_name", &peer_name);
-        req.release(peer_name);
+        peer_name.give_up(req);
         set?;
     }
     let target_port = port_of(uri);
@@ -706,8 +706,16 @@ fn http_connect(
     head.extend_from_slice(b"\r\n");
     proxy_authentication(this, &mut head);
     head.extend_from_slice(b"\r\n");
-    if stream.write(req, &head) != Some(head.len()) || get_http_headers(req, stream)?.is_none() {
-        stream.free(req);
+    let connected = stream.write(req, &head) == Some(head.len())
+        && match get_http_headers(req, *stream) {
+            Ok(headers) => headers.is_some(),
+            Err(thrown) => {
+                stream.hand_on_unmigrated().free(req);
+                return Err(thrown);
+            }
+        };
+    if !connected {
+        stream.hand_on_unmigrated().free(req);
         return Ok(None);
     }
     // Enable the TLS layer: the method the `ssl_method` names, TLS for
@@ -724,7 +732,7 @@ fn http_connect(
             Handshake::Failed | Handshake::Unsupported
         )
     {
-        stream.free(req);
+        stream.hand_on_unmigrated().free(req);
         return Ok(None);
     }
     Ok(Some(stream))
@@ -745,7 +753,7 @@ fn in_domain(host: &[u8], domain: &[u8]) -> bool {
 /// `add_soap_fault(this_ptr, "HTTP", text, NULL, NULL, soap_lang_en)`.
 fn fault(req: &mut Request, this: PhpObject, text: &[u8]) -> R<()> {
     let fault = add_soap_fault(req, this, b"HTTP", text, None, None, b"en")?;
-    req.release(Value::object(fault));
+    fault.give_up(req);
     Ok(())
 }
 
@@ -765,10 +773,10 @@ fn drop_connection(req: &mut Request, this: PhpObject, stream: Stream, forget_ur
 /// An array slot of the client separated for a write, `SEPARATE_ARRAY`:
 /// the array with one owner, the caller's, to write back with
 /// [`set_client_slot`]; a fresh one where the slot holds none.
-fn slot_array(req: &mut Request, this: PhpObject, which: ClientSlot) -> R<PhpArray> {
+fn slot_array(req: &mut Request, this: PhpObject, which: ClientSlot) -> R<Owner<PhpArray>> {
     match client_slot(this, which).as_array().copied() {
-        Some(mut array) => {
-            req.addref(&Value::array(array));
+        Some(array) => {
+            let mut array = Owner::take(req, array);
             array.separate(req)?;
             Ok(array)
         }
@@ -778,13 +786,13 @@ fn slot_array(req: &mut Request, this: PhpObject, which: ClientSlot) -> R<PhpArr
 
 /// A string slot of the client written, `ZVAL_STRINGL`.
 fn set_string_slot(req: &mut Request, this: PhpObject, which: ClientSlot, bytes: &[u8]) -> R<()> {
-    let value = Value::string(PhpString::new(req, bytes)?);
-    set_client_slot(req, this, which, value)
+    let value = PhpString::new(req, bytes)?;
+    set_client_slot(req, this, which, Value::string(value.hand_on_unmigrated()))
 }
 
 /// `bytes` as a string value with one owner.
-fn string(req: &mut Request, bytes: &[u8]) -> R<Value> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `call_user_function` of the function named, over a string and
@@ -793,17 +801,16 @@ fn string(req: &mut Request, bytes: &[u8]) -> R<Value> {
 fn call_by_name(req: &mut Request, name: &[u8], data: &[u8], ints: &[i64]) -> R<Option<Vec<u8>>> {
     let named = string(req, name)?;
     let callable = to_callable(req, &named);
-    req.release(named);
+    named.give_up(req);
     let callable = callable?;
-    let mut args = vec![string(req, data)?];
+    let text = string(req, data)?;
+    let mut args = vec![*text];
     args.extend(ints.iter().map(|n| Value::int(*n)));
     let answered = call(req, &callable, &args);
-    for arg in args {
-        req.release(arg);
-    }
+    text.give_up(req);
     let answered = answered?;
     let out = answered.as_str_bytes().map(<[u8]>::to_vec);
-    req.release(answered);
+    answered.give_up(req);
     Ok(out)
 }
 
@@ -1027,14 +1034,17 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
                 fault(req, this, b"Could not connect to host")?;
                 return Ok(Sent::Failed);
             };
-            set_client_slot(req, this, ClientSlot::HttpSocket, s.as_value())?;
+            let view = *s;
+            // The client's slot keeps the connection.
+            let kept = s.into_resource().into_value().hand_on_unmigrated();
+            set_client_slot(req, this, ClientSlot::HttpSocket, kept)?;
             set_client_slot(
                 req,
                 this,
                 ClientSlot::UseProxy,
                 Value::int(i64::from(use_proxy)),
             )?;
-            stream = Some(s);
+            stream = Some(view);
         }
         let client_trace = matches!(
             client_slot(this, ClientSlot::Trace).as_ref(),
@@ -1200,7 +1210,12 @@ fn request_headers(
     if let Some(payload) = url.native_mut::<UrlPayload>(req) {
         payload.uri = Some(uri.clone());
     }
-    set_client_slot(req, this, ClientSlot::HttpUrl, Value::object(url))?;
+    set_client_slot(
+        req,
+        this,
+        ClientSlot::HttpUrl,
+        url.into_value().hand_on_unmigrated(),
+    )?;
     let http_1_1 = match context {
         Some(context) => !matches!(
             context.option(req, b"http", b"protocol_version")
@@ -1366,7 +1381,7 @@ fn digest_authorization(
         .find(b"nc")
         .and_then(|v| v.as_int())
         .map_or(1, |n| n.wrapping_add(1));
-    let key = Key::Str(PhpString::new(req, b"nc")?);
+    let key = Key::Str(PhpString::new(req, b"nc")?.hand_on_unmigrated());
     digest.set(req, key, Value::int(count))?;
     // `snprintf(nc, sizeof(nc), "%08" ZEND_LONG_FMT_SPEC, ...)`, or
     // `"00000001"` for a count it adds.
@@ -1382,7 +1397,8 @@ fn digest_authorization(
     let qop = field(b"qop");
     let opaque = field(b"opaque");
     let algorithm = field(b"algorithm");
-    set_client_slot(req, this, ClientSlot::Digest, Value::array(digest))?;
+    let kept = digest.into_value().hand_on_unmigrated();
+    set_client_slot(req, this, ClientSlot::Digest, kept)?;
     let password = client_slot(this, ClientSlot::Password);
     let mut ha1 = md5_hex(&[
         login,
@@ -1520,14 +1536,15 @@ fn set_cookie(req: &mut Request, this: PhpObject, cookie: &[u8], uri: &UriStruct
         }
         _ => Ok(()),
     };
-    set_client_slot(req, this, ClientSlot::Cookies, Value::array(cookies))?;
+    let kept = cookies.into_value().hand_on_unmigrated();
+    set_client_slot(req, this, ClientSlot::Cookies, kept)?;
     stored
 }
 
 /// The body of [`set_cookie`] once the name is known.
 fn store_cookie(
     req: &mut Request,
-    cookies: &mut PhpArray,
+    cookies: &mut Owner<PhpArray>,
     cookie: &[u8],
     eqpos: usize,
     sempos: Option<usize>,
@@ -1535,7 +1552,7 @@ fn store_cookie(
 ) -> R<()> {
     let mut zcookie = PhpArray::new(req)?;
     let value = string(req, &cookie[eqpos + 1..sempos.unwrap_or(cookie.len())])?;
-    zcookie.set(req, Key::Int(0), value)?;
+    zcookie.set(req, Key::Int(0), value.hand_on_unmigrated())?;
     if let Some(sempos) = sempos {
         let mut options = sempos + 1;
         while options < cookie.len() {
@@ -1547,10 +1564,10 @@ fn store_cookie(
             let end = next.unwrap_or(rest.len());
             if let Some(path) = rest.strip_prefix(b"path=") {
                 let value = string(req, &path[..end - 5])?;
-                zcookie.set(req, Key::Int(1), value)?;
+                zcookie.set(req, Key::Int(1), value.hand_on_unmigrated())?;
             } else if let Some(domain) = rest.strip_prefix(b"domain=") {
                 let value = string(req, &domain[..end - 7])?;
-                zcookie.set(req, Key::Int(2), value)?;
+                zcookie.set(req, Key::Int(2), value.hand_on_unmigrated())?;
             } else if rest.starts_with(b"secure") {
                 zcookie.set(req, Key::Int(3), Value::bool(true))?;
             }
@@ -1564,15 +1581,19 @@ fn store_cookie(
         let t = cstr(uri.path.as_deref().unwrap_or(b"/"));
         if let Some(c) = t.iter().rposition(|c| *c == b'/') {
             let value = string(req, &t[..c])?;
-            zcookie.set(req, Key::Int(1), value)?;
+            zcookie.set(req, Key::Int(1), value.hand_on_unmigrated())?;
         }
     }
     if !zcookie.contains(&Key::Int(2)) {
         let value = string(req, host_of(uri))?;
-        zcookie.set(req, Key::Int(2), value)?;
+        zcookie.set(req, Key::Int(2), value.hand_on_unmigrated())?;
     }
     let name = PhpString::new(req, &cookie[..eqpos])?;
-    cookies.set(req, Key::from_string(name), Value::array(zcookie))
+    cookies.set(
+        req,
+        Key::from_string(name.hand_on_unmigrated()),
+        zcookie.into_value().hand_on_unmigrated(),
+    )
 }
 
 /// The URL a `Location` sends the next request to: a relative one takes
@@ -1631,7 +1652,7 @@ fn digest_challenge(req: &mut Request, this: PhpObject, headers: &[u8]) -> R<boo
     {
         return Ok(false);
     }
-    let mut digest: Option<PhpArray> = None;
+    let mut digest: Option<Owner<PhpArray>> = None;
     let mut s = b"Digest".len();
     while s < auth.len() {
         while at(auth, s) == b' ' {
@@ -1677,14 +1698,15 @@ fn digest_challenge(req: &mut Request, this: PhpObject, headers: &[u8]) -> R<boo
             Some(array) => array,
             None => digest.insert(PhpArray::new(req)?),
         };
-        let key = Key::from_string(PhpString::new(req, name)?);
+        let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
         let value = string(req, val)?;
-        array.set(req, key, value)?;
+        array.set(req, key, value.hand_on_unmigrated())?;
     }
     let Some(digest) = digest else {
         return Ok(false);
     };
-    set_client_slot(req, this, ClientSlot::Digest, Value::array(digest))?;
+    let kept = digest.into_value().hand_on_unmigrated();
+    set_client_slot(req, this, ClientSlot::Digest, kept)?;
     Ok(true)
 }
 

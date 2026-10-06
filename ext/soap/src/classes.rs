@@ -10,7 +10,7 @@ use php_ext::call::{call_method, lookup_class, read_prop};
 use php_ext::coerce::{to_long, to_string};
 use php_ext::raising::{Thrown, arg_value_error, argument_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::model;
 use crate::{SOAP_1_1, SOAP_1_2, State};
@@ -26,8 +26,8 @@ pub(crate) fn is_fault(req: &mut Request, object: PhpObject) -> bool {
 }
 
 /// A string value, made in the request's heap.
-pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> R<Value> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `ZVAL_COPY`: one more owner of `value`, the caller's to give away.
@@ -354,36 +354,56 @@ impl SoapFault {
     /// #0 %s(5): g()
     /// #1 {main}
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> R<PhpString> {
+    fn __toString(req: &mut Request, this: This<Self>) -> R<Owner<PhpString>> {
         let object = this.object();
         let faultcode = read_prop(req, &object, b"faultcode")?;
         let faultstring = read_prop(req, &object, b"faultstring")?;
         let file = read_prop(req, &object, b"file")?;
         let line = read_prop(req, &object, b"line")?;
         let trace = call_method(req, &object, b"gettraceasstring", &[])?;
-        let faultcode = to_string(req, &faultcode)?;
-        let faultstring = to_string(req, &faultstring)?;
-        let file = to_string(req, &file)?;
-        let line = to_long(req, &line)?;
-        let trace_s = to_string(req, &trace)?;
-        req.release(trace);
+        // Each converted in php's order, those made given up where one
+        // throws.
+        let mut texts: Vec<Owner<PhpString>> = Vec::with_capacity(4);
+        let mut line_n = 0;
+        let mut failed = None;
+        for (at, value) in [&faultcode, &faultstring, &file, &line, &*trace]
+            .into_iter()
+            .enumerate()
+        {
+            let step = if at == 3 {
+                to_long(req, value).map(|n| line_n = n)
+            } else {
+                to_string(req, value).map(|s| texts.push(s))
+            };
+            if let Err(thrown) = step {
+                failed = Some(thrown);
+                break;
+            }
+        }
+        trace.give_up(req);
+        if let Some(thrown) = failed {
+            for s in texts {
+                s.give_up(req);
+            }
+            return Err(thrown);
+        }
         let mut out = Vec::new();
         out.extend_from_slice(b"SoapFault exception: [");
-        out.extend_from_slice(faultcode.as_bytes());
+        out.extend_from_slice(texts[0].as_bytes());
         out.extend_from_slice(b"] ");
-        out.extend_from_slice(faultstring.as_bytes());
+        out.extend_from_slice(texts[1].as_bytes());
         out.extend_from_slice(b" in ");
-        out.extend_from_slice(file.as_bytes());
+        out.extend_from_slice(texts[2].as_bytes());
         out.push(b':');
-        out.extend_from_slice(line.to_string().as_bytes());
+        out.extend_from_slice(line_n.to_string().as_bytes());
         out.extend_from_slice(b"\nStack trace:\n");
-        if trace_s.is_empty() {
+        if texts[3].is_empty() {
             out.extend_from_slice(b"#0 {main}\n");
         } else {
-            out.extend_from_slice(trace_s.as_bytes());
+            out.extend_from_slice(texts[3].as_bytes());
         }
-        for s in [faultcode, faultstring, file, trace_s] {
-            req.release(Value::string(s));
+        for s in texts {
+            s.give_up(req);
         }
         PhpString::new(req, &out)
     }
@@ -403,7 +423,7 @@ pub(crate) struct Fault<'a> {
 /// `soap_fault_dtor_properties`: the eight slots back to their defaults.
 fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
     let empty = string(req, b"")?;
-    set_fault_slot(req, object, FaultSlot::String, empty)?;
+    set_fault_slot(req, object, FaultSlot::String, empty.hand_on_unmigrated())?;
     for slot in [
         FaultSlot::Code,
         FaultSlot::CodeNs,
@@ -415,7 +435,7 @@ fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
         set_fault_slot(req, object, slot, Value::null())?;
     }
     let empty = string(req, b"")?;
-    set_fault_slot(req, object, FaultSlot::Lang, empty)
+    set_fault_slot(req, object, FaultSlot::Lang, empty.hand_on_unmigrated())
 }
 
 /// `set_soap_fault`: the string (and `Exception::$message`), the code
@@ -423,9 +443,9 @@ fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
 /// language written into `object`.
 pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>) -> R<()> {
     let text = string(req, f.string.unwrap_or_default())?;
-    set_fault_slot(req, object, FaultSlot::String, text)?;
+    set_fault_slot(req, object, FaultSlot::String, text.hand_on_unmigrated())?;
     let message = string(req, f.string.unwrap_or_default())?;
-    php_ext::call::write_prop(req, &object, b"message", message)?;
+    php_ext::call::write_prop(req, &object, b"message", message.hand_on_unmigrated())?;
     if let Some(code) = f.code {
         let version = req.state::<State>().soap_version;
         let (code, ns): (&[u8], Option<&[u8]>) = if let Some(ns) = f.code_ns {
@@ -451,16 +471,16 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
         };
         if version == SOAP_1_1 || version == SOAP_1_2 || f.code_ns.is_some() {
             let c = string(req, code)?;
-            set_fault_slot(req, object, FaultSlot::Code, c)?;
+            set_fault_slot(req, object, FaultSlot::Code, c.hand_on_unmigrated())?;
             if let Some(ns) = ns {
                 let n = string(req, ns)?;
-                set_fault_slot(req, object, FaultSlot::CodeNs, n)?;
+                set_fault_slot(req, object, FaultSlot::CodeNs, n.hand_on_unmigrated())?;
             }
         }
     }
     if let Some(actor) = f.actor {
         let a = string(req, actor)?;
-        set_fault_slot(req, object, FaultSlot::Actor, a)?;
+        set_fault_slot(req, object, FaultSlot::Actor, a.hand_on_unmigrated())?;
     }
     if let Some(detail) = f.detail
         && !matches!(detail.as_ref(), ValueRef::Undef)
@@ -470,10 +490,10 @@ pub(crate) fn set_soap_fault(req: &mut Request, object: PhpObject, f: &Fault<'_>
     }
     if let Some(name) = f.name {
         let n = string(req, name)?;
-        set_fault_slot(req, object, FaultSlot::Name, n)?;
+        set_fault_slot(req, object, FaultSlot::Name, n.hand_on_unmigrated())?;
     }
     let lang = string(req, f.lang)?;
-    set_fault_slot(req, object, FaultSlot::Lang, lang)
+    set_fault_slot(req, object, FaultSlot::Lang, lang.hand_on_unmigrated())
 }
 
 // ---- SoapVar

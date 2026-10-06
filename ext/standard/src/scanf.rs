@@ -10,7 +10,7 @@ use php_ext::abi::{Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 /// `SCAN_MAX_ARGS`.
 const SCAN_MAX_ARGS: u64 = 0xff;
@@ -266,7 +266,7 @@ fn build_char_set(format: &[u8], mut f: usize) -> (CharSet, usize) {
 /// answered array at an index.
 enum Target {
     Vars { first: u32, count: usize },
-    Array(PhpArray),
+    Array(Owner<PhpArray>),
 }
 
 /// `ZEND_STRTOL(buf, NULL, base)` and `ZEND_STRTOUL`: the digits of
@@ -400,13 +400,15 @@ pub(super) fn sscanf(
     string: PhpString,
     format: PhpString,
     vars: Variadic<Ref<Value>>,
-) -> Result<Option<Union<PhpArray, i64>>, Thrown> {
+) -> Result<Option<Union<Owner<PhpArray>, i64>>, Thrown> {
     let scanned = php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, vars.0.len())?;
-    Ok(match scanned.as_ref() {
-        ValueRef::Array(array) => Some(Union::A(*array)),
+    let answer = match scanned.as_ref() {
+        ValueRef::Array(array) => Some(Union::A(Owner::take(req, *array))),
         ValueRef::Int(n) => Some(Union::B(n)),
         _ => None,
-    })
+    };
+    scanned.give_up(req);
+    Ok(answer)
 }
 
 /// `php_sscanf_internal(string, format, argCount, args, varStart,
@@ -438,7 +440,7 @@ pub fn php_sscanf_internal(
     format: &[u8],
     first: u32,
     num_vars: usize,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
     let (input, format) = (c_string(string), c_string(format));
     scan(req, &input, &format, first, num_vars)
@@ -452,7 +454,7 @@ fn scan(
     format: &[u8],
     first: u32,
     num_vars: usize,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let total = match validate(format, num_vars) {
         Ok(total) => total,
         Err(Invalid::Value(message)) => return Err(throw_error(req, "ValueError", message)),
@@ -593,7 +595,8 @@ fn scan(
                     }
                 }
                 if !suppress {
-                    let value = Value::string(PhpString::new(req, &input[s..end])?);
+                    let value =
+                        Value::string(PhpString::new(req, &input[s..end])?.hand_on_unmigrated());
                     put(req, &mut target, &mut obj_index, value)?;
                 }
                 s = end;
@@ -617,7 +620,8 @@ fn scan(
                     break 'scan;
                 }
                 if !suppress {
-                    let value = Value::string(PhpString::new(req, &input[s..end])?);
+                    let value =
+                        Value::string(PhpString::new(req, &input[s..end])?.hand_on_unmigrated());
                     put(req, &mut target, &mut obj_index, value)?;
                 }
                 s = end;
@@ -715,7 +719,7 @@ fn scan(
                     let value = strtol(&buf, base, unsigned);
                     let value = if unsigned && value < 0 {
                         let text = u64::from_ne_bytes(value.to_ne_bytes()).to_string();
-                        Value::string(PhpString::new(req, text.as_bytes())?)
+                        Value::string(PhpString::new(req, text.as_bytes())?.hand_on_unmigrated())
                     } else {
                         Value::int(value)
                     };
@@ -787,17 +791,20 @@ fn scan(
     }
     if underflow && nconversions == 0 {
         if let Target::Array(array) = target {
-            req.release(Value::array(array));
+            array.give_up(req);
         }
-        return Ok(if num_vars > 0 {
+        let answer = if num_vars > 0 {
             Value::int(SCAN_ERROR_EOF)
         } else {
             Value::null()
-        });
+        };
+        return Ok(Owner::take(req, answer));
     }
     Ok(match target {
-        Target::Vars { .. } => Value::int(i64::try_from(nconversions).unwrap_or(0)),
-        Target::Array(array) => Value::array(array),
+        Target::Vars { .. } => {
+            Owner::take(req, Value::int(i64::try_from(nconversions).unwrap_or(0)))
+        }
+        Target::Array(array) => array.into_value(),
     })
 }
 

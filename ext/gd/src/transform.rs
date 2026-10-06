@@ -11,7 +11,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, arity, docref, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{Ft, Im, Rect, affine_concat, affine_matrix};
 use crate::image::{GdImage, gd, im, int, wrap};
@@ -36,7 +36,7 @@ fn imagerotate(
     image: Instance<GdImage>,
     angle: f64,
     background_color: i64,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let (min, max) = (i32::MIN / 100, i32::MAX / 100);
     if angle < f64::from(min) || angle > f64::from(max) {
         let text = format!("be between {min} and {max}");
@@ -62,7 +62,7 @@ fn ttf(
     font: PhpString,
     text: PhpString,
     options: Option<PhpArray>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     let (min, max) = ((i64::MIN as f64) / 64.0, (i64::MAX as f64) / 64.0);
     if size < min || size > max {
@@ -135,7 +135,7 @@ fn imageftbbox(
     font_filename: PhpString,
     string: PhpString,
     #[php(default = [])] options: PhpArray,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let options = (req.argument_count() > 4).then_some(options);
     ttf(
         req,
@@ -178,7 +178,7 @@ fn imagefttext(
     font_filename: PhpString,
     text: PhpString,
     #[php(default = [])] options: PhpArray,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let im = im(req, image)?;
     let options = (req.argument_count() > 8).then_some(options);
     ttf(
@@ -500,7 +500,7 @@ fn imagecrop(
     req: &mut Request,
     image: Instance<GdImage>,
     rectangle: PhpArray,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let im = im(req, image)?;
     let r = rect(req, rectangle, 2)?;
     let checks = [
@@ -551,7 +551,7 @@ fn imagecropauto(
     #[php(default = IMG_CROP_DEFAULT)] mode: i64,
     #[php(default = 0.5)] threshold: f64,
     #[php(default = -1)] color: i64,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let im = im(req, image)?;
     let cropped = match mode {
         0..=4 => gd(req, || im.crop_auto(u32::try_from(mode).unwrap_or(0)))?,
@@ -602,7 +602,7 @@ fn imagescale(
     width: i64,
     #[php(default = -1)] height: i64,
     #[php(default = IMG_BILINEAR_FIXED)] mode: i64,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     if !(0..METHOD_COUNT).contains(&mode) {
         return Err(arg_value_error(req, 4, "be one of the GD_* constants"));
     }
@@ -707,7 +707,7 @@ fn imageaffine(
     image: Instance<GdImage>,
     affine: PhpArray,
     #[php(default = null)] clip: Option<PhpArray>,
-) -> Result<OrFalse<Instance<GdImage>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<GdImage>>>, Thrown> {
     let im = im(req, image)?;
     if affine.len() != 6 {
         return Err(arg_value_error(req, 2, "have 6 elements"));
@@ -755,7 +755,7 @@ fn imageaffinematrixget(
     req: &mut Request,
     r#type: i64,
     options: Untyped<Value>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let options = options.0;
     let (x, y) = match r#type {
         0 | 1 => {
@@ -806,7 +806,7 @@ fn imageaffinematrixconcat(
     req: &mut Request,
     matrix1: PhpArray,
     matrix2: PhpArray,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if matrix1.len() != 6 || matrix2.len() != 6 {
         return Err(arg_value_error(req, 1, "have 6 elements"));
     }
@@ -912,7 +912,7 @@ fn imageresolution(
     image: Instance<GdImage>,
     #[php(default = null)] resolution_x: Option<i64>,
     #[php(default = null)] resolution_y: Option<i64>,
-) -> Result<Union<PhpArray, True>, Thrown> {
+) -> Result<Union<Owner<PhpArray>, True>, Thrown> {
     let im = im(req, image)?;
     let check = |req: &mut Request, n: i64, position: u32| {
         if n < 0 || n > i64::from(u32::MAX) {

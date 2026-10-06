@@ -6,7 +6,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::{Owner, Value};
 
 use crate::conn::ConnData;
 use crate::consts::{CloseType as Close, ServerOption as Server, fetch, status};
@@ -602,15 +602,15 @@ impl ResultSet {
     /// `flags` (`MYSQLND_FETCH_ASSOC`, `_NUM` or both) asks, a numeric
     /// column name an integer key; `null` past the last, `false` where
     /// the fetch failed. The connection's error is emptied first.
-    pub fn fetch_into(&mut self, req: &mut Request, flags: u32) -> Result<Value, Thrown> {
+    pub fn fetch_into(&mut self, req: &mut Request, flags: u32) -> Result<Owner<Value>, Thrown> {
         // "We clean the error here because in unbuffered mode we could
         // receive a new error and therefore consumers of this method are
         // checking for errors."
         let _ = self.conn.0.with(req, |_, conn| conn.error.reset());
         let row = match self.fetch(req)? {
             Fetched::Row(row) => row,
-            Fetched::Done => return Ok(Value::null()),
-            Fetched::Failed => return Ok(Value::bool(false)),
+            Fetched::Done => return Ok(Owner::take(req, Value::null())),
+            Fetched::Failed => return Ok(Owner::take(req, Value::bool(false))),
         };
         let mut array = php_ext::values::PhpArray::new(req)?;
         for (i, value) in row.into_iter().enumerate() {
@@ -625,17 +625,20 @@ impl ResultSet {
             if flags & fetch::ASSOC != 0 {
                 let key = match field.and_then(|f| f.num_key) {
                     Some(n) => php_ext::values::Key::Int(n),
-                    None => php_ext::values::Key::Str(php_ext::values::PhpString::new(
-                        req,
-                        field.map(|f| f.name.as_slice()).unwrap_or_default(),
-                    )?),
+                    None => php_ext::values::Key::Str(
+                        php_ext::values::PhpString::new(
+                            req,
+                            field.map(|f| f.name.as_slice()).unwrap_or_default(),
+                        )?
+                        .hand_on_unmigrated(),
+                    ),
                 };
                 array.set(req, key, value)?;
             } else {
                 req.release(value);
             }
         }
-        Ok(Value::array(array))
+        Ok(array.into_value())
     }
 
     /// The columns' descriptions, `mysqlnd_fetch_fields`.

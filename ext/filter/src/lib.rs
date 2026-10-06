@@ -57,7 +57,7 @@ use php_ext::raising::{
     throw_value,
 };
 use php_ext::request::{Input, Request};
-use php_ext::values::{ClassId, Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 /// `IF_G`'s input arrays: each variable [`sapi_filter`] was handed, raw,
 /// by where it came from; `None` where none came.
@@ -132,14 +132,14 @@ fn sapi_filter(
         let array = if let Some(array) = kept {
             array
         } else {
-            let array = PhpArray::new(req)?;
+            let array = PhpArray::new(req)?.hand_on_unmigrated();
             if let Some(slot) = req.state::<State>().slot(input) {
                 *slot = Some(array);
             }
             array
         };
         let raw = string_value(req, value)?;
-        req.register_variable(array, name, raw)?;
+        req.register_variable(array, name, raw.hand_on_unmigrated())?;
     }
     let raw = string_value(req, value)?;
     let default = req
@@ -151,7 +151,7 @@ fn sapi_filter(
         })
         .map_or(FILTER_DEFAULT, |(_, id, _)| *id);
     if value.is_empty() || default == FILTER_UNSAFE_RAW {
-        return Ok(Some(raw));
+        return Ok(Some(raw.hand_on_unmigrated()));
     }
     // `OnUpdateFlags`: no value is `FILTER_FLAG_NO_ENCODE_QUOTES`, any
     // value its `atoi`, so the empty string is 0.
@@ -163,7 +163,7 @@ fn sapi_filter(
         options: None,
         native: "filter",
     };
-    zval_filter(req, raw, default, &run).map(Some)
+    zval_filter(req, raw, default, &run).map(|value| Some(value.hand_on_unmigrated()))
 }
 
 /// C's `atoi`.
@@ -278,7 +278,7 @@ pub(crate) mod constants {
 /// `RETURN_VALIDATION_FAILED`, which the flags turn into `false`, `null`
 /// or the throwable.
 enum Outcome {
-    Value(Value),
+    Value(Owner<Value>),
     Failed,
 }
 
@@ -542,8 +542,8 @@ fn find(options: Option<&Value>, name: &[u8]) -> Option<Value> {
 }
 
 /// A new string of the request's as a value.
-fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// The bytes as C's `%s` prints them, up to the first NUL.
@@ -566,7 +566,7 @@ fn throw_failed(req: &mut Request, message: &str) -> Thrown {
     match new_throwable(req, "Filter\\FilterFailedException", message) {
         Ok(value) => {
             let thrown = throw_value(req, &value);
-            req.release(value);
+            value.give_up(req);
             thrown
         }
         Err(thrown) => thrown,
@@ -599,15 +599,20 @@ fn has_to_string(req: &mut Request, class: ClassId) -> bool {
 
 /// `php_zval_filter(value, filter, flags, options, charset)`: `value`
 /// owned, what it became handed back owned.
-fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Result<Value, Thrown> {
+fn zval_filter(
+    req: &mut Request,
+    value: Owner<Value>,
+    filter: i64,
+    run: &Run,
+) -> Result<Owner<Value>, Thrown> {
     let (name, function) = find_filter(filter);
     let flags = run.flags;
-    let filtered = if let Some(object) = value.deref().as_object().copied()
+    let filtered = if let Some(object) = (*value).deref().as_object().copied()
         && !has_to_string(req, object.class())
     {
         // #49274: an object with no `__toString` fails nicely, and
         // #67167 makes the failure `false` or `null`.
-        req.release(value);
+        value.give_up(req);
         if flags & FILTER_THROW_ON_FAILURE != 0 {
             let class = req
                 .class_decl(object.class())
@@ -620,13 +625,13 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
                 ),
             ));
         }
-        failure(flags)
+        Owner::take(req, failure(flags))
     } else {
-        let string = to_string(req, &value.deref());
-        req.release(value);
+        let string = to_string(req, &(*value).deref());
+        value.give_up(req);
         let string = string?;
         let bytes = string.as_bytes().to_vec();
-        req.release(Value::string(string));
+        string.give_up(req);
         match function(req, run, &bytes)? {
             Outcome::Value(value) => value,
             Outcome::Failed if flags & FILTER_THROW_ON_FAILURE != 0 => {
@@ -638,7 +643,7 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
                     ),
                 ));
             }
-            Outcome::Failed => failure(flags),
+            Outcome::Failed => Owner::take(req, failure(flags)),
         }
     };
     // `handle_default`: the `default` option in place of the failure.
@@ -655,9 +660,8 @@ fn zval_filter(req: &mut Request, value: Value, filter: i64, run: &Run) -> Resul
         && let Some(default) = find(run.options.as_ref(), b"default")
     {
         let default = default.deref();
-        req.addref(&default);
-        req.release(filtered);
-        return Ok(default);
+        filtered.give_up(req);
+        return Ok(Owner::take(req, default));
     }
     Ok(filtered)
 }
@@ -676,16 +680,16 @@ fn failure(flags: i64) -> Value {
 /// the filter, and an array as php walks its `ZVAL_DUP`, [`filtered_copy`].
 fn zval_filter_recursive(
     req: &mut Request,
-    value: Value,
+    value: Owner<Value>,
     filter: i64,
     run: &Run,
-) -> Result<Value, Thrown> {
-    let Some(array) = value.deref().as_array().copied() else {
+) -> Result<Owner<Value>, Thrown> {
+    let Some(array) = (*value).deref().as_array().copied() else {
         return zval_filter(req, value, filter, run);
     };
     let copied = filtered_copy(req, array, filter, run);
-    req.release(value);
-    copied.map(PhpArray::to_value)
+    value.give_up(req);
+    copied.map(Owner::into_value)
 }
 
 /// `ZVAL_DUP` and then `php_zval_filter_recursive` over the copy: the
@@ -750,12 +754,15 @@ fn filtered_copy(
     array: PhpArray,
     filter: i64,
     run: &Run,
-) -> Result<PhpArray, Thrown> {
-    let mut copied = array.copy(req)?;
-    match filter_in_place(req, &mut copied, filter, run) {
+) -> Result<Owner<PhpArray>, Thrown> {
+    let copied = array.copy(req)?;
+    // The copy has the one owner, so the walk's writes never separate it
+    // and the view walked is the array the owner stands on.
+    let mut walked = *copied;
+    match filter_in_place(req, &mut walked, filter, run) {
         Ok(()) => Ok(copied),
         Err(thrown) => {
-            req.release(copied.to_value());
+            copied.give_up(req);
             Err(thrown)
         }
     }
@@ -798,16 +805,15 @@ fn filter_elements(
             if let Some(mut held) = cell.separate_array(req)? {
                 filter_in_place(req, &mut held, filter, run)?;
             } else {
-                let held = cell.get();
-                req.addref(&held);
+                let held = Owner::take(req, cell.get());
                 let filtered = zval_filter(req, held, filter, run)?;
-                cell.convert(req, filtered);
+                cell.convert(req, filtered.hand_on_unmigrated());
             }
             continue;
         }
-        req.addref(&element);
+        let element = Owner::take(req, element);
         let filtered = zval_filter_recursive(req, element, filter, run)?;
-        array.replace(req, &key, filtered)?;
+        array.replace(req, &key, filtered.hand_on_unmigrated())?;
     }
     Ok(())
 }
@@ -817,12 +823,12 @@ fn filter_elements(
 fn filter_call(
     req: &mut Request,
     native: &'static str,
-    value: Value,
+    value: Owner<Value>,
     mut filter: i64,
     arguments: Union<PhpArray, i64>,
     mut flags: i64,
     options_position: u32,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let mut options = None;
     match arguments {
         Union::B(long) if filter != -1 => {
@@ -835,7 +841,13 @@ fn filter_call(
         Union::A(table) => {
             let table = Some(table.to_value());
             if let Some(given) = find(table.as_ref(), b"filter") {
-                filter = to_long(req, &given.deref())?;
+                filter = match to_long(req, &given.deref()) {
+                    Ok(filter) => filter,
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                };
             }
             if let Some(given) = find(table.as_ref(), b"options") {
                 let given = given.deref();
@@ -847,7 +859,13 @@ fn filter_call(
                 }
             }
             if let Some(given) = find(table.as_ref(), b"flags") {
-                flags = to_long(req, &given.deref())?;
+                flags = match to_long(req, &given.deref()) {
+                    Ok(flags) => flags,
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                };
                 if flags & (FILTER_REQUIRE_ARRAY | FILTER_FORCE_ARRAY) == 0 {
                     flags |= FILTER_REQUIRE_SCALAR;
                 }
@@ -855,7 +873,7 @@ fn filter_call(
         }
     }
     if flags & FILTER_NULL_ON_FAILURE != 0 && flags & FILTER_THROW_ON_FAILURE != 0 {
-        req.release(value);
+        value.give_up(req);
         return Err(options_error(req, options_position, BOTH_FAILURES));
     }
     let run = Run {
@@ -863,35 +881,35 @@ fn filter_call(
         options,
         native,
     };
-    if value.deref().as_array().is_some() {
+    if (*value).deref().as_array().is_some() {
         if flags & FILTER_REQUIRE_SCALAR != 0 {
-            req.release(value);
+            value.give_up(req);
             if flags & FILTER_THROW_ON_FAILURE != 0 {
                 return Err(throw_failed(
                     req,
                     "filter validation failed: not a scalar value (got an array)",
                 ));
             }
-            return Ok(failure(flags));
+            return Ok(Owner::take(req, failure(flags)));
         }
         return zval_filter_recursive(req, value, filter, &run);
     }
     if flags & FILTER_REQUIRE_ARRAY != 0 {
-        let name = value_name(req, &value.deref());
-        req.release(value);
+        let name = value_name(req, &(*value).deref());
+        value.give_up(req);
         if flags & FILTER_THROW_ON_FAILURE != 0 {
             return Err(throw_failed(
                 req,
                 &format!("filter validation failed: not an array (got {name})"),
             ));
         }
-        return Ok(failure(flags));
+        return Ok(Owner::take(req, failure(flags)));
     }
     let filtered = zval_filter(req, value, filter, &run)?;
     if flags & FILTER_FORCE_ARRAY != 0 {
         let mut wrapped = PhpArray::new(req)?;
-        wrapped.append(req, filtered)?;
-        return Ok(wrapped.to_value());
+        wrapped.append(req, filtered.hand_on_unmigrated())?;
+        return Ok(wrapped.into_value());
     }
     Ok(filtered)
 }
@@ -906,7 +924,7 @@ fn array_handler(
     input: PhpArray,
     definition: Union<PhpArray, i64>,
     add_empty: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let table = match definition {
         Union::A(table) => table,
         Union::B(filter) => {
@@ -923,11 +941,11 @@ fn array_handler(
         let name = match key {
             Key::Str(name) if !name.is_empty() => name,
             Key::Str(_) => {
-                req.release(out.to_value());
+                out.give_up(req);
                 return Err(options_error(req, 2, "cannot contain empty keys"));
             }
             Key::Int(_) => {
-                req.release(out.to_value());
+                out.give_up(req);
                 return Err(arg_type_error(req, 2, "contain only string keys"));
             }
         };
@@ -942,21 +960,26 @@ fn array_handler(
         let arguments = if let Some(array) = element.as_array() {
             Union::A(*array)
         } else {
-            let id = to_long(req, &element)?;
+            let id = match to_long(req, &element) {
+                Ok(id) => id,
+                Err(thrown) => {
+                    out.give_up(req);
+                    return Err(thrown);
+                }
+            };
             if !id_exists(id) {
                 unknown_filter(req, id);
             }
             Union::B(id)
         };
-        let found = found.deref();
-        req.addref(&found);
+        let found = Owner::take(req, found.deref());
         match filter_call(req, native, found, -1, arguments, FILTER_REQUIRE_SCALAR, 2) {
             Ok(filtered) => {
                 req.addref(&Value::string(name));
-                out.set(req, Key::Str(name), filtered)?;
+                out.set(req, Key::Str(name), filtered.hand_on_unmigrated())?;
             }
             Err(thrown) => {
-                req.release(out.to_value());
+                out.give_up(req);
                 return Err(thrown);
             }
         }
@@ -977,7 +1000,7 @@ fn array_handler(
 /// NULL
 /// bool(true)
 /// ```
-fn storage(req: &mut Request, input: i64) -> Result<Option<PhpArray>, Thrown> {
+fn storage(req: &mut Request, input: i64) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let kept = match input {
         INPUT_POST => req.state::<State>().post,
         INPUT_GET => req.state::<State>().get,
@@ -989,10 +1012,7 @@ fn storage(req: &mut Request, input: i64) -> Result<Option<PhpArray>, Thrown> {
         INPUT_ENV => req.superglobal(b"_ENV"),
         _ => return Err(arg_value_error(req, 1, "be an INPUT_* constant")),
     };
-    if let Some(array) = kept {
-        req.addref(&array.to_value());
-    }
-    Ok(kept)
+    Ok(kept.map(|array| Owner::take(req, array)))
 }
 
 /// `zend_hash_find` by a variable name, a view: a string key alone, or
@@ -1029,8 +1049,8 @@ fn filter_has_var(req: &mut Request, input_type: i64, var_name: PhpString) -> Re
     let Some(array) = storage(req, input_type)? else {
         return Ok(false);
     };
-    let found = lookup(array, var_name.as_bytes(), false).is_some();
-    req.release(array.to_value());
+    let found = lookup(*array, var_name.as_bytes(), false).is_some();
+    array.give_up(req);
     Ok(found)
 }
 
@@ -1063,19 +1083,19 @@ fn filter_input(
     var_name: PhpString,
     #[php(default = FILTER_DEFAULT)] filter: i64,
     #[php(default = 0)] options: Union<PhpArray, i64>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let name = var_name.as_bytes();
     if !id_exists(filter) {
         unknown_filter(req, filter);
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let array = storage(req, r#type)?;
-    let found = array.and_then(|array| lookup(array, name, false).map(|v| v.deref()));
-    if let Some(found) = &found {
-        req.addref(found);
-    }
+    let found = array
+        .as_deref()
+        .and_then(|array| lookup(*array, name, false).map(|v| v.deref()));
+    let found = found.map(|found| Owner::take(req, found));
     if let Some(array) = array {
-        req.release(array.to_value());
+        array.give_up(req);
     }
     if let Some(found) = found {
         return filter_call(
@@ -1111,17 +1131,16 @@ fn filter_input(
     if options.as_ref().is_some_and(|o| o.as_array().is_some())
         && let Some(default) = find(options.as_ref(), b"default")
     {
-        let default = default.deref();
-        req.addref(&default);
-        return Ok(default);
+        return Ok(Owner::take(req, default.deref()));
     }
     // Inverted on purpose, as `filter.c` says: a missing variable is
     // `false` under the flag that makes a failure `null`.
-    Ok(if flags & FILTER_NULL_ON_FAILURE != 0 {
+    let missing = if flags & FILTER_NULL_ON_FAILURE != 0 {
         Value::bool(false)
     } else {
         Value::null()
-    })
+    };
+    Ok(Owner::take(req, missing))
 }
 
 /// `filter_var(mixed $value, int $filter = FILTER_DEFAULT, array|int
@@ -1195,12 +1214,12 @@ fn filter_var(
     value: Value,
     #[php(default = FILTER_DEFAULT)] filter: i64,
     #[php(default = 0)] options: Union<PhpArray, i64>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if !id_exists(filter) {
         unknown_filter(req, filter);
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
-    req.addref(&value);
+    let value = Owner::take(req, value);
     filter_call(
         req,
         "filter_var",
@@ -1236,7 +1255,7 @@ fn filter_input_array(
     r#type: i64,
     #[php(default = FILTER_DEFAULT)] options: Union<PhpArray, i64>,
     #[php(default = true)] add_empty: bool,
-) -> Result<Option<OrFalse<PhpArray>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<PhpArray>>>, Thrown> {
     if let Union::B(filter) = options
         && !id_exists(filter)
     {
@@ -1246,8 +1265,8 @@ fn filter_input_array(
     let Some(array) = storage(req, r#type)? else {
         return Ok(None);
     };
-    let filtered = array_handler(req, "filter_input_array", array, options, add_empty);
-    req.release(array.to_value());
+    let filtered = array_handler(req, "filter_input_array", *array, options, add_empty);
+    array.give_up(req);
     Ok(Some(OrFalse::Value(filtered?)))
 }
 
@@ -1303,7 +1322,7 @@ fn filter_var_array(
     array: PhpArray,
     #[php(default = FILTER_DEFAULT)] options: Union<PhpArray, i64>,
     #[php(default = true)] add_empty: bool,
-) -> Result<Option<OrFalse<PhpArray>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<PhpArray>>>, Thrown> {
     if let Union::B(filter) = options
         && !id_exists(filter)
     {
@@ -1323,11 +1342,11 @@ fn filter_var_array(
 /// int,boolean,float,validate_regexp,validate_domain,validate_url,validate_email,validate_ip,validate_mac,string,stripped,encoded,special_chars,full_special_chars,unsafe_raw,email,url,number_int,number_float,add_slashes,callback
 /// ```
 #[php_function]
-fn filter_list(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn filter_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, _, _) in FILTERS {
         let name = string_value(req, name.as_bytes())?;
-        array.append(req, name)?;
+        array.append(req, name.hand_on_unmigrated())?;
     }
     Ok(array)
 }

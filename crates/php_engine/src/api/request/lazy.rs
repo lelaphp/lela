@@ -22,7 +22,7 @@ use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
 use crate::api::raising::{Thrown, throw_error};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Key, PhpArray, PhpObject, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
 pub(crate) const SKIP_INITIALIZATION_ON_SERIALIZE: i64 = 1 << 3;
@@ -365,7 +365,7 @@ impl Request {
         }
         let (object, lazy) = match object {
             None => {
-                let object = crate::api::call::new_object(self, class)?;
+                let object = crate::api::call::new_object_made(self, class)?;
                 let o = object.heap();
                 // `Z_PROP_FLAG_P(p) = IS_PROP_UNINIT | IS_PROP_LAZY` over
                 // every slot, as `zend_object_make_lazy` lays them.
@@ -443,7 +443,7 @@ impl Request {
                 let table = self.object_handlers(o);
                 table.dtor_obj(self, object);
                 self.release(object.as_value());
-                if let Some(pending) = self.take_pending() {
+                if let Some(pending) = self.take_pending_view() {
                     return Err(Thrown::of(Some(pending)));
                 }
             }
@@ -680,7 +680,7 @@ impl Request {
                 (_, None) => {}
             }
         }
-        let served = crate::api::call::call(self, &initializer, &[object.as_value()]);
+        let served = crate::api::call::call_made(self, &initializer, &[object.as_value()]);
         let outcome = match served {
             Err(thrown) => {
                 self.lazy_revert(o, snapshot, table);
@@ -753,7 +753,7 @@ impl Request {
         };
         self.addref(&object.as_value());
         o.set_laziness(Laziness::Eager);
-        let served = crate::api::call::call(self, &initializer, &[object.as_value()]);
+        let served = crate::api::call::call_made(self, &initializer, &[object.as_value()]);
         let outcome = match served {
             Err(thrown) => {
                 o.set_laziness(Laziness::Proxy);
@@ -965,7 +965,7 @@ impl Request {
             }
             Some(value) => {
                 self.lazy_set_waiting(o, slot, false);
-                let key = PhpString::new(self, name)?;
+                let key = self.string(name)?;
                 let written = self.in_declared_scope(object.class(), name, |req| {
                     // `write_property`'s `found` arm over a slot that
                     // holds a value: an initialised readonly property
@@ -1069,7 +1069,7 @@ impl Request {
         // The new proxy is made before the instance is cloned, as
         // `zend_objects_new` stands before `zend_objects_clone_obj`
         // there, so the two take their ids in php's order.
-        let proxy = crate::api::call::new_object(self, object.class())?;
+        let proxy = crate::api::call::new_object_made(self, object.class())?;
         let p = proxy.heap();
         for i in 0..p.slots() {
             Heap::object_set_slot(&mut Hooks(self), p, i, php_heap::Zval::UNDEF);
@@ -1123,9 +1123,9 @@ impl Request {
         let Some(instance) = self.lazy_instance(object.heap()) else {
             return Ok(None);
         };
-        let mut rows = PhpArray::new(self)?;
+        let mut rows = self.array()?;
         self.addref(&instance.as_value());
-        let key = PhpString::new(self, b"instance")?;
+        let key = self.string(b"instance")?;
         rows.set(
             self,
             crate::api::values::Key::from_string(key),

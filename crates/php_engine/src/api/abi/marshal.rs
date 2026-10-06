@@ -203,7 +203,7 @@ fn default_value(
             return Ok(kept);
         }
         let scope = scope.and_then(|name| req.class_named(name));
-        crate::api::call::eval_const_expr(req, expr, scope)?
+        crate::api::call::eval_const_expr_made(req, expr, scope)?
     };
     let held = if admits(mask, &value) {
         value
@@ -636,6 +636,17 @@ impl<T> Clone for Raw<T> {
     }
 }
 impl<T> Copy for Raw<T> {}
+
+impl<T> Raw<T> {
+    /// `value` declared as `T`, to return.
+    pub(crate) fn returned(value: Value) -> Raw<T> {
+        Raw {
+            value,
+            position: 0,
+            held: PhantomData,
+        }
+    }
+}
 
 impl<T: FromArgument> Raw<T> {
     /// The argument as passed, a reference followed.

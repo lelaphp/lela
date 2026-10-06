@@ -170,7 +170,7 @@ fn openssl_sign(
             return Ok(false);
         };
         let signed = PhpString::new(req, &signed)?;
-        signature.set(req, Untyped(Value::string(signed)))?;
+        signature.set(req, Untyped(Value::string(signed.hand_on_unmigrated())))?;
         Ok(true)
     })
 }
@@ -314,7 +314,7 @@ fn written(
         return Ok(false);
     };
     let bytes = PhpString::new(req, &bytes)?;
-    out.set(req, Untyped(Value::string(bytes)))?;
+    out.set(req, Untyped(Value::string(bytes.hand_on_unmigrated())))?;
     Ok(true)
 }
 

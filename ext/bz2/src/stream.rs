@@ -22,7 +22,7 @@ use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, t
 use php_ext::request::{
     Cast, HostPath, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::State;
 use crate::ffi::{Action, Code, Compress, Decompress};
@@ -70,7 +70,7 @@ impl Handle {
             Handle::Stream(inner) => {
                 let chunk = inner.read(req, MAX_UNUSED).ok()??;
                 buf.extend_from_slice(chunk.as_bytes());
-                req.release(Value::string(chunk));
+                chunk.give_up(req);
                 Some(())
             }
         }
@@ -386,7 +386,7 @@ fn from_file(
     handle: Handle,
     mode: &[u8],
     direction: Direction,
-) -> Result<Stream, Thrown> {
+) -> Result<Owner<Stream>, Thrown> {
     let state = req.state::<State>();
     let id = FileId(state.next);
     state.next += 1;
@@ -415,7 +415,7 @@ fn open(
     path: &[u8],
     mode: &[u8],
     opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let prefix = b"compress.bzip2://";
     let path = if path.len() >= prefix.len() && path[..prefix.len()].eq_ignore_ascii_case(prefix) {
         &path[prefix.len()..]
@@ -436,10 +436,11 @@ fn open(
             return Ok(None);
         };
         if inner.cast(req, Cast::Fd, true).is_none() {
-            inner.free(req);
+            inner.close(req);
+            inner.give_up(req);
             return Ok(None);
         }
-        Handle::Stream(inner)
+        Handle::Stream(inner.hand_on_unmigrated())
     };
     let Some(direction) = parsed.direction() else {
         // `php_stream_close(stream)`: what this open opened, given up.
@@ -502,7 +503,9 @@ pub(crate) fn wrapper() -> StreamWrapper {
         scheme: "compress.bzip2".into(),
         label: "BZip2",
         is_url: false,
-        open: Some(open),
+        open: Some(|req, path, mode, opening| {
+            Ok(open(req, path, mode, opening)?.map(Owner::hand_on_unmigrated))
+        }),
         open_dir: None,
         stat: None,
         unlink: None,
@@ -521,7 +524,7 @@ fn stream_mode(req: &mut Request, stream: Stream) -> Result<Vec<u8>, Thrown> {
         .find(b"mode")
         .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
         .unwrap_or_default();
-    req.release(Value::array(meta));
+    meta.give_up(req);
     Ok(mode)
 }
 
@@ -596,7 +599,7 @@ fn bzopen(
     req: &mut Request,
     file: Untyped<Value>,
     mode: PhpString,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let Untyped(file) = file;
     let mode = mode.as_bytes();
     if mode != b"r" && mode != b"w" {
@@ -636,13 +639,17 @@ fn bzopen(
         }
     };
     Ok(Untyped(opened.map_or(OrFalse::False, |stream| {
-        OrFalse::Value(stream.resource())
+        OrFalse::Value(stream.into_resource())
     })))
 }
 
 /// `bzopen` over a stream: its `stream->mode` held to what `mode` needs, php's
 /// warnings where it is not, then its fd, which `BZ2_bzdopen` opens.
-fn open_stream(req: &mut Request, stream: Stream, mode: &[u8]) -> Result<Option<Stream>, Thrown> {
+fn open_stream(
+    req: &mut Request,
+    stream: Stream,
+    mode: &[u8],
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let stream_mode = stream_mode(req, stream)?;
     let primary = match stream_mode.as_slice() {
         [only] => Some(*only),
@@ -701,7 +708,7 @@ fn bzread(
     req: &mut Request,
     bz: Stream,
     #[php(default = 1024)] length: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Ok(length) = usize::try_from(length) else {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     };
@@ -865,7 +872,7 @@ fn bzerrno(req: &mut Request, bz: Stream) -> Result<i64, Thrown> {
 /// bzerrstr(): Argument #1 ($bz) must be a bz2 stream
 /// ```
 #[php_function]
-fn bzerrstr(req: &mut Request, bz: Stream) -> Result<PhpString, Thrown> {
+fn bzerrstr(req: &mut Request, bz: Stream) -> Result<Owner<PhpString>, Thrown> {
     let code = last_error(req, bz)?;
     PhpString::new(req, error_text(code).as_bytes())
 }
@@ -880,13 +887,21 @@ fn bzerrstr(req: &mut Request, bz: Stream) -> Result<PhpString, Thrown> {
 /// bzerror(): Argument #1 ($bz) must be a bz2 stream
 /// ```
 #[php_function]
-fn bzerror(req: &mut Request, bz: Stream) -> Result<PhpArray, Thrown> {
+fn bzerror(req: &mut Request, bz: Stream) -> Result<Owner<PhpArray>, Thrown> {
     let code = last_error(req, bz)?;
     let mut array = PhpArray::new(req)?;
     let errno = PhpString::new(req, b"errno")?;
-    array.set(req, Key::Str(errno), Value::int(code.number()))?;
+    array.set(
+        req,
+        Key::Str(errno.hand_on_unmigrated()),
+        Value::int(code.number()),
+    )?;
     let errstr = PhpString::new(req, b"errstr")?;
     let text = PhpString::new(req, error_text(code).as_bytes())?;
-    array.set(req, Key::Str(errstr), Value::string(text))?;
+    array.set(
+        req,
+        Key::Str(errstr.hand_on_unmigrated()),
+        text.into_value().hand_on_unmigrated(),
+    )?;
     Ok(array)
 }

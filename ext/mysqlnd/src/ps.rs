@@ -833,7 +833,7 @@ enum Wire {
 fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let s = to_string(req, value)?;
     let bytes = s.as_bytes().to_vec();
-    req.release(Value::string(s));
+    s.give_up(req);
     Ok(bytes)
 }
 

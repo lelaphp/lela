@@ -8,7 +8,7 @@
 
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{Request, Stream, Streams as _};
-use php_ext::values::{PhpObject, PhpString};
+use php_ext::values::{Owner, PhpObject, PhpString};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,
 };
@@ -551,7 +551,7 @@ pub(crate) fn save_html(
     req: &mut Request,
     this: PhpObject,
     given: Option<PhpObject>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let doc = fetch(req, this)?;
     let node = match given {
         Some(given) => {
@@ -586,21 +586,24 @@ pub(crate) fn save_html_file(
     let doc = match fetch(req, this) {
         Ok(found) => found,
         Err(thrown) => {
-            stream.free(req);
+            stream.hand_on_unmigrated().free(req);
             return Err(thrown);
         }
     };
     let templates = templates_of(req, this, doc);
     let encoding = doc.doc_encoding().unwrap_or_default();
     let saved = {
-        let mut out = StreamSink { req, stream };
+        let mut out = StreamSink {
+            req,
+            stream: *stream,
+        };
         common_save(&mut out, &templates, doc, &encoding)
     };
     if !saved {
-        stream.free(req);
+        stream.hand_on_unmigrated().free(req);
         return Ok(None);
     }
     let written = stream.tell(req);
-    stream.free(req);
+    stream.hand_on_unmigrated().free(req);
     Ok(Some(written))
 }

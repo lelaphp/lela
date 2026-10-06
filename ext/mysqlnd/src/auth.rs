@@ -644,9 +644,9 @@ impl ConnData {
 
 /// A native of the bundle by name, where it is loaded.
 fn native(req: &mut Request, name: &[u8]) -> Result<Option<Callable>, Thrown> {
-    let name = Value::string(PhpString::new(req, name)?);
-    let callable: Result<Callable, String> = callable_checked(req, &name);
-    req.release(name);
+    let name = PhpString::new(req, name)?;
+    let callable: Result<Callable, String> = callable_checked(req, &Value::string(*name));
+    name.give_up(req);
     Ok(callable.ok())
 }
 
@@ -662,8 +662,12 @@ fn read_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> 
         return Ok(None);
     };
     let read = stream.copy_to_mem(req, None);
-    stream.free(req);
-    Ok(Some(read?.as_bytes().to_vec()))
+    stream.close(req);
+    stream.give_up(req);
+    let read = read?;
+    let bytes = read.as_bytes().to_vec();
+    read.give_up(req);
+    Ok(Some(bytes))
 }
 
 /// `EVP_PKEY_size`: the key's modulus in bytes, through
@@ -675,27 +679,25 @@ fn rsa_size(req: &mut Request, pem: &[u8]) -> Result<Option<usize>, Thrown> {
     ) else {
         return Ok(None);
     };
-    let pem = Value::string(PhpString::new(req, pem)?);
-    let key = php_ext::call::call(req, &get, std::slice::from_ref(&pem));
-    req.release(pem);
+    let pem = PhpString::new(req, pem)?;
+    let key = php_ext::call::call(req, &get, &[Value::string(*pem)]);
+    pem.give_up(req);
     let key = key?;
     if matches!(key.as_ref(), ValueRef::Bool(false)) {
-        req.release(key);
+        key.give_up(req);
         return Ok(None);
     }
-    let got = php_ext::call::call(req, &details, std::slice::from_ref(&key));
-    req.release(key);
+    let got = php_ext::call::call(req, &details, std::slice::from_ref(&*key));
+    key.give_up(req);
     let got = got?;
     let bits = match got.as_ref() {
-        ValueRef::Array(a) => a
-            .get(&php_ext::values::Key::Str(PhpString::new(req, b"bits")?))
-            .and_then(|v| match v.as_ref() {
-                ValueRef::Int(n) => usize::try_from(n).ok(),
-                _ => None,
-            }),
+        ValueRef::Array(a) => a.find(b"bits").and_then(|v| match v.as_ref() {
+            ValueRef::Int(n) => usize::try_from(n).ok(),
+            _ => None,
+        }),
         _ => None,
     };
-    req.release(got);
+    got.give_up(req);
     Ok(bits.map(|b| b.div_ceil(8)))
 }
 
@@ -708,10 +710,12 @@ fn rsa_encrypt(req: &mut Request, pem: &[u8], data: &[u8]) -> Result<Option<Vec<
         return Ok(None);
     };
     let out = PhpRef::new(req, Value::null())?;
+    let data = PhpString::new(req, data)?;
+    let pem = PhpString::new(req, pem)?;
     let args = [
-        Value::string(PhpString::new(req, data)?),
+        Value::string(*data),
         out.as_value(),
-        Value::string(PhpString::new(req, pem)?),
+        Value::string(*pem),
         Value::int(OAEP),
     ];
     let done = php_ext::call::call(req, &encrypt, &args);
@@ -719,11 +723,11 @@ fn rsa_encrypt(req: &mut Request, pem: &[u8], data: &[u8]) -> Result<Option<Vec<
         ValueRef::Str(s) => Some(s.as_bytes().to_vec()),
         _ => None,
     };
-    for arg in args {
-        req.release(arg);
-    }
+    data.give_up(req);
+    out.give_up(req);
+    pem.give_up(req);
     let done = done?;
     let ok = matches!(done.as_ref(), ValueRef::Bool(true));
-    req.release(done);
+    done.give_up(req);
     Ok(encrypted.filter(|_| ok))
 }

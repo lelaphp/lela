@@ -7,7 +7,7 @@ use std::sync::Arc;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::State;
 use crate::ffi::{Tzdb, Zone};
@@ -141,7 +141,7 @@ fn date_default_timezone_set(req: &mut Request, timezoneId: PhpString) -> bool {
 /// string(10) "Asia/Tokyo"
 /// ```
 #[php_function]
-fn date_default_timezone_get(req: &mut Request) -> Result<PhpString, Thrown> {
+fn date_default_timezone_get(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     let zone = default_zone(req)?;
     PhpString::new(req, zone.name())
 }

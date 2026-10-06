@@ -178,6 +178,7 @@ impl Net {
                 return Ok(false);
             }
         };
+        let stream = stream.hand_on_unmigrated();
         self.stream = Some(stream);
         self.unix = unix;
         self.post_connect(req, stream);
@@ -194,7 +195,7 @@ impl Net {
         let (Some(kept), Some(key)) = (self.kept.take(), self.persistent_id.clone()) else {
             return Ok(());
         };
-        let stream = req.stream_lend(key, kept)?;
+        let stream = req.stream_lend(key, kept)?.hand_on_unmigrated();
         self.stream = Some(stream);
         self.post_connect(req, stream);
         Ok(())
@@ -247,12 +248,15 @@ impl Net {
         };
         let mut out = Vec::with_capacity(count);
         while out.len() < count {
-            match stream.read(req, count - out.len())? {
-                Some(chunk) if !chunk.is_empty() => out.extend_from_slice(chunk.as_bytes()),
-                _ => {
-                    stats.add(Stat::BytesReceived, out.len() as u64);
-                    return Ok(None);
-                }
+            let chunk = stream.read(req, count - out.len())?;
+            let read = chunk.as_ref().is_some_and(|chunk| !chunk.is_empty());
+            if let Some(chunk) = chunk {
+                out.extend_from_slice(chunk.as_bytes());
+                chunk.give_up(req);
+            }
+            if !read {
+                stats.add(Stat::BytesReceived, out.len() as u64);
+                return Ok(None);
             }
         }
         stats.add(Stat::BytesReceived, count as u64);
@@ -459,17 +463,17 @@ impl Net {
         };
         let o = self.options.clone();
         let context = StreamCtx::alloc(req)?;
-        let set = ssl_options(req, context, &o);
+        let set = ssl_options(req, *context, &o);
         let peer = match set {
             Ok(peer) => peer,
             Err(thrown) => {
-                req.release(context.resource().as_value());
+                context.give_up(req);
                 return Err(thrown);
             }
         };
         self.options.ssl_verify_peer = peer;
-        stream.set_ctx(req, Some(context));
-        req.release(context.resource().as_value());
+        stream.set_ctx(req, Some(*context));
+        context.give_up(req);
         let secured = stream.crypto_setup(req, TLS_CLIENT, None)
             && matches!(
                 stream.crypto_enable(req, true),
@@ -505,9 +509,9 @@ fn ssl_options(req: &mut Request, context: StreamCtx, o: &VioOptions) -> Result<
         (b"ciphers", &o.ssl_cipher),
     ];
     let put = |req: &mut Request, name: &[u8], value: &[u8]| {
-        let text = Value::string(PhpString::new(req, value)?);
-        let set = context.set_option(req, b"ssl", name, &text);
-        req.release(text);
+        let text = PhpString::new(req, value)?;
+        let set = context.set_option(req, b"ssl", name, &Value::string(*text));
+        text.give_up(req);
         set
     };
     for (name, value) in string_options {

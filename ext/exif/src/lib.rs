@@ -35,7 +35,7 @@ use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use image::{EncodingNames, Found, Image, Number, Section, Stored, TAG_NONE, c_int};
 use walk::Reader;
@@ -226,7 +226,7 @@ fn encodings(req: &Request) -> EncodingNames {
 /// bool(false)
 /// ```
 #[php_function]
-fn exif_tagname(req: &mut Request, index: i64) -> Result<OrFalse<PhpString>, Thrown> {
+fn exif_tagname(req: &mut Request, index: i64) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     // php looks the `int` the long truncates to up in a table keyed by
     // the `unsigned short` tags.
     #[expect(clippy::cast_possible_truncation, reason = "php's `int tag_num`")]
@@ -318,7 +318,7 @@ fn exif_read_data(
     #[php(default = null)] required_sections: Option<PhpString>,
     #[php(default = false)] as_arrays: bool,
     #[php(default = false)] read_thumbnail: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Untyped(file) = file;
     let needed = required_sections.map(|names| walk::needed(names.as_bytes()));
     let (mut reader, ok) = read(req, &file, read_thumbnail)?;
@@ -473,7 +473,7 @@ fn computed(reader: &mut Reader<'_>, sections: &str) {
 /// an array of their own under the section's name.
 fn add_section(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     img: &Image,
     section: Section,
     sub_array: bool,
@@ -487,17 +487,17 @@ fn add_section(
     let mut index = 0;
     for entry in entries {
         let value = if entry.length == 0 {
-            Value::null()
+            Owner::take(req, Value::null())
         } else {
             match &entry.value {
                 Stored::Text(text) if section == Section::Comment => {
-                    let text = Value::string(PhpString::new(req, text)?);
-                    target.set(req, Key::Int(index), text)?;
+                    let text = PhpString::new(req, text)?.into_value();
+                    target.set(req, Key::Int(index), text.hand_on_unmigrated())?;
                     index += 1;
                     continue;
                 }
                 Stored::Bytes(bytes) | Stored::Text(bytes) => {
-                    Value::string(PhpString::new(req, bytes)?)
+                    PhpString::new(req, bytes)?.into_value()
                 }
                 Stored::Numbers(numbers) => match numbers.as_slice() {
                     [one] => number(req, *one)?,
@@ -505,19 +505,21 @@ fn add_section(
                         let mut list = PhpArray::new(req)?;
                         for (at, one) in (0..).zip(many) {
                             let value = number(req, *one)?;
-                            list.set(req, Key::Int(at), value)?;
+                            list.set(req, Key::Int(at), value.hand_on_unmigrated())?;
                         }
-                        Value::array(list)
+                        list.into_value()
                     }
                 },
             }
         };
-        let key = Key::from_string(PhpString::new(req, &entry.name)?);
-        target.set(req, key, value)?;
+        let key = Key::from_string(PhpString::new(req, &entry.name)?.hand_on_unmigrated());
+        target.set(req, key, value.hand_on_unmigrated())?;
     }
     if sub_array {
-        let key = Key::Str(PhpString::new(req, section.name().as_bytes())?);
-        array.set(req, key, Value::array(own))?;
+        let key = Key::Str(PhpString::new(req, section.name().as_bytes())?.hand_on_unmigrated());
+        array.set(req, key, own.into_value().hand_on_unmigrated())?;
+    } else {
+        own.give_up(req);
     }
     Ok(())
 }
@@ -525,17 +527,19 @@ fn add_section(
 /// One number as `add_assoc_image_info` renders it: an `int` of the
 /// `int` php casts to, a rational as its `%u/%u` or `%i/%i` string, a
 /// float as a double.
-fn number(req: &mut Request, number: Number) -> Result<Value, Thrown> {
-    let text =
-        |req: &mut Request, text: String| PhpString::new(req, text.as_bytes()).map(Value::string);
-    match number {
-        Number::Unsigned(u) => Ok(Value::int(i64::from(i32::from_ne_bytes(u.to_ne_bytes())))),
-        Number::Signed(i) => Ok(Value::int(i64::from(i))),
-        Number::URational(n, d) => text(req, format!("{n}/{d}")),
-        Number::SRational(n, d) => text(req, format!("{n}/{d}")),
-        Number::Single(f) => Ok(Value::float(f64::from(f))),
-        Number::Double(d) => Ok(Value::float(d)),
-    }
+fn number(req: &mut Request, number: Number) -> Result<Owner<Value>, Thrown> {
+    let text = |req: &mut Request, text: String| {
+        PhpString::new(req, text.as_bytes()).map(Owner::into_value)
+    };
+    let scalar = match number {
+        Number::Unsigned(u) => Value::int(i64::from(i32::from_ne_bytes(u.to_ne_bytes()))),
+        Number::Signed(i) => Value::int(i64::from(i)),
+        Number::URational(n, d) => return text(req, format!("{n}/{d}")),
+        Number::SRational(n, d) => return text(req, format!("{n}/{d}")),
+        Number::Single(f) => Value::float(f64::from(f)),
+        Number::Double(d) => Value::float(d),
+    };
+    Ok(Owner::take(req, scalar))
 }
 
 /// `exif_thumbnail($file, &$width = null, &$height = null, &$image_type
@@ -563,7 +567,7 @@ fn exif_thumbnail(
     #[php(default = null)] width: Ref<Untyped<Value>>,
     #[php(default = null)] height: Ref<Untyped<Value>>,
     #[php(default = null)] image_type: Ref<Untyped<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Untyped(file) = file;
     let (mut reader, ok) = read(req, &file, true)?;
     let thumb = &reader.img.thumbnail;
@@ -588,7 +592,10 @@ fn exif_thumbnail(
         (image_type, thumb.filetype.code()),
     ];
     for (slot, value) in answers {
-        slot.set(reader.req, Untyped(Value::int(value)))?;
+        if let Err(thrown) = slot.set(reader.req, Untyped(Value::int(value))) {
+            answer.give_up(reader.req);
+            return Err(thrown);
+        }
     }
     Ok(OrFalse::Value(answer))
 }
@@ -617,10 +624,12 @@ fn exif_imagetype(req: &mut Request, filename: Path) -> Result<OrFalse<i64>, Thr
     let Some(stream) = req.open_stream_with(filename.as_bytes(), b"rb", opening)? else {
         return Ok(OrFalse::False);
     };
-    let bytes = stream.copy_to_mem(req, None)?;
-    stream.free(req);
+    let bytes = stream.copy_to_mem(req, None);
+    stream.close(req);
+    stream.give_up(req);
+    let bytes = bytes?;
     let itype = php_ext_standard::php_getimagetype(req, bytes.as_bytes(), filename.as_bytes());
-    req.release(Value::string(bytes));
+    bytes.give_up(req);
     Ok(match itype {
         0 => OrFalse::False,
         itype => OrFalse::Value(itype),
@@ -643,29 +652,36 @@ fn read<'r>(
     read_thumbnail: bool,
 ) -> Result<(Reader<'r>, bool), Thrown> {
     let mut img = Image::new(read_thumbnail, encodings(req));
-    let (stream, opened) = if let ValueRef::Resource(_) = file.as_ref() {
+    let (stream, owned) = if let ValueRef::Resource(_) = file.as_ref() {
         let Some(stream) = Stream::from_value(req, file) else {
             let function = req.active_function_name();
             let message = format!("{function}(): supplied resource is not a valid stream resource");
             return Err(throw_error(req, "TypeError", &message));
         };
-        (Some(stream), false)
+        (Some(stream), None)
     } else {
         let path = to_string(req, file)?;
-        if path.is_empty() {
-            return Err(arg_value_error(req, 1, "not be empty"));
-        }
-        if path.as_bytes().contains(&0) {
-            return Err(arg_value_error(req, 1, "not contain any null bytes"));
+        let refused = if path.is_empty() {
+            Some("not be empty")
+        } else if path.as_bytes().contains(&0) {
+            Some("not contain any null bytes")
+        } else {
+            None
+        };
+        if let Some(refused) = refused {
+            path.give_up(req);
+            return Err(arg_value_error(req, 1, refused));
         }
         let opening = Opening {
             must_seek: true,
             ..Opening::default()
         };
         let stream = req.open_stream_with(path.as_bytes(), b"rb", opening);
-        req.release(Value::string(path));
-        (stream?, true)
+        path.give_up(req);
+        let owned = stream?;
+        (owned.as_deref().copied(), owned)
     };
+    let opened = owned.is_some();
     let Some(stream) = stream else {
         let mut reader = Reader::new(req, img, None);
         reader.error(Level::Warning, "Unable to open file");
@@ -698,8 +714,9 @@ fn read<'r>(
     } else {
         reader.scan()
     };
-    if opened {
-        stream.free(reader.req);
+    if let Some(owned) = owned {
+        owned.close(reader.req);
+        owned.give_up(reader.req);
     } else if old_pos != 0 {
         stream.seek(reader.req, old_pos, Whence::Set);
     }

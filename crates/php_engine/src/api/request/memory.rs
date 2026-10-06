@@ -10,7 +10,7 @@ pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
 use php_heap::{Arr, Fatal, Heap, Intern, Ref, SortEntry, ZvalRef};
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, adopted};
 
 use super::{Hooks, Request};
 
@@ -516,9 +516,16 @@ impl Request {
     /// `gc_status()`, `zend_gc_get_status` in php 8.5's twelve fields, the
     /// times in seconds as php divides its nanoseconds, the keys strings
     /// of the request's.
-    pub fn gc_status(&mut self) -> Result<PhpArray, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn gc_status(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.gc_status_made();
+        adopted(self, made)
+    }
+
+    /// What [`gc_status`](Self::gc_status) makes, its one owner not yet named.
+    pub(crate) fn gc_status_made(&mut self) -> Result<PhpArray, Thrown> {
         let status = self.heap.gc_status();
-        let mut array = PhpArray::new(self)?;
+        let mut array = self.array()?;
         for (name, value) in [
             ("running", Value::bool(status.running)),
             ("protected", Value::bool(status.protected)),
@@ -542,7 +549,7 @@ impl Request {
             ),
             ("free_time", Value::float(seconds(status.free_time))),
         ] {
-            let key = Key::Str(PhpString::new(self, name.as_bytes())?);
+            let key = Key::Str(self.string(name.as_bytes())?);
             array.set(self, key, value)?;
         }
         Ok(array)

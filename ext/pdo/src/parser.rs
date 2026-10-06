@@ -213,7 +213,10 @@ fn quote(
     let text = match (ty.kind(), value.as_ref()) {
         (BindKind::Lob, ValueRef::Resource(_)) => {
             if let Some(stream) = php_ext::request::Stream::from_value(req, &value) {
-                stream.copy_to_mem(req, None)?.as_bytes().to_vec()
+                let copied = stream.copy_to_mem(req, None)?;
+                let bytes = copied.as_bytes().to_vec();
+                copied.give_up(req);
+                bytes
             } else {
                 error::raise_impl(
                     req,
@@ -234,7 +237,12 @@ fn quote(
             }));
         }
         (BindKind::Int, _) => return Ok(Some(to_long(req, &value)?.to_string().into_bytes())),
-        _ => to_string(req, &value)?.as_bytes().to_vec(),
+        _ => {
+            let text = to_string(req, &value)?;
+            let bytes = text.as_bytes().to_vec();
+            text.give_up(req);
+            bytes
+        }
     };
     let mode = crate::dbh::state(req, dbh).map_or(OnError::Throw, |d| d.error_mode);
     let quoted =

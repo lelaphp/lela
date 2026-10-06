@@ -8,7 +8,7 @@ use std::sync::Arc;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpObject, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpObject, Value, ValueRef};
 
 use crate::classes::{Fault, FaultSlot, SdlPayload, set_soap_fault};
 use crate::model::Sdl;
@@ -122,10 +122,10 @@ pub(crate) fn instance_of(req: &mut Request, object: PhpObject, name: &str) -> b
 
 /// `object_init_ex(soap_fault_class_entry)` and `set_soap_fault`: a
 /// fresh fault, the caller's one owner.
-pub(crate) fn new_fault(req: &mut Request, f: &Fault<'_>) -> R<PhpObject> {
+pub(crate) fn new_fault(req: &mut Request, f: &Fault<'_>) -> R<Owner<PhpObject>> {
     let class = class_id(req, "SoapFault")?;
     let object = new_object(req, class)?;
-    set_soap_fault(req, object, f)?;
+    set_soap_fault(req, *object, f)?;
     Ok(object)
 }
 
@@ -140,7 +140,7 @@ pub(crate) fn add_soap_fault(
     actor: Option<&[u8]>,
     detail: Option<Value>,
     lang: &[u8],
-) -> R<PhpObject> {
+) -> R<Owner<PhpObject>> {
     let fault = new_fault(
         req,
         &Fault {
@@ -158,7 +158,7 @@ pub(crate) fn add_soap_fault(
     } else {
         SERVER_SOAP_FAULT
     };
-    let value = Value::object(fault);
+    let value = Value::object(*fault);
     req.addref(&value);
     obj.set_slot(req, index, value)?;
     Ok(fault)
@@ -170,7 +170,7 @@ pub(crate) fn fault_slot(object: PhpObject, which: FaultSlot) -> Value {
 }
 
 /// A `Soap\Sdl` holding `sdl`, the caller's one owner.
-pub(crate) fn new_sdl_object(req: &mut Request, sdl: Arc<Sdl>) -> R<PhpObject> {
+pub(crate) fn new_sdl_object(req: &mut Request, sdl: Arc<Sdl>) -> R<Owner<PhpObject>> {
     let class = class_id(req, "Soap\\Sdl")?;
     let object = new_object(req, class)?;
     if let Some(p) = object.native_mut::<SdlPayload>(req) {

@@ -9,7 +9,7 @@
 
 use php_ext::raising::{Thrown, fatal};
 use php_ext::request::{Request, Stream, Whence};
-use php_ext::values::{Emalloc, Value};
+use php_ext::values::Emalloc;
 
 /// `FLATFILE_BLOCK_SIZE`.
 const BLOCK: usize = 1024;
@@ -57,7 +57,7 @@ pub(crate) fn gets(
     match file.get_line(req, max)? {
         Some(line) => {
             let bytes = line.as_bytes().to_vec();
-            req.release(Value::string(line));
+            line.give_up(req);
             Ok(Some(bytes))
         }
         None => Ok(None),

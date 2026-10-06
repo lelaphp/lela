@@ -12,7 +12,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `INT_MAX`, the bound every count of the file is held to.
 const INT_MAX: i64 = 2_147_483_647;
@@ -109,7 +109,7 @@ fn pack(
     req: &mut Request,
     format: PhpString,
     values: Variadic<Value>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut argv = values.0;
     let format = format.as_bytes().to_vec();
     let num_args = argv.len();
@@ -153,8 +153,8 @@ fn pack(
                     // `try_convert_to_string`: the value converted where
                     // it stands, so the packing pass reads the string.
                     let s = to_string(req, &argv[currentarg].deref())?;
-                    argv[currentarg] = Value::string(s);
                     arg = i64::try_from(s.len()).unwrap_or(INT_MAX);
+                    argv[currentarg] = Value::string(s.hand_on_unmigrated());
                     if code == b'Z' {
                         arg += 1;
                     }
@@ -255,17 +255,16 @@ fn pack(
                     count
                 };
                 let value = next_value(&mut current);
-                let s = to_string(req, &value)?;
+                let s = crate::string::string_bytes(req, &value)?;
                 let pad = if code == b'A' { b' ' } else { 0 };
                 out[pos..pos + count].fill(pad);
                 let n = s.len().min(copy);
-                out[pos..pos + n].copy_from_slice(&s.as_bytes()[..n]);
+                out[pos..pos + n].copy_from_slice(&s[..n]);
                 pos += count;
             }
             b'h' | b'H' => {
                 let value = next_value(&mut current);
-                let s = to_string(req, &value)?;
-                let digits = s.as_bytes();
+                let digits = crate::string::string_bytes(req, &value)?;
                 let mut left = count;
                 if left > digits.len() {
                     docref(
@@ -481,7 +480,7 @@ fn unpack(
     format: PhpString,
     string: PhpString,
     #[php(default = 0)] offset: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let input = string;
     let full = input.as_bytes();
     if offset < 0 || offset > i64::try_from(full.len()).unwrap_or(i64::MAX) {
@@ -515,7 +514,7 @@ fn unpack(
                     .filter(|v| *v <= INT_MAX);
                 let Some(parsed) = parsed else {
                     docref(req, Level::Warning, &format!("Type {ch}: integer overflow"));
-                    req.release(Value::array(array));
+                    array.give_up(req);
                     return Ok(OrFalse::False);
                 };
                 repetitions = parsed;
@@ -559,7 +558,7 @@ fn unpack(
             b'i' | b'I' | b'l' | b'L' | b'N' | b'V' | b'f' | b'g' | b'G' => 4,
             b'q' | b'Q' | b'J' | b'P' | b'd' | b'e' | b'E' => 8,
             _ => {
-                req.release(Value::array(array));
+                array.give_up(req);
                 return Err(throw_error(
                     req,
                     "ValueError",
@@ -571,7 +570,7 @@ fn unpack(
         while i != repetitions {
             if size != 0 && size != -1 && INT_MAX - size + 1 < inputpos {
                 docref(req, Level::Warning, &format!("Type {ch}: integer overflow"));
-                req.release(Value::array(array));
+                array.give_up(req);
                 return Ok(OrFalse::False);
             }
             if inputpos + size > inputlen {
@@ -587,7 +586,7 @@ fn unpack(
                         "Type {ch}: not enough input values, need {size} values but only {left} {verb} provided"
                     ),
                 );
-                req.release(Value::array(array));
+                array.give_up(req);
                 return Ok(OrFalse::False);
             }
             let at = usize::try_from(inputpos).unwrap_or(0);
@@ -616,11 +615,13 @@ fn unpack(
                             &span[..end]
                         }
                     };
-                    Some(Value::string(PhpString::new(req, kept)?))
+                    Some(Value::string(
+                        PhpString::new(req, kept)?.hand_on_unmigrated(),
+                    ))
                 }
                 b'h' | b'H' => {
                     if size > INT_MAX / 2 {
-                        req.release(Value::array(array));
+                        array.give_up(req);
                         return Err(argument_error(
                             req,
                             "ValueError",
@@ -654,7 +655,9 @@ fn unpack(
                             first = true;
                         }
                     }
-                    Some(Value::string(PhpString::new(req, &hex)?))
+                    Some(Value::string(
+                        PhpString::new(req, &hex)?.hand_on_unmigrated(),
+                    ))
                 }
                 b'c' => Some(Value::int(i64::from(i8::from_ne_bytes([input[at]])))),
                 b'C' => Some(Value::int(i64::from(input[at]))),
@@ -734,11 +737,11 @@ fn unpack(
                 let key = if name.is_empty() {
                     Key::Int(i + 1)
                 } else if repetitions == 1 {
-                    Key::from_string(PhpString::new(req, &name)?)
+                    Key::from_string(PhpString::new(req, &name)?.hand_on_unmigrated())
                 } else {
                     let mut numbered = name.clone();
                     numbered.extend_from_slice((i + 1).to_string().as_bytes());
-                    Key::from_string(PhpString::new(req, &numbered)?)
+                    Key::from_string(PhpString::new(req, &numbered)?.hand_on_unmigrated())
                 };
                 array.set(req, key, value)?;
             }

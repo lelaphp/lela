@@ -7,11 +7,11 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// A string key of the request's.
 fn key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
-    Ok(Key::Str(PhpString::new(req, name)?))
+    Ok(Key::Str(PhpString::new(req, name)?.hand_on_unmigrated()))
 }
 
 /// `net_get_interfaces(): array|false`, `PHP_FUNCTION(net_get_interfaces)`
@@ -54,7 +54,7 @@ fn key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
 /// }
 /// ```
 #[php_function]
-fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let found = match crate::ffi::interfaces() {
         Ok(found) => found,
         Err(error) => {
@@ -67,7 +67,7 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
             return Ok(OrFalse::False);
         }
     };
-    let mut names: Vec<(Vec<u8>, bool, PhpArray)> = Vec::new();
+    let mut names: Vec<(Vec<u8>, bool, Owner<PhpArray>)> = Vec::new();
     for entry in found {
         let mut unicast_entry = PhpArray::new(req)?;
         let k = key(req, b"flags")?;
@@ -85,16 +85,17 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
         for (name, text) in texts {
             if let Some(text) = text {
                 let k = key(req, name)?;
-                let v = Value::string(PhpString::new(req, &text)?);
+                let v = Value::string(PhpString::new(req, &text)?.hand_on_unmigrated());
                 unicast_entry.set(req, k, v)?;
             }
         }
         let up = entry.flags & IFF_UP != 0;
         if let Some(slot) = names.iter_mut().find(|(n, _, _)| *n == entry.name) {
-            slot.2.append(req, Value::array(unicast_entry))?;
+            slot.2
+                .append(req, Value::array(unicast_entry.hand_on_unmigrated()))?;
         } else {
             let mut unicast = PhpArray::new(req)?;
-            unicast.append(req, Value::array(unicast_entry))?;
+            unicast.append(req, Value::array(unicast_entry.hand_on_unmigrated()))?;
             names.push((entry.name, up, unicast));
         }
     }
@@ -102,11 +103,11 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
     for (name, up, unicast) in names {
         let mut iface = PhpArray::new(req)?;
         let k = key(req, b"unicast")?;
-        iface.set(req, k, Value::array(unicast))?;
+        iface.set(req, k, Value::array(unicast.hand_on_unmigrated()))?;
         let k = key(req, b"up")?;
         iface.set(req, k, Value::bool(up))?;
         let k = key(req, &name)?;
-        array.set(req, k, Value::array(iface))?;
+        array.set(req, k, Value::array(iface.hand_on_unmigrated()))?;
     }
     Ok(OrFalse::Value(array))
 }

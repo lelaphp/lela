@@ -38,7 +38,7 @@ use php_ext::call::lookup_class;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, docref};
 use php_ext::request::{Request, StreamCtx};
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use ffi::{Raised, Route, sys};
 pub use mime_sniff::sniff_charset_from_stream;
@@ -757,7 +757,7 @@ fn libxml_use_internal_errors(
 }
 
 /// `php_libxml_create_error_object`: a `LibXMLError` of one error.
-fn error_object(req: &mut Request, error: &Raised) -> Result<Instance<LibXMLError>, Thrown> {
+fn error_object(req: &mut Request, error: &Raised) -> Result<Owner<Instance<LibXMLError>>, Thrown> {
     let Some(class) = php_ext::call::lookup_class(req, b"LibXMLError")? else {
         return Err(php_ext::raising::fatal(
             req,
@@ -771,22 +771,25 @@ fn error_object(req: &mut Request, error: &Raised) -> Result<Instance<LibXMLErro
         (b"column", Value::int(i64::from(error.column))),
         (
             b"message",
-            Value::string(PhpString::new(req, &error.message)?),
+            Value::string(PhpString::new(req, &error.message)?.hand_on_unmigrated()),
         ),
         (
             b"file",
-            Value::string(PhpString::new(
-                req,
-                error.file.as_deref().unwrap_or_default(),
-            )?),
+            Value::string(
+                PhpString::new(req, error.file.as_deref().unwrap_or_default())?
+                    .hand_on_unmigrated(),
+            ),
         ),
         (b"line", Value::int(i64::from(error.line))),
     ];
     for (name, value) in rows {
         let name = PhpString::new(req, name)?;
-        object.set_prop(req, name, value)?;
+        if let Err(thrown) = object.set_prop(req, name.hand_on_unmigrated(), value) {
+            object.give_up(req);
+            return Err(thrown);
+        }
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// `libxml_get_last_error(): LibXMLError|false`: the list's last with
@@ -802,7 +805,9 @@ fn error_object(req: &mut Request, error: &Raised) -> Result<Instance<LibXMLErro
 /// bool(false)
 /// ```
 #[php_function]
-fn libxml_get_last_error(req: &mut Request) -> Result<OrFalse<Instance<LibXMLError>>, Thrown> {
+fn libxml_get_last_error(
+    req: &mut Request,
+) -> Result<OrFalse<Owner<Instance<LibXMLError>>>, Thrown> {
     let last = match &req.state::<State>().errors {
         Some(list) => list.last().cloned(),
         None => ffi::Raised::last(),
@@ -828,14 +833,14 @@ fn libxml_get_last_error(req: &mut Request) -> Result<OrFalse<Instance<LibXMLErr
 /// }
 /// ```
 #[php_function]
-fn libxml_get_errors(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn libxml_get_errors(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let Some(list) = req.state::<State>().errors.clone() else {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     };
     let mut out = PhpArray::new(req)?;
     for error in &list {
         let object = error_object(req, error)?;
-        out.append(req, object.object().as_value())?;
+        out.append(req, object.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }

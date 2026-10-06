@@ -55,7 +55,7 @@ use php_ext::attr::php_function;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, argument_error, docref};
 use php_ext::request::{Request, Streams as _, UrlStat, WrapperOp};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
 
@@ -154,7 +154,7 @@ impl Fs {
 /// bool(true)
 /// ```
 #[php_function]
-fn realpath_cache_get(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn realpath_cache_get(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut all = PhpArray::new(req)?;
     for entry in req.realpath_cache() {
         let key = match i64::try_from(entry.key) {
@@ -168,15 +168,15 @@ fn realpath_cache_get(req: &mut Request) -> Result<PhpArray, Thrown> {
             (b"is_dir", Value::bool(entry.is_dir)),
             (
                 b"realpath",
-                Value::string(PhpString::new(req, &entry.realpath)?),
+                Value::string(PhpString::new(req, &entry.realpath)?.hand_on_unmigrated()),
             ),
             (b"expires", Value::int(entry.expires)),
         ] {
-            let name = Key::Str(PhpString::new(req, name)?);
+            let name = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
             row.set(req, name, value)?;
         }
-        let path = Key::Str(PhpString::new(req, &entry.path)?);
-        all.set(req, path, Value::array(row))?;
+        let path = Key::Str(PhpString::new(req, &entry.path)?.hand_on_unmigrated());
+        all.set(req, path, Value::array(row.hand_on_unmigrated()))?;
     }
     Ok(all)
 }
@@ -396,21 +396,21 @@ fn plain_access(req: &mut Request, filename: &[u8], ty: Fs) -> Option<bool> {
 /// bool(true)
 /// bool(false)
 /// ```
-pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thrown> {
+pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Owner<Value>, Thrown> {
     let bad = filename.is_empty() || filename.contains(&0);
     if ty.is_access_check() {
         if bad {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         if let Some(answer) = plain_access(req, filename, ty) {
-            return Ok(Value::bool(answer));
+            return Ok(Owner::take(req, Value::bool(answer)));
         }
     }
     if bad {
         if !filename.is_empty() && !ty.is_exists_check() {
             docref(req, Level::Warning, "Filename contains null byte");
         }
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let link = ty.is_link_operation();
     let answered = if ty.is_exists_check() {
@@ -421,7 +421,7 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
     let sb = match answered {
         UrlStat::Found(sb) => sb,
         // `php_stat`'s own guard refused it, with its warning.
-        UrlStat::Refused => return Ok(Value::bool(false)),
+        UrlStat::Refused => return Ok(Owner::take(req, Value::bool(false))),
         UrlStat::Failed | UrlStat::Unsupported => {
             if !ty.is_exists_check() {
                 let text = format!(
@@ -431,7 +431,7 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
                 );
                 docref(req, Level::Warning, &text);
             }
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
     };
     let mode = sb[2];
@@ -449,7 +449,7 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
             (rmask, wmask, xmask) = group();
         }
     }
-    Ok(match ty {
+    let value = match ty {
         Fs::Perms => Value::int(mode),
         Fs::Inode => Value::int(sb[1]),
         Fs::Size => Value::int(sb[7]),
@@ -473,7 +473,7 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
                     b"unknown"
                 }
             };
-            Value::string(PhpString::new(req, name)?)
+            return Ok(PhpString::new(req, name)?.into_value());
         }
         Fs::IsW => Value::bool(mode & wmask != 0),
         Fs::IsR => Value::bool(mode & rmask != 0),
@@ -488,34 +488,45 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Value, Thr
                 out.append(req, Value::int(field))?;
             }
             for (name, field) in STAT_NAMES.iter().zip(sb) {
-                let key = Key::Str(PhpString::new(req, name)?);
+                let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
                 out.set(req, key, Value::int(field))?;
             }
-            Value::array(out)
+            return Ok(out.into_value());
         }
-    })
+    };
+    Ok(Owner::take(req, value))
 }
 
 /// `FileFunction(name, funcnum)` (`Z/ext/standard/filestat.c:1016`), one
 /// `Z_PARAM_STR` and `php_stat` over it, of an integer field: `int|false`.
 fn stat_int(req: &mut Request, filename: PhpString, ty: Fs) -> Result<OrFalse<i64>, Thrown> {
     let answer = php_stat(req, filename.as_bytes(), ty)?;
-    Ok(answer.as_int().map_or(OrFalse::False, OrFalse::Value))
+    let int = answer.as_int();
+    answer.give_up(req);
+    Ok(int.map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `bool`: the `php_stat` answer of a check.
 fn stat_bool(req: &mut Request, filename: PhpString, ty: Fs) -> Result<bool, Thrown> {
     let answer = php_stat(req, filename.as_bytes(), ty)?;
-    Ok(matches!(answer.as_ref(), ValueRef::Bool(true)))
+    let checked = matches!(answer.as_ref(), ValueRef::Bool(true));
+    answer.give_up(req);
+    Ok(checked)
 }
 
 /// `array|false`: the `php_stat` answer of `stat` and `lstat`.
-fn stat_array(req: &mut Request, filename: PhpString, ty: Fs) -> Result<OrFalse<PhpArray>, Thrown> {
+fn stat_array(
+    req: &mut Request,
+    filename: PhpString,
+    ty: Fs,
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let answer = php_stat(req, filename.as_bytes(), ty)?;
-    Ok(answer
+    let array = answer
         .as_array()
         .copied()
-        .map_or(OrFalse::False, OrFalse::Value))
+        .map(|array| Owner::take(req, array));
+    answer.give_up(req);
+    Ok(array.map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `fileatime(string $filename): int|false`: `st_atime`, or `false` after
@@ -665,12 +676,14 @@ fn filesize(req: &mut Request, filename: PhpString) -> Result<OrFalse<i64>, Thro
 /// bool(false)
 /// ```
 #[php_function]
-fn filetype(req: &mut Request, filename: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+fn filetype(req: &mut Request, filename: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let answer = php_stat(req, filename.as_bytes(), Fs::Type)?;
-    Ok(answer
+    let name = answer
         .as_php_string()
         .copied()
-        .map_or(OrFalse::False, OrFalse::Value))
+        .map(|name| Owner::take(req, name));
+    answer.give_up(req);
+    Ok(name.map_or(OrFalse::False, OrFalse::Value))
 }
 
 /// `file_exists(string $filename): bool`: `access(F_OK)` for a plain
@@ -812,7 +825,7 @@ fn is_link(req: &mut Request, filename: PhpString) -> Result<bool, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn stat(req: &mut Request, filename: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+fn stat(req: &mut Request, filename: PhpString) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     stat_array(req, filename, Fs::Stat)
 }
 
@@ -831,7 +844,7 @@ fn stat(req: &mut Request, filename: PhpString) -> Result<OrFalse<PhpArray>, Thr
 /// bool(false)
 /// ```
 #[php_function]
-fn lstat(req: &mut Request, filename: PhpString) -> Result<OrFalse<PhpArray>, Thrown> {
+fn lstat(req: &mut Request, filename: PhpString) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     stat_array(req, filename, Fs::Lstat)
 }
 

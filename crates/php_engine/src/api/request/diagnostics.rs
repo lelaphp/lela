@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::api::abi::{AfterLog, Callable, IniStage};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
 
 use super::{Phase, Raised, Request, ini_atol, ini_truth, zone};
 
@@ -1078,11 +1078,18 @@ impl Request {
 
     /// `error_get_last()`: the last diagnostic as php's four-key array,
     /// its strings the request's.
-    pub fn last_error(&mut self) -> Result<Option<PhpArray>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn last_error(&mut self) -> Result<Option<Owner<PhpArray>>, Thrown> {
+        let made = self.last_error_made();
+        adopted_some(self, made)
+    }
+
+    /// What [`last_error`](Self::last_error) makes, its one owner not yet named.
+    pub(crate) fn last_error_made(&mut self) -> Result<Option<PhpArray>, Thrown> {
         let Some(last) = self.diagnostics.last_error else {
             return Ok(None);
         };
-        let mut array = PhpArray::new(self)?;
+        let mut array = self.array()?;
         // `ZVAL_STR_COPY` of the message and the file.
         self.addref(&Value::string(last.message));
         self.addref(&Value::string(last.file));
@@ -1185,7 +1192,7 @@ impl Request {
     pub(crate) fn alter_error_reporting(&mut self, level: i64) {
         let text = level.to_string();
         // The memory limit's fatal is recorded and ends the request.
-        let string = PhpString::new(self, text.as_bytes()).ok();
+        let string = self.string(text.as_bytes()).ok();
         self.ini_hold_string(b"error_reporting", Some(text.as_bytes()), string);
         self.diagnostics.error_reporting = level;
     }
@@ -1385,7 +1392,7 @@ impl Request {
         let served = match arguments {
             Ok(arguments) => {
                 let record = self.record_set_aside();
-                let answer = crate::api::call::call(self, &handler, &arguments);
+                let answer = crate::api::call::call_made(self, &handler, &arguments);
                 self.record_restored(record);
                 for argument in arguments {
                     self.release(argument);
@@ -1427,13 +1434,13 @@ impl Request {
         if self.diagnostics.exception_handler.is_none() {
             return;
         }
-        let Some(throwable) = self.take_pending() else {
+        let Some(throwable) = self.take_pending_view() else {
             return;
         };
         let handler = self.diagnostics.exception_handler.take();
         self.diagnostics.exception_handlers.push(handler.clone());
         if let Some(handler) = handler {
-            match crate::api::call::call(self, &handler, &[throwable.as_value()]) {
+            match crate::api::call::call_made(self, &handler, &[throwable.as_value()]) {
                 Ok(value) => self.release(value),
                 Err(thrown) => {
                     self.leave_pending(&thrown);

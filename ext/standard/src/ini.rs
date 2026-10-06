@@ -75,7 +75,7 @@ impl Callback {
         }
         match event {
             Event::Section(name) => {
-                let section = PhpArray::new(req)?;
+                let section = PhpArray::new(req)?.hand_on_unmigrated();
                 let key = key_of(req, &name)?;
                 self.top.set(req, key, Value::array(section))?;
                 self.active = Some(section);
@@ -92,7 +92,7 @@ impl Callback {
 fn key_of(req: &mut Request, label: &Value) -> Result<Key, Thrown> {
     let s = match label.as_php_string() {
         Some(s) => *s,
-        None => PhpString::new(req, b"")?,
+        None => PhpString::new(req, b"")?.hand_on_unmigrated(),
     };
     let key = Key::from_string(s);
     if matches!(key, Key::Str(_)) {
@@ -119,13 +119,13 @@ fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<
             let key = match (index, label.as_php_string()) {
                 (Some(n), _) => Key::Int(n),
                 (None, Some(s)) => Key::Str(*s),
-                (None, None) => Key::Str(PhpString::new(req, b"")?),
+                (None, None) => Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated()),
             };
             let found = arr.get(&key).and_then(|v| v.as_array().copied());
             let mut inner = if let Some(inner) = found {
                 inner
             } else {
-                let inner = PhpArray::new(req)?;
+                let inner = PhpArray::new(req)?.hand_on_unmigrated();
                 if let Key::Str(s) = &key {
                     req.addref(&Value::string(*s));
                 }

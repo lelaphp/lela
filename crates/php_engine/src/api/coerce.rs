@@ -18,7 +18,9 @@ use php_unit::decl::Type;
 use crate::api::abi::Callable;
 use crate::api::raising::{Thrown, arg_type_error};
 use crate::api::request::{Deprecations, Request};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef, adopted,
+};
 
 /// php's binary operators as `zend_binary_op` names them, and the one
 /// unary operator an object's `do_operation` is asked for besides,
@@ -72,7 +74,8 @@ pub fn float_to_long(f: f64) -> i64 {
 
 /// `zend_long_to_str`: the digits as a string of the request's, which
 /// for one digit is the process's interned one, as php's `ZSTR_CHAR` is.
-pub fn int_to_string(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, n.to_string().as_bytes())
 }
 
@@ -161,8 +164,10 @@ pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
 /// `zval_get_string`'s is: a string value's own with one more owner
 /// (`zend_string_copy`), and a new string of the request's for
 /// everything else.
-pub fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
-    crate::ops::to_string(req, value)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn to_string(req: &mut Request, value: &Value) -> Result<Owner<PhpString>, Thrown> {
+    let made = crate::ops::to_string(req, value);
+    adopted(req, made)
 }
 
 /// `convert_scalar_to_number`: an `int` or a `float`, a string the
@@ -188,8 +193,10 @@ pub fn to_number(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
 /// is handed back is the caller's to own, as `zval_get_string`'s is:
 /// an array value's own with one more owner, a new one of the
 /// request's otherwise.
-pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
-    crate::ops::to_array(req, value)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn to_array(req: &mut Request, value: &Value) -> Result<Owner<PhpArray>, Thrown> {
+    let made = crate::ops::to_array(req, value);
+    adopted(req, made)
 }
 
 /// `(object)`, the kernel [`crate::ops::to_object`] through the face:
@@ -198,8 +205,10 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
 /// itself. What is handed back is the caller's to own: an object
 /// value's own with one more owner, a new one of the request's
 /// otherwise.
-pub fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, Thrown> {
-    crate::ops::to_object(req, value)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn to_object(req: &mut Request, value: &Value) -> Result<Owner<PhpObject>, Thrown> {
+    let made = crate::ops::to_object(req, value);
+    adopted(req, made)
 }
 
 /// `zend_is_callable` with the request's scope.
@@ -226,12 +235,19 @@ pub fn callable_checked(req: &mut Request, value: &Value) -> Result<Callable, St
 /// `zend_create_fake_closure` made of a method with its scope before
 /// it, any other object `Class::__invoke`, and any other value its
 /// string, as `zval_get_string` makes it.
-pub fn callable_name(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn callable_name(req: &mut Request, value: &Value) -> Result<Owner<PhpString>, Thrown> {
+    let made = callable_name_made(req, value);
+    adopted(req, made)
+}
+
+/// What [`callable_name`] makes, its one owner not yet named.
+pub(crate) fn callable_name_made(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
     let held = value.deref();
     match held.as_ref() {
         ValueRef::Str(_) | ValueRef::Array(_) | ValueRef::Object(_) => {
             let named = req.callable_name(&held);
-            PhpString::new(req, named.as_bytes())
+            req.string(named.as_bytes())
         }
         _ => crate::ops::to_string(req, &held),
     }
@@ -253,7 +269,7 @@ pub fn callable_name(req: &mut Request, value: &Value) -> Result<PhpString, Thro
 /// ```
 pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown> {
     match req.callable_checked(value) {
-        Ok(_) if req.is_pending() => Err(Thrown::of(req.take_pending())),
+        Ok(_) if req.is_pending() => Err(Thrown::of(req.take_pending_view())),
         Ok(callable) => Ok(callable),
         // `zend_get_callable_name_ex`'s string stands beside the
         // sentence, made for an array or an object and the string's own
@@ -272,7 +288,7 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
             };
             let thrown = crate::api::raising::throw_over_pending(req, "Error", &message);
             if let Some(made) = made {
-                req.release(Value::string(made));
+                made.give_up(req);
             }
             thrown
         })),
@@ -329,7 +345,14 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
 /// }
 /// Cannot access offset of type stdClass on array
 /// ```
-pub fn key_of(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn key_of(req: &mut Request, value: &Value) -> Result<Owner<Key>, Thrown> {
+    let made = key_of_made(req, value);
+    adopted(req, made)
+}
+
+/// What [`key_of`] makes, its one owner not yet named.
+pub(crate) fn key_of_made(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
     let value = value.deref();
     let key = Key::of(crate::ops::array_offset(req, &value, false)?);
     // The kernel names a string offset's own string; a `null`'s `""` it
@@ -440,7 +463,19 @@ pub fn compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thro
 /// `concat_function` of `Zend/zend_operators.c`), with its conversions,
 /// its warnings and its throws, so a native that applies an operator
 /// applies php's. [`BinaryOp::BitwiseNot`] reads `lhs` alone.
+#[cfg_attr(debug_assertions, track_caller)]
 pub fn binary_op(
+    req: &mut Request,
+    op: BinaryOp,
+    lhs: &Value,
+    rhs: &Value,
+) -> Result<Owner<Value>, Thrown> {
+    let made = binary_op_made(req, op, lhs, rhs);
+    adopted(req, made)
+}
+
+/// What [`binary_op`] makes, its one owner not yet named.
+pub(crate) fn binary_op_made(
     req: &mut Request,
     op: BinaryOp,
     lhs: &Value,
@@ -760,7 +795,7 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<He
             // A deprecation the resolution raised became a throw, which
             // stands as it is, as `zend_wrong_callback_error` raises
             // nothing over a pending exception.
-            Err(_) if req.is_pending() => Err(Thrown::of(req.take_pending())),
+            Err(_) if req.is_pending() => Err(Thrown::of(req.take_pending_view())),
             Err(why) => {
                 let or_null = if nullable { " or null" } else { "" };
                 let tail = format!("be a valid callback{or_null}, {why}");
@@ -801,7 +836,7 @@ fn hold(req: &mut Request, value: &Value, ty: &Type, position: u32) -> Result<He
         crate::api::raising::arg_null_deprecated(req, position, &declared);
         if req.is_pending() {
             req.release(coerced);
-            return Err(Thrown::of(req.take_pending()));
+            return Err(Thrown::of(req.take_pending_view()));
         }
     }
     // `zend_parse_arg_str_weak` converts the argument's own zval, and
@@ -1088,7 +1123,7 @@ fn null_as_scalar(req: &mut Request, mask: u32) -> Result<Option<Value>, Thrown>
     } else if mask & MAY_BE_DOUBLE != 0 {
         Some(Value::float(0.0))
     } else if mask & MAY_BE_STRING != 0 {
-        Some(Value::string(PhpString::new(req, b"")?))
+        Some(Value::string(req.string(b"")?))
     } else if mask & MAY_BE_BOOL != 0 {
         Some(Value::bool(false))
     } else {

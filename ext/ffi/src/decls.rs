@@ -13,7 +13,7 @@ use php_ext::call::{Function, new_object};
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Thrown, arg_type_error, deprecated, pending, throw_chained, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::cdata::{
     CData, Data, Fetch, Place, alloc, as_cdata, free, free_types, hold, hold_types, make, remember,
@@ -77,7 +77,7 @@ impl FFI {
         req: &mut Request,
         #[php(default = "")] code: PhpString,
         #[php(default = null)] lib: Option<PhpString>,
-    ) -> Result<Instance<FFI>, Thrown> {
+    ) -> Result<Owner<Instance<FFI>>, Thrown> {
         validate_api_restriction(req)?;
         let lib = match lib {
             Some(path) => match Library::open(path.as_bytes()) {
@@ -117,7 +117,10 @@ impl FFI {
     /// ```expect
     /// nowhere.h', file doesn't exist
     /// ```
-    fn load(req: &mut Request, filename: PhpString) -> Result<Option<Instance<FFI>>, Thrown> {
+    fn load(
+        req: &mut Request,
+        filename: PhpString,
+    ) -> Result<Option<Owner<Instance<FFI>>>, Thrown> {
         validate_api_restriction(req)?;
         if req.preloading() {
             let Some(scope) = crate::preload::register(req, filename.as_bytes()) else {
@@ -145,7 +148,7 @@ impl FFI {
     /// ```expect
     /// Failed loading scope 'NONE'
     /// ```
-    fn scope(req: &mut Request, name: PhpString) -> Result<Instance<FFI>, Thrown> {
+    fn scope(req: &mut Request, name: PhpString) -> Result<Owner<Instance<FFI>>, Thrown> {
         validate_api_restriction(req)?;
         let Some(scope) = crate::preload::scope(req, name.as_bytes()) else {
             let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
@@ -181,7 +184,7 @@ impl FFI {
         r#type: Union<Instance<CType>, PhpString>,
         #[php(default = true)] owned: bool,
         #[php(default = false)] persistent: bool,
-    ) -> Result<Instance<CData>, Thrown> {
+    ) -> Result<Owner<Instance<CData>>, Thrown> {
         ffi_new(req, None, r#type, owned, persistent)
     }
 
@@ -256,7 +259,7 @@ impl FFI {
         req: &mut Request,
         r#type: Union<Instance<CType>, PhpString>,
         #[php(prefer_ref)] ptr: Ref<Untyped<Value>>,
-    ) -> Result<Instance<CData>, Thrown> {
+    ) -> Result<Owner<Instance<CData>>, Thrown> {
         let value = ptr.get().map_or(Value::null(), |held| held.0);
         ffi_cast(req, None, r#type, value)
     }
@@ -272,7 +275,7 @@ impl FFI {
     /// string(9) "uint32_t*"
     /// <EOF> expected, got '<ID>' at line 1
     /// ```
-    fn r#type(req: &mut Request, r#type: PhpString) -> Result<Instance<CType>, Thrown> {
+    fn r#type(req: &mut Request, r#type: PhpString) -> Result<Owner<Instance<CType>>, Thrown> {
         ffi_type(req, None, r#type)
     }
 
@@ -287,7 +290,7 @@ impl FFI {
     fn r#typeof(
         req: &mut Request,
         #[php(prefer_ref)] ptr: Ref<Instance<CData>>,
-    ) -> Result<Instance<CType>, Thrown> {
+    ) -> Result<Owner<Instance<CType>>, Thrown> {
         validate_api_restriction(req)?;
         let ty = match ptr.get() {
             Some(object) => view(req, object.object()).ty,
@@ -310,7 +313,7 @@ impl FFI {
         req: &mut Request,
         r#type: Instance<CType>,
         dimensions: PhpArray,
-    ) -> Result<Instance<CType>, Thrown> {
+    ) -> Result<Owner<Instance<CType>>, Thrown> {
         validate_api_restriction(req)?;
         let mut ty = ctype_of(req, r#type.object());
         let (kind_func, incomplete_array, is_void, incomplete_tag) = {
@@ -385,7 +388,7 @@ impl FFI {
     fn addr(
         req: &mut Request,
         #[php(prefer_ref)] ptr: Ref<Instance<CData>>,
-    ) -> Result<Instance<CData>, Thrown> {
+    ) -> Result<Owner<Instance<CData>>, Thrown> {
         validate_api_restriction(req)?;
         let Some(object) = ptr.get().map(Instance::object) else {
             return Err(ffi_error(req, "NULL pointer dereference"));
@@ -589,7 +592,7 @@ impl FFI {
         req: &mut Request,
         #[php(prefer_ref)] ptr: Ref<Instance<CData>>,
         #[php(default = null)] size: Option<i64>,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         validate_api_restriction(req)?;
         let Some(object) = ptr.get().map(Instance::object) else {
             return PhpString::new(req, b"");
@@ -652,7 +655,7 @@ pub(crate) mod instance {
     use php_ext::attr::php_class;
     use php_ext::raising::Thrown;
     use php_ext::request::Request;
-    use php_ext::values::{PhpString, Value};
+    use php_ext::values::{Owner, PhpString, Value};
 
     use crate::cdata::CData;
     use crate::ctype::CType;
@@ -684,7 +687,7 @@ pub(crate) mod instance {
             r#type: Union<Instance<CType>, PhpString>,
             #[php(default = true)] owned: bool,
             #[php(default = false)] persistent: bool,
-        ) -> Result<Instance<CData>, Thrown> {
+        ) -> Result<Owner<Instance<CData>>, Thrown> {
             super::ffi_new(req, Some(this.object()), r#type, owned, persistent)
         }
 
@@ -703,7 +706,7 @@ pub(crate) mod instance {
             this: This<Self>,
             r#type: Union<Instance<CType>, PhpString>,
             #[php(prefer_ref)] ptr: Ref<Untyped<Value>>,
-        ) -> Result<Instance<CData>, Thrown> {
+        ) -> Result<Owner<Instance<CData>>, Thrown> {
             let value = ptr.get().map_or(Value::null(), |held| held.0);
             super::ffi_cast(req, Some(this.object()), r#type, value)
         }
@@ -721,7 +724,7 @@ pub(crate) mod instance {
             req: &mut Request,
             this: This<Self>,
             r#type: PhpString,
-        ) -> Result<Instance<CType>, Thrown> {
+        ) -> Result<Owner<Instance<CType>>, Thrown> {
             super::ffi_type(req, Some(this.object()), r#type)
         }
     }
@@ -807,23 +810,23 @@ fn hold_decls(req: &mut Request, scope: &Scope, from: usize) -> Result<Box<[usiz
 }
 
 /// An `FFI` object holding `decls`.
-fn made(req: &mut Request, decls: Decls) -> Result<Instance<FFI>, Thrown> {
+fn made(req: &mut Request, decls: Decls) -> Result<Owner<Instance<FFI>>, Thrown> {
     let class = classes(req)?.ffi;
     let object = new_object(req, class)?;
     if let Some(slot) = object.native_mut::<Decls>(req) {
         *slot = decls;
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// A `FFI\CData` holding `data`, returned.
-fn made_cdata(req: &mut Request, data: Data) -> Result<Instance<CData>, Thrown> {
-    make(req, data).map(Instance::of)
+fn made_cdata(req: &mut Request, data: Data) -> Result<Owner<Instance<CData>>, Thrown> {
+    make(req, data).map(Owner::into_instance)
 }
 
 /// `zend_ffi_load(filename, 0)`: a header's declarations, each failure
 /// thrown as php throws it.
-fn load(req: &mut Request, filename: &[u8]) -> Result<Instance<FFI>, Thrown> {
+fn load(req: &mut Request, filename: &[u8]) -> Result<Owner<Instance<FFI>>, Thrown> {
     let shown = String::from_utf8_lossy(filename).into_owned();
     let from = types(req).len();
     let loaded = match crate::preload::load_header(filename, types(req), attr::STORED, None) {
@@ -901,7 +904,7 @@ fn ffi_new(
     ty: Union<Instance<CType>, PhpString>,
     owned: bool,
     persistent: bool,
-) -> Result<Instance<CData>, Thrown> {
+) -> Result<Owner<Instance<CData>>, Thrown> {
     validate_api_restriction(req)?;
     static_call(req, scope_of, "new")?;
     let from = types(req).len();
@@ -987,7 +990,7 @@ fn ffi_cast(
     scope_of: Option<PhpObject>,
     ty: Union<Instance<CType>, PhpString>,
     given: Value,
-) -> Result<Instance<CData>, Thrown> {
+) -> Result<Owner<Instance<CData>>, Thrown> {
     validate_api_restriction(req)?;
     static_call(req, scope_of, "cast")?;
     let from = types(req).len();
@@ -1090,7 +1093,7 @@ fn ffi_type(
     req: &mut Request,
     scope_of: Option<PhpObject>,
     text: PhpString,
-) -> Result<Instance<CType>, Thrown> {
+) -> Result<Owner<Instance<CType>>, Thrown> {
     validate_api_restriction(req)?;
     static_call(req, scope_of, "type")?;
     let from = types(req).len();
@@ -1287,10 +1290,12 @@ impl ObjectHandlers for Handlers {
                     false,
                     false,
                 )
+                .map(Owner::hand_on_unmigrated)
             }
             SymbolKind::Func => {
                 let ty = types(req).pointer_to(sym.ty, 0);
-                Ok(make(req, Data::holding(ty, sym.addr, true))?.as_value())
+                let made = make(req, Data::holding(ty, sym.addr, true))?;
+                Ok(made.into_value().hand_on_unmigrated())
             }
             _ => Ok(Value::int(sym.value)),
         }

@@ -18,7 +18,7 @@ use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown, deprecated, raise, throw, throw_error, warning};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
@@ -45,30 +45,28 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.addref(value);
             Ok(*s)
         }
-        ValueRef::Int(n) => PhpString::new(req, n.to_string().as_bytes()),
+        ValueRef::Int(n) => req.string(n.to_string().as_bytes()),
         ValueRef::Float(f) => {
             // `zend_double_to_str`: the text, then the warning php raises
             // when the value it converted was NAN.
-            let text = PhpString::new(
-                req,
-                double_to_string(f, req.precision(), Exponent::Upper).as_bytes(),
-            )?;
+            let text =
+                req.string(double_to_string(f, req.precision(), Exponent::Upper).as_bytes())?;
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
             }
             Ok(text)
         }
-        ValueRef::Bool(true) => PhpString::new(req, b"1"),
+        ValueRef::Bool(true) => req.string(b"1"),
         ValueRef::Array(_) => {
             warning(req, "Array to string conversion");
-            PhpString::new(req, b"Array")
+            req.string(b"Array")
         }
-        ValueRef::Resource(r) => PhpString::new(req, format!("Resource id #{}", r.id()).as_bytes()),
+        ValueRef::Resource(r) => req.string(format!("Resource id #{}", r.id()).as_bytes()),
         ValueRef::Object(o) => object_to_string(req, *o),
         // `false` and `null` are both the empty string; a reference was
         // followed above.
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false) | ValueRef::Reference(_) => {
-            PhpString::new(req, b"")
+            req.string(b"")
         }
     }
 }
@@ -780,7 +778,7 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             if value.as_float().is_some_and(f64::is_nan) {
                 warning(req, "unexpected NAN value was coerced to array");
             }
-            let mut array = PhpArray::new(req)?;
+            let mut array = req.array()?;
             req.addref(&value);
             array.append(req, value)?;
             Ok(array)
@@ -844,7 +842,7 @@ pub(crate) fn mangled_array(
 ) -> Result<PhpArray, Thrown> {
     let mangled = mangled_names(req, object);
     let duplicate = !mangled.is_empty() || req.own_handlers(object.class()).is_some();
-    let mut array = PhpArray::new(req)?;
+    let mut array = req.array()?;
     let mut at = 0;
     for (key, entry) in rows {
         let entry = match entry.as_ref() {
@@ -861,7 +859,7 @@ pub(crate) fn mangled_array(
         };
         let key = if let Some(prefix) = mangled_prefix(&mangled, &mut at, name) {
             let bytes = [prefix.as_slice(), name.as_bytes()].concat();
-            Key::Str(PhpString::new(req, &bytes)?)
+            Key::Str(req.string(&bytes)?)
         } else {
             req.addref(&Value::string(name));
             Key::from_string(name)
@@ -1823,7 +1821,7 @@ pub(crate) fn to_object(req: &mut Request, value: &Value) -> Result<PhpObject, T
             if value.as_float().is_some_and(f64::is_nan) {
                 warning(req, "unexpected NAN value was coerced to object");
             }
-            let name = PhpString::new(req, b"scalar")?;
+            let name = req.string(b"scalar")?;
             req.addref(&value);
             object.set_prop(req, name, value)?;
         }
@@ -1985,7 +1983,7 @@ fn not_converted(req: &mut Request, value: &Value, to: &str) {
 /// ```
 pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
     if let (Some(a), Some(b)) = (left.deref().as_array(), right.deref().as_array()) {
-        return Ok(Value::array(merged(req, *a, *b)?));
+        return Ok(merged(req, *a, *b)?.into_value().hand_on());
     }
     if let Some(value) = object_operation(req, BinaryOp::Add, left, right)? {
         return Ok(value);
@@ -2370,7 +2368,7 @@ fn bitwise(req: &mut Request, op: Bitwise, left: &Value, right: &Value) -> Resul
         } else {
             shorter.len()
         };
-        let joined = PhpString::filled(req, len, |bytes| {
+        let joined = req.string_with(len, |bytes| {
             for (out, (l, r)) in bytes.iter_mut().zip(longer.iter().zip(shorter)) {
                 *out = op.byte(*l, *r);
             }
@@ -2585,7 +2583,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
         if let [byte] = *bytes {
             return Ok(Value::string(req.string(&[!byte])?));
         }
-        let negated = PhpString::filled(req, bytes.len(), |out| {
+        let negated = req.string_with(bytes.len(), |out| {
             for (out, b) in out.iter_mut().zip(bytes) {
                 *out = !*b;
             }
@@ -2689,7 +2687,7 @@ pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpS
     if a.len() > ZSTR_MAX_LEN - b.len() {
         return Err(throw_error(req, "Error", "String size overflow"));
     }
-    PhpString::filled(req, a.len() + b.len(), |bytes| {
+    req.string_with(a.len() + b.len(), |bytes| {
         let (head, tail) = bytes.split_at_mut(a.len());
         head.copy_from_slice(a.as_bytes());
         tail.copy_from_slice(b.as_bytes());
@@ -3796,7 +3794,7 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
         return Err(Thrown::of(None));
     }
     if bytes.is_empty() {
-        return PhpString::new(req, b"1");
+        return req.string(b"1");
     }
     let mut out = bytes.to_vec();
     let mut last = None;
@@ -3826,7 +3824,7 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
         // has run off its front.
         out.insert(0, if first == b'0' { b'1' } else { first });
     }
-    PhpString::new(req, &out)
+    req.string(&out)
 }
 
 /// `ZEND_STRLEN`'s handler (`Z/Zend/zend_vm_def.h:8759`), the length of
@@ -4080,7 +4078,7 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
         {
             let returned = req.serve_method(method, Some(object), class, &[], &[])?;
             let count = get_long(req, &returned);
-            req.release(returned);
+            returned.give_up(req);
             return Ok(count);
         }
     }
@@ -4453,14 +4451,14 @@ pub(crate) fn string_offset(
             return Ok(Value::null());
         }
         warning(req, &format!("Uninitialized string offset {offset}"));
-        return Ok(Value::string(PhpString::new(req, b"")?));
+        return Ok(Value::string(req.string(b"")?));
     }
     let byte = text
         .as_bytes()
         .get(usize::try_from(at).unwrap_or(0))
         .copied()
         .unwrap_or(0);
-    Ok(Value::string(PhpString::new(req, &[byte])?))
+    Ok(Value::string(req.string(&[byte])?))
 }
 
 /// The key an array offset makes, the `add_again` ladder of
@@ -4497,7 +4495,7 @@ pub(crate) fn array_offset(
     offset: &Value,
     constant: bool,
 ) -> Result<php_heap::Key, Thrown> {
-    let empty = |req: &mut Request| Ok(php_heap::Key::Str(PhpString::new(req, b"")?.heap()));
+    let empty = |req: &mut Request| Ok(php_heap::Key::Str(req.string(b"")?.heap()));
     match offset.as_ref() {
         ValueRef::Str(s) if constant => Ok(php_heap::Key::Str(s.heap())),
         ValueRef::Str(s) => Ok(Key::from_string(*s).heap()),
@@ -4609,14 +4607,14 @@ pub(crate) fn array_key_exists(
     let converted = match key.as_ref() {
         ValueRef::Undef => {
             undefined(req);
-            PhpString::new(req, b"").map(|s| php_heap::Key::Str(s.heap()))
+            req.string(b"").map(|s| php_heap::Key::Str(s.heap()))
         }
         ValueRef::Null => {
             deprecated(
                 req,
                 "Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead",
             );
-            PhpString::new(req, b"").map(|s| php_heap::Key::Str(s.heap()))
+            req.string(b"").map(|s| php_heap::Key::Str(s.heap()))
         }
         _ => array_offset(req, &key, false),
     };
@@ -4877,7 +4875,7 @@ pub(crate) fn unset_dim(
         // nothing wrote both delete; the string is this function's to
         // give back, since `zend_hash_del` takes no owner of its key.
         ValueRef::Null | ValueRef::Undef => {
-            let empty = PhpString::new(req, b"")?;
+            let empty = req.string(b"")?;
             req.array_del(a, php_heap::Key::Str(empty.heap()));
             req.release(Value::string(empty));
             return Ok(());
@@ -5016,7 +5014,7 @@ fn promoted(stayed: Option<i64>, overflowed: f64) -> Value {
 /// ```expect
 /// a,kkkkkkkkkk,
 /// ```
-fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<PhpArray, Thrown> {
+fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut union = left.copy(req)?;
     for (key, value) in right.snapshot_refs() {
         if !union.contains(&key) {
@@ -5643,7 +5641,7 @@ mod tests {
     }
 
     fn array(req: &mut Request, entries: Vec<(Key, Value)>) -> Value {
-        let Ok(mut a) = PhpArray::new(req) else {
+        let Ok(mut a) = req.array() else {
             return Value::null();
         };
         for (k, v) in entries {

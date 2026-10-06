@@ -12,7 +12,7 @@ use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Key, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::Node;
 
 use crate::object::{Code, Dom, Extra};
@@ -408,24 +408,24 @@ fn update(req: &mut Request, object: PhpObject) {
 /// array(0) {
 /// }
 /// ```
-pub(crate) fn create(req: &mut Request, element_object: PhpObject) -> Result<Value, Thrown> {
+pub(crate) fn create(req: &mut Request, element_object: PhpObject) -> Result<Owner<Value>, Thrown> {
     let class = crate::class(req, "Dom\\TokenList")?;
     let object = php_ext::call::new_object(req, class)?;
     let node = crate::node_of(req, element_object);
     let shared = crate::shared_doc(req, element_object);
-    if let Some(mut obj) = crate::libxml_half(req, object)
+    if let Some(mut obj) = crate::libxml_half(req, *object)
         && let Some(n) = node
     {
         obj.attach(req, n, shared);
     }
-    if let Some(d) = dom_mut(req, object) {
+    if let Some(d) = dom_mut(req, *object) {
         d.extra = Extra::TokenList(Box::default());
     }
     let mut set = TokenSet::default();
     set.parse(node.and_then(class_value));
     set.tag = 0;
-    put(req, object, set);
-    Ok(object.as_value())
+    put(req, *object, set);
+    Ok(object.into_value())
 }
 
 /// `dom_validate_token`.
@@ -450,11 +450,11 @@ fn validate(req: &mut Request, token: &[u8]) -> Result<(), Thrown> {
 }
 
 /// `dom_token_list_item_read`: the token at `index`, `null` past the end.
-fn item_value(req: &mut Request, object: PhpObject, index: i64) -> Result<Value, Thrown> {
+fn item_value(req: &mut Request, object: PhpObject, index: i64) -> Result<Owner<Value>, Thrown> {
     let tokens = tokens(req, object);
     match usize::try_from(index).ok().and_then(|i| tokens.get(i)) {
         Some(token) => string(req, token),
-        None => Ok(Value::null()),
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -462,7 +462,10 @@ fn item_value(req: &mut Request, object: PhpObject, index: i64) -> Result<Value,
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn length_read(req: &mut Request, object: PhpObject) -> crate::Read {
     let n = tokens(req, object).len();
-    Ok(Some(Value::int(i64::try_from(n).unwrap_or(i64::MAX))))
+    Ok(Some(Owner::take(
+        req,
+        Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
+    )))
 }
 
 /// `dom_token_list_value_read`: the attribute's value, not the set's.
@@ -531,7 +534,7 @@ impl ClassIterator for TokenIter {
         })
         .flatten();
         match token {
-            Some(token) => string(req, &token),
+            Some(token) => Ok(string(req, &token)?.hand_on_unmigrated()),
             None => Ok(Value::null()),
         }
     }
@@ -718,7 +721,7 @@ impl ObjectHandlers for TokenListHandlers {
             return Err(throw_error(req, "Error", "Cannot append to Dom\\TokenList"));
         };
         match offset(req, offset_value)? {
-            Some(index) => item_value(req, object, index),
+            Some(index) => item_value(req, object, index).map(Owner::hand_on_unmigrated),
             None => Err(illegal_offset(
                 req,
                 object,
@@ -741,7 +744,7 @@ impl ObjectHandlers for TokenListHandlers {
         if not_empty {
             let value = item_value(req, object, index)?;
             let answer = truthy(req, &value);
-            req.release(value);
+            value.give_up(req);
             return Ok(answer);
         }
         let n = tokens(req, object).len();
@@ -869,9 +872,9 @@ impl TokenList {
         req: &mut Request,
         this: This<Self>,
         index: i64,
-    ) -> Result<Raw<Option<PhpString>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<PhpString>>>, Thrown> {
         let token = item_value(req, this.object(), index)?;
-        crate::returned(req, token)
+        crate::returned(token)
     }
 
     /// `Dom\TokenList::contains(string $token): bool`.
@@ -1005,7 +1008,7 @@ impl TokenList {
     fn getIterator(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<crate::Iterator>, Thrown> {
-        php_ext::call::internal_iterator(req, &this.object()).map(Instance::of)
+    ) -> Result<Owner<Instance<crate::Iterator>>, Thrown> {
+        php_ext::call::internal_iterator(req, &this.object()).map(Owner::into_instance)
     }
 }

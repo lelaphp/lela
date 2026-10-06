@@ -13,7 +13,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{identical, loose_eq, to_string};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 #[php_const]
 pub(crate) mod constants {
@@ -73,7 +73,7 @@ fn explode(
     separator: PhpString,
     string: PhpString,
     #[php(default = PHP_INT_MAX)] limit: i64,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     if separator.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
@@ -92,8 +92,8 @@ fn explode(
     pieces.push(rest);
     let mut array = PhpArray::new(req)?;
     for piece in pieces {
-        let piece = Value::string(PhpString::new(req, piece)?);
-        array.append(req, piece)?;
+        let piece = PhpString::new(req, piece)?.into_value();
+        array.append(req, piece.hand_on_unmigrated())?;
     }
     Ok(array)
 }
@@ -108,7 +108,7 @@ fn htmlspecialchars(
     #[php(default = ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401)] flags: i64,
     #[php(default = null)] encoding: Option<PhpString>,
     #[php(default = true)] double_encode: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let _ = (string, encoding, double_encode);
     PhpString::new(req, format!("flags={flags}").as_bytes())
 }
@@ -164,7 +164,7 @@ fn trim(
     req: &mut Request,
     string: PhpString,
     #[php(default = " \n\r\t\x0B\0")] characters: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let set = characters.as_bytes();
     let s = string.as_bytes();
     let start = s.iter().position(|b| !set.contains(b)).unwrap_or(s.len());
@@ -197,7 +197,7 @@ fn str_replace(
     replace: Union<PhpArray, PhpString>,
     subject: Union<PhpString, PhpArray>,
     #[php(default = null)] count: Ref<Untyped<Value>>,
-) -> Result<Union<PhpString, PhpArray>, Thrown> {
+) -> Result<Union<Owner<PhpString>, PhpArray>, Thrown> {
     let (Union::B(search), Union::B(replace), Union::A(subject)) = (search, replace, subject)
     else {
         return Err(arg_value_error(req, 1, "is mirrored for strings only"));
@@ -248,17 +248,24 @@ fn array_keys(
     array: PhpArray,
     filter_value: Passed<Value>,
     #[php(default = false)] strict: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in array.snapshot() {
         let keep = match &filter_value {
             Passed::Omitted => true,
             Passed::Given(filter) => {
                 let value = value.deref();
-                if strict {
-                    identical(req, filter, &value)?
+                let same = if strict {
+                    identical(req, filter, &value)
                 } else {
-                    loose_eq(req, filter, &value)?
+                    loose_eq(req, filter, &value)
+                };
+                match same {
+                    Ok(same) => same,
+                    Err(thrown) => {
+                        out.give_up(req);
+                        return Err(thrown);
+                    }
                 }
             }
         };
@@ -348,7 +355,7 @@ fn implode(
     req: &mut Request,
     separator: Union<PhpArray, PhpString>,
     #[php(default = null)] array: Option<PhpArray>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let _ = (separator, array);
     PhpString::new(req, b"")
 }
@@ -447,7 +454,7 @@ impl SplFileObject {
         let _ = (this, filename, mode, useIncludePath, context);
     }
     #[php(tentative)]
-    fn fgets(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn fgets(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let _ = this;
         PhpString::new(req, b"line")
     }
@@ -540,7 +547,7 @@ fn proto_raw(req: &mut Request, n: Raw<i64>) -> Result<i64, Thrown> {
 fn proto_seen(
     req: &mut Request,
     #[php(default = true)] flag: Passed<bool>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let text = match flag {
         Passed::Given(b) => format!("given {b}"),
         Passed::Omitted => "omitted".to_owned(),
@@ -555,7 +562,7 @@ fn proto_call(
     req: &mut Request,
     callback: Callable,
     args: NamedVariadic<Value>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let named: Vec<(PhpString, Value)> = args.named().to_vec();
     php_ext::call::call_named(req, &callback, &args.positional, &named)
 }
@@ -572,7 +579,7 @@ fn proto_count(req: &mut Request, of: Iterable) -> Result<i64, Thrown> {
 /// `proto_manual(int ...$n): string`, which counts its own arguments: none
 /// or two.
 #[php_function(arity = manual)]
-fn proto_manual(req: &mut Request, n: Variadic<i64>) -> Result<PhpString, Thrown> {
+fn proto_manual(req: &mut Request, n: Variadic<i64>) -> Result<Owner<PhpString>, Thrown> {
     if !matches!(n.0.len(), 0 | 2) {
         return Err(php_ext::raising::arg_count_error(
             req,
@@ -585,7 +592,7 @@ fn proto_manual(req: &mut Request, n: Variadic<i64>) -> Result<PhpString, Thrown
 
 /// `proto_describe(mixed $value): string`, through `to_string`.
 #[php_function]
-fn proto_describe(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn proto_describe(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     to_string(req, &value)
 }
 
@@ -635,7 +642,7 @@ pub(crate) struct ProtoBase;
 #[php_class]
 impl ProtoBase {
     fn grow(this: This<Self>);
-    fn kind(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn kind(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let _ = this;
         PhpString::new(req, b"base")
     }
@@ -684,15 +691,17 @@ impl ProtoBox {
         req.addref(&this.object().as_value());
         Ok(Static(this.object()))
     }
-    fn make(req: &mut Request, #[php(default = 0)] n: i64) -> Result<Instance<Self>, Thrown> {
+    fn make(
+        req: &mut Request,
+        #[php(default = 0)] n: i64,
+    ) -> Result<Owner<Instance<Self>>, Thrown> {
         let Some(class) = php_ext::call::lookup_class(req, b"ProtoBox")? else {
             return Err(php_ext::raising::fatal(
                 req,
                 "InternalError: ProtoBox unlinked",
             ));
         };
-        let object: PhpObject = php_ext::call::new_object(req, class)?;
-        let made = Instance::<Self>::of(object);
+        let made = php_ext::call::new_object(req, class)?.into_instance::<Self>();
         made.payload_mut(req)?.n = n;
         Ok(made)
     }

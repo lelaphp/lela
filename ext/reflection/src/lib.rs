@@ -81,7 +81,7 @@ use php_ext::decl::{
 use php_ext::raising::{Thrown, arg_count_error, throw, throw_error};
 use php_ext::request::{ExtensionId, Request};
 use php_ext::values::{
-    ClassId, Emalloc, Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
+    ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
 };
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -4973,8 +4973,8 @@ fn set_string_prop(
 }
 
 /// A string of the request's as a native's return.
-fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `GET_REFLECTION_OBJECT_PTR(module)` for a `ReflectionExtension`: the
@@ -5013,7 +5013,7 @@ fn extension_classes(req: &Request, extension: ExtensionId) -> Vec<(ClassId, Vec
 /// `zend_reflection_class_factory`: a `ReflectionClass`, or a
 /// `ReflectionEnum` for an enum, with `$name` written and no
 /// constructor served.
-fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<PhpObject, Thrown> {
+fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
     let is_enum = req
         .class_decl(class)
         .is_some_and(|decl| decl.kind == ClassKind::Enum);
@@ -5028,7 +5028,7 @@ fn reflection_class_factory(req: &mut Request, class: ClassId) -> Result<PhpObje
     };
     let object = new_object(req, reflector)?;
     let name = class_name_of(req, class);
-    set_name(req, object, &name)?;
+    set_name(req, *object, &name)?;
     Ok(object)
 }
 
@@ -5255,7 +5255,7 @@ fn constant_value(
     req: &mut Request,
     constant: &php_ext::decl::ClassConstDecl,
     scope: ClassId,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     php_ext::call::class_constant(req, scope, &constant.name.0)
 }
 
@@ -5514,8 +5514,12 @@ fn const_string(req: &mut Request, name: &[u8], indent: &str) -> String {
 /// at startup carries and one a running program defined does not,
 /// which is `get_defined_constants()`'s own list here.
 fn constant_is_persistent(req: &mut Request, name: &[u8]) -> bool {
-    let defined = req.constants().map(|table| table.find(name).is_some());
-    !defined.unwrap_or(false)
+    let Ok(table) = req.constants() else {
+        return true;
+    };
+    let defined = table.find(name).is_some();
+    table.give_up(req);
+    !defined
 }
 
 /// `CONST_DEPRECATED`: the bit `gen_stub` raises from a `#[\Deprecated]`
@@ -5555,10 +5559,14 @@ fn value_string(req: &mut Request, value: &Value) -> String {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
         ValueRef::Float(number) => float_format(number, precision(req), Exponent::Upper),
-        _ => php_ext::coerce::to_string(req, value).map_or_else(
-            |_| String::new(),
-            |s| String::from_utf8_lossy(s.as_bytes()).into_owned(),
-        ),
+        _ => match php_ext::coerce::to_string(req, value) {
+            Ok(s) => {
+                let text = String::from_utf8_lossy(s.as_bytes()).into_owned();
+                s.give_up(req);
+                text
+            }
+            Err(_) => String::new(),
+        },
     }
 }
 
@@ -5792,10 +5800,10 @@ fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> V
             let Ok(string) = PhpString::new(req, key) else {
                 continue;
             };
-            if object.row(req, &Key::Str(string)).ok().flatten().is_some() {
+            if object.row(req, &Key::Str(*string)).ok().flatten().is_some() {
                 held += 1;
             }
-            req.release(Value::string(string));
+            string.give_up(req);
         }
         if rows > held {
             dynamic.push(name);
@@ -6011,6 +6019,7 @@ fn class_const_string(
         Some(_) => String::from("Object"),
         None => value_string(req, &value),
     };
+    value.give_up(req);
     let _ = writeln!(
         out,
         "{indent}Constant [ {}{} {ty} {} ] {{ {shown} }}",
@@ -6042,8 +6051,10 @@ fn enum_case_string(
         String::from_utf8_lossy(&case.name.0)
     );
     if backing != EnumBacking::Pure {
-        let value = eval_const_expr(req, &case.value, None).unwrap_or_default();
+        let value = eval_const_expr(req, &case.value, None)
+            .unwrap_or_else(|_| Owner::take(req, Value::null()));
         let _ = write!(out, " = {}", value_string(req, &value));
+        value.give_up(req);
     }
     out.push('\n');
     out
@@ -6237,7 +6248,7 @@ fn double_string(req: &mut Request, f: f64) -> String {
         return String::new();
     };
     let mut text = String::from_utf8_lossy(printed.as_bytes()).into_owned();
-    req.release(Value::string(printed));
+    printed.give_up(req);
     if f.is_finite() && !text.contains('.') {
         text.push_str(".0");
     }
@@ -6306,7 +6317,7 @@ fn folded_array(
     match eval_const_expr(req, expr, None) {
         Ok(value) => {
             let written = write(req, &value);
-            req.release(value);
+            value.give_up(req);
             written
         }
         Err(_) => String::new(),
@@ -7142,11 +7153,11 @@ fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result
     let Some(decl) = signature::closure_decl(req, closure) else {
         return Ok(String::new());
     };
-    let bound: Vec<Vec<u8>> = closure
-        .closure_bound(req)?
-        .into_iter()
-        .map(|(name, _)| name.as_bytes().to_vec())
-        .collect();
+    let mut bound: Vec<Vec<u8>> = Vec::new();
+    for (name, _) in closure.closure_bound(req)? {
+        bound.push(name.as_bytes().to_vec());
+        name.give_up(req);
+    }
     let module = closure
         .closure(req)
         .and_then(|info| req.function_extension(info.function))
@@ -8080,7 +8091,7 @@ impl ReflectionExtension {
     ///   }
     /// }
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let text = extension_string(req, extension, "")?;
         PhpString::new(req, text.as_bytes())
@@ -8096,7 +8107,7 @@ impl ReflectionExtension {
     /// string(5) "ctype"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let name = req
             .extension_name(extension)
@@ -8121,7 +8132,7 @@ impl ReflectionExtension {
     /// Extension [ <persistent> extension #N dom version 20031129 ] {
     /// ```
     #[php(tentative)]
-    fn getVersion(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn getVersion(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let version = req.extension_version(extension).unwrap_or_default();
         PhpString::new(req, version.as_bytes()).map(Some)
@@ -8165,7 +8176,7 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getFunctions(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getFunctions(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let reflector = class_named(req, b"ReflectionFunction")?;
         let mut functions = PhpArray::new(req)?;
@@ -8174,9 +8185,9 @@ impl ReflectionExtension {
                 continue;
             };
             let object = new_object(req, reflector)?;
-            set_name(req, object, &name)?;
-            let key = Key::Str(PhpString::new(req, &name)?);
-            functions.set(req, key, object.as_value())?;
+            set_name(req, *object, &name)?;
+            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
+            functions.set(req, key, object.into_value().hand_on_unmigrated())?;
         }
         Ok(functions)
     }
@@ -8221,13 +8232,13 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getConstants(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getConstants(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
         for declared in req.extension_constants(extension) {
             let name = declared.0.to_vec();
             let value = constant(req, &name)?.unwrap_or_default();
-            let key = Key::Str(PhpString::new(req, &name)?);
+            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
             constants.set(req, key, value)?;
         }
         Ok(constants)
@@ -8263,13 +8274,13 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getINIEntries(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getINIEntries(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let mut entries = PhpArray::new(req)?;
         for entry in req.extension_ini(extension) {
-            let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?);
+            let key = Key::Str(PhpString::new(req, &entry.decl.name.0)?.hand_on_unmigrated());
             let value = match entry.value {
-                Some(value) => Value::string(PhpString::new(req, &value)?),
+                Some(value) => Value::string(PhpString::new(req, &value)?.hand_on_unmigrated()),
                 None => Value::null(),
             };
             entries.set(req, key, value)?;
@@ -8299,13 +8310,13 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getClasses(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getClasses(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let mut classes = PhpArray::new(req)?;
         for (class, name) in extension_classes(req, extension) {
             let reflector = reflection_class_factory(req, class)?;
-            let key = Key::Str(PhpString::new(req, &name)?);
-            classes.set(req, key, Value::object(reflector))?;
+            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
+            classes.set(req, key, reflector.into_value().hand_on_unmigrated())?;
         }
         Ok(classes)
     }
@@ -8334,11 +8345,11 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getClassNames(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getClassNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let mut names = PhpArray::new(req)?;
         for (_, name) in extension_classes(req, extension) {
-            let name = Value::string(PhpString::new(req, &name)?);
+            let name = Value::string(PhpString::new(req, &name)?.hand_on_unmigrated());
             names.append(req, name)?;
         }
         Ok(names)
@@ -8358,11 +8369,11 @@ impl ReflectionExtension {
     /// }
     /// ```
     #[php(tentative)]
-    fn getDependencies(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getDependencies(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let extension = this_extension(req, this.object())?;
         let listed = req.extension_dependencies(extension);
         if listed.is_empty() {
-            return Ok(PhpArray::empty());
+            return Ok(Owner::take(req, PhpArray::empty()));
         }
         let mut dependencies = PhpArray::new(req)?;
         for dependency in listed {
@@ -8375,8 +8386,10 @@ impl ReflectionExtension {
                 relation.push(' ');
                 relation.push_str(part);
             }
-            let key = Key::Str(PhpString::new(req, dependency.name.as_bytes())?);
-            let value = Value::string(PhpString::new(req, relation.as_bytes())?);
+            let key =
+                Key::Str(PhpString::new(req, dependency.name.as_bytes())?.hand_on_unmigrated());
+            let value =
+                Value::string(PhpString::new(req, relation.as_bytes())?.hand_on_unmigrated());
             dependencies.set(req, key, value)?;
         }
         Ok(dependencies)
@@ -8512,7 +8525,7 @@ impl ReflectionZendExtension {
     /// Internal error: Failed to retrieve the reflection object
     /// ReflectionZendExtension::getName() expects exactly 0 arguments, 1 given
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let row = this_zend_extension(req, this.object())?;
         let mut text = format!("Zend Extension [ {} ", row.name);
         for (field, before, after) in [
@@ -8538,7 +8551,7 @@ impl ReflectionZendExtension {
     /// string(12) "Zend OPcache"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let row = this_zend_extension(req, this.object())?;
         PhpString::new(req, row.name.as_bytes())
     }
@@ -8552,7 +8565,7 @@ impl ReflectionZendExtension {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn getVersion(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getVersion(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let row = this_zend_extension(req, this.object())?;
         PhpString::new(req, row.version.as_bytes())
     }
@@ -8566,7 +8579,7 @@ impl ReflectionZendExtension {
     /// string(17) "Zend Technologies"
     /// ```
     #[php(tentative)]
-    fn getAuthor(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getAuthor(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let row = this_zend_extension(req, this.object())?;
         PhpString::new(req, row.author.as_bytes())
     }
@@ -8580,7 +8593,7 @@ impl ReflectionZendExtension {
     /// string(20) "http://www.zend.com/"
     /// ```
     #[php(tentative)]
-    fn getURL(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getURL(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let row = this_zend_extension(req, this.object())?;
         PhpString::new(req, row.url.as_bytes())
     }
@@ -8594,7 +8607,7 @@ impl ReflectionZendExtension {
     /// string(13) "Copyright (c)"
     /// ```
     #[php(tentative)]
-    fn getCopyright(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getCopyright(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let row = this_zend_extension(req, this.object())?;
         PhpString::new(req, row.copyright.as_bytes())
     }
@@ -8660,7 +8673,7 @@ impl ReflectionReference {
         req: &mut Request,
         array: PhpArray,
         key: Union<i64, PhpString>,
-    ) -> Result<Option<Instance<ReflectionReference>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<ReflectionReference>>>, Thrown> {
         let key = match key {
             Union::A(n) => Key::Int(n),
             Union::B(name) => Key::Str(name),
@@ -8691,7 +8704,7 @@ impl ReflectionReference {
         } else {
             req.release(reference.as_value());
         }
-        Ok(Some(Instance::of(object)))
+        Ok(Some(object.into_instance()))
     }
 
     /// `ReflectionReference::getId()`: a string that is the same for two
@@ -8711,7 +8724,7 @@ impl ReflectionReference {
     /// bool(true)
     /// int(20)
     /// ```
-    fn getId(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getId(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         use std::hash::BuildHasher as _;
         let reference = this
             .object()

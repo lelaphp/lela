@@ -38,7 +38,9 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, Layout, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Key, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef,
+};
 use php_ext_libxml::ffi::{
     Answer, ClassType, Exported, Item, Kind, Name, Node, Parser, Returned, Scope, Source, XPath,
 };
@@ -221,7 +223,7 @@ fn load(
     class: ClassId,
     options: i64,
     ns: Option<Ns>,
-) -> Result<OrFalse<Instance<SimpleXMLElement>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<SimpleXMLElement>>>, Thrown> {
     if exceeds_int(options) {
         return Err(argument_error(req, "ValueError", 3, "is too large"));
     }
@@ -229,8 +231,8 @@ fn load(
         return Ok(OrFalse::False);
     };
     let made = new_object(req, class)?;
-    adopt(req, made, doc, ns);
-    Ok(OrFalse::Value(Instance::of(made)))
+    adopt(req, *made, doc, ns);
+    Ok(OrFalse::Value(made.into_instance()))
 }
 
 /// `simplexml_load_file(string $filename, ?string $class_name = SimpleXMLElement::class, int $options = 0, string $namespace_or_prefix = "", bool $is_prefix = false): SimpleXMLElement|false`.
@@ -256,7 +258,7 @@ fn simplexml_load_file(
     #[php(default = 0)] options: i64,
     #[php(default = "")] namespace_or_prefix: PhpString,
     #[php(default = false)] is_prefix: bool,
-) -> Result<OrFalse<Instance<SimpleXMLElement>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<SimpleXMLElement>>>, Thrown> {
     let class = class_argument(req, class_name.value(), 2)?;
     let ns = Ns::of(Some(namespace_or_prefix.as_bytes()), is_prefix);
     load(req, Source::File(filename.0.as_bytes()), class, options, ns)
@@ -292,7 +294,7 @@ fn simplexml_load_string(
     #[php(default = 0)] options: i64,
     #[php(default = "")] namespace_or_prefix: PhpString,
     #[php(default = false)] is_prefix: bool,
-) -> Result<OrFalse<Instance<SimpleXMLElement>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<SimpleXMLElement>>>, Thrown> {
     let class = class_argument(req, class_name.value(), 2)?;
     let ns = Ns::of(Some(namespace_or_prefix.as_bytes()), is_prefix);
     load(req, Source::Memory(data.as_bytes()), class, options, ns)
@@ -323,7 +325,7 @@ fn simplexml_import_dom(
     req: &mut Request,
     node: PhpObject,
     #[php(default = SimpleXMLElement::class)] class_name: Raw<Option<PhpString>>,
-) -> Result<Option<Instance<SimpleXMLElement>>, Thrown> {
+) -> Result<Option<Owner<Instance<SimpleXMLElement>>>, Thrown> {
     let class = class_argument(req, class_name.value(), 2)?;
     let Some(exported) = import_node(req, node) else {
         return Err(arg_type_error(req, 1, "be a valid XML node"));
@@ -345,17 +347,17 @@ fn simplexml_import_dom(
         return Ok(None);
     };
     let made = new_object(req, class)?;
-    if let Some(mut obj) = sxe::libxml_half(req, made) {
+    if let Some(mut obj) = sxe::libxml_half(req, *made) {
         obj.share(req, exported.document(), doc);
         obj.hold_node(req, target);
     }
-    Ok(Some(Instance::of(made)))
+    Ok(Some(made.into_instance()))
 }
 
 // ---- the classes
 
 /// `SimpleXMLElement::xpath`'s answer, `array|null|false`.
-type Found = Option<OrFalse<PhpArray>>;
+type Found = Option<OrFalse<Owner<PhpArray>>>;
 
 /// A `SimpleXMLElement` value handed back under its declared type.
 type Element = Raw<Instance<SimpleXMLElement>>;
@@ -493,7 +495,7 @@ impl SimpleXMLElement {
             };
             if let Some(target) = target {
                 let made = wrap(req, this, target, walk, ns)?;
-                out.append(req, made.as_value())?;
+                out.append(req, made.into_value().hand_on_unmigrated())?;
             }
         }
         Ok(Some(OrFalse::Value(out)))
@@ -558,7 +560,7 @@ impl SimpleXMLElement {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] filename: Option<Path>,
-    ) -> Result<Union<PhpString, bool>, Thrown> {
+    ) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
         as_xml(req, this.object(), filename)
     }
 
@@ -597,7 +599,7 @@ impl SimpleXMLElement {
         req: &mut Request,
         this: This<Self>,
         #[php(default = false)] recursive: bool,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let view = View::of(req, this.object());
         let base = view.node(req)?;
         let mut found = Vec::new();
@@ -646,7 +648,7 @@ impl SimpleXMLElement {
         this: This<Self>,
         #[php(default = false)] recursive: bool,
         #[php(default = true)] fromRoot: bool,
-    ) -> Result<OrFalse<PhpArray>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         let this = this.object();
         let node = if fromRoot {
             let Some(doc) = sxe(req, this).and_then(|s| s.obj.document_node()) else {
@@ -689,7 +691,7 @@ impl SimpleXMLElement {
         this: This<Self>,
         #[php(default = null)] namespaceOrPrefix: Option<PhpString>,
         #[php(default = false)] isPrefix: bool,
-    ) -> Result<Option<Instance<SimpleXMLElement>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<SimpleXMLElement>>>, Thrown> {
         let this = this.object();
         let view = View::of(req, this);
         if matches!(view.walk, Walk::Attributes(_)) {
@@ -703,7 +705,7 @@ impl SimpleXMLElement {
             namespaceOrPrefix.as_ref().map(PhpString::as_bytes),
             isPrefix,
         );
-        wrap(req, this, node, Walk::Children, ns).map(|o| Some(Instance::of(o)))
+        wrap(req, this, node, Walk::Children, ns).map(|o| Some(o.into_instance()))
     }
 
     /// `attributes(?string $namespaceOrPrefix = null, bool $isPrefix = false): ?SimpleXMLElement`:
@@ -727,7 +729,7 @@ impl SimpleXMLElement {
         this: This<Self>,
         #[php(default = null)] namespaceOrPrefix: Option<PhpString>,
         #[php(default = false)] isPrefix: bool,
-    ) -> Result<Option<Instance<SimpleXMLElement>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<SimpleXMLElement>>>, Thrown> {
         let this = this.object();
         let view = View::of(req, this);
         let base = view.node(req)?;
@@ -741,7 +743,7 @@ impl SimpleXMLElement {
             namespaceOrPrefix.as_ref().map(PhpString::as_bytes),
             isPrefix,
         );
-        wrap(req, this, node, Walk::Attributes(None), ns).map(|o| Some(Instance::of(o)))
+        wrap(req, this, node, Walk::Attributes(None), ns).map(|o| Some(o.into_instance()))
     }
 
     /// `__construct(string $data, int $options = 0, bool $dataIsURL = false, string $namespaceOrPrefix = "", bool $isPrefix = false)`:
@@ -821,7 +823,7 @@ impl SimpleXMLElement {
         qualifiedName: PhpString,
         #[php(default = null)] value: Option<PhpString>,
         #[php(default = null)] namespace: Option<PhpString>,
-    ) -> Result<Option<Instance<SimpleXMLElement>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<SimpleXMLElement>>>, Thrown> {
         let this = this.object();
         if qualifiedName.is_empty() {
             return Err(arg_value_error(req, 1, "not be empty"));
@@ -859,7 +861,7 @@ impl SimpleXMLElement {
             }
         }
         let ns = Ns::of(prefix.as_deref(), false);
-        wrap(req, this, made, Walk::Node, ns).map(|o| Some(Instance::of(o)))
+        wrap(req, this, made, Walk::Node, ns).map(|o| Some(o.into_instance()))
     }
 
     /// `addAttribute(string $qualifiedName, string $value, ?string $namespace = null): void`:
@@ -943,7 +945,7 @@ impl SimpleXMLElement {
     /// string(0) ""
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let view = View::of(req, this.object());
         let base = view.node(req)?;
         let name = view.first(base).map(Node::name).unwrap_or_default();
@@ -961,7 +963,7 @@ impl SimpleXMLElement {
     /// string(1) "x"
     /// string(0) ""
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let text = sxe::cast_text(req, this.object())?.unwrap_or_default();
         PhpString::new(req, &text)
     }
@@ -994,7 +996,7 @@ impl SimpleXMLElement {
     ///   }
     /// }
     /// ```
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Option<PhpArray>, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpArray>>, Thrown> {
         sxe::debug_table(req, this.object()).map(Some)
     }
 
@@ -1079,7 +1081,7 @@ impl SimpleXMLElement {
     /// string(1) "a"
     /// ```
     #[php(tentative)]
-    fn key(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         match sxe::current_name(req, this.object()) {
             Some(name) => PhpString::new(req, &name),
             None => Err(throw_error(
@@ -1201,7 +1203,7 @@ fn as_xml(
     req: &mut Request,
     this: PhpObject,
     filename: Option<Path>,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let view = View::of(req, this);
     let base = view.node(req)?;
     let Some(node) = view.first(base) else {
@@ -1313,12 +1315,15 @@ fn declared_namespaces(
 }
 
 /// The namespaces found as php's array, prefix to URI.
-fn namespace_array(req: &mut Request, found: Vec<(Vec<u8>, Vec<u8>)>) -> Result<PhpArray, Thrown> {
+fn namespace_array(
+    req: &mut Request,
+    found: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (prefix, href) in found {
-        let key = Key::Str(PhpString::new(req, &prefix)?);
+        let key = Key::Str(PhpString::new(req, &prefix)?.hand_on_unmigrated());
         let value = sxe::string(req, &href)?;
-        out.set(req, key, value)?;
+        out.set(req, key, value.hand_on_unmigrated())?;
     }
     Ok(out)
 }

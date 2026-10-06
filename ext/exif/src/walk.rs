@@ -6,7 +6,6 @@
 
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::{Request, Stream, Whence};
-use php_ext::values::Value;
 
 use crate::image::{
     FileType, Format, Found, Image, Order, Section, TAG_COMPUTED, TAG_NONE, c_hex, c_int, cstr,
@@ -176,10 +175,10 @@ impl<'r> Reader<'r> {
             match stream.read(self.req, want) {
                 Ok(Some(chunk)) if !chunk.is_empty() => {
                     out.extend_from_slice(chunk.as_bytes());
-                    self.req.release(Value::string(chunk));
+                    chunk.give_up(self.req);
                 }
                 Ok(Some(chunk)) => {
-                    self.req.release(Value::string(chunk));
+                    chunk.give_up(self.req);
                     break;
                 }
                 Ok(None) => break,

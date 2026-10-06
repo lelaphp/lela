@@ -56,7 +56,7 @@ use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Owner, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{CLIENT_INFO, Idle, Mysqlnd, ReverseApi};
 
 /// `MYSQLI_VERSION_ID`, what the deprecated `driver_version` reads.
@@ -471,7 +471,7 @@ pub(crate) fn payload_ref<T: Send + 'static>(req: &Request, object: PhpObject) -
 }
 
 /// `object_init`: a new `stdClass`.
-pub(crate) fn std_object(req: &mut Request) -> Result<PhpObject, Thrown> {
+pub(crate) fn std_object(req: &mut Request) -> Result<Owner<PhpObject>, Thrown> {
     let class = php_ext::call::lookup_class(req, b"stdClass")?
         .ok_or_else(|| php_ext::raising::fatal(req, "InternalError: stdClass is not linked"))?;
     php_ext::call::new_object(req, class)
@@ -504,18 +504,18 @@ pub(crate) fn sql_exception(
     let value = new_throwable(req, "mysqli_sql_exception", &message)?;
     if let Some(object) = value.as_object().copied() {
         let written = string(req, sqlstate).and_then(|text| {
-            let name = PhpString::new(req, b"sqlstate")?;
-            object.set_prop(req, name, text)?;
-            let name = PhpString::new(req, b"code")?;
+            let name = PhpString::new(req, b"sqlstate")?.hand_on_unmigrated();
+            object.set_prop(req, name, text.hand_on_unmigrated())?;
+            let name = PhpString::new(req, b"code")?.hand_on_unmigrated();
             object.set_prop(req, name, Value::int(i64::from(errno)))
         });
         if let Err(thrown) = written {
-            req.release(value);
+            value.give_up(req);
             return Err(thrown);
         }
     }
     let thrown = throw_value(req, &value);
-    req.release(value);
+    value.give_up(req);
     Err(thrown)
 }
 
@@ -589,24 +589,24 @@ pub(crate) fn not_initialized(req: &mut Request, object: PhpObject) -> Thrown {
 
 /// `MYSQLI_RETURN_LONG_INT`: a count below `ZEND_LONG_MAX` as an integer,
 /// any other as its decimal string.
-pub(crate) fn long_or_string(req: &mut Request, n: u64) -> Result<Value, Thrown> {
+pub(crate) fn long_or_string(req: &mut Request, n: u64) -> Result<Owner<Value>, Thrown> {
     match i64::try_from(n) {
-        Ok(n) if n < i64::MAX => Ok(Value::int(n)),
+        Ok(n) if n < i64::MAX => Ok(Owner::take(req, Value::int(n))),
         _ => string(req, n.to_string().as_bytes()),
     }
 }
 
 /// `mysql_affected_rows` as mysqli answers it: `~0` is `-1`.
-pub(crate) fn affected(req: &mut Request, n: u64) -> Result<Value, Thrown> {
+pub(crate) fn affected(req: &mut Request, n: u64) -> Result<Owner<Value>, Thrown> {
     if n == u64::MAX {
-        return Ok(Value::int(-1));
+        return Ok(Owner::take(req, Value::int(-1)));
     }
     long_or_string(req, n)
 }
 
 /// A string value of `bytes`.
-pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// The ini entry as `OnUpdateString` keeps it: `None` for no value or an

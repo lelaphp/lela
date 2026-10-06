@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_mysqlnd::client::{CLIENT_INFO, CLIENT_VERSION, Mysqlnd};
 
 use crate::link::{self, Link, Need};
@@ -83,7 +83,7 @@ impl Props for DriverProps {
         quiet: bool,
     ) -> Result<Option<Value>, Thrown> {
         Ok(Some(match name {
-            "client_info" => string(req, CLIENT_INFO.as_bytes())?,
+            "client_info" => string(req, CLIENT_INFO.as_bytes())?.hand_on_unmigrated(),
             "client_version" => Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0)),
             "driver_version" => {
                 if quiet {
@@ -213,8 +213,8 @@ impl Props for WarningProps {
             return props::gone(req, object, quiet);
         };
         Ok(Some(match name {
-            "message" => string(req, &message)?,
-            "sqlstate" => string(req, b"HY000")?,
+            "message" => string(req, &message)?.hand_on_unmigrated(),
+            "sqlstate" => string(req, b"HY000")?.hand_on_unmigrated(),
             _ => Value::int(errno),
         }))
     }
@@ -235,20 +235,32 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
     loop {
         let row = set.fetch_into(req, 2)?;
         let Some(array) = row.as_array().copied() else {
-            req.release(row);
+            row.give_up(req);
             break;
         };
         let cells = array.snapshot();
-        let errno = match cells.get(1) {
-            Some((_, v)) => php_ext::coerce::to_long(req, v)?,
+        let errno = match cells.get(1).map(|(_, v)| php_ext::coerce::to_long(req, v)) {
+            Some(Ok(n)) => n,
+            Some(Err(thrown)) => {
+                row.give_up(req);
+                return Err(thrown);
+            }
             None => 0,
         };
-        let message = match cells.get(2) {
-            Some((_, v)) => to_string(req, v)?.as_bytes().to_vec(),
+        let message = match cells.get(2).map(|(_, v)| to_string(req, v)) {
+            Some(Ok(text)) => {
+                let bytes = text.as_bytes().to_vec();
+                text.give_up(req);
+                bytes
+            }
+            Some(Err(thrown)) => {
+                row.give_up(req);
+                return Err(thrown);
+            }
             None => Vec::new(),
         };
         list.push(Warning { message, errno });
-        req.release(row);
+        row.give_up(req);
     }
     set.free(req, false)?;
     Ok(list)
@@ -259,7 +271,7 @@ fn warnings(
     req: &mut Request,
     conn: Mysqlnd,
     count: u32,
-) -> Result<OrFalse<Instance<mysqli_warning>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_warning>>>, Thrown> {
     if count == 0 {
         return Ok(OrFalse::False);
     }
@@ -270,17 +282,17 @@ fn warnings(
     let class = lookup_class(req, b"mysqli_warning")?
         .ok_or_else(|| fatal(req, "InternalError: mysqli_warning is not linked"))?;
     let object = new_object(req, class)?;
-    if let Some(w) = crate::payload::<Warnings>(req, object) {
+    if let Some(w) = crate::payload::<Warnings>(req, *object) {
         *w = Warnings { list, at: 0 };
     }
-    Ok(OrFalse::Value(Instance::of(object)))
+    Ok(OrFalse::Value(object.into_instance()))
 }
 
 /// `mysqli_get_warnings`.
 pub(crate) fn link_warnings(
     req: &mut Request,
     on: On,
-) -> Result<OrFalse<Instance<mysqli_warning>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_warning>>>, Thrown> {
     let conn = link::conn(req, on.object, Need::Open)?;
     let count = conn.status(req).warning_count;
     warnings(req, conn, count)
@@ -290,7 +302,7 @@ pub(crate) fn link_warnings(
 pub(crate) fn stmt_warnings(
     req: &mut Request,
     on: On,
-) -> Result<OrFalse<Instance<mysqli_warning>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_warning>>>, Thrown> {
     let (conn, count) = crate::stmt::connection(req, on)?;
     warnings(req, conn, count)
 }
@@ -325,7 +337,7 @@ impl mysqli_sql_exception {
     #[php(property, protected)]
     const sqlstate: PhpString = "00000";
 
-    fn getSqlState(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getSqlState(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let value = this.object().prop(req, b"sqlstate").unwrap_or_default();
         to_string(req, &value.deref())
     }
@@ -371,7 +383,7 @@ fn array_of(
     req: &mut Request,
     links: &[(Value, Mysqlnd)],
     kept: &[Mysqlnd],
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (value, conn) in links {
         if kept.contains(conn) {
@@ -429,14 +441,14 @@ pub(crate) fn poll(
         Some(links) => array_of(req, links, &dont_poll)?,
         None => PhpArray::new(req)?,
     };
-    reject.set(req, rejected)?;
+    reject.set(req, rejected.hand_on_unmigrated())?;
     if let (Some(links), Some(kept)) = (&read_links, &read_conns) {
         let ready = array_of(req, links, kept)?;
-        read.set(req, Some(ready))?;
+        read.set(req, Some(ready.hand_on_unmigrated()))?;
     }
     if let (Some(links), Some(kept)) = (&error_links, &error_conns) {
         let ready = array_of(req, links, kept)?;
-        error.set(req, Some(ready))?;
+        error.set(req, Some(ready.hand_on_unmigrated()))?;
     }
     Ok(match ready {
         Some(n) => OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX)),
@@ -445,7 +457,7 @@ pub(crate) fn poll(
 }
 
 /// `mysqli_get_client_stats`.
-pub(crate) fn client_stats(req: &mut Request) -> Result<PhpArray, Thrown> {
+pub(crate) fn client_stats(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let stats = Mysqlnd::client_stats(req);
     link::stats_array(req, &stats)
 }

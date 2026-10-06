@@ -765,7 +765,8 @@ fn add_var(
             handler: StartHandler::Registered(context.handler()),
             chunk_size: 0,
             flags: 0x70,
-        })?;
+        })?
+        .give_up(req);
     }
     Ok(())
 }

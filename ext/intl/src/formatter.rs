@@ -9,7 +9,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long};
 use php_ext::raising::{Thrown, argument_error, arity, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::formatter::{Number, NumberFormat, ParseError, Parsed, iso3_language};
@@ -66,9 +66,9 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
     let message = match held.then_some(()) {
         None => "Cannot clone uninitialized NumberFormatter",
         Some(()) if status.is_failure() => "Failed to clone NumberFormatter",
-        Some(()) => return Ok(new),
+        Some(()) => return Ok(new.hand_on_unmigrated()),
     };
-    req.release(Value::object(new));
+    new.give_up(req);
     Err(throw_error(req, "Error", message))
 }
 
@@ -141,7 +141,7 @@ fn utf8(
     object: PhpObject,
     (text, code): (Vec<u16>, Code),
     message: &str,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     if check(req, object, code, message)?.is_none() {
         return Ok(None);
     }
@@ -270,27 +270,33 @@ fn create(
     locale: &Raw<PhpString>,
     style: &Raw<i64>,
     pattern: &Raw<Option<PhpString>>,
-) -> Result<Option<Instance<NumberFormatter>>, Thrown> {
+) -> Result<Option<Owner<Instance<NumberFormatter>>>, Thrown> {
     let held = held(req, locale, style, pattern)?;
     let Some(class) = lookup_class(req, b"NumberFormatter")? else {
         return Err(fatal(req, "InternalError: NumberFormatter is not linked"));
     };
     let object = new_object(req, class)?;
-    match construct(req, object, &held) {
-        Ok(true) => Ok(Some(Instance::of(object))),
+    match construct(req, *object, &held) {
+        Ok(true) => Ok(Some(object.into_instance())),
         Ok(false) => {
-            req.release(Value::object(object));
+            object.give_up(req);
             Ok(None)
         }
         Err(thrown) => {
-            req.release(Value::object(object));
+            object.give_up(req);
             Err(thrown)
         }
     }
 }
 
 /// `numfmt_format`.
-fn format(req: &mut Request, object: PhpObject, num: Num, kind: i64, at: u32) -> Answer<PhpString> {
+fn format(
+    req: &mut Request,
+    object: PhpObject,
+    num: Num,
+    kind: i64,
+    at: u32,
+) -> Answer<Owner<PhpString>> {
     with(req, object, |req, unum| {
         let kind = match (kind, &num) {
             (0, Union::A(_)) => 2,
@@ -401,7 +407,7 @@ fn format_currency(
     object: PhpObject,
     amount: f64,
     currency: PhpString,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     with(req, object, |req, unum| {
         let Some(mut code) = utf16(
             req,
@@ -457,7 +463,7 @@ fn parse_currency(
         else {
             return Ok(None);
         };
-        currency.set(req, Untyped(Value::string(text)))?;
+        currency.set(req, Untyped(Value::string(text.hand_on_unmigrated())))?;
         Ok(Some(number))
     })
 }
@@ -518,7 +524,7 @@ fn get_text(
     which: u8,
     key: i64,
     message: &str,
-) -> Answer<PhpString> {
+) -> Answer<Owner<PhpString>> {
     error::reset(req);
     if which == 1 && !(0..29).contains(&key) {
         error::set(req, Code::ILLEGAL_ARGUMENT, "invalid symbol value")?;
@@ -570,7 +576,7 @@ fn set_text(
 }
 
 /// `numfmt_get_locale`.
-fn get_locale(req: &mut Request, object: PhpObject, kind: i64) -> Answer<PhpString> {
+fn get_locale(req: &mut Request, object: PhpObject, kind: i64) -> Answer<Owner<PhpString>> {
     with(req, object, |req, unum| {
         let mut status = Code::ZERO;
         let locale = unum.locale(int32(kind), &mut status).unwrap_or("");
@@ -588,7 +594,7 @@ fn error_code(req: &mut Request, object: PhpObject) -> i64 {
 }
 
 /// `numfmt_get_error_message`.
-fn error_message(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
+fn error_message(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
     error::reset(req);
     let message = error::object_message::<FormatterObject>(req, object);
     PhpString::new(req, &message)
@@ -751,7 +757,7 @@ impl NumberFormatter {
         locale: Raw<PhpString>,
         style: Raw<i64>,
         #[php(default = null)] pattern: Raw<Option<PhpString>>,
-    ) -> Result<Option<Instance<NumberFormatter>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<NumberFormatter>>>, Thrown> {
         create(req, &locale, &style, &pattern)
     }
 
@@ -761,7 +767,7 @@ impl NumberFormatter {
         this: This<Self>,
         num: Num,
         #[php(default = NumberFormatter::TYPE_DEFAULT)] r#type: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         format(req, this.object(), num, r#type, 0).map(or_false)
     }
 
@@ -782,7 +788,7 @@ impl NumberFormatter {
         this: This<Self>,
         amount: f64,
         currency: PhpString,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         format_currency(req, this.object(), amount, currency).map(or_false)
     }
 
@@ -831,7 +837,7 @@ impl NumberFormatter {
         req: &mut Request,
         this: This<Self>,
         attribute: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_text(
             req,
             this.object(),
@@ -857,7 +863,7 @@ impl NumberFormatter {
         req: &mut Request,
         this: This<Self>,
         symbol: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_text(req, this.object(), 1, symbol, "Error getting symbol value").map(or_false)
     }
 
@@ -867,7 +873,10 @@ impl NumberFormatter {
     }
 
     #[php(tentative)]
-    fn getPattern(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getPattern(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_text(req, this.object(), 2, 0, "Error getting formatter pattern").map(or_false)
     }
 
@@ -876,7 +885,7 @@ impl NumberFormatter {
         req: &mut Request,
         this: This<Self>,
         #[php(default = ULOC_ACTUAL_LOCALE)] r#type: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_locale(req, this.object(), r#type).map(or_false)
     }
 
@@ -886,7 +895,7 @@ impl NumberFormatter {
     }
 
     #[php(tentative)]
-    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         error_message(req, this.object())
     }
 }
@@ -920,7 +929,7 @@ fn numfmt_create(
     locale: Raw<PhpString>,
     style: Raw<i64>,
     #[php(default = null)] pattern: Raw<Option<PhpString>>,
-) -> Result<Option<Fmt>, Thrown> {
+) -> Result<Option<Owner<Fmt>>, Thrown> {
     create(req, &locale, &style, &pattern)
 }
 
@@ -950,7 +959,7 @@ fn numfmt_format(
     formatter: Fmt,
     num: Num,
     #[php(default = NumberFormatter::TYPE_DEFAULT)] r#type: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     format(req, formatter.object(), num, r#type, 1).map(or_false)
 }
 
@@ -995,7 +1004,7 @@ fn numfmt_format_currency(
     formatter: Fmt,
     amount: f64,
     currency: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     format_currency(req, formatter.object(), amount, currency).map(or_false)
 }
 
@@ -1104,7 +1113,7 @@ fn numfmt_get_text_attribute(
     req: &mut Request,
     formatter: Fmt,
     attribute: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_text(
         req,
         formatter.object(),
@@ -1154,7 +1163,7 @@ fn numfmt_get_symbol(
     req: &mut Request,
     formatter: Fmt,
     symbol: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_text(
         req,
         formatter.object(),
@@ -1198,7 +1207,10 @@ fn numfmt_set_pattern(
 /// string(6) "#,##0%"
 /// ```
 #[php_function]
-fn numfmt_get_pattern(req: &mut Request, formatter: Fmt) -> Result<OrFalse<PhpString>, Thrown> {
+fn numfmt_get_pattern(
+    req: &mut Request,
+    formatter: Fmt,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_text(
         req,
         formatter.object(),
@@ -1225,7 +1237,7 @@ fn numfmt_get_locale(
     req: &mut Request,
     formatter: Fmt,
     #[php(default = ULOC_ACTUAL_LOCALE)] r#type: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_locale(req, formatter.object(), r#type).map(or_false)
 }
 
@@ -1253,7 +1265,7 @@ fn numfmt_get_error_code(req: &mut Request, formatter: Fmt) -> i64 {
 /// string(23) "U_USING_DEFAULT_WARNING"
 /// ```
 #[php_function]
-fn numfmt_get_error_message(req: &mut Request, formatter: Fmt) -> Result<PhpString, Thrown> {
+fn numfmt_get_error_message(req: &mut Request, formatter: Fmt) -> Result<Owner<PhpString>, Thrown> {
     error_message(req, formatter.object())
 }
 

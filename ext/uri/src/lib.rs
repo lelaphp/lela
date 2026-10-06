@@ -37,7 +37,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal, throw, throw_chained, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 /// `php_uri_component_read_mode`: how a component is read, as it was
 /// written or normalized.
@@ -71,7 +71,7 @@ impl Recomposition {
 /// errors array where the caller asked for one (`zval *errors`).
 pub(crate) struct Parsed<P> {
     pub(crate) uri: Option<P>,
-    pub(crate) errors: Option<PhpArray>,
+    pub(crate) errors: Option<Owner<PhpArray>>,
 }
 
 /// A component the parser could not read: a `read` handler's
@@ -271,7 +271,7 @@ pub(crate) struct Handlers<P>(PhantomData<fn() -> P>);
 
 impl<P: UriParser> ObjectHandlers for Handlers<P> {
     fn clone_obj(&self) -> Option<CloneObj> {
-        Some(clone_uri::<P>)
+        Some(|req, object| clone_uri::<P>(req, object).map(Owner::hand_on_unmigrated))
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
@@ -284,7 +284,10 @@ impl<P: UriParser> ObjectHandlers for Handlers<P> {
     }
 }
 
-fn clone_uri<P: UriParser>(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_uri<P: UriParser>(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<Owner<PhpObject>, Thrown> {
     let copy = with_uri::<P, _>(req, object, |req, uri| uri.duplicate(req))?;
     let Some(copy) = copy else {
         return Err(fatal(req, "InternalError: a URI could not be copied"));
@@ -346,15 +349,18 @@ fn instantiate<P: UriParser>(
     base: Option<PhpObject>,
     should_throw: bool,
     errors: Option<&Ref<Untyped<Value>>>,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let (object, fresh) = match target {
         Target::This(object) => {
             if is_set::<P>(req, object) {
                 return Err(readonly(req, P::CLASS));
             }
-            (object, false)
+            (object, None)
         }
-        Target::New(class) => (new_object(req, class)?, true),
+        Target::New(class) => {
+            let fresh = new_object(req, class)?;
+            (*fresh, Some(fresh))
+        }
     };
     let want_errors = errors.is_some_and(Ref::is_given);
     let parsed = match base {
@@ -365,8 +371,10 @@ fn instantiate<P: UriParser>(
     };
     let parsed = parsed.and_then(|parsed| {
         match (parsed.errors, errors) {
-            (Some(array), Some(errors)) => errors.set(req, Untyped(Value::array(array)))?,
-            (Some(array), None) => req.release(Value::array(array)),
+            (Some(array), Some(errors)) => {
+                errors.set(req, Untyped(Value::array(array.hand_on_unmigrated())))?;
+            }
+            (Some(array), None) => array.give_up(req),
             (None, _) => {}
         }
         Ok(parsed.uri)
@@ -376,11 +384,14 @@ fn instantiate<P: UriParser>(
             if let Some(slot) = object.native_mut::<Slot<P>>(req) {
                 slot.0 = Some(uri);
             }
-            Ok(Some(object))
+            Ok(Some(match fresh {
+                Some(fresh) => fresh,
+                None => Owner::take(req, object),
+            }))
         }
         failed => {
-            if fresh {
-                req.release(object.as_value());
+            if let Some(fresh) = fresh {
+                fresh.give_up(req);
             }
             failed.map(|_| None)
         }
@@ -403,7 +414,7 @@ fn parse_static<P: UriParser>(
     text: PhpString,
     base: Option<PhpObject>,
     errors: Option<&Ref<Untyped<Value>>>,
-) -> Result<Option<Static>, Thrown> {
+) -> Result<Option<Owner<Static>>, Thrown> {
     let class = match req.called_scope() {
         Some(class) => class,
         None => match lookup_class(req, P::CLASS.as_bytes())? {
@@ -413,7 +424,7 @@ fn parse_static<P: UriParser>(
     };
     let text = text.as_bytes().to_vec();
     let made = instantiate::<P>(req, Target::New(class), &text, base, false, errors)?;
-    Ok(made.map(Static))
+    Ok(made.map(Owner::into_static))
 }
 
 /// The constructor of either class, `create_*_uri` with
@@ -426,7 +437,11 @@ fn construct<P: UriParser>(
     errors: Option<&Ref<Untyped<Value>>>,
 ) -> Result<(), Thrown> {
     let text = text.as_bytes().to_vec();
-    instantiate::<P>(req, Target::This(this), &text, base, true, errors).map(|_| ())
+    let made = instantiate::<P>(req, Target::This(this), &text, base, true, errors)?;
+    if let Some(made) = made {
+        made.give_up(req);
+    }
+    Ok(())
 }
 
 /// `resolve()`: `text` against the receiver, into a fresh object of its
@@ -436,7 +451,7 @@ fn resolve<P: UriParser>(
     this: PhpObject,
     text: PhpString,
     errors: Option<&Ref<Untyped<Value>>>,
-) -> Result<Static, Thrown> {
+) -> Result<Owner<Static>, Thrown> {
     let text = text.as_bytes().to_vec();
     let made = instantiate::<P>(
         req,
@@ -447,7 +462,7 @@ fn resolve<P: UriParser>(
         errors,
     )?;
     match made {
-        Some(object) => Ok(Static(object)),
+        Some(object) => Ok(object.into_static()),
         None => Err(fatal(
             req,
             "InternalError: a resolution that throws returned nothing",
@@ -495,7 +510,7 @@ fn component_string<P: UriParser>(
     name: &str,
     mode: ReadAs,
     f: impl FnOnce(&mut P) -> Read<Option<Vec<u8>>>,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let bytes = component::<P, _>(req, this, name, mode, f)?;
     bytes.map(|bytes| PhpString::new(req, &bytes)).transpose()
 }
@@ -507,12 +522,12 @@ fn write<P: UriParser>(
     req: &mut Request,
     this: PhpObject,
     f: impl FnOnce(&mut Request, &mut P) -> Result<(), Thrown>,
-) -> Result<Static, Thrown> {
+) -> Result<Owner<Static>, Thrown> {
     let copy = clone_uri::<P>(req, this)?;
-    match with_uri::<P, _>(req, copy, f) {
-        Ok(()) => Ok(Static(copy)),
+    match with_uri::<P, _>(req, *copy, f) {
+        Ok(()) => Ok(copy.into_static()),
         Err(thrown) => {
-            req.release(copy.as_value());
+            copy.give_up(req);
             Err(thrown)
         }
     }
@@ -524,7 +539,7 @@ fn write_bytes<P: UriParser>(
     this: PhpObject,
     value: Option<PhpString>,
     f: impl FnOnce(&mut P, &mut Request, Option<&[u8]>) -> Result<(), Thrown>,
-) -> Result<Static, Thrown> {
+) -> Result<Owner<Static>, Thrown> {
     let value = value.map(|value| value.as_bytes().to_vec());
     write::<P>(req, this, |req, uri| f(uri, req, value.as_deref()))
 }
@@ -544,7 +559,7 @@ fn recompose<P: UriParser>(
     req: &mut Request,
     this: PhpObject,
     mode: Recomposition,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let bytes = read::<P, _>(req, this, mode.read_as(), |uri| uri.recompose(mode, false))?;
     match bytes {
         Some(bytes) => PhpString::new(req, &bytes),
@@ -576,13 +591,17 @@ fn equals<P: UriParser>(
 const URI_FIELD: &[u8] = b"uri";
 
 /// `__serialize()`: `[["uri" => raw ASCII string], []]`.
-fn serialize<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
+fn serialize<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let uri = recompose::<P>(req, this, Recomposition::RawAscii)?;
     let mut state = PhpArray::new(req)?;
     let key = PhpString::new(req, URI_FIELD)?;
-    state.set(req, Key::Str(key), Value::string(uri))?;
+    state.set(
+        req,
+        Key::Str(key.hand_on_unmigrated()),
+        Value::string(uri.hand_on_unmigrated()),
+    )?;
     let mut out = PhpArray::new(req)?;
-    out.append(req, Value::array(state))?;
+    out.append(req, Value::array(state.hand_on_unmigrated()))?;
     out.append(req, Value::array(PhpArray::empty()))?;
     Ok(out)
 }
@@ -639,7 +658,7 @@ fn serialized_uri(data: PhpArray) -> Option<Vec<u8>> {
 /// `uri_get_debug_properties`: the declared properties, none, and each
 /// component read raw, in php's order; the properties alone where the URI
 /// was never set.
-fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
+fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in this.props(req)? {
         req.addref(&value);
@@ -649,19 +668,25 @@ fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArr
         return Ok(out);
     }
     let raw = ReadAs::Raw;
-    let (scheme, username, password, host, port, path, query, fragment) =
-        read::<P, _>(req, this, raw, |u| {
-            (
-                u.scheme(raw),
-                u.username(raw),
-                u.password(raw),
-                u.host(raw),
-                u.port(raw),
-                u.path(raw),
-                u.query(raw),
-                u.fragment(raw),
-            )
-        })?;
+    let read = read::<P, _>(req, this, raw, |u| {
+        (
+            u.scheme(raw),
+            u.username(raw),
+            u.password(raw),
+            u.host(raw),
+            u.port(raw),
+            u.path(raw),
+            u.query(raw),
+            u.fragment(raw),
+        )
+    });
+    let (scheme, username, password, host, port, path, query, fragment) = match read {
+        Ok(read) => read,
+        Err(thrown) => {
+            out.give_up(req);
+            return Err(thrown);
+        }
+    };
     // A component the parser cannot read is left out, as php's
     // `== SUCCESS` checks leave it.
     let strings = [
@@ -696,20 +721,25 @@ fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<PhpArr
 
 fn put_string(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     name: &[u8],
     value: Option<Vec<u8>>,
 ) -> Result<(), Thrown> {
     let value = match value {
-        Some(bytes) => Value::string(PhpString::new(req, &bytes)?),
+        Some(bytes) => Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated()),
         None => Value::null(),
     };
     put(req, array, name, value)
 }
 
-fn put(req: &mut Request, array: &mut PhpArray, name: &[u8], value: Value) -> Result<(), Thrown> {
+fn put(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    name: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
     let key = PhpString::new(req, name)?;
-    array.set(req, Key::Str(key), value)
+    array.set(req, Key::Str(key.hand_on_unmigrated()), value)
 }
 
 /// Core's `Exception`, `Uri\UriException`'s parent.

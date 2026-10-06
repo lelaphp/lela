@@ -25,7 +25,7 @@
 //! [`Observed`]: crate::api::abi::Observed
 
 use crate::api::raising::Thrown;
-use crate::api::values::Value;
+use crate::api::values::{Owner, Value, adopted};
 
 use super::inspect::Evaluation;
 use super::{FrameId, Request};
@@ -66,7 +66,20 @@ impl Request {
     /// one evaluated in, where php's starts at it (#2036). `None`
     /// where the frame is not one this reaches: popped, suspended, or
     /// below a fiber.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn eval_in_frame(
+        &mut self,
+        frame: FrameId,
+        code: &[u8],
+        name: &[u8],
+    ) -> Option<Result<Owner<Value>, Thrown>> {
+        let made = self.eval_in_frame_made(frame, code, name)?;
+        Some(adopted(self, made))
+    }
+
+    /// What [`eval_in_frame`](Self::eval_in_frame) makes, its one owner
+    /// not yet named.
+    fn eval_in_frame_made(
         &mut self,
         frame: FrameId,
         code: &[u8],
@@ -84,7 +97,7 @@ impl Request {
         let returned = std::mem::replace(&mut self.returned, Value::null());
         let served = match self.fatal_of(evaluated) {
             Ok(Evaluation::Served) if !self.is_pending() => return Some(Ok(returned)),
-            Ok(_) => Err(Thrown::of(self.take_pending())),
+            Ok(_) => Err(Thrown::of(self.take_pending_view())),
             Err(thrown) => Err(thrown),
         };
         self.release(returned);

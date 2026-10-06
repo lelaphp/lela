@@ -5,7 +5,7 @@ use php_ext::abi::{Instance, Path, Raw, This, Union, Untyped, Variadic};
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_null_deprecated, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{Kind, Name, Node, Ns, Quirks, XML_ATTRIBUTE_ID};
 
 use crate::document::XMLNS_NS;
@@ -100,7 +100,12 @@ fn decl_named(elem: Node, prefix: Option<&[u8]>) -> Option<Ns> {
 
 /// A namespace declaration handed out as a `DOMNameSpaceNode`, the
 /// element kept alive by it.
-fn namespace_node(req: &mut Request, this: PhpObject, elem: Node, ns: Ns) -> Result<Value, Thrown> {
+fn namespace_node(
+    req: &mut Request,
+    this: PhpObject,
+    elem: Node,
+    ns: Ns,
+) -> Result<Owner<Value>, Thrown> {
     let Some(fake) = Node::fake_namespace_decl(elem, ns.href().as_deref(), ns.prefix().as_deref())
     else {
         return Err(dom_throw(req, Code::InvalidState));
@@ -384,7 +389,7 @@ fn in_scope_namespace_info(
     req: &mut Request,
     this: PhpObject,
     node: Node,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
 ) -> Result<(), Thrown> {
     let doc = node.doc();
     let mut table: Vec<(Vec<u8>, Option<Ns>)> = Vec::new();
@@ -423,16 +428,22 @@ fn in_scope_namespace_info(
         }
         let info = php_ext::call::new_object(req, class)?;
         let prefix = if prefix.is_empty() {
-            Value::null()
+            Owner::take(req, Value::null())
         } else {
             string(req, &prefix)?
         };
-        info.set_slot(req, 0, prefix)?;
+        info.set_slot(req, 0, prefix.hand_on_unmigrated())?;
         let uri = crate::nullable_string(req, href.as_deref())?;
-        info.set_slot(req, 1, uri)?;
-        let element = object_for(req, node, Some(this))?;
-        info.set_slot(req, 2, element)?;
-        out.append(req, info.as_value())?;
+        info.set_slot(req, 1, uri.hand_on_unmigrated())?;
+        let element = match object_for(req, node, Some(this)) {
+            Ok(element) => element,
+            Err(thrown) => {
+                info.give_up(req);
+                return Err(thrown);
+            }
+        };
+        info.set_slot(req, 2, element.hand_on_unmigrated())?;
+        out.append(req, info.into_value().hand_on_unmigrated())?;
     }
     Ok(())
 }
@@ -520,12 +531,12 @@ fn insert_adjacent_element(
     this: PhpObject,
     place: Option<AdjacentPosition>,
     other_obj: PhpObject,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let elem = fetch(req, this)?;
     let other = fetch(req, other_obj)?;
     match insert_adjacent(req, this, elem, place, other)? {
         Inserted::Done => object_for(req, other, Some(other_obj)),
-        Inserted::NoParent | Inserted::Failed => Ok(Value::null()),
+        Inserted::NoParent | Inserted::Failed => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -559,7 +570,7 @@ fn set_attribute(
     this: PhpObject,
     name: &[u8],
     value: &[u8],
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if name.is_empty() {
         return Err(arg_value_error(req, 1, "not be empty"));
     }
@@ -569,19 +580,19 @@ fn set_attribute(
     let elem = fetch(req, this)?;
     if follows_spec(req, this) {
         set_attribute_modern(req, this, elem, name, value);
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     match attribute_or_decl(false, elem, name) {
         Some(Found::Attr(a)) if a.kind() == Kind::Attribute => {
             crate::attr_value_will_change(req, this, a);
             node_list_unlink(a.children());
         }
-        Some(Found::Decl(_)) => return Ok(Value::bool(false)),
+        Some(Found::Decl(_)) => return Ok(Owner::take(req, Value::bool(false))),
         _ => {}
     }
     if name == b"xmlns" {
         return Ok(match elem.new_ns(value, None) {
-            Some(_) => Value::bool(true),
+            Some(_) => Owner::take(req, Value::bool(true)),
             None => return Err(arg_value_error(req, 1, "be a valid XML attribute")),
         });
     }
@@ -599,7 +610,7 @@ fn set_attribute_node(
     this: PhpObject,
     attr: PhpObject,
     (use_ns, modern): (bool, bool),
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let elem = fetch(req, this)?;
     let attr = fetch(req, attr)?;
     if modern {
@@ -614,7 +625,7 @@ fn set_attribute_node(
     } else if attr.doc().is_some() && attr.doc() != elem.doc() {
         let strict = strict(req, this);
         dom_error(req, Code::WrongDocument, strict)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let existing = match attr.ns().and_then(Ns::href).filter(|_| use_ns) {
         Some(href) => elem.has_ns_prop(&attr.name(), Some(&href)),
@@ -623,7 +634,7 @@ fn set_attribute_node(
     .filter(|a| a.kind() != Kind::AttributeDecl);
     if let Some(old) = existing {
         if old == attr {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         }
         old.unlink();
     }
@@ -673,7 +684,7 @@ fn get_attribute_node_ns(
     this: PhpObject,
     uri: Option<&[u8]>,
     name: &[u8],
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let elem = fetch(req, this)?;
     let modern = follows_spec(req, this);
     let uri = uri.filter(|u| !modern || !u.is_empty());
@@ -681,19 +692,23 @@ fn get_attribute_node_ns(
         Some(a) => object_for(req, a, Some(this)),
         None if !modern && uri == Some(XMLNS_NS) => match decl_named(elem, Some(name)) {
             Some(ns) => namespace_node(req, this, elem, ns),
-            None => Ok(Value::null()),
+            None => Ok(Owner::take(req, Value::null())),
         },
-        None => Ok(Value::null()),
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
 /// `DOMElement::getAttributeNode`'s body.
-fn get_attribute_node(req: &mut Request, this: PhpObject, name: &[u8]) -> Result<Value, Thrown> {
+fn get_attribute_node(
+    req: &mut Request,
+    this: PhpObject,
+    name: &[u8],
+) -> Result<Owner<Value>, Thrown> {
     let elem = fetch(req, this)?;
     let modern = follows_spec(req, this);
     match attribute_or_decl(modern, elem, name) {
-        None if modern => Ok(Value::null()),
-        None => Ok(Value::bool(false)),
+        None if modern => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::take(req, Value::bool(false))),
         Some(Found::Decl(ns)) => namespace_node(req, this, elem, ns),
         Some(Found::Attr(a)) => object_for(req, a, Some(this)),
     }
@@ -704,13 +719,13 @@ fn remove_attribute_node(
     req: &mut Request,
     this: PhpObject,
     attr: PhpObject,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let elem = fetch(req, this)?;
     let attr = fetch(req, attr)?;
     if attr.parent() != Some(elem) {
         let strict = strict(req, this);
         dom_error(req, Code::NotFound, strict)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     attr.unlink();
     object_for(req, attr, Some(this))
@@ -915,7 +930,7 @@ impl DOMElement {
         req: &mut Request,
         this: This<Self>,
         qualifiedName: PhpString,
-    ) -> Result<Raw<PhpString>, Thrown> {
+    ) -> Result<Owner<Raw<PhpString>>, Thrown> {
         let this = this.object();
         let elem = fetch(req, this)?;
         let modern = follows_spec(req, this);
@@ -926,14 +941,14 @@ impl DOMElement {
         };
         let value = match value {
             Some(v) => string(req, &v)?,
-            None if modern => Value::null(),
+            None if modern => Owner::take(req, Value::null()),
             None => empty_string(req)?,
         };
-        returned(req, value)
+        returned(value)
     }
 
     /// `DOMElement::getAttributeNames(): array`.
-    fn getAttributeNames(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getAttributeNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let elem = fetch(req, this)?;
         let modern = follows_spec(req, this);
@@ -945,13 +960,13 @@ impl DOMElement {
                 None => b"xmlns".to_vec(),
             };
             let v = string(req, &name)?;
-            out.append(req, v)?;
+            out.append(req, v.hand_on_unmigrated())?;
             ns = n.next();
         }
         let mut attr = elem.properties();
         while let Some(a) = attr {
             let v = string(req, &crate::qualified_name(a))?;
-            out.append(req, v)?;
+            out.append(req, v.hand_on_unmigrated())?;
             attr = a.next();
         }
         Ok(out)
@@ -991,17 +1006,17 @@ impl DOMElement {
         this: This<Self>,
         namespace: Option<PhpString>,
         localName: PhpString,
-    ) -> Result<Raw<PhpString>, Thrown> {
+    ) -> Result<Owner<Raw<PhpString>>, Thrown> {
         let this = this.object();
         let elem = fetch(req, this)?;
         let modern = follows_spec(req, this);
         let uri = namespace.as_ref().map(PhpString::as_bytes);
         let value = match attribute_ns(modern, elem, uri, localName.as_bytes()) {
             Some(v) => string(req, &v)?,
-            None if modern => Value::null(),
+            None if modern => Owner::take(req, Value::null()),
             None => empty_string(req)?,
         };
-        returned(req, value)
+        returned(value)
     }
 
     /// `DOMElement::getAttributeNode(string $qualifiedName)`.
@@ -1049,7 +1064,7 @@ impl DOMElement {
         req: &mut Request,
         this: This<Self>,
         qualifiedName: PhpString,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         get_attribute_node(req, this.object(), qualifiedName.as_bytes()).map(Untyped)
     }
 
@@ -1059,7 +1074,7 @@ impl DOMElement {
         this: This<Self>,
         namespace: Option<PhpString>,
         localName: PhpString,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         let uri = namespace.as_ref().map(PhpString::as_bytes);
         get_attribute_node_ns(req, this.object(), uri, localName.as_bytes()).map(Untyped)
     }
@@ -1084,7 +1099,7 @@ impl DOMElement {
         req: &mut Request,
         this: This<Self>,
         qualifiedName: Path,
-    ) -> Result<Raw<Instance<crate::map::DOMNodeList>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::map::DOMNodeList>>>, Thrown> {
         let this = intern(req, this.object())?;
         let list = crate::create(
             req,
@@ -1096,7 +1111,7 @@ impl DOMElement {
                 qname: false,
             },
         )?;
-        returned(req, list)
+        returned(list)
     }
 
     /// `getElementsByTagNameNS(?string $namespace, string $localName): DOMNodeList`.
@@ -1106,7 +1121,7 @@ impl DOMElement {
         this: This<Self>,
         namespace: Option<Path>,
         localName: Path,
-    ) -> Result<Raw<Instance<crate::map::DOMNodeList>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::map::DOMNodeList>>>, Thrown> {
         let list = crate::document::elements_by_tag_name_ns(
             req,
             this.object(),
@@ -1114,7 +1129,7 @@ impl DOMElement {
             localName,
             "DOMNodeList",
         )?;
-        returned(req, list)
+        returned(list)
     }
 
     /// `DOMElement::hasAttribute(string $qualifiedName): bool`.
@@ -1260,7 +1275,7 @@ impl DOMElement {
         req: &mut Request,
         this: This<Self>,
         attr: Instance<crate::classes::DOMAttr>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         remove_attribute_node(req, this.object(), attr.object()).map(Untyped)
     }
 
@@ -1320,7 +1335,7 @@ impl DOMElement {
         this: This<Self>,
         qualifiedName: PhpString,
         value: PhpString,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         set_attribute(
             req,
             this.object(),
@@ -1414,7 +1429,7 @@ impl DOMElement {
         req: &mut Request,
         this: This<Self>,
         attr: Instance<crate::classes::DOMAttr>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         set_attribute_node(req, this.object(), attr.object(), (false, false)).map(Untyped)
     }
 
@@ -1423,7 +1438,7 @@ impl DOMElement {
         req: &mut Request,
         this: This<Self>,
         attr: Instance<crate::classes::DOMAttr>,
-    ) -> Result<Untyped<Value>, Thrown> {
+    ) -> Result<Untyped<Owner<Value>>, Thrown> {
         set_attribute_node(req, this.object(), attr.object(), (true, false)).map(Untyped)
     }
 
@@ -1673,10 +1688,10 @@ impl DOMElement {
         this: This<Self>,
         r#where: PhpString,
         element: Instance<DOMElement>,
-    ) -> Result<Raw<Option<Instance<DOMElement>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<DOMElement>>>>, Thrown> {
         let place = AdjacentPosition::of(r#where.as_bytes());
         let inserted = insert_adjacent_element(req, this.object(), place, element.object())?;
-        returned(req, inserted)
+        returned(inserted)
     }
 
     /// `DOMElement::insertAdjacentText(string $where, string $data): void`.
@@ -1911,9 +1926,9 @@ impl Element {
         req: &mut Request,
         this: This<Self>,
         attr: Instance<crate::modern::Attr>,
-    ) -> Result<Raw<Option<Instance<crate::modern::Attr>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<crate::modern::Attr>>>>, Thrown> {
         let old = set_attribute_node(req, this.object(), attr.object(), (true, true))?;
-        returned(req, old)
+        returned(old)
     }
 
     #[php(implementation = DOMElement::removeAttributeNode)]
@@ -1950,7 +1965,7 @@ impl Element {
         req: &mut Request,
         this: This<Self>,
         qualifiedName: Path,
-    ) -> Result<Raw<Instance<crate::map::HTMLCollection>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::map::HTMLCollection>>>, Thrown> {
         let this = intern(req, this.object())?;
         let list = crate::create(
             req,
@@ -1962,7 +1977,7 @@ impl Element {
                 qname: true,
             },
         )?;
-        returned(req, list)
+        returned(list)
     }
 
     /// `Dom\Element::getElementsByTagNameNS(?string $namespace, string $localName): Dom\HTMLCollection`.
@@ -1971,7 +1986,7 @@ impl Element {
         this: This<Self>,
         namespace: Option<Path>,
         localName: Path,
-    ) -> Result<Raw<Instance<crate::map::HTMLCollection>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::map::HTMLCollection>>>, Thrown> {
         let list = crate::document::elements_by_tag_name_ns(
             req,
             this.object(),
@@ -1979,7 +1994,7 @@ impl Element {
             localName,
             "Dom\\HTMLCollection",
         )?;
-        returned(req, list)
+        returned(list)
     }
 
     /// `Dom\Element::getElementsByClassName(string $classNames): Dom\HTMLCollection`:
@@ -2007,7 +2022,7 @@ impl Element {
         req: &mut Request,
         this: This<Self>,
         classNames: Path,
-    ) -> Result<Raw<Instance<crate::map::HTMLCollection>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::map::HTMLCollection>>>, Thrown> {
         let this = intern(req, this.object())?;
         let quirks = dom(req, this).is_some_and(|d| d.obj.quirks() == Quirks::Quirks);
         let tokens = crate::token_list::ordered_set(classNames.0.as_bytes(), quirks);
@@ -2017,7 +2032,7 @@ impl Element {
             MapKind::ByClassName(tokens)
         };
         let list = crate::create(req, this, "Dom\\HTMLCollection", kind)?;
-        returned(req, list)
+        returned(list)
     }
 
     /// `Dom\Element::insertAdjacentElement(Dom\AdjacentPosition $where, Dom\Element $element): ?Dom\Element`.
@@ -2050,10 +2065,10 @@ impl Element {
         this: This<Self>,
         r#where: AdjacentPosition,
         element: Instance<Element>,
-    ) -> Result<Raw<Option<Instance<Element>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<Element>>>>, Thrown> {
         let inserted =
             insert_adjacent_element(req, this.object(), Some(r#where), element.object())?;
-        returned(req, inserted)
+        returned(inserted)
     }
 
     /// `Dom\Element::insertAdjacentText(Dom\AdjacentPosition $where, string $data): void`.
@@ -2181,9 +2196,9 @@ impl Element {
         req: &mut Request,
         this: This<Self>,
         selectors: PhpString,
-    ) -> Result<Raw<Option<Instance<Element>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<Element>>>>, Thrown> {
         let found = crate::css::query_selector(req, this.object(), selectors.as_bytes())?;
-        returned(req, found)
+        returned(found)
     }
 
     /// `Dom\ParentNode::querySelectorAll(string $selectors): Dom\NodeList`,
@@ -2216,9 +2231,9 @@ impl Element {
         req: &mut Request,
         this: This<Self>,
         selectors: PhpString,
-    ) -> Result<Raw<Instance<crate::map::NodeList>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<crate::map::NodeList>>>, Thrown> {
         let list = crate::css::query_selector_all(req, this.object(), selectors.as_bytes())?;
-        returned(req, list)
+        returned(list)
     }
 
     /// `Dom\Element::closest(string $selectors): ?Dom\Element`,
@@ -2241,9 +2256,9 @@ impl Element {
         req: &mut Request,
         this: This<Self>,
         selectors: PhpString,
-    ) -> Result<Raw<Option<Instance<Element>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<Element>>>>, Thrown> {
         let found = crate::css::closest(req, this.object(), selectors.as_bytes())?;
-        returned(req, found)
+        returned(found)
     }
 
     /// `Dom\Element::matches(string $selectors): bool`, `dom_element_matches`.
@@ -2297,27 +2312,43 @@ impl Element {
     /// a urn:a2 e
     /// Cannot modify readonly property Dom\NamespaceInfo::$prefix
     /// ```
-    fn getInScopeNamespaces(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getInScopeNamespaces(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let node = fetch(req, this)?;
         let mut out = PhpArray::new(req)?;
-        in_scope_namespace_info(req, this, node, &mut out)?;
+        if let Err(thrown) = in_scope_namespace_info(req, this, node, &mut out) {
+            out.give_up(req);
+            return Err(thrown);
+        }
         Ok(out)
     }
 
     /// `Dom\Element::getDescendantNamespaces(): array`: the element's, then
     /// every descendant element's in tree order.
-    fn getDescendantNamespaces(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getDescendantNamespaces(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let node = fetch(req, this)?;
-        let mut out = PhpArray::new(req)?;
-        in_scope_namespace_info(req, this, node, &mut out)?;
-        let mut at = node.children();
-        while let Some(cur) = at {
-            if cur.kind() == Kind::Element {
-                in_scope_namespace_info(req, this, cur, &mut out)?;
+        let walk = |req: &mut Request, out: &mut Owner<PhpArray>| -> Result<(), Thrown> {
+            in_scope_namespace_info(req, this, node, out)?;
+            let mut at = node.children();
+            while let Some(cur) = at {
+                if cur.kind() == Kind::Element {
+                    in_scope_namespace_info(req, this, cur, out)?;
+                }
+                at = crate::next_in_tree_order(cur, node);
             }
-            at = crate::next_in_tree_order(cur, node);
+            Ok(())
+        };
+        let mut out = PhpArray::new(req)?;
+        if let Err(thrown) = walk(req, &mut out) {
+            out.give_up(req);
+            return Err(thrown);
         }
         Ok(out)
     }

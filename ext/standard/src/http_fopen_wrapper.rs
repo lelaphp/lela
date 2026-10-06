@@ -20,7 +20,7 @@ use php_ext::request::{
     Handshake, Notification, NotifyCode, Opening, OptionAnswer, Request, SocketOptions, Stream,
     StreamCtx, StreamOption, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::State;
@@ -424,7 +424,7 @@ impl Chain {
         if let Some(headers) = self.headers {
             return Ok(headers);
         }
-        let headers = PhpArray::new(req)?;
+        let headers = PhpArray::new(req)?.hand_on_unmigrated();
         self.headers = Some(headers);
         Ok(headers)
     }
@@ -432,7 +432,7 @@ impl Chain {
     /// One line appended to the headers array.
     fn add_header(&mut self, req: &mut Request, line: &[u8]) -> Result<(), Thrown> {
         let mut headers = self.headers(req)?;
-        let line = Value::string(PhpString::new(req, line)?);
+        let line = Value::string(PhpString::new(req, line)?.hand_on_unmigrated());
         headers.append(req, line)
     }
 }
@@ -498,7 +498,7 @@ fn get_line(
         return Ok(None);
     };
     let bytes = line.as_bytes().to_vec();
-    req.release(Value::string(line));
+    line.give_up(req);
     Ok(Some(bytes))
 }
 
@@ -623,9 +623,10 @@ fn tunnel(
     let context = stream.ctx(req);
     let reset = match context {
         Some(context) if !given => {
-            let value = Value::string(PhpString::new(req, &host)?);
-            context.set_option(req, b"ssl", b"peer_name", &value)?;
-            req.release(value);
+            let value = PhpString::new(req, &host)?;
+            let set = context.set_option(req, b"ssl", b"peer_name", &Value::string(*value));
+            value.give_up(req);
+            set?;
             true
         }
         _ => false,
@@ -767,7 +768,10 @@ fn wrap_http_ex(
             };
             let mode = chain.mode.clone();
             let ctx = chain.ctx;
-            return req.with_stream_ctx(ctx, |req| req.open_stream_with(path, &mode, opening));
+            return req.with_stream_ctx(ctx, |req| {
+                req.open_stream_with(path, &mode, opening)
+                    .map(|opened| opened.map(Owner::hand_on_unmigrated))
+            });
         };
         // Called from a non-http wrapper with http proxying asked for
         // (ftp).
@@ -800,6 +804,7 @@ fn wrap_http_ex(
     };
     let stream = match req.xport_create(&transport, xport)? {
         Ok(stream) => {
+            let stream = stream.hand_on_unmigrated();
             if let Some(timeout) = timeout {
                 stream.set_option(req, StreamOption::ReadTimeout(timeout));
             }
@@ -1428,7 +1433,7 @@ fn out(
     if info.chunked
         && let Some(filter) = stream.add_filter(req, b"dechunk", None, 1, true)?
     {
-        req.release(filter.as_value());
+        filter.give_up(req);
     }
     let unread = unread_bytes(req, stream)?;
     if unread > 0 && chain.thrown.is_none() {
@@ -1453,6 +1458,6 @@ fn unread_bytes(req: &mut Request, stream: Stream) -> Result<usize, Thrown> {
         .find(b"unread_bytes")
         .and_then(|v| v.as_int())
         .unwrap_or(0);
-    req.release(Value::array(meta));
+    meta.give_up(req);
     Ok(usize::try_from(unread).unwrap_or(0))
 }

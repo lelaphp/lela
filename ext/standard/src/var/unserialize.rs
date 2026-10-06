@@ -331,7 +331,7 @@ impl VarHash {
                         }
                     });
                     match called {
-                        Ok(answer) => req.release(answer),
+                        Ok(answer) => answer.give_up(req),
                         Err(thrown) => failed = Some(thrown),
                     }
                 }
@@ -997,10 +997,12 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             ValueRef::Bool(true) => {}
             // `ALLOC_HASHTABLE` and `zend_hash_init` at the list's count,
             // or none for `false`, which no name is ever added to.
-            ValueRef::Bool(false) => allowed = Allowed::Only(PhpArray::new(req)?),
+            ValueRef::Bool(false) => {
+                allowed = Allowed::Only(PhpArray::new(req)?.hand_on_unmigrated());
+            }
             ValueRef::Array(list) => {
                 let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
-                let names = PhpArray::init_size(req, count)?;
+                let names = PhpArray::init_size(req, count)?.hand_on_unmigrated();
                 allowed = Allowed::Only(names);
                 if let Err(thrown) = allowed_names(req, names, *list, function) {
                     // `goto cleanup`, which frees what was added so far.
@@ -1083,22 +1085,22 @@ fn allowed_names(
                     "{function}(): Option \"allowed_classes\" must be an array of class names, \"{shown}\" given"
                 ),
             );
-            req.release(Value::string(name));
+            name.give_up(req);
             return Err(thrown);
         }
         let lowered = if name.as_bytes().iter().any(u8::is_ascii_uppercase) {
             // `zend_string_alloc`, whatever the length.
             let bytes = name.as_bytes().to_ascii_lowercase();
             let lowered = PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(&bytes));
-            req.release(Value::string(name));
+            name.give_up(req);
             lowered?
         } else {
             name
         };
         if names.find(lowered.as_bytes()).is_some() {
-            req.release(Value::string(lowered));
+            lowered.give_up(req);
         } else {
-            names.set(req, Key::Str(lowered), Value::null())?;
+            names.set(req, Key::Str(lowered.hand_on_unmigrated()), Value::null())?;
         }
     }
     Ok(())
@@ -1329,7 +1331,7 @@ impl State<'_> {
                         *cell
                     } else {
                         req.addref(&held);
-                        let cell = PhpRef::new(req, held)?;
+                        let cell = PhpRef::new(req, held)?.hand_on_unmigrated();
                         self.write(req, &held_slot, Some(at), cell.as_value())?;
                         // `ref_props`: a typed property whose value was read
                         // becomes a source of the cell it now holds.
@@ -1386,7 +1388,7 @@ impl State<'_> {
                 let Some(text) = self.string(req, start, c0 == b'S') else {
                     return Ok(false);
                 };
-                let value = Value::string(PhpString::new(req, &text)?);
+                let value = Value::string(PhpString::new(req, &text)?.hand_on_unmigrated());
                 self.write(req, &slot, entry, value)?;
                 Ok(true)
             }
@@ -1678,7 +1680,7 @@ impl State<'_> {
         // convert from packed to hash during unserialization"; and
         // `ZVAL_EMPTY_ARRAY` for none, which costs the request nothing.
         let array = match u32::try_from(elements) {
-            Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?,
+            Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?.hand_on_unmigrated(),
             _ => PhpArray::empty(),
         };
         self.write(req, slot, entry, Value::array(array))?;
@@ -1732,9 +1734,9 @@ impl State<'_> {
             let key = match self.key(req) {
                 Some(Scalar::Long(n)) => Key::Int(n),
                 // A key is `zend_string_init_existing_interned`'s.
-                Some(Scalar::Str(bytes)) => {
-                    Key::from_string(PhpString::existing_interned(req, &bytes)?)
-                }
+                Some(Scalar::Str(bytes)) => Key::from_string(
+                    PhpString::existing_interned(req, &bytes)?.hand_on_unmigrated(),
+                ),
                 _ => return Ok(false),
             };
             // The key's own owner is the var hash's, whose slots name it
@@ -1910,11 +1912,11 @@ impl State<'_> {
             );
             return Ok(false);
         }
-        let object = new_object(req, class)?;
+        let object = new_object(req, class)?.hand_on_unmigrated();
         self.write(req, slot, entry, object.as_value())?;
         if incomplete {
-            let key = PhpString::new(req, MAGIC_MEMBER)?;
-            let stored = Value::string(PhpString::new(req, &name)?);
+            let key = PhpString::new(req, MAGIC_MEMBER)?.hand_on_unmigrated();
+            let stored = Value::string(PhpString::new(req, &name)?.hand_on_unmigrated());
             object.unserialize_prop(req, key, stored)?;
         }
         if has_unserialize {
@@ -1923,7 +1925,8 @@ impl State<'_> {
             }
             // `array_init_size` and `zend_hash_real_init_mixed`, "Avoid
             // reallocation due to packed -> mixed conversion".
-            let array = PhpArray::sized(req, u32::try_from(elements).unwrap_or(0), Layout::Hash)?;
+            let array = PhpArray::sized(req, u32::try_from(elements).unwrap_or(0), Layout::Hash)?
+                .hand_on_unmigrated();
             if !self.array_elements(req, array, elements)? {
                 object.mark_destructor_called();
                 req.release(array.to_value());
@@ -2000,9 +2003,9 @@ impl State<'_> {
             return Ok(false);
         };
         let shown = String::from_utf8_lossy(&function).into_owned();
-        let callee = Value::string(PhpString::new(req, &function)?);
-        let checked = callable_checked(req, &callee);
-        req.release(callee);
+        let callee = PhpString::new(req, &function)?;
+        let checked = callable_checked(req, &Value::string(*callee));
+        callee.give_up(req);
         let callable = match checked {
             Ok(callable) => callable,
             Err(error) => {
@@ -2013,10 +2016,10 @@ impl State<'_> {
                 ));
             }
         };
-        let argument = Value::string(PhpString::new(req, name)?);
-        let answer = call(req, &callable, &[argument]);
-        req.release(argument);
-        req.release(answer?);
+        let argument = PhpString::new(req, name)?;
+        let answer = call(req, &callable, &[Value::string(*argument)]);
+        argument.give_up(req);
+        answer?.give_up(req);
         if autoload(req, name)?.is_some() {
             return Ok(true);
         }
@@ -2066,7 +2069,7 @@ impl State<'_> {
             self.p += datalen;
             return Ok(false);
         }
-        let object = new_object(req, class)?;
+        let object = new_object(req, class)?.hand_on_unmigrated();
         self.write(req, slot, entry, object.as_value())?;
         let payload = self.buf[self.p..self.p + datalen].to_vec();
         // `zend_user_unserialize` runs outside `BG(serialize_lock)`: what
@@ -2090,8 +2093,8 @@ impl State<'_> {
         .into_owned();
         warning(req, &format!("Class {shown} has no unserializer"));
         if incomplete {
-            let key = PhpString::new(req, MAGIC_MEMBER)?;
-            let stored = Value::string(PhpString::new(req, name)?);
+            let key = PhpString::new(req, MAGIC_MEMBER)?.hand_on_unmigrated();
+            let stored = Value::string(PhpString::new(req, name)?.hand_on_unmigrated());
             object.unserialize_prop(req, key, stored)?;
         }
         self.p += datalen + 1;
@@ -2146,7 +2149,7 @@ impl State<'_> {
             };
             // A key is `zend_string_init_existing_interned`'s, so a name
             // a unit already holds costs nothing.
-            let name = PhpString::existing_interned(req, &key)?;
+            let name = PhpString::existing_interned(req, &key)?.hand_on_unmigrated();
             self.hash.keys.push(name);
             if let Some(old) = object.prop(req, &key) {
                 req.addref(&old);
@@ -2266,7 +2269,7 @@ impl State<'_> {
             }
             Some(true) => {}
         }
-        let value = class_constant(req, class, case)?;
+        let value = class_constant(req, class, case)?.hand_on_unmigrated();
         self.write(req, slot, entry, value)?;
         Ok(true)
     }

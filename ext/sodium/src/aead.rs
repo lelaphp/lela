@@ -10,7 +10,7 @@ use php_ext::abi::{OrFalse, Raw};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use crate::ffi::{self, Aead};
 use crate::{ZSTR_MAX_LEN, bad_arg, fail, internal, made, parsed, random_key};
@@ -109,7 +109,7 @@ fn held(
 }
 
 /// `PHP_FUNCTION(sodium_crypto_aead_*_encrypt)`.
-fn encrypt(req: &mut Request, of: &Construction, args: Four) -> Result<PhpString, Thrown> {
+fn encrypt(req: &mut Request, of: &Construction, args: Four) -> Result<Owner<PhpString>, Thrown> {
     let (msg, ad, npub, key) = held(req, of, args)?;
     let abytes = of.aead.abytes;
     if ZSTR_MAX_LEN - msg.len() <= abytes {
@@ -144,7 +144,11 @@ fn encrypt(req: &mut Request, of: &Construction, args: Four) -> Result<PhpString
 
 /// `PHP_FUNCTION(sodium_crypto_aead_*_decrypt)`: `false` for a
 /// ciphertext too short to hold the tag or one that does not verify.
-fn decrypt(req: &mut Request, of: &Construction, args: Four) -> Result<OrFalse<PhpString>, Thrown> {
+fn decrypt(
+    req: &mut Request,
+    of: &Construction,
+    args: Four,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (ciphertext, ad, npub, key) = held(req, of, args)?;
     let len = ciphertext.len();
     let abytes = of.aead.abytes;
@@ -246,7 +250,7 @@ pub(crate) fn sodium_crypto_aead_aes256gcm_decrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decrypt(req, &AES256GCM, (ciphertext, additional_data, nonce, key))
 }
 
@@ -269,7 +273,7 @@ pub(crate) fn sodium_crypto_aead_aes256gcm_encrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     encrypt(req, &AES256GCM, (message, additional_data, nonce, key))
 }
 
@@ -282,7 +286,9 @@ pub(crate) fn sodium_crypto_aead_aes256gcm_encrypt(
 /// int(32)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_aead_aes256gcm_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_aead_aes256gcm_keygen(
+    req: &mut Request,
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, ffi::AES256GCM.key)
 }
 
@@ -305,7 +311,7 @@ pub(crate) fn sodium_crypto_aead_chacha20poly1305_decrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decrypt(
         req,
         &CHACHA20POLY1305,
@@ -332,7 +338,7 @@ pub(crate) fn sodium_crypto_aead_chacha20poly1305_encrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     encrypt(
         req,
         &CHACHA20POLY1305,
@@ -352,7 +358,7 @@ pub(crate) fn sodium_crypto_aead_chacha20poly1305_encrypt(
 #[php_function]
 pub(crate) fn sodium_crypto_aead_chacha20poly1305_keygen(
     req: &mut Request,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, ffi::CHACHA20POLY1305.key)
 }
 
@@ -375,7 +381,7 @@ pub(crate) fn sodium_crypto_aead_chacha20poly1305_ietf_decrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decrypt(
         req,
         &CHACHA20POLY1305_IETF,
@@ -402,7 +408,7 @@ pub(crate) fn sodium_crypto_aead_chacha20poly1305_ietf_encrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     encrypt(
         req,
         &CHACHA20POLY1305_IETF,
@@ -422,7 +428,7 @@ pub(crate) fn sodium_crypto_aead_chacha20poly1305_ietf_encrypt(
 #[php_function]
 pub(crate) fn sodium_crypto_aead_chacha20poly1305_ietf_keygen(
     req: &mut Request,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, ffi::CHACHA20POLY1305_IETF.key)
 }
 
@@ -446,7 +452,7 @@ pub(crate) fn sodium_crypto_aead_xchacha20poly1305_ietf_decrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decrypt(
         req,
         &XCHACHA20POLY1305_IETF,
@@ -466,7 +472,7 @@ pub(crate) fn sodium_crypto_aead_xchacha20poly1305_ietf_decrypt(
 #[php_function]
 pub(crate) fn sodium_crypto_aead_xchacha20poly1305_ietf_keygen(
     req: &mut Request,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, ffi::XCHACHA20POLY1305_IETF.key)
 }
 
@@ -489,7 +495,7 @@ pub(crate) fn sodium_crypto_aead_xchacha20poly1305_ietf_encrypt(
     additional_data: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     encrypt(
         req,
         &XCHACHA20POLY1305_IETF,

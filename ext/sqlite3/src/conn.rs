@@ -11,7 +11,7 @@ use php_ext::raising::{
     Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error, while_pending,
 };
 use php_ext::request::{Request, Resolve, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
     self, Db, Function, Handler, Registration, SQLITE_BUSY, SQLITE_LOCKED, SQLITE_OK,
@@ -111,8 +111,8 @@ fn with_code(req: &mut Request, thrown: Thrown, code: i64) -> Thrown {
     let Some(object) = thrown.exception().copied() else {
         return thrown;
     };
-    let written =
-        PhpString::new(req, b"code").and_then(|name| object.set_prop(req, name, Value::int(code)));
+    let written = PhpString::new(req, b"code")
+        .and_then(|name| object.set_prop(req, name.hand_on_unmigrated(), Value::int(code)));
     match written {
         Ok(()) => thrown,
         Err(failed) => failed,
@@ -125,7 +125,7 @@ pub(crate) fn text(bytes: &[u8]) -> String {
 }
 
 /// A new object of an internal class of this extension, `object_init_ex`.
-pub(crate) fn instantiate(req: &mut Request, class: &[u8]) -> Result<PhpObject, Thrown> {
+pub(crate) fn instantiate(req: &mut Request, class: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         return Err(fatal(req, "InternalError: a sqlite3 class is not linked"));
     };
@@ -215,24 +215,31 @@ pub(crate) fn give_back(req: &mut Request, taken: Taken) {
 
 /// What a column holds as php reads it, `sqlite_value_to_zval`: text
 /// up to its first NUL, as `ZVAL_STRING` copies it.
-pub(crate) fn column_value(req: &mut Request, stmt: &Stmt, column: usize) -> Result<Value, Thrown> {
-    Ok(match stmt.column_type(column) {
+pub(crate) fn column_value(
+    req: &mut Request,
+    stmt: &Stmt,
+    column: usize,
+) -> Result<Owner<Value>, Thrown> {
+    let value = match stmt.column_type(column) {
         ffi::SQLITE_INTEGER => Value::int(stmt.column_int64(column)),
         ffi::SQLITE_FLOAT => Value::float(stmt.column_double(column)),
         ffi::SQLITE_NULL => Value::null(),
         ffi::SQLITE_TEXT => {
             let text = stmt.column_text(column);
             let end = text.iter().position(|b| *b == 0).unwrap_or(text.len());
-            Value::string(PhpString::new(req, &text[..end])?)
+            return Ok(PhpString::new(req, &text[..end])?.into_value());
         }
-        _ => Value::string(PhpString::new(req, &stmt.column_blob(column))?),
-    })
+        _ => return Ok(PhpString::new(req, &stmt.column_blob(column))?.into_value()),
+    };
+    Ok(Owner::take(req, value))
 }
 
 /// `sqlite3_column_name` as the key `add_assoc_zval` and
 /// `zend_symtable_update` file a column under.
 pub(crate) fn column_key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
-    Ok(Key::from_string(PhpString::new(req, name)?))
+    Ok(Key::from_string(
+        PhpString::new(req, name)?.hand_on_unmigrated(),
+    ))
 }
 
 /// `SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE`.
@@ -416,9 +423,10 @@ fn run_query(
     req: &mut Request,
     object: PhpObject,
     sql: &[u8],
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let (db, exceptions) = open_db(req, object)?;
-    let stmt_object = instantiate(req, b"SQLite3Stmt")?;
+    let stmt_owner = instantiate(req, b"SQLite3Stmt")?;
+    let stmt_object = *stmt_owner;
     req.addref(&object.as_value());
     stmt::attach(req, stmt_object, object);
     let (prepared, thrown) = db.prepare(req, sql);
@@ -426,20 +434,25 @@ fn run_query(
         Ok(stmt) => stmt,
         Err(code) => {
             let message = format!("Unable to prepare statement: {}", text(&db.errmsg()));
-            req.release(stmt_object.as_value());
+            stmt_owner.give_up(req);
             fail(req, exceptions, thrown, i64::from(code), &message)?;
             return Ok(None);
         }
     };
     let Some(id) = add_stmt(req, object, stmt) else {
-        req.release(stmt_object.as_value());
+        stmt_owner.give_up(req);
         return Err(not_ready(req, "SQLite3"));
     };
     stmt::set_id(req, stmt_object, id);
     let result_object = instantiate(req, b"SQLite3Result")?;
-    result::attach(req, result_object, stmt_object, Origin::Query);
+    result::attach(
+        req,
+        *result_object,
+        stmt_owner.hand_on_unmigrated(),
+        Origin::Query,
+    );
     let Some(mut taken) = take(req, object, id) else {
-        req.release(result_object.as_value());
+        result_object.give_up(req);
         return Err(not_ready(req, "SQLite3"));
     };
     let (step, thrown) = stmt::step(req, taken.stmt.as_ref());
@@ -452,7 +465,7 @@ fn run_query(
         give_back(req, taken);
         return match thrown {
             Some(thrown) => {
-                req.release(result_object.as_value());
+                result_object.give_up(req);
                 Err(thrown)
             }
             None => Ok(Some(result_object)),
@@ -467,7 +480,7 @@ fn run_query(
     );
     taken.stmt = None;
     drop(taken);
-    req.release(result_object.as_value());
+    result_object.give_up(req);
     failed.map(|()| None)
 }
 
@@ -477,7 +490,7 @@ fn query_single(
     object: PhpObject,
     sql: &[u8],
     entire: bool,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let (db, exceptions) = open_db(req, object)?;
     let (prepared, thrown) = db.prepare(req, sql);
     let stmt = match prepared {
@@ -485,7 +498,7 @@ fn query_single(
         Err(code) => {
             let message = format!("Unable to prepare statement: {}", text(&db.errmsg()));
             fail(req, exceptions, thrown, i64::from(code), &message)?;
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
     };
     let (step, thrown) = stmt::step(req, stmt.as_ref());
@@ -495,25 +508,25 @@ fn query_single(
             for column in 0..stmt.data_count() {
                 let value = column_value(req, stmt, column)?;
                 let key = column_key(req, &stmt.column_name(column).unwrap_or_default())?;
-                row.set(req, key, value)?;
+                row.set(req, key, value.hand_on_unmigrated())?;
             }
-            Value::array(row)
+            row.into_value()
         }
         (Step::Row, Some(stmt)) => column_value(req, stmt, 0)?,
-        (Step::Done, _) if entire => Value::array(PhpArray::new(req)?),
-        (Step::Done, _) => Value::null(),
+        (Step::Done, _) if entire => PhpArray::new(req)?.into_value(),
+        (Step::Done, _) => Owner::take(req, Value::null()),
         _ => {
             if thrown.is_none() {
                 let message = format!("Unable to execute statement: {}", text(&db.errmsg()));
                 fail(req, exceptions, None, i64::from(db.errcode()), &message)?;
             }
-            Value::bool(false)
+            Owner::take(req, Value::bool(false))
         }
     };
     drop(stmt);
     match thrown {
         Some(thrown) => {
-            req.release(answer);
+            answer.give_up(req);
             Err(thrown)
         }
         None => Ok(answer),
@@ -744,12 +757,12 @@ impl SQLite3 {
     /// bool(true)
     /// ```
     #[php(tentative)]
-    fn version(req: &mut Request) -> Answer<PhpArray> {
+    fn version(req: &mut Request) -> Answer<Owner<PhpArray>> {
         let mut out = PhpArray::new(req)?;
-        let version = Value::string(PhpString::new(req, ffi::version().as_bytes())?);
-        let key = Key::Str(PhpString::new(req, b"versionString")?);
-        out.set(req, key, version)?;
-        let key = Key::Str(PhpString::new(req, b"versionNumber")?);
+        let version = PhpString::new(req, ffi::version().as_bytes())?.into_value();
+        let key = Key::Str(PhpString::new(req, b"versionString")?.hand_on_unmigrated());
+        out.set(req, key, version.hand_on_unmigrated())?;
+        let key = Key::Str(PhpString::new(req, b"versionNumber")?.hand_on_unmigrated());
         out.set(req, key, Value::int(ffi::version_number()))?;
         Ok(out)
     }
@@ -811,7 +824,7 @@ impl SQLite3 {
     /// string(12) "not an error"
     /// ```
     #[php(tentative)]
-    fn lastErrorMsg(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn lastErrorMsg(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         let message = ever_opened(req, this.object())?
             .map(|db| db.errmsg())
             .unwrap_or_default();
@@ -917,7 +930,7 @@ impl SQLite3 {
     /// string(0) ""
     /// ```
     #[php(tentative)]
-    fn escapeString(req: &mut Request, string: PhpString) -> Answer<PhpString> {
+    fn escapeString(req: &mut Request, string: PhpString) -> Answer<Owner<PhpString>> {
         PhpString::new(req, &escape(string.as_bytes()))
     }
 
@@ -939,7 +952,7 @@ impl SQLite3 {
         req: &mut Request,
         this: This<Self>,
         query: PhpString,
-    ) -> Answer<OrFalse<Instance<crate::stmt::SQLite3Stmt>>> {
+    ) -> Answer<OrFalse<Owner<Instance<crate::stmt::SQLite3Stmt>>>> {
         let object = this.object();
         open_db(req, object)?;
         if query.as_bytes().is_empty() {
@@ -947,7 +960,7 @@ impl SQLite3 {
         }
         let sql = query.as_bytes().to_vec();
         Ok(match stmt::prepare_on(req, object, None, &sql)? {
-            Some(stmt) => OrFalse::Value(Instance::of(stmt)),
+            Some(stmt) => OrFalse::Value(stmt.into_instance()),
             None => OrFalse::False,
         })
     }
@@ -995,7 +1008,7 @@ impl SQLite3 {
         req: &mut Request,
         this: This<Self>,
         query: PhpString,
-    ) -> Answer<OrFalse<Instance<crate::result::SQLite3Result>>> {
+    ) -> Answer<OrFalse<Owner<Instance<crate::result::SQLite3Result>>>> {
         let object = this.object();
         let (db, exceptions) = open_db(req, object)?;
         let sql = query.as_bytes().to_vec();
@@ -1012,7 +1025,7 @@ impl SQLite3 {
             return Ok(OrFalse::False);
         }
         Ok(run_query(req, object, &sql)?
-            .map_or(OrFalse::False, |r| OrFalse::Value(Instance::of(r))))
+            .map_or(OrFalse::False, |r| OrFalse::Value(r.into_instance())))
     }
 
     /// `SQLite3::querySingle()`: the first column of the first row, or
@@ -1041,12 +1054,12 @@ impl SQLite3 {
         this: This<Self>,
         query: PhpString,
         #[php(default = false)] entireRow: bool,
-    ) -> Answer<Value> {
+    ) -> Answer<Owner<Value>> {
         let object = this.object();
         let (db, exceptions) = open_db(req, object)?;
         let sql = query.as_bytes().to_vec();
         if sql.is_empty() {
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         if !req.return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
@@ -1055,7 +1068,7 @@ impl SQLite3 {
             } else if let Some(thrown) = thrown {
                 return Err(thrown);
             }
-            return Ok(Value::bool(false));
+            return Ok(Owner::take(req, Value::bool(false)));
         }
         query_single(req, object, &sql, entireRow)
     }
@@ -1209,7 +1222,7 @@ impl SQLite3 {
         rowid: i64,
         #[php(default = "main")] database: Path,
         #[php(default = SQLITE3_OPEN_READONLY)] flags: i64,
-    ) -> Answer<Untyped<Value>> {
+    ) -> Answer<Untyped<Owner<Value>>> {
         let (db, exceptions) = open_db(req, this.object())?;
         let writable = flags & i64::from(SQLITE_OPEN_READWRITE) != 0;
         let opened = db.blob_open(
@@ -1224,13 +1237,17 @@ impl SQLite3 {
             Err(message) => {
                 let message = format!("Unable to open blob: {}", text(&message));
                 fail(req, exceptions, None, i64::from(db.errcode()), &message)?;
-                return Ok(Untyped(Value::bool(false)));
+                return Ok(Untyped(Owner::take(req, Value::bool(false))));
             }
         };
         let read_only = flags & i64::from(SQLITE_OPEN_READONLY) != 0;
         let stream = BlobStream::new(blob, read_only, "SQLite3");
         let mode: &[u8] = if writable { b"r+b" } else { b"rb" };
-        Ok(Untyped(req.new_stream(Box::new(stream), mode)?.as_value()))
+        Ok(Untyped(
+            req.new_stream(Box::new(stream), mode)?
+                .into_resource()
+                .into_value(),
+        ))
     }
 
     /// `SQLite3::enableExceptions()`: the setting it replaced; warnings

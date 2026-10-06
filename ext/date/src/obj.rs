@@ -17,13 +17,12 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, raise, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone};
 use crate::format::date_format;
 use crate::held::{Held, Shape};
 use crate::interval::DateInterval;
-use crate::timezone::DateTimeZone;
 
 /// `PHP_DATE_CIVIL` and `PHP_DATE_WALL`.
 pub(super) const CIVIL: i64 = 1;
@@ -237,21 +236,22 @@ pub(super) fn set_time(
 }
 
 /// `object_init_ex(zv, ce)` with its time set, one owner, the caller's.
-pub(super) fn new_date(req: &mut Request, class: ClassId, time: Time) -> Result<PhpObject, Thrown> {
+pub(super) fn new_date(
+    req: &mut Request,
+    class: ClassId,
+    time: Time,
+) -> Result<Owner<PhpObject>, Thrown> {
     let object = new_object(req, class)?;
-    set_time(req, object, Some(time))?;
+    set_time(req, *object, Some(time))?;
     Ok(object)
 }
 
 /// A new `DateTimeZone` holding `kind`, one owner, the caller's.
-pub(super) fn new_timezone(
-    req: &mut Request,
-    kind: TzKind,
-) -> Result<Instance<DateTimeZone>, Thrown> {
+pub(super) fn new_timezone(req: &mut Request, kind: TzKind) -> Result<Owner<PhpObject>, Thrown> {
     let class = class_id(req, "DateTimeZone")?;
     let object = new_object(req, class)?;
-    set_tz(req, object, Some(kind))?;
-    Ok(Instance::of(object))
+    set_tz(req, *object, Some(kind))?;
+    Ok(object)
 }
 
 /// The object's zone replaced, `set_timezone_from_timelib_time`: an
@@ -309,7 +309,7 @@ pub(super) fn new_interval(
     diff: RelTime,
     civil_or_wall: i64,
     date_string: Option<Vec<u8>>,
-) -> Result<Instance<DateInterval>, Thrown> {
+) -> Result<Owner<Instance<DateInterval>>, Thrown> {
     let class = class_id(req, "DateInterval")?;
     let object = new_object(req, class)?;
     if let Some(payload) = object.native_mut::<IntervalObj>(req) {
@@ -318,8 +318,8 @@ pub(super) fn new_interval(
         payload.from_string = date_string.is_some();
         payload.date_string = date_string;
     }
-    hold_diff(req, object)?;
-    Ok(Instance::of(object))
+    hold_diff(req, *object)?;
+    Ok(object.into_instance())
 }
 
 /// What the interval's relative time holds on the request's heap
@@ -360,22 +360,22 @@ pub(super) fn again<C: Class>(req: &mut Request, object: PhpObject) -> Instance<
 /// `add_assoc_*`: one row under a string key.
 pub(super) fn set_str(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     key: &[u8],
     value: Value,
 ) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, key)?);
+    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
     array.set(req, key, value)
 }
 
 /// `add_assoc_string`.
 pub(super) fn set_string(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     key: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let value = Value::string(PhpString::new(req, value)?);
+    let value = Value::string(PhpString::new(req, value)?.hand_on_unmigrated());
     set_str(req, array, key, value)
 }
 
@@ -396,7 +396,12 @@ fn mangled(req: &mut Request, class: ClassId, name: PhpString) -> Result<PhpStri
                 Visibility::Protected => b"\0*\0".to_vec(),
                 Visibility::Private => [&b"\0"[..], &owner, b"\0"].concat(),
             };
-            return PhpString::new(req, &[prefix.as_slice(), name.as_bytes()].concat());
+            // The mangled name is a view in the rows `std_rows` answers,
+            // which nothing gives back: the leak it was before #2047.
+            return Ok(
+                PhpString::new(req, &[prefix.as_slice(), name.as_bytes()].concat())?
+                    .hand_on_unmigrated(),
+            );
         }
         at = parent_of(req, c);
     }
@@ -440,7 +445,7 @@ pub(super) fn rows_array(
     own: &[(Key, Value)],
     fields: Vec<(&[u8], Value)>,
     first: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     if !first {
         for (key, value) in own {
@@ -452,7 +457,7 @@ pub(super) fn rows_array(
         }
     }
     for (name, value) in fields {
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         array.set(req, key, value)?;
     }
     if first {
@@ -482,7 +487,7 @@ fn rows_view(
     let mut rows = std_rows(req, object)?;
     let mut made = Vec::with_capacity(fields.len());
     for (name, value) in fields {
-        let name = PhpString::new(req, name)?;
+        let name = PhpString::new(req, name)?.hand_on_unmigrated();
         made.push(Value::string(name));
         made.push(value);
         update(&mut rows, name, value);
@@ -513,7 +518,10 @@ pub(super) fn date_fields(
     t: &Time,
 ) -> Result<Vec<(&'static [u8], Value)>, Thrown> {
     let text = date_format(b"x-m-d H:i:s.u", t, true);
-    let mut fields = vec![(&b"date"[..], Value::string(PhpString::new(req, &text)?))];
+    let mut fields = vec![(
+        &b"date"[..],
+        Value::string(PhpString::new(req, &text)?.hand_on_unmigrated()),
+    )];
     if t.is_localtime != 0 {
         fields.push((b"timezone_type", Value::int(i64::from(t.zone_type))));
         let zone: Vec<u8> = match t.zone_type {
@@ -522,7 +530,10 @@ pub(super) fn date_fields(
             ZONETYPE_ABBR => t.tz_abbr().to_vec(),
             _ => Vec::new(),
         };
-        fields.push((b"timezone", Value::string(PhpString::new(req, &zone)?)));
+        fields.push((
+            b"timezone",
+            Value::string(PhpString::new(req, &zone)?.hand_on_unmigrated()),
+        ));
     }
     Ok(fields)
 }
@@ -536,7 +547,7 @@ pub(super) fn tz_fields(
         (&b"timezone_type"[..], Value::int(kind.zone_type())),
         (
             b"timezone",
-            Value::string(PhpString::new(req, &kind.name())?),
+            Value::string(PhpString::new(req, &kind.name())?.hand_on_unmigrated()),
         ),
     ])
 }
@@ -550,7 +561,10 @@ pub(super) fn interval_fields(
     if let Some(text) = date_string {
         return Ok(vec![
             (&b"from_string"[..], Value::bool(true)),
-            (b"date_string", Value::string(PhpString::new(req, text)?)),
+            (
+                b"date_string",
+                Value::string(PhpString::new(req, text)?.hand_on_unmigrated()),
+            ),
         ]);
     }
     #[allow(clippy::cast_precision_loss)]
@@ -586,7 +600,9 @@ pub(super) fn period_date(
     let (Some(t), Some(class)) = (t, class) else {
         return Ok(Value::null());
     };
-    Ok(new_date(req, class, t.clone())?.as_value())
+    Ok(new_date(req, class, t.clone())?
+        .into_value()
+        .hand_on_unmigrated())
 }
 
 /// `date_period_object_to_hash`.
@@ -605,7 +621,9 @@ pub(super) fn period_fields(
     let current = period_date(req, current.as_ref(), class)?;
     let end = period_date(req, end.as_ref(), class)?;
     let interval = match interval {
-        Some(diff) => new_interval(req, diff, 0, None)?.object().as_value(),
+        Some(diff) => new_interval(req, diff, 0, None)?
+            .into_value()
+            .hand_on_unmigrated(),
         None => Value::null(),
     };
     Ok(vec![
@@ -640,7 +658,7 @@ impl ObjectHandlers for DateHandlers {
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
-        Some(clone_date)
+        Some(|req, object| clone_date(req, object).map(Owner::hand_on_unmigrated))
     }
 
     fn compare(
@@ -685,7 +703,7 @@ impl ObjectHandlers for DateHandlers {
             Some(t) => date_fields(req, t)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
+        rows_array(req, &own, fields, false).map(|t| Some(t.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -720,14 +738,14 @@ impl ObjectHandlers for DateHandlers {
 
 /// `date_object_clone_date`: a fresh object of the class, its members
 /// copied and `__clone` served, then the time copied into it.
-pub(super) fn clone_date(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+pub(super) fn clone_date(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     // `date_object_new_*` then `zend_objects_clone_members`: the copy's
     // payload is fresh while `__clone` runs, as php's is, and is filled
     // after it.
     let copy = object.clone_with(req, DateObj::default())?;
     let time = object.native::<DateObj>(req).and_then(|d| d.time.clone());
     if time.is_some() {
-        set_time(req, copy, time)?;
+        set_time(req, *copy, time)?;
     }
     Ok(copy)
 }
@@ -806,7 +824,7 @@ impl ObjectHandlers for TzHandlers {
             Some(kind) => tz_fields(req, kind)?,
             None => Vec::new(),
         };
-        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
+        rows_array(req, &own, fields, false).map(|t| Some(t.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -846,8 +864,8 @@ fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
     // after it.
     let copy = object.clone_with(req, TzObj::default())?;
     let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
-    set_tz(req, copy, kind)?;
-    Ok(copy)
+    set_tz(req, *copy, kind)?;
+    Ok(copy.hand_on_unmigrated())
 }
 
 /// The names `DateInterval` answers from its relative time.
@@ -1015,7 +1033,7 @@ impl ObjectHandlers for IntervalHandlers {
         }
         write_fields(req, object)?;
         let rows = std_rows(req, object)?;
-        rows_array(req, &rows, Vec::new(), false).map(|t| Some(t.into()))
+        rows_array(req, &rows, Vec::new(), false).map(|t| Some(t.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1132,8 +1150,8 @@ fn write_fields(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
                 return Err(thrown);
             }
         };
-        let written = object.set_row(req, &Key::Str(name), value);
-        req.release(Value::string(name));
+        let written = object.set_row(req, &Key::Str(*name), value);
+        name.give_up(req);
         written?;
     }
     Ok(())
@@ -1175,8 +1193,8 @@ fn clone_interval(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
         payload.from_string = from;
         payload.date_string = text;
     }
-    hold_diff(req, copy)?;
-    Ok(copy)
+    hold_diff(req, *copy)?;
+    Ok(copy.hand_on_unmigrated())
 }
 
 /// The names `DatePeriod` answers itself, `date_period_is_internal_property`.
@@ -1370,7 +1388,7 @@ impl ObjectHandlers for PeriodHandlers {
         } else {
             Vec::new()
         };
-        rows_array(req, &own, fields, false).map(|t| Some(t.into()))
+        rows_array(req, &own, fields, false).map(|t| Some(t.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -1482,6 +1500,6 @@ fn clone_period(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
     if let (Some(state), Some(payload)) = (state, copy.native_mut::<PeriodObj>(req)) {
         payload.replace(state);
     }
-    hold_period(req, copy)?;
-    Ok(copy)
+    hold_period(req, *copy)?;
+    Ok(copy.hand_on_unmigrated())
 }

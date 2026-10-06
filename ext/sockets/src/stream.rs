@@ -11,7 +11,7 @@ use php_ext::abi::{Instance, OrFalse, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::{Cast, FdStream, Request, Stream, StreamOption, Streams as _};
-use php_ext::values::{Resource, Value};
+use php_ext::values::{Owner, Resource, Value};
 
 use crate::ffi;
 use crate::socket::{Handle, Sock, Socket, made, sock, socket_error, valid};
@@ -51,7 +51,7 @@ use crate::socket::{Handle, Sock, Socket, made, sock, socket_error, valid};
 fn socket_import_stream(
     req: &mut Request,
     stream: Resource,
-) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
         return Err(throw_error(
             req,
@@ -62,7 +62,8 @@ fn socket_import_stream(
     let Some(fd) = stream.cast(req, Cast::Socket, true) else {
         return Ok(OrFalse::False);
     };
-    let object = made(req, b"Socket")?;
+    let owner = made(req, b"Socket")?;
+    let object = *owner;
     let family = match ffi::name(fd, false) {
         Ok(ffi::Addr::V4(_)) => libc::AF_INET,
         Ok(ffi::Addr::V6(_)) => libc::AF_INET6,
@@ -70,7 +71,7 @@ fn socket_import_stream(
         Ok(ffi::Addr::Other(family)) => family,
         Err(errno) => {
             socket_error(req, object, "Unable to obtain socket family", errno as i32);
-            req.release(object.as_value());
+            owner.give_up(req);
             return Ok(OrFalse::False);
         }
     };
@@ -78,7 +79,7 @@ fn socket_import_stream(
         Ok(flags) => flags,
         Err(errno) => {
             socket_error(req, object, "Unable to obtain blocking state", errno as i32);
-            req.release(object.as_value());
+            owner.give_up(req);
             return Ok(OrFalse::False);
         }
     };
@@ -102,7 +103,7 @@ fn socket_import_stream(
             size: 0,
         },
     );
-    Ok(OrFalse::Value(Instance::of(object)))
+    Ok(OrFalse::Value(owner.into_instance()))
 }
 
 /// The `transport` `socket_export_stream` makes the stream with: `tcp`
@@ -165,11 +166,10 @@ fn transport(fd: i32, family: i32) -> Option<&'static str> {
 fn socket_export_stream(
     req: &mut Request,
     socket: Instance<Socket>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let fd = valid(req, socket)?;
     if let Some(stream) = sock(req, socket)?.stream() {
-        req.addref(&Value::resource(stream));
-        return Ok(Untyped(OrFalse::Value(stream)));
+        return Ok(Untyped(OrFalse::Value(Owner::take(req, stream))));
     }
     let payload = sock(req, socket)?;
     let (family, blocking) = (payload.family, payload.blocking);
@@ -182,11 +182,19 @@ fn socket_export_stream(
         blocking,
     };
     let stream = req.stream_from_fd(owned, kind)?;
-    let resource = stream.resource();
-    req.addref(&Value::resource(resource));
-    sock(req, socket)?.handle = Handle::Stream {
-        fd: raw,
-        stream: resource,
-    };
+    let resource = Owner::take(req, stream.resource());
+    match sock(req, socket) {
+        Ok(payload) => {
+            payload.handle = Handle::Stream {
+                fd: raw,
+                stream: stream.hand_on_unmigrated().resource(),
+            }
+        }
+        Err(thrown) => {
+            stream.give_up(req);
+            resource.give_up(req);
+            return Err(thrown);
+        }
+    }
     Ok(Untyped(OrFalse::Value(resource)))
 }

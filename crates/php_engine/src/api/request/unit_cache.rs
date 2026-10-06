@@ -14,7 +14,7 @@ use php_compile::SourceKind;
 use super::{Request, Unresolved};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
-use crate::api::values::{Emalloc, PhpString, Value};
+use crate::api::values::{Emalloc, PhpString};
 use crate::exec::IncludeKind;
 use crate::unit_cache::{Asked, Cached, Disk, Filed, Held, Levels, UnitKey, full_path};
 
@@ -450,7 +450,7 @@ impl Request {
         let resolved = PhpString::filled(self, full.len(), |out| out.copy_from_slice(full));
         buffer.free(self);
         if let Ok(resolved) = resolved {
-            self.release(Value::string(resolved));
+            resolved.give_up(self);
         }
     }
 

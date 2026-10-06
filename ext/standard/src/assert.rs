@@ -29,7 +29,7 @@ use php_ext::raising::{
     uncaught_at,
 };
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
 use constants::{ASSERT_ACTIVE, ASSERT_BAIL, ASSERT_CALLBACK, ASSERT_EXCEPTION, ASSERT_WARNING};
 
@@ -349,7 +349,7 @@ fn assert(
         && let Some(cb) = req.ini_get(b"assert.callback").filter(|cb| !cb.is_empty())
     {
         let cb = cb.to_vec();
-        let cb = Value::string(PhpString::new(req, &cb)?);
+        let cb = Value::string(PhpString::new(req, &cb)?.hand_on_unmigrated());
         req.set_assert_callback(Some(cb));
     }
     let callback = req.assert_callback().copied();
@@ -379,7 +379,7 @@ fn assert(
             req.release(argument);
         }
         match returned {
-            Ok(returned) => req.release(returned),
+            Ok(returned) => returned.give_up(req),
             Err(thrown) => pending = Some(thrown),
         }
     }
@@ -390,7 +390,7 @@ fn assert(
         // code written before the throw, which `zend_throw_exception_hook`
         // is told of.
         let coded = |req: &mut Request, object: &PhpObject| -> Result<(), Thrown> {
-            let code = PhpString::new(req, b"code")?;
+            let code = PhpString::new(req, b"code")?.hand_on_unmigrated();
             object.set_prop(req, code, Value::int(E_ERROR))
         };
         let thrown = if let Some(previous) = pending {
@@ -405,7 +405,7 @@ fn assert(
                 coded(req, object)?;
             }
             let thrown = throw_value(req, &error);
-            req.release(error);
+            error.give_up(req);
             thrown
         };
         return Err(thrown);
@@ -473,7 +473,11 @@ fn assert(
 /// }
 /// ```
 #[php_function(deprecated(since = "8.3"))]
-fn assert_options(req: &mut Request, option: i64, value: Passed<Value>) -> Result<Value, Thrown> {
+fn assert_options(
+    req: &mut Request,
+    option: i64,
+    value: Passed<Value>,
+) -> Result<Owner<Value>, Thrown> {
     let what = option;
     let value = match value {
         Passed::Given(value) => Some(value),
@@ -486,13 +490,10 @@ fn assert_options(req: &mut Request, option: i64, value: Passed<Value>) -> Resul
         ASSERT_EXCEPTION => b"assert.exception",
         ASSERT_CALLBACK => {
             let old = match req.assert_callback().copied() {
-                Some(callback) => {
-                    req.addref(&callback);
-                    callback
-                }
+                Some(callback) => Owner::take(req, callback),
                 None => match req.ini_get(b"assert.callback").map(<[u8]>::to_vec) {
-                    Some(cb) if !cb.is_empty() => Value::string(PhpString::new(req, &cb)?),
-                    _ => Value::null(),
+                    Some(cb) if !cb.is_empty() => PhpString::new(req, &cb)?.into_value(),
+                    _ => Owner::take(req, Value::null()),
                 },
             };
             if let Some(value) = value {
@@ -514,10 +515,10 @@ fn assert_options(req: &mut Request, option: i64, value: Passed<Value>) -> Resul
     if let Some(value) = value {
         let text = to_string(req, &value)?;
         req.state::<crate::State>().assert.assert_options = true;
-        let set = req.ini_set_string(entry, text);
+        let set = req.ini_set_string(entry, *text);
         req.state::<crate::State>().assert.assert_options = false;
-        req.release(Value::string(text));
+        text.give_up(req);
         set?;
     }
-    Ok(Value::int(i64::from(old)))
+    Ok(Owner::take(req, Value::int(i64::from(old))))
 }

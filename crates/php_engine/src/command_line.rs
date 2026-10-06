@@ -18,7 +18,7 @@ use php_compile::SourceKind;
 
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::Request;
-use crate::api::values::{PhpString, Value};
+use crate::api::values::Value;
 use crate::engine::{Engine, Observables, OutputSink, RequestDescription};
 
 /// What the CLI's command line serves where no program is, php's
@@ -119,7 +119,7 @@ impl Engine {
                 break;
             };
             let line = argn(line);
-            let Ok(line) = PhpString::new(req, &line) else {
+            let Ok(line) = req.string(&line) else {
                 return;
             };
             index += 1;
@@ -165,7 +165,7 @@ impl Request {
     pub fn eval_stringl(&mut self, code: &[u8], name: &[u8]) -> Result<(), Thrown> {
         eval(self, code, name, None);
         self.catch_bailout();
-        if let Some(exception) = self.take_pending() {
+        if let Some(exception) = self.take_pending_view() {
             return Err(Thrown::of(Some(exception)));
         }
         if self.is_pending() {

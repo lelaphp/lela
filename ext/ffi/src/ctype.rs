@@ -11,7 +11,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 use crate::cdata::free_types;
 use crate::types::{Kind, TypeId};
@@ -94,7 +94,7 @@ impl CType {
     /// string(12) "int32_t(*)()"
     /// string(8) "char*[2]"
     /// ```
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let ty = ctype_of(req, this.object());
         match types(req).name(ty) {
             Some(name) => PhpString::new(req, &name),
@@ -187,7 +187,10 @@ impl CType {
     /// string(7) "char[3]"
     /// FFI\CType is not an array
     /// ```
-    fn getArrayElementType(req: &mut Request, this: This<Self>) -> Result<Instance<CType>, Thrown> {
+    fn getArrayElementType(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<CType>>, Thrown> {
         let ty = ctype_of(req, this.object());
         match types(req).get(ty).element() {
             Some((of, _)) => make_ctype(req, of),
@@ -225,7 +228,10 @@ impl CType {
     /// ```expect
     /// string(7) "double*"
     /// ```
-    fn getPointerType(req: &mut Request, this: This<Self>) -> Result<Instance<CType>, Thrown> {
+    fn getPointerType(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<CType>>, Thrown> {
         let ty = ctype_of(req, this.object());
         match types(req).get(ty).pointee() {
             Some(to) => make_ctype(req, to),
@@ -250,7 +256,7 @@ impl CType {
     /// int(4)
     /// string(4) "char"
     /// ```
-    fn getStructFieldNames(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getStructFieldNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let ty = ctype_of(req, this.object());
         let names: Option<Vec<Vec<u8>>> = types(req).get(ty).record().map(|record| {
             record
@@ -265,7 +271,7 @@ impl CType {
         let mut array = PhpArray::new(req)?;
         for name in names {
             let name = PhpString::new(req, &name)?;
-            array.append(req, Value::string(name))?;
+            array.append(req, Value::string(name.hand_on_unmigrated()))?;
         }
         Ok(array)
     }
@@ -313,7 +319,7 @@ impl CType {
         req: &mut Request,
         this: This<Self>,
         name: PhpString,
-    ) -> Result<Instance<CType>, Thrown> {
+    ) -> Result<Owner<Instance<CType>>, Thrown> {
         let ty = ctype_of(req, this.object());
         let field = match types(req).get(ty).record() {
             Some(record) => record.field(name.as_bytes()).copied(),
@@ -358,7 +364,10 @@ impl CType {
     /// string(5) "char*"
     /// Wrong argument number
     /// ```
-    fn getFuncReturnType(req: &mut Request, this: This<Self>) -> Result<Instance<CType>, Thrown> {
+    fn getFuncReturnType(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<CType>>, Thrown> {
         let ty = ctype_of(req, this.object());
         match types(req).get(ty).func().map(|func| func.ret) {
             Some(ret) => make_ctype(req, ret),
@@ -401,7 +410,7 @@ impl CType {
         req: &mut Request,
         this: This<Self>,
         index: i64,
-    ) -> Result<Instance<CType>, Thrown> {
+    ) -> Result<Owner<Instance<CType>>, Thrown> {
         let ty = ctype_of(req, this.object());
         let arg = match types(req).get(ty).func() {
             Some(func) => func.args.as_ref().and_then(|args| {
@@ -426,7 +435,7 @@ pub(crate) fn ctype_of(req: &Request, object: PhpObject) -> TypeId {
 }
 
 /// A new `FFI\CType` over `ty`.
-pub(crate) fn make_ctype(req: &mut Request, ty: TypeId) -> Result<Instance<CType>, Thrown> {
+pub(crate) fn make_ctype(req: &mut Request, ty: TypeId) -> Result<Owner<Instance<CType>>, Thrown> {
     make_owning(req, ty, Box::default())
 }
 
@@ -435,14 +444,14 @@ pub(crate) fn make_owning(
     req: &mut Request,
     ty: TypeId,
     held: Box<[usize]>,
-) -> Result<Instance<CType>, Thrown> {
+) -> Result<Owner<Instance<CType>>, Thrown> {
     let class = classes(req)?.ctype;
     let object = new_object(req, class)?;
     if let Some(slot) = object.native_mut::<TypeRef>(req) {
         slot.ty = ty;
         slot.held = held;
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// The handlers of `FFI\CType`.

@@ -9,7 +9,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{float_to_long, numeric_string, type_name};
 use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::State;
 use crate::conv::put;
@@ -182,7 +182,7 @@ fn socket_addrinfo_lookup(
     host: PhpString,
     #[php(default = null)] service: Option<PhpString>,
     #[php(default = [])] hints: PhpArray,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let mut want = [0i32; 4];
     let entries = hints.snapshot();
     if !entries.is_empty() && hints.is_list() {
@@ -236,7 +236,7 @@ fn socket_addrinfo_lookup(
         if let Some(entry) = object.native_mut::<Entry>(req) {
             entry.0 = Some(held);
         }
-        out.append(req, object.as_value())?;
+        out.append(req, object.into_value().hand_on_unmigrated())?;
     }
     Ok(OrFalse::Value(out))
 }
@@ -259,9 +259,10 @@ fn open(
     req: &mut Request,
     address: Instance<AddressInfo>,
     connect: bool,
-) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     let info = entry(req, address)?;
-    let object = made(req, b"Socket")?;
+    let owner = made(req, b"Socket")?;
+    let object = *owner;
     let fd = match ffi::socket(info.family, info.socktype, info.protocol) {
         Ok(fd) => fd,
         Err(errno) => {
@@ -269,7 +270,7 @@ fn open(
             req.state::<State>().last_error = code;
             let text = format!("Unable to create socket [{code}]: {}", strerror(req, code));
             docref(req, Level::Warning, &text);
-            req.release(object.as_value());
+            owner.give_up(req);
             return Ok(OrFalse::False);
         }
     };
@@ -284,10 +285,10 @@ fn open(
     };
     if let Err(errno) = done {
         socket_error(req, object, msg, errno as i32);
-        req.release(object.as_value());
+        owner.give_up(req);
         return Ok(OrFalse::False);
     }
-    Ok(OrFalse::Value(Instance::of(object)))
+    Ok(OrFalse::Value(owner.into_instance()))
 }
 
 /// `socket_addrinfo_connect(AddressInfo $address): Socket|false`.
@@ -306,7 +307,7 @@ fn open(
 fn socket_addrinfo_connect(
     req: &mut Request,
     address: Instance<AddressInfo>,
-) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     open(req, address, true)
 }
 
@@ -326,7 +327,7 @@ fn socket_addrinfo_connect(
 fn socket_addrinfo_bind(
     req: &mut Request,
     address: Instance<AddressInfo>,
-) -> Result<OrFalse<Instance<Socket>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     open(req, address, false)
 }
 
@@ -360,7 +361,7 @@ fn socket_addrinfo_bind(
 fn socket_addrinfo_explain(
     req: &mut Request,
     address: Instance<AddressInfo>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let info = entry(req, address)?;
     let mut out = PhpArray::new(req)?;
     put(req, &mut out, "ai_flags", Value::int(i64::from(info.flags)))?;
@@ -384,14 +385,14 @@ fn socket_addrinfo_explain(
     )?;
     if let Some(name) = &info.canonname {
         let name = string(req, name)?;
-        put(req, &mut out, "ai_canonname", name)?;
+        put(req, &mut out, "ai_canonname", name.hand_on_unmigrated())?;
     }
     let mut addr = PhpArray::new(req)?;
     match &info.addr {
         Addr::V4(v4) if info.family == libc::AF_INET => {
             put(req, &mut addr, "sin_port", Value::int(i64::from(v4.port())))?;
             let text = string(req, v4.ip().to_string().as_bytes())?;
-            put(req, &mut addr, "sin_addr", text)?;
+            put(req, &mut addr, "sin_addr", text.hand_on_unmigrated())?;
         }
         Addr::V6(v6) if info.family == libc::AF_INET6 => {
             put(
@@ -401,10 +402,15 @@ fn socket_addrinfo_explain(
                 Value::int(i64::from(v6.port())),
             )?;
             let text = string(req, v6.ip().to_string().as_bytes())?;
-            put(req, &mut addr, "sin6_addr", text)?;
+            put(req, &mut addr, "sin6_addr", text.hand_on_unmigrated())?;
         }
         _ => {}
     }
-    put(req, &mut out, "ai_addr", Value::array(addr))?;
+    put(
+        req,
+        &mut out,
+        "ai_addr",
+        addr.into_value().hand_on_unmigrated(),
+    )?;
     Ok(out)
 }

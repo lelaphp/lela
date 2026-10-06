@@ -206,7 +206,9 @@ pub(crate) fn cert_from_value(
         return Ok(held.cert.clone());
     }
     let text = to_string(req, value)?;
-    Ok(cert_from_str(req, text.as_bytes(), origin))
+    let cert = cert_from_str(req, text.as_bytes(), origin);
+    text.give_up(req);
+    Ok(cert)
 }
 
 /// `php_openssl_array_to_X509_sk`: the certificates an array lists, or

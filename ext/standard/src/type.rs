@@ -13,7 +13,7 @@ use php_ext::coerce::{
 };
 use php_ext::raising::{Thrown, arg_value_error, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef};
 
 /// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
 /// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
@@ -142,7 +142,7 @@ use php_ext::values::{Key, PhpArray, PhpString, TypeTag, Value, ValueRef};
 /// }
 /// ```
 #[php_function]
-fn gettype(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn gettype(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     let name: &[u8] = match value.as_ref() {
         ValueRef::Null | ValueRef::Undef => b"NULL",
         ValueRef::Bool(_) => b"boolean",
@@ -182,7 +182,7 @@ fn gettype(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
 /// string(4) "bool"
 /// ```
 #[php_function]
-fn get_debug_type(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn get_debug_type(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     let name: Vec<u8> = match value.as_ref() {
         ValueRef::Null | ValueRef::Undef => b"null".to_vec(),
         ValueRef::Bool(_) => b"bool".to_vec(),
@@ -299,18 +299,17 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
             "array" => {
                 let mut array = PhpArray::new(req)?;
                 array.append(req, now)?;
-                Value::array(array)
+                Value::array(array.hand_on_unmigrated())
             }
             // `object_init` and `scalar` added to its table, which is
             // the object an array of that one row casts to.
             _ => {
                 let mut row = PhpArray::new(req)?;
-                let key = Key::Str(PhpString::new(req, b"scalar")?);
+                let key = Key::Str(PhpString::new(req, b"scalar")?.hand_on_unmigrated());
                 row.set(req, key, now)?;
-                let row = Value::array(row);
-                let object = to_object(req, &row);
-                req.release(row);
-                Value::object(object?)
+                let object = to_object(req, &Value::array(*row));
+                row.give_up(req);
+                Value::object(object?.hand_on_unmigrated())
             }
         };
         var.set(req, converted)?;
@@ -320,12 +319,12 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
         b"integer" | b"int" => Value::int(to_long(req, &current)?),
         b"float" | b"double" => Value::float(to_double(req, &current)?),
         b"string" => match to_string(req, &current) {
-            Ok(string) => Value::string(string),
+            Ok(string) => Value::string(string.hand_on_unmigrated()),
             // `convert_to_string` leaves the empty string behind a
             // conversion that threw.
             Err(thrown) => {
                 let empty = PhpString::new(req, b"")?;
-                var.set(req, Value::string(empty))?;
+                var.set(req, Value::string(empty.hand_on_unmigrated()))?;
                 return Err(thrown);
             }
         },
@@ -334,9 +333,9 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
                 req.addref(&current);
                 current
             } else if matches!(current.as_ref(), ValueRef::Null | ValueRef::Undef) {
-                Value::array(php_ext::values::PhpArray::new(req)?)
+                Value::array(php_ext::values::PhpArray::new(req)?.hand_on_unmigrated())
             } else {
-                Value::array(to_array(req, &current)?)
+                Value::array(to_array(req, &current)?.hand_on_unmigrated())
             }
         }
         b"object" => {
@@ -344,7 +343,7 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
                 req.addref(&current);
                 current
             } else {
-                Value::object(to_object(req, &current)?)
+                Value::object(to_object(req, &current)?.hand_on_unmigrated())
             }
         }
         b"bool" | b"boolean" => Value::bool(truthy(req, &current)),
@@ -548,7 +547,7 @@ fn boolval(req: &mut Request, value: Value) -> bool {
 /// Object of class stdClass could not be converted to string
 /// ```
 #[php_function]
-fn strval(req: &mut Request, value: Value) -> Result<PhpString, Thrown> {
+fn strval(req: &mut Request, value: Value) -> Result<Owner<PhpString>, Thrown> {
     to_string(req, &value)
 }
 
@@ -833,7 +832,7 @@ fn is_callable(
         callable(req, &value)
     };
     if callable_name.is_given() {
-        let name = Value::string(self::callable_name(req, &value)?);
+        let name = Value::string(self::callable_name(req, &value)?.hand_on_unmigrated());
         callable_name.set(req, Untyped(name))?;
     }
     Ok(answer)

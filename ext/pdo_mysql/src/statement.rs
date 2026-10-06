@@ -4,7 +4,7 @@
 //! `executer` call; the columns' descriptions and the `getColumnMeta` rows.
 
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_mysqlnd::client::{
     Fetched, Field, FieldType, ResultSet, Stmt as Ps, StmtFetch, column,
 };
@@ -373,7 +373,7 @@ impl Statement for Stmt {
                             ));
                         };
                         let text = stream.copy_to_mem(req, None)?;
-                        replace(req, param.value, Value::string(text));
+                        replace(req, param.value, Value::string(text.hand_on_unmigrated()));
                     }
                     _ => {}
                 }
@@ -409,12 +409,12 @@ impl Statement for Stmt {
         };
         let mut meta = PhpArray::new(req)?;
         let mut flags = PhpArray::new(req)?;
-        let set = |req: &mut Request, meta: &mut PhpArray, key: &[u8], value: Value| {
-            let key = Key::Str(PhpString::new(req, key)?);
+        let set = |req: &mut Request, meta: &mut Owner<PhpArray>, key: &[u8], value: Value| {
+            let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
             meta.set(req, key, value)
         };
         if let Some(def) = &field.def {
-            let text = Value::string(PhpString::new(req, def)?);
+            let text = Value::string(PhpString::new(req, def)?.hand_on_unmigrated());
             set(req, &mut meta, b"mysql:def", text)?;
         }
         for (bit, name) in [
@@ -425,13 +425,13 @@ impl Statement for Stmt {
             (column::BLOB, b"blob"),
         ] {
             if field.flags & bit != 0 {
-                let text = Value::string(PhpString::new(req, name)?);
+                let text = Value::string(PhpString::new(req, name)?.hand_on_unmigrated());
                 flags.append(req, text)?;
             }
         }
         let ty = field.field_type();
         if let Some(name) = native_type(ty) {
-            let text = Value::string(PhpString::new(req, name.as_bytes())?);
+            let text = Value::string(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
             set(req, &mut meta, b"native_type", text)?;
         }
         let pdo_type = match ty {
@@ -445,10 +445,15 @@ impl Statement for Stmt {
             _ => 2,
         };
         set(req, &mut meta, b"pdo_type", Value::int(pdo_type))?;
-        set(req, &mut meta, b"flags", Value::array(flags))?;
-        let table = Value::string(PhpString::new(req, &field.table)?);
+        set(
+            req,
+            &mut meta,
+            b"flags",
+            flags.into_value().hand_on_unmigrated(),
+        )?;
+        let table = Value::string(PhpString::new(req, &field.table)?.hand_on_unmigrated());
         set(req, &mut meta, b"table", table)?;
-        Ok(meta)
+        Ok(meta.hand_on_unmigrated())
     }
 
     /// `pdo_mysql_stmt_next_rowset`.

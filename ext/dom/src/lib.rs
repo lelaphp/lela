@@ -57,7 +57,7 @@ use php_ext::raising::{
     Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw_error, throw_value,
 };
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
     Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc,
     XML_ATTRIBUTE_ID,
@@ -82,7 +82,7 @@ pub(crate) struct Iterator;
 
 /// A property read's answer: `None` is php's `FAILURE`, a row a dumper
 /// leaves out.
-type Read = Result<Option<Value>, Thrown>;
+type Read = Result<Option<Owner<Value>>, Thrown>;
 
 /// Core's `Exception`, named for `extends`.
 #[php_class(extern)]
@@ -379,9 +379,9 @@ type Imported = Raw<Union<Instance<classes::DOMAttr>, Instance<element::DOMEleme
 /// Dom\import_simplexml(): Argument #1 ($node) must not be already imported as a DOMNode
 /// ```
 #[php_function]
-fn dom_import_simplexml(req: &mut Request, node: PhpObject) -> Result<Imported, Thrown> {
+fn dom_import_simplexml(req: &mut Request, node: PhpObject) -> Result<Owner<Imported>, Thrown> {
     let found = import_simplexml_common(req, node, ClassType::Legacy)?;
-    returned(req, found)
+    returned(found)
 }
 
 /// `dom_import_simplexml_common`: the node an object exports, locked to
@@ -390,7 +390,7 @@ fn import_simplexml_common(
     req: &mut Request,
     object: PhpObject,
     new_class: ClassType,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let exported = php_ext_libxml::import_node(req, object)
         .filter(|e| e.document().is_some())
         .filter(|e| matches!(e.node().kind(), Kind::Element | Kind::Attribute));
@@ -415,9 +415,7 @@ fn import_simplexml_common(
     exported.set_class_type(new_class);
     let node = exported.node();
     if let Some(existing) = node.object() {
-        let value = existing.as_value();
-        req.addref(&value);
-        return Ok(value);
+        return Ok(Owner::take(req, existing.as_value()));
     }
     let Some(name) = class_for(node, new_class == ClassType::Modern) else {
         let n = node.kind().number();
@@ -430,7 +428,7 @@ fn import_simplexml_common(
     let base = class(req, name)?;
     let class = mapped(&exported.props(), base);
     let made = new_object(req, class)?;
-    if let Some(mut obj) = libxml_half(req, made) {
+    if let Some(mut obj) = libxml_half(req, *made) {
         obj.attach(req, node, exported.document());
     }
     if old != ClassType::Modern
@@ -438,12 +436,12 @@ fn import_simplexml_common(
         && let Some(doc) = node.doc()
     {
         let private = private::Private::new(req)?;
-        if let Some(d) = dom_mut(req, made) {
+        if let Some(d) = dom_mut(req, *made) {
             d.obj.set_private_data(Box::new(private));
         }
-        modern::convert_to_modern(req, made, doc);
+        modern::convert_to_modern(req, *made, doc);
     }
-    Ok(made.as_value())
+    Ok(made.into_value())
 }
 
 /// `php_dom_export_node`: the node a dom object stands for, and its
@@ -588,10 +586,14 @@ fn dom_error_message(
         let exception = new_throwable(req, "DOMException", message)?;
         if let Some(object) = exception.as_object().copied() {
             let name = PhpString::new(req, b"code")?;
-            object.set_prop(req, name, Value::int(code as i64))?;
+            let set = object.set_prop(req, name.hand_on_unmigrated(), Value::int(code as i64));
+            if let Err(thrown) = set {
+                exception.give_up(req);
+                return Err(thrown);
+            }
         }
         let thrown = throw_value(req, &exception);
-        req.release(exception);
+        exception.give_up(req);
         return Err(thrown);
     }
     php_ext_libxml::Errors::issue(req, Level::Warning, message);
@@ -645,20 +647,20 @@ fn intern(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
 /// caller's, `zend_string_init` whatever its length, so never the
 /// interned empty or one-byte string [`PhpString::new`] answers with.
 /// What ext/dom's readers and natives hand out for libxml's bytes.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     let made = PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(bytes))?;
-    Ok(Value::string(made))
+    Ok(made.into_value())
 }
 
 /// php's `ZVAL_EMPTY_STRING`: the interned empty string, where a body
 /// answers nothing found with it rather than with a string it made.
-fn empty_string(req: &mut Request) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, b"")?))
+fn empty_string(req: &mut Request) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, b"")?.into_value())
 }
 
 /// php's `smart_str_extract`: the interned empty string where nothing
 /// was appended, and the buffer's own new string otherwise.
-fn extracted(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
+fn extracted(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     if bytes.is_empty() {
         return empty_string(req);
     }
@@ -667,17 +669,22 @@ fn extracted(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
 
 /// A body's value returned under its declared type `T`, as php returns
 /// one: php verifies a native's return in its debug builds only.
-fn returned<T: FromArgument>(req: &mut Request, value: Value) -> Result<Raw<T>, Thrown> {
-    <Raw<T> as FromArgument>::from_value(req, value)
+#[allow(clippy::unnecessary_wraps)] // the tail of every native that returns it
+fn returned<T: FromArgument>(value: Owner<Value>) -> Result<Owner<Raw<T>>, Thrown> {
+    Ok(value.into_raw())
 }
 
 /// A body's `T|false` returned under its declared type: `false` as
 /// itself, anything else under `T`.
-fn or_false<T: FromArgument>(req: &mut Request, value: Value) -> Result<OrFalse<Raw<T>>, Thrown> {
+fn or_false<T: FromArgument>(
+    req: &mut Request,
+    value: Owner<Value>,
+) -> Result<OrFalse<Owner<Raw<T>>>, Thrown> {
     if value.as_bool() == Some(false) {
+        value.give_up(req);
         return Ok(OrFalse::False);
     }
-    returned(req, value).map(OrFalse::Value)
+    returned(value).map(OrFalse::Value)
 }
 
 /// The bytes of an optional string argument, none where the call gave
@@ -690,21 +697,23 @@ fn passed(given: Passed<PhpString>) -> Option<Vec<u8>> {
 }
 
 /// A string value, or `null` for none.
-fn nullable_string(req: &mut Request, bytes: Option<&[u8]>) -> Result<Value, Thrown> {
+fn nullable_string(req: &mut Request, bytes: Option<&[u8]>) -> Result<Owner<Value>, Thrown> {
     match bytes {
         Some(b) => string(req, b),
-        None => Ok(Value::null()),
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
 /// `php_dom_create_object`: the object standing for `node`, one more owner
 /// of it where one exists, a fresh one of the node's class otherwise,
 /// sharing `context`'s document.
-fn object_for(req: &mut Request, node: Node, context: Option<PhpObject>) -> Result<Value, Thrown> {
+fn object_for(
+    req: &mut Request,
+    node: Node,
+    context: Option<PhpObject>,
+) -> Result<Owner<Value>, Thrown> {
     if let Some(existing) = node.object() {
-        let value = existing.as_value();
-        req.addref(&value);
-        return Ok(value);
+        return Ok(Owner::take(req, existing.as_value()));
     }
     let modern = context.is_some_and(|c| modern::follows_spec(req, c));
     let Some(name) = class_for(node, modern) else {
@@ -745,7 +754,7 @@ pub fn create_object(
     req: &mut Request,
     node: Node,
     context: Option<PhpObject>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     object_for(req, node, context)
 }
 
@@ -756,11 +765,13 @@ pub fn create_object(
 /// more owner of it where one exists, a fresh one of the node's class,
 /// mapped by `doc`'s `registerNodeClass` table, counting `doc`'s
 /// document otherwise.
-pub fn create_object_in(req: &mut Request, node: Node, doc: &NodeObject) -> Result<Value, Thrown> {
+pub fn create_object_in(
+    req: &mut Request,
+    node: Node,
+    doc: &NodeObject,
+) -> Result<Owner<Value>, Thrown> {
     if let Some(existing) = node.object() {
-        let value = existing.as_value();
-        req.addref(&value);
-        return Ok(value);
+        return Ok(Owner::take(req, existing.as_value()));
     }
     let Some(name) = class_for(node, doc.class_type() == ClassType::Modern) else {
         let n = node.kind().number();
@@ -772,10 +783,10 @@ pub fn create_object_in(req: &mut Request, node: Node, doc: &NodeObject) -> Resu
     };
     let class = mapped(&doc.props(), class(req, name)?);
     let object = new_object(req, class)?;
-    if let Some(mut obj) = libxml_half(req, object) {
+    if let Some(mut obj) = libxml_half(req, *object) {
         obj.attach(req, node, doc.shared_doc());
     }
-    Ok(object.as_value())
+    Ok(object.into_value())
 }
 
 /// `php_dom_create_nullable_object`.
@@ -783,10 +794,10 @@ fn nullable_object(
     req: &mut Request,
     node: Option<Node>,
     context: Option<PhpObject>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     match node {
         Some(n) => object_for(req, n, context),
-        None => Ok(Value::null()),
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -797,13 +808,13 @@ fn instantiate(
     class: ClassId,
     node: Node,
     parent: Option<PhpObject>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let object = new_object(req, class)?;
     let shared = parent.and_then(|p| shared_doc(req, p));
-    if let Some(mut obj) = libxml_half(req, object) {
+    if let Some(mut obj) = libxml_half(req, *object) {
         obj.attach(req, node, shared);
     }
-    Ok(object.as_value())
+    Ok(object.into_value())
 }
 
 /// `dom_objects_free_storage`'s libxml half, past each class's own:
@@ -844,7 +855,10 @@ fn read_property(
     read: PropertyRead,
 ) -> Result<Value, Thrown> {
     match handler(req, object, name) {
-        Some(prop) => Ok((prop.read)(req, object)?.unwrap_or_default()),
+        Some(prop) => Ok(match (prop.read)(req, object)? {
+            Some(read) => read.hand_on_unmigrated(),
+            None => Value::null(),
+        }),
         None => Std.read_property(req, object, name, read),
     }
 }
@@ -868,7 +882,7 @@ fn write_property(
     req.release(value);
     let coerced = coerced?;
     let written = write(req, object, &coerced);
-    req.release(coerced);
+    coerced.give_up(req);
     written
 }
 
@@ -905,7 +919,7 @@ fn has_property(
         PropertyTest::NotEmpty => truthy(req, &value),
         _ => !matches!(value.as_ref(), ValueRef::Null),
     };
-    req.release(value);
+    value.give_up(req);
     Ok(answer)
 }
 
@@ -1020,7 +1034,7 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
         out.set(req, key, value)?;
     }
     let Some(table) = table_of(req, object) else {
-        return Ok(Some(out.into()));
+        return Ok(Some(out.hand_on_unmigrated().into()));
     };
     let mut pending: Option<Thrown> = None;
     let omitted = string(req, b"(object value omitted)")?;
@@ -1039,8 +1053,8 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
                 };
                 if thrown.exception().is_none() {
                     req.state::<State>().suppress_warnings = false;
-                    req.release(omitted);
-                    req.release(Value::array(out));
+                    omitted.give_up(req);
+                    out.give_up(req);
                     return Err(thrown);
                 }
                 pending = Some(thrown);
@@ -1048,19 +1062,18 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
             }
         };
         let shown = if read.as_object().is_some() {
-            req.release(read);
-            req.addref(&omitted);
-            omitted
+            read.give_up(req);
+            Owner::take(req, *omitted)
         } else {
             read
         };
-        let key = Key::Str(PhpString::new(req, prop.name)?);
-        out.set(req, key, shown)?;
+        let key = Key::Str(PhpString::new(req, prop.name)?.hand_on_unmigrated());
+        out.set(req, key, shown.hand_on_unmigrated())?;
     }
-    req.release(omitted);
+    omitted.give_up(req);
     req.state::<State>().suppress_warnings = false;
     Ok(Some(DebugInfo {
-        table: out,
+        table: out.hand_on_unmigrated(),
         thrown: pending,
     }))
 }
@@ -1176,17 +1189,21 @@ fn is_connected(node: Node) -> bool {
 /// attribute's value as `RETVAL_STRING_FAST` makes it, so an empty or
 /// one-byte value is the interned string, and the interned empty string
 /// or `null` where there is none.
-fn content_value(req: &mut Request, node: Node, null_on_failure: bool) -> Result<Value, Thrown> {
+fn content_value(
+    req: &mut Request,
+    node: Node,
+    null_on_failure: bool,
+) -> Result<Owner<Value>, Thrown> {
     let content = match node.kind() {
         Kind::Text | Kind::CData | Kind::Pi | Kind::Comment => node.content(),
         Kind::Attribute => {
-            return Ok(Value::string(PhpString::new(req, &node.attr_value())?));
+            return Ok(PhpString::new(req, &node.attr_value())?.into_value());
         }
         _ => node.get_content(),
     };
     match content {
         Some(bytes) => string(req, &bytes),
-        None if null_on_failure => Ok(Value::null()),
+        None if null_on_failure => Ok(Owner::take(req, Value::null())),
         None => empty_string(req),
     }
 }
@@ -1392,7 +1409,7 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             let shared = shared_doc(req, object);
             payload.obj.attach(req, cloned, shared);
         }
-        let clone = object.clone_with(req, payload)?;
+        let clone = object.clone_with(req, payload)?.hand_on_unmigrated();
         if let Some(d) = dom_mut(req, clone) {
             d.obj.set_object(clone);
         }
@@ -1427,7 +1444,7 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             copied = Some((n, cloned));
         }
     }
-    let clone = object.clone_with(req, payload)?;
+    let clone = object.clone_with(req, payload)?.hand_on_unmigrated();
     if let Some(d) = dom_mut(req, clone) {
         d.obj.set_object(clone);
     }
@@ -1785,33 +1802,45 @@ fn create(
     base: PhpObject,
     class_name: &str,
     kind: MapKind,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let class = class(req, class_name)?;
     let object = php_ext::call::new_object(req, class)?;
     req.addref(&base.as_value());
-    if let Some(d) = dom_mut(req, object) {
+    if let Some(d) = dom_mut(req, *object) {
         d.extra = Extra::Map(Box::new(Map {
             base: Some(base),
             kind,
             dims: map::Dims::of(class_name),
         }));
     }
-    Ok(object.as_value())
+    Ok(object.into_value())
 }
 
 /// A list of `class_name` over the objects `array` holds, the answer of an
 /// `XPath` query; `array` is the list's from here.
-fn node_set(req: &mut Request, class_name: &str, array: PhpArray) -> Result<Value, Thrown> {
-    let class = class(req, class_name)?;
+fn node_set(
+    req: &mut Request,
+    class_name: &str,
+    array: Owner<PhpArray>,
+) -> Result<Owner<Value>, Thrown> {
+    let class = match class(req, class_name) {
+        Ok(class) => class,
+        Err(thrown) => {
+            array.give_up(req);
+            return Err(thrown);
+        }
+    };
     let object = php_ext::call::new_object(req, class)?;
-    if let Some(d) = dom_mut(req, object) {
+    if let Some(d) = dom_mut(req, *object) {
         d.extra = Extra::Map(Box::new(Map {
             base: None,
-            kind: MapKind::NodeSet(array),
+            kind: MapKind::NodeSet(array.hand_on_unmigrated()),
             dims: map::Dims::of(class_name),
         }));
+    } else {
+        array.give_up(req);
     }
-    Ok(object.as_value())
+    Ok(object.into_value())
 }
 
 fn content_equal(a: Node, b: Node) -> bool {
@@ -1939,7 +1968,7 @@ fn coerce_property(
     object: PhpObject,
     name: &[u8],
     value: &Value,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let (declaring, declared) = declared_type(req, object, name);
     let v = value.deref();
     let given = match v.as_ref() {
@@ -1969,22 +1998,20 @@ fn coerce_property(
     };
     match declared {
         Declared::Bool => match v.as_ref() {
-            ValueRef::Bool(_) => Ok(v),
+            ValueRef::Bool(_) => Ok(Owner::take(req, v)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_) => {
-                Ok(Value::bool(truthy(req, &v)))
+                let truth = truthy(req, &v);
+                Ok(Owner::take(req, Value::bool(truth)))
             }
             _ => Err(fail(req, "bool")),
         },
         Declared::String { nullable } => match v.as_ref() {
-            ValueRef::Null if nullable => Ok(Value::null()),
-            ValueRef::Str(_) => {
-                req.addref(&v);
-                Ok(v)
-            }
+            ValueRef::Null if nullable => Ok(Owner::take(req, Value::null())),
+            ValueRef::Str(_) => Ok(Owner::take(req, v)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-                Ok(Value::string(to_string(req, &v)?))
+                Ok(to_string(req, &v)?.into_value())
             }
-            ValueRef::Object(o) if has_to_string(req, *o) => Ok(Value::string(to_string(req, &v)?)),
+            ValueRef::Object(o) if has_to_string(req, *o) => Ok(to_string(req, &v)?.into_value()),
             _ => Err(fail(req, if nullable { "?string" } else { "string" })),
         },
         Declared::Object { class, nullable } => {
@@ -1996,8 +2023,7 @@ fn coerce_property(
                 _ => false,
             };
             if accepted {
-                req.addref(&v);
-                return Ok(v);
+                return Ok(Owner::take(req, v));
             }
             let shown = format!(
                 "{}{}",

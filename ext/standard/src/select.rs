@@ -39,7 +39,7 @@ use php_ext::abi::{OrFalse, Ref};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Cast, Request, Stream};
-use php_ext::values::{Key, PhpArray, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef};
 
 /// `?array &$read` and its two siblings: the caller's array, or `null`,
 /// by reference.
@@ -104,12 +104,17 @@ fn from_fd_set(
             keep(req, &mut out, &key, element)?;
         }
     }
-    target.set(req, Some(out))
+    target.set(req, Some(out.hand_on_unmigrated()))
 }
 
 /// One element copied into the array written back, key and value one
 /// more owner each, as `zend_hash_update` and `zval_add_ref` take them.
-fn keep(req: &mut Request, out: &mut PhpArray, key: &Key, element: Value) -> Result<(), Thrown> {
+fn keep(
+    req: &mut Request,
+    out: &mut Owner<PhpArray>,
+    key: &Key,
+    element: Value,
+) -> Result<(), Thrown> {
     req.addref(&element);
     let key = match key {
         Key::Str(s) => {
@@ -139,9 +144,9 @@ fn emulate_read_fd_set(
         }
     }
     if ret > 0 {
-        target.set(req, Some(out))?;
+        target.set(req, Some(out.hand_on_unmigrated()))?;
     } else {
-        req.release(Value::array(out));
+        out.give_up(req);
     }
     Ok(ret)
 }

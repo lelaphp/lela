@@ -38,11 +38,21 @@ fn owned_first(req: &mut Request, array: PhpArray) -> Owner<Value> {
     Owner::take(req, array.get(&Key::Int(0)).unwrap_or_default())
 }
 
-/// `fresh(): string`: a string made by the native, returned as the view
-/// of the one owner it was made with, handed on.
+/// `fresh(): string`: a string made by the native, returned as the
+/// owner it was made with.
 #[php_function]
-fn fresh(req: &mut Request) -> Result<PhpString, Thrown> {
+fn fresh(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, b"made by the native")
+}
+
+/// `appended(array $array): array`: the array with one more element,
+/// written through an owner taken of it, which the write separates from
+/// the caller's.
+#[php_function]
+fn appended(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
+    let mut owner = Owner::take(req, array);
+    owner.append(req, Value::int(1))?;
+    Ok(owner)
 }
 
 /// `s($c)`: a string of the request's, counted, which the program builds.
@@ -55,6 +65,7 @@ fn owners() -> Extension {
             give_up_owner::declared(),
             owned_first::declared(),
             fresh::declared(),
+            appended::declared(),
         ])
         .build("owners")
 }
@@ -106,10 +117,10 @@ fn an_owner_given_up_is_reported_nowhere() {
 
 /// An owner returned is moved to the caller: the element outlives the
 /// array it was read from, so the slot it stands in is not handed to the
-/// string made after the array is freed. A view the native made and
-/// returns is the one owner it was made with, handed on.
+/// string made after the array is freed. A string the native made is
+/// returned as the owner it was made with.
 #[test]
-fn returning_an_owner_and_returning_a_fresh_view_are_both_correct() {
+fn returning_an_owner_taken_and_an_owner_made_are_both_correct() {
     let engine = Engine::cli_builder().extensions(&[owners()]).build();
     let served = engine.serve_capture(
         &format!("<?php {COUNTED} $a = [s('x')];\n$v = owned_first($a);\nunset($a);\n$b = s('y');\necho $v, \"\\n\", $b, \"\\n\";\nunset($v);\necho fresh(), \"\\n\";\n$f = fresh(); unset($f);\n"),
@@ -118,6 +129,23 @@ fn returning_an_owner_and_returning_a_fresh_view_are_both_correct() {
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "x9223372036854775807\ny9223372036854775807\nmade by the native\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A write through an owner that separates the array moves the owner to
+/// the copy: the copy is what the native returns, and the caller's array
+/// keeps its own owner and its elements.
+#[test]
+fn a_write_through_an_owner_moves_it_to_the_separated_copy() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        &format!("<?php {COUNTED} $a = [s('x')]; $b = appended($a); echo isset($a[1]) ? 'shared' : 'kept', $b[1], \"\\n\"; unset($a); $c = s('y'); echo $b[0], $b[1], \"\\n\";\n"),
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "kept1\nx92233720368547758071\n"
     );
     assert_eq!(served.exit_code, 0);
 }

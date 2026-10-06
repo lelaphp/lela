@@ -21,7 +21,7 @@ use php_unit::decl::{ClassKind, EnumBacking, Type};
 use crate::api::abi::{CloneObj, Entry, ObjectHandlers};
 use crate::api::raising::{Thrown, arg_count_error, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpArray, Value};
+use crate::api::values::{ClassId, Value};
 
 /// Where the function numbers of a program's enum methods begin: past
 /// every native, native method and user function a request can number,
@@ -168,7 +168,7 @@ pub(crate) fn case_names(req: &Request, class: ClassId) -> Vec<Vec<u8>> {
 fn cases(req: &mut Request) -> Result<Value, Thrown> {
     exactly(req, 0)?;
     let class = called_enum(req)?;
-    let mut out = PhpArray::new(req)?;
+    let mut out = req.array()?;
     for name in case_names(req, class) {
         let case = req.enum_case(class, &name)?;
         out.append(req, case.as_value())?;
@@ -214,7 +214,7 @@ fn try_from(req: &mut Request) -> Result<Value, Thrown> {
 /// only what is neither is read as a string.
 fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result<Value, Thrown> {
     use crate::api::coerce::coerce_param;
-    use crate::api::values::{PhpString, ValueRef};
+    use crate::api::values::ValueRef;
     if backing == EnumBacking::Int {
         return coerce_param(req, given, &Type::Int, 1);
     }
@@ -237,10 +237,7 @@ fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result
         }
     };
     if let Some(n) = long {
-        return Ok(Value::string(PhpString::new(
-            req,
-            n.to_string().as_bytes(),
-        )?));
+        return Ok(Value::string(req.string(n.to_string().as_bytes())?));
     }
     req.addref(given);
     Ok(*given)

@@ -31,7 +31,7 @@ use php_ext::call::read_prop;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, argument_error, throw, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use num::{Num, RaiseError, RaiseModError, Rounding};
 
@@ -199,7 +199,7 @@ fn value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 }
 
 /// A string of the request's holding `bytes`.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, bytes)
 }
 
@@ -224,7 +224,7 @@ fn bcadd(
     num1: PhpString,
     num2: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 3)?;
     let first = operand(req, num1.as_bytes(), 1)?;
     let second = operand(req, num2.as_bytes(), 2)?;
@@ -249,7 +249,7 @@ fn bcsub(
     num1: PhpString,
     num2: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 3)?;
     let first = operand(req, num1.as_bytes(), 1)?;
     let second = operand(req, num2.as_bytes(), 2)?;
@@ -274,7 +274,7 @@ fn bcmul(
     num1: PhpString,
     num2: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 3)?;
     let first = operand(req, num1.as_bytes(), 1)?;
     let second = operand(req, num2.as_bytes(), 2)?;
@@ -301,7 +301,7 @@ fn bcdiv(
     num1: PhpString,
     num2: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 3)?;
     let first = operand(req, num1.as_bytes(), 1)?;
     let second = operand(req, num2.as_bytes(), 2)?;
@@ -330,7 +330,7 @@ fn bcmod(
     num1: PhpString,
     num2: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 3)?;
     let first = operand(req, num1.as_bytes(), 1)?;
     let second = operand(req, num2.as_bytes(), 2)?;
@@ -368,7 +368,7 @@ fn bcdivmod(
     num1: PhpString,
     num2: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let scale = scale_or_default(req, scale, 3)?;
     let first = operand(req, num1.as_bytes(), 1)?;
     let second = operand(req, num2.as_bytes(), 2)?;
@@ -377,14 +377,18 @@ fn bcdivmod(
     };
     let quot = string(req, &quot.render(0))?;
     let rem = string(req, &rem.render(scale))?;
-    pair(req, Value::string(quot), Value::string(rem))
+    pair(req, quot.into_value(), rem.into_value())
 }
 
 /// `zend_new_pair`: a packed array of the two.
-fn pair(req: &mut Request, first: Value, second: Value) -> Result<PhpArray, Thrown> {
+fn pair(
+    req: &mut Request,
+    first: Owner<Value>,
+    second: Owner<Value>,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
-    array.set(req, Key::Int(0), first)?;
-    array.set(req, Key::Int(1), second)?;
+    array.set(req, Key::Int(0), first.hand_on_unmigrated())?;
+    array.set(req, Key::Int(1), second.hand_on_unmigrated())?;
     Ok(array)
 }
 
@@ -416,7 +420,7 @@ fn bcpowmod(
     exponent: PhpString,
     modulus: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 4)?;
     let base = operand(req, num.as_bytes(), 1)?;
     let exponent = operand(req, exponent.as_bytes(), 2)?;
@@ -477,7 +481,7 @@ fn bcpow(
     num: PhpString,
     exponent: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 3)?;
     let base = operand(req, num.as_bytes(), 1)?;
     let exponent = operand(req, exponent.as_bytes(), 2)?;
@@ -527,7 +531,7 @@ fn bcsqrt(
     req: &mut Request,
     num: PhpString,
     #[php(default = null)] scale: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let scale = scale_or_default(req, scale, 2)?;
     let value = operand(req, num.as_bytes(), 1)?;
     match num::sqrt(&value.num, scale) {
@@ -599,8 +603,8 @@ fn bcscale(req: &mut Request, #[php(default = null)] scale: Option<i64>) -> Resu
         let scale = check_scale(req, scale, 1)?;
         // `zend_long_to_str`'s string, which the entry keeps.
         let text = php_ext::coerce::int_to_string(req, i64::try_from(scale).unwrap_or(i64::MAX))?;
-        let set = req.ini_set_string(SCALE, text);
-        req.release(php_ext::values::Value::string(text));
+        let set = req.ini_set_string(SCALE, *text);
+        text.give_up(req);
         set?;
     }
     Ok(i64::try_from(old).unwrap_or(i64::from(i32::MAX)))
@@ -618,7 +622,7 @@ fn bcscale(req: &mut Request, #[php(default = null)] scale: Option<i64>) -> Resu
 /// string(1) "3"
 /// ```
 #[php_function]
-fn bcfloor(req: &mut Request, num: PhpString) -> Result<PhpString, Thrown> {
+fn bcfloor(req: &mut Request, num: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let value = operand(req, num.as_bytes(), 1)?;
     string(req, &num::floor_or_ceil(&value.num, true).render(0))
 }
@@ -635,7 +639,7 @@ fn bcfloor(req: &mut Request, num: PhpString) -> Result<PhpString, Thrown> {
 /// string(1) "3"
 /// ```
 #[php_function]
-fn bcceil(req: &mut Request, num: PhpString) -> Result<PhpString, Thrown> {
+fn bcceil(req: &mut Request, num: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let value = operand(req, num.as_bytes(), 1)?;
     string(req, &num::floor_or_ceil(&value.num, false).render(0))
 }
@@ -703,7 +707,7 @@ fn bcround(
     num: PhpString,
     #[php(default = 0)] precision: i64,
     #[php(default = RoundingMode::HalfAwayFromZero)] mode: Instance<RoundingMode>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     check_precision(req, precision, 2)?;
     let mode = rounding(req, mode, 3)?;
     let value = operand(req, num.as_bytes(), 1)?;

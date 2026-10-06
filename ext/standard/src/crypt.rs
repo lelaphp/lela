@@ -14,7 +14,7 @@
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 mod blowfish;
 mod freesec;
@@ -171,7 +171,7 @@ fn crypt(
     req: &mut Request,
     #[php(sensitive)] string: PhpString,
     salt: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let hash = crypt_string(string.as_bytes(), salt.as_bytes());
     PhpString::new(req, &hash)
 }

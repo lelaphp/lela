@@ -6,7 +6,7 @@ use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::State;
 use crate::ffi::{Errors, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
@@ -27,7 +27,11 @@ pub(super) fn keep_errors(req: &mut Request, errors: &Errors) {
 }
 
 /// `zval_from_error_container`: the counts and the messages by position.
-fn add_errors(req: &mut Request, array: &mut PhpArray, errors: &Errors) -> Result<(), Thrown> {
+fn add_errors(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    errors: &Errors,
+) -> Result<(), Thrown> {
     for (count, list, messages) in [
         (&b"warning_count"[..], &b"warnings"[..], &errors.warnings),
         (b"error_count", b"errors", &errors.errors),
@@ -36,16 +40,16 @@ fn add_errors(req: &mut Request, array: &mut PhpArray, errors: &Errors) -> Resul
         set_str(req, array, count, Value::int(n))?;
         let mut element = PhpArray::new(req)?;
         for message in messages {
-            let text = Value::string(PhpString::new(req, &message.text)?);
+            let text = Value::string(PhpString::new(req, &message.text)?.hand_on_unmigrated());
             element.set(req, Key::Int(i64::from(message.position)), text)?;
         }
-        set_str(req, array, list, Value::array(element))?;
+        set_str(req, array, list, Value::array(element.hand_on_unmigrated()))?;
     }
     Ok(())
 }
 
 /// `date_get_last_errors`' array: `zval_from_error_container` alone.
-pub(super) fn errors_value(req: &mut Request, errors: &Errors) -> Result<PhpArray, Thrown> {
+pub(super) fn errors_value(req: &mut Request, errors: &Errors) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     add_errors(req, &mut array, errors)?;
     Ok(array)
@@ -109,7 +113,12 @@ fn strtotime(
 
 /// `PHP_DATE_PARSE_DATE_SET_TIME_ELEMENT`: `false` for a field the parse
 /// left unset, the number otherwise.
-fn element(req: &mut Request, array: &mut PhpArray, name: &[u8], n: i64) -> Result<(), Thrown> {
+fn element(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    name: &[u8],
+    n: i64,
+) -> Result<(), Thrown> {
     let value = if n == UNSET {
         Value::bool(false)
     } else {
@@ -119,7 +128,7 @@ fn element(req: &mut Request, array: &mut PhpArray, name: &[u8], n: i64) -> Resu
 }
 
 /// `php_date_do_return_parsed_time`.
-fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<PhpArray, Thrown> {
+fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, n) in [
         (&b"year"[..], t.y),
@@ -195,7 +204,12 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<PhpArray,
             };
             set_str(req, &mut rel, name, Value::bool(true))?;
         }
-        set_str(req, &mut array, b"relative", Value::array(rel))?;
+        set_str(
+            req,
+            &mut array,
+            b"relative",
+            Value::array(rel.hand_on_unmigrated()),
+        )?;
     }
     Ok(array)
 }
@@ -395,7 +409,7 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<PhpArray,
 /// }
 /// ```
 #[php_function]
-fn date_parse(req: &mut Request, datetime: PhpString) -> Result<PhpArray, Thrown> {
+fn date_parse(req: &mut Request, datetime: PhpString) -> Result<Owner<PhpArray>, Thrown> {
     let (t, errors) = Time::strtotime(datetime.as_bytes());
     parsed_time(req, &t, &errors)
 }
@@ -481,7 +495,7 @@ fn date_parse_from_format(
     req: &mut Request,
     format: PhpString,
     datetime: Path,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (t, errors) = Time::parse_from_format(format.as_bytes(), datetime.0.as_bytes());
     parsed_time(req, &t, &errors)
 }

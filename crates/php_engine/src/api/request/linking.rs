@@ -156,7 +156,7 @@ impl Request {
             return thrown;
         };
         if self.pending() == Some(exception) {
-            self.take_pending();
+            self.take_pending_view();
         }
         // `zval_get_string` over the throwable: its class's own
         // `__toString`, which a user class may override.
@@ -287,7 +287,7 @@ impl Request {
             if values.iter().any(|(written, _)| *written == expr) {
                 continue;
             }
-            match crate::api::call::eval_const_expr(self, &expr, None) {
+            match crate::api::call::eval_const_expr_made(self, &expr, None) {
                 Ok(value) => {
                     if let Some(literal) = literal_of(&value) {
                         values.push((expr, literal));

@@ -32,7 +32,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, fatal, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
 /// A by-reference parameter with no declared type.
@@ -182,7 +182,7 @@ fn msg_get_queue(
     req: &mut Request,
     key: i64,
     #[php(default = 0666)] permissions: i64,
-) -> Result<OrFalse<Instance<SysvMessageQueue>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<SysvMessageQueue>>>, Thrown> {
     let flags = libc::IPC_CREAT | libc::IPC_EXCL | c_int(permissions);
     let id = match ffi::get(c_int(key), 0).or_else(|_| ffi::get(c_int(key), flags)) {
         Ok(id) => id,
@@ -204,7 +204,7 @@ fn msg_get_queue(
             "Class \"SysvMessageQueue\" not found",
         ));
     };
-    let queue = Instance::of(new_object(req, class)?);
+    let queue = new_object(req, class)?.into_instance::<SysvMessageQueue>();
     *queue.payload_mut(req)? = Some(Queue { id });
     Ok(OrFalse::Value(queue))
 }
@@ -363,7 +363,7 @@ fn msg_receive(
     // `safe_emalloc(maxsize, 1, sizeof(struct php_msgbuf))`: the
     // request's memory limit met as php meets it, before the room.
     let asked = PhpString::product(req, max, 1, 16, |_| {})?;
-    req.release(Value::string(asked));
+    asked.give_up(req);
     let (kind, text) = match ffi::receive(id, max, desired_message_type, how) {
         Ok(got) => got,
         Err(errno) => {
@@ -377,7 +377,7 @@ fn msg_receive(
     error_code.set(req, Untyped(Value::int(0)))?;
     if !unserialize {
         let text = PhpString::new(req, &text)?;
-        message.set(req, Value::string(text))?;
+        message.set(req, text.into_value().hand_on_unmigrated())?;
         return Ok(true);
     }
     let mut reader = Unserializer::new(req, &text)?;
@@ -453,7 +453,7 @@ fn msg_remove_queue(req: &mut Request, queue: Instance<SysvMessageQueue>) -> Res
 fn msg_stat_queue(
     req: &mut Request,
     queue: Instance<SysvMessageQueue>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(stat) = ffi::stat(id(req, queue)?) else {
         return Ok(OrFalse::False);
     };
@@ -470,7 +470,7 @@ fn msg_stat_queue(
         ("msg_lspid", stat.lspid),
         ("msg_lrpid", stat.lrpid),
     ] {
-        let key = Key::Str(PhpString::new(req, key.as_bytes())?);
+        let key = Key::Str(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
         array.set(req, key, Value::int(value))?;
     }
     Ok(OrFalse::Value(array))

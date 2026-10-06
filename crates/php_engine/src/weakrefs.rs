@@ -27,7 +27,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{HashIterator, Key, PhpArray, PhpObject, PhpRef, PhpString, Place, Value};
+use crate::api::values::{HashIterator, Key, Owner, PhpArray, PhpObject, PhpString, Place, Value};
 use crate::classes::ArrayAccess;
 use crate::interfaces::{Countable, Iterator, IteratorAggregate};
 
@@ -248,9 +248,9 @@ impl ObjectHandlers for WeakReferenceHandlers {
         let mut table = PhpArray::new(req)?;
         let value = referent.map_or(Value::null(), |referent| referent.as_value());
         req.addref(&value);
-        let key = Key::Str(PhpString::new(req, b"object")?);
+        let key = Key::Str(PhpString::new(req, b"object")?.hand_on_unmigrated());
         table.set(req, key, value)?;
-        Ok(Some(table.into()))
+        Ok(Some(table.hand_on_unmigrated().into()))
     }
 }
 
@@ -426,7 +426,7 @@ impl ObjectHandlers for WeakMapHandlers {
         let mut entries = if let Some(entries) = entries_of(req, object) {
             entries
         } else {
-            let made = PhpArray::new(req)?;
+            let made = PhpArray::new(req)?.hand_on_unmigrated();
             if let Some(payload) = object.native_mut::<ZendWeakMap>(req) {
                 payload.entries = Some(made);
             }
@@ -545,14 +545,14 @@ impl ObjectHandlers for WeakMapHandlers {
             };
             let mut pair = PhpArray::new(req)?;
             req.addref(&owner.as_value());
-            let at = Key::Str(PhpString::new(req, b"key")?);
+            let at = Key::Str(PhpString::new(req, b"key")?.hand_on_unmigrated());
             pair.set(req, at, owner.as_value())?;
             req.addref(&value);
-            let at = Key::Str(PhpString::new(req, b"value")?);
+            let at = Key::Str(PhpString::new(req, b"value")?.hand_on_unmigrated());
             pair.set(req, at, value)?;
-            table.append(req, Value::array(pair))?;
+            table.append(req, pair.into_value().hand_on_unmigrated())?;
         }
-        Ok(Some(table.into()))
+        Ok(Some(table.hand_on_unmigrated().into()))
     }
 
     /// `zend_weakmap_get_gc`: the values, which the map owns; the keys it
@@ -637,7 +637,7 @@ impl ClassIterator for MapIter {
             return Ok(Value::null());
         };
         req.addref(&value);
-        let cell = PhpRef::new(req, value)?;
+        let cell = req.reference(value)?;
         req.addref(&cell.as_value());
         entries.set(req, key, cell.as_value())?;
         Ok(cell.as_value())
@@ -704,7 +704,7 @@ fn weakmap_place(
 /// one more owner, and the copy registered against every key.
 fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let copy = match entries_of(req, object) {
-        Some(entries) => Some(entries.copy(req)?),
+        Some(entries) => Some(entries.copy(req)?.hand_on()),
         None => None,
     };
     let made = req.clone_with_payload(object, ZendWeakMap { entries: copy })?;
@@ -1057,7 +1057,10 @@ impl WeakMap {
     /// bool(false)
     /// int(20)
     /// ```
-    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
-        crate::api::call::internal_iterator(req, &this.object()).map(Instance::of)
+    fn getIterator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<Iterator>>, Thrown> {
+        crate::api::call::internal_iterator(req, &this.object()).map(Owner::into_instance)
     }
 }

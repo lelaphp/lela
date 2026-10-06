@@ -120,12 +120,14 @@ fn repair(req: &mut Request, doc: &mut ffi::Doc, input: &[u8]) -> Result<Option<
 /// `php_output_handler_started`.
 fn started(req: &mut Request) -> Result<bool, Thrown> {
     let list = req.output_buffer_op(&OutputOp::ListHandlers)?;
-    let ValueRef::Array(list) = list.as_ref() else {
-        return Ok(false);
+    let started = match list.as_ref() {
+        ValueRef::Array(list) => list.iter().any(|(_, value)| {
+            matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == NAME.as_bytes())
+        }),
+        _ => false,
     };
-    Ok(list.iter().any(
-        |(_, value)| matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == NAME.as_bytes()),
-    ))
+    list.give_up(req);
+    Ok(started)
 }
 
 /// `php_tidy_clean_output_start`: the handler started where
@@ -136,7 +138,8 @@ fn clean_output_start(req: &mut Request) -> Result<(), Thrown> {
             handler: StartHandler::Registered(OB_TIDYHANDLER),
             chunk_size: 0,
             flags: STDFLAGS,
-        })?;
+        })?
+        .give_up(req);
     }
     Ok(())
 }

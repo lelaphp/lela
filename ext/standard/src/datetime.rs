@@ -7,7 +7,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Zone};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `strptime(string $timestamp, string $format): array|false`,
 /// `PHP_FUNCTION(strptime)` (`Z/ext/standard/datetime.c:34`): the
@@ -83,7 +83,7 @@ fn strptime(
     req: &mut Request,
     timestamp: PhpString,
     format: PhpString,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let c_string = |bytes: &[u8]| bytes.split(|c| *c == 0).next().unwrap_or(&[]).to_vec();
     let Some(parsed) = crate::ffi::strptime(
         &c_string(timestamp.as_bytes()),
@@ -104,11 +104,11 @@ fn strptime(
         "tm_sec", "tm_min", "tm_hour", "tm_mday", "tm_mon", "tm_year", "tm_wday", "tm_yday",
     ];
     for (name, value) in names.iter().zip(fields) {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?);
+        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
         array.set(req, key, Value::int(i64::from(value)))?;
     }
-    let key = Key::Str(PhpString::new(req, b"unparsed")?);
-    let unparsed = Value::string(PhpString::new(req, &unparsed)?);
+    let key = Key::Str(PhpString::new(req, b"unparsed")?.hand_on_unmigrated());
+    let unparsed = Value::string(PhpString::new(req, &unparsed)?.hand_on_unmigrated());
     array.set(req, key, unparsed)?;
     Ok(OrFalse::Value(array))
 }

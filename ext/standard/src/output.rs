@@ -10,28 +10,37 @@ use php_ext::attr::php_function;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{OutputOp, Request, StartHandler};
-use php_ext::values::{PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 /// What an op that answers `true` or `false` answered.
 fn op_bool(req: &mut Request, op: &OutputOp) -> Result<bool, Thrown> {
-    Ok(req.output_buffer_op(op)?.as_bool().unwrap_or(false))
+    let answer = req.output_buffer_op(op)?;
+    let done = answer.as_bool().unwrap_or(false);
+    answer.give_up(req);
+    Ok(done)
 }
 
 /// What an op that answers the buffer or `false` answered, the string's
 /// owner handed on.
-fn op_string(req: &mut Request, op: &OutputOp) -> Result<OrFalse<PhpString>, Thrown> {
-    Ok(match req.output_buffer_op(op)?.as_ref() {
-        ValueRef::Str(string) => OrFalse::Value(*string),
+fn op_string(req: &mut Request, op: &OutputOp) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
+    let answer = req.output_buffer_op(op)?;
+    let string = match answer.as_ref() {
+        ValueRef::Str(string) => OrFalse::Value(Owner::take(req, *string)),
         _ => OrFalse::False,
-    })
+    };
+    answer.give_up(req);
+    Ok(string)
 }
 
 /// What an op that answers an array answered, its owner handed on.
-fn op_array(req: &mut Request, op: &OutputOp) -> Result<PhpArray, Thrown> {
-    match req.output_buffer_op(op)?.as_array() {
-        Some(array) => Ok(*array),
+fn op_array(req: &mut Request, op: &OutputOp) -> Result<Owner<PhpArray>, Thrown> {
+    let answer = req.output_buffer_op(op)?;
+    let array = match answer.as_array() {
+        Some(array) => Ok(Owner::take(req, *array)),
         None => PhpArray::new(req),
-    }
+    };
+    answer.give_up(req);
+    array
 }
 
 /// `ob_start($callback = null, int $chunk_size = 0, int $flags = PHP_OUTPUT_HANDLER_STDFLAGS): bool`
@@ -263,7 +272,7 @@ fn ob_end_clean(req: &mut Request) -> Result<bool, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn ob_get_flush(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn ob_get_flush(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     op_string(req, &OutputOp::GetFlush)
 }
 
@@ -279,7 +288,7 @@ fn ob_get_flush(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn ob_get_clean(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn ob_get_clean(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     op_string(req, &OutputOp::GetClean)
 }
 
@@ -293,7 +302,7 @@ fn ob_get_clean(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 /// string(6) "so far"
 /// ```
 #[php_function]
-fn ob_get_contents(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn ob_get_contents(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     op_string(req, &OutputOp::GetContents)
 }
 
@@ -308,10 +317,10 @@ fn ob_get_contents(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
 /// ```
 #[php_function]
 fn ob_get_level(req: &mut Request) -> Result<i64, Thrown> {
-    Ok(req
-        .output_buffer_op(&OutputOp::GetLevel)?
-        .as_int()
-        .unwrap_or(0))
+    let level = req.output_buffer_op(&OutputOp::GetLevel)?;
+    let n = level.as_int().unwrap_or(0);
+    level.give_up(req);
+    Ok(n)
 }
 
 /// `ob_get_length(): int|false` (`Z/main/output.c:1531`).
@@ -325,7 +334,10 @@ fn ob_get_level(req: &mut Request) -> Result<i64, Thrown> {
 /// ```
 #[php_function]
 fn ob_get_length(req: &mut Request) -> Result<OrFalse<i64>, Thrown> {
-    Ok(match req.output_buffer_op(&OutputOp::GetLength)?.as_int() {
+    let length = req.output_buffer_op(&OutputOp::GetLength)?;
+    let n = length.as_int();
+    length.give_up(req);
+    Ok(match n {
         Some(length) => OrFalse::Value(length),
         None => OrFalse::False,
     })
@@ -348,7 +360,7 @@ fn ob_get_length(req: &mut Request) -> Result<OrFalse<i64>, Thrown> {
 /// }
 /// ```
 #[php_function]
-fn ob_list_handlers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn ob_list_handlers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     op_array(req, &OutputOp::ListHandlers)
 }
 
@@ -403,7 +415,7 @@ fn ob_list_handlers(req: &mut Request) -> Result<PhpArray, Thrown> {
 fn ob_get_status(
     req: &mut Request,
     #[php(default = false)] full_status: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     op_array(req, &OutputOp::GetStatus { full: full_status })
 }
 
@@ -421,6 +433,6 @@ fn ob_get_status(
 #[php_function]
 fn ob_implicit_flush(req: &mut Request, #[php(default = true)] enable: bool) -> Result<(), Thrown> {
     let done = req.output_buffer_op(&OutputOp::ImplicitFlush(enable))?;
-    req.release(done);
+    done.give_up(req);
     Ok(())
 }

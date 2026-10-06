@@ -10,7 +10,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{FieldType, Mysqlnd, Stmt, StmtAttr, StmtFetch, StmtStatus};
 
 use crate::link::{self, Need, mysqli};
@@ -92,20 +92,20 @@ fn kept_query(req: &mut Request, query: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// A statement on a new `mysqli_stmt` in `state`.
-fn wrap(req: &mut Request, state: StmtObj) -> Result<Instance<mysqli_stmt>, Thrown> {
+fn wrap(req: &mut Request, state: StmtObj) -> Result<Owner<Instance<mysqli_stmt>>, Thrown> {
     let class = stmt_class(req)?;
     let object = new_object(req, class)?;
-    if let Some(slot) = crate::payload::<StmtObj>(req, object) {
+    if let Some(slot) = crate::payload::<StmtObj>(req, *object) {
         *slot = state;
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// `mysqli_stmt_init`.
 pub(crate) fn stmt_init(
     req: &mut Request,
     on: On,
-) -> Result<OrFalse<Instance<mysqli_stmt>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_stmt>>>, Thrown> {
     let conn = link::conn(req, on.object, Need::Open)?;
     let stmt = Stmt::init(req, conn);
     wrap(req, StmtObj::Made(MyStmt { stmt, query: None })).map(OrFalse::Value)
@@ -117,7 +117,7 @@ pub(crate) fn prepare(
     req: &mut Request,
     on: On,
     query: PhpString,
-) -> Result<OrFalse<Instance<mysqli_stmt>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_stmt>>>, Thrown> {
     let conn = link::conn(req, on.object, Need::Open)?;
     let mut stmt = Stmt::init(req, conn);
     if !stmt.prepare(req, query.as_bytes())? {
@@ -291,7 +291,7 @@ pub(crate) fn execute_query(
     on: On,
     query: PhpString,
     params: Option<PhpArray>,
-) -> Result<Union<Instance<mysqli_result>, bool>, Thrown> {
+) -> Result<Union<Owner<Instance<mysqli_result>>, bool>, Thrown> {
     let conn = link::conn(req, on.object, Need::Open)?;
     let mut stmt = Stmt::init(req, conn);
     if !stmt.prepare(req, query.as_bytes())? {
@@ -342,7 +342,12 @@ pub(crate) fn execute_query(
         return Ok(Union::B(false));
     };
     let result = crate::result::wrap(req, rows);
-    stmt.close_into_connection(req)?;
+    if let Err(thrown) = stmt.close_into_connection(req) {
+        if let Ok(result) = result {
+            result.give_up(req);
+        }
+        return Err(thrown);
+    }
     result.map(Union::A)
 }
 
@@ -365,7 +370,7 @@ pub(crate) fn fetch(req: &mut Request, on: On) -> Result<Option<bool>, Thrown> {
 pub(crate) fn get_result(
     req: &mut Request,
     on: On,
-) -> Result<OrFalse<Instance<mysqli_result>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_result>>>, Thrown> {
     let rows = with_stmt(req, on.object, Need::Open, |req, s| {
         let rows = s.stmt.take_rows(req)?;
         if rows.is_none() {
@@ -383,7 +388,7 @@ pub(crate) fn get_result(
 pub(crate) fn result_metadata(
     req: &mut Request,
     on: On,
-) -> Result<OrFalse<Instance<mysqli_result>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_result>>>, Thrown> {
     let rows = with_stmt(req, on.object, Need::Open, |req, s| {
         let rows = s.stmt.described(req);
         if rows.is_none() {
@@ -545,10 +550,9 @@ pub(crate) fn attr_get(req: &mut Request, on: On, attr: i64) -> Result<i64, Thro
 }
 
 /// `mysqli_stmt_error_list`.
-pub(crate) fn error_list(req: &mut Request, on: On) -> Result<PhpArray, Thrown> {
+pub(crate) fn error_list(req: &mut Request, on: On) -> Result<Owner<PhpArray>, Thrown> {
     let status = facts(req, on, Need::Made)?;
-    let list = props::error_list(req, &status.error_list)?;
-    Ok(list.as_array().copied().unwrap_or(PhpArray::new(req)?))
+    props::error_list(req, &status.error_list)
 }
 
 /// The connection a statement runs over, for its warnings.
@@ -564,7 +568,7 @@ pub(crate) fn count(
     on: On,
     need: Need,
     of: fn(&StmtStatus) -> u64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let status = facts(req, on, need)?;
     long_or_string(req, of(&status))
 }
@@ -772,7 +776,7 @@ impl mysqli_stmt {
     fn get_warnings(
         req: &mut Request,
         this: This<Self>,
-    ) -> Answer<OrFalse<Instance<crate::extras::mysqli_warning>>> {
+    ) -> Answer<OrFalse<Owner<Instance<crate::extras::mysqli_warning>>>> {
         crate::extras::stmt_warnings(req, On::method(this.object()))
     }
 
@@ -780,7 +784,7 @@ impl mysqli_stmt {
     fn result_metadata(
         req: &mut Request,
         this: This<Self>,
-    ) -> Answer<OrFalse<Instance<mysqli_result>>> {
+    ) -> Answer<OrFalse<Owner<Instance<mysqli_result>>>> {
         result_metadata(req, On::method(this.object()))
     }
 
@@ -830,7 +834,10 @@ impl mysqli_stmt {
     }
 
     #[php(tentative)]
-    fn get_result(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Instance<mysqli_result>>> {
+    fn get_result(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Answer<OrFalse<Owner<Instance<mysqli_result>>>> {
         get_result(req, On::method(this.object()))
     }
 }
@@ -880,15 +887,17 @@ impl Props for StmtProps {
             _ => return props::gone(req, object, quiet),
         };
         let value = match name {
-            "affected_rows" => affected(req, status.affected_rows)?,
-            "insert_id" => long_or_string(req, status.insert_id)?,
-            "num_rows" => long_or_string(req, status.num_rows)?,
+            "affected_rows" => affected(req, status.affected_rows)?.hand_on_unmigrated(),
+            "insert_id" => long_or_string(req, status.insert_id)?.hand_on_unmigrated(),
+            "num_rows" => long_or_string(req, status.num_rows)?.hand_on_unmigrated(),
             "param_count" => Value::int(i64::from(status.parameter_count)),
             "field_count" => Value::int(i64::from(status.field_count)),
             "errno" => Value::int(i64::from(status.errno)),
-            "error" => string(req, &status.error)?,
-            "error_list" => props::error_list(req, &status.error_list)?,
-            "sqlstate" => string(req, &status.sqlstate)?,
+            "error" => string(req, &status.error)?.hand_on_unmigrated(),
+            "error_list" => props::error_list(req, &status.error_list)?
+                .into_value()
+                .hand_on_unmigrated(),
+            "sqlstate" => string(req, &status.sqlstate)?.hand_on_unmigrated(),
             "id" => Value::int(i64::from(status.id)),
             _ => return Ok(None),
         };

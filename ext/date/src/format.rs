@@ -10,7 +10,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::obj::{set_str, set_string};
@@ -339,7 +339,7 @@ fn php_date(
     format: PhpString,
     timestamp: Option<i64>,
     localtime: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let ts = timestamp.unwrap_or_else(now);
     let text = format_timestamp(req, format.as_bytes(), ts, localtime)?;
     PhpString::new(req, &text)
@@ -371,7 +371,7 @@ fn date(
     req: &mut Request,
     format: PhpString,
     #[php(default = null)] timestamp: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     php_date(req, format, timestamp, true)
 }
 
@@ -393,7 +393,7 @@ fn gmdate(
     req: &mut Request,
     format: PhpString,
     #[php(default = null)] timestamp: Option<i64>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     php_date(req, format, timestamp, false)
 }
 
@@ -660,7 +660,7 @@ fn localtime(
     req: &mut Request,
     #[php(default = null)] timestamp: Option<i64>,
     #[php(default = false)] associative: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let ts = timestamp.unwrap_or_else(now);
     let t = local_time(req, ts)?;
     let rows: [(&[u8], i64); 9] = [
@@ -711,7 +711,7 @@ fn localtime(
 fn getdate(
     req: &mut Request,
     #[php(default = null)] timestamp: Option<i64>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let ts = timestamp.unwrap_or_else(now);
     let t = local_time(req, ts)?;
     let mut array = PhpArray::new(req)?;
@@ -749,7 +749,7 @@ fn php_strftime(
     format: PhpString,
     timestamp: Option<i64>,
     gmt: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let format = format.as_bytes();
     if format.is_empty() {
         return Ok(OrFalse::False);
@@ -821,7 +821,7 @@ fn strftime(
     req: &mut Request,
     format: PhpString,
     #[php(default = null)] timestamp: Option<i64>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     php_strftime(req, format, timestamp, false)
 }
 
@@ -854,6 +854,6 @@ fn gmstrftime(
     req: &mut Request,
     format: PhpString,
     #[php(default = null)] timestamp: Option<i64>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     php_strftime(req, format, timestamp, true)
 }

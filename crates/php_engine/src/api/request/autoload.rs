@@ -8,7 +8,7 @@
 use crate::api::abi::Callable;
 use crate::api::call::Target;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use super::Request;
 
@@ -108,10 +108,12 @@ impl Request {
     /// name an autoloader is loading already. The `Err` is the memory
     /// limit.
     pub(crate) fn autoload_enter(&mut self, lowered: &[u8]) -> Result<Option<PhpString>, Thrown> {
-        let name = PhpString::new(self, lowered)?;
+        let name = self.string(lowered)?;
         let made = match self.autoload.in_autoload {
             Some(table) => Ok(table),
-            None => PhpArray::new(self).inspect(|table| self.autoload.in_autoload = Some(*table)),
+            None => self
+                .array()
+                .inspect(|table| self.autoload.in_autoload = Some(*table)),
         };
         let mut table = match made {
             Ok(table) => table,
@@ -172,7 +174,18 @@ impl Request {
     /// Closure
     /// Inv
     /// ```
-    pub fn autoload_functions(&mut self) -> Result<Vec<Value>, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn autoload_functions(&mut self) -> Result<Vec<Owner<Value>>, Thrown> {
+        let made = self.autoload_functions_made()?;
+        let mut owners = Vec::with_capacity(made.len());
+        for value in made {
+            owners.push(Owner::adopt(self, value));
+        }
+        Ok(owners)
+    }
+
+    /// What [`autoload_functions`](Self::autoload_functions) makes, its one owner not yet named.
+    pub(crate) fn autoload_functions_made(&mut self) -> Result<Vec<Value>, Thrown> {
         let loaders: Vec<(Target, Value)> = self
             .autoload
             .autoloaders
@@ -209,7 +222,7 @@ impl Request {
             }
             Target::Function(function) => {
                 let name = self.function_name(function);
-                Ok(Value::string(PhpString::new(self, name.as_bytes())?))
+                Ok(Value::string(self.string(name.as_bytes())?))
             }
             Target::Method {
                 function,
@@ -221,12 +234,12 @@ impl Request {
                     object.as_value()
                 } else {
                     let class = self.class_name(scope);
-                    Value::string(PhpString::new(self, class.as_bytes())?)
+                    Value::string(self.string(class.as_bytes())?)
                 };
                 let name = self.function_name(function);
-                let mut pair = PhpArray::new(self)?;
+                let mut pair = self.array()?;
                 pair.append(self, first)?;
-                let name = Value::string(PhpString::new(self, name.as_bytes())?);
+                let name = Value::string(self.string(name.as_bytes())?);
                 pair.append(self, name)?;
                 Ok(Value::array(pair))
             }

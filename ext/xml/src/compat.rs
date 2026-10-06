@@ -11,7 +11,7 @@ use php_ext::call::call;
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{At, AttributeNs, Node, Sax};
 
 use crate::{Hook, Parser, parser_mut};
@@ -115,8 +115,8 @@ impl Compat {
         req: &mut Request,
         at: &At,
         hook: Hook,
-        arguments: Vec<Value>,
-    ) -> Result<Option<Value>, Thrown> {
+        arguments: Vec<Owner<Value>>,
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let callable: Option<Callable> = self
             .parser(req)
             .and_then(|p| p.handlers.get(hook))
@@ -128,7 +128,7 @@ impl Compat {
         self.note(req, at);
         let mut all = Vec::with_capacity(arguments.len() + 1);
         all.push(self.object.as_value());
-        all.extend(arguments.iter().copied());
+        all.extend(arguments.iter().map(|argument| **argument));
         let answered = call(req, &callable, &all);
         release_all(req, arguments);
         answered.map(Some)
@@ -155,13 +155,13 @@ impl Compat {
     }
 
     /// `xml_xmlchar_zval`: the decoded text, `false` for none.
-    fn text(&self, req: &mut Request, text: Option<&[u8]>) -> Result<Value, Thrown> {
+    fn text(&self, req: &mut Request, text: Option<&[u8]>) -> Result<Owner<Value>, Thrown> {
         match text {
             Some(t) => {
                 let decoded = self.decode(req, t);
-                Ok(Value::string(PhpString::new(req, &decoded)?))
+                Ok(PhpString::new(req, &decoded)?.into_value())
             }
-            None => Ok(Value::bool(false)),
+            None => Ok(Owner::take(req, Value::bool(false))),
         }
     }
 
@@ -202,7 +202,7 @@ impl Compat {
                 req,
                 at,
                 Hook::StartElement,
-                vec![Value::string(stripped), Value::array(attrs)],
+                vec![stripped.into_value(), attrs.into_value()],
             )?;
             release_all(req, answered);
         }
@@ -236,13 +236,20 @@ impl Compat {
         }
         if !attributes.is_empty() {
             let attrs = self.attributes(req, attributes)?;
-            set(req, &mut entry, b"attributes", Value::array(attrs))?;
+            set(
+                req,
+                &mut entry,
+                b"attributes",
+                attrs.into_value().hand_on_unmigrated(),
+            )?;
         }
         let Some(mut data) = self.data(req)? else {
-            req.release(Value::array(entry));
+            entry.give_up(req);
             return Ok(());
         };
-        if data.append(req, Value::array(entry)).is_ok()
+        if data
+            .append(req, entry.into_value().hand_on_unmigrated())
+            .is_ok()
             && let Some(p) = self.parser(req)
         {
             p.ctag_index = data.next_free() - 1;
@@ -256,14 +263,14 @@ impl Compat {
         &self,
         req: &mut Request,
         attributes: &[(Vec<u8>, &[u8])],
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let mut array = PhpArray::new(req)?;
         for (name, value) in attributes {
             let key = self.decode_tag(req, name);
             let decoded = self.decode(req, value);
-            let key = Key::from_string(PhpString::new(req, &key)?);
-            let value = Value::string(PhpString::new(req, &decoded)?);
-            array.set(req, key, value)?;
+            let key = Key::from_string(PhpString::new(req, &key)?.hand_on_unmigrated());
+            let value = PhpString::new(req, &decoded)?;
+            array.set(req, key, Value::string(value.hand_on_unmigrated()))?;
         }
         Ok(array)
     }
@@ -277,7 +284,7 @@ impl Compat {
             .is_some_and(|p| p.handlers.get(Hook::EndElement).is_some())
         {
             let stripped = PhpString::new(req, stripped(&tag, offset))?;
-            let answered = self.serve(req, at, Hook::EndElement, vec![Value::string(stripped)])?;
+            let answered = self.serve(req, at, Hook::EndElement, vec![stripped.into_value()])?;
             release_all(req, answered);
         }
         if self.building(req, at) {
@@ -294,7 +301,7 @@ impl Compat {
                     set_str(req, &mut entry, b"tag", &stripped)?;
                     set_str(req, &mut entry, b"type", b"close")?;
                     set(req, &mut entry, b"level", Value::int(i64::from(level)))?;
-                    data.append(req, Value::array(entry))?;
+                    data.append(req, entry.into_value().hand_on_unmigrated())?;
                 }
             }
             if let Some(p) = self.parser(req) {
@@ -335,7 +342,7 @@ impl Compat {
         let keep = doprint || !skipwhite;
         if lastwasopen {
             return self.with_ctag(req, |req, ctag| {
-                if let Some(held) = string_at(req, *ctag, b"value")? {
+                if let Some(held) = string_at(req, **ctag, b"value")? {
                     let mut joined = held;
                     joined.extend_from_slice(&decoded);
                     set_str(req, ctag, b"value", &joined)
@@ -352,15 +359,15 @@ impl Compat {
         // The last element, where it is a `cdata` entry with a value, takes
         // the text.
         if let Some((key, last)) = last(data)
-            && let Some(mut entry) = last.deref().as_array().copied()
+            && let Some(entry) = last.deref().as_array().copied()
             && string_at(req, entry, b"type")?.as_deref() == Some(b"cdata")
             && let Some(held) = string_at(req, entry, b"value")?
         {
             let mut joined = held;
             joined.extend_from_slice(&decoded);
-            separate_owned(req, &mut entry)?;
+            let mut entry = separate_owned(req, entry)?;
             set_str(req, &mut entry, b"value", &joined)?;
-            return data.set(req, key, Value::array(entry));
+            return data.set(req, key, entry.into_value().hand_on_unmigrated());
         }
         if level > 0 && level <= MAX_LEVEL && keep {
             let tag = self
@@ -375,7 +382,7 @@ impl Compat {
             set_str(req, &mut entry, b"value", &decoded)?;
             set_str(req, &mut entry, b"type", b"cdata")?;
             set(req, &mut entry, b"level", Value::int(i64::from(level)))?;
-            data.append(req, Value::array(entry))?;
+            data.append(req, entry.into_value().hand_on_unmigrated())?;
         } else if level == MAX_LEVEL + 1 {
             docref(
                 req,
@@ -412,7 +419,7 @@ impl Compat {
         match self.serve(req, at, Hook::ExternalEntityRef, arguments)? {
             Some(answer) => {
                 let n = to_long(req, &answer);
-                req.release(answer);
+                answer.give_up(req);
                 n
             }
             None => Ok(0),
@@ -457,17 +464,13 @@ impl Compat {
         let Some(mut index) = info.separate_array(req)? else {
             return Ok(());
         };
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         let mut list = match index.get(&key).and_then(|v| v.deref().as_array().copied()) {
-            Some(list) => {
-                let mut list = list;
-                separate_owned(req, &mut list)?;
-                list
-            }
+            Some(list) => separate_owned(req, list)?,
             None => PhpArray::new(req)?,
         };
         list.append(req, Value::int(i64::from(curtag)))?;
-        index.set(req, key, Value::array(list))?;
+        index.set(req, key, list.into_value().hand_on_unmigrated())?;
         if let Some(p) = self.parser(req) {
             p.curtag += 1;
         }
@@ -488,19 +491,19 @@ impl Compat {
     fn with_ctag(
         &self,
         req: &mut Request,
-        f: impl FnOnce(&mut Request, &mut PhpArray) -> Result<(), Thrown>,
+        f: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<(), Thrown>,
     ) -> Result<(), Thrown> {
         let Some(mut data) = self.data(req)? else {
             return Ok(());
         };
         let index = self.parser(req).map_or(0, |p| p.ctag_index);
         let key = Key::Int(index);
-        let Some(mut entry) = data.get(&key).and_then(|v| v.deref().as_array().copied()) else {
+        let Some(entry) = data.get(&key).and_then(|v| v.deref().as_array().copied()) else {
             return Ok(());
         };
-        separate_owned(req, &mut entry)?;
+        let mut entry = separate_owned(req, entry)?;
         f(req, &mut entry)?;
-        data.set(req, key, Value::array(entry))
+        data.set(req, key, entry.into_value().hand_on_unmigrated())
     }
 }
 
@@ -513,14 +516,14 @@ fn stripped(tag: &[u8], offset: usize) -> &[u8] {
 /// A string element of `array`.
 fn string_at(req: &mut Request, array: PhpArray, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
     let key = PhpString::new(req, name)?;
-    let found = match array.get(&Key::Str(key)).map(|v| v.deref()) {
+    let found = match array.get(&Key::Str(*key)).map(|v| v.deref()) {
         Some(v) => match v.as_ref() {
             ValueRef::Str(s) => Some(s.as_bytes().to_vec()),
             _ => None,
         },
         None => None,
     };
-    req.release(Value::string(key));
+    key.give_up(req);
     Ok(found)
 }
 
@@ -538,29 +541,35 @@ fn last(array: PhpArray) -> Option<(Key, Value)> {
 
 fn set_str(
     req: &mut Request,
-    array: &mut PhpArray,
+    array: &mut Owner<PhpArray>,
     name: &[u8],
     text: &[u8],
 ) -> Result<(), Thrown> {
-    let value = Value::string(PhpString::new(req, text)?);
-    set(req, array, name, value)
+    let value = PhpString::new(req, text)?;
+    set(req, array, name, Value::string(value.hand_on_unmigrated()))
 }
 
-fn set(req: &mut Request, array: &mut PhpArray, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?);
+fn set(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    name: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
+    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
     array.set(req, key, value)
 }
 
 /// An array read out of another taken as one owner of its own and
 /// separated, so writing it changes only the copy written back.
-fn separate_owned(req: &mut Request, array: &mut PhpArray) -> Result<(), Thrown> {
-    req.addref(&Value::array(*array));
-    array.separate(req)
+fn separate_owned(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
+    let mut owned = Owner::take(req, array);
+    owned.separate(req)?;
+    Ok(owned)
 }
 
-fn release_all(req: &mut Request, values: impl IntoIterator<Item = Value>) {
+fn release_all(req: &mut Request, values: impl IntoIterator<Item = Owner<Value>>) {
     for v in values {
-        req.release(v);
+        v.give_up(req);
     }
 }
 

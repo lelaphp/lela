@@ -12,7 +12,7 @@ use php_ext::coerce::{coerce_param, numeric_string, to_string};
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, fatal, throw_chained, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 use php_ext_date::TzKind;
 
 use crate::calendar::CalendarObject;
@@ -104,11 +104,12 @@ pub(crate) fn datetime_decompose(
     let class = String::from_utf8_lossy(&Std.get_class_name(req, object)).into_owned();
     let stamp = call_method(req, &object, b"getTimestamp", &[])?;
     let Some(seconds) = stamp.as_int() else {
-        req.release(stamp);
+        stamp.give_up(req);
         let message = format!("{class}::getTimestamp() did not return an int");
         outside.set(req, Code::INTERNAL_PROGRAM, &message)?;
         return Ok(None);
     };
+    stamp.give_up(req);
     let parts = php_ext_date::date_obj(req, object);
     let us = parts.as_ref().map_or(0, |p| p.us);
     #[allow(clippy::cast_precision_loss, reason = "php's (double) cast")]
@@ -211,7 +212,7 @@ pub(crate) fn convert_to_datetimezone(
     req: &mut Request,
     zone: &TimeZone,
     outside: &mut Outside,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let Some(id) = tz::php_intl_tz_id(zone) else {
         outside.set(req, Code::ILLEGAL_ARGUMENT, "could not obtain TimeZone id")?;
         return Ok(None);
@@ -230,9 +231,9 @@ pub(crate) fn convert_to_datetimezone(
     let Some(class) = lookup_class(req, b"DateTimeZone")? else {
         return Err(fatal(req, "InternalError: DateTimeZone is not linked"));
     };
-    let argument = Value::string(PhpString::new(req, &id)?);
-    let made = instantiate(req, class, &[argument]);
-    req.release(argument);
+    let argument = PhpString::new(req, &id)?;
+    let made = instantiate(req, class, &[Value::string(*argument)]);
+    argument.give_up(req);
     match made {
         Ok(object) => Ok(Some(object)),
         Err(thrown) => {
@@ -260,7 +261,9 @@ pub(crate) fn zone_sorted(req: &mut Request, value: Value) -> Result<ZoneArg, Th
         ValueRef::Object(object) if is_a(req, *object, b"DateTimeZone")? => {
             Some(Union::B(Union::A(Instance::of(*object))))
         }
-        ValueRef::Object(_) => Some(Union::B(Union::B(to_string(req, &value)?))),
+        ValueRef::Object(_) => Some(Union::B(Union::B(
+            to_string(req, &value)?.hand_on_unmigrated(),
+        ))),
         ValueRef::Str(text) => Some(Union::B(Union::B(*text))),
         _ => None,
     })

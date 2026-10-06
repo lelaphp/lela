@@ -18,7 +18,7 @@ use php_ext::coerce::{to_string, value_name};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use super::{
     class_chain, class_name_of, class_named, linked_methods, lookup_function, new_object,
@@ -154,7 +154,7 @@ pub(super) fn type_factory(
     req: &mut Request,
     ty: &Type,
     legacy: bool,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let kind = kind_of(ty);
     let class = class_named(
         req,
@@ -169,7 +169,7 @@ pub(super) fn type_factory(
     let is_only_null = matches!(ty, Type::Null);
     let legacy = legacy && kind == Kind::Named && !is_mixed && !is_only_null;
     let ty = ty.clone();
-    super::keep_type(req, object, TypeRef { ty, legacy })?;
+    super::keep_type(req, *object, TypeRef { ty, legacy })?;
     Ok(object)
 }
 
@@ -254,7 +254,7 @@ fn scope_of(req: &mut Request, function: &FunctionRef) -> Option<ClassId> {
 fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     let string = to_string(req, value)?;
     let bytes = string.as_bytes().to_vec();
-    req.release(Value::string(string));
+    string.give_up(req);
     Ok(bytes)
 }
 
@@ -312,7 +312,7 @@ pub(super) fn parameter_factory(
     function: &FunctionRef,
     decl: &FunctionDecl,
     offset: usize,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let class = class_named(req, b"ReflectionParameter")?;
     let object = new_object(req, class)?;
     let name = decl
@@ -320,13 +320,13 @@ pub(super) fn parameter_factory(
         .get(offset)
         .map(|p| p.name.0.to_vec())
         .unwrap_or_default();
-    set_name(req, object, &name)?;
+    set_name(req, *object, &name)?;
     let reference = ParameterRef {
         function: function.clone(),
         offset,
         required: offset < required_parameters(decl),
     };
-    super::keep_parameter(req, object, reference)?;
+    super::keep_parameter(req, *object, reference)?;
     Ok(object)
 }
 
@@ -868,7 +868,7 @@ impl ReflectionParameter {
     /// bool(true)
     /// bool(false)
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (reference, decl, parameter) = this_parameter(req, this.object())?;
         let internal = decl.file.0.is_empty();
         let text = parameter_string(
@@ -890,7 +890,7 @@ impl ReflectionParameter {
     /// string(6) "string"
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (_, _, parameter) = this_parameter(req, this.object())?;
         let name = parameter.name.0.to_vec();
         PhpString::new(req, &name)
@@ -965,13 +965,13 @@ impl ReflectionParameter {
     fn getDeclaringFunction(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<crate::func::ReflectionFunctionAbstract>, Thrown> {
+    ) -> Result<Owner<Instance<crate::func::ReflectionFunctionAbstract>>, Thrown> {
         let (reference, decl, _) = this_parameter(req, this.object())?;
         let object = match &reference.function {
             FunctionRef::Global(_) => {
                 let class = class_named(req, b"ReflectionFunction")?;
                 let object = new_object(req, class)?;
-                set_name(req, object, &decl.name.0)?;
+                set_name(req, *object, &decl.name.0)?;
                 object
             }
             // php's `reflection_function_factory` over the closure itself,
@@ -989,13 +989,13 @@ impl ReflectionParameter {
                 };
                 let class = class_named(req, reflector)?;
                 let object = new_object(req, class)?;
-                set_name(req, object, &decl.name.0)?;
+                set_name(req, *object, &decl.name.0)?;
                 if let Some(scope) = scope {
                     let named = class_name_of(req, scope);
-                    set_string_prop(req, object, b"class", &named)?;
-                    super::keep(req, object, scope, Some(closure));
+                    set_string_prop(req, *object, b"class", &named)?;
+                    super::keep(req, *object, scope, Some(closure));
                 } else {
-                    super::keep_closure(req, object, closure);
+                    super::keep_closure(req, *object, closure);
                 }
                 object
             }
@@ -1003,8 +1003,8 @@ impl ReflectionParameter {
                 let class = class_named(req, b"ReflectionMethod")?;
                 let object = new_object(req, class)?;
                 let scope = class_name_of(req, *scope);
-                set_name(req, object, name)?;
-                set_string_prop(req, object, b"class", &scope)?;
+                set_name(req, *object, name)?;
+                set_string_prop(req, *object, b"class", &scope)?;
                 object
             }
             // `reflection_method_factory` over the `__invoke` the parameter
@@ -1013,14 +1013,14 @@ impl ReflectionParameter {
                 let closure = *closure;
                 let class = class_named(req, b"ReflectionMethod")?;
                 let object = new_object(req, class)?;
-                set_name(req, object, b"__invoke")?;
-                set_string_prop(req, object, b"class", b"Closure")?;
+                set_name(req, *object, b"__invoke")?;
+                set_string_prop(req, *object, b"class", b"Closure")?;
                 let scope = class_named(req, b"Closure")?;
-                super::keep(req, object, scope, closure);
+                super::keep(req, *object, scope, closure);
                 object
             }
         };
-        Ok(Instance::of(object))
+        Ok(object.into_instance())
     }
 
     /// `ReflectionParameter::getDeclaringClass()`:
@@ -1042,13 +1042,13 @@ impl ReflectionParameter {
     fn getDeclaringClass(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::class::ReflectionClass>>>, Thrown> {
         let (reference, _, _) = this_parameter(req, this.object())?;
         let Some(scope) = scope_of(req, &reference.function) else {
             return Ok(None);
         };
         let object = reflection_class_factory(req, scope)?;
-        Ok(Some(Instance::of(object)))
+        Ok(Some(object.into_instance()))
     }
 
     /// `ReflectionParameter::getClass()`: where the declared type names
@@ -1087,7 +1087,7 @@ impl ReflectionParameter {
     fn getClass(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<crate::class::ReflectionClass>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<crate::class::ReflectionClass>>>, Thrown> {
         let (reference, _, parameter) = this_parameter(req, this.object())?;
         let Some(name) = parameter.ty.as_ref().and_then(one_name) else {
             return Ok(None);
@@ -1116,7 +1116,7 @@ impl ReflectionParameter {
             _ => return Ok(None),
         };
         match class {
-            Ok(class) => Ok(Some(Instance::of(reflection_class_factory(req, class)?))),
+            Ok(class) => Ok(Some(reflection_class_factory(req, class)?.into_instance())),
             Err(message) => Err(throw(req, "ReflectionException", &message)),
         }
     }
@@ -1153,13 +1153,13 @@ impl ReflectionParameter {
     fn getType(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<ReflectionType>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<ReflectionType>>>, Thrown> {
         let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(ty) = parameter.ty else {
             return Ok(None);
         };
         let object = type_factory(req, &ty, true)?;
-        Ok(Some(Instance::of(object)))
+        Ok(Some(object.into_instance()))
     }
 
     /// `ReflectionParameter::isArray()`: the `MAY_BE_*` mask, `null` aside,
@@ -1349,7 +1349,7 @@ impl ReflectionParameter {
     ///   thrown in %s on line 2
     /// ```
     #[php(tentative)]
-    fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn getDefaultValue(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let (reference, decl, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter).cloned() else {
             return Err(no_default(req));
@@ -1398,7 +1398,7 @@ impl ReflectionParameter {
     fn getDefaultValueConstantName(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let (_, _, parameter) = this_parameter(req, this.object())?;
         let Some(expr) = parameter_default(&parameter).cloned() else {
             return Err(no_default(req));
@@ -1469,7 +1469,7 @@ impl ReflectionParameter {
         this: This<Self>,
         #[php(default = null)] name: Option<PhpString>,
         #[php(default = 0)] flags: i64,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let (reference, decl, parameter) = this_parameter(req, this.object())?;
         let file = super::attr::declared_in(&decl.file.0);
         let scope = match reference.function {
@@ -1526,7 +1526,7 @@ impl ReflectionType {
     /// ```expect
     /// ?bool
     /// ```
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let reference = this_type(req, this.object())?;
         let text = type_text(&reference.ty);
         PhpString::new(req, text.as_bytes())
@@ -1565,7 +1565,7 @@ impl ReflectionNamedType {
     /// ?bool
     /// ```
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let reference = this_type(req, this.object())?;
         let text = if reference.legacy {
             type_text_without_null(&reference.ty)
@@ -1658,7 +1658,7 @@ impl ReflectionUnionType {
     /// ```expect
     /// X Traversable array bool
     /// ```
-    fn getTypes(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getTypes(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let reference = this_type(req, this.object())?;
         let parts = parts(&reference.ty);
         let mut members: Vec<Type> = Vec::new();
@@ -1693,7 +1693,7 @@ impl ReflectionUnionType {
         let mut types = PhpArray::new(req)?;
         for member in &members {
             let object = type_factory(req, member, false)?;
-            types.append(req, object.as_value())?;
+            types.append(req, object.into_value().hand_on_unmigrated())?;
         }
         Ok(types)
     }

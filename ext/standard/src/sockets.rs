@@ -139,7 +139,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{
     FdStream, Handshake, Request, SocketOptions, Stream, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::constants::{
     STREAM_CLIENT_ASYNC_CONNECT, STREAM_CLIENT_CONNECT, STREAM_CLIENT_PERSISTENT,
@@ -232,7 +232,9 @@ fn addslashes(bytes: &[u8]) -> Vec<u8> {
 
 /// A string of the request's as a value.
 fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+    Ok(Value::string(
+        PhpString::new(req, bytes)?.hand_on_unmigrated(),
+    ))
 }
 
 /// `ZEND_TRY_ASSIGN_REF_LONG` and `ZEND_TRY_ASSIGN_REF_STR` of the two
@@ -318,7 +320,7 @@ fn fsockopen(
     #[php(default = null)] error_code: Out,
     #[php(default = null)] error_message: Out,
     #[php(default = null)] timeout: Option<f64>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let error = (&error_code, &error_message);
     fsockopen_stream(req, "fsockopen", (hostname, port, timeout), error)
 }
@@ -351,7 +353,7 @@ fn pfsockopen(
     #[php(default = null)] error_code: Out,
     #[php(default = null)] error_message: Out,
     #[php(default = null)] timeout: Option<f64>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let error = (&error_code, &error_message);
     fsockopen_stream(req, "pfsockopen", (hostname, port, timeout), error)
 }
@@ -377,7 +379,7 @@ fn fsockopen_stream(
     native: &str,
     (host, port, timeout): (PhpString, i64, Option<f64>),
     error: (&Out, &Out),
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let host = host.as_bytes().to_vec();
     let timeout = timeout_or_default(req, timeout);
     #[allow(clippy::float_cmp)] // php's `timeout != -1.0`
@@ -407,8 +409,11 @@ fn fsockopen_stream(
     };
     match req.xport_create(&hostname, xport)? {
         Ok(stream) => {
-            assign_error(req, error, 0, Some(b""))?;
-            Ok(Untyped(OrFalse::Value(stream.resource())))
+            if let Err(thrown) = assign_error(req, error, 0, Some(b"")) {
+                stream.give_up(req);
+                return Err(thrown);
+            }
+            Ok(Untyped(OrFalse::Value(stream.into_resource())))
         }
         Err(XportFailure { code, text }) => {
             // php prints the host as the C string it holds.
@@ -548,7 +553,7 @@ fn stream_socket_client(
     #[php(default = null)] timeout: Option<f64>,
     #[php(default = STREAM_CLIENT_CONNECT)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let context = context_of(req, context, NullContext::Default)?;
     let host = address.as_bytes().to_vec();
     let timeout = match timeout {
@@ -574,7 +579,7 @@ fn stream_socket_client(
             context,
         },
     )? {
-        Ok(stream) => Ok(Untyped(OrFalse::Value(stream.resource()))),
+        Ok(stream) => Ok(Untyped(OrFalse::Value(stream.into_resource()))),
         Err(XportFailure { code, text }) => {
             let shown = format!(
                 "Unable to connect to {} ({})",
@@ -666,7 +671,7 @@ fn stream_socket_server(
     #[php(default = null)] error_message: Out,
     #[php(default = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN)] flags: i64,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let context = context_of(req, context, NullContext::Default)?;
     let host = address.as_bytes().to_vec();
     let error = (&error_code, &error_message);
@@ -677,7 +682,7 @@ fn stream_socket_server(
         context,
     };
     match req.xport_create(&host, xport)? {
-        Ok(stream) => Ok(Untyped(OrFalse::Value(stream.resource()))),
+        Ok(stream) => Ok(Untyped(OrFalse::Value(stream.into_resource()))),
         Err(XportFailure { code, text }) => {
             let shown = format!(
                 "Unable to connect to {} ({})",
@@ -728,7 +733,7 @@ fn stream_socket_accept(
     socket: Stream,
     #[php(default = null)] timeout: Option<f64>,
     #[php(default = null)] peer_name: Out,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let timeout = match timeout {
         Some(timeout) if !timeout.is_finite() => {
             return Err(arg_value_error(req, 2, "be a finite value"));
@@ -738,9 +743,9 @@ fn stream_socket_accept(
     match socket.accept(req, timeval(timeout), peer_name.is_given())? {
         Ok((client, peer)) => {
             if let Some(peer) = peer {
-                peer_name.set(req, Untyped(Value::string(peer)))?;
+                peer_name.set(req, Untyped(Value::string(peer.hand_on_unmigrated())))?;
             }
-            Ok(Untyped(OrFalse::Value(client.resource())))
+            Ok(Untyped(OrFalse::Value(client.into_resource())))
         }
         Err(text) => {
             let text = format!(
@@ -777,7 +782,7 @@ fn stream_socket_get_name(
     req: &mut Request,
     socket: Stream,
     remote: bool,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     Ok(socket
         .socket_name(req, remote)?
         .map_or(OrFalse::False, OrFalse::Value))
@@ -813,7 +818,7 @@ fn stream_socket_recvfrom(
     length: i64,
     #[php(default = 0)] flags: i64,
     #[php(default = null)] address: Out,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let want_addr = address.is_given();
     address.set(req, Untyped(Value::null()))?;
     let Ok(len) = usize::try_from(length) else {
@@ -824,8 +829,12 @@ fn stream_socket_recvfrom(
     }
     match socket.recvfrom(req, len, flags, want_addr)? {
         Some((bytes, from)) => {
-            if let Some(from) = from {
-                address.set(req, Untyped(Value::string(from)))?;
+            if let Some(from) = from
+                && let Err(thrown) =
+                    address.set(req, Untyped(Value::string(from.hand_on_unmigrated())))
+            {
+                bytes.give_up(req);
+                return Err(thrown);
             }
             Ok(OrFalse::Value(bytes))
         }
@@ -1015,7 +1024,7 @@ fn stream_socket_pair(
     domain: i64,
     r#type: i64,
     protocol: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let as_int = |n: i64| i32::try_from(n).unwrap_or(-1);
     let (first, second) =
         match crate::ffi::socketpair(as_int(domain), as_int(r#type), as_int(protocol)) {
@@ -1034,8 +1043,8 @@ fn stream_socket_pair(
     let s1 = req.stream_from_fd(first, FdStream::Socket)?;
     let s2 = req.stream_from_fd(second, FdStream::Socket)?;
     let mut pair = PhpArray::new(req)?;
-    pair.append(req, s1.as_value())?;
-    pair.append(req, s2.as_value())?;
+    pair.append(req, s1.into_value().hand_on_unmigrated())?;
+    pair.append(req, s2.into_value().hand_on_unmigrated())?;
     Ok(OrFalse::Value(pair))
 }
 
@@ -1061,7 +1070,7 @@ fn stream_socket_pair(
 /// }
 /// ```
 #[php_function]
-fn stream_get_transports(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn stream_get_transports(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in req.transports() {
         let value = string_value(req, name.as_bytes())?;

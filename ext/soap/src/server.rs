@@ -14,7 +14,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error,
 };
 use php_ext::request::{OutputOp, Request, StartHandler, Streams as _};
-use php_ext::values::{ClassId, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 
 use crate::classes::{Fault as FaultArgs, SoapFault, SoapHeader};
@@ -208,23 +208,26 @@ fn fatal_to_fault(req: &mut Request, this: Option<PhpObject>, code: &str, messag
         .and_then(|o| o.native::<Server>(req))
         .and_then(|s| s.service.as_ref())
         .is_none_or(|s| s.send_errors != 0);
-    let mut detail: Option<Value> = None;
+    let mut detail: Option<Owner<Value>> = None;
     let string: Vec<u8> = if send_errors {
-        let level = req
-            .output_buffer_op(&OutputOp::GetLevel)
-            .ok()
-            .and_then(|v| v.as_int())
-            .unwrap_or(0);
+        let level = match req.output_buffer_op(&OutputOp::GetLevel) {
+            Ok(v) => {
+                let level = v.as_int().unwrap_or(0);
+                v.give_up(req);
+                level
+            }
+            Err(_) => 0,
+        };
         if level > 0 {
             if let Ok(contents) = req.output_buffer_op(&OutputOp::GetContents) {
                 if contents.as_str_bytes().is_some_and(|s| !s.is_empty()) {
                     detail = Some(contents);
                 } else {
-                    req.release(contents);
+                    contents.give_up(req);
                 }
             }
             if let Ok(v) = req.output_buffer_op(&OutputOp::EndClean) {
-                req.release(v);
+                v.give_up(req);
             }
         }
         message.as_bytes().to_vec()
@@ -238,19 +241,19 @@ fn fatal_to_fault(req: &mut Request, this: Option<PhpObject>, code: &str, messag
             code: Some(code.as_bytes()),
             string: Some(&string),
             actor: None,
-            detail,
+            detail: detail.as_ref().map(|d| **d),
             name: None,
             lang: b"en",
         },
     );
     if let Some(d) = detail {
-        req.release(d);
+        d.give_up(req);
     }
     match made {
         Ok(fault) => {
             let value = fault.as_value();
             let written = soap_server_fault_ex(req, None, None, value, &[]);
-            req.release(value);
+            fault.give_up(req);
             // `php_error_cb` has run under the fatal, so the request ends
             // with its status, 255.
             match written {
@@ -357,7 +360,7 @@ fn soap_server_fault(
     };
     let value = fault.as_value();
     let written = soap_server_fault_ex(req, None, None, value, &[]);
-    req.release(value);
+    fault.give_up(req);
     match written {
         Ok(()) => Error::Thrown(exit(req, &Value::null())),
         Err(t) => Error::Thrown(t),
@@ -404,7 +407,7 @@ fn server_exception(
             let m = php_ext::call::read_prop(req, &exception, b"message")?;
             let s = to_string(req, &m)?;
             let bytes = s.as_bytes().to_vec();
-            req.release(Value::string(s));
+            s.give_up(req);
             bytes
         } else {
             b"Internal Error".to_vec()
@@ -412,7 +415,7 @@ fn server_exception(
         let fault = add_soap_fault(req, this, b"Server", &msg, None, None, b"en")?;
         let value = fault.as_value();
         let written = soap_server_fault_ex(req, sdl, function, value, &[]);
-        req.release(value);
+        fault.give_up(req);
         written?;
         return clear(req, thrown);
     }
@@ -730,7 +733,7 @@ impl SoapServer {
     /// }
     /// ```
     #[php(tentative)]
-    fn getFunctions(req: &mut Request, this: This<Self>) -> R<PhpArray> {
+    fn getFunctions(req: &mut Request, this: This<Self>) -> R<Owner<PhpArray>> {
         let object = this.object();
         service_of(req, object)?;
         let mut out = PhpArray::new(req)?;
@@ -754,8 +757,8 @@ impl SoapServer {
                 .unwrap_or_default(),
         };
         for n in names {
-            let v = Value::string(PhpString::new(req, &n)?);
-            out.append(req, v)?;
+            let v = PhpString::new(req, &n)?;
+            out.append(req, Value::string(v.hand_on_unmigrated()))?;
         }
         Ok(out)
     }
@@ -943,7 +946,7 @@ impl SoapServer {
     /// NULL
     /// bool(true)
     /// ```
-    fn __getLastResponse(req: &mut Request, this: This<Self>) -> R<Option<PhpString>> {
+    fn __getLastResponse(req: &mut Request, this: This<Self>) -> R<Option<Owner<PhpString>>> {
         let object = this.object();
         service_of(req, object)?;
         match service_ref(req, object).and_then(|s| s.last_response_body.clone()) {
@@ -973,7 +976,7 @@ fn all_functions(req: &mut Request) -> R<Vec<Vec<u8>>> {
             }
         }
     }
-    req.release(Value::array(all));
+    all.give_up(req);
     Ok(out)
 }
 
@@ -1070,7 +1073,7 @@ fn construct(
             ));
         }
         let copy = a.copy(req)?;
-        service.class_map = Some(Value::array(copy));
+        service.class_map = Some(copy.into_value().hand_on_unmigrated());
     }
     if let Some(tm) = option(opts, b"typemap")
         && let ValueRef::Array(a) = tm.as_ref()
@@ -1204,7 +1207,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
                         }
                         req.write(&buf[..n]);
                     }
-                    stream.close(req);
+                    stream.hand_on_unmigrated().free(req);
                 }
                 None => return Err(server_fault_en(req, "Server", "Couldn't find WSDL")),
             }
@@ -1222,7 +1225,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
         flags: 0x70,
     });
     match started {
-        Ok(v) => req.release(v),
+        Ok(v) => v.give_up(req),
         Err(_) => return Err(docref_error(req, "ob_start failed")),
     }
     let mut soap_action: Option<Vec<u8>> = None;
@@ -1318,19 +1321,22 @@ fn inflated_input(req: &mut Request) -> Res<Option<Vec<u8>>> {
         }
         body.extend_from_slice(&buf[..n]);
     }
-    stream.close(req);
+    stream.hand_on_unmigrated().free(req);
     if lookup_function(req, b"zlib_decode").is_none() {
         return Ok(None);
     }
-    let name = Value::string(PhpString::new(req, b"zlib_decode")?);
+    let name = PhpString::new(req, b"zlib_decode")?.into_value();
     let callable = php_ext::coerce::to_callable(req, &name);
-    req.release(name);
-    let arg = Value::string(PhpString::new(req, &body)?);
-    let out = call(req, &callable?, &[arg]);
-    req.release(arg);
+    name.give_up(req);
+    let arg = PhpString::new(req, &body)?.into_value();
+    let out = match callable {
+        Ok(callable) => call(req, &callable, &[*arg]),
+        Err(thrown) => Err(thrown),
+    };
+    arg.give_up(req);
     let out = out?;
     let bytes = out.as_str_bytes().map(<[u8]>::to_vec);
-    req.release(out);
+    out.give_up(req);
     Ok(Some(bytes.unwrap_or_default()))
 }
 
@@ -1390,19 +1396,19 @@ fn callable_for(
     object: Option<Value>,
     name: &[u8],
 ) -> R<Option<php_ext::abi::Callable>> {
-    let n = Value::string(PhpString::new(req, name)?);
+    let n = PhpString::new(req, name)?.into_value();
     let value = match object {
         Some(o) => {
             let mut pair = PhpArray::new(req)?;
             req.addref(&o);
             pair.append(req, o)?;
-            pair.append(req, n)?;
-            Value::array(pair)
+            pair.append(req, n.hand_on_unmigrated())?;
+            pair.into_value()
         }
         None => n,
     };
     let callable = callable_checked(req, &value).ok();
-    req.release(value);
+    value.give_up(req);
     Ok(callable)
 }
 
@@ -1552,7 +1558,10 @@ fn serve(
                 let params = parsed.headers[i].parameters.clone();
                 match call(req, &callable, &params) {
                     Ok(v) => {
-                        let old = std::mem::replace(&mut parsed.headers[i].retval, v);
+                        let old = std::mem::replace(
+                            &mut parsed.headers[i].retval,
+                            v.hand_on_unmigrated(),
+                        );
                         req.release(old);
                     }
                     Err(t) => {
@@ -1637,8 +1646,8 @@ fn serve(
             && instance_of(req, *o, "SoapFault")
         {
             discard(req);
-            let r = soap_server_fault_ex(req, sdl, function, retval, &[]);
-            req.release(retval);
+            let r = soap_server_fault_ex(req, sdl, function, *retval, &[]);
+            retval.give_up(req);
             return r.map_err(Error::from);
         }
         let response_name = if let Some(n) = function.and_then(|f| f.response_name.clone()) {
@@ -1654,11 +1663,11 @@ fn serve(
             function,
             Some(&response_name),
             uri,
-            retval,
+            *retval,
             &parsed.headers,
             parsed.version,
         );
-        req.release(retval);
+        retval.give_up(req);
         let doc_return = match doc_return {
             Ok(d) => d,
             Err(Error::Thrown(t))
@@ -1718,10 +1727,10 @@ const SESSION_KEY: &[u8] = b"_bogus_session_name";
 
 /// A function of the program's served by name, its answer.
 fn call_named_function(req: &mut Request, name: &[u8]) -> Res<Value> {
-    let n = Value::string(PhpString::new(req, name)?);
+    let n = PhpString::new(req, name)?.into_value();
     let callable = php_ext::coerce::to_callable(req, &n);
-    req.release(n);
-    Ok(call(req, &callable?, &[])?)
+    n.give_up(req);
+    Ok(call(req, &callable?, &[])?.hand_on_unmigrated())
 }
 
 /// The session's `$_SESSION` array, through its reference.
@@ -1776,22 +1785,25 @@ fn store_session_object(req: &mut Request, value: Value) -> Res<bool> {
     let Some(mut arr) = cell.separate_array(req)? else {
         return Ok(false);
     };
-    let key = php_ext::values::Key::Str(PhpString::new(req, SESSION_KEY)?);
+    let key = php_ext::values::Key::Str(PhpString::new(req, SESSION_KEY)?.hand_on_unmigrated());
     arr.set(req, key, value)?;
     Ok(true)
 }
 
 /// `php_output_discard`: the top buffer dropped, where there is one.
 fn discard(req: &mut Request) {
-    let level = req
-        .output_buffer_op(&OutputOp::GetLevel)
-        .ok()
-        .and_then(|v| v.as_int())
-        .unwrap_or(0);
+    let level = match req.output_buffer_op(&OutputOp::GetLevel) {
+        Ok(v) => {
+            let level = v.as_int().unwrap_or(0);
+            v.give_up(req);
+            level
+        }
+        Err(_) => 0,
+    };
     if level > 0
         && let Ok(v) = req.output_buffer_op(&OutputOp::EndClean)
     {
-        req.release(v);
+        v.give_up(req);
     }
 }
 

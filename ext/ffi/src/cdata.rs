@@ -21,7 +21,7 @@ use php_ext::coerce::{BinaryOp, to_double, to_long, to_string, truthy, value_nam
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{
-    ClosureInfo, Emalloc, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
+    ClosureInfo, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
 };
 
 use std::num::NonZeroUsize;
@@ -320,7 +320,7 @@ pub(crate) fn as_cdata(req: &mut Request, value: &Value) -> Result<Option<PhpObj
 }
 
 /// A new `FFI\CData` holding `data`.
-pub(crate) fn make(req: &mut Request, data: Data) -> Result<PhpObject, Thrown> {
+pub(crate) fn make(req: &mut Request, data: Data) -> Result<Owner<PhpObject>, Thrown> {
     let class = classes(req)?.cdata;
     let object = new_object(req, class)?;
     if let Some(slot) = object.native_mut::<Data>(req) {
@@ -330,8 +330,12 @@ pub(crate) fn make(req: &mut Request, data: Data) -> Result<PhpObject, Thrown> {
 }
 
 /// A scalar read from C memory, as `zend_ffi_cdata_to_zval` reads one.
-pub(crate) fn read_scalar(req: &mut Request, scalar: Scalar, addr: usize) -> Result<Value, Thrown> {
-    Ok(match scalar {
+pub(crate) fn read_scalar(
+    req: &mut Request,
+    scalar: Scalar,
+    addr: usize,
+) -> Result<Owner<Value>, Thrown> {
+    let value = match scalar {
         Scalar::Float => Value::float(f64::from(ffi::read::<f32>(addr))),
         Scalar::Double | Scalar::LongDouble => Value::float(ffi::read::<f64>(addr)),
         Scalar::Int(Int::U8) => Value::int(i64::from(ffi::read::<u8>(addr))),
@@ -343,8 +347,9 @@ pub(crate) fn read_scalar(req: &mut Request, scalar: Scalar, addr: usize) -> Res
         Scalar::Int(Int::U64) => Value::int(ffi::read::<u64>(addr) as i64),
         Scalar::Int(Int::I64) => Value::int(ffi::read::<i64>(addr)),
         Scalar::Bool => Value::bool(ffi::read::<u8>(addr) != 0),
-        Scalar::Char => Value::string(PhpString::new(req, &[ffi::read::<u8>(addr)])?),
-    })
+        Scalar::Char => return Ok(PhpString::new(req, &[ffi::read::<u8>(addr)])?.into_value()),
+    };
+    Ok(Owner::take(req, value))
 }
 
 /// The facts of a type the conversions read, copied out of the arena.
@@ -405,7 +410,7 @@ pub(crate) fn to_value(
     is_const: bool,
     is_ret: bool,
     debug_union: bool,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let f = facts(req, ty);
     if fetch == Fetch::Read {
         if let Some(scalar) = f.scalar {
@@ -414,40 +419,36 @@ pub(crate) fn to_value(
         if let Some(pointee) = f.pointee {
             let value = ffi::read::<usize>(ptr);
             if value == 0 {
-                return Ok(Value::null());
+                return Ok(Owner::take(req, Value::null()));
             }
             if debug_union {
                 let text = format!("{value:#x}");
-                return Ok(Value::string(PhpString::new(req, text.as_bytes())?));
+                return Ok(PhpString::new(req, text.as_bytes())?.into_value());
             }
             if f.attr & attr::CONST != 0 && is_char(req, pointee) {
                 let text = ffi::c_string(value);
-                return Ok(Value::string(PhpString::new(req, &text)?));
+                return Ok(PhpString::new(req, &text)?.into_value());
             }
             if let Some(object) = existing {
-                let value = object.as_value();
-                req.addref(&value);
-                return Ok(value);
+                return Ok(Owner::take(req, object.as_value()));
             }
             let data = if is_ret {
                 slow_ret(req, ptr, ty, f, is_const)?
             } else {
                 Data::holding(ty, value, is_const)
             };
-            return Ok(make(req, data)?.as_value());
+            return Ok(make(req, data)?.into_value());
         }
     }
     if let Some(object) = existing {
-        let value = object.as_value();
-        req.addref(&value);
-        return Ok(value);
+        return Ok(Owner::take(req, object.as_value()));
     }
     let data = if is_ret {
         slow_ret(req, ptr, ty, f, is_const)?
     } else {
         Data::borrowed(ty, ptr, is_const)
     };
-    Ok(make(req, data)?.as_value())
+    Ok(make(req, data)?.into_value())
 }
 
 /// `zend_ffi_cdata_to_zval_slow_ret`: a returned pointer held, a
@@ -636,7 +637,7 @@ pub(crate) fn write_value(
             Scalar::Char => {
                 let text = to_string(req, &value)?;
                 let bytes = text.as_bytes().to_vec();
-                req.release(Value::string(text));
+                text.give_up(req);
                 if let [byte] = bytes.as_slice() {
                     ffi::write(ptr, *byte);
                 } else {
@@ -925,6 +926,7 @@ impl ObjectHandlers for Handlers {
                     false,
                     false,
                 )
+                .map(Owner::hand_on_unmigrated)
             }
             Table::Data => {
                 let (field, ptr) = field_of(req, &v, name, "read")?;
@@ -944,6 +946,7 @@ impl ObjectHandlers for Handlers {
                         false,
                         false,
                     )
+                    .map(Owner::hand_on_unmigrated)
                 } else {
                     Ok(bit_field_value(req, ptr, &field))
                 }
@@ -1038,6 +1041,7 @@ impl ObjectHandlers for Handlers {
                     Fetch::Place
                 };
                 to_value(req, None, ptr, ty, fetch, is_const, false, false)
+                    .map(Owner::hand_on_unmigrated)
             }
         }
     }
@@ -1156,24 +1160,28 @@ impl ObjectHandlers for Handlers {
             TypeTag::String if !v.freed() => {
                 let f = facts(req, v.ty);
                 let value = if let Some(scalar) = f.scalar {
+                    let value = read_scalar(req, scalar, v.ptr)?;
                     if scalar == Scalar::Char {
-                        return read_scalar(req, scalar, v.ptr).map(Some);
+                        return Ok(Some(value.hand_on_unmigrated()));
                     }
-                    read_scalar(req, scalar, v.ptr)?
+                    value
                 } else if let Some(pointee) = f.pointee {
                     let value = ffi::read::<usize>(v.ptr);
                     if value == 0 {
-                        Value::null()
+                        Owner::take(req, Value::null())
                     } else if f.attr & attr::CONST != 0 && is_char(req, pointee) {
                         let text = ffi::c_string(value);
-                        return Ok(Some(Value::string(PhpString::new(req, &text)?)));
+                        let text = PhpString::new(req, &text)?;
+                        return Ok(Some(text.into_value().hand_on_unmigrated()));
                     } else {
                         return Ok(None);
                     }
                 } else {
                     return Ok(None);
                 };
-                Ok(Some(Value::string(to_string(req, &value)?)))
+                let text = to_string(req, &value);
+                value.give_up(req);
+                Ok(Some(text?.into_value().hand_on_unmigrated()))
             }
             _ => Ok(None),
         }
@@ -1219,18 +1227,19 @@ impl ObjectHandlers for Handlers {
         if v.freed() {
             let thrown = use_after_free(req);
             return Ok(Some(DebugInfo {
-                table: PhpArray::new(req)?,
+                table: PhpArray::new(req)?.hand_on_unmigrated(),
                 thrown: Some(thrown),
             }));
         }
         if v.ptr == 0 {
             let thrown = ffi_error(req, "NULL pointer dereference");
             return Ok(Some(DebugInfo {
-                table: PhpArray::new(req)?,
+                table: PhpArray::new(req)?.hand_on_unmigrated(),
                 thrown: Some(thrown),
             }));
         }
-        debug_table(req, &v).map(|table| table.map(DebugInfo::from))
+        debug_table(req, &v)
+            .map(|table| table.map(|table| DebugInfo::from(table.hand_on_unmigrated())))
     }
 
     /// `zend_ffi_cdata_get_closure`: a pointer to a C function called as
@@ -1307,7 +1316,11 @@ impl ObjectHandlers for Handlers {
             match op {
                 BinaryOp::Add => {
                     let offset = to_long(req, &right)?;
-                    return Ok(Some(add(req, base, &v, offset)?.as_value()));
+                    return Ok(Some(
+                        add(req, base, &v, offset)?
+                            .into_value()
+                            .hand_on_unmigrated(),
+                    ));
                 }
                 BinaryOp::Sub => {
                     if let Some(other) = as_cdata(req, &right)? {
@@ -1327,7 +1340,11 @@ impl ObjectHandlers for Handlers {
                         }
                     }
                     let offset = to_long(req, &right)?;
-                    return Ok(Some(add(req, base, &v, offset.wrapping_neg())?.as_value()));
+                    return Ok(Some(
+                        add(req, base, &v, offset.wrapping_neg())?
+                            .into_value()
+                            .hand_on_unmigrated(),
+                    ));
                 }
                 _ => return Ok(None),
             }
@@ -1336,7 +1353,11 @@ impl ObjectHandlers for Handlers {
             let v = view(req, base);
             if !v.freed() && is_sequence(req, v.ty) && op == BinaryOp::Add {
                 let offset = to_long(req, &left)?;
-                return Ok(Some(add(req, base, &v, offset)?.as_value()));
+                return Ok(Some(
+                    add(req, base, &v, offset)?
+                        .into_value()
+                        .hand_on_unmigrated(),
+                ));
             }
         }
         Ok(None)
@@ -1425,7 +1446,12 @@ fn element_base(req: &mut Request, v: &View) -> (TypeId, usize) {
 
 /// `zend_ffi_add`: a pointer `offset` elements past what `base` points
 /// at or holds.
-fn add(req: &mut Request, base: PhpObject, v: &View, offset: i64) -> Result<PhpObject, Thrown> {
+fn add(
+    req: &mut Request,
+    base: PhpObject,
+    v: &View,
+    offset: i64,
+) -> Result<Owner<PhpObject>, Thrown> {
     let (ty, ptr, element) = {
         let t = types(req).get(v.ty).clone();
         match (t.pointee(), t.element()) {
@@ -1441,15 +1467,15 @@ fn add(req: &mut Request, base: PhpObject, v: &View, offset: i64) -> Result<PhpO
 }
 
 /// The table `zend_ffi_cdata_get_debug_info` builds; none for `void`.
-fn debug_table(req: &mut Request, v: &View) -> Result<Option<PhpArray>, Thrown> {
+fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let t = types(req).get(v.ty).clone();
     let mut table = PhpArray::new(req)?;
     match &t.kind {
         Kind::Void => return Ok(None),
         _ if t.scalar().is_some() => {
             let value = to_value(req, None, v.ptr, v.ty, Fetch::Read, true, false, false)?;
-            let key = PhpString::new(req, b"cdata")?;
-            table.set(req, Key::Str(key), value)?;
+            let key = PhpString::new(req, b"cdata")?.hand_on_unmigrated();
+            table.set(req, Key::Str(key), value.hand_on_unmigrated())?;
         }
         Kind::Pointer(to) => {
             let value = ffi::read::<usize>(v.ptr);
@@ -1459,6 +1485,7 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<PhpArray>, Thrown> 
                 Value::int(value as i64)
             } else {
                 to_value(req, None, value, *to, Fetch::Read, true, false, false)?
+                    .hand_on_unmigrated()
             };
             table.set(req, Key::Int(0), shown)?;
         }
@@ -1479,10 +1506,11 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<PhpArray>, Thrown> 
                         false,
                         union,
                     )?
+                    .hand_on_unmigrated()
                 } else {
                     bit_field_value(req, v.ptr, field)
                 };
-                let key = PhpString::new(req, key)?;
+                let key = PhpString::new(req, key)?.hand_on_unmigrated();
                 table.set(req, Key::Str(key), value)?;
             }
         }
@@ -1491,7 +1519,7 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<PhpArray>, Thrown> 
             let mut ptr = v.ptr;
             for n in 0..*len {
                 let value = to_value(req, None, ptr, *of, Fetch::Read, true, false, false)?;
-                table.set(req, Key::Int(n), value)?;
+                table.set(req, Key::Int(n), value.hand_on_unmigrated())?;
                 ptr = ptr.wrapping_add(size);
             }
         }
@@ -1519,6 +1547,7 @@ fn clone_cdata(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
             held: Box::default(),
         },
     )
+    .map(Owner::hand_on_unmigrated)
 }
 
 /// The write handler's body, its arguments still the caller's.
@@ -1639,6 +1668,7 @@ impl ClassIterator for Iter {
             false,
             false,
         )
+        .map(Owner::hand_on_unmigrated)
     }
 
     fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Value, Thrown> {

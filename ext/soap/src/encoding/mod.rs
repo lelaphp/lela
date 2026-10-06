@@ -24,7 +24,7 @@ use std::sync::Arc;
 use php_ext::call::lookup_class;
 use php_ext::raising::throw_error;
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Library, Node, Ns};
 
 use crate::model::{
@@ -242,8 +242,8 @@ pub(super) fn type_code(v: &Value) -> i32 {
 }
 
 /// A string value, made in the request's heap, one owner.
-pub(super) fn string(req: &mut Request, b: &[u8]) -> Res<Value> {
-    Ok(Value::string(PhpString::new(req, b)?))
+pub(super) fn string(req: &mut Request, b: &[u8]) -> Res<Owner<Value>> {
+    Ok(PhpString::new(req, b)?.into_value())
 }
 
 /// The class named, linked by now.
@@ -984,17 +984,17 @@ fn wrap_soap_var(
         var.set_slot(req, VAR_ENC_TYPE, Value::int(i64::from(e.details.type_)))?;
         var.set_slot(req, crate::shared::VAR_ENC_VALUE, ret)?;
         let s = string(req, cptype)?;
-        var.set_slot(req, VAR_ENC_STYPE, s)?;
+        var.set_slot(req, VAR_ENC_STYPE, s.hand_on_unmigrated())?;
         if let Some(n) = nsptr {
             let s = string(req, &href(n))?;
-            var.set_slot(req, VAR_ENC_NS, s)?;
+            var.set_slot(req, VAR_ENC_NS, s.hand_on_unmigrated())?;
         }
         Ok(())
     };
     match fill(req) {
-        Ok(()) => Ok(Value::object(var)),
+        Ok(()) => Ok(var.into_value().hand_on_unmigrated()),
         Err(err) => {
-            req.release(Value::object(var));
+            var.give_up(req);
             Err(err)
         }
     }

@@ -19,7 +19,7 @@ use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::Serializer;
 
 use crate::{ArrayAccess, Countable, Iterator, SeekableIterator, Serializable};
@@ -782,7 +782,7 @@ impl SplObjectStorage {
     /// 2
     /// ```
     #[php(tentative)]
-    fn serialize(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = this.object();
         let count = with(req, this, |s| s.len())?;
         crate::serialized_parts(req, |req, serializer, out| {
@@ -792,8 +792,8 @@ impl SplObjectStorage {
             serialize_rows(req, this, serializer, out)?;
             out.extend_from_slice(b"m:");
             let members = crate::members(req, this)?;
-            let written = serializer.write(req, out, &Value::array(members));
-            req.release(Value::array(members));
+            let written = serializer.write(req, out, &Value::array(*members));
+            members.give_up(req);
             written
         })
     }
@@ -930,7 +930,7 @@ impl SplObjectStorage {
         req: &mut Request,
         this: This<Self>,
         object: PhpObject,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         let _ = this;
         let hash = format!("{:016x}0000000000000000", object.index());
         PhpString::new(req, hash.as_bytes())
@@ -959,7 +959,7 @@ impl SplObjectStorage {
     /// }
     /// ```
     #[php(tentative)]
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let rows = with(req, this, |s| s.live())?;
         let mut list = PhpArray::new(req)?;
@@ -968,9 +968,9 @@ impl SplObjectStorage {
             list.append(req, crate::copied(req, inf))?;
         }
         let mut out = PhpArray::new(req)?;
-        out.append(req, Value::array(list))?;
+        out.append(req, list.into_value().hand_on_unmigrated())?;
         let members = crate::members(req, this)?;
-        out.append(req, Value::array(members))?;
+        out.append(req, members.into_value().hand_on_unmigrated())?;
         Ok(out)
     }
 
@@ -1059,7 +1059,7 @@ impl SplObjectStorage {
     /// }
     /// ```
     #[php(tentative)]
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let rows = with(req, this, |s| s.live())?;
         let mut out = PhpArray::new(req)?;
@@ -1071,13 +1071,25 @@ impl SplObjectStorage {
         for (object, inf) in rows {
             let mut row = PhpArray::new(req)?;
             let key = PhpString::new(req, b"obj")?;
-            row.set(req, Key::Str(key), crate::copied(req, object.as_value()))?;
+            row.set(
+                req,
+                Key::Str(key.hand_on_unmigrated()),
+                crate::copied(req, object.as_value()),
+            )?;
             let key = PhpString::new(req, b"inf")?;
-            row.set(req, Key::Str(key), crate::copied(req, inf))?;
-            storage.append(req, Value::array(row))?;
+            row.set(
+                req,
+                Key::Str(key.hand_on_unmigrated()),
+                crate::copied(req, inf),
+            )?;
+            storage.append(req, row.into_value().hand_on_unmigrated())?;
         }
         let name = PhpString::new(req, b"\0SplObjectStorage\0storage")?;
-        out.set(req, Key::Str(name), Value::array(storage))?;
+        out.set(
+            req,
+            Key::Str(name.hand_on_unmigrated()),
+            storage.into_value().hand_on_unmigrated(),
+        )?;
         Ok(out)
     }
 }
@@ -1243,7 +1255,7 @@ impl MultipleIterator {
             held.let_go(req);
             let answered = answered?;
             let valid = answered.as_bool() == Some(true);
-            req.release(answered);
+            answered.give_up(req);
             if expect != valid {
                 return Ok(!expect);
             }
@@ -1254,7 +1266,7 @@ impl MultipleIterator {
 
     /// `MultipleIterator::key(): array`.
     #[php(tentative)]
-    fn key(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         get_all(req, this.object(), "key")
     }
 
@@ -1329,7 +1341,7 @@ impl MultipleIterator {
     /// RuntimeException: Called key() with non valid sub iterator / valid
     /// ```
     #[php(tentative)]
-    fn current(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         get_all(req, this.object(), "current")
     }
 
@@ -1380,11 +1392,11 @@ fn hashed(
     }
     let answered = call_method(req, &this, b"getHash", &[object.as_value()])?;
     if let Some(bytes) = answered.as_str_bytes().map(<[u8]>::to_vec) {
-        return Ok((RowKey::Hash(bytes), Some(answered)));
+        return Ok((RowKey::Hash(bytes), Some(answered.hand_on_unmigrated())));
     }
     let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
     let name = value_name(req, &answered);
-    req.release(answered);
+    answered.give_up(req);
     Err(throw_error(
         req,
         "TypeError",
@@ -1856,12 +1868,13 @@ fn overridden_bits(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> 
 /// ```
 fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     let copy = new_object(req, object.class())?;
-    let filled = add_all(req, copy, object).and_then(|()| clone_members(req, &copy, &object));
+    let filled = add_all(req, *copy, object).and_then(|()| clone_members(req, &copy, &object));
     if let Err(thrown) = filled {
-        req.release(copy.as_value());
+        copy.give_up(req);
         return Err(thrown);
     }
-    Ok(copy)
+    // The `clone_obj` slot's return, the one owner the copy was made with.
+    Ok(copy.hand_on_unmigrated())
 }
 
 /// `SplObjectStorage::serialize`'s walk over the storage, live by a
@@ -2025,7 +2038,7 @@ fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown>
 /// `spl_multiple_iterator_get_all`: each sub-iterator's current or key,
 /// keyed by its information under `MultipleIterator::MIT_KEYS_ASSOC`,
 /// the flags read after each row's calls as php reads them.
-fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<PhpArray, Thrown> {
+fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<Owner<PhpArray>, Thrown> {
     if with(req, this, |s| s.len())? == 0 {
         return Err(throw(
             req,
@@ -2036,7 +2049,7 @@ fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<PhpArray,
     let mut out = PhpArray::new(req)?;
     let walked = get_all_rows(req, this, method, &mut out);
     if let Err(thrown) = walked {
-        req.release(Value::array(out));
+        out.give_up(req);
         return Err(thrown);
     }
     Ok(out)
@@ -2049,7 +2062,7 @@ fn get_all_rows(
     req: &mut Request,
     this: PhpObject,
     method: &str,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
 ) -> Result<(), Thrown> {
     with(req, this, |s| s.reset())?;
     while let Some((iterator, held, inf)) = held_here(req, this)? {
@@ -2070,7 +2083,7 @@ fn get_one(
     iterator: PhpObject,
     inf: Value,
     method: &str,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
 ) -> Result<(), Thrown> {
     // A `valid()` that throws is read as not valid, with what it threw
     // pending: the walk stops after this row, and a `MIT_NEED_ALL`
@@ -2078,7 +2091,7 @@ fn get_one(
     let (valid, pending) = match crate::method(req, iterator, b"valid") {
         Ok(answered) => {
             let valid = answered.as_bool() == Some(true);
-            req.release(answered);
+            answered.give_up(req);
             (valid, None)
         }
         Err(thrown) => (false, Some(thrown)),
@@ -2103,10 +2116,10 @@ fn get_one(
     } else if let Some(thrown) = pending {
         return Err(thrown);
     } else {
-        Value::null()
+        Owner::take(req, Value::null())
     };
     if with(req, this, |s| s.flags)? & MultipleIterator::MIT_KEYS_ASSOC == 0 {
-        return out.append(req, value);
+        return out.append(req, value.hand_on_unmigrated());
     }
     let key = match inf.as_ref() {
         ValueRef::Int(n) => Key::Int(n),
@@ -2117,7 +2130,7 @@ fn get_one(
                 .unwrap_or(*s),
         ),
         _ => {
-            req.release(value);
+            value.give_up(req);
             return Err(throw(
                 req,
                 "InvalidArgumentException",
@@ -2125,5 +2138,5 @@ fn get_one(
             ));
         }
     };
-    out.set(req, key, value)
+    out.set(req, key, value.hand_on_unmigrated())
 }

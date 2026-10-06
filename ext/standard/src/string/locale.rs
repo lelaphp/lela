@@ -19,10 +19,9 @@ use std::ffi::{CString, c_char};
 
 use php_ext::abi::{OrFalse, Untyped, Variadic};
 use php_ext::attr::php_function;
-use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
     self, LC_ALL, LC_COLLATE, LC_CTYPE, LC_MESSAGES, LC_MONETARY, LC_NUMERIC, LC_TIME,
@@ -295,7 +294,7 @@ pub(super) fn setlocale(
     category: i64,
     locales: Untyped<Value>,
     rest: Variadic<Untyped<Value>>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let given: Vec<Value> = std::iter::once(locales.0)
         .chain(rest.0.into_iter().map(|rest| rest.0))
         .collect();
@@ -313,7 +312,7 @@ pub(super) fn setlocale(
             ValueRef::Array(array) => {
                 let mut names = Vec::new();
                 for (_, element) in array.snapshot() {
-                    names.push(to_string(req, &element.deref())?.as_bytes().to_vec());
+                    names.push(crate::string::string_bytes(req, &element.deref())?);
                 }
                 names
             }
@@ -404,7 +403,7 @@ pub(super) fn setlocale(
 /// string(1) ","
 /// ```
 #[php_function]
-pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
+pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let lconv = c::conventions();
     let mut array = PhpArray::new(req)?;
     let strings: [(&[u8], &[u8]); 8] = [
@@ -418,8 +417,8 @@ pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
         (b"negative_sign", &lconv.negative_sign),
     ];
     for (name, value) in strings {
-        let key = Key::Str(PhpString::new(req, name)?);
-        let value = Value::string(PhpString::new(req, value)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+        let value = Value::string(PhpString::new(req, value)?.hand_on_unmigrated());
         array.set(req, key, value)?;
     }
     let chars: [(&[u8], c_char); 8] = [
@@ -433,7 +432,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
         (b"n_sign_posn", lconv.n_sign_posn),
     ];
     for (name, value) in chars {
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         array.set(req, key, Value::int(i64::from(value)))?;
     }
     for (name, grouping) in [
@@ -445,8 +444,8 @@ pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
             let value = i64::from(c_char::from_ne_bytes([*byte]));
             list.set(req, Key::Int(at), Value::int(value))?;
         }
-        let key = Key::Str(PhpString::new(req, name)?);
-        array.set(req, key, Value::array(list))?;
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+        array.set(req, key, Value::array(list.hand_on_unmigrated()))?;
     }
     Ok(array)
 }
@@ -489,7 +488,10 @@ pub(super) fn localeconv(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// string(1) ","
 /// ```
 #[php_function]
-pub(super) fn nl_langinfo(req: &mut Request, item: i64) -> Result<OrFalse<PhpString>, Thrown> {
+pub(super) fn nl_langinfo(
+    req: &mut Request,
+    item: i64,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some((_, host)) = LANGINFO.iter().find(|(id, _)| *id == item) else {
         docref(req, Level::Warning, &format!("Item '{item}' is not valid"));
         return Ok(OrFalse::False);

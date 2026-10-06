@@ -7,7 +7,7 @@ use php_ext::abi::{Passed, Path as PathArg, This, True};
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_spl::directory::{self as spl, Other};
 
 use crate::archive::{
@@ -226,8 +226,8 @@ impl PharFileInfo {
         };
         spl::set_other(req, this, Box::new(info));
         let url = string(req, &fname)?;
-        let constructed = construct_as(req, b"SplFileInfo", this, &[url]);
-        req.release(url);
+        let constructed = construct_as(req, b"SplFileInfo", this, &[*url]);
+        url.give_up(req);
         constructed
     }
 
@@ -528,7 +528,7 @@ impl PharFileInfo {
     /// `getContent(): string`: the whole entry, a link's target read
     /// where it is one.
     #[php(tentative)]
-    fn getContent(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getContent(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = this.object();
         let (id, slot) = held(req, this)?;
         let (fname, _, _) = archive_facts(req, id);

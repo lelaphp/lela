@@ -1,16 +1,45 @@
 //! One owner of a value as a type (design §5.1, #1980): [`Owner`]
 //! beside the views it owns.
 
+use std::cmp::Ordering;
+
 use php_unit::decl::Type;
 
-use crate::api::abi::IntoReturn;
+use crate::api::abi::{Class, FromArgument, Instance, IntoReturn, Raw, Static};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value};
 
-/// A view an [`Owner`] can own: [`Value`], the five refcounted kinds and
-/// a [`Key`]. Sealed: the face lists them, and no extension adds one.
+/// A view an [`Owner`] can own: [`Value`], the five refcounted kinds, a
+/// [`Key`], the two object returns, [`Instance`] and [`Static`], a
+/// [`Raw`] return, and a typed view of one resource ([`ResourceView`]).
+/// Sealed but for that last door: the face lists them.
 pub trait View: sealed::Counted + Clone {}
+
+/// A typed view of one [`Resource`]: the streams facet's `Stream` and
+/// `StreamCtx`, or an extension's own, `Copy` and naming the resource it
+/// is. An owner of one is an owner of the resource, so a constructor
+/// that makes one hands back an [`Owner`] of the typed view, and a
+/// native returns it as it returns the resource. The count stands on
+/// the resource the owner read where it was made, whatever the view
+/// answers later.
+pub trait ResourceView: Copy {
+    /// The resource the view is.
+    fn resource(&self) -> Resource;
+}
+
+impl ResourceView for Resource {
+    fn resource(&self) -> Resource {
+        *self
+    }
+}
+
+impl<T: ResourceView> sealed::Counted for T {
+    fn counted(&self) -> Value {
+        Value::resource(self.resource())
+    }
+}
+impl<T: ResourceView> View for T {}
 
 mod sealed {
     use crate::api::values::Value;
@@ -37,11 +66,26 @@ view!(PhpString, Value::string);
 view!(PhpArray, Value::array);
 view!(PhpObject, Value::object);
 view!(PhpRef, Value::reference);
-view!(Resource, Value::resource);
+
 view!(Key, |k: Key| match k {
     Key::Int(n) => Value::int(n),
     Key::Str(s) => Value::string(s),
 });
+view!(Static, |s: Static| Value::object(s.0));
+
+impl<C: Class> sealed::Counted for Instance<C> {
+    fn counted(&self) -> Value {
+        Value::object(self.object())
+    }
+}
+impl<C: Class> View for Instance<C> {}
+
+impl<T: FromArgument> sealed::Counted for Raw<T> {
+    fn counted(&self) -> Value {
+        self.value()
+    }
+}
+impl<T: FromArgument> View for Raw<T> {}
 
 /// One owner of the value a view names: one counted claim on it, the
 /// glossary's **Owner**, where the view itself carries none. Neither
@@ -126,6 +170,8 @@ view!(Key, |k: Key| match k {
 #[derive(Debug)]
 pub struct Owner<T: View> {
     view: T,
+    /// The value the count stands on, read where the owner was made.
+    counted: Value,
     /// A debug build's record of where the owner was made, until it is
     /// consumed.
     #[cfg(debug_assertions)]
@@ -149,18 +195,27 @@ impl<T: View> Owner<T> {
     /// element of one, `RETURN_COPY`.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn take(req: &Request, view: T) -> Owner<T> {
-        req.addref(&view.counted());
-        Owner::adopt(req, view)
+        let counted = view.counted();
+        req.addref(&counted);
+        Owner::of(req, view, counted)
     }
 
     /// The owner `view` already is: the count a value is made with,
     /// which only the engine hands out.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn adopt(req: &Request, view: T) -> Owner<T> {
+        let counted = view.counted();
+        Owner::of(req, view, counted)
+    }
+
+    /// The owner of `counted`, presented as `view`.
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn of(req: &Request, view: T, counted: Value) -> Owner<T> {
         #[cfg(not(debug_assertions))]
         let _ = req;
         Owner {
             view,
+            counted,
             #[cfg(debug_assertions)]
             made: Some(Made {
                 site: std::panic::Location::caller(),
@@ -180,7 +235,7 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn give_up(mut self, req: &mut Request) {
         self.consume();
-        req.release(self.view.counted());
+        req.release(self.counted);
     }
 
     /// The view, the owner handed on with it: what a sink keeps, and what
@@ -192,6 +247,46 @@ impl<T: View> Owner<T> {
         self.view.clone()
     }
 
+    /// The view, the owner handed with it to a sink that still takes a
+    /// view: the debt of the migration of #1980, for a sink not yet
+    /// taking owners (`PhpArray::set` and its siblings, the property
+    /// sinks, a `Key`, the handler slots, a native's own state). #1996,
+    /// #1997, #1999, #2102 and #2104 delete its uses as their sinks take
+    /// owners, and #1999 makes it `pub(crate)` again. The worst it does misused is a leak, which the
+    /// request's leak sensor reports, never a second release: it hands on
+    /// the one owner there is.
+    #[must_use = "the view carries the owner to the sink it is handed to"]
+    pub fn hand_on_unmigrated(self) -> T {
+        self.hand_on()
+    }
+
+    /// The owner of the value as a [`Value`], the same count: what a
+    /// native returns as `mixed` or hands to a sink that takes a value.
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_value(self) -> Owner<Value> {
+        let value = self.counted;
+        self.recast(value)
+    }
+
+    /// The value the owner's count stands on, the owner handed on with
+    /// it: what the engine is handed as a native's return.
+    // Taking the owner is the point: the engine holds it from here.
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn hand_on_counted(mut self) -> Value {
+        self.consume();
+        self.counted
+    }
+
+    /// The same owner over another view of its value.
+    fn recast<U: View>(mut self, view: U) -> Owner<U> {
+        Owner {
+            view,
+            counted: self.counted,
+            #[cfg(debug_assertions)]
+            made: self.made.take(),
+        }
+    }
+
     /// The owner consumed, so a debug build's `Drop` records nothing.
     // A release build's owner has nothing to mark.
     #[allow(clippy::unused_self)]
@@ -200,6 +295,156 @@ impl<T: View> Owner<T> {
         {
             self.made = None;
         }
+    }
+}
+
+impl<T: ResourceView> Owner<T> {
+    /// The owner of the typed view as the [`Resource`] it is, the same
+    /// count: what a native returns a stream it made as.
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_resource(self) -> Owner<Resource> {
+        let resource = self.view.resource();
+        self.recast(resource)
+    }
+}
+
+impl Owner<Value> {
+    /// The owner of the value returned as it is under `T`'s declaration,
+    /// the same count ([`Raw`]).
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_raw<T: FromArgument>(self) -> Owner<Raw<T>> {
+        let raw = Raw::returned(self.view);
+        self.recast(raw)
+    }
+}
+
+impl Owner<PhpObject> {
+    /// The owner of the object as the `C` the body vouches it is, the
+    /// same count, to return ([`Instance::of`]).
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_instance<C: Class>(self) -> Owner<Instance<C>> {
+        let instance = Instance::of(self.view);
+        self.recast(instance)
+    }
+
+    /// The owner of the object as `static`, the same count, to return.
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_static(self) -> Owner<Static> {
+        let object = Static(self.view);
+        self.recast(object)
+    }
+}
+
+/// The writes of an owned array, [`PhpArray`]'s own, through the owner:
+/// a write that separates moves the owner to the copy, as it moves the
+/// name, and the owner lends no `&mut PhpArray`, through which a view
+/// could be put where the owner stands.
+impl Owner<PhpArray> {
+    /// A write through the owner's array, its count moved with the name
+    /// where the write separated the array.
+    fn written<R>(&mut self, write: impl FnOnce(&mut PhpArray) -> R) -> R {
+        let answer = write(&mut self.view);
+        self.counted = Value::array(self.view);
+        answer
+    }
+
+    /// [`PhpArray::set`].
+    pub fn set(&mut self, req: &mut Request, key: Key, value: Value) -> Result<(), Thrown> {
+        self.written(|view| view.set(req, key, value))
+    }
+
+    /// [`PhpArray::add_new`].
+    pub(crate) fn add_new(
+        &mut self,
+        req: &mut Request,
+        key: Key,
+        value: Value,
+    ) -> Result<(), Thrown> {
+        self.written(|view| view.add_new(req, key, value))
+    }
+
+    /// [`PhpArray::replace`].
+    pub fn replace(&mut self, req: &mut Request, key: &Key, value: Value) -> Result<bool, Thrown> {
+        self.written(|view| view.replace(req, key, value))
+    }
+
+    /// [`PhpArray::append`].
+    pub fn append(&mut self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+        self.written(|view| view.append(req, value))
+    }
+
+    /// [`PhpArray::try_append`].
+    pub fn try_append(&mut self, req: &mut Request, value: Value) -> Result<bool, Thrown> {
+        self.written(|view| view.try_append(req, value))
+    }
+
+    /// [`PhpArray::unset`].
+    pub fn unset(&mut self, req: &mut Request, key: &Key) -> Result<bool, Thrown> {
+        self.written(|view| view.unset(req, key))
+    }
+
+    /// [`PhpArray::set_next_free`].
+    pub fn set_next_free(&mut self, req: &mut Request, next: i64) -> Result<(), Thrown> {
+        self.written(|view| view.set_next_free(req, next))
+    }
+
+    /// [`PhpArray::separate`].
+    pub fn separate(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        self.written(|view| view.separate(req))
+    }
+
+    /// [`PhpArray::sort_by`].
+    pub fn sort_by(
+        &mut self,
+        req: &mut Request,
+        renumber: bool,
+        compare: impl FnMut(&mut Request, (&Key, &Value), (&Key, &Value)) -> Result<Ordering, Thrown>,
+    ) -> Result<(), Thrown> {
+        self.written(|view| view.sort_by(req, renumber, compare))
+    }
+
+    /// [`PhpArray::cursor_next`].
+    pub fn cursor_next(&mut self) {
+        self.view.cursor_next();
+    }
+
+    /// [`PhpArray::cursor_prev`].
+    pub fn cursor_prev(&mut self) {
+        self.view.cursor_prev();
+    }
+
+    /// [`PhpArray::cursor_reset`].
+    pub fn cursor_reset(&mut self) {
+        self.view.cursor_reset();
+    }
+
+    /// [`PhpArray::cursor_end`].
+    pub fn cursor_end(&mut self) {
+        self.view.cursor_end();
+    }
+}
+
+/// What the engine made, as the owner it is: the face's constructors
+/// over the engine's own, whose view is the one owner the value was made
+/// with ([`Owner::adopt`]).
+#[cfg_attr(debug_assertions, track_caller)]
+pub(crate) fn adopted<T: View>(req: &Request, made: Result<T, Thrown>) -> Result<Owner<T>, Thrown> {
+    match made {
+        Ok(view) => Ok(Owner::adopt(req, view)),
+        Err(thrown) => Err(thrown),
+    }
+}
+
+/// [`adopted`] over what may be nothing.
+#[cfg_attr(debug_assertions, track_caller)]
+pub(crate) fn adopted_some<T: View>(
+    req: &Request,
+    made: Result<Option<T>, Thrown>,
+) -> Result<Option<Owner<T>>, Thrown> {
+    match made {
+        Ok(Some(view)) => Ok(Some(Owner::adopt(req, view))),
+        Ok(None) => Ok(None),
+        Err(thrown) => Err(thrown),
     }
 }
 
@@ -223,10 +468,9 @@ impl<T: View> Drop for Owner<T> {
 }
 
 /// An owner returned from a native is moved to the engine: the caller's
-/// temporary holds it, and nothing more is taken. The value is the
-/// view's own and not `T::into_return`'s: that is a view's return, which
-/// hands on the owner the view was made with until the constructors
-/// return owners, and then takes an owner of its own (#2047).
+/// temporary holds it, and nothing more is taken. The value is the one
+/// the count stands on, and not `T::into_return`'s, which is a view's
+/// return.
 impl<T: View + IntoReturn> IntoReturn for Owner<T> {
     const UNDECLARED: bool = T::UNDECLARED;
     const MASK: u32 = T::MASK;
@@ -234,6 +478,6 @@ impl<T: View + IntoReturn> IntoReturn for Owner<T> {
         T::declared()
     }
     fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
-        Ok(self.hand_on().counted())
+        Ok(self.hand_on_counted())
     }
 }

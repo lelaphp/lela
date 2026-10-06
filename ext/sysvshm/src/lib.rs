@@ -32,7 +32,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::{Owner, Value};
 use php_ext_standard::{Serializer, Unserializer};
 
 use crate::ffi::Segment;
@@ -290,7 +290,7 @@ fn shm_attach(
     key: i64,
     #[php(default = null)] size: Option<i64>,
     #[php(default = 0666)] permissions: i64,
-) -> Result<OrFalse<Instance<SysvSharedMemory>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<SysvSharedMemory>>>, Thrown> {
     let size = match size {
         Some(size) => size,
         None => req
@@ -342,7 +342,7 @@ fn shm_attach(
             "Class \"SysvSharedMemory\" not found",
         ));
     };
-    let shm = Instance::of(new_object(req, class)?);
+    let shm = new_object(req, class)?.into_instance::<SysvSharedMemory>();
     *shm.payload_mut(req)? = Shm {
         key: key as i32,
         id,
@@ -527,7 +527,7 @@ fn shm_get_var(
     req: &mut Request,
     shm: Instance<SysvSharedMemory>,
     key: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let bytes = with(req, shm, |seg| {
         let pos = Head::read(seg)?.find(seg, key)?;
         let len = at(seg.word(pos + 8)?);
@@ -536,7 +536,7 @@ fn shm_get_var(
     let Some(bytes) = bytes else {
         let text = format!("Variable key {key} doesn't exist");
         docref(req, Level::Warning, &text);
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     let mut reader = Unserializer::new(req, bytes.as_deref().unwrap_or_default())?;
     let read = reader.local(req);
@@ -544,7 +544,13 @@ fn shm_get_var(
     let read = read?;
     finished?;
     match read {
-        Some(value) if bytes.is_some() => Ok(value),
+        // The unserializer's value is owned as a bare value: the one
+        // owner taken over from it.
+        Some(value) if bytes.is_some() => {
+            let owned = Owner::take(req, value);
+            req.release(value);
+            Ok(owned)
+        }
         read => {
             if let Some(value) = read {
                 req.release(value);
@@ -554,7 +560,7 @@ fn shm_get_var(
                 Level::Warning,
                 "Variable data in shared memory is corrupted",
             );
-            Ok(Value::bool(false))
+            Ok(Owner::take(req, Value::bool(false)))
         }
     }
 }

@@ -173,8 +173,10 @@ fn extract_file(
             _ => break,
         }
     }
-    req.wrapper_op(&full, WrapperOp::Touch(Some((st.mtime, st.mtime))))?;
-    stream.free(req);
+    let touched = req.wrapper_op(&full, WrapperOp::Touch(Some((st.mtime, st.mtime))));
+    stream.close(req);
+    stream.give_up(req);
+    touched?;
     Ok(true)
 }
 

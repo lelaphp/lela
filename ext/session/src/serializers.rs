@@ -173,7 +173,7 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         // empty array.
         let vars = match read {
             Some(value) if !matches!(value.as_ref(), ValueRef::Null) => value,
-            _ => PhpArray::new(req)?.to_value(),
+            _ => PhpArray::new(req)?.into_value().hand_on_unmigrated(),
         };
         bind_vars(req, vars)?;
         return Ok(ok || data.is_empty());
@@ -201,7 +201,7 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         };
         let name = PhpString::new(req, name)?;
         reader.set_offset(at);
-        match reader.element(req, array, Key::Str(name)) {
+        match reader.element(req, array, Key::Str(name.hand_on_unmigrated())) {
             Ok(true) => p = reader.offset(),
             Ok(false) => {
                 ok = false;

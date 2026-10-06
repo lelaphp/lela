@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Stream, Streams as _, Whence};
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 
 use crate::table::Table;
 
@@ -691,8 +691,8 @@ pub(crate) fn lossy(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
 }
 
 /// A string of the request's from bytes, as a value.
-pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(PhpString::new(req, bytes)?))
+pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 // ---- reading and writing a file whole through the streams layer
@@ -711,16 +711,17 @@ pub(crate) fn read_file(
     let Some(stream) = req.open_stream_with(path, b"rb", opening)? else {
         return Ok(None);
     };
-    let bytes = copy_all(req, stream)?;
-    stream.free(req);
-    Ok(Some(bytes))
+    let bytes = copy_all(req, *stream);
+    stream.close(req);
+    stream.give_up(req);
+    Ok(Some(bytes?))
 }
 
 /// The rest of a stream as bytes.
 pub(crate) fn copy_all(req: &mut Request, stream: Stream) -> Result<Vec<u8>, Thrown> {
     let s = stream.copy_to_mem(req, None)?;
     let bytes = s.as_bytes().to_vec();
-    req.release(Value::string(s));
+    s.give_up(req);
     Ok(bytes)
 }
 
@@ -734,7 +735,7 @@ pub(crate) fn read_at(
     stream.seek(req, at, Whence::Set);
     let s = stream.copy_to_mem(req, Some(len))?;
     let bytes = s.as_bytes().to_vec();
-    req.release(Value::string(s));
+    s.give_up(req);
     Ok(bytes)
 }
 
@@ -762,15 +763,20 @@ pub(crate) fn filter_bytes(
                 }
                 at = end;
             }
-            let removed = req.remove_filter(filter);
-            req.release(filter.as_value());
-            removed?;
-            temp.seek(req, 0, Whence::Set);
-            Ok(Some(copy_all(req, temp)?))
+            let removed = req.remove_filter(*filter);
+            filter.give_up(req);
+            match removed {
+                Ok(_) => {
+                    temp.seek(req, 0, Whence::Set);
+                    copy_all(req, *temp).map(Some)
+                }
+                Err(thrown) => Err(thrown),
+            }
         }
         Ok(None) => Ok(None),
         Err(thrown) => Err(thrown),
     };
-    temp.free(req);
+    temp.close(req);
+    temp.give_up(req);
     out
 }

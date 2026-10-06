@@ -10,7 +10,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use crate::api::request::Request;
-use crate::api::values::{PhpObject, PhpString, Value};
+use crate::api::values::{Owner, PhpObject, PhpString, Value, adopted};
 
 /// php's error levels, `E_*`: the unit's, since a compile-time
 /// diagnostic is recorded on the unit at one of them and raised here
@@ -706,7 +706,7 @@ pub fn throw(req: &mut Request, class: &str, message: &str) -> Thrown {
     match new_throwable(req, class, message) {
         Ok(throwable) => {
             let thrown = throw_value(req, &throwable);
-            req.release(throwable);
+            throwable.give_up(req);
             thrown
         }
         Err(fatal) => fatal,
@@ -770,11 +770,11 @@ fn throwable_at(
     line: u32,
 ) -> Result<PhpObject, Thrown> {
     let object = req.new_object_of(class)?;
-    let message = Value::string(PhpString::new(req, message.as_bytes())?);
-    let file = Value::string(PhpString::new(req, file)?);
+    let message = Value::string(req.string(message.as_bytes())?);
+    let file = Value::string(req.string(file)?);
     let line = Value::int(i64::from(line));
     for (name, value) in [(&b"message"[..], message), (b"file", file), (b"line", line)] {
-        let name = PhpString::new(req, name)?;
+        let name = req.string(name)?;
         object.set_prop(req, name, value)?;
     }
     Ok(object)
@@ -798,7 +798,7 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
     let Some(earlier) = previous.exception().copied() else {
         return previous;
     };
-    match new_throwable(req, class, message) {
+    match new_throwable_made(req, class, message) {
         Ok(throwable) => {
             let Some(object) = throwable.as_object().copied() else {
                 req.release(throwable);
@@ -823,7 +823,7 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
 /// none is pending, `zend_vspprintf`'s buffer standing across either.
 /// An `exit` or a fatal standing is handed on as it is.
 pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) -> Thrown {
-    match req.take_pending() {
+    match req.take_pending_view() {
         Some(earlier) => match printf_buffer(req, message.len()) {
             Ok(buffer) => {
                 let thrown = throw_chained(req, Thrown::of(Some(earlier)), class, message);
@@ -935,7 +935,22 @@ pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
 /// 2328 32
 /// 1128 0
 /// ```
-pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Value, Thrown> {
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn new_throwable(
+    req: &mut Request,
+    class: &str,
+    message: &str,
+) -> Result<Owner<Value>, Thrown> {
+    let made = new_throwable_made(req, class, message);
+    adopted(req, made)
+}
+
+/// What [`new_throwable`] makes, its one owner not yet named.
+pub(crate) fn new_throwable_made(
+    req: &mut Request,
+    class: &str,
+    message: &str,
+) -> Result<Value, Thrown> {
     // `zend_throw_exception` makes the message's string before the
     // object (`zend_string_init`), so it stands across the trace.
     let message = message.split('\0').next().unwrap_or_default();
@@ -943,12 +958,12 @@ pub fn new_throwable(req: &mut Request, class: &str, message: &str) -> Result<Va
     let object = match req.new_object_of(class) {
         Ok(object) => object,
         Err(refused) => {
-            req.release(Value::string(message));
+            message.give_up(req);
             return Err(refused);
         }
     };
-    let name = PhpString::new(req, b"message")?;
-    object.set_prop(req, name, Value::string(message))?;
+    let name = req.string(b"message")?;
+    object.set_prop(req, name, Value::string(message.hand_on()))?;
     if !req.records_throw_site(object.class()) {
         req.note_throw_site(object)?;
     }
@@ -1037,7 +1052,7 @@ pub(crate) fn under_name(
     };
     let thrown = throw(req);
     if let Some(name) = name {
-        req.release(Value::string(name));
+        name.give_up(req);
     }
     thrown
 }
@@ -1074,9 +1089,9 @@ pub(crate) fn strpprintf(req: &mut Request, text: &[u8]) -> Result<PhpString, Th
     let buffer = req.fatal_of(block)?;
     if paged {
         req.heap_mut().free_block(buffer);
-        return PhpString::new(req, text);
+        return req.string(text);
     }
-    let string = PhpString::new(req, text);
+    let string = req.string(text);
     req.heap_mut().free_block(buffer);
     string
 }
@@ -1280,7 +1295,7 @@ pub fn clear(req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
         return Err(thrown);
     };
     if req.pending() == Some(exception) {
-        req.take_pending();
+        req.take_pending_view();
     }
     req.release(exception.as_value());
     Ok(())
@@ -1303,7 +1318,7 @@ pub fn clear(req: &mut Request, thrown: Thrown) -> Result<(), Thrown> {
 /// dtor 1
 /// ```
 pub fn pending(req: &mut Request) -> Result<(), Thrown> {
-    match req.take_pending() {
+    match req.take_pending_view() {
         Some(pending) => Err(Thrown::of(Some(pending))),
         None if req.is_pending() => Err(Thrown::of(None)),
         None => Ok(()),
@@ -1425,7 +1440,7 @@ mod tests {
 
     /// The same class made and not thrown.
     fn unlinked_made(req: &mut Request) -> Result<Value, Thrown> {
-        new_throwable(req, "LogicException", "never made")
+        new_throwable(req, "LogicException", "never made").map(crate::api::values::Owner::hand_on)
     }
 
     /// The fatal a source comes to under an engine with the natives

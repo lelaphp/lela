@@ -9,7 +9,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
@@ -95,9 +95,9 @@ fn set_zone(req: &mut Request, object: PhpObject, kind: TzKind) -> Result<(), Th
 fn timezone_open(
     req: &mut Request,
     timezone: Path,
-) -> Result<OrFalse<Instance<DateTimeZone>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
     match initialize(timezone.0.as_bytes()) {
-        Ok(kind) => new_timezone(req, kind).map(OrFalse::Value),
+        Ok(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
         Err(message) => {
             docref(req, Level::Warning, &message);
             Ok(OrFalse::False)
@@ -107,7 +107,7 @@ fn timezone_open(
 
 /// `timezone_name_get` and `DateTimeZone::getName`: the name the zone
 /// was made with.
-fn name_of(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
+fn name_of(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
     let kind = tz_of(req, object)?;
     PhpString::new(req, &kind.name())
 }
@@ -128,7 +128,7 @@ fn name_of(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
 fn timezone_name_get(
     req: &mut Request,
     object: Instance<DateTimeZone>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     name_of(req, object.object())
 }
 
@@ -174,7 +174,7 @@ fn timezone_offset_get(
 /// One row of `getTransitions`.
 fn transition(
     req: &mut Request,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
     ts: i64,
     offset: i64,
     is_dst: bool,
@@ -187,7 +187,7 @@ fn transition(
     set_str(req, &mut row, b"offset", Value::int(offset))?;
     set_str(req, &mut row, b"isdst", Value::bool(is_dst))?;
     set_string(req, &mut row, b"abbr", abbr)?;
-    out.append(req, Value::array(row))
+    out.append(req, Value::array(row.hand_on_unmigrated()))
 }
 
 /// `timezone_transitions_get` and `DateTimeZone::getTransitions`.
@@ -197,7 +197,7 @@ fn transitions_of(
     object: PhpObject,
     begin_ts: i64,
     end_ts: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let kind = tz_of(req, object)?;
     let TzKind::Id(zone) = kind else {
         return Ok(OrFalse::False);
@@ -206,7 +206,7 @@ fn transitions_of(
     let trans = zone.transitions();
     let ty = |i: usize| types.get(i).cloned();
     let mut out = PhpArray::new(req)?;
-    let nominal = |req: &mut Request, out: &mut PhpArray, ts: i64| -> Result<(), Thrown> {
+    let nominal = |req: &mut Request, out: &mut Owner<PhpArray>, ts: i64| -> Result<(), Thrown> {
         match ty(0) {
             Some(t) => transition(req, out, ts, i64::from(t.offset), t.is_dst, &t.abbr),
             None => Ok(()),
@@ -372,7 +372,7 @@ fn timezone_transitions_get(
     object: Instance<DateTimeZone>,
     #[php(default = PHP_INT_MIN)] timestampBegin: i64,
     #[php(default = 2147483647)] timestampEnd: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     transitions_of(req, object.object(), timestampBegin, timestampEnd)
 }
 
@@ -384,7 +384,7 @@ fn year_of(ts: i64) -> (i64, i64, i64) {
 }
 
 /// `timezone_location_get` and `DateTimeZone::getLocation`.
-fn location_of(req: &mut Request, object: PhpObject) -> Result<OrFalse<PhpArray>, Thrown> {
+fn location_of(req: &mut Request, object: PhpObject) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let kind = tz_of(req, object)?;
     let TzKind::Id(zone) = kind else {
         return Ok(OrFalse::False);
@@ -431,7 +431,7 @@ fn location_of(req: &mut Request, object: PhpObject) -> Result<OrFalse<PhpArray>
 fn timezone_location_get(
     req: &mut Request,
     object: Instance<DateTimeZone>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     location_of(req, object.object())
 }
 
@@ -570,7 +570,7 @@ impl DateTimeZone {
 
     /// `DateTimeZone::getName(): string`, `timezone_name_get`'s body.
     #[php(tentative)]
-    fn getName(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         name_of(req, this.object())
     }
 
@@ -593,14 +593,17 @@ impl DateTimeZone {
         this: This<Self>,
         #[php(default = PHP_INT_MIN)] timestampBegin: i64,
         #[php(default = 2147483647)] timestampEnd: i64,
-    ) -> Result<OrFalse<PhpArray>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         transitions_of(req, this.object(), timestampBegin, timestampEnd)
     }
 
     /// `DateTimeZone::getLocation(): array|false`,
     /// `timezone_location_get`'s body.
     #[php(tentative)]
-    fn getLocation(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpArray>, Thrown> {
+    fn getLocation(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         location_of(req, this.object())
     }
 
@@ -620,7 +623,7 @@ impl DateTimeZone {
     /// }
     /// ```
     #[php(tentative)]
-    fn listAbbreviations(req: &mut Request) -> Result<PhpArray, Thrown> {
+    fn listAbbreviations(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         crate::tzdb::abbreviations(req)
     }
 
@@ -642,7 +645,7 @@ impl DateTimeZone {
         req: &mut Request,
         #[php(default = DateTimeZone::ALL)] timezoneGroup: i64,
         #[php(default = null)] countryCode: Option<PhpString>,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         crate::tzdb::identifiers(req, timezoneGroup, countryCode)
     }
 
@@ -665,7 +668,7 @@ impl DateTimeZone {
     ///   string(6) "-01:00"
     /// }
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         let kind = tz_of(req, object)?;
         let fields = tz_fields(req, &kind)?;
@@ -722,8 +725,8 @@ impl DateTimeZone {
             req.addref(&value);
             hash.set(req, key, value)?;
         }
-        let kind = from_hash(hash);
-        req.release(Value::array(hash));
+        let kind = from_hash(*hash);
+        hash.give_up(req);
         match kind {
             Some(kind) => set_zone(req, object, kind),
             None => Err(throw_error(
@@ -756,19 +759,22 @@ impl DateTimeZone {
     /// ))
     /// ```
     #[php(tentative)]
-    fn __set_state(req: &mut Request, array: PhpArray) -> Result<Instance<DateTimeZone>, Thrown> {
+    fn __set_state(
+        req: &mut Request,
+        array: PhpArray,
+    ) -> Result<Owner<Instance<DateTimeZone>>, Thrown> {
         let hash = array;
         let class = class_id(req, "DateTimeZone")?;
         let object = new_object(req, class)?;
         let Some(kind) = from_hash(hash) else {
-            req.release(object.as_value());
+            object.give_up(req);
             return Err(throw_error(
                 req,
                 "Error",
                 "Invalid serialization data for DateTimeZone object",
             ));
         };
-        set_zone(req, object, kind)?;
-        Ok(Instance::of(object))
+        set_zone(req, *object, kind)?;
+        Ok(object.into_instance())
     }
 }

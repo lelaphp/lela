@@ -13,7 +13,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, pending, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key as ArrayKey, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key as ArrayKey, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::constants::{
     OPENSSL_KEYTYPE_DH, OPENSSL_KEYTYPE_DSA, OPENSSL_KEYTYPE_EC, OPENSSL_KEYTYPE_ED448,
@@ -88,7 +88,7 @@ pub(crate) fn object_of(
     req: &mut Request,
     pkey: PKey,
     private: bool,
-) -> Result<Instance<OpenSSLAsymmetricKey>, Thrown> {
+) -> Result<Owner<Instance<OpenSSLAsymmetricKey>>, Thrown> {
     let Some(class) = lookup_class(req, b"OpenSSLAsymmetricKey")? else {
         return Err(fatal(
             req,
@@ -100,7 +100,15 @@ pub(crate) fn object_of(
         payload.pkey = Some(pkey);
         payload.private = private;
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
+}
+
+/// `zval_try_get_string`'s bytes, the string given up once read.
+fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let text = to_string(req, value)?;
+    let bytes = text.as_bytes().to_vec();
+    text.give_up(req);
+    Ok(bytes)
 }
 
 /// The key an `OpenSSLAsymmetricKey` holds, and whether it is private.
@@ -200,10 +208,7 @@ pub(crate) fn key_from(
             defer(req, thrown);
             return Ok(None);
         };
-        phrase = Some(match given.as_ref() {
-            ValueRef::Str(s) => s.as_bytes().to_vec(),
-            _ => to_string(req, &given)?.as_bytes().to_vec(),
-        });
+        phrase = Some(string_bytes(req, &given)?);
         let Some(inner) = array.get(&ArrayKey::Int(0)) else {
             let thrown = throw_error(req, "ValueError", form);
             defer(req, thrown);
@@ -240,8 +245,10 @@ pub(crate) fn key_from(
         if !matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             return Ok(None);
         }
-        let text = to_string(req, &value)?;
-        let text = text.as_bytes();
+        let owned = to_string(req, &value)?;
+        let bytes = owned.as_bytes().to_vec();
+        owned.give_up(req);
+        let text = bytes.as_slice();
         let mut file: Option<CString> = None;
         if text.len() > 7 && text.starts_with(b"file://") {
             let Some(path) = check_path(req, text, Origin::Arg(arg), true) else {
@@ -347,7 +354,7 @@ pub(crate) fn key_from(
 fn openssl_pkey_new(
     req: &mut Request,
     #[php(default = null)] options: Option<PhpArray>,
-) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<OpenSSLAsymmetricKey>>>, Thrown> {
     if let Some(array) = options
         && let Some((kind, data)) = keydata::entry(array)
     {
@@ -518,7 +525,7 @@ fn openssl_pkey_export(
             return Ok(false);
         }
         let pem = PhpString::new(req, &out.contents())?;
-        output.set(req, Untyped(Value::string(pem)))?;
+        output.set(req, Untyped(Value::string(pem.hand_on_unmigrated())))?;
         Ok(true)
     })
 }
@@ -544,7 +551,7 @@ fn openssl_pkey_export(
 fn openssl_pkey_get_public(
     req: &mut Request,
     public_key: Untyped<Value>,
-) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<OpenSSLAsymmetricKey>>>, Thrown> {
     finish(req, move |req| {
         let arg = Arg::new(1, "public_key");
         let Some(pkey) = key_from(req, &public_key.0, Half::Public, None, arg)? else {
@@ -605,7 +612,7 @@ fn openssl_pkey_get_private(
     req: &mut Request,
     #[php(sensitive)] private_key: Untyped<Value>,
     #[php(sensitive, default = null)] passphrase: Passed<Option<PhpString>>,
-) -> Result<OrFalse<Instance<OpenSSLAsymmetricKey>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<OpenSSLAsymmetricKey>>>, Thrown> {
     finish(req, move |req| {
         let phrase = match &passphrase {
             Passed::Omitted => Some(Vec::new()),
@@ -756,7 +763,7 @@ fn layout(kind: KeyKind) -> Option<Layout> {
 fn openssl_pkey_get_details(
     req: &mut Request,
     key: Instance<OpenSSLAsymmetricKey>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let (pkey, _) = held(req, key)?;
     let Some(pem) = pkey.public_pem() else {
         store_errors(req);
@@ -788,7 +795,7 @@ fn openssl_pkey_get_details(
                 put_bytes(req, &mut inner, entry, &bytes)?;
             }
         }
-        put(req, &mut out, name, Value::array(inner))?;
+        put(req, &mut out, name, inner.into_value().hand_on_unmigrated())?;
     }
     put(req, &mut out, b"type", Value::int(key_type(kind)))?;
     Ok(OrFalse::Value(out))
@@ -831,7 +838,7 @@ fn openssl_dh_compute_key(
     req: &mut Request,
     public_key: PhpString,
     #[php(sensitive)] private_key: Instance<OpenSSLAsymmetricKey>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     check_int_len(req, public_key.as_bytes().len(), "pub_key", 1)?;
     let (pkey, _) = held(req, private_key)?;
     if !pkey.is_dh() {
@@ -878,7 +885,7 @@ fn openssl_pkey_derive(
     public_key: Untyped<Value>,
     #[php(sensitive)] private_key: Untyped<Value>,
     #[php(default = 0)] key_length: Passed<i64>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     finish(req, move |req| {
         let length = match key_length {
             Passed::Omitted => 0,
@@ -923,14 +930,14 @@ fn openssl_pkey_derive(
 /// bool(true)
 /// ```
 #[php_function]
-fn openssl_get_curve_names(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn openssl_get_curve_names(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(names) = ffi::cipher::curve_names() else {
         return Ok(OrFalse::False);
     };
     let mut out = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, &name)?;
-        out.append(req, Value::string(name))?;
+        out.append(req, Value::string(name.hand_on_unmigrated()))?;
     }
     Ok(OrFalse::Value(out))
 }

@@ -6,6 +6,7 @@ use std::os::fd::OwnedFd;
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{FdStream, Request, Stream, Streams as _};
+use php_ext::values::Owner;
 
 use crate::cdb::{Maker, Reader};
 use crate::flatfile::Flatfile;
@@ -413,7 +414,7 @@ impl KeptFd {
 
     /// The stream made again over the fd at the position it held, as php's
     /// persistent stream is found again.
-    fn reopen(self, req: &mut Request, mode: &[u8]) -> Result<Stream, Thrown> {
+    fn reopen(self, req: &mut Request, mode: &[u8]) -> Result<Owner<Stream>, Thrown> {
         let position = self.position;
         req.stream_from_fd(self.fd, FdStream::Kept { mode, position })
     }
@@ -457,9 +458,11 @@ impl Kept {
             test: false,
         }
         .file_mode();
-        let store = self.store.map(|fd| fd.reopen(req, mode))?;
+        let store = self
+            .store
+            .map(|fd| fd.reopen(req, mode).map(Owner::hand_on_unmigrated))?;
         let lock_file = match self.lock_file {
-            Some(fd) => Some(fd.reopen(req, b"rb")?),
+            Some(fd) => Some(fd.reopen(req, b"rb")?.hand_on_unmigrated()),
             None => None,
         };
         Ok(Link {

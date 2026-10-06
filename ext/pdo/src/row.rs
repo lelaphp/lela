@@ -93,7 +93,7 @@ pub(super) fn lazy(req: &mut Request, object: PhpObject) -> Result<Value, Thrown
             "InternalError: PDORow is not declared",
         ));
     };
-    let row = new_object(req, class)?;
+    let row = new_object(req, class)?.hand_on_unmigrated();
     req.addref(&object.as_value());
     if let Some(r) = row.native_mut::<Row>(req) {
         r.stmt = Some(object);
@@ -198,7 +198,9 @@ impl ObjectHandlers for Handlers {
         } else {
             PropertyRead::Warning
         };
-        self.read_property(req, object, name.as_bytes(), how)
+        let read = self.read_property(req, object, name.as_bytes(), how);
+        name.give_up(req);
+        read
     }
 
     fn write_property(
@@ -293,7 +295,9 @@ impl ObjectHandlers for Handlers {
         } else {
             PropertyTest::Isset
         };
-        self.has_property(req, object, name.as_bytes(), test)
+        let has = self.has_property(req, object, name.as_bytes(), test);
+        name.give_up(req);
+        has
     }
 
     fn unset_property(
@@ -333,7 +337,7 @@ impl ObjectHandlers for Handlers {
             req.addref(&value);
             out.set(req, key, value)?;
         }
-        Ok(Some(out.into()))
+        Ok(Some(out.hand_on_unmigrated().into()))
     }
 
     fn properties_overloaded(&self) -> bool {
@@ -370,13 +374,14 @@ impl ObjectHandlers for Handlers {
                 continue;
             }
             let value = crate::fetch::value(req, stmt, i64::try_from(at).unwrap_or(-1), None)?;
-            let key = PhpString::new(req, name)?;
-            match rows
-                .iter_mut()
-                .find(|(k, _)| matches!(k, Key::Str(k) if k.as_bytes() == name.as_slice()))
+            if let Some(at) = rows
+                .iter()
+                .position(|(k, _)| matches!(k, Key::Str(k) if k.as_bytes() == name.as_slice()))
             {
-                Some(slot) => slot.1 = value,
-                None => rows.push((Key::Str(key), value)),
+                rows[at].1 = value;
+            } else {
+                let key = PhpString::new(req, name)?.hand_on_unmigrated();
+                rows.push((Key::Str(key), value));
             }
         }
         Ok(PropertiesFor::Rows(rows))

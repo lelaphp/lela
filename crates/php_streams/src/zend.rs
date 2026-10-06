@@ -56,7 +56,7 @@ fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown>
 fn spend(req: &mut Request) {
     let kind = req.types().stream;
     if let Ok(opened) = Resource::bare(req, kind) {
-        req.release(opened.as_value());
+        opened.give_up(req);
     }
 }
 
@@ -65,7 +65,9 @@ fn spend(req: &mut Request) {
 fn get_line(req: &mut Request, value: &Value) -> Option<Vec<u8>> {
     let stream = req.stream_of(value)?;
     let line = stream.get_line(req, None).ok().flatten()?;
-    Some(line.as_bytes().to_vec())
+    let bytes = line.as_bytes().to_vec();
+    line.give_up(req);
+    Some(bytes)
 }
 
 /// `php_resolve_path` (`Z/main/fopen_wrappers.c:500`) over the ini's

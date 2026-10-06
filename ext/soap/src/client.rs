@@ -9,7 +9,9 @@ use php_ext::call::{call_method, lookup_function};
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, argument_error, docref, fatal, throw_value};
 use php_ext::request::{Request, StreamCtx};
-use php_ext::values::{Key as PhpKey, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{
+    Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+};
 use php_ext_libxml::ffi::{Library, Node, Save};
 
 use crate::classes::SoapFault;
@@ -114,9 +116,8 @@ fn fail<T>(req: &mut Request, this: PhpObject, code: &str, message: &str) -> R<T
                     None,
                     b"en",
                 )?;
-                let value = fault.as_value();
-                let thrown = throw_value(req, &value);
-                req.release(value);
+                let thrown = throw_value(req, &fault.as_value());
+                fault.give_up(req);
                 Err(thrown)
             } else {
                 Err(fatal(req, message))
@@ -347,7 +348,7 @@ impl SoapClient {
         }
         let output = if outputHeaders.is_given() {
             let fresh = PhpArray::new(req)?;
-            outputHeaders.set(req, Untyped(Value::array(fresh)))?;
+            outputHeaders.set(req, Untyped(fresh.into_value().hand_on_unmigrated()))?;
             Some(())
         } else {
             None
@@ -398,15 +399,15 @@ impl SoapClient {
     /// NULL
     /// ```
     #[php(tentative)]
-    fn __getFunctions(req: &mut Request, this: This<Self>) -> R<Option<PhpArray>> {
+    fn __getFunctions(req: &mut Request, this: This<Self>) -> R<Option<Owner<PhpArray>>> {
         let Some(sdl) = this_sdl(req, this.object()) else {
             return Ok(None);
         };
         let mut out = PhpArray::new(req)?;
         for f in sdl.functions.values() {
             let s = function_to_string(&sdl, f);
-            let v = Value::string(PhpString::new(req, &s)?);
-            out.append(req, v)?;
+            let v = PhpString::new(req, &s)?;
+            out.append(req, Value::string(v.hand_on_unmigrated()))?;
         }
         Ok(Some(out))
     }
@@ -421,7 +422,7 @@ impl SoapClient {
     /// NULL
     /// ```
     #[php(tentative)]
-    fn __getTypes(req: &mut Request, this: This<Self>) -> R<Option<PhpArray>> {
+    fn __getTypes(req: &mut Request, this: This<Self>) -> R<Option<Owner<PhpArray>>> {
         let Some(sdl) = this_sdl(req, this.object()) else {
             return Ok(None);
         };
@@ -432,8 +433,8 @@ impl SoapClient {
                 if let Some(t) = sdl.ty(*id) {
                     type_to_string(&sdl, t, &mut s, 0);
                 }
-                let v = Value::string(PhpString::new(req, &s)?);
-                out.append(req, v)?;
+                let v = PhpString::new(req, &s)?;
+                out.append(req, Value::string(v.hand_on_unmigrated()))?;
             }
         }
         Ok(Some(out))
@@ -527,7 +528,7 @@ impl SoapClient {
         version: i64,
         #[php(default = false)] oneWay: bool,
         #[php(default = null)] uriParserClass: Option<PhpString>,
-    ) -> R<Option<PhpString>> {
+    ) -> R<Option<Owner<PhpString>>> {
         let object = this.object();
         let mut one_way = oneWay;
         if req.state::<State>().features & 2 != 0 {
@@ -594,8 +595,7 @@ impl SoapClient {
         let cookies = client_slot(object, ClientSlot::Cookies);
         let mut cookies = match cookies.as_ref() {
             ValueRef::Array(a) => {
-                let mut a = *a;
-                req.addref(&Value::array(a));
+                let mut a = Owner::take(req, *a);
                 a.separate(req)?;
                 a
             }
@@ -610,10 +610,19 @@ impl SoapClient {
                 req.addref(&Value::string(v));
                 cookie.set(req, PhpKey::Int(0), Value::string(v))?;
                 req.addref(&Value::string(name));
-                cookies.set(req, PhpKey::from_string(name), Value::array(cookie))?;
+                cookies.set(
+                    req,
+                    PhpKey::from_string(name),
+                    cookie.into_value().hand_on_unmigrated(),
+                )?;
             }
         }
-        set_client_slot(req, object, ClientSlot::Cookies, Value::array(cookies))
+        set_client_slot(
+            req,
+            object,
+            ClientSlot::Cookies,
+            cookies.into_value().hand_on_unmigrated(),
+        )
     }
 
     /// `SoapClient::__getCookies(): array`.
@@ -627,15 +636,12 @@ impl SoapClient {
     /// ```
     #[php(tentative)]
     #[allow(clippy::unnecessary_wraps)] // the native's return shape
-    fn __getCookies(req: &mut Request, this: This<Self>) -> R<PhpArray> {
+    fn __getCookies(req: &mut Request, this: This<Self>) -> R<Owner<PhpArray>> {
         match client_slot(this.object(), ClientSlot::Cookies)
             .as_array()
             .copied()
         {
-            Some(a) => {
-                req.addref(&Value::array(a));
-                Ok(a)
-            }
+            Some(a) => Ok(Owner::take(req, a)),
             None => PhpArray::new(req),
         }
     }
@@ -679,7 +685,12 @@ impl SoapClient {
                 let mut list = PhpArray::new(req)?;
                 req.addref(&headers);
                 list.append(req, headers)?;
-                set_client_slot(req, object, ClientSlot::DefaultHeaders, Value::array(list))?;
+                set_client_slot(
+                    req,
+                    object,
+                    ClientSlot::DefaultHeaders,
+                    list.into_value().hand_on_unmigrated(),
+                )?;
             }
             _ => {
                 let shown = value_name(req, &headers);
@@ -803,7 +814,8 @@ fn construct(
             req.addref(&v);
             context
         } else {
-            StreamCtx::alloc(req)?
+            // The client's slot keeps it, as the fetched one's.
+            StreamCtx::alloc(req)?.hand_on_unmigrated()
         };
         match str_option(*ht, b"location") {
             Some(v) => set_str(req, this, ClientSlot::Location, v)?,
@@ -973,7 +985,12 @@ fn construct(
         req.state::<State>().soap_version = old;
         let loaded = loaded?;
         let object = new_sdl_object(req, loaded.clone())?;
-        set_client_slot(req, this, ClientSlot::Sdl, object.as_value())?;
+        set_client_slot(
+            req,
+            this,
+            ClientSlot::Sdl,
+            object.into_value().hand_on_unmigrated(),
+        )?;
         sdl = Some(loaded);
     }
     if let Some(ht) = typemap_ht {
@@ -982,11 +999,16 @@ fn construct(
                 let mut shown = PhpArray::new(req)?;
                 for (k, _) in t.iter() {
                     if let crate::table::Key::Str(name) = k {
-                        let key = PhpKey::Str(PhpString::new(req, name)?);
+                        let key = PhpKey::Str(PhpString::new(req, name)?.hand_on_unmigrated());
                         shown.set(req, key, Value::null())?;
                     }
                 }
-                set_client_slot(req, this, ClientSlot::Typemap, Value::array(shown))?;
+                set_client_slot(
+                    req,
+                    this,
+                    ClientSlot::Typemap,
+                    shown.into_value().hand_on_unmigrated(),
+                )?;
                 let old = this
                     .native_mut::<Client>(req)
                     .and_then(|c| c.typemap.replace(t));
@@ -1055,7 +1077,7 @@ fn do_request(
     action: Option<&[u8]>,
     version: i64,
     one_way: bool,
-) -> Res<(bool, Option<Value>)> {
+) -> Res<(bool, Option<Owner<Value>>)> {
     let (buf, _) = Save::doc(request, 0, false, None);
     let Some(buf) = buf else {
         add_soap_fault(
@@ -1066,24 +1088,25 @@ fn do_request(
             None,
             None,
             b"en",
-        )?;
+        )?
+        .give_up(req);
         return Ok((false, None));
     };
-    let p0 = Value::string(PhpString::new(req, &buf)?);
-    let p1 = Value::string(PhpString::new(req, location)?);
-    let p2 = Value::string(PhpString::new(req, action.unwrap_or_default())?);
-    let params = [p0, p1, p2, Value::int(version), Value::bool(one_way)];
+    let p0 = PhpString::new(req, &buf)?.into_value();
+    let p1 = PhpString::new(req, location)?.into_value();
+    let p2 = PhpString::new(req, action.unwrap_or_default())?.into_value();
+    let params = [*p0, *p1, *p2, Value::int(version), Value::bool(one_way)];
     let trace = matches!(
         client_slot(this, ClientSlot::Trace).as_ref(),
         ValueRef::Bool(true)
     );
     if trace {
         req.addref(&p0);
-        set_client_slot(req, this, ClientSlot::LastRequest, p0)?;
+        set_client_slot(req, this, ClientSlot::LastRequest, *p0)?;
     }
     let response = call_method(req, &this, b"__dorequest", &params);
     for p in [p2, p1, p0] {
-        req.release(p);
+        p.give_up(req);
     }
     let response = response?;
     let mut ret = true;
@@ -1100,12 +1123,13 @@ fn do_request(
                 None,
                 None,
                 b"en",
-            )?;
+            )?
+            .give_up(req);
         }
         ret = false;
     } else if trace {
         req.addref(&response);
-        set_client_slot(req, this, ClientSlot::LastResponse, response)?;
+        set_client_slot(req, this, ClientSlot::LastResponse, *response)?;
     }
     if ret
         && client_slot(this, ClientSlot::SoapFault)
@@ -1271,19 +1295,19 @@ fn soap_call_body(
                         sdl,
                         output_headers,
                     );
-                    req.release(resp);
+                    resp.give_up(req);
                     let (r, v) = parsed?;
                     ret = r;
                     return_value = v;
                 } else {
-                    req.release(resp);
+                    resp.give_up(req);
                 }
             }
         } else {
             let mut error = b"Function (\"".to_vec();
             error.extend_from_slice(function);
             error.extend_from_slice(b"\") is not a valid method for this service");
-            add_soap_fault(req, this, b"Client", &error, None, None, b"en")?;
+            add_soap_fault(req, this, b"Client", &error, None, None, b"en")?.give_up(req);
         }
     } else {
         let uri = client_slot(this, ClientSlot::Uri);
@@ -1296,7 +1320,8 @@ fn soap_call_body(
                 None,
                 None,
                 b"en",
-            )?;
+            )?
+            .give_up(req);
         } else if location.is_none() {
             add_soap_fault(
                 req,
@@ -1306,7 +1331,8 @@ fn soap_call_body(
                 None,
                 None,
                 b"en",
-            )?;
+            )?
+            .give_up(req);
         } else {
             let call_uri = call_uri
                 .map(<[u8]>::to_vec)
@@ -1354,12 +1380,12 @@ fn soap_call_body(
                         None,
                         output_headers,
                     );
-                    req.release(resp);
+                    resp.give_up(req);
                     let (r, v) = parsed?;
                     ret = r;
                     return_value = v;
                 } else {
-                    req.release(resp);
+                    resp.give_up(req);
                 }
             }
         }
@@ -1371,8 +1397,7 @@ fn soap_call_body(
             return_value = owned(req, fault);
         } else {
             let made = add_soap_fault(req, this, b"Client", b"Unknown Error", None, None, b"en")?;
-            return_value = made.as_value();
-            req.addref(&return_value);
+            return_value = made.into_value().hand_on_unmigrated();
         }
     } else if fault.as_object().is_some() {
         req.release(return_value);

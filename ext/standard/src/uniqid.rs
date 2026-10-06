@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 /// The request state: `prev_tv`, the last time a call answered with.
 #[derive(Default)]
@@ -79,7 +79,7 @@ fn uniqid(
     req: &mut Request,
     #[php(default = "")] prefix: PhpString,
     #[php(default = false)] more_entropy: bool,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let previous = req.state::<crate::State>().uniqid.prev;
     let mut tv = now();
     while Some(tv) == previous {

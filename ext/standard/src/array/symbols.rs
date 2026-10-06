@@ -12,7 +12,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpRef, PhpString, Value, ValueRef};
 
 use super::constants::{
     EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
@@ -66,7 +66,7 @@ fn assign_ref(
         *cell
     } else {
         req.addref(&value);
-        let cell = PhpRef::new(req, value)?;
+        let cell = PhpRef::new(req, value)?.hand_on_unmigrated();
         let written = key_copy(req, key);
         array.set(req, written, cell.as_value())?;
         cell
@@ -411,7 +411,7 @@ fn compact(
     req: &mut Request,
     var_name: Untyped<Value>,
     var_names: Variadic<Untyped<Value>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     req.forbid_dynamic_call()?;
     let arguments: Vec<Value> = std::iter::once(var_name.0)
         .chain(var_names.0.into_iter().map(|name| name.0))
@@ -419,7 +419,10 @@ fn compact(
     let mut out = PhpArray::new(req)?;
     for (at, argument) in arguments.iter().enumerate() {
         let position = at + 1;
-        compact_var(req, &mut out, argument, position)?;
+        if let Err(thrown) = compact_var(req, &mut out, argument, position) {
+            out.give_up(req);
+            return Err(thrown);
+        }
     }
     Ok(out)
 }
@@ -427,7 +430,7 @@ fn compact(
 /// `php_compact_var`.
 fn compact_var(
     req: &mut Request,
-    out: &mut PhpArray,
+    out: &mut Owner<PhpArray>,
     entry: &Value,
     position: usize,
 ) -> Result<(), Thrown> {
@@ -438,7 +441,7 @@ fn compact_var(
             if let Some(value) = req.caller_var(&bytes) {
                 let value = value.deref();
                 req.addref(&value);
-                let key = Key::from_string(PhpString::new(req, &bytes)?);
+                let key = Key::from_string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
                 out.set(req, key, value)?;
             } else if bytes == b"this" {
                 // `zend_get_this_object`: the object the caller runs on,
@@ -446,7 +449,7 @@ fn compact_var(
                 if let Some(object) = req.this_object() {
                     let value = object.as_value();
                     req.addref(&value);
-                    let key = Key::from_string(PhpString::new(req, &bytes)?);
+                    let key = Key::from_string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
                     out.set(req, key, value)?;
                 }
             } else {

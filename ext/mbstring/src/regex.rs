@@ -24,7 +24,7 @@ use php_ext::abi::{Callable, OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `ONIG_OPTION_*`.
 const IGNORECASE: u32 = 1;
@@ -426,7 +426,7 @@ fn groups(
     region: &Region,
     subject: &[u8],
     empty_ok: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     let all = region.groups();
     let slice = |beg: i32, end: i32| -> Option<(usize, usize)> {
@@ -435,10 +435,11 @@ fn groups(
     };
     for (i, &(beg, end)) in all.iter().enumerate() {
         let value = match slice(beg, end) {
-            Some((b, e)) => Value::string(new_string(req, &subject[b..e])?),
-            None => Value::bool(false),
+            Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
+            None => Owner::take(req, Value::bool(false)),
         };
-        out.set(req, Key::Int(i64::try_from(i).unwrap_or(0)), value)?;
+        let at = Key::Int(i64::try_from(i).unwrap_or(0));
+        out.set(req, at, value.hand_on_unmigrated())?;
     }
     for (name, group) in re.regex.names(region) {
         let (beg, end) = usize::try_from(group)
@@ -450,11 +451,11 @@ fn groups(
             .zip(usize::try_from(end).ok())
             .filter(|(b, e)| b < e && *e <= subject.len());
         let value = match named {
-            Some((b, e)) => Value::string(new_string(req, &subject[b..e])?),
-            None => Value::bool(false),
+            Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
+            None => Owner::take(req, Value::bool(false)),
         };
-        let key = Key::from_string(new_string(req, &name)?);
-        out.set(req, key, value)?;
+        let key = Key::from_string(new_string(req, &name)?.hand_on_unmigrated());
+        out.set(req, key, value.hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -472,7 +473,7 @@ fn ereg(
     }
     if matches.is_given() {
         let empty = PhpArray::new(req)?;
-        matches.set(req, Untyped(Value::array(empty)))?;
+        matches.set(req, Untyped(empty.into_value().hand_on_unmigrated()))?;
     }
     let enc = mbctype(req);
     if !check(string.as_bytes(), enc.mbfl) {
@@ -492,7 +493,7 @@ fn ereg(
     }
     if matches.is_given() {
         let found = groups(req, &re, &region, subject, false)?;
-        matches.set(req, Untyped(Value::array(found)))?;
+        matches.set(req, Untyped(found.into_value().hand_on_unmigrated()))?;
     }
     Ok(true)
 }
@@ -698,7 +699,7 @@ fn replace(
     string: PhpString,
     options: Option<PhpString>,
     base: u32,
-) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
     let enc = mbctype(req);
     if !check(string.as_bytes(), enc.mbfl) {
         return Ok(None);
@@ -745,7 +746,7 @@ fn replace(
                         usize::try_from(end).unwrap_or(0),
                     );
                     let s = new_string(req, subject.get(b..e).unwrap_or_default())?;
-                    subpats.append(req, Value::string(s))?;
+                    subpats.append(req, s.into_value().hand_on_unmigrated())?;
                 }
                 for (name, group) in re.regex.names(&region) {
                     let (beg, end) = usize::try_from(group)
@@ -757,18 +758,20 @@ fn replace(
                         .zip(usize::try_from(end).ok())
                         .filter(|(b, e)| b < e && *e <= subject.len());
                     let value = match named {
-                        Some((b, e)) => Value::string(new_string(req, &subject[b..e])?),
-                        None => Value::bool(false),
+                        Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
+                        None => Owner::take(req, Value::bool(false)),
                     };
-                    let key = Key::from_string(new_string(req, &name)?);
-                    subpats.set(req, key, value)?;
+                    let key = Key::from_string(new_string(req, &name)?.hand_on_unmigrated());
+                    subpats.set(req, key, value.hand_on_unmigrated())?;
                 }
-                let returned = php_ext::call::call(req, callback, &[Value::array(subpats)]);
-                req.release(Value::array(subpats));
+                let returned = php_ext::call::call(req, callback, &[Value::array(*subpats)]);
+                subpats.give_up(req);
                 let returned = returned?;
-                let text = php_ext::coerce::to_string(req, &returned)?;
+                let text = php_ext::coerce::to_string(req, &returned);
+                returned.give_up(req);
+                let text = text?;
                 out.extend_from_slice(text.as_bytes());
-                req.release(returned);
+                text.give_up(req);
             }
         }
         let n = usize::try_from(end0).unwrap_or(pos);
@@ -813,7 +816,7 @@ pub(crate) fn mb_ereg_replace(
     replacement: PhpString,
     string: PhpString,
     #[php(default = null)] options: Option<PhpString>,
-) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
     replace(
         req,
         pattern,
@@ -839,7 +842,7 @@ pub(crate) fn mb_eregi_replace(
     replacement: PhpString,
     string: PhpString,
     #[php(default = null)] options: Option<PhpString>,
-) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
     replace(
         req,
         pattern,
@@ -866,7 +869,7 @@ pub(crate) fn mb_ereg_replace_callback(
     callback: Callable,
     string: PhpString,
     #[php(default = null)] options: Option<PhpString>,
-) -> Result<Option<OrFalse<PhpString>>, Thrown> {
+) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
     replace(
         req,
         pattern,
@@ -908,7 +911,7 @@ pub(crate) fn mb_split(
     pattern: PhpString,
     string: PhpString,
     #[php(default = -1)] limit: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     // `zend_ulong count`: the limit read unsigned, so a negative one is
     // all but unlimited, and one fewer than asked split off.
     let mut count = limit.cast_unsigned().saturating_sub(1);
@@ -947,7 +950,7 @@ pub(crate) fn mb_split(
         if pos < end {
             if beg < subject.len() && beg >= chunk {
                 let s = new_string(req, &subject[chunk..beg])?;
-                out.append(req, Value::string(s))?;
+                out.append(req, s.into_value().hand_on_unmigrated())?;
                 count = count.wrapping_sub(1);
             } else {
                 failed = Some(-2);
@@ -966,11 +969,11 @@ pub(crate) fn mb_split(
             Level::Warning,
             &format!("mbregex search failure in mbsplit(): {text}"),
         );
-        req.release(Value::array(out));
+        out.give_up(req);
         return Ok(OrFalse::False);
     }
     let tail = new_string(req, subject.get(chunk..).unwrap_or_default())?;
-    out.append(req, Value::string(tail))?;
+    out.append(req, tail.into_value().hand_on_unmigrated())?;
     Ok(OrFalse::Value(out))
 }
 
@@ -1110,7 +1113,7 @@ pub(crate) fn mb_ereg_search_pos(
     req: &mut Request,
     #[php(default = null)] pattern: Option<PhpString>,
     #[php(default = null)] options: Option<PhpString>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if !search(req, pattern, options)? {
         return Ok(OrFalse::False);
     }
@@ -1145,7 +1148,7 @@ pub(crate) fn mb_ereg_search_regs(
     req: &mut Request,
     #[php(default = null)] pattern: Option<PhpString>,
     #[php(default = null)] options: Option<PhpString>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if !search(req, pattern, options)? {
         return Ok(OrFalse::False);
     }
@@ -1212,7 +1215,9 @@ pub(crate) fn mb_ereg_search_init(
 /// }
 /// ```
 #[php_function]
-pub(crate) fn mb_ereg_search_getregs(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+pub(crate) fn mb_ereg_search_getregs(
+    req: &mut Request,
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let st = state(req);
     let (Some(region), Some(subject), Some(re)) =
         (st.search_regs.take(), st.search_str, st.search_re.clone())
@@ -1282,7 +1287,7 @@ pub(crate) fn mb_ereg_search_setpos(req: &mut Request, offset: i64) -> Result<bo
 pub(crate) fn mb_regex_set_options(
     req: &mut Request,
     #[php(default = null)] options: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (previous, previous_syntax) = {
         let st = state(req);
         (st.options, st.syntax)
@@ -1312,7 +1317,7 @@ pub(crate) fn mb_regex_set_options(
 pub(crate) fn mb_regex_encoding(
     req: &mut Request,
     #[php(default = null)] encoding: Option<PhpString>,
-) -> Result<Union<PhpString, bool>, Thrown> {
+) -> Result<Union<Owner<PhpString>, bool>, Thrown> {
     let Some(name) = encoding else {
         let current = mbctype(req);
         return Ok(Union::A(new_string(req, current.name().as_bytes())?));

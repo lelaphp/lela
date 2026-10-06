@@ -7,7 +7,7 @@ use php_ext::coerce::{
 };
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Library, Node, Save};
 
 use super::{
@@ -46,7 +46,7 @@ pub(super) fn to_zval_string(req: &mut Request, data: Node, space: Space) -> Res
         return Ok(Value::null());
     }
     let Some(child) = data.children() else {
-        return string(req, b"");
+        return string(req, b"").map(Owner::hand_on_unmigrated);
     };
     let single = child.next().is_none();
     match child.kind() {
@@ -67,9 +67,11 @@ pub(super) fn to_zval_string(req: &mut Request, data: Node, space: Space) -> Res
                 Some(enc) => Library::from_utf8(&enc, &content).unwrap_or(content),
                 None => content,
             };
-            string(req, &out)
+            string(req, &out).map(Owner::hand_on_unmigrated)
         }
-        Kind::CData if single => string(req, &child.content().unwrap_or_default()),
+        Kind::CData if single => {
+            string(req, &child.content().unwrap_or_default()).map(Owner::hand_on_unmigrated)
+        }
         _ => Err(violation()),
     }
 }
@@ -80,7 +82,7 @@ pub(super) fn to_zval_base64(req: &mut Request, data: Node) -> Res<Value> {
         return Ok(Value::null());
     }
     let Some(child) = data.children() else {
-        return string(req, b"");
+        return string(req, b"").map(Owner::hand_on_unmigrated);
     };
     let content = match child.kind() {
         Kind::Text if child.next().is_none() => collapse_in_place(child),
@@ -88,7 +90,7 @@ pub(super) fn to_zval_base64(req: &mut Request, data: Node) -> Res<Value> {
         _ => return Err(violation()),
     };
     match php_ext_standard::base64::decode(&content, false) {
-        Some(bytes) => string(req, &bytes),
+        Some(bytes) => string(req, &bytes).map(Owner::hand_on_unmigrated),
         None => Err(violation()),
     }
 }
@@ -117,7 +119,7 @@ pub(super) fn to_zval_hexbin(req: &mut Request, data: Node) -> Res<Value> {
         return Ok(Value::null());
     }
     let Some(child) = data.children() else {
-        return string(req, b"");
+        return string(req, b"").map(Owner::hand_on_unmigrated);
     };
     let content = match child.kind() {
         Kind::Text if child.next().is_none() => collapse_in_place(child),
@@ -125,7 +127,7 @@ pub(super) fn to_zval_hexbin(req: &mut Request, data: Node) -> Res<Value> {
         _ => return Err(violation()),
     };
     match hex_decode(&content) {
-        Some(bytes) => string(req, &bytes),
+        Some(bytes) => string(req, &bytes).map(Owner::hand_on_unmigrated),
         None => Err(violation()),
     }
 }
@@ -239,7 +241,7 @@ fn left_pending(req: &mut Request, msg: &str) {
 }
 
 /// `get_serialization_string_from_zval`: the string, one owner, the caller's.
-pub(super) fn serialization_string(req: &mut Request, data: &Value) -> Res<PhpString> {
+pub(super) fn serialization_string(req: &mut Request, data: &Value) -> Res<Owner<PhpString>> {
     let data = data.deref();
     match enum_backing(req, &data) {
         Some(EnumBacking::Pure) => {
@@ -262,7 +264,7 @@ pub(super) fn serialization_string(req: &mut Request, data: &Value) -> Res<PhpSt
 pub(super) fn serialization_bytes(req: &mut Request, data: &Value) -> Res<Vec<u8>> {
     let s = serialization_string(req, data)?;
     let out = s.as_bytes().to_vec();
-    req.release(Value::string(s));
+    s.give_up(req);
     Ok(out)
 }
 
@@ -621,8 +623,8 @@ fn list_items(
         if !collapsed.is_empty() {
             for item in collapsed.split(|&c| c == b' ') {
                 let v = string(req, item)?;
-                let r = one(req, cx, v);
-                req.release(v);
+                let r = one(req, cx, *v);
+                v.give_up(req);
                 r?;
             }
         }
@@ -652,7 +654,7 @@ pub(super) fn to_zval_any(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Val
     }
     let dumped = Save::bare(data).unwrap_or_default();
     let end = dumped.iter().position(|&b| b == 0).unwrap_or(dumped.len());
-    string(req, &dumped[..end])
+    string(req, &dumped[..end]).map(Owner::hand_on_unmigrated)
 }
 
 /// `to_xml_any`.
@@ -728,7 +730,7 @@ pub(super) fn to_xml_user(
         let answer = call(req, &callable, &[arg])?;
         if let Some(s) = answer.as_str_bytes().map(<[u8]>::to_vec) {
             let parsed = parse_memory(req, &s);
-            req.release(answer);
+            answer.give_up(req);
             let doc = parsed?;
             if let Some(doc) = doc {
                 if let Some(first) = doc.children() {
@@ -737,7 +739,7 @@ pub(super) fn to_xml_user(
                 doc.free_document();
             }
         } else {
-            req.release(answer);
+            answer.give_up(req);
         }
     }
     let ret = match ret {
@@ -769,9 +771,9 @@ pub(super) fn to_zval_user(req: &mut Request, e: &Enc, node: Node) -> Res<Value>
         return Err(soap_error("Encoding: Error calling from_xml callback"));
     };
     let arg = string(req, &dumped[..end])?;
-    let out = call(req, &callable, &[arg]);
-    req.release(arg);
-    Ok(out?)
+    let out = call(req, &callable, &[*arg]);
+    arg.give_up(req);
+    Ok(out?.hand_on_unmigrated())
 }
 
 #[cfg(test)]

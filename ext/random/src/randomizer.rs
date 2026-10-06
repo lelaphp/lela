@@ -9,7 +9,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, arg_value_error, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::rng::Rng;
 use crate::{Algo, Engine, Failure, gammasection};
@@ -57,9 +57,9 @@ fn drawn_string(
     this: PhpObject,
     len: usize,
     f: impl FnOnce(&mut dyn Algo, &mut Vec<u8>) -> Result<(), Failure>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let reserved = PhpString::filled(req, len, |_| ())?;
-    req.release(Value::string(reserved));
+    reserved.give_up(req);
     let mut out = Vec::with_capacity(len);
     draw(req, this, |algo| f(algo, &mut out))?;
     PhpString::new(req, &out)
@@ -135,8 +135,7 @@ impl Randomizer {
     ) -> Result<(), Thrown> {
         let this = this.object();
         let engine = if let Some(engine) = engine.map(|engine| engine.object()) {
-            req.addref(&engine.as_value());
-            engine
+            Owner::take(req, engine)
         } else {
             let Some(secure) = lookup_class(req, b"Random\\Engine\\Secure")? else {
                 return Err(fatal(
@@ -147,16 +146,17 @@ impl Randomizer {
             new_object(req, secure)?
         };
         if this.prop(req, b"engine").is_some() {
-            req.release(engine.as_value());
+            engine.give_up(req);
             return Err(throw_error(
                 req,
                 "Error",
                 "Cannot modify readonly property Random\\Randomizer::$engine",
             ));
         }
-        let name = PhpString::new(req, b"engine")?;
-        this.set_prop(req, name, engine.as_value())?;
-        common_init(req, this, engine);
+        let name = PhpString::new(req, b"engine")?.hand_on_unmigrated();
+        let view = *engine;
+        this.set_prop(req, name, engine.into_value().hand_on_unmigrated())?;
+        common_init(req, this, view);
         Ok(())
     }
 
@@ -318,7 +318,11 @@ impl Randomizer {
     /// c510c70f6daff2b3ea4c
     /// Random\Randomizer::getBytes(): Argument #1 ($length) must be greater than 0
     /// ```
-    fn getBytes(req: &mut Request, this: This<Self>, length: i64) -> Result<PhpString, Thrown> {
+    fn getBytes(
+        req: &mut Request,
+        this: This<Self>,
+        length: i64,
+    ) -> Result<Owner<PhpString>, Thrown> {
         if length < 1 {
             return Err(arg_value_error(req, 1, "be greater than 0"));
         }
@@ -373,7 +377,7 @@ impl Randomizer {
         this: This<Self>,
         string: PhpString,
         length: i64,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         let source = string.as_bytes().to_vec();
         if source.is_empty() {
             return Err(arg_value_error(req, 1, "not be empty"));
@@ -445,7 +449,7 @@ impl Randomizer {
         req: &mut Request,
         this: This<Self>,
         array: PhpArray,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let mut values: Vec<Value> = array.snapshot_refs().into_iter().map(|(_, v)| v).collect();
         let handle = engine(req, this.object())?;
         handle.shuffle(req, &mut values)?;
@@ -470,10 +474,9 @@ impl Randomizer {
         req: &mut Request,
         this: This<Self>,
         bytes: PhpString,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         if bytes.len() < 2 {
-            req.addref(&Value::string(bytes));
-            return Ok(bytes);
+            return Ok(Owner::take(req, bytes));
         }
         let mut out = bytes.as_bytes().to_vec();
         let handle = engine(req, this.object())?;
@@ -509,7 +512,7 @@ impl Randomizer {
         this: This<Self>,
         array: PhpArray,
         num: i64,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let handle = engine(req, this.object())?;
         let keys = handle.pick_keys(req, array, num)?;
         let mut out = PhpArray::new(req)?;
@@ -532,10 +535,10 @@ impl Randomizer {
     /// ```expect
     /// O:17:"Random\Randomizer":1:{i:0;a:1:{s:6:"engine";O:33:"Random\Engine\PcgOneseq128XslRr64":2:{i:0;a:0:{}i:1;a:2:{i:0;s:16:"9cd108b9ceabd26b";i:1;s:16:"df3b50d88069a5ef";}}}}
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let members = crate::members(req, this.object())?;
         let mut out = PhpArray::new(req)?;
-        out.append(req, Value::array(members))?;
+        out.append(req, Value::array(members.hand_on_unmigrated()))?;
         Ok(out)
     }
 

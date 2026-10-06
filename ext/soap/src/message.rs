@@ -10,7 +10,7 @@
 use php_ext::call::lookup_class;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key as PhpKey, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Node, Ns};
 
 use crate::classes::FaultSlot;
@@ -278,27 +278,27 @@ pub(crate) fn serialize_zval(
     parent: Node,
 ) -> Res<Option<Node>> {
     let mut val = val;
-    let mut defval: Option<Value> = None;
+    let mut defval: Option<Owner<Value>> = None;
     let enc = param.and_then(|p| p.encode);
     if let Some(p) = param
         && matches!(val.as_ref(), ValueRef::Undef)
         && let Some(element) = p.element.and_then(|e| sdl.and_then(|s| s.ty(e)))
     {
         if let Some(fixed) = &element.fixed {
-            let v = Value::string(PhpString::new(req, fixed)?);
+            let v = PhpString::new(req, fixed)?.into_value();
+            val = *v;
             defval = Some(v);
-            val = v;
         } else if let Some(def) = &element.def
             && !element.nillable
         {
-            let v = Value::string(PhpString::new(req, def)?);
+            let v = PhpString::new(req, def)?.into_value();
+            val = *v;
             defval = Some(v);
-            val = v;
         }
     }
     let node = master_to_xml(req, cx, enc, val, style, parent);
     if let Some(d) = defval {
-        req.release(d);
+        d.give_up(req);
     }
     let node = node?;
     if let Some(n) = node

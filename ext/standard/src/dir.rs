@@ -65,7 +65,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Request, Resolve, Stream, Streams, Whence};
-use php_ext::values::{PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::set_default_dir;
 use crate::streamsfuncs::{NullContext, context_of};
@@ -233,7 +233,7 @@ impl Directory {
     /// `Directory::read(): string|false`, `PHP_METHOD(Directory, read)`
     /// (`Z/ext/standard/dir.c:294`): the next entry's name, `false` past
     /// the last.
-    fn read(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn read(req: &mut Request, this: This<Self>) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let stream = this_stream(req, this, "read")?;
         Ok(stream.read_dir(req)?.map_or(OrFalse::False, OrFalse::Value))
     }
@@ -282,15 +282,16 @@ fn dir(
     req: &mut Request,
     directory: PathArg,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<OrFalse<Instance<Directory>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Directory>>>, Thrown> {
     let PathArg(directory) = directory;
     let context = context_of(req, context, NullContext::Default)?;
     let Some(stream) = req.with_stream_ctx(context, |req| req.open_dir(directory.as_bytes()))?
     else {
         return Ok(OrFalse::False);
     };
-    set_default_dir(req, Some(stream));
+    set_default_dir(req, Some(*stream));
     let Some(class) = lookup_class(req, b"Directory")? else {
+        stream.give_up(req);
         return Err(php_ext::raising::fatal(
             req,
             "InternalError: dir() without its Directory class",
@@ -299,8 +300,8 @@ fn dir(
     let object = new_object(req, class)?;
     req.addref(&Value::string(directory));
     object.set_slot(req, 0, Value::string(directory))?;
-    object.set_slot(req, 1, stream.as_value())?;
-    Ok(OrFalse::Value(Instance::of(object)))
+    object.set_slot(req, 1, stream.into_value().hand_on_unmigrated())?;
+    Ok(OrFalse::Value(object.into_instance()))
 }
 
 /// `php_dir_get_directory_stream_from_this` (`Z/ext/standard/dir.c:184`):
@@ -427,7 +428,7 @@ mod libc_errno {
 /// getcwd() expects exactly 0 arguments, 1 given
 /// ```
 #[php_function]
-fn getcwd(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+fn getcwd(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let cwd = req.cwd();
     Ok(OrFalse::Value(PhpString::new(
         req,
@@ -484,7 +485,7 @@ fn scandir(
     directory: PathArg,
     #[php(default = SCANDIR_SORT_ASCENDING)] sorting_order: i64,
     #[php(default = null)] context: Option<Resource>,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let PathArg(directory) = directory;
     let order = sorting_order;
     if directory.as_bytes().is_empty() {
@@ -512,11 +513,21 @@ fn scandir(
         docref(req, Level::Warning, &format!("(errno {code}): {text}"));
         return Ok(OrFalse::False);
     };
-    let mut names: Vec<PhpString> = Vec::new();
-    while let Some(name) = stream.read_dir(req)? {
-        names.push(name);
+    let mut names: Vec<Owner<PhpString>> = Vec::new();
+    loop {
+        match stream.read_dir(req) {
+            Ok(Some(name)) => names.push(name),
+            Ok(None) => break,
+            Err(thrown) => {
+                for name in names {
+                    name.give_up(req);
+                }
+                stream.give_up(req);
+                return Err(thrown);
+            }
+        }
     }
-    stream.free(req);
+    stream.hand_on_unmigrated().free(req);
     match order {
         SCANDIR_SORT_NONE => {}
         SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a.as_bytes(), b.as_bytes())),
@@ -524,7 +535,7 @@ fn scandir(
     }
     let mut array = PhpArray::new(req)?;
     for name in names {
-        array.append(req, Value::string(name))?;
+        array.append(req, Value::string(name.hand_on_unmigrated()))?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -579,7 +590,7 @@ fn glob(
     req: &mut Request,
     pattern: PathArg,
     #[php(default = 0)] flags: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let PathArg(pattern) = pattern;
     if pattern.len() >= crate::virtual_cwd::MAXPATHLEN {
         let text = format!(
@@ -618,7 +629,7 @@ fn glob(
         Err(_) => return Ok(OrFalse::False),
     };
     if paths.is_empty() {
-        return Ok(OrFalse::Value(PhpArray::empty()));
+        return Ok(OrFalse::Value(Owner::take(req, PhpArray::empty())));
     }
     let only_dirs = flags & i64::from(php_glob::PHP_GLOB_ONLYDIR) != 0;
     let mut array = PhpArray::new(req)?;
@@ -632,12 +643,12 @@ fn glob(
             continue;
         }
         let shown = path.get(cwd_skip..).unwrap_or_default();
-        let shown = Value::string(PhpString::new(req, shown)?);
+        let shown = Value::string(PhpString::new(req, shown)?.hand_on_unmigrated());
         array.append(req, shown)?;
     }
     // Every match refused by the guard is `false`, not the empty array.
     if basedir_limit && array.is_empty() {
-        req.release(Value::array(array));
+        array.give_up(req);
         return Ok(OrFalse::False);
     }
     Ok(OrFalse::Value(array))

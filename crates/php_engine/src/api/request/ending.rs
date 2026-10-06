@@ -11,7 +11,7 @@ use php_heap::Fatal;
 
 use crate::api::abi::AfterLog;
 use crate::api::raising::Level;
-use crate::api::values::{PhpString, Value};
+use crate::api::values::Value;
 
 use diagnostics::Display;
 
@@ -146,7 +146,7 @@ impl Request {
         self.clear_fatal_error_backtrace();
         // `zend_strpprintf`'s message, handed to `zend_error_cb` and
         // released after.
-        if let Ok(string) = PhpString::new(self, message.as_bytes()) {
+        if let Ok(string) = self.string(message.as_bytes()) {
             // `zend_exception_error`'s `zend_observer_error_notify`
             // before `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`).
             crate::observer::uncaught(self, level, file, line, string.as_bytes());

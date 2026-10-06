@@ -15,7 +15,7 @@ use php_ext::coerce::value_name;
 use php_ext::decl::PropertyDecl;
 use php_ext::raising::{Thrown, arg_type_error, argument_error, throw};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, PhpObject};
+use php_ext::values::{ClassId, Owner, PhpObject};
 
 use super::{class_chain, class_name_of, is_internal, this_class};
 
@@ -83,7 +83,7 @@ pub(super) fn new_lazy(
     strategy: Strategy,
     initializer: &Callable,
     options: i64,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let class = this_class(req, this)?;
     held_options(req, 2, options)?;
     if options & SKIP_DESTRUCTOR != 0 {

@@ -153,7 +153,12 @@ where
     type Error = Thrown;
     fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         match constant(self.req, name)? {
-            Some(value) => Ok(Some(to_string(self.req, &value)?.as_bytes().to_vec())),
+            Some(value) => {
+                let text = to_string(self.req, &value)?;
+                let bytes = text.as_bytes().to_vec();
+                text.give_up(self.req);
+                Ok(Some(bytes))
+            }
             None => Ok(None),
         }
     }

@@ -16,7 +16,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal,
 };
 use php_ext::request::{Receiving, Request, Siginfo, take_signals};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Disposition};
 use crate::{State, failed};
@@ -305,8 +305,8 @@ fn call_handler(req: &mut Request, handler: Value, posted: &Siginfo) -> Result<(
             &[Value::int(posted.number.into()), info.to_value()],
         )
     });
-    req.release(info.to_value());
-    req.release(called?);
+    info.give_up(req);
+    called?.give_up(req);
     Ok(())
 }
 
@@ -317,7 +317,7 @@ pub(crate) fn siginfo(
     req: &mut Request,
     number: i32,
     posted: &Siginfo,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut info = PhpArray::new(req)?;
     put(req, &mut info, b"signo", Value::int(posted.number.into()))?;
     put(req, &mut info, b"errno", Value::int(posted.errno.into()))?;
@@ -346,9 +346,14 @@ pub(crate) fn siginfo(
 }
 
 /// `add_assoc_long_ex` and its kin: one string key.
-fn put(req: &mut Request, array: &mut PhpArray, key: &[u8], value: Value) -> Result<(), Thrown> {
+fn put(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    key: &[u8],
+    value: Value,
+) -> Result<(), Thrown> {
     let key = PhpString::new(req, key)?;
-    array.set(req, Key::Str(key), value)
+    array.set(req, Key::Str(key.hand_on_unmigrated()), value)
 }
 
 /// `pcntl_sigprocmask(int $mode, array $signals, &$old_signals = null):
@@ -410,7 +415,7 @@ pub(crate) fn pcntl_sigprocmask(
                 numbers.append(req, Value::int(number))?;
             }
         }
-        old_signals.set(req, Untyped(numbers.to_value()))?;
+        old_signals.set(req, Untyped(numbers.into_value().hand_on_unmigrated()))?;
     }
     Ok(true)
 }

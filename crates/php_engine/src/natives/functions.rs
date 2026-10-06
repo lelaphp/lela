@@ -9,7 +9,7 @@ use php_macros::php_function;
 use crate::api::abi::{OrFalse, Passed};
 use crate::api::raising::{Thrown, arg_value_error, deprecated, throw_error};
 use crate::api::request::{NativeCaller, Request};
-use crate::api::values::{Key, PhpArray, PhpString, Resource, TypeTag, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Resource, TypeTag, Value};
 
 /// `ZEND_VERSION` at the pin (`Z/Zend/zend.h:23`).
 pub(crate) const ZEND_VERSION: &str = "4.5.9";
@@ -24,7 +24,7 @@ pub(crate) const ZEND_VERSION: &str = "4.5.9";
 /// string(5) "4.5.9"
 /// ```
 #[php_function]
-fn zend_version(req: &mut Request) -> Result<PhpString, Thrown> {
+fn zend_version(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, ZEND_VERSION.as_bytes())
 }
 
@@ -160,14 +160,14 @@ fn func_get_arg(req: &mut Request, position: i64) -> Result<Value, Thrown> {
 ///   thrown in %s on line 4
 /// ```
 #[php_function]
-fn func_get_args(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn func_get_args(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let arguments = caller_arguments(
         req,
         "func_get_args",
         "cannot be called from the global scope",
     )?;
     if arguments.is_empty() {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut array = PhpArray::new(req)?;
     for argument in arguments {
@@ -384,10 +384,12 @@ fn function_exists(req: &mut Request, function: PhpString) -> bool {
 /// bool(true)
 /// ```
 #[php_function(aliases(get_required_files))]
-fn get_included_files(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn get_included_files(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for path in req.included_files() {
-        let path = Value::string(PhpString::new(req, &path)?);
+        let path = PhpString::new(req, &path)?
+            .into_value()
+            .hand_on_unmigrated();
         array.append(req, path)?;
     }
     Ok(array)
@@ -417,7 +419,7 @@ fn get_included_files(req: &mut Request) -> Result<PhpArray, Thrown> {
 fn get_defined_functions(
     req: &mut Request,
     #[php(default = true)] exclude_disabled: Passed<bool>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     if let Passed::Given(_) = exclude_disabled {
         deprecated(
             req,
@@ -483,7 +485,7 @@ fn get_defined_vars(req: &mut Request) -> Result<PhpArray, Thrown> {
 ///   thrown in %s on line 3
 /// ```
 #[php_function]
-fn get_resource_type(req: &mut Request, resource: Resource) -> Result<PhpString, Thrown> {
+fn get_resource_type(req: &mut Request, resource: Resource) -> Result<Owner<PhpString>, Thrown> {
     let name = resource
         .type_name(req)
         .map_or_else(|| b"Unknown".to_vec(), <[u8]>::to_vec);
@@ -533,7 +535,7 @@ fn get_resource_id(resource: Resource) -> i64 {
 fn get_resources(
     req: &mut Request,
     #[php(default = null)] r#type: Option<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let wanted = r#type.map(|name| name.as_bytes().to_vec());
     let kind = match wanted.as_deref() {
         None => None,
@@ -581,7 +583,7 @@ fn get_resources(
 fn get_loaded_extensions(
     req: &mut Request,
     #[php(default = false)] zend_extensions: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let names = if zend_extensions {
         req.zend_extensions()
             .into_iter()
@@ -592,7 +594,9 @@ fn get_loaded_extensions(
     };
     let mut array = PhpArray::new(req)?;
     for name in names {
-        let name = Value::string(PhpString::new(req, name.as_bytes())?);
+        let name = PhpString::new(req, name.as_bytes())?
+            .into_value()
+            .hand_on_unmigrated();
         array.append(req, name)?;
     }
     Ok(array)
@@ -630,7 +634,7 @@ fn get_loaded_extensions(
 fn get_defined_constants(
     req: &mut Request,
     #[php(default = false)] categorize: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let rows: Vec<(Option<String>, Vec<u8>, Value)> = req
         .constant_table()
         .into_iter()
@@ -640,7 +644,7 @@ fn get_defined_constants(
     if !categorize {
         for (_, name, value) in rows {
             req.addref(&value);
-            let key = Key::Str(PhpString::new(req, &name)?);
+            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
             array.set(req, key, value)?;
         }
         return Ok(array);
@@ -657,11 +661,11 @@ fn get_defined_constants(
         let mut group = PhpArray::new(req)?;
         for (name, value) in members {
             req.addref(&value);
-            let key = Key::Str(PhpString::new(req, &name)?);
+            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
             group.set(req, key, value)?;
         }
-        let key = Key::Str(PhpString::new(req, module.as_bytes())?);
-        array.set(req, key, Value::array(group))?;
+        let key = Key::Str(PhpString::new(req, module.as_bytes())?.hand_on_unmigrated());
+        array.set(req, key, group.into_value().hand_on_unmigrated())?;
     }
     Ok(array)
 }
@@ -690,7 +694,7 @@ type Named = (Vec<u8>, Value);
 fn get_extension_funcs(
     req: &mut Request,
     extension: PhpString,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let name = extension.as_bytes().to_vec();
     let names: Vec<Vec<u8>> =
         if name.eq_ignore_ascii_case(b"zend") || name.eq_ignore_ascii_case(b"core") {
@@ -714,7 +718,9 @@ fn get_extension_funcs(
     }
     let mut array = PhpArray::new(req)?;
     for name in names {
-        let name = Value::string(PhpString::new(req, &name)?);
+        let name = PhpString::new(req, &name)?
+            .into_value()
+            .hand_on_unmigrated();
         array.append(req, name)?;
     }
     Ok(OrFalse::Value(array))

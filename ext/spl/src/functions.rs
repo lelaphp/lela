@@ -12,7 +12,7 @@ use php_ext::call::{autoload, call, call_array, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::{State, Traversable};
 
@@ -57,16 +57,18 @@ fn subject(req: &mut Request, given: Value, autoloading: bool) -> Result<Option<
 }
 
 /// `spl_add_class_name` over a list of classes: each keyed by its name.
-fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<OrFalse<PhpArray>, Thrown> {
+fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for class in classes {
         let name = crate::class_name(req, *class);
         let key = PhpString::new(req, &name)?;
-        if out.contains(&Key::from_string(key)) {
+        if out.contains(&Key::from_string(*key)) {
+            key.give_up(req);
             continue;
         }
         let value = crate::string_value(req, &name)?;
-        out.set(req, Key::from_string(key), value)?;
+        let key = Key::from_string(key.hand_on_unmigrated());
+        out.set(req, key, value.hand_on_unmigrated())?;
     }
     Ok(OrFalse::Value(out))
 }
@@ -100,7 +102,7 @@ fn class_implements(
     req: &mut Request,
     object_or_class: Untyped<Value>,
     #[php(default = true)] autoload: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(class) = subject(req, object_or_class.0, autoload)? else {
         return Ok(OrFalse::False);
     };
@@ -134,7 +136,7 @@ fn class_parents(
     req: &mut Request,
     object_or_class: Untyped<Value>,
     #[php(default = true)] autoload: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(class) = subject(req, object_or_class.0, autoload)? else {
         return Ok(OrFalse::False);
     };
@@ -193,7 +195,7 @@ fn class_uses(
     req: &mut Request,
     object_or_class: Untyped<Value>,
     #[php(default = true)] autoload: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(class) = subject(req, object_or_class.0, autoload)? else {
         return Ok(OrFalse::False);
     };
@@ -304,7 +306,7 @@ fn spl_autoload_call(req: &mut Request, class: PhpString) -> Result<(), Thrown> 
 fn spl_autoload_extensions(
     req: &mut Request,
     #[php(default = null)] file_extensions: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     if let Some(given) = file_extensions {
         req.state::<State>().autoload_extensions = Some(given.as_bytes().to_vec());
     }
@@ -339,11 +341,11 @@ fn spl_autoload_extensions(
 /// }
 /// ```
 #[php_function]
-fn spl_autoload_functions(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn spl_autoload_functions(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let loaders = req.autoload_functions()?;
     let mut out = PhpArray::new(req)?;
     for loader in loaders {
-        out.append(req, loader)?;
+        out.append(req, loader.hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -411,16 +413,19 @@ fn spl_autoload_register(
             "not be the spl_autoload_call() function",
         ));
     }
-    let loader = if let Some(loader) = loader {
-        loader
-    } else {
-        let name = crate::string_value(req, b"spl_autoload")?;
-        let Ok(loader) = callable_checked(req, &name) else {
-            return Ok(false);
-        };
-        loader
+    if let Some(loader) = loader {
+        req.autoload_register(loader, prepend)?;
+        return Ok(true);
+    }
+    // The name is lent to the callable, which the stack takes its own of.
+    let name = crate::string_value(req, b"spl_autoload")?;
+    let Ok(loader) = callable_checked(req, &name) else {
+        name.give_up(req);
+        return Ok(false);
     };
-    req.autoload_register(loader, prepend)?;
+    let registered = req.autoload_register(loader, prepend);
+    name.give_up(req);
+    registered?;
     Ok(true)
 }
 
@@ -479,7 +484,7 @@ fn spl_autoload_unregister(req: &mut Request, callback: Raw<Callable>) -> Result
             if let Ok(held) = callable_checked(req, &listed) {
                 req.autoload_unregister(&held);
             }
-            req.release(listed);
+            listed.give_up(req);
         }
         return Ok(true);
     }
@@ -560,12 +565,13 @@ pub(crate) const SPL_CLASSES: &[&str] = &[
 /// string(14) "AppendIterator"
 /// ```
 #[php_function]
-fn spl_classes(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn spl_classes(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in SPL_CLASSES {
         let key = PhpString::new(req, name.as_bytes())?;
         let value = crate::string_value(req, name.as_bytes())?;
-        out.set(req, Key::from_string(key), value)?;
+        let key = Key::from_string(key.hand_on_unmigrated());
+        out.set(req, key, value.hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -583,7 +589,7 @@ fn spl_classes(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn spl_object_hash(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
+fn spl_object_hash(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
     let hash = format!("{:016x}0000000000000000", object.index());
     PhpString::new(req, hash.as_bytes())
 }
@@ -647,7 +653,7 @@ fn iterator_apply(
             None => call(req, &callback, &[])?,
         };
         let keep = truthy(req, &answered);
-        req.release(answered);
+        answered.give_up(req);
         Ok(keep)
     })?;
     Ok(count)
@@ -728,13 +734,12 @@ fn iterator_to_array(
     req: &mut Request,
     iterator: Iterable,
     #[php(default = true)] preserve_keys: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let keys = preserve_keys;
     let object = match iterator {
         Iterable::Array(array) => {
             if keys {
-                req.addref(&Value::array(array));
-                return Ok(array);
+                return Ok(Owner::take(req, array));
             }
             let mut out = PhpArray::new(req)?;
             for (_, value) in array.snapshot() {
@@ -766,7 +771,7 @@ fn iterator_to_array(
         Ok(true)
     });
     if let Err(thrown) = walked {
-        req.release(Value::array(out));
+        out.give_up(req);
         return Err(thrown);
     }
     Ok(out)

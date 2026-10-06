@@ -7,7 +7,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::ValueRef;
 
 /// <https://fetch.spec.whatwg.org/#http-tab-or-space>.
 const fn is_http_tab_or_space(c: u8) -> bool {
@@ -175,7 +175,7 @@ pub fn sniff_charset_from_stream(
     let lines = headers
         .map(|headers| headers.snapshot())
         .unwrap_or_default();
-    req.release(Value::array(meta));
+    meta.give_up(req);
     for (_, line) in lines.iter().rev() {
         let line = line.deref();
         let ValueRef::Str(line) = line.as_ref() else {

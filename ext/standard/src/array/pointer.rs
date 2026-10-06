@@ -21,7 +21,7 @@ use php_ext::coerce::{coerce_param, compare, to_array, value_name};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, PointerMove, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, PointerMove, Value, ValueRef};
 
 use super::keys::key_return;
 
@@ -238,7 +238,11 @@ fn current(req: &mut Request, array: ArrayOrObject) -> Result<Value, Thrown> {
 
 fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Value, Thrown> {
     let current = match pointed(req, &given, name)? {
-        Pointed::Array(array) => array.cursor_current(),
+        Pointed::Array(array) => {
+            let current = owned_current(req, array.cursor_current());
+            array.give_up(req);
+            return Ok(current);
+        }
         Pointed::Object(object) => object.pointer_row(req, None)?.map(|(_, value)| value),
     };
     Ok(owned_current(req, current))
@@ -275,7 +279,11 @@ fn owned_current(req: &mut Request, current: Option<Value>) -> Value {
 #[php_function]
 fn key(req: &mut Request, array: ArrayOrObject) -> Result<Option<Union<PhpString, i64>>, Thrown> {
     let key = match pointed(req, &array.value(), "key")? {
-        Pointed::Array(array) => array.cursor_key(),
+        Pointed::Array(array) => {
+            let key = array.cursor_key().map(|key| key_return(req, &key));
+            array.give_up(req);
+            return Ok(key);
+        }
         Pointed::Object(object) => object.pointer_row(req, None)?.map(|(key, _)| key),
     };
     Ok(key.map(|key| key_return(req, &key)))
@@ -284,7 +292,8 @@ fn key(req: &mut Request, array: ArrayOrObject) -> Result<Option<Union<PhpString
 /// What a pointer native reads: an array, or an object whose property
 /// table holds the pointer.
 enum Pointed {
-    Array(PhpArray),
+    /// An owner of the array, the argument's or the table the cast made.
+    Array(Owner<PhpArray>),
     Object(PhpObject),
 }
 
@@ -294,7 +303,7 @@ enum Pointed {
 /// anything else.
 fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thrown> {
     match given.as_ref() {
-        ValueRef::Array(array) => Ok(Pointed::Array(*array)),
+        ValueRef::Array(array) => Ok(Pointed::Array(Owner::take(req, *array))),
         ValueRef::Object(object) => {
             docref(
                 req,
@@ -328,7 +337,7 @@ fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Res
     let target = given.get().map_or_else(Value::null, Raw::value);
     let mut array = match target.as_ref() {
         ValueRef::Array(array) => match given.separated(req)? {
-            Some(array) => array,
+            Some(array) => Owner::take(req, array),
             // A value sent where a reference was asked for, past the
             // notice: php separates the argument slot, which nobody
             // reads after, so the move is over a copy.
@@ -349,6 +358,7 @@ fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Res
         },
     };
     if array.is_empty() {
+        array.give_up(req);
         return Ok(Value::bool(false));
     }
     match how {
@@ -357,7 +367,9 @@ fn moved(req: &mut Request, given: &Ref<ArrayOrObject>, how: PointerMove) -> Res
         PointerMove::Forward => array.cursor_next(),
         PointerMove::Backward => array.cursor_prev(),
     }
-    Ok(owned_current(req, array.cursor_current()))
+    let current = owned_current(req, array.cursor_current());
+    array.give_up(req);
+    Ok(current)
 }
 
 /// `min(mixed $value, mixed ...$values): mixed`, php's

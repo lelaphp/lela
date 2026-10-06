@@ -14,7 +14,7 @@ use php_ext::coerce;
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, fatal, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, zend_sort};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, zend_sort};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::collator::{Collator as Coll, is_space};
@@ -147,15 +147,18 @@ fn ctor(req: &mut Request, object: PhpObject, locale: &[u8]) -> Result<bool, Thr
 }
 
 /// `collator_create`: a new `Collator`, `null` where it failed to open.
-fn create(req: &mut Request, locale: PhpString) -> Result<Option<Instance<Collator>>, Thrown> {
+fn create(
+    req: &mut Request,
+    locale: PhpString,
+) -> Result<Option<Owner<Instance<Collator>>>, Thrown> {
     let Some(class) = lookup_class(req, b"Collator")? else {
         return Err(fatal(req, "InternalError: Collator is not linked"));
     };
     let object = new_object(req, class)?;
-    match ctor(req, object, locale.as_bytes()) {
-        Ok(true) => Ok(Some(Instance::of(object))),
+    match ctor(req, *object, locale.as_bytes()) {
+        Ok(true) => Ok(Some(object.into_instance())),
         answer => {
-            req.release(Value::object(object));
+            object.give_up(req);
             answer.map(|_| None)
         }
     }
@@ -232,7 +235,7 @@ fn get_locale(
     req: &mut Request,
     object: PhpObject,
     kind: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     fetched(req, object, true)?;
     let mut status = Code::ZERO;
     let locale = with(req, object, |c| c.locale(c_int(kind), &mut status)).flatten();
@@ -250,7 +253,10 @@ fn get_error_code(req: &mut Request, object: PhpObject) -> OrFalse<i64> {
 }
 
 /// `collator_get_error_message`: the object's message, not reset.
-fn get_error_message(req: &mut Request, object: PhpObject) -> Result<OrFalse<PhpString>, Thrown> {
+fn get_error_message(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let message = error::object_message::<CollatorObject>(req, object);
     PhpString::new(req, &message).map(OrFalse::Value)
 }
@@ -260,7 +266,7 @@ fn get_sort_key(
     req: &mut Request,
     object: PhpObject,
     text: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     fetched(req, object, true)?;
     let utf16 = match to_utf16(text.as_bytes()) {
         Ok(utf16) => utf16,
@@ -431,7 +437,7 @@ fn operand(req: &mut Request, value: &Value) -> Result<Operand, Thrown> {
     }
     let text = coerce::to_string(req, value)?;
     let bytes = text.as_bytes().to_vec();
-    req.release(Value::string(text));
+    text.give_up(req);
     if to_utf16(&bytes).is_err() {
         warning(
             req,
@@ -454,16 +460,13 @@ fn strcoll(req: &Request, object: PhpObject, a: &[u16], b: &[u16]) -> Ordering {
 
 /// `collator_normalize_sort_argument`: a string as its number where it
 /// is numeric, else as itself; a new value the caller releases.
-fn normalized(req: &mut Request, operand: Operand) -> Result<Value, Thrown> {
+fn normalized(req: &mut Request, operand: Operand) -> Result<Owner<Value>, Thrown> {
     match operand {
         Operand::Text(text) => match numeric(&utf16(&text)) {
-            Some(number) => Ok(number),
-            None => PhpString::new(req, &text).map(Value::string),
+            Some(number) => Ok(Owner::take(req, number)),
+            None => PhpString::new(req, &text).map(Owner::into_value),
         },
-        Operand::Other(value) => {
-            req.addref(&value);
-            Ok(value)
-        }
+        Operand::Other(value) => Ok(Owner::take(req, value)),
     }
 }
 
@@ -484,8 +487,8 @@ fn regular(req: &mut Request, object: PhpObject, a: &Value, b: &Value) -> Result
     let a = normalized(req, a)?;
     let b = normalized(req, b)?;
     let order = coerce::compare(req, &a, &b);
-    req.release(a);
-    req.release(b);
+    a.give_up(req);
+    b.give_up(req);
     order
 }
 
@@ -497,7 +500,7 @@ fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u16>, Thrown> {
     }
     let text = coerce::to_string(req, value)?;
     let converted = to_utf16(text.as_bytes());
-    req.release(Value::string(text));
+    text.give_up(req);
     converted.or_else(|_| {
         warning(
             req,
@@ -559,7 +562,7 @@ fn sort(
         }
         _ => regular(req, object, a, b),
     });
-    array.set(req, sorted)?;
+    array.set(req, sorted.hand_on_unmigrated())?;
     answer.map(|()| true)
 }
 
@@ -597,7 +600,7 @@ fn sort_with_sort_keys(
         req.addref(&value);
         sorted.append(req, value)?;
     }
-    array.set(req, sorted)?;
+    array.set(req, sorted.hand_on_unmigrated())?;
     Ok(true)
 }
 
@@ -619,7 +622,7 @@ type Object = Instance<Collator>;
 fn collator_create(
     req: &mut Request,
     locale: PhpString,
-) -> Result<Option<Instance<Collator>>, Thrown> {
+) -> Result<Option<Owner<Instance<Collator>>>, Thrown> {
     create(req, locale)
 }
 
@@ -797,7 +800,7 @@ fn collator_get_locale(
     req: &mut Request,
     object: Object,
     r#type: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_locale(req, object.object(), r#type)
 }
 
@@ -827,7 +830,7 @@ fn collator_get_error_code(req: &mut Request, object: Object) -> OrFalse<i64> {
 fn collator_get_error_message(
     req: &mut Request,
     object: Object,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_error_message(req, object.object())
 }
 
@@ -844,7 +847,7 @@ fn collator_get_sort_key(
     req: &mut Request,
     object: Object,
     string: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     get_sort_key(req, object.object(), string)
 }
 
@@ -935,7 +938,10 @@ impl Collator {
     }
 
     #[php(tentative)]
-    fn create(req: &mut Request, locale: PhpString) -> Result<Option<Instance<Collator>>, Thrown> {
+    fn create(
+        req: &mut Request,
+        locale: PhpString,
+    ) -> Result<Option<Owner<Instance<Collator>>>, Thrown> {
         create(req, locale)
     }
 
@@ -1012,7 +1018,7 @@ impl Collator {
         req: &mut Request,
         this: This<Self>,
         r#type: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_locale(req, this.object(), r#type)
     }
 
@@ -1022,7 +1028,10 @@ impl Collator {
     }
 
     #[php(tentative)]
-    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getErrorMessage(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_error_message(req, this.object())
     }
 
@@ -1031,7 +1040,7 @@ impl Collator {
         req: &mut Request,
         this: This<Self>,
         string: PhpString,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         get_sort_key(req, this.object(), string)
     }
 }

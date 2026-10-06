@@ -117,7 +117,7 @@ fn get_result(req: &mut Request, stream: Stream) -> Result<Reply, Thrown> {
     let mut line = Vec::new();
     while let Some(read) = stream.get_line(req, Some(511))? {
         line = read.as_bytes().to_vec();
-        req.release(Value::string(read));
+        read.give_up(req);
         let reply = line.len() >= 4 && line[..3].iter().all(u8::is_ascii_digit) && line[3] == b' ';
         if reply {
             break;
@@ -232,7 +232,7 @@ fn connect(
         context: ctx,
     };
     let control = match req.xport_create(&transport, xport)? {
-        Ok(stream) => stream,
+        Ok(stream) => stream.hand_on_unmigrated(),
         Err(XportFailure { text, .. }) => {
             let text = if text.is_empty() {
                 "Unspecified error"
@@ -735,7 +735,7 @@ fn open(
         context: ctx,
     };
     let data = match req.xport_create(&transport, xport)? {
-        Ok(data) => data,
+        Ok(data) => data.hand_on_unmigrated(),
         Err(XportFailure { text, .. }) => return refused(req, Reply::default(), Some(text)),
     };
     let reply = get_result(req, control)?;
@@ -817,7 +817,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
         context: None,
     };
     let data = match req.xport_create(&transport, xport)? {
-        Ok(data) => data,
+        Ok(data) => data.hand_on_unmigrated(),
         Err(XportFailure { text, .. }) => {
             let text = if text.is_empty() {
                 "Unspecified error"
@@ -844,7 +844,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
             break;
         };
         let bytes = line.as_bytes().to_vec();
-        req.release(Value::string(line));
+        line.give_up(req);
         names.push(entry_name(&bytes));
     }
     control.free(req);
@@ -931,10 +931,10 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<PhpArray>, Thrown> {
     let sb = [0, 0, mode, 1, 0, 0, -1, size, -1, mtime, -1, 4096, blocks];
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = Key::Str(PhpString::new(req, name)?);
+        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         out.set(req, key, Value::int(field))?;
     }
-    Ok(Some(out))
+    Ok(Some(out.hand_on_unmigrated()))
 }
 
 /// The time `MDTM` answers, `YYYYMMDDhhmmss` after the code, as a Unix

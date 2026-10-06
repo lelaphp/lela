@@ -10,7 +10,7 @@ use php_ext::call::{instantiate, lookup_class};
 use php_ext::coerce::value_name;
 use php_ext::raising::{Thrown, arity, deprecated, throw};
 use php_ext::request::{Request, Stream, Streams as _};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Filesystem};
 
 use crate::archive::{
@@ -518,14 +518,17 @@ pub(crate) fn set_stub(
         let max = usize::try_from(len).ok().filter(|l| *l > 0);
         let content = stream.copy_to_mem(req, max)?;
         let bytes = content.as_bytes().to_vec();
-        req.release(Value::string(content));
+        content.give_up(req);
         return flushed_with(req, id, Some(&bytes), false);
     }
     arity(req, 1, Some(1))?;
     let bytes = match stub.deref().as_ref() {
         ValueRef::Str(s) => s.as_bytes().to_vec(),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            php_ext::coerce::to_string(req, stub)?.as_bytes().to_vec()
+            let text = php_ext::coerce::to_string(req, stub)?;
+            let bytes = text.as_bytes().to_vec();
+            text.give_up(req);
+            bytes
         }
         _ => {
             let given = value_name(req, stub);
@@ -607,7 +610,7 @@ struct Build {
     id: ArchiveId,
     class: String,
     base: Vec<u8>,
-    ret: PhpArray,
+    ret: Owner<PhpArray>,
     buffer: Vec<u8>,
 }
 
@@ -619,7 +622,7 @@ pub(crate) fn from_directory(
     id: ArchiveId,
     dir: PhpString,
     pattern: PhpString,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let rdi = class_named(req, b"RecursiveDirectoryIterator")?;
     let dir_value = Value::string(dir);
     req.addref(&dir_value);
@@ -627,31 +630,43 @@ pub(crate) fn from_directory(
     let constructed = construct_as(
         req,
         b"RecursiveDirectoryIterator",
-        iter,
+        *iter,
         &[dir_value, Value::int(4096 | 8192)],
     );
     if let Err(thrown) = constructed {
-        req.release(iter.as_value());
+        iter.give_up(req);
         return Err(thrown);
     }
-    let rii = class_named(req, b"RecursiveIteratorIterator")?;
+    let rii = match class_named(req, b"RecursiveIteratorIterator") {
+        Ok(rii) => rii,
+        Err(thrown) => {
+            iter.give_up(req);
+            return Err(thrown);
+        }
+    };
     let iteriter = instantiate(req, rii, &[iter.as_value()]);
-    req.release(iter.as_value());
+    iter.give_up(req);
     let iteriter = iteriter?;
     let walked = if pattern.as_bytes().is_empty() {
         iteriter
     } else {
-        let regex = class_named(req, b"RegexIterator")?;
+        let regex = match class_named(req, b"RegexIterator") {
+            Ok(regex) => regex,
+            Err(thrown) => {
+                iteriter.give_up(req);
+                return Err(thrown);
+            }
+        };
         let pattern = Value::string(pattern);
         req.addref(&pattern);
         let made = instantiate(req, regex, &[iteriter.as_value(), pattern]);
         req.release(pattern);
-        req.release(iteriter.as_value());
+        iteriter.give_up(req);
         made?
     };
     let dir = dir_bytes(&Value::string(dir));
-    let out = walk(req, id, walked, dir);
-    req.release(walked.as_value());
+    let out = walk(req, id, *walked, dir);
+    walked.give_up(req);
     out
 }
 
@@ -665,7 +680,7 @@ pub(crate) fn from_iterator(
     id: ArchiveId,
     iterator: PhpObject,
     base: &[u8],
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     walk(req, id, iterator, base.to_vec())
 }
 
@@ -676,7 +691,7 @@ fn walk(
     id: ArchiveId,
     iterator: PhpObject,
     base: Vec<u8>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let class = class_name(req, iterator);
     let ret = PhpArray::new(req)?;
     let mut build = Build {
@@ -690,17 +705,23 @@ fn walk(
         php_ext_spl::iterator_apply(req, iterator, |req, it| build_one(req, &mut build, it));
     let Build { ret, buffer, .. } = build;
     if let Err(thrown) = walked {
-        req.release(Value::array(ret));
+        ret.give_up(req);
         return Err(thrown);
     }
     if let Some(a) = archives(req).get_mut(id) {
         a.ufp = Some(Arc::new(buffer));
     }
-    if let Some(error) = write::flush(req, id)? {
-        req.release(Value::array(ret));
-        return Err(throw(req, "PharException", &error));
+    match write::flush(req, id) {
+        Ok(None) => Ok(ret),
+        Ok(Some(error)) => {
+            ret.give_up(req);
+            Err(throw(req, "PharException", &error))
+        }
+        Err(thrown) => {
+            ret.give_up(req);
+            Err(thrown)
+        }
     }
-    Ok(ret)
 }
 
 /// A class's name, as the messages print it.
@@ -885,7 +906,8 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
             ),
         );
     };
-    source = stream;
+    // `add_built` closes the stream it opened, and its owner with it.
+    source = stream.hand_on_unmigrated();
     opened = archive::expand_filepath(req, &fname).unwrap_or_else(|| std::mem::take(&mut fname));
     add_built(req, b, &key, source, &opened, close)
 }
@@ -951,9 +973,9 @@ fn add_built(
         }
     }
     done(req);
-    let k = Key::Str(PhpString::new(req, key)?);
+    let k = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
     let v = string(req, opened)?;
-    b.ret.set(req, k, v)?;
+    b.ret.set(req, k, v.hand_on_unmigrated())?;
     entry::delref(req, data);
     Ok(true)
 }

@@ -18,7 +18,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error, while_pending,
 };
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value};
 use php_ext_mysqlnd::client::{Field, ResultSet};
 
 use crate::link::{self, Need, mysqli};
@@ -65,7 +65,10 @@ fn result_class(req: &mut Request) -> Result<ClassId, Thrown> {
 
 /// `MYSQLI_RETVAL_RESOURCE(result, mysqli_result_class_entry)`: the rows
 /// on a new `mysqli_result`.
-pub(crate) fn wrap(req: &mut Request, set: ResultSet) -> Result<Instance<mysqli_result>, Thrown> {
+pub(crate) fn wrap(
+    req: &mut Request,
+    set: ResultSet,
+) -> Result<Owner<Instance<mysqli_result>>, Thrown> {
     let class = result_class(req)?;
     let object = match new_object(req, class) {
         Ok(object) => object,
@@ -74,10 +77,10 @@ pub(crate) fn wrap(req: &mut Request, set: ResultSet) -> Result<Instance<mysqli_
             return Err(thrown);
         }
     };
-    if let Some(rows) = crate::payload::<Rows>(req, object) {
+    if let Some(rows) = crate::payload::<Rows>(req, *object) {
         *rows = Rows::of(set);
     }
-    Ok(Instance::of(object))
+    Ok(object.into_instance())
 }
 
 /// `MYSQLI_FETCH_RESOURCE(result, ..., MYSQLI_STATUS_VALID)` around one use
@@ -109,7 +112,7 @@ pub(crate) fn fetch_row(
     req: &mut Request,
     set: &mut ResultSet,
     mode: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let flags = (u32::from(mode & NUM != 0) << 1) | u32::from(mode & ASSOC != 0);
     let row = set.fetch_into(req, flags)?;
     if report_mode(req) & report::ERROR != 0 {
@@ -117,7 +120,7 @@ pub(crate) fn fetch_row(
         if status.errno != 0
             && let Err(thrown) = report_error(req, status.errno, status.sqlstate, &status.error)
         {
-            req.release(row);
+            row.give_up(req);
             return Err(thrown);
         }
     }
@@ -138,10 +141,10 @@ fn checked_mode(req: &mut Request, on: On, mode: i64) -> Result<i64, Thrown> {
 
 /// A declared return answered with the value as it is, as php's natives
 /// return what they built without a check.
-pub(crate) struct AsIs<T>(pub(crate) Value, std::marker::PhantomData<fn() -> T>);
+pub(crate) struct AsIs<T>(pub(crate) Owner<Value>, std::marker::PhantomData<fn() -> T>);
 
 impl<T> AsIs<T> {
-    pub(crate) fn new(value: Value) -> AsIs<T> {
+    pub(crate) fn new(value: Owner<Value>) -> AsIs<T> {
         AsIs(value, std::marker::PhantomData)
     }
 }
@@ -151,8 +154,8 @@ impl<T: IntoReturn> IntoReturn for AsIs<T> {
     fn declared() -> Option<Type> {
         T::declared()
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
-        Ok(self.0)
+    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+        self.0.into_return(req)
     }
 }
 
@@ -184,10 +187,18 @@ pub(crate) fn fetch_object(
     // conversion's `Error` and not a `TypeError` of the parameter, before
     // the arguments are held.
     let class = php_ext::coerce::to_string(req, &class.value())?;
-    let args = args.hold(req)?;
+    let args = match args.hold(req) {
+        Ok(args) => args,
+        Err(thrown) => {
+            class.give_up(req);
+            return Err(thrown);
+        }
+    };
     let args = given.then_some(args);
-    let Some(target) = autoload(req, class.as_bytes())? else {
-        let given = String::from_utf8_lossy(class.as_bytes()).into_owned();
+    let target = autoload(req, class.as_bytes());
+    let given = String::from_utf8_lossy(class.as_bytes()).into_owned();
+    class.give_up(req);
+    let Some(target) = target? else {
         return Err(arg_type_error(
             req,
             on.at(2),
@@ -210,30 +221,27 @@ pub(crate) fn fetch_object(
         return Ok(AsIs::new(row));
     };
     let made = new_object(req, target)?;
-    if let Err(thrown) = set_row(req, made, array) {
-        req.release(row);
-        req.release(made.as_value());
+    if let Err(thrown) = set_row(req, *made, array) {
+        row.give_up(req);
+        made.give_up(req);
         return Err(thrown);
     }
-    req.release(row);
+    row.give_up(req);
     let constructor = Name(b"__construct".as_slice().into());
-    match known_method(req, made.class(), &constructor, Some(made)) {
+    match known_method(req, made.class(), &constructor, Some(*made)) {
         Some(callable) => {
-            let args = match args {
-                Some(args) => args,
-                None => PhpArray::new(req)?,
-            };
+            let args = args.unwrap_or_else(PhpArray::empty);
             match call_array(req, &callable, args) {
-                Ok(answered) => req.release(answered),
+                Ok(answered) => answered.give_up(req),
                 Err(thrown) => {
-                    req.release(made.as_value());
+                    made.give_up(req);
                     return Err(thrown);
                 }
             }
         }
         None if args.is_some_and(|a| !a.is_empty()) => {
             let name = class_name(req, target);
-            req.release(made.as_value());
+            made.give_up(req);
             return Err(arg_value_error(
                 req,
                 on.at(3),
@@ -242,7 +250,7 @@ pub(crate) fn fetch_object(
         }
         None => {}
     }
-    Ok(AsIs::new(made.as_value()))
+    Ok(AsIs::new(made.into_value()))
 }
 
 /// The row as `made`'s properties: its table in place of the object's
@@ -302,7 +310,8 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
         let name = match key {
             Key::Str(name) => PhpString::new(req, name.as_bytes())?,
             Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
-        };
+        }
+        .hand_on_unmigrated();
         req.addref(&value);
         if plain {
             table.set(req, Key::Str(name), value)?;
@@ -319,7 +328,7 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
                 continue;
             };
             if thrown.exception().is_none() {
-                req.release(Value::array(table));
+                table.give_up(req);
                 return Err(thrown);
             }
             pending = Some(match pending.take() {
@@ -329,9 +338,9 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
         }
     }
     if plain {
-        made.replace_table(req, table)?;
+        made.replace_table(req, table.hand_on_unmigrated())?;
     } else {
-        req.release(Value::array(table));
+        table.give_up(req);
     }
     pending.map_or(Ok(()), Err)
 }
@@ -361,7 +370,7 @@ fn declares_nothing(req: &mut Request, class: ClassId) -> bool {
 }
 
 /// `mysqli_fetch_all`.
-pub(crate) fn fetch_all(req: &mut Request, on: On, mode: i64) -> Result<PhpArray, Thrown> {
+pub(crate) fn fetch_all(req: &mut Request, on: On, mode: i64) -> Result<Owner<PhpArray>, Thrown> {
     with_rows(req, on.object, |_, _| Ok(()))?;
     if mode == 0 || mode & !BOTH != 0 {
         return Err(arg_value_error(
@@ -373,12 +382,18 @@ pub(crate) fn fetch_all(req: &mut Request, on: On, mode: i64) -> Result<PhpArray
     with_rows(req, on.object, |req, set| {
         let mut all = PhpArray::new(req)?;
         loop {
-            let row = fetch_row(req, set, mode)?;
+            let row = match fetch_row(req, set, mode) {
+                Ok(row) => row,
+                Err(thrown) => {
+                    all.give_up(req);
+                    return Err(thrown);
+                }
+            };
             if row.as_array().is_none() {
-                req.release(row);
+                row.give_up(req);
                 break;
             }
-            all.append(req, row)?;
+            all.append(req, row.hand_on_unmigrated())?;
         }
         Ok(all)
     })
@@ -403,29 +418,35 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
     }
     let row = with_rows(req, on.object, |req, set| fetch_row(req, set, NUM))?;
     let Some(array) = row.as_array().copied() else {
-        req.release(row);
-        return Ok(AsIs::new(Value::bool(false)));
+        row.give_up(req);
+        return Ok(AsIs::new(Owner::take(req, Value::bool(false))));
     };
     let value = array.get(&Key::Int(column)).unwrap_or_default();
-    req.addref(&value);
-    req.release(row);
+    let value = Owner::take(req, value);
+    row.give_up(req);
     Ok(AsIs::new(value))
 }
 
 /// `php_add_field_properties`: one column's description as an object.
-fn field_object(req: &mut Request, field: &Field) -> Result<PhpObject, Thrown> {
+fn field_object(req: &mut Request, field: &Field) -> Result<Owner<PhpObject>, Thrown> {
     let object = crate::std_object(req)?;
     let rows = [
-        ("name", string(req, &field.name)?),
-        ("orgname", string(req, &field.org_name)?),
-        ("table", string(req, &field.table)?),
-        ("orgtable", string(req, &field.org_table)?),
+        ("name", string(req, &field.name)?.hand_on_unmigrated()),
+        (
+            "orgname",
+            string(req, &field.org_name)?.hand_on_unmigrated(),
+        ),
+        ("table", string(req, &field.table)?.hand_on_unmigrated()),
+        (
+            "orgtable",
+            string(req, &field.org_table)?.hand_on_unmigrated(),
+        ),
         (
             "def",
-            string(req, field.def.as_deref().unwrap_or_default())?,
+            string(req, field.def.as_deref().unwrap_or_default())?.hand_on_unmigrated(),
         ),
-        ("db", string(req, &field.db)?),
-        ("catalog", string(req, b"def")?),
+        ("db", string(req, &field.db)?.hand_on_unmigrated()),
+        ("catalog", string(req, b"def")?.hand_on_unmigrated()),
         ("max_length", Value::int(0)),
         (
             "length",
@@ -437,14 +458,14 @@ fn field_object(req: &mut Request, field: &Field) -> Result<PhpObject, Thrown> {
         ("decimals", Value::int(i64::from(field.decimals))),
     ];
     for (name, value) in rows {
-        let name = PhpString::new(req, name.as_bytes())?;
+        let name = PhpString::new(req, name.as_bytes())?.hand_on_unmigrated();
         object.set_prop(req, name, value)?;
     }
     Ok(object)
 }
 
 /// `mysqli_fetch_field`.
-pub(crate) fn fetch_field(req: &mut Request, on: On) -> Result<OrFalse<PhpObject>, Thrown> {
+pub(crate) fn fetch_field(req: &mut Request, on: On) -> Result<OrFalse<Owner<PhpObject>>, Thrown> {
     let field = with_rows(req, on.object, |_, set| Ok(set.fetch_field().cloned()))?;
     match field {
         Some(field) => field_object(req, &field).map(OrFalse::Value),
@@ -453,12 +474,12 @@ pub(crate) fn fetch_field(req: &mut Request, on: On) -> Result<OrFalse<PhpObject
 }
 
 /// `mysqli_fetch_fields`.
-pub(crate) fn fetch_fields(req: &mut Request, on: On) -> Result<PhpArray, Thrown> {
+pub(crate) fn fetch_fields(req: &mut Request, on: On) -> Result<Owner<PhpArray>, Thrown> {
     let fields = with_rows(req, on.object, |_, set| Ok(set.fields().to_vec()))?;
     let mut out = PhpArray::new(req)?;
     for field in &fields {
         let object = field_object(req, field)?;
-        out.append(req, object.as_value())?;
+        out.append(req, object.into_value().hand_on_unmigrated())?;
     }
     Ok(out)
 }
@@ -468,7 +489,7 @@ pub(crate) fn fetch_field_direct(
     req: &mut Request,
     on: On,
     index: i64,
-) -> Result<OrFalse<PhpObject>, Thrown> {
+) -> Result<OrFalse<Owner<PhpObject>>, Thrown> {
     if index < 0 {
         return Err(arg_value_error(
             req,
@@ -488,7 +509,7 @@ pub(crate) fn fetch_field_direct(
 }
 
 /// `mysqli_fetch_lengths`.
-pub(crate) fn fetch_lengths(req: &mut Request, on: On) -> Result<OrFalse<PhpArray>, Thrown> {
+pub(crate) fn fetch_lengths(req: &mut Request, on: On) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let lengths = with_rows(req, on.object, |_, set| Ok(lengths_of(set)))?;
     let Some(lengths) = lengths else {
         return Ok(OrFalse::False);
@@ -507,7 +528,7 @@ fn lengths_of(set: &ResultSet) -> Option<Vec<u64>> {
     })
 }
 
-fn lengths_array(req: &mut Request, lengths: &[u64]) -> Result<PhpArray, Thrown> {
+fn lengths_array(req: &mut Request, lengths: &[u64]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for n in lengths {
         out.append(req, Value::int(i64::try_from(*n).unwrap_or(i64::MAX)))?;
@@ -748,12 +769,12 @@ impl mysqli_result {
     }
 
     #[php(tentative)]
-    fn fetch_field(req: &mut Request, this: This<Self>) -> Answer<OrFalse<PhpObject>> {
+    fn fetch_field(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpObject>>> {
         fetch_field(req, On::method(this.object()))
     }
 
     #[php(tentative)]
-    fn fetch_fields(req: &mut Request, this: This<Self>) -> Answer<PhpArray> {
+    fn fetch_fields(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpArray>> {
         fetch_fields(req, On::method(this.object()))
     }
 
@@ -762,7 +783,7 @@ impl mysqli_result {
         req: &mut Request,
         this: This<Self>,
         index: i64,
-    ) -> Answer<OrFalse<PhpObject>> {
+    ) -> Answer<OrFalse<Owner<PhpObject>>> {
         fetch_field_direct(req, On::method(this.object()), index)
     }
 
@@ -771,7 +792,7 @@ impl mysqli_result {
         req: &mut Request,
         this: This<Self>,
         #[php(default = MYSQLI_NUM)] mode: i64,
-    ) -> Answer<PhpArray> {
+    ) -> Answer<Owner<PhpArray>> {
         fetch_all(req, On::method(this.object()), mode)
     }
 
@@ -829,9 +850,9 @@ impl mysqli_result {
         free(req, On::method(this.object()))
     }
 
-    fn getIterator(req: &mut Request, this: This<Self>) -> Answer<Instance<Iterator>> {
+    fn getIterator(req: &mut Request, this: This<Self>) -> Answer<Owner<Instance<Iterator>>> {
         let object = this.object();
-        internal_iterator(req, &object).map(Instance::of)
+        internal_iterator(req, &object).map(Owner::into_instance)
     }
 }
 
@@ -937,7 +958,7 @@ impl RowIter {
         if row.as_array().is_some() {
             self.row_num += 1;
         }
-        self.current = Some(row);
+        self.current = Some(row.hand_on_unmigrated());
         Ok(())
     }
 }
@@ -1021,10 +1042,12 @@ impl Props for ResultProps {
             "current_field" => Value::int(i64::try_from(set.field_tell()).unwrap_or(0)),
             "field_count" => Value::int(i64::from(set.num_fields())),
             "lengths" => match lengths_of(set).filter(|_| set.num_fields() > 0) {
-                Some(lengths) => Value::array(lengths_array(req, &lengths)?),
+                Some(lengths) => lengths_array(req, &lengths)?
+                    .into_value()
+                    .hand_on_unmigrated(),
                 None => Value::null(),
             },
-            "num_rows" => long_or_string(req, set.num_rows())?,
+            "num_rows" => long_or_string(req, set.num_rows())?.hand_on_unmigrated(),
             "type" => Value::int(if set.is_buffered() {
                 link::STORE
             } else {

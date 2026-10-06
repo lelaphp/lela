@@ -361,10 +361,10 @@ impl Request {
         let o = object.heap();
         let mut table = table;
         if table.iter().any(|(key, _)| matches!(key, Key::Int(_))) {
-            let mut spelt = PhpArray::new(self)?;
+            let mut spelt = self.array()?;
             for (key, value) in table.snapshot_refs() {
                 let key = match key {
-                    Key::Int(n) => Key::Str(PhpString::new(self, n.to_string().as_bytes())?),
+                    Key::Int(n) => Key::Str(self.string(n.to_string().as_bytes())?),
                     Key::Str(name) => {
                         self.addref(&Value::string(name));
                         Key::Str(name)

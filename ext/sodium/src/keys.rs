@@ -7,7 +7,7 @@ use php_ext::abi::{OrFalse, Raw};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::ffi;
 use crate::{ZSTR_MAX_LEN, bad_arg, fail, internal, made, parsed, random_key};
@@ -83,7 +83,7 @@ fn written(
     req: &mut Request,
     len: usize,
     write: impl FnOnce(&mut [u8]) -> Result<(), ffi::Failed>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let mut out = vec![0u8; len];
     if write(&mut out).is_err() {
         out.fill(0);
@@ -114,7 +114,7 @@ pub(crate) fn sodium_crypto_box(
     #[php(sensitive)] message: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, nonce, whole) = three(req, message, nonce, key_pair)?;
     sized(req, nonce, BOX_NONCE, 2, "SODIUM_CRYPTO_BOX_NONCEBYTES")?;
     sized(req, whole, 2 * BOX_KEY, 3, "SODIUM_CRYPTO_BOX_KEYPAIRBYTES")?;
@@ -138,7 +138,7 @@ pub(crate) fn sodium_crypto_box(
 /// bool(true)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_box_keypair(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_box_keypair(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     written(req, 2 * BOX_KEY, ffi::box_keypair)
 }
 
@@ -156,7 +156,7 @@ pub(crate) fn sodium_crypto_box_keypair(req: &mut Request) -> Result<PhpString, 
 pub(crate) fn sodium_crypto_box_seed_keypair(
     req: &mut Request,
     #[php(sensitive)] seed: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let seed = one(req, seed)?;
     sized(req, seed, SEED, 1, "SODIUM_CRYPTO_BOX_SEEDBYTES")?;
     written(req, 2 * BOX_KEY, |kp| {
@@ -172,7 +172,7 @@ fn joined(
     public_key: Raw<PhpString>,
     lens: (usize, usize),
     names: (&str, &str),
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (sk, pk) = two(req, secret_key, public_key)?;
     sized(req, sk, lens.0, 1, names.0)?;
     sized(req, pk, lens.1, 2, names.1)?;
@@ -202,7 +202,7 @@ pub(crate) fn sodium_crypto_box_keypair_from_secretkey_and_publickey(
     req: &mut Request,
     #[php(sensitive)] secret_key: Raw<PhpString>,
     public_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     joined(
         req,
         secret_key,
@@ -234,7 +234,7 @@ pub(crate) fn sodium_crypto_box_open(
     ciphertext: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (c, nonce, whole) = three(req, ciphertext, nonce, key_pair)?;
     sized(req, nonce, BOX_NONCE, 2, "SODIUM_CRYPTO_BOX_NONCEBYTES")?;
     sized(req, whole, 2 * BOX_KEY, 3, "SODIUM_CRYPTO_BOX_KEYPAIRBYTES")?;
@@ -257,7 +257,7 @@ fn half(
     (secret, public): (usize, usize),
     want_public: bool,
     name: &str,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let whole = one(req, key_pair)?;
     sized(req, whole, secret + public, 1, name)?;
     let bytes = whole.as_bytes();
@@ -283,7 +283,7 @@ fn half(
 pub(crate) fn sodium_crypto_box_publickey(
     req: &mut Request,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     half(
         req,
         key_pair,
@@ -311,7 +311,7 @@ pub(crate) fn sodium_crypto_box_publickey(
 pub(crate) fn sodium_crypto_box_publickey_from_secretkey(
     req: &mut Request,
     #[php(sensitive)] secret_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let sk = one(req, secret_key)?;
     sized(req, sk, BOX_KEY, 1, "SODIUM_CRYPTO_BOX_SECRETKEYBYTES")?;
     let mut pk = [0u8; BOX_KEY];
@@ -337,7 +337,7 @@ pub(crate) fn sodium_crypto_box_seal(
     req: &mut Request,
     #[php(sensitive)] message: Raw<PhpString>,
     public_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, pk) = two(req, message, public_key)?;
     sized(req, pk, BOX_KEY, 2, "SODIUM_CRYPTO_BOX_PUBLICKEYBYTES")?;
     if ZSTR_MAX_LEN - msg.len() <= BOX_SEAL {
@@ -368,7 +368,7 @@ pub(crate) fn sodium_crypto_box_seal_open(
     req: &mut Request,
     ciphertext: Raw<PhpString>,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (c, whole) = two(req, ciphertext, key_pair)?;
     sized(req, whole, 2 * BOX_KEY, 2, "SODIUM_CRYPTO_BOX_KEYPAIRBYTES")?;
     let Some(len) = c.len().checked_sub(BOX_SEAL) else {
@@ -397,7 +397,7 @@ pub(crate) fn sodium_crypto_box_seal_open(
 pub(crate) fn sodium_crypto_box_secretkey(
     req: &mut Request,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     half(
         req,
         key_pair,
@@ -419,7 +419,7 @@ pub(crate) fn sodium_crypto_box_secretkey(
 /// bool(true)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_kx_keypair(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_kx_keypair(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     written(req, 2 * BOX_KEY, |kp| {
         let (sk, pk) = kp.split_at_mut(BOX_KEY);
         ffi::random(sk);
@@ -441,7 +441,7 @@ pub(crate) fn sodium_crypto_kx_keypair(req: &mut Request) -> Result<PhpString, T
 pub(crate) fn sodium_crypto_kx_publickey(
     req: &mut Request,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     half(
         req,
         key_pair,
@@ -465,7 +465,7 @@ pub(crate) fn sodium_crypto_kx_publickey(
 pub(crate) fn sodium_crypto_kx_secretkey(
     req: &mut Request,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     half(
         req,
         key_pair,
@@ -491,7 +491,7 @@ pub(crate) fn sodium_crypto_kx_secretkey(
 pub(crate) fn sodium_crypto_kx_seed_keypair(
     req: &mut Request,
     #[php(sensitive)] seed: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let seed = one(req, seed)?;
     sized(req, seed, SEED, 1, "SODIUM_CRYPTO_KX_SEEDBYTES")?;
     written(req, 2 * BOX_KEY, |kp| {
@@ -510,7 +510,7 @@ fn session_keys(
     key_pair: Raw<PhpString>,
     other_key: Raw<PhpString>,
     server: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (whole, other) = two(req, key_pair, other_key)?;
     sized(req, whole, 2 * BOX_KEY, 1, "SODIUM_CRYPTO_KX_KEYPAIRBYTES")?;
     sized(req, other, BOX_KEY, 2, "SODIUM_CRYPTO_KX_PUBLICKEYBYTES")?;
@@ -544,7 +544,7 @@ fn session_keys(
     let mut pair = PhpArray::new(req)?;
     for half in [rx, tx] {
         let string = made(req, half)?;
-        pair.append(req, Value::string(string))?;
+        pair.append(req, Value::string(string.hand_on_unmigrated()))?;
     }
     keys.fill(0);
     Ok(pair)
@@ -573,7 +573,7 @@ pub(crate) fn sodium_crypto_kx_client_session_keys(
     req: &mut Request,
     #[php(sensitive)] client_key_pair: Raw<PhpString>,
     server_key: Raw<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     session_keys(req, client_key_pair, server_key, false)
 }
 
@@ -598,7 +598,7 @@ pub(crate) fn sodium_crypto_kx_server_session_keys(
     req: &mut Request,
     #[php(sensitive)] server_key_pair: Raw<PhpString>,
     client_key: Raw<PhpString>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     session_keys(req, server_key_pair, client_key, true)
 }
 
@@ -619,7 +619,7 @@ pub(crate) fn sodium_crypto_scalarmult(
     req: &mut Request,
     n: Raw<PhpString>,
     p: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (n, p) = two(req, n, p)?;
     sized(req, n, BOX_KEY, 1, "SODIUM_CRYPTO_SCALARMULT_SCALARBYTES")?;
     sized(req, p, BOX_KEY, 2, "SODIUM_CRYPTO_SCALARMULT_BYTES")?;
@@ -646,7 +646,7 @@ pub(crate) fn sodium_crypto_scalarmult_ristretto255(
     req: &mut Request,
     n: Raw<PhpString>,
     p: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (n, p) = two(req, n, p)?;
     sized(
         req,
@@ -683,7 +683,7 @@ pub(crate) fn sodium_crypto_scalarmult_ristretto255(
 pub(crate) fn sodium_crypto_scalarmult_ristretto255_base(
     req: &mut Request,
     n: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let n = one(req, n)?;
     sized(
         req,
@@ -718,7 +718,7 @@ pub(crate) fn sodium_crypto_secretbox(
     #[php(sensitive)] message: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, nonce, key) = three(req, message, nonce, key)?;
     sized(
         req,
@@ -751,7 +751,9 @@ pub(crate) fn sodium_crypto_secretbox(
 /// int(32)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_secretbox_keygen(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_secretbox_keygen(
+    req: &mut Request,
+) -> Result<Owner<PhpString>, Thrown> {
     random_key(req, SECRETBOX_KEY)
 }
 
@@ -774,7 +776,7 @@ pub(crate) fn sodium_crypto_secretbox_open(
     ciphertext: Raw<PhpString>,
     nonce: Raw<PhpString>,
     #[php(sensitive)] key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (c, nonce, key) = three(req, ciphertext, nonce, key)?;
     sized(
         req,
@@ -819,7 +821,7 @@ pub(crate) fn sodium_crypto_sign(
     req: &mut Request,
     message: Raw<PhpString>,
     #[php(sensitive)] secret_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, sk) = two(req, message, secret_key)?;
     sized(req, sk, SIGN_SECRET, 2, "SODIUM_CRYPTO_SIGN_SECRETKEYBYTES")?;
     if ZSTR_MAX_LEN - msg.len() <= SIGN_BYTES {
@@ -852,7 +854,7 @@ pub(crate) fn sodium_crypto_sign_detached(
     req: &mut Request,
     message: Raw<PhpString>,
     #[php(sensitive)] secret_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (msg, sk) = two(req, message, secret_key)?;
     sized(req, sk, SIGN_SECRET, 2, "SODIUM_CRYPTO_SIGN_SECRETKEYBYTES")?;
     let mut signature = [0u8; SIGN_BYTES];
@@ -883,7 +885,7 @@ pub(crate) fn sodium_crypto_sign_detached(
 pub(crate) fn sodium_crypto_sign_ed25519_pk_to_curve25519(
     req: &mut Request,
     public_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let pk = one(req, public_key)?;
     sized(req, pk, SIGN_PUBLIC, 1, "SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES")?;
     let mut out = [0u8; BOX_KEY];
@@ -909,7 +911,7 @@ pub(crate) fn sodium_crypto_sign_ed25519_pk_to_curve25519(
 pub(crate) fn sodium_crypto_sign_ed25519_sk_to_curve25519(
     req: &mut Request,
     #[php(sensitive)] secret_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let sk = one(req, secret_key)?;
     sized(req, sk, SIGN_SECRET, 1, "SODIUM_CRYPTO_SIGN_SECRETKEYBYTES")?;
     let mut out = [0u8; BOX_KEY];
@@ -933,7 +935,7 @@ pub(crate) fn sodium_crypto_sign_ed25519_sk_to_curve25519(
 /// bool(true)
 /// ```
 #[php_function]
-pub(crate) fn sodium_crypto_sign_keypair(req: &mut Request) -> Result<PhpString, Thrown> {
+pub(crate) fn sodium_crypto_sign_keypair(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     written(req, SIGN_SECRET + SIGN_PUBLIC, ffi::sign_keypair)
 }
 
@@ -955,7 +957,7 @@ pub(crate) fn sodium_crypto_sign_keypair_from_secretkey_and_publickey(
     req: &mut Request,
     #[php(sensitive)] secret_key: Raw<PhpString>,
     public_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     joined(
         req,
         secret_key,
@@ -987,7 +989,7 @@ pub(crate) fn sodium_crypto_sign_open(
     req: &mut Request,
     signed_message: Raw<PhpString>,
     public_key: Raw<PhpString>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (signed, pk) = two(req, signed_message, public_key)?;
     sized(req, pk, SIGN_PUBLIC, 2, "SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES")?;
     if signed.len() >= ZSTR_MAX_LEN {
@@ -1014,7 +1016,7 @@ pub(crate) fn sodium_crypto_sign_open(
 pub(crate) fn sodium_crypto_sign_publickey(
     req: &mut Request,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     half(
         req,
         key_pair,
@@ -1038,7 +1040,7 @@ pub(crate) fn sodium_crypto_sign_publickey(
 pub(crate) fn sodium_crypto_sign_secretkey(
     req: &mut Request,
     #[php(sensitive)] key_pair: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     half(
         req,
         key_pair,
@@ -1064,7 +1066,7 @@ pub(crate) fn sodium_crypto_sign_secretkey(
 pub(crate) fn sodium_crypto_sign_publickey_from_secretkey(
     req: &mut Request,
     #[php(sensitive)] secret_key: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let sk = one(req, secret_key)?;
     sized(req, sk, SIGN_SECRET, 1, "SODIUM_CRYPTO_SIGN_SECRETKEYBYTES")?;
     written(req, SIGN_PUBLIC, |pk| ffi::sign_sk_to_pk(pk, sk.as_bytes()))
@@ -1084,7 +1086,7 @@ pub(crate) fn sodium_crypto_sign_publickey_from_secretkey(
 pub(crate) fn sodium_crypto_sign_seed_keypair(
     req: &mut Request,
     #[php(sensitive)] seed: Raw<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let seed = one(req, seed)?;
     sized(req, seed, SEED, 1, "SODIUM_CRYPTO_SIGN_SEEDBYTES")?;
     written(req, SIGN_SECRET + SIGN_PUBLIC, |kp| {

@@ -44,7 +44,7 @@ use php_heap::{Block, FiberStack, Host, StackRefused, Suspensions, Switched};
 use php_macros::php_class;
 
 use crate::api::abi::{Callable, CloneObj, Instance, NamedVariadic, ObjectHandlers, This};
-use crate::api::call::call_named;
+use crate::api::call::call_named_made;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::{ObservedChain, Raised, Request};
 use crate::api::values::{PhpObject, PhpString, Value};
@@ -1081,7 +1081,7 @@ fn run(
         }
         return Transfer::Fatal;
     }
-    let outcome = call_named(req, callable, arguments, named);
+    let outcome = call_named_made(req, callable, arguments, named);
     let held = object
         .native_mut::<ZendFiber>(req)
         .and_then(|fiber| fiber.callable.take());

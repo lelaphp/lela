@@ -10,7 +10,7 @@
 use php_unit::decl::Attribute;
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, Value, adopted};
 use crate::exec;
 
 use super::{ExtensionId, Request, Standard};
@@ -152,8 +152,15 @@ impl Request {
 
     /// `get_defined_constants()`: what `define()` declared in this
     /// request, each name a string of the request's.
-    pub fn constants(&mut self) -> Result<PhpArray, Thrown> {
-        let mut array = PhpArray::new(self)?;
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn constants(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.constants_made();
+        adopted(self, made)
+    }
+
+    /// What [`constants`](Self::constants) makes, its one owner not yet named.
+    pub(crate) fn constants_made(&mut self) -> Result<PhpArray, Thrown> {
+        let mut array = self.array()?;
         let constants: Vec<(Vec<u8>, Value)> = self
             .constants
             .constants
@@ -162,7 +169,7 @@ impl Request {
             .map(|row| (row.name.clone(), row.value))
             .collect();
         for (name, value) in constants {
-            let key = Key::Str(PhpString::new(self, &name)?);
+            let key = Key::Str(self.string(&name)?);
             self.addref(&value);
             array.set(self, key, value)?;
         }

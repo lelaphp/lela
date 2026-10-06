@@ -147,7 +147,7 @@ pub(crate) fn open_from_fp(
             }
             let params = window_params(req, 15 + 32)?;
             let out = archive::filter_bytes(req, b"zlib.inflate", Some(&params), &bytes);
-            req.release(params);
+            params.give_up(req);
             let Some(out) = out? else {
                 return fail("unable to decompress gzipped phar archive \"%s\" to temporary file");
             };
@@ -210,11 +210,16 @@ fn find_halt(bytes: &[u8]) -> Option<usize> {
 }
 
 /// `array("window" => $bits)`, the zlib filters' parameters.
-pub(crate) fn window_params(req: &mut Request, bits: i64) -> Result<Value, Thrown> {
+pub(crate) fn window_params(
+    req: &mut Request,
+    bits: i64,
+) -> Result<php_ext::values::Owner<Value>, Thrown> {
     let mut params = php_ext::values::PhpArray::new(req)?;
-    let key = php_ext::values::Key::Str(php_ext::values::PhpString::new(req, b"window")?);
+    let key = php_ext::values::Key::Str(
+        php_ext::values::PhpString::new(req, b"window")?.hand_on_unmigrated(),
+    );
     params.set(req, key, Value::int(bits))?;
-    Ok(Value::array(params))
+    Ok(params.into_value())
 }
 
 /// A little-endian word at `at`.
@@ -745,8 +750,9 @@ pub(crate) fn compile_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<
         let Some(stream) = req.open_stream_with(&url, b"rb", opening)? else {
             return Ok(None);
         };
-        let source = archive::copy_all(req, stream);
-        stream.free(req);
+        let source = archive::copy_all(req, *stream);
+        stream.close(req);
+        stream.give_up(req);
         return Ok(Some(source?));
     }
     if a.flags & FILE_COMPRESSION_MASK != 0 {

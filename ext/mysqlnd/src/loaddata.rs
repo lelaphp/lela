@@ -61,7 +61,8 @@ pub(crate) fn handle(
     }
     if let Some(dir) = &directory {
         if let Some(stream) = req.open_dir(dir)? {
-            stream.free(req);
+            stream.close(req);
+            stream.give_up(req);
         } else {
             conn.error.client(
                 cr::LOAD_DATA_LOCAL_INFILE_REJECTED,
@@ -135,24 +136,33 @@ fn send_file(
     let mut failed_read = false;
     loop {
         let chunk = match stream.read(req, CHUNK) {
-            Ok(Some(chunk)) if !chunk.is_empty() => chunk.as_bytes().to_vec(),
-            Ok(Some(_)) => break,
+            Ok(Some(chunk)) => {
+                let bytes = chunk.as_bytes().to_vec();
+                chunk.give_up(req);
+                if bytes.is_empty() {
+                    break;
+                }
+                bytes
+            }
             Ok(None) => {
                 failed_read = true;
                 break;
             }
             Err(thrown) => {
-                stream.free(req);
+                stream.close(req);
+                stream.give_up(req);
                 return Err(thrown);
             }
         };
         if conn.net.send(req, &chunk, &mut conn.stats, &mut conn.error) == 0 {
             conn.error.client(cr::SERVER_LOST, LOST_CONN);
-            stream.free(req);
+            stream.close(req);
+            stream.give_up(req);
             return Ok((false, false));
         }
     }
-    stream.free(req);
+    stream.close(req);
+    stream.give_up(req);
     if conn.net.send(req, &[], &mut conn.stats, &mut conn.error) == 0 {
         conn.error.client(cr::SERVER_LOST, LOST_CONN);
         return Ok((false, false));

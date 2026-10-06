@@ -24,7 +24,7 @@ use php_unit::decl::{
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, PhpArray, Value};
 
 /// Where the trampolines' function numbers begin: past the enum methods'
 /// ([`crate::enums::ENUM_FUNCTIONS`]), so the spaces never meet. Each
@@ -319,13 +319,13 @@ pub(crate) fn hand_to_magic(req: &mut Request, function: Function) -> Result<Fun
     else {
         return Ok(function);
     };
-    let name = PhpString::new(req, &name.0)?;
+    let name = req.string(&name.0)?;
     let (arguments, named) = req.take_serving_arguments();
     // `ZVAL_EMPTY_ARRAY(call_args)` for a call with none.
     let mut packed = if arguments.is_empty() && named.is_empty() {
         PhpArray::empty()
     } else {
-        PhpArray::new(req)?
+        req.array()?
     };
     for argument in arguments {
         packed.append(req, argument)?;
@@ -404,11 +404,11 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Value, Thrown> {
         .filter_map(|position| req.argument(position))
         .collect();
     let named = req.named_arguments();
-    let name = Value::string(PhpString::new(req, &name.0)?);
+    let name = Value::string(req.string(&name.0)?);
     let mut packed = if passed.is_empty() && named.is_empty() {
         PhpArray::empty()
     } else {
-        PhpArray::new(req)?
+        req.array()?
     };
     for argument in passed {
         req.addref(&argument);
@@ -423,7 +423,7 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Value, Thrown> {
     let arguments = [name, packed];
     let called = this.map(|this| this.class()).or(called);
     let served = match called {
-        Some(called) => req.serve_method(magic, this, called, &arguments, &[]),
+        Some(called) => req.serve_method_made(magic, this, called, &arguments, &[]),
         None => req.serve_function(magic, &arguments, &[]),
     };
     for argument in arguments {

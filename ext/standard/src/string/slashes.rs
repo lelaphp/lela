@@ -4,7 +4,7 @@
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 use super::charmask;
 use super::str_copy;
@@ -27,7 +27,7 @@ use super::str_copy;
 /// string(1) "\"
 /// ```
 #[php_function]
-pub(super) fn addslashes(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+pub(super) fn addslashes(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     if !s.iter().any(|c| matches!(c, 0 | b'\'' | b'"' | b'\\')) {
         return Ok(str_copy(req, string));
@@ -61,7 +61,10 @@ pub(super) fn addslashes(req: &mut Request, string: PhpString) -> Result<PhpStri
 /// string(0) ""
 /// ```
 #[php_function]
-pub(super) fn stripslashes(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+pub(super) fn stripslashes(
+    req: &mut Request,
+    string: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -107,7 +110,7 @@ pub(super) fn addcslashes(
     req: &mut Request,
     string: PhpString,
     characters: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let what = characters;
     if string.is_empty() {
         return PhpString::new(req, b"");
@@ -155,7 +158,10 @@ pub(super) fn addcslashes(
 /// string(14) "07080c0b0d0000"
 /// ```
 #[php_function]
-pub(super) fn stripcslashes(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+pub(super) fn stripcslashes(
+    req: &mut Request,
+    string: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;

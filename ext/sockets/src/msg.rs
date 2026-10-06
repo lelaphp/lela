@@ -5,7 +5,7 @@ use php_ext::abi::{Instance, OrFalse, Ref};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::{Owner, PhpArray, Value};
 
 use crate::State;
 use crate::conv::{Ancillary, Conv};
@@ -151,15 +151,15 @@ fn socket_recvmsg(
     let mut conv = Conv::native("msghdr", socket.object(), family);
     let value = conv.msghdr_value(req, &got, room.size)?;
     let value = if conv.failed() {
-        req.release(value);
+        value.give_up(req);
         conv.report(req);
-        Value::bool(false)
+        Owner::take(req, Value::bool(false))
     } else {
         value
     };
     match message.reference() {
-        Some(cell) => cell.set(req, value)?,
-        None => req.release(value),
+        Some(cell) => cell.set(req, value.hand_on_unmigrated())?,
+        None => value.give_up(req),
     }
     Ok(OrFalse::Value(long(got.count)))
 }

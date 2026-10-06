@@ -387,7 +387,7 @@ impl Request {
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
         self.addref(&object.as_value());
-        let served = self.serve_method(hook, Some(object), object.class(), arguments, &[]);
+        let served = self.serve_method_made(hook, Some(object), object.class(), arguments, &[]);
         self.release(object.as_value());
         served
     }
@@ -977,7 +977,7 @@ fn parent_hook_get(req: &mut Request) -> Result<Value, Thrown> {
 fn parent_hook_set(req: &mut Request) -> Result<Value, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
     let value = req.argument(1).unwrap_or_else(Value::null).deref();
-    let key = PhpString::new(req, &name)?;
+    let key = req.string(&name)?;
     req.addref(&value);
     req.addref(&value);
     let table = req.object_handlers(this.heap());

@@ -14,7 +14,9 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Thrown, arg_type_error, deprecated, throw_error, warning};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use crate::api::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
+};
 
 /// `zend_lookup_class_ex`: a leading `\` dropped, the table under the
 /// lowered name, and the autoloaders where the table has none and
@@ -352,7 +354,7 @@ fn visible(
 /// }
 /// ```
 #[php_function]
-fn get_class_vars(req: &mut Request, class: PhpString) -> Result<PhpArray, Thrown> {
+fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>, Thrown> {
     let bytes = class.as_bytes().to_vec();
     let Some(class) = lookup_class(req, &bytes, true)? else {
         let tail = format!(
@@ -372,10 +374,11 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<PhpArray, Throw
     for statics in [false, true] {
         for (declaring, property) in rows.iter().filter(|(_, p)| p.is_instance != statics) {
             let value = match &property.default {
-                Some(expr) => crate::api::call::eval_declared(req, expr, Some(*declaring))?,
+                Some(expr) => crate::api::call::eval_declared(req, expr, Some(*declaring))?
+                    .hand_on_unmigrated(),
                 None => Value::null(),
             };
-            let key = Key::Str(PhpString::new(req, &property.name.0)?);
+            let key = Key::Str(PhpString::new(req, &property.name.0)?.hand_on_unmigrated());
             array.set(req, key, value)?;
         }
     }
@@ -471,7 +474,7 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<PhpArray, Throw
 /// int(5)
 /// ```
 #[php_function]
-fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
+fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let class = object.class();
     let scope = req.scope();
     // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
@@ -480,7 +483,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thr
     match table.get_properties_for(req, object, PropertyPurpose::GetObjectVars)? {
         PropertiesFor::Rows(rows) => return answered_vars(req, class, rows),
         // No table: `RETURN_EMPTY_ARRAY` (`Z/Zend/zend_builtin_functions.c:849`).
-        PropertiesFor::Null => return Ok(PhpArray::empty()),
+        PropertiesFor::Null => return Ok(Owner::take(req, PhpArray::empty())),
         PropertiesFor::Standard => {}
     }
     // Over a class with a hooked property it is the table its hooks
@@ -581,7 +584,7 @@ fn answered_vars(
     req: &mut Request,
     class: ClassId,
     rows: Vec<(Key, Value)>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (key, value) in rows {
         // An integer key is an element the class shows among its
@@ -708,7 +711,7 @@ fn function_table(req: &Request, class: ClassId) -> Vec<(Box<[u8]>, Visibility, 
 fn get_class_methods(
     req: &mut Request,
     object_or_class: Raw<Union<PhpObject, PhpString>>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let class = object_or_class_name(req, object_or_class.value(), 1)?;
     let scope = req.scope();
     let names: Vec<Box<[u8]>> = function_table(req, class)
@@ -1135,7 +1138,7 @@ fn class_alias(
 /// `EG(class_table)` in its order, each row whose kind `kinds` takes, by
 /// the class's declared name, and an alias's row by the lowered name it
 /// is keyed by.
-fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<PhpArray, Thrown> {
+fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Owner<PhpArray>, Thrown> {
     let names: Vec<Vec<u8>> = req
         .class_table()
         .into_iter()
@@ -1176,7 +1179,7 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<PhpArray, Thrown> 
 /// string(1) "B"
 /// ```
 #[php_function]
-fn get_declared_classes(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn get_declared_classes(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     declared(req, &[ClassKind::Class, ClassKind::Enum])
 }
 
@@ -1196,7 +1199,7 @@ fn get_declared_classes(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// }
 /// ```
 #[php_function]
-fn get_declared_traits(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn get_declared_traits(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     declared(req, &[ClassKind::Trait])
 }
 
@@ -1215,6 +1218,6 @@ fn get_declared_traits(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// bool(false)
 /// ```
 #[php_function]
-fn get_declared_interfaces(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn get_declared_interfaces(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     declared(req, &[ClassKind::Interface])
 }

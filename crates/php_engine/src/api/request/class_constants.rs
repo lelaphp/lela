@@ -10,7 +10,7 @@
 use php_unit::decl::{ClassConstDecl, ClassKind, Name, Visibility};
 
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, PhpObject, TypeTag, Value};
 
 use super::Request;
 
@@ -289,7 +289,7 @@ impl Request {
         let mut seen: Vec<(Value, Vec<u8>)> = Vec::new();
         let mut outcome = Ok(());
         for (name, expr) in cases {
-            let value = match crate::api::call::eval_declared(self, &expr, Some(class)) {
+            let value = match crate::api::call::eval_declared_made(self, &expr, Some(class)) {
                 Ok(value) => value,
                 Err(thrown) => {
                     outcome = Err(thrown);
@@ -391,11 +391,11 @@ impl Request {
         // The case's name is the constant's, an interned string, as
         // `zend_enum_new` copies `case_name`.
         let spelled = self.interned(name)?;
-        let slot = PhpString::new(self, b"name")?;
+        let slot = self.string(b"name")?;
         case.set_prop(self, slot, Value::string(spelled))?;
         if backing != php_unit::decl::EnumBacking::Pure {
-            let value = crate::api::call::eval_declared(self, &constant.value, Some(class))?;
-            let slot = PhpString::new(self, b"value")?;
+            let value = crate::api::call::eval_declared_made(self, &constant.value, Some(class))?;
+            let slot = self.string(b"value")?;
             case.set_prop(self, slot, value)?;
         }
         self.class_constants

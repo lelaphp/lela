@@ -36,7 +36,7 @@ use crate::api::request::{
     BufferHandler, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request,
     StartHandler,
 };
-use crate::api::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use crate::api::values::{Key, Owner, PhpString, Value, ValueRef};
 
 /// The handler operations, `Z/main/php_output.h:23-29`.
 const HANDLER_WRITE: u32 = 0x00;
@@ -491,8 +491,8 @@ struct StatusFields {
 impl StatusFields {
     /// `php_output_handler_status`: the row as its array.
     fn into_array(self, req: &mut Request) -> Result<Value, Thrown> {
-        let mut entry = PhpArray::new(req)?;
-        let name = Value::string(PhpString::new(req, &self.name)?);
+        let mut entry = req.array()?;
+        let name = Value::string(req.string(&self.name)?);
         let rows: [(&[u8], Value); 7] = [
             (b"name", name),
             (b"type", Value::int(i64::from(self.flags & 0xf))),
@@ -503,7 +503,7 @@ impl StatusFields {
             (b"buffer_used", Value::int(long(self.buffer_used))),
         ];
         for (key, value) in rows {
-            let key = Key::Str(PhpString::new(req, key)?);
+            let key = Key::Str(req.string(key)?);
             entry.set(req, key, value)?;
         }
         Ok(Value::array(entry))
@@ -890,9 +890,9 @@ fn user_handler(
     buffered: &[u8],
     context: &mut Context,
 ) -> Result<Status, Thrown> {
-    let data = PhpString::new(req, buffered)?;
+    let data = req.string(buffered)?;
     let arguments = [Value::string(data), Value::int(i64::from(context.op))];
-    let returned = call::call(req, callable, &arguments);
+    let returned = call::call(req, callable, &arguments).map(Owner::hand_on);
     req.release(Value::string(data));
     let returned = returned?;
     // `Z_TYPE(retval) != IS_UNDEF`: a handler that threw, even where
@@ -913,7 +913,7 @@ fn user_handler(
                 context.out = text.as_bytes().to_vec();
                 Status::Success
             };
-            req.release(Value::string(text));
+            text.give_up(req);
             status
         }
     };
@@ -1016,8 +1016,9 @@ fn send_headers(req: &mut Request) -> bool {
         req.output_mut().send_default_content_type = false;
     }
     if let Some(callback) = req.take_header_callback() {
-        if let Err(thrown) = call::call(req, &callback, &[]) {
-            req.leave_pending(&thrown);
+        match call::call(req, &callback, &[]) {
+            Ok(returned) => returned.give_up(req),
+            Err(thrown) => req.leave_pending(&thrown),
         }
         callback.release(req);
     }
@@ -1671,7 +1672,7 @@ fn contents(req: &mut Request) -> Result<Option<Value>, Thrown> {
         return Ok(None);
     }
     let buffered = req.output().buffered(level - 1);
-    Ok(Some(Value::string(PhpString::new(req, &buffered)?)))
+    Ok(Some(Value::string(req.string(&buffered)?)))
 }
 
 /// `php_request_startup`'s buffer (`Z/main/main.c:1931-1941`): the
@@ -1703,7 +1704,7 @@ pub(crate) fn start_at_request(req: &mut Request) -> Result<(), Thrown> {
         )?;
         return Ok(());
     }
-    let value = Value::string(PhpString::new(req, &name)?);
+    let value = Value::string(req.string(&name)?);
     let started = match crate::api::coerce::callable_checked(req, &value) {
         Ok(callable) => {
             start_user(req, &StartHandler::User(callable), 0, HANDLER_STDFLAGS).map(|_| ())
@@ -1880,7 +1881,7 @@ fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
             None => Value::bool(false),
         },
         OutputOp::ListHandlers => {
-            let mut list = PhpArray::new(req)?;
+            let mut list = req.array()?;
             let names: Vec<Vec<u8>> = req
                 .output()
                 .handlers
@@ -1888,16 +1889,16 @@ fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
                 .map(|handler| handler.name.bytes().to_vec())
                 .collect();
             for name in names {
-                let name = Value::string(PhpString::new(req, &name)?);
+                let name = Value::string(req.string(&name)?);
                 list.append(req, name)?;
             }
             Value::array(list)
         }
         OutputOp::GetStatus { full } => {
             if level == 0 {
-                Value::array(PhpArray::new(req)?)
+                Value::array(req.array()?)
             } else if *full {
-                let mut rows = PhpArray::new(req)?;
+                let mut rows = req.array()?;
                 for at in 0..level {
                     if let Some(fields) = req.output().status_fields(at) {
                         let row = fields.into_array(req)?;
@@ -1908,7 +1909,7 @@ fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
             } else {
                 match req.output().status_fields(level - 1) {
                     Some(fields) => fields.into_array(req)?,
-                    None => Value::array(PhpArray::new(req)?),
+                    None => Value::array(req.array()?),
                 }
             }
         }

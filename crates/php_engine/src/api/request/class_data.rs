@@ -429,7 +429,8 @@ impl Request {
             self.addref(&value);
             return Ok(value);
         }
-        let evaluated = crate::api::call::eval_declared(self, &constant.value, Some(declaring))?;
+        let evaluated =
+            crate::api::call::eval_declared_made(self, &constant.value, Some(declaring))?;
         let value = match &constant.ty {
             Some(ty) if ty.mask() != php_unit::decl::Type::MAY_BE_ANY => {
                 crate::ops::verify_class_constant_type(self, evaluated, ty, declaring, name)?
@@ -682,7 +683,7 @@ impl Request {
         for (declaring, property) in &rows {
             let value = match &property.default {
                 Some(expr) => {
-                    let value = crate::api::call::eval_declared(self, expr, Some(*declaring))?;
+                    let value = crate::api::call::eval_declared_made(self, expr, Some(*declaring))?;
                     Some(self.strictly_held(value, property, *declaring)?)
                 }
                 None if property.ty.is_some() => None,

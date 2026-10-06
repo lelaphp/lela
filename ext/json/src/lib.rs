@@ -37,7 +37,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, OrFalse};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error, new_throwable, pending, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 
 use constants::{
     JSON_ERROR_CTRL_CHAR, JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN,
@@ -217,14 +217,14 @@ fn throw_json(req: &mut Request, code: i64) -> Thrown {
     };
     if let Some(object) = value.as_object().copied() {
         let written = PhpString::new(req, b"code")
-            .and_then(|name| object.set_prop(req, name, Value::int(code)));
+            .and_then(|name| object.set_prop(req, name.hand_on_unmigrated(), Value::int(code)));
         if let Err(thrown) = written {
-            req.release(value);
+            value.give_up(req);
             return thrown;
         }
     }
     let thrown = throw_value(req, &value);
-    req.release(value);
+    value.give_up(req);
     thrown
 }
 
@@ -336,7 +336,7 @@ fn json_encode(
     value: Value,
     #[php(default = 0)] flags: i64,
     #[php(default = 512)] depth: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut encoder = encode::Encoder::new(req, depth)?;
     let mut buffer = Vec::new();
     encode::encode(req, &mut buffer, &value, flags, &mut encoder)?;
@@ -467,7 +467,7 @@ fn json_decode(
     #[php(default = null)] associative: Option<bool>,
     #[php(default = 512)] depth: i64,
     #[php(default = 0)] mut flags: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let throwing = flags & JSON_THROW_ON_ERROR != 0;
     if !throwing {
         set_error(req, JSON_ERROR_NONE);
@@ -477,7 +477,7 @@ fn json_decode(
             return Err(throw_json(req, JSON_ERROR_SYNTAX));
         }
         set_error(req, JSON_ERROR_SYNTAX);
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     depth_within(req, depth, 3)?;
     // For BC reasons the bool overrides the option bit, either way.
@@ -487,13 +487,18 @@ fn json_decode(
         None => {}
     }
     match decode::decode(req, json.as_bytes(), flags, depth)? {
-        Ok(value) => Ok(value),
+        // The decoder's value is the one owner its sinks were handed.
+        Ok(value) => {
+            let owner = Owner::take(req, value);
+            req.release(value);
+            Ok(owner)
+        }
         Err(code) => {
             if throwing {
                 return Err(throw_json(req, code));
             }
             set_error(req, code);
-            Ok(Value::null())
+            Ok(Owner::take(req, Value::null()))
         }
     }
 }
@@ -603,7 +608,7 @@ fn json_last_error(req: &mut Request) -> i64 {
 /// string(8) "No error"
 /// ```
 #[php_function]
-fn json_last_error_msg(req: &mut Request) -> Result<PhpString, Thrown> {
+fn json_last_error_msg(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     let code = req.state::<State>().error_code;
     PhpString::new(req, error_message(code).as_bytes())
 }

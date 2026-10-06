@@ -17,7 +17,7 @@ use std::cell::Cell;
 use crate::api::abi::{ExtensionBuilder, Observed, ObserverHandlers};
 use crate::api::raising::{Cause, Thrown};
 use crate::api::request::{FrameId, Request};
-use crate::api::values::Value;
+use crate::api::values::{Owner, Value};
 use crate::engine::Engine;
 use crate::test::Capture;
 
@@ -48,7 +48,7 @@ fn paused(observed: &Observed<'_>, depth: usize) -> Option<FrameId> {
 
 /// What an evaluation answered, as the debugger reports it: the value's
 /// type and contents, or the class and message of what it threw.
-fn shown(req: &mut Request, answered: Option<Result<Value, Thrown>>) -> String {
+fn shown(req: &mut Request, answered: Option<Result<Owner<Value>, Thrown>>) -> String {
     match answered {
         None => String::from("refused"),
         Some(Ok(value)) => {
@@ -59,7 +59,7 @@ fn shown(req: &mut Request, answered: Option<Result<Value, Thrown>>) -> String {
             } else {
                 value.type_name().to_owned()
             };
-            req.release(value);
+            value.give_up(req);
             text
         }
         Some(Err(thrown)) => match thrown.cause(req) {

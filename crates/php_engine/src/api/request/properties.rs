@@ -1674,7 +1674,7 @@ impl Request {
         sent.push(Value::string(interned));
         sent.extend_from_slice(arguments);
         let held = self.take_hold(object.as_value());
-        let served = self.serve_method(accessor, Some(object), object.class(), &sent, &[]);
+        let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
         self.release_hold(held);
         served
     }
@@ -2977,7 +2977,7 @@ impl Request {
             let o = object.heap();
             let table = self.separated_properties(o)?;
             self.array_update(table, php_heap::Key::Str(name.heap()), entry)?;
-            self.release(Value::string(name));
+            name.give_up(self);
         }
         Ok(())
     }

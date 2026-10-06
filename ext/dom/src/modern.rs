@@ -8,7 +8,7 @@ use php_ext::abi::{Instance, ObjectHandlers, OrFalse, PropertyTest, Raw, Std, Th
 use php_ext::attr::{php_class, php_function};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{ClassType, DocString, Library, Parsed, Parser, Source};
 use php_ext_libxml::{Errors, ffi as f};
 
@@ -53,11 +53,11 @@ pub(crate) fn document_object(
     req: &mut Request,
     class: &str,
     doc: f::Node,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let class = crate::class(req, class)?;
     let object = php_ext::call::new_object(req, class)?;
     let private = Private::new(req)?;
-    if let Some(mut obj) = crate::libxml_half(req, object) {
+    if let Some(mut obj) = crate::libxml_half(req, *object) {
         obj.adopt_document(req, doc);
         obj.take_node(req, doc);
         obj.set_class_type(ClassType::Modern);
@@ -155,7 +155,7 @@ pub(crate) fn xml_load(
     req: &mut Request,
     given: (PhpString, i64, Option<PhpString>),
     from_file: bool,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let LoadArgs {
         source,
         options,
@@ -225,7 +225,7 @@ pub(crate) fn xml_load(
         doc.set_doc_string(DocString::Url, Some(&fixed));
     }
     let object = document_object(req, "Dom\\XMLDocument", doc)?;
-    convert_to_modern(req, object, doc);
+    convert_to_modern(req, *object, doc);
     Ok(object)
 }
 
@@ -279,9 +279,12 @@ type Imported = Raw<Union<Instance<Attr>, Instance<crate::element::Element>>>;
 /// dom_import_simplexml(): Argument #1 ($node) must not be already imported as a Dom\Node
 /// ```
 #[php_function(namespace(Dom))]
-pub(crate) fn import_simplexml(req: &mut Request, node: PhpObject) -> Result<Imported, Thrown> {
+pub(crate) fn import_simplexml(
+    req: &mut Request,
+    node: PhpObject,
+) -> Result<Owner<Imported>, Thrown> {
     let found = crate::import_simplexml_common(req, node, ClassType::Modern)?;
-    returned(req, found)
+    returned(found)
 }
 
 // ---- the cached `[SameObject]` properties
@@ -356,7 +359,7 @@ pub(crate) fn keep(
 ) -> Result<(), Thrown> {
     req.addref(value);
     let key = PhpString::new(req, name)?;
-    Std.write_property(req, object, key, *value)
+    Std.write_property(req, object, key.hand_on_unmigrated(), *value)
 }
 
 /// Forget what the slot `name` keeps, as a clone does with `ZVAL_UNDEF`.
@@ -644,7 +647,7 @@ impl Node {
         req: &mut Request,
         this: This<Self>,
         namespace: Option<PhpString>,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         crate::node::lookup_prefix(req, this.object(), namespace, true)
     }
 
@@ -713,7 +716,7 @@ impl Node {
         this: This<Self>,
         node: Instance<Node>,
         child: Option<Instance<Node>>,
-    ) -> Result<Raw<Instance<Node>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<Node>>>, Thrown> {
         let this = this.object();
         let parent = fetch(req, this)?;
         let node = fetch(req, node.object())?;
@@ -727,7 +730,7 @@ impl Node {
         invalidate(req, this);
         crate::parent::pre_insert(req, this, node, parent, point)?;
         let inserted = object_for(req, node, Some(this))?;
-        returned(req, inserted)
+        returned(inserted)
     }
 
     /// `Dom\Node::appendChild(Dom\Node $node): Dom\Node`: the standard's
@@ -760,7 +763,7 @@ impl Node {
         req: &mut Request,
         this: This<Self>,
         node: Instance<Node>,
-    ) -> Result<Raw<Instance<Node>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<Node>>>, Thrown> {
         let this = this.object();
         let parent = fetch(req, this)?;
         let node = fetch(req, node.object())?;
@@ -770,7 +773,7 @@ impl Node {
         invalidate(req, this);
         crate::parent::pre_insert(req, this, node, parent, None)?;
         let appended = object_for(req, node, Some(this))?;
-        returned(req, appended)
+        returned(appended)
     }
 
     /// `Dom\Node::replaceChild(Dom\Node $node, Dom\Node $child): Dom\Node`.
@@ -800,10 +803,10 @@ impl Node {
         this: This<Self>,
         node: Instance<Node>,
         child: Instance<Node>,
-    ) -> Result<Raw<Instance<Node>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<Node>>>, Thrown> {
         let old =
             crate::node::replace_child(req, this.object(), node.object(), child.object(), true)?;
-        returned(req, old)
+        returned(old)
     }
 
     #[php(implementation = DOMNode::removeChild)]
@@ -821,7 +824,7 @@ impl Node {
     /// ```expect
     /// /r/p:a/b /r/p:a/b/@x /
     /// ```
-    fn getNodePath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getNodePath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         match fetch(req, this.object())?.path() {
             Some(p) => PhpString::new(req, &p),
             None => Err(dom_throw(req, Code::InvalidState)),

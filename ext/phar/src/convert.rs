@@ -9,7 +9,7 @@ use std::sync::Arc;
 use php_ext::call::instantiate;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::PhpObject;
+use php_ext::values::{Owner, PhpObject};
 
 use crate::archive::{
     self, Archive, ArchiveId, Content, ENT_COMPRESSION_MASK, FILE_COMPRESSED_BZ2,
@@ -48,7 +48,7 @@ pub(crate) fn convert(
     format: Option<i64>,
     compression: Option<i64>,
     ext: Option<&[u8]>,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let Some(a) = archives(req).get(id) else {
         return Ok(None);
     };
@@ -139,7 +139,7 @@ pub(crate) fn to_other(
     format: Format,
     ext: Option<&[u8]>,
     flags: u32,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     archives(req).last = None;
     let Some(source) = archives(req).get_mut(id) else {
         return Ok(None);
@@ -267,7 +267,7 @@ fn rename(
     req: &mut Request,
     id: ArchiveId,
     ext: Option<&[u8]>,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let Some(a) = archives(req).get(id) else {
         return Ok(None);
     };
@@ -400,7 +400,7 @@ fn rename(
     }
     let class = class_named(req, if is_data { b"PharData" } else { b"Phar" })?;
     let name = string(req, &fname)?;
-    let made = instantiate(req, class, &[name]);
-    req.release(name);
+    let made = instantiate(req, class, &[*name]);
+    name.give_up(req);
     Ok(Some(made?))
 }

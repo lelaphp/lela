@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{
     CLIENT_INFO, CLIENT_VERSION, ClientOption, CloseType, Command, Connect, Mysqlnd, ServerOption,
 };
@@ -390,7 +390,7 @@ pub(crate) fn common_connect(
     args: Args,
     real: bool,
     in_ctor: bool,
-) -> Result<Option<PhpObject>, Thrown> {
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let Some((existing, open)) = connect_from(req, object, real, in_ctor)? else {
         return Ok(None);
     };
@@ -474,12 +474,12 @@ pub(crate) fn common_connect(
     state.num_links += 1;
     mysql.multi_query = false;
     let object = if let Some(object) = object {
-        object
+        Owner::take(req, object)
     } else {
         let class = link_class(req)?;
         new_object(req, class)?
     };
-    if let Some(link) = crate::payload::<Link>(req, object) {
+    if let Some(link) = crate::payload::<Link>(req, *object) {
         *link = Link::Open(mysql);
     }
     Ok(Some(object))
@@ -509,7 +509,7 @@ fn give_back(
     mut mysql: Conn,
     real: bool,
     self_alloced: bool,
-) -> Option<PhpObject> {
+) -> Option<Owner<PhpObject>> {
     mysql.hash_key = None;
     if (real || !self_alloced)
         && let Some(object) = object
@@ -565,23 +565,26 @@ fn close_conn(
 /// `php_mysqli_init`: a link made with a connection not yet connected,
 /// always persistent-capable as php makes it; on `object` for the method,
 /// on a new link otherwise.
-pub(crate) fn init(req: &mut Request, object: Option<PhpObject>) -> Result<PhpObject, Thrown> {
+pub(crate) fn init(
+    req: &mut Request,
+    object: Option<PhpObject>,
+) -> Result<Owner<PhpObject>, Thrown> {
     if let Some(object) = object
         && !matches!(
             crate::payload_ref::<Link>(req, object),
             Some(Link::Closed) | None
         )
     {
-        return Ok(object);
+        return Ok(Owner::take(req, object));
     }
     let object = if let Some(object) = object {
-        object
+        Owner::take(req, object)
     } else {
         let class = link_class(req)?;
         new_object(req, class)?
     };
     let mysql = Mysqlnd::init(req, true);
-    if let Some(link) = crate::payload::<Link>(req, object) {
+    if let Some(link) = crate::payload::<Link>(req, *object) {
         *link = Link::Made(Conn::new(Some(mysql)));
     }
     Ok(object)
@@ -626,7 +629,7 @@ pub(crate) fn query(
     on: On,
     query: PhpString,
     mode: i64,
-) -> Result<Union<Instance<mysqli_result>, bool>, Thrown> {
+) -> Result<Union<Owner<Instance<mysqli_result>>, bool>, Thrown> {
     if query.is_empty() {
         return Err(arg_value_error(req, on.at(2), "not be empty"));
     }
@@ -662,7 +665,7 @@ fn rows_of(
     mysql: Mysqlnd,
     mode: i64,
     query: &[u8],
-) -> Result<Union<Instance<mysqli_result>, bool>, Thrown> {
+) -> Result<Union<Owner<Instance<mysqli_result>>, bool>, Thrown> {
     let status = mysql.status(req);
     if status.field_count == 0 {
         report_index(req, query, status.server_status)?;
@@ -679,7 +682,10 @@ fn rows_of(
     };
     let result = crate::result::wrap(req, rows)?;
     let status = mysql.status(req);
-    report_index(req, query, status.server_status)?;
+    if let Err(thrown) = report_index(req, query, status.server_status) {
+        result.give_up(req);
+        return Err(thrown);
+    }
     Ok(Union::A(result))
 }
 
@@ -718,7 +724,7 @@ pub(crate) fn multi_query(req: &mut Request, on: On, query: PhpString) -> Result
 pub(crate) fn reap_async_query(
     req: &mut Request,
     on: On,
-) -> Result<Union<Instance<mysqli_result>, bool>, Thrown> {
+) -> Result<Union<Owner<Instance<mysqli_result>>, bool>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
     if !mysql.reap_query(req)? {
         report_conn(req, mysql)?;
@@ -746,7 +752,7 @@ pub(crate) fn take_rows(
     req: &mut Request,
     on: On,
     mode: i64,
-) -> Result<OrFalse<Instance<mysqli_result>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_result>>>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
     let rows = if mode == USE {
         mysql.use_unbuffered(req)
@@ -759,7 +765,10 @@ pub(crate) fn take_rows(
     };
     let result = crate::result::wrap(req, rows)?;
     let status = mysql.status(req);
-    report_index(req, b"from previous query", status.server_status)?;
+    if let Err(thrown) = report_index(req, b"from previous query", status.server_status) {
+        result.give_up(req);
+        return Err(thrown);
+    }
     Ok(OrFalse::Value(result))
 }
 
@@ -768,7 +777,7 @@ pub(crate) fn store_result(
     req: &mut Request,
     on: On,
     given: bool,
-) -> Result<OrFalse<Instance<mysqli_result>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<mysqli_result>>>, Thrown> {
     if given {
         php_ext::raising::deprecated(
             req,
@@ -920,8 +929,17 @@ pub(crate) fn dump_debug_info(req: &mut Request, on: On) -> Result<bool, Thrown>
     mysql.command(req, Command::DumpDebugInfo)
 }
 
+/// Whether a connect on a link answered it, the link's owner given up.
+pub(crate) fn connected_link(req: &mut Request, made: Option<Owner<PhpObject>>) -> bool {
+    let Some(made) = made else {
+        return false;
+    };
+    made.give_up(req);
+    true
+}
+
 /// `mysqli_stat`.
-pub(crate) fn stat(req: &mut Request, on: On) -> Result<OrFalse<PhpString>, Thrown> {
+pub(crate) fn stat(req: &mut Request, on: On) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
     match mysql.stat(req)? {
         Some(text) => Ok(OrFalse::Value(PhpString::new(req, &text)?)),
@@ -930,7 +948,11 @@ pub(crate) fn stat(req: &mut Request, on: On) -> Result<OrFalse<PhpString>, Thro
 }
 
 /// `mysqli_real_escape_string`.
-pub(crate) fn escape(req: &mut Request, on: On, from: PhpString) -> Result<PhpString, Thrown> {
+pub(crate) fn escape(
+    req: &mut Request,
+    on: On,
+    from: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
     let escaped = mysql.escape(req, from.as_bytes());
     PhpString::new(req, &escaped)
@@ -952,7 +974,12 @@ pub(crate) fn options(
     };
     let as_long = |_: &mut Request| long;
     let text = match option {
-        3 | 4 | 5 | 7 | 35 | 43 => Some(to_string(req, &value)?.as_bytes().to_vec()),
+        3 | 4 | 5 | 7 | 35 | 43 => {
+            let text = to_string(req, &value)?;
+            let bytes = text.as_bytes().to_vec();
+            text.give_up(req);
+            Some(bytes)
+        }
         _ => None,
     };
     let text = text.unwrap_or_default();
@@ -1010,7 +1037,7 @@ pub(crate) fn status(req: &mut Request, on: On) -> Result<php_ext_mysqlnd::clien
 }
 
 /// `mysqli_get_charset`: the connection's character set as an object.
-pub(crate) fn get_charset(req: &mut Request, on: On) -> Result<Option<PhpObject>, Thrown> {
+pub(crate) fn get_charset(req: &mut Request, on: On) -> Result<Option<Owner<PhpObject>>, Thrown> {
     let Some(cs) = status(req, on)?.charset else {
         docref(
             req,
@@ -1021,17 +1048,26 @@ pub(crate) fn get_charset(req: &mut Request, on: On) -> Result<Option<PhpObject>
     };
     let object = crate::std_object(req)?;
     let rows = [
-        ("charset", string(req, cs.name.as_bytes())?),
-        ("collation", string(req, cs.collation.as_bytes())?),
-        ("dir", string(req, b"")?),
+        (
+            "charset",
+            string(req, cs.name.as_bytes())?.hand_on_unmigrated(),
+        ),
+        (
+            "collation",
+            string(req, cs.collation.as_bytes())?.hand_on_unmigrated(),
+        ),
+        ("dir", string(req, b"")?.hand_on_unmigrated()),
         ("min_length", Value::int(i64::from(cs.min_length))),
         ("max_length", Value::int(i64::from(cs.max_length))),
         ("number", Value::int(i64::from(cs.nr))),
         ("state", Value::int(1)),
-        ("comment", string(req, cs.comment.as_bytes())?),
+        (
+            "comment",
+            string(req, cs.comment.as_bytes())?.hand_on_unmigrated(),
+        ),
     ];
     for (name, value) in rows {
-        let name = PhpString::new(req, name.as_bytes())?;
+        let name = PhpString::new(req, name.as_bytes())?.hand_on_unmigrated();
         object.set_prop(req, name, value)?;
     }
     Ok(Some(object))
@@ -1039,30 +1075,33 @@ pub(crate) fn get_charset(req: &mut Request, on: On) -> Result<Option<PhpObject>
 
 /// `mysqlnd_fill_stats_hash`: each statistic's name with its value as a
 /// decimal string.
-pub(crate) fn stats_array(req: &mut Request, stats: &[(&str, u64)]) -> Result<PhpArray, Thrown> {
+pub(crate) fn stats_array(
+    req: &mut Request,
+    stats: &[(&str, u64)],
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (name, value) in stats {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?);
+        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
         let value = string(req, value.to_string().as_bytes())?;
-        out.set(req, key, value)?;
+        out.set(req, key, value.hand_on_unmigrated())?;
     }
     Ok(out)
 }
 
 /// `mysqli_get_connection_stats`.
-pub(crate) fn connection_stats(req: &mut Request, on: On) -> Result<PhpArray, Thrown> {
+pub(crate) fn connection_stats(req: &mut Request, on: On) -> Result<Owner<PhpArray>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
     let stats = mysql.stats(req);
     stats_array(req, &stats)
 }
 
 /// The text of a fact the connection may hold none of, `""` for none.
-pub(crate) fn text(req: &mut Request, text: Option<&[u8]>) -> Result<PhpString, Thrown> {
+pub(crate) fn text(req: &mut Request, text: Option<&[u8]>) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, text.unwrap_or_default())
 }
 
 /// `mysqli_get_links_stats`.
-pub(crate) fn links_stats(req: &mut Request) -> Result<PhpArray, Thrown> {
+pub(crate) fn links_stats(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let inactive = crate::num_inactive_persistent(req);
     let state = req.state::<State>();
     let counts = [
@@ -1072,7 +1111,7 @@ pub(crate) fn links_stats(req: &mut Request) -> Result<PhpArray, Thrown> {
     ];
     let mut out = PhpArray::new(req)?;
     for (name, n) in counts {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?);
+        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
         out.set(req, key, Value::int(n))?;
     }
     Ok(out)
@@ -1190,7 +1229,7 @@ pub(crate) struct mysqli;
 pub(crate) static LINK: props::Handlers<LinkProps> = props::Handlers::new();
 
 type Answer<T> = Result<T, Thrown>;
-type Rows = Union<Instance<mysqli_result>, bool>;
+type Rows = Union<Owner<Instance<mysqli_result>>, bool>;
 
 #[php_class]
 impl mysqli {
@@ -1249,7 +1288,7 @@ impl mysqli {
             ) {
                 return Err(throw_error(req, "Error", "Cannot call constructor twice"));
             }
-            init(req, Some(object))?;
+            init(req, Some(object))?.give_up(req);
             return Ok(());
         }
         let args = Args {
@@ -1261,7 +1300,11 @@ impl mysqli {
             socket,
             flags: 0,
         };
-        common_connect(req, Some(object), args, false, true).map(|_| ())
+        let made = common_connect(req, Some(object), args, false, true)?;
+        if let Some(made) = made {
+            made.give_up(req);
+        }
+        Ok(())
     }
 
     #[php(tentative)]
@@ -1296,7 +1339,7 @@ impl mysqli {
     }
 
     #[php(tentative)]
-    fn character_set_name(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn character_set_name(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         let cs = status(req, On::method(this.object()))?.charset;
         text(req, cs.map(|c| c.name.as_bytes()))
     }
@@ -1336,7 +1379,8 @@ impl mysqli {
             socket,
             flags: 0,
         };
-        Ok(common_connect(req, Some(this.object()), args, false, false)?.is_some())
+        let made = common_connect(req, Some(this.object()), args, false, false)?;
+        Ok(connected_link(req, made))
     }
 
     #[php(tentative)]
@@ -1351,7 +1395,7 @@ impl mysqli {
     }
 
     #[php(tentative)]
-    fn get_charset(req: &mut Request, this: This<Self>) -> Answer<Option<PhpObject>> {
+    fn get_charset(req: &mut Request, this: This<Self>) -> Answer<Option<Owner<PhpObject>>> {
         get_charset(req, On::method(this.object()))
     }
 
@@ -1368,18 +1412,18 @@ impl mysqli {
         tentative,
         deprecated(since = "8.1", message = "use mysqli_get_client_info() instead")
     )]
-    fn get_client_info(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn get_client_info(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         let _ = this;
         PhpString::new(req, CLIENT_INFO.as_bytes())
     }
 
     #[php(tentative)]
-    fn get_connection_stats(req: &mut Request, this: This<Self>) -> Answer<PhpArray> {
+    fn get_connection_stats(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpArray>> {
         connection_stats(req, On::method(this.object()))
     }
 
     #[php(tentative)]
-    fn get_server_info(req: &mut Request, this: This<Self>) -> Answer<PhpString> {
+    fn get_server_info(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         let info = status(req, On::method(this.object()))?.server_info;
         text(req, info.as_deref())
     }
@@ -1388,7 +1432,7 @@ impl mysqli {
     fn get_warnings(
         req: &mut Request,
         this: This<Self>,
-    ) -> Answer<OrFalse<Instance<extras::mysqli_warning>>> {
+    ) -> Answer<OrFalse<Owner<Instance<extras::mysqli_warning>>>> {
         extras::link_warnings(req, On::method(this.object()))
     }
 
@@ -1397,7 +1441,7 @@ impl mysqli {
         message = "replace calls to parent::init() with parent::__construct()"
     ))]
     fn init(req: &mut Request, this: This<Self>) -> Answer<Untyped<()>> {
-        init(req, Some(this.object()))?;
+        init(req, Some(this.object()))?.give_up(req);
         Ok(Untyped(()))
     }
 
@@ -1455,7 +1499,7 @@ impl mysqli {
         req: &mut Request,
         this: This<Self>,
         query: PhpString,
-    ) -> Answer<OrFalse<Instance<mysqli_stmt>>> {
+    ) -> Answer<OrFalse<Owner<Instance<mysqli_stmt>>>> {
         crate::stmt::prepare(req, On::method(this.object()), query)
     }
 
@@ -1490,7 +1534,8 @@ impl mysqli {
             socket,
             flags,
         };
-        Ok(common_connect(req, Some(this.object()), args, true, false)?.is_some())
+        let made = common_connect(req, Some(this.object()), args, true, false)?;
+        Ok(connected_link(req, made))
     }
 
     #[php(tentative)]
@@ -1498,7 +1543,7 @@ impl mysqli {
         req: &mut Request,
         this: This<Self>,
         string: PhpString,
-    ) -> Answer<PhpString> {
+    ) -> Answer<Owner<PhpString>> {
         escape(req, On::method(this.object()), string)
     }
 
@@ -1508,7 +1553,11 @@ impl mysqli {
     }
 
     #[php(tentative)]
-    fn escape_string(req: &mut Request, this: This<Self>, string: PhpString) -> Answer<PhpString> {
+    fn escape_string(
+        req: &mut Request,
+        this: This<Self>,
+        string: PhpString,
+    ) -> Answer<Owner<PhpString>> {
         escape(req, On::method(this.object()), string)
     }
 
@@ -1584,12 +1633,15 @@ impl mysqli {
     }
 
     #[php(tentative)]
-    fn stat(req: &mut Request, this: This<Self>) -> Answer<OrFalse<PhpString>> {
+    fn stat(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Owner<PhpString>>> {
         stat(req, On::method(this.object()))
     }
 
     #[php(tentative)]
-    fn stmt_init(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Instance<mysqli_stmt>>> {
+    fn stmt_init(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Answer<OrFalse<Owner<Instance<mysqli_stmt>>>> {
         crate::stmt::stmt_init(req, On::method(this.object()))
     }
 
@@ -1598,7 +1650,7 @@ impl mysqli {
         req: &mut Request,
         this: This<Self>,
         #[php(default = 0)] mode: i64,
-    ) -> Answer<OrFalse<Instance<mysqli_result>>> {
+    ) -> Answer<OrFalse<Owner<Instance<mysqli_result>>>> {
         let _ = mode;
         let given = req.argument_count() == 1;
         store_result(req, On::method(this.object()), given)
@@ -1611,7 +1663,10 @@ impl mysqli {
     }
 
     #[php(tentative)]
-    fn use_result(req: &mut Request, this: This<Self>) -> Answer<OrFalse<Instance<mysqli_result>>> {
+    fn use_result(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Answer<OrFalse<Owner<Instance<mysqli_result>>>> {
         take_rows(req, On::method(this.object()), USE)
     }
 
@@ -1656,14 +1711,16 @@ impl Props for LinkProps {
         quiet: bool,
     ) -> Result<Option<Value>, Thrown> {
         match name {
-            "client_info" => return string(req, CLIENT_INFO.as_bytes()).map(Some),
+            "client_info" => {
+                return string(req, CLIENT_INFO.as_bytes()).map(|s| Some(s.hand_on_unmigrated()));
+            }
             "client_version" => {
                 return Ok(Some(Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0))));
             }
             "connect_errno" => return Ok(Some(Value::int(req.state::<State>().connect_errno))),
             "connect_error" => {
                 return match req.state::<State>().connect_error.clone() {
-                    Some(error) => string(req, &error).map(Some),
+                    Some(error) => string(req, &error).map(|s| Some(s.hand_on_unmigrated())),
                     None => Ok(Some(Value::null())),
                 };
             }
@@ -1690,20 +1747,26 @@ impl Props for LinkProps {
         };
         let s = mysql.status(req);
         let value = match name {
-            "affected_rows" => affected(req, s.affected_rows)?,
+            "affected_rows" => affected(req, s.affected_rows)?.hand_on_unmigrated(),
             "errno" => Value::int(i64::from(s.errno)),
-            "error" => string(req, &s.error)?,
-            "error_list" => props::error_list(req, &s.error_list)?,
+            "error" => string(req, &s.error)?.hand_on_unmigrated(),
+            "error_list" => props::error_list(req, &s.error_list)?
+                .into_value()
+                .hand_on_unmigrated(),
             "field_count" => Value::int(i64::from(s.field_count)),
-            "host_info" => string(req, s.host_info.as_deref().unwrap_or_default())?,
+            "host_info" => {
+                string(req, s.host_info.as_deref().unwrap_or_default())?.hand_on_unmigrated()
+            }
             "info" => match s.info {
-                Some(info) => string(req, &info)?,
+                Some(info) => string(req, &info)?.hand_on_unmigrated(),
                 None => Value::null(),
             },
-            "insert_id" => long_or_string(req, s.insert_id)?,
-            "server_info" => string(req, s.server_info.as_deref().unwrap_or_default())?,
+            "insert_id" => long_or_string(req, s.insert_id)?.hand_on_unmigrated(),
+            "server_info" => {
+                string(req, s.server_info.as_deref().unwrap_or_default())?.hand_on_unmigrated()
+            }
             "server_version" => Value::int(i64::try_from(s.server_version).unwrap_or(0)),
-            "sqlstate" => string(req, &s.sqlstate)?,
+            "sqlstate" => string(req, &s.sqlstate)?.hand_on_unmigrated(),
             "protocol_version" => Value::int(i64::from(s.proto_info)),
             "thread_id" => Value::int(i64::try_from(s.thread_id).unwrap_or(0)),
             "warning_count" => Value::int(i64::from(s.warning_count)),

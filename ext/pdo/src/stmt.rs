@@ -13,7 +13,7 @@ use php_ext::call::internal_iterator;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::connector::{
     BindEvent, BindKind, BindType, Binding, Cause, Failure, Placeholders, Prepared, SqlState,
@@ -781,7 +781,9 @@ fn convert(req: &mut Request, bound: &mut Bound) -> Result<(), Thrown> {
     let inner = bound.value.deref();
     let converted = match (bound.ty.kind(), inner.as_ref()) {
         (BindKind::Str, ValueRef::Null | ValueRef::Str(_)) => None,
-        (BindKind::Str, _) if bound.max_len <= 0 => Some(Value::string(to_string(req, &inner)?)),
+        (BindKind::Str, _) if bound.max_len <= 0 => {
+            Some(Value::string(to_string(req, &inner)?.hand_on_unmigrated()))
+        }
         (BindKind::Int, ValueRef::Bool(b)) => Some(Value::int(i64::from(b))),
         (BindKind::Bool, ValueRef::Int(n)) => Some(Value::bool(n != 0)),
         _ => None,
@@ -1253,7 +1255,7 @@ impl PDOStatement {
     /// string(5) "00000"
     /// ```
     #[php(tentative)]
-    fn errorCode(req: &mut Request, this: This<Self>) -> Result<Option<PhpString>, Thrown> {
+    fn errorCode(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         let (stmt, _) = this_stmt(req, this.object())?;
         match read(req, stmt, |s| s.error_code).flatten() {
             Some(state) => PhpString::new(req, state.as_str().as_bytes()).map(Some),
@@ -1281,12 +1283,12 @@ impl PDOStatement {
     /// }
     /// ```
     #[php(tentative)]
-    fn errorInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn errorInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let (stmt, dbh) = this_stmt(req, this.object())?;
         let state = read(req, stmt, |s| s.error_code).flatten();
         let mut out = PhpArray::new(req)?;
         let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
-        out.append(req, made)?;
+        out.append(req, made.hand_on_unmigrated())?;
         if state != Some(SqlState::NONE) {
             error::fetch_error(req, dbh, On::Stmt(stmt), &mut out)?;
         }
@@ -1515,7 +1517,7 @@ impl PDOStatement {
         this: This<Self>,
         #[php(default = PDO::FETCH_DEFAULT)] mode: Raw<i64>,
         args: Variadic<Value>,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         fetch::fetch_all(req, this.object(), mode, &args.0)
     }
 
@@ -1702,14 +1704,14 @@ impl PDOStatement {
         .flatten();
         let mut meta = meta;
         if let Some(info) = info {
-            let key = PhpString::new(req, b"name")?;
+            let key = PhpString::new(req, b"name")?.hand_on_unmigrated();
             let made = crate::string(req, &info.name)?;
-            meta.set(req, Key::Str(key), made)?;
-            let key = PhpString::new(req, b"len")?;
+            meta.set(req, Key::Str(key), made.hand_on_unmigrated())?;
+            let key = PhpString::new(req, b"len")?.hand_on_unmigrated();
             // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
             #[allow(clippy::cast_possible_wrap)]
             meta.set(req, Key::Str(key), Value::int(info.max_len as i64))?;
-            let key = PhpString::new(req, b"precision")?;
+            let key = PhpString::new(req, b"precision")?.hand_on_unmigrated();
             #[allow(clippy::cast_possible_wrap)]
             meta.set(req, Key::Str(key), Value::int(info.precision as i64))?;
         }
@@ -1868,9 +1870,12 @@ impl PDOStatement {
     /// ```expect
     /// int(4)
     /// ```
-    fn getIterator(req: &mut Request, this: This<Self>) -> Result<Instance<Iterator>, Thrown> {
+    fn getIterator(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Instance<Iterator>>, Thrown> {
         let stmt = this.object();
         handle(req, stmt)?;
-        Ok(Instance::of(internal_iterator(req, &stmt)?))
+        Ok(internal_iterator(req, &stmt)?.into_instance())
     }
 }

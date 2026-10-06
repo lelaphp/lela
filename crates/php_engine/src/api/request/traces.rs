@@ -13,7 +13,9 @@ use php_unit::decl::ClassKind;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use crate::api::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted,
+};
 use crate::exec::{self, IncludeKind};
 
 use super::{
@@ -338,12 +340,12 @@ impl Request {
     ) -> Result<PhpArray, Thrown> {
         let ignore_arguments = options & DEBUG_BACKTRACE_IGNORE_ARGS != 0;
         let provide_object = options & DEBUG_BACKTRACE_PROVIDE_OBJECT != 0;
-        let mut trace = PhpArray::new(self)?;
+        let mut trace = self.array()?;
         self.constant_expression_row(&mut trace)?;
         for (traced, this, scope, arguments, named, site) in links {
             // `zend_new_array(8)` and `zend_hash_real_init_mixed`: every
             // row is a hash laid down before its first key.
-            let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?;
+            let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
             if let Some((file, line)) = site {
                 // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
                 // name, one more owner of the interned string.
@@ -386,8 +388,8 @@ impl Request {
                     // `DEBUG_BACKTRACE_IGNORE_ARGS` as without it, made
                     // here with the row as its one owner.
                     if let Some(file) = file {
-                        let file = Value::string(PhpString::new(self, &file)?);
-                        let mut args = PhpArray::new(self)?;
+                        let file = Value::string(self.string(&file)?);
+                        let mut args = self.array()?;
                         args.append(self, file)?;
                         self.set_string_key(&mut row, b"args", Value::array(args))?;
                     }
@@ -395,7 +397,7 @@ impl Request {
                     self.set_string_key(&mut row, b"function", name)?;
                 }
                 Traced::Unknown => {
-                    let name = Value::string(PhpString::new(self, b"unknown")?);
+                    let name = Value::string(self.string(b"unknown")?);
                     self.set_string_key(&mut row, b"function", name)?;
                 }
                 Traced::Dropped => {
@@ -427,7 +429,7 @@ impl Request {
         let mut args = if arguments.is_empty() {
             PhpArray::empty()
         } else {
-            PhpArray::new(self)?
+            self.array()?
         };
         for (at, argument) in arguments.into_iter().enumerate() {
             let argument = argument.deref();
@@ -475,11 +477,11 @@ impl Request {
         if *executing == *file && at == line {
             return Ok(());
         }
-        let mut row = PhpArray::new(self)?;
-        let file = Value::string(PhpString::new(self, &executing)?);
+        let mut row = self.array()?;
+        let file = Value::string(self.string(&executing)?);
         self.set_string_key(&mut row, b"file", file)?;
         self.set_string_key(&mut row, b"line", Value::int(i64::from(at)))?;
-        let name = Value::string(PhpString::new(self, b"[constant expression]")?);
+        let name = Value::string(self.string(b"[constant expression]")?);
         self.set_string_key(&mut row, b"function", name)?;
         trace.append(self, Value::array(row))
     }
@@ -556,7 +558,8 @@ impl Request {
                 "InternalError: SensitiveParameterValue is not linked",
             ));
         };
-        crate::api::call::instantiate(self, class, &[argument]).map(|object| object.as_value())
+        crate::api::call::instantiate_named_made(self, class, &[argument], &[])
+            .map(|object| object.as_value())
     }
 
     /// php's one `prev_execute_data` chain, innermost first, walked back
@@ -1137,8 +1140,10 @@ impl Request {
     /// `zend_fetch_debug_backtrace(return_value, 1, options, limit)`,
     /// what `debug_backtrace()` answers from inside the native being
     /// served: the rows below it, under php's options and limit.
-    pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<PhpArray, Thrown> {
-        self.fetch_debug_backtrace(true, options, limit)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn backtrace(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.fetch_debug_backtrace(true, options, limit);
+        adopted(self, made)
     }
 
     /// `zend_hash_str_update` on a row: `value` at the string key `name`,

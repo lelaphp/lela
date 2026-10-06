@@ -9,7 +9,7 @@ use std::ffi::c_int;
 use php_ext::coerce::to_long;
 use php_ext::raising::throw_error;
 use php_ext::request::{Request, Stream};
-use php_ext::values::{PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
 use crate::constants as c;
 use crate::ffi::{Cx, Hook};
@@ -23,7 +23,7 @@ fn user(
     object: PhpObject,
     pick: impl Fn(&Curl) -> Option<&crate::handle::Handler>,
     rest: &[Value],
-) -> Option<Value> {
+) -> Option<Owner<Value>> {
     let callable = object
         .native::<Curl>(cx.req)
         .and_then(|curl| pick(curl).map(|handler| handler.callable.clone()))?;
@@ -46,9 +46,9 @@ fn set_in_callback(req: &mut Request, object: PhpObject, on: bool) {
 
 /// A string argument of the request's, `ZVAL_STRINGL`; `None` where the
 /// memory limit refused it, which is kept for the call to hand back.
-fn string(cx: &mut Cx<'_>, bytes: &[u8]) -> Option<Value> {
+fn string(cx: &mut Cx<'_>, bytes: &[u8]) -> Option<Owner<PhpString>> {
     match PhpString::new(cx.req, bytes) {
-        Ok(string) => Some(Value::string(string)),
+        Ok(string) => Some(string),
         Err(thrown) => {
             cx.raise(thrown);
             None
@@ -56,17 +56,17 @@ fn string(cx: &mut Cx<'_>, bytes: &[u8]) -> Option<Value> {
     }
 }
 
-fn release_all(req: &mut Request, values: Vec<Value>) {
+fn release_all(req: &mut Request, values: Vec<Owner<PhpString>>) {
     for value in values {
-        req.release(value);
+        value.give_up(req);
     }
 }
 
 /// `php_curl_get_long(&retval)`: the value as `zval_get_long` reads it,
 /// the value let go.
-fn long(cx: &mut Cx<'_>, value: Value) -> i64 {
+fn long(cx: &mut Cx<'_>, value: Owner<Value>) -> i64 {
     let n = to_long(cx.req, &value).unwrap_or(0);
-    cx.req.release(value);
+    value.give_up(cx.req);
     n
 }
 
@@ -84,12 +84,13 @@ fn user_write(cx: &mut Cx<'_>, object: PhpObject, header: bool, data: &[u8]) -> 
     let Some(text) = string(cx, data) else {
         return data.len();
     };
+    let arguments = [Value::string(*text)];
     let returned = if header {
-        user(cx, object, |curl| curl.header.handler.as_ref(), &[text])
+        user(cx, object, |curl| curl.header.handler.as_ref(), &arguments)
     } else {
-        user(cx, object, |curl| curl.write.handler.as_ref(), &[text])
+        user(cx, object, |curl| curl.write.handler.as_ref(), &arguments)
     };
-    cx.req.release(text);
+    text.give_up(cx.req);
     match returned {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         Some(value) => long(cx, value) as usize,
@@ -152,7 +153,7 @@ pub(crate) fn read(cx: &mut Cx<'_>, object: PhpObject, buffer: &mut [u8]) -> usi
                     let bytes = read.as_bytes();
                     let len = bytes.len().min(buffer.len());
                     buffer[..len].copy_from_slice(&bytes[..len]);
-                    cx.req.release(Value::string(read));
+                    read.give_up(cx.req);
                     len
                 }
                 Ok(None) => 0,
@@ -182,7 +183,7 @@ pub(crate) fn read(cx: &mut Cx<'_>, object: PhpObject, buffer: &mut [u8]) -> usi
                 ValueRef::Int(n) => n as usize,
                 _ => 0,
             };
-            cx.req.release(returned);
+            returned.give_up(cx.req);
             length
         }
     }
@@ -190,7 +191,7 @@ pub(crate) fn read(cx: &mut Cx<'_>, object: PhpObject, buffer: &mut [u8]) -> usi
 
 /// A hook's callable handed `ch` and `rest`, `None` where it is unset or
 /// served nothing.
-fn hooked(cx: &mut Cx<'_>, object: PhpObject, hook: Hook, rest: &[Value]) -> Option<Value> {
+fn hooked(cx: &mut Cx<'_>, object: PhpObject, hook: Hook, rest: &[Value]) -> Option<Owner<Value>> {
     user(cx, object, |curl| curl.hook(hook), rest)
 }
 
@@ -221,7 +222,8 @@ pub(crate) fn fnmatch(cx: &mut Cx<'_>, object: PhpObject, pattern: &[u8], string
     let (Some(pattern), Some(text)) = (string(cx, pattern), string(cx, string_)) else {
         return FAIL;
     };
-    let returned = hooked(cx, object, Hook::Fnmatch, &[pattern, text]);
+    let arguments = [Value::string(*pattern), Value::string(*text)];
+    let returned = hooked(cx, object, Hook::Fnmatch, &arguments);
     release_all(cx.req, vec![pattern, text]);
     match returned {
         #[allow(clippy::cast_possible_truncation)]
@@ -249,11 +251,14 @@ pub(crate) fn debug(cx: &mut Cx<'_>, object: PhpObject, kind: i64, data: &[u8]) 
         return 0;
     };
     set_in_callback(cx.req, object, true);
-    let returned = cx.call(&callable, &[object.as_value(), Value::int(kind), text]);
+    let returned = cx.call(
+        &callable,
+        &[object.as_value(), Value::int(kind), Value::string(*text)],
+    );
     set_in_callback(cx.req, object, false);
-    cx.req.release(text);
+    text.give_up(cx.req);
     if let Some(returned) = returned {
-        cx.req.release(returned);
+        returned.give_up(cx.req);
     }
     0
 }
@@ -271,8 +276,8 @@ pub(crate) fn prereq(
         return 0;
     };
     let arguments = [
-        primary,
-        local,
+        Value::string(*primary),
+        Value::string(*local),
         Value::int(i64::from(ports[0])),
         Value::int(i64::from(ports[1])),
     ];
@@ -298,7 +303,7 @@ pub(crate) fn prereq(
             0
         }
     };
-    cx.req.release(returned);
+    returned.give_up(cx.req);
     answer
 }
 
@@ -310,9 +315,13 @@ pub(crate) fn ssh_hostkey(cx: &mut Cx<'_>, object: PhpObject, keytype: c_int, ke
         return MISMATCH;
     };
     let length = i64::try_from(key.len()).unwrap_or(i64::MAX);
-    let arguments = [Value::int(i64::from(keytype)), text, Value::int(length)];
+    let arguments = [
+        Value::int(i64::from(keytype)),
+        Value::string(*text),
+        Value::int(length),
+    ];
     let returned = hooked(cx, object, Hook::SshHostkey, &arguments);
-    cx.req.release(text);
+    text.give_up(cx.req);
     let Some(returned) = returned else {
         return MISMATCH;
     };
@@ -329,6 +338,6 @@ pub(crate) fn ssh_hostkey(cx: &mut Cx<'_>, object: PhpObject, keytype: c_int, ke
             MISMATCH
         }
     };
-    cx.req.release(returned);
+    returned.give_up(cx.req);
     answer
 }

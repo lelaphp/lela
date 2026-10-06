@@ -212,7 +212,7 @@ fn usort(req: &mut Request, array: Ref<PhpArray>, callback: Callable) -> Result<
     let sorted = copy.sort_by(req, true, |req, (_, a), (_, b)| {
         user_compare(req, &callback, &mut deprecated, a, b)
     });
-    let written = array.set(req, copy);
+    let written = array.set(req, copy.hand_on_unmigrated());
     sorted?;
     written?;
     Ok(True)
@@ -639,7 +639,7 @@ fn user_sort(
             user_compare(req, callback, &mut deprecated, a, b)
         }
     });
-    let written = array.set(req, copy);
+    let written = array.set(req, copy.hand_on_unmigrated());
     sorted?;
     written?;
     Ok(True)
@@ -1032,7 +1032,7 @@ fn multisort(
             }
         }
         rebuilt.set_next_free(req, count)?;
-        cell.set(req, Untyped(rebuilt.to_value()))?;
+        cell.set(req, Untyped(rebuilt.into_value().hand_on_unmigrated()))?;
     }
     Ok(())
 }

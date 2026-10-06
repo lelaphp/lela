@@ -16,7 +16,7 @@ use php_ext::raising::{Level, Thrown, docref, warning};
 use php_ext::request::{
     Cast, Opening, Request, Stream, StreamCtx, StreamOps, StreamWrapper, Streams as _, Whence,
 };
-use php_ext::values::{PhpArray, PhpString, Resource};
+use php_ext::values::{Owner, PhpArray, PhpString, Resource};
 
 /// `php_gz_stream_data_t`: the `gzFile` and the stream whose fd
 /// it duplicated, kept open until the kind closes.
@@ -192,7 +192,7 @@ fn open(
     path: &[u8],
     mode: &[u8],
     opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     if mode.contains(&b'+') {
         if !opening.warn {
             return Ok(None);
@@ -220,19 +220,29 @@ fn open(
         return Ok(None);
     };
     let Some(fd) = inner.cast(req, Cast::Fd, true) else {
-        inner.free(req);
+        inner.close(req);
+        inner.give_up(req);
         return Ok(None);
     };
-    let Some(file) = gzdopen(req, fd, mode)? else {
+    let file = match gzdopen(req, fd, mode) {
+        Ok(file) => file,
+        Err(thrown) => {
+            inner.close(req);
+            inner.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let Some(file) = file else {
         if opening.warn {
             docref(req, Level::Warning, "gzopen failed");
         }
-        inner.free(req);
+        inner.close(req);
+        inner.give_up(req);
         return Ok(None);
     };
     let kind = GzStream {
         file: Some(file),
-        inner: Some(inner),
+        inner: Some(inner.hand_on_unmigrated()),
     };
     req.new_stream(Box::new(kind), mode).map(Some)
 }
@@ -266,7 +276,7 @@ fn wrapper_open(
     mode: &[u8],
     opening: Opening,
 ) -> Result<Option<Stream>, Thrown> {
-    open(req, path, mode, opening)
+    Ok(open(req, path, mode, opening)?.map(Owner::hand_on_unmigrated))
 }
 
 /// `php_stream_gzip_wrapper`, `compress.zlib`, labelled `ZLIB`: an
@@ -330,7 +340,7 @@ fn open_plain(
     filename: &[u8],
     mode: &[u8],
     use_include_path: bool,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let context = Some(StreamCtx::default_ctx(req)?);
     let opening = Opening {
         use_path: use_include_path,
@@ -407,11 +417,11 @@ fn gzopen(
     filename: Path,
     mode: PhpString,
     #[php(default = false)] use_include_path: bool,
-) -> Result<Untyped<OrFalse<Resource>>, Thrown> {
+) -> Result<Untyped<OrFalse<Owner<Resource>>>, Thrown> {
     let Path(filename) = filename;
     let opened = open_plain(req, filename.as_bytes(), mode.as_bytes(), use_include_path)?;
     Ok(Untyped(opened.map_or(OrFalse::False, |stream| {
-        OrFalse::Value(stream.resource())
+        OrFalse::Value(stream.into_resource())
     })))
 }
 
@@ -461,24 +471,34 @@ fn gzfile(
     req: &mut Request,
     filename: Path,
     #[php(default = false)] use_include_path: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Path(filename) = filename;
     let Some(stream) = open_plain(req, filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(OrFalse::False);
     };
-    let lines = read_lines(req, stream);
-    stream.free(req);
+    let lines = read_lines(req, *stream);
+    stream.close(req);
+    stream.give_up(req);
     Ok(OrFalse::Value(lines?))
 }
 
 /// `gzfile`'s loop: each line of `stream` into a new array.
-fn read_lines(req: &mut Request, stream: Stream) -> Result<PhpArray, Thrown> {
+fn read_lines(req: &mut Request, stream: Stream) -> Result<Owner<PhpArray>, Thrown> {
     let mut lines = PhpArray::new(req)?;
-    while let Some(line) = stream.get_line(req, Some(8191))? {
+    loop {
+        let line = match stream.get_line(req, Some(8191)) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(thrown) => {
+                lines.give_up(req);
+                return Err(thrown);
+            }
+        };
         let bytes = line.as_bytes();
         let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
-        let line = PhpString::new(req, &bytes[..end])?;
-        lines.append(req, php_ext::values::Value::string(line))?;
+        let cut = PhpString::new(req, &bytes[..end])?;
+        line.give_up(req);
+        lines.append(req, cut.into_value().hand_on_unmigrated())?;
     }
     Ok(lines)
 }
@@ -509,8 +529,9 @@ fn readgzfile(
     let Some(stream) = open_plain(req, filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(OrFalse::False);
     };
-    let size = php_ext_standard::fpassthru(req, stream);
-    stream.free(req);
+    let size = php_ext_standard::fpassthru(req, *stream);
+    stream.close(req);
+    stream.give_up(req);
     Ok(OrFalse::Value(size?))
 }
 
@@ -599,7 +620,7 @@ fn gzeof(req: &mut Request, stream: Stream) -> bool {
 /// bool(false)
 /// ```
 #[php_function]
-fn gzgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<PhpString>, Thrown> {
+fn gzgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     php_ext_standard::fgetc(req, stream)
 }
 
@@ -677,7 +698,11 @@ fn gztell(req: &mut Request, stream: Stream) -> OrFalse<i64> {
 /// gzread(): Argument #2 ($length) must be greater than 0
 /// ```
 #[php_function]
-fn gzread(req: &mut Request, stream: Stream, length: i64) -> Result<OrFalse<PhpString>, Thrown> {
+fn gzread(
+    req: &mut Request,
+    stream: Stream,
+    length: i64,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     php_ext_standard::fread(req, stream, length)
 }
 
@@ -700,6 +725,6 @@ fn gzgets(
     req: &mut Request,
     stream: Stream,
     #[php(default = null)] length: Option<i64>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     php_ext_standard::fgets(req, stream, length)
 }

@@ -8,7 +8,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, FreshString, PhpString};
+use php_ext::values::{Emalloc, FreshString, Owner, PhpString};
 
 use crate::constants::{ZLIB_ENCODING_DEFLATE, ZLIB_ENCODING_GZIP, ZLIB_ENCODING_RAW};
 use crate::ffi::{Deflate, Flush, Inflate, Status};
@@ -44,7 +44,7 @@ fn encode(
     input: &[u8],
     encoding: i64,
     level: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let status = match Deflate::new(req, level, encoding, MAX_MEM_LEVEL, DEFAULT_STRATEGY)? {
         Ok(mut stream) => {
             let mut out = match FreshString::new(req, size_guess(input.len())) {
@@ -59,7 +59,7 @@ fn encode(
             match step {
                 Ok(step) if step.status == Status::StreamEnd => {
                     let out = out.truncate(req, step.written)?;
-                    return Ok(OrFalse::Value(out.finish()));
+                    return Ok(OrFalse::Value(out.finish(req)));
                 }
                 Ok(step) => {
                     out.free(req);
@@ -149,7 +149,7 @@ fn gzcompress(
     data: PhpString,
     #[php(default = -1)] level: i64,
     #[php(default = ZLIB_ENCODING_DEFLATE)] encoding: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     checked(req, level, 2, encoding, 3)?;
     encode(req, data.as_bytes(), encoding, level)
 }
@@ -185,7 +185,7 @@ fn gzdeflate(
     data: PhpString,
     #[php(default = -1)] level: i64,
     #[php(default = ZLIB_ENCODING_RAW)] encoding: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     checked(req, level, 2, encoding, 3)?;
     encode(req, data.as_bytes(), encoding, level)
 }
@@ -221,7 +221,7 @@ fn gzencode(
     data: PhpString,
     #[php(default = -1)] level: i64,
     #[php(default = ZLIB_ENCODING_GZIP)] encoding: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     checked(req, level, 2, encoding, 3)?;
     encode(req, data.as_bytes(), encoding, level)
 }
@@ -247,7 +247,7 @@ fn zlib_encode(
     data: PhpString,
     encoding: i64,
     #[php(default = -1)] level: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     checked(req, level, 3, encoding, 2)?;
     encode(req, data.as_bytes(), encoding, level)
 }
@@ -334,7 +334,7 @@ fn decode(
     data: &[u8],
     mut encoding: i64,
     max: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     if max < 0 {
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     }
@@ -411,7 +411,7 @@ fn gzuncompress(
     req: &mut Request,
     data: PhpString,
     #[php(default = 0)] max_length: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decode(req, data.as_bytes(), ZLIB_ENCODING_DEFLATE, max_length)
 }
 
@@ -433,7 +433,7 @@ fn gzinflate(
     req: &mut Request,
     data: PhpString,
     #[php(default = 0)] max_length: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decode(req, data.as_bytes(), ZLIB_ENCODING_RAW, max_length)
 }
 
@@ -453,7 +453,7 @@ fn gzdecode(
     req: &mut Request,
     data: PhpString,
     #[php(default = 0)] max_length: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decode(req, data.as_bytes(), ZLIB_ENCODING_GZIP, max_length)
 }
 
@@ -476,6 +476,6 @@ fn zlib_decode(
     req: &mut Request,
     data: PhpString,
     #[php(default = 0)] max_length: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     decode(req, data.as_bytes(), ENCODING_ANY, max_length)
 }

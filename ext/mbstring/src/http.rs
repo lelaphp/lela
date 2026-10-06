@@ -14,7 +14,7 @@ use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{ContentType, Input, Request};
-use php_ext::values::{PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use php_ext_pcre::Regex;
 
 /// `PHP_OUTPUT_HANDLER_START` and `PHP_OUTPUT_HANDLER_FINAL`.
@@ -216,8 +216,9 @@ fn mb_parse_str(
     string: PhpString,
     result: Ref<Untyped<Value>>,
 ) -> Result<bool, Thrown> {
-    let array = PhpArray::new(req)?;
-    result.set(req, Untyped(Value::array(array)))?;
+    let made = PhpArray::new(req)?;
+    let array = *made;
+    result.set(req, Untyped(made.into_value().hand_on_unmigrated()))?;
     let into = match result.reference() {
         Some(cell) => cell.separate_array(req)?.unwrap_or(array),
         None => array,
@@ -232,7 +233,7 @@ fn mb_parse_str(
     for (name, value) in variables {
         // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`.
         let value = crate::text::cut_string(req, &value)?;
-        req.register_variable(into, &name, Value::string(value))?;
+        req.register_variable(into, &name, value.into_value().hand_on_unmigrated())?;
     }
     req.state::<State>().identified = detected;
     Ok(detected.is_some())
@@ -255,10 +256,12 @@ fn mb_parse_str(
 /// mb_http_input(): Argument #1 ($type) must be one of "G", "P", "C", "S", "I", or "L"
 /// ```
 #[php_function]
+// The declared `array|string|false`, each fresh value an owner.
+#[allow(clippy::type_complexity)]
 fn mb_http_input(
     req: &mut Request,
     #[php(default = null)] r#type: Option<PhpString>,
-) -> Result<OrFalse<Union<PhpArray, PhpString>>, Thrown> {
+) -> Result<OrFalse<Union<Owner<PhpArray>, Owner<PhpString>>>, Thrown> {
     let refused = "must be one of \"G\", \"P\", \"C\", \"S\", \"I\", or \"L\"";
     let encoding = match r#type.as_ref().map(PhpString::as_bytes) {
         None => req.state::<State>().identified,
@@ -272,7 +275,7 @@ fn mb_http_input(
                 let mut out = PhpArray::new(req)?;
                 for enc in list {
                     let name = new_string(req, enc.name())?;
-                    out.append(req, Value::string(name))?;
+                    out.append(req, name.into_value().hand_on_unmigrated())?;
                 }
                 return Ok(OrFalse::Value(Union::A(out)));
             }
@@ -330,7 +333,7 @@ fn mb_output_handler(
     req: &mut Request,
     string: PhpString,
     status: i64,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let (encoding, internal, sub) = {
         let s = settings(req);
         (s.http_output, s.current_internal, s.substitute)

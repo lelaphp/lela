@@ -15,7 +15,7 @@ use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{
-    ClassId, Key, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, ValueRef,
 };
 
 use crate::State;
@@ -257,17 +257,17 @@ fn create<C: Class>(
     format: Option<&[u8]>,
     timezone: Option<Instance<DateTimeZone>>,
     how: Init,
-) -> Result<OrFalse<Instance<C>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<C>>>, Thrown> {
     let object = new_object(req, class)?;
     let timezone = timezone.map(|tz| tz.object());
-    match initialize(req, object, text, format, timezone, how) {
-        Ok(true) => Ok(OrFalse::Value(Instance::of(object))),
+    match initialize(req, *object, text, format, timezone, how) {
+        Ok(true) => Ok(OrFalse::Value(object.into_instance())),
         Ok(false) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Ok(OrFalse::False)
         }
         Err(thrown) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -280,7 +280,7 @@ fn date_create_of<C: Class>(
     name: &str,
     datetime: PhpString,
     timezone: Option<Instance<DateTimeZone>>,
-) -> Result<OrFalse<Instance<C>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<C>>>, Thrown> {
     let class = class_id(req, name)?;
     let how = Init {
         ctor: false,
@@ -297,7 +297,7 @@ fn from_format<C: Class>(
     format: PhpString,
     datetime: Path,
     timezone: Option<Instance<DateTimeZone>>,
-) -> Result<OrFalse<Instance<C>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<C>>>, Thrown> {
     let how = Init {
         ctor: false,
         format: true,
@@ -318,7 +318,11 @@ fn called_or(req: &mut Request, fallback: &str) -> Result<ClassId, Thrown> {
 /// `createFromImmutable`, `createFromMutable` and both
 /// `createFromInterface`s: a date of the called class over a copy of
 /// the given one's time.
-fn create_from(req: &mut Request, from: PhpObject, fallback: &str) -> Result<PhpObject, Thrown> {
+fn create_from(
+    req: &mut Request,
+    from: PhpObject,
+    fallback: &str,
+) -> Result<Owner<PhpObject>, Thrown> {
     let time = time_of(req, from)?;
     let class = called_or(req, fallback)?;
     new_date(req, class, time)
@@ -329,7 +333,7 @@ fn create_from_timestamp(
     req: &mut Request,
     timestamp: Union<i64, f64>,
     fallback: &str,
-) -> Result<Static, Thrown> {
+) -> Result<Owner<Static>, Thrown> {
     // `object_init_ex` before the timestamp is read, so the object
     // stands across `php_date_initialize_from_ts_double`'s
     // `DateRangeError`, and `zval_ptr_dtor` after it.
@@ -340,17 +344,17 @@ fn create_from_timestamp(
         Union::B(f) => match from_float(req, f) {
             Ok(time) => time,
             Err(thrown) => {
-                req.release(object.as_value());
+                object.give_up(req);
                 return Err(thrown);
             }
         },
     };
-    set_time(req, object, Some(time))?;
-    Ok(Static(object))
+    set_time(req, *object, Some(time))?;
+    Ok(object.into_static())
 }
 
 /// `date_get_last_errors` and `getLastErrors` of both classes.
-fn last_errors(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn last_errors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(errors) = req.state::<State>().last_errors.clone() else {
         return Ok(OrFalse::False);
     };
@@ -367,7 +371,11 @@ pub(crate) fn format_obj(req: &mut Request, format: &[u8], object: PhpObject) ->
 }
 
 /// `date_format` and `format` of both classes.
-fn format_of(req: &mut Request, object: PhpObject, format: PhpString) -> Result<PhpString, Thrown> {
+fn format_of(
+    req: &mut Request,
+    object: PhpObject,
+    format: PhpString,
+) -> Result<Owner<PhpString>, Thrown> {
     let Some(text) = format_obj(req, format.as_bytes(), object) else {
         return Err(crate::obj::uninitialized(req, object.class()));
     };
@@ -501,13 +509,13 @@ fn sub(
 fn timezone_of(
     req: &mut Request,
     object: PhpObject,
-) -> Result<OrFalse<Instance<DateTimeZone>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
     let time = time_of(req, object)?;
     if time.is_localtime == 0 {
         return Ok(OrFalse::False);
     }
     match tz_from_time(&time) {
-        Some(kind) => new_timezone(req, kind).map(OrFalse::Value),
+        Some(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
         None => Ok(OrFalse::False),
     }
 }
@@ -633,12 +641,12 @@ fn changed_copy(
     req: &mut Request,
     object: PhpObject,
     change: impl FnOnce(&mut Request, PhpObject) -> Result<(), Thrown>,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let copy = clone_date(req, object)?;
-    match change(req, copy) {
+    match change(req, *copy) {
         Ok(()) => Ok(copy),
         Err(thrown) => {
-            req.release(copy.as_value());
+            copy.give_up(req);
             Err(thrown)
         }
     }
@@ -667,7 +675,7 @@ fn diff_of(
     one: PhpObject,
     two: PhpObject,
     absolute: bool,
-) -> Result<Instance<DateInterval>, Thrown> {
+) -> Result<Owner<Instance<DateInterval>>, Thrown> {
     let a = time_of(req, one)?;
     let b = time_of(req, two)?;
     let mut diff = a.diff(&b);
@@ -707,9 +715,9 @@ pub(super) fn initialize_from_hash(
             let Some(tzi) = parse_tzfile(req, &zone) else {
                 return Ok(false);
             };
-            let tz = new_timezone(req, TzKind::Id(tzi))?.object();
-            let done = initialize(req, object, &date, None, Some(tz), init);
-            req.release(tz.as_value());
+            let tz = new_timezone(req, TzKind::Id(tzi))?;
+            let done = initialize(req, object, &date, None, Some(*tz), init);
+            tz.give_up(req);
             done
         }
         _ => Ok(false),
@@ -718,13 +726,13 @@ pub(super) fn initialize_from_hash(
 
 /// `__set_state(array $array)` of either class: always of the class
 /// itself, as `php_date_instantiate(date_ce_date)` makes it.
-fn set_state(req: &mut Request, class: &str, hash: PhpArray) -> Result<PhpObject, Thrown> {
+fn set_state(req: &mut Request, class: &str, hash: PhpArray) -> Result<Owner<PhpObject>, Thrown> {
     let class_id = class_id(req, class)?;
     let object = new_object(req, class_id)?;
-    match initialize_from_hash(req, object, hash) {
+    match initialize_from_hash(req, *object, hash) {
         Ok(true) => Ok(object),
         Ok(false) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Err(throw_error(
                 req,
                 "Error",
@@ -732,7 +740,7 @@ fn set_state(req: &mut Request, class: &str, hash: PhpArray) -> Result<PhpObject
             ))
         }
         Err(thrown) => {
-            req.release(object.as_value());
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -810,7 +818,12 @@ pub(super) fn restore_properties(
         };
         let plain = PhpString::new(req, plain)?;
         req.addref(&value);
-        object.write_prop_in(req, PropertyScope::Of(ClassRef(scope)), plain, value)?;
+        object.write_prop_in(
+            req,
+            PropertyScope::Of(ClassRef(scope)),
+            plain.hand_on_unmigrated(),
+            value,
+        )?;
     }
     Ok(())
 }
@@ -840,8 +853,8 @@ fn wakeup(req: &mut Request, class: &str, object: PhpObject) -> Result<(), Throw
         req.addref(&value);
         hash.set(req, key, value)?;
     }
-    let done = initialize_from_hash(req, object, hash);
-    req.release(Value::array(hash));
+    let done = initialize_from_hash(req, object, *hash);
+    hash.give_up(req);
     if !done? {
         return Err(throw_error(
             req,
@@ -899,7 +912,7 @@ fn date_create(
     req: &mut Request,
     #[php(default = "now")] datetime: PhpString,
     #[php(default = null)] timezone: Option<Instance<DateTimeZone>>,
-) -> Result<OrFalse<Instance<DateTime>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateTime>>>, Thrown> {
     date_create_of(req, "DateTime", datetime, timezone)
 }
 
@@ -924,7 +937,7 @@ fn date_create_immutable(
     req: &mut Request,
     #[php(default = "now")] datetime: PhpString,
     #[php(default = null)] timezone: Option<Instance<DateTimeZone>>,
-) -> Result<OrFalse<Instance<DateTimeImmutable>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateTimeImmutable>>>, Thrown> {
     date_create_of(req, "DateTimeImmutable", datetime, timezone)
 }
 
@@ -962,7 +975,7 @@ fn date_create_from_format(
     format: PhpString,
     datetime: Path,
     #[php(default = null)] timezone: Option<Instance<DateTimeZone>>,
-) -> Result<OrFalse<Instance<DateTime>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateTime>>>, Thrown> {
     let class = class_id(req, "DateTime")?;
     from_format(req, class, format, datetime, timezone)
 }
@@ -983,7 +996,7 @@ fn date_create_immutable_from_format(
     format: PhpString,
     datetime: Path,
     #[php(default = null)] timezone: Option<Instance<DateTimeZone>>,
-) -> Result<OrFalse<Instance<DateTimeImmutable>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateTimeImmutable>>>, Thrown> {
     let class = class_id(req, "DateTimeImmutable")?;
     from_format(req, class, format, datetime, timezone)
 }
@@ -1020,7 +1033,7 @@ fn date_create_immutable_from_format(
 /// bool(false)
 /// ```
 #[php_function]
-fn date_get_last_errors(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+fn date_get_last_errors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     last_errors(req)
 }
 
@@ -1040,7 +1053,7 @@ fn date_format(
     req: &mut Request,
     object: Instance<DateTimeInterface>,
     format: PhpString,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     format_of(req, object.object(), format)
 }
 
@@ -1140,7 +1153,7 @@ fn date_sub(
 fn date_timezone_get(
     req: &mut Request,
     object: Instance<DateTimeInterface>,
-) -> Result<OrFalse<Instance<DateTimeZone>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
     timezone_of(req, object.object())
 }
 
@@ -1224,7 +1237,7 @@ fn date_diff(
     baseObject: Instance<DateTimeInterface>,
     targetObject: Instance<DateTimeInterface>,
     #[php(default = false)] absolute: bool,
-) -> Result<Instance<DateInterval>, Thrown> {
+) -> Result<Owner<Instance<DateInterval>>, Thrown> {
     diff_of(req, baseObject.object(), targetObject.object(), absolute)
 }
 
@@ -1477,7 +1490,7 @@ impl DateTime {
     ///   string(6) "+02:00"
     /// }
     /// ```
-    fn __serialize(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
         let time = time_of(req, object)?;
         let fields = date_fields(req, &time)?;
@@ -1557,8 +1570,11 @@ impl DateTime {
     /// ))
     /// ```
     #[php(tentative)]
-    fn __set_state(req: &mut Request, array: PhpArray) -> Result<Instance<DateTime>, Thrown> {
-        set_state(req, "DateTime", array).map(Instance::of)
+    fn __set_state(
+        req: &mut Request,
+        array: PhpArray,
+    ) -> Result<Owner<Instance<DateTime>>, Thrown> {
+        set_state(req, "DateTime", array).map(Owner::into_instance)
     }
 
     /// `DateTime::createFromImmutable(DateTimeImmutable $object): static`.
@@ -1581,8 +1597,8 @@ impl DateTime {
     fn createFromImmutable(
         req: &mut Request,
         object: Instance<DateTimeImmutable>,
-    ) -> Result<Static, Thrown> {
-        create_from(req, object.object(), "DateTime").map(Static)
+    ) -> Result<Owner<Static>, Thrown> {
+        create_from(req, object.object(), "DateTime").map(Owner::into_static)
     }
 
     /// `DateTime::createFromInterface(DateTimeInterface $object): DateTime`.
@@ -1597,8 +1613,8 @@ impl DateTime {
     fn createFromInterface(
         req: &mut Request,
         object: Instance<DateTimeInterface>,
-    ) -> Result<Instance<DateTime>, Thrown> {
-        create_from(req, object.object(), "DateTime").map(Instance::of)
+    ) -> Result<Owner<Instance<DateTime>>, Thrown> {
+        create_from(req, object.object(), "DateTime").map(Owner::into_instance)
     }
 
     /// `DateTime::createFromFormat(...)`: `date_create_from_format` of the
@@ -1625,7 +1641,7 @@ impl DateTime {
         format: PhpString,
         datetime: Path,
         #[php(default = null)] timezone: Option<Instance<DateTimeZone>>,
-    ) -> Result<OrFalse<Instance<DateTime>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Instance<DateTime>>>, Thrown> {
         let class = called_or(req, "DateTime")?;
         from_format(req, class, format, datetime, timezone)
     }
@@ -1667,14 +1683,14 @@ impl DateTime {
     fn createFromTimestamp(
         req: &mut Request,
         timestamp: Union<i64, f64>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         create_from_timestamp(req, timestamp, "DateTime")
     }
 
     /// `DateTime::getLastErrors(): array|false`, `date_get_last_errors`'
     /// body.
     #[php(tentative)]
-    fn getLastErrors(req: &mut Request) -> Result<OrFalse<PhpArray>, Thrown> {
+    fn getLastErrors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         last_errors(req)
     }
 
@@ -1690,7 +1706,11 @@ impl DateTime {
     /// string(39) "Thursday, 01-Jan-1970 00:00:00 GMT+0000"
     /// ```
     #[php(tentative)]
-    fn format(req: &mut Request, this: This<Self>, format: PhpString) -> Result<PhpString, Thrown> {
+    fn format(
+        req: &mut Request,
+        this: This<Self>,
+        format: PhpString,
+    ) -> Result<Owner<PhpString>, Thrown> {
         format_of(req, this.object(), format)
     }
 
@@ -1758,7 +1778,7 @@ impl DateTime {
     fn getTimezone(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<OrFalse<Instance<DateTimeZone>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
         timezone_of(req, this.object())
     }
 
@@ -1901,7 +1921,7 @@ impl DateTime {
         this: This<Self>,
         targetObject: Instance<DateTimeInterface>,
         #[php(default = false)] absolute: bool,
-    ) -> Result<Instance<DateInterval>, Thrown> {
+    ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         diff_of(req, this.object(), targetObject.object(), absolute)
     }
 }
@@ -1970,8 +1990,8 @@ impl DateTimeImmutable {
     fn __set_state(
         req: &mut Request,
         array: PhpArray,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
-        set_state(req, "DateTimeImmutable", array).map(Instance::of)
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
+        set_state(req, "DateTimeImmutable", array).map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::createFromFormat(...)`.
@@ -1989,7 +2009,7 @@ impl DateTimeImmutable {
         format: PhpString,
         datetime: Path,
         #[php(default = null)] timezone: Option<Instance<DateTimeZone>>,
-    ) -> Result<OrFalse<Instance<DateTimeImmutable>>, Thrown> {
+    ) -> Result<OrFalse<Owner<Instance<DateTimeImmutable>>>, Thrown> {
         let class = called_or(req, "DateTimeImmutable")?;
         from_format(req, class, format, datetime, timezone)
     }
@@ -2006,7 +2026,7 @@ impl DateTimeImmutable {
     fn createFromTimestamp(
         req: &mut Request,
         timestamp: Union<i64, f64>,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         create_from_timestamp(req, timestamp, "DateTimeImmutable")
     }
 
@@ -2055,12 +2075,12 @@ impl DateTimeImmutable {
         req: &mut Request,
         this: This<Self>,
         modifier: PhpString,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         let text = modifier.as_bytes();
         changed_copy(req, this.object(), |req, copy| {
             modify(req, copy, text, Some("DateTimeImmutable::modify")).map(drop)
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::add(DateInterval $interval): DateTimeImmutable`.
@@ -2082,11 +2102,11 @@ impl DateTimeImmutable {
         req: &mut Request,
         this: This<Self>,
         interval: Instance<DateInterval>,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         changed_copy(req, this.object(), |req, copy| {
             add(req, copy, interval.object())
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::sub(DateInterval $interval): DateTimeImmutable`.
@@ -2107,11 +2127,11 @@ impl DateTimeImmutable {
         req: &mut Request,
         this: This<Self>,
         interval: Instance<DateInterval>,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         changed_copy(req, this.object(), |req, copy| {
             sub(req, copy, interval.object(), Some("DateTimeImmutable::sub"))
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::setTimezone(DateTimeZone $timezone): DateTimeImmutable`.
@@ -2134,11 +2154,11 @@ impl DateTimeImmutable {
         req: &mut Request,
         this: This<Self>,
         timezone: Instance<DateTimeZone>,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         changed_copy(req, this.object(), |req, copy| {
             timezone_set(req, copy, timezone.object())
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::setTime(...)`.
@@ -2162,11 +2182,11 @@ impl DateTimeImmutable {
         minute: i64,
         #[php(default = 0)] second: i64,
         #[php(default = 0)] microsecond: i64,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         changed_copy(req, this.object(), |req, copy| {
             time_set(req, copy, hour, minute, second, microsecond)
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::setDate(...)`.
@@ -2189,11 +2209,11 @@ impl DateTimeImmutable {
         year: i64,
         month: i64,
         day: i64,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         changed_copy(req, this.object(), |req, copy| {
             date_set(req, copy, year, month, day)
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::setISODate(...)`.
@@ -2216,11 +2236,11 @@ impl DateTimeImmutable {
         year: i64,
         week: i64,
         #[php(default = 1)] dayOfWeek: i64,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         changed_copy(req, this.object(), |req, copy| {
             isodate_set(req, copy, year, week, dayOfWeek)
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::setTimestamp(...)`.
@@ -2241,11 +2261,11 @@ impl DateTimeImmutable {
         req: &mut Request,
         this: This<Self>,
         timestamp: i64,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
         changed_copy(req, this.object(), |req, copy| {
             timestamp_set(req, copy, timestamp)
         })
-        .map(Instance::of)
+        .map(Owner::into_instance)
     }
 
     /// `DateTimeImmutable::setMicrosecond(int $microsecond): static`.
@@ -2267,14 +2287,14 @@ impl DateTimeImmutable {
         req: &mut Request,
         this: This<Self>,
         microsecond: i64,
-    ) -> Result<Static, Thrown> {
+    ) -> Result<Owner<Static>, Thrown> {
         microsecond_in_range(req, microsecond)?;
         let object = this.object();
         let mut time = time_of(req, object)?;
         time.us = microsecond;
         let copy = clone_date(req, object)?;
-        set_time(req, copy, Some(time))?;
-        Ok(Static(copy))
+        set_time(req, *copy, Some(time))?;
+        Ok(copy.into_static())
     }
 
     /// `DateTimeImmutable::createFromMutable(DateTime $object): static`.
@@ -2293,8 +2313,11 @@ impl DateTimeImmutable {
     /// }
     /// ```
     #[php(tentative)]
-    fn createFromMutable(req: &mut Request, object: Instance<DateTime>) -> Result<Static, Thrown> {
-        create_from(req, object.object(), "DateTimeImmutable").map(Static)
+    fn createFromMutable(
+        req: &mut Request,
+        object: Instance<DateTime>,
+    ) -> Result<Owner<Static>, Thrown> {
+        create_from(req, object.object(), "DateTimeImmutable").map(Owner::into_static)
     }
 
     /// `DateTimeImmutable::createFromInterface(DateTimeInterface $object):
@@ -2310,7 +2333,7 @@ impl DateTimeImmutable {
     fn createFromInterface(
         req: &mut Request,
         object: Instance<DateTimeInterface>,
-    ) -> Result<Instance<DateTimeImmutable>, Thrown> {
-        create_from(req, object.object(), "DateTimeImmutable").map(Instance::of)
+    ) -> Result<Owner<Instance<DateTimeImmutable>>, Thrown> {
+        create_from(req, object.object(), "DateTimeImmutable").map(Owner::into_instance)
     }
 }

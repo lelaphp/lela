@@ -7,7 +7,7 @@ use php_ext::abi::{Instance, OrFalse, Path, Raw, This};
 use php_ext::attr::php_class;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{Kind, Node};
 
 use crate::object::Code;
@@ -29,12 +29,14 @@ use crate::{Read, dom_error_message, empty_string, nullable_object, prop_node, s
 /// ```
 fn implementation(req: &mut Request, object: PhpObject) -> Read {
     if let Some(kept) = crate::modern::cached(req, object, b"implementation") {
-        req.addref(&kept);
-        return Ok(Some(kept));
+        return Ok(Some(Owner::take(req, kept)));
     }
     let class = crate::class(req, "Dom\\Implementation")?;
-    let made = php_ext::call::new_object(req, class)?.as_value();
-    crate::modern::keep(req, object, b"implementation", &made)?;
+    let made = php_ext::call::new_object(req, class)?.into_value();
+    if let Err(thrown) = crate::modern::keep(req, object, b"implementation", &made) {
+        made.give_up(req);
+        return Err(thrown);
+    }
     Ok(Some(made))
 }
 
@@ -392,8 +394,8 @@ impl HTMLDocument {
     fn createEmpty(
         req: &mut Request,
         #[php(default = "UTF-8")] encoding: Path,
-    ) -> Result<Instance<HTMLDocument>, Thrown> {
-        crate::html5_parser::create_empty(req, encoding.0.as_bytes()).map(Instance::of)
+    ) -> Result<Owner<Instance<HTMLDocument>>, Thrown> {
+        crate::html5_parser::create_empty(req, encoding.0.as_bytes()).map(Owner::into_instance)
     }
 
     /// `Dom\HTMLDocument::createFromFile(string $path, int $options = 0, ?string $overrideEncoding = null): Dom\HTMLDocument`.
@@ -417,10 +419,10 @@ impl HTMLDocument {
         path: PhpString,
         #[php(default = 0)] options: i64,
         #[php(default = null)] overrideEncoding: Option<PhpString>,
-    ) -> Result<Raw<Instance<HTMLDocument>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<HTMLDocument>>>, Thrown> {
         let made =
             crate::html5_parser::create_from_file(req, path.as_bytes(), options, overrideEncoding)?;
-        crate::returned(req, made)
+        crate::returned(made)
     }
 
     /// `Dom\HTMLDocument::createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): Dom\HTMLDocument`.
@@ -450,14 +452,14 @@ impl HTMLDocument {
         source: PhpString,
         #[php(default = 0)] options: i64,
         #[php(default = null)] overrideEncoding: Option<PhpString>,
-    ) -> Result<Raw<Instance<HTMLDocument>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<HTMLDocument>>>, Thrown> {
         let made = crate::html5_parser::create_from_string(
             req,
             source.as_bytes(),
             options,
             overrideEncoding,
         )?;
-        crate::returned(req, made)
+        crate::returned(made)
     }
 
     #[php(implementation = crate::document::DOMDocument::saveXML)]
@@ -496,7 +498,7 @@ impl HTMLDocument {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] node: Option<Instance<crate::modern::Node>>,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         crate::html5_serializer::save_html(req, this.object(), node.map(|n| n.object()))
     }
 

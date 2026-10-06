@@ -9,7 +9,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::PhpString;
+use php_ext::values::{Owner, PhpString};
 
 /// `PHP_UU_ENC(c)`.
 const fn enc(c: u8) -> u8 {
@@ -169,7 +169,7 @@ fn uudecode(src: &[u8]) -> Option<Vec<u8>> {
 /// }
 /// ```
 #[php_function]
-fn convert_uuencode(req: &mut Request, string: PhpString) -> Result<PhpString, Thrown> {
+fn convert_uuencode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let out = uuencode(string.as_bytes());
     PhpString::new(req, &out)
 }
@@ -192,7 +192,10 @@ fn convert_uuencode(req: &mut Request, string: PhpString) -> Result<PhpString, T
 /// bool(false)
 /// ```
 #[php_function]
-fn convert_uudecode(req: &mut Request, string: PhpString) -> Result<OrFalse<PhpString>, Thrown> {
+fn convert_uudecode(
+    req: &mut Request,
+    string: PhpString,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let Some(out) = uudecode(string.as_bytes()) else {
         docref(
             req,

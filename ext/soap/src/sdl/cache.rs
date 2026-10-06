@@ -1343,13 +1343,14 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
             let ctx = if let Some(c) = context {
                 c
             } else {
-                let c = StreamCtx::alloc(req)?;
+                // libxml's stream state keeps it from the switch below.
+                let c = StreamCtx::alloc(req)?.hand_on_unmigrated();
                 context = Some(c);
                 c
             };
             let value = string(req, &proxy)?;
             let set = ctx.set_option(req, b"http", b"proxy", &value);
-            req.release(value);
+            value.give_up(req);
             set?;
             let https = uri_len >= 8 && uri[..8].eq_ignore_ascii_case(b"https://");
             if !https {
@@ -1361,7 +1362,8 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
     }
     let ctx = match context {
         Some(c) => c,
-        None => StreamCtx::alloc(req)?,
+        // libxml's stream state keeps it from the switch below.
+        None => StreamCtx::alloc(req)?.hand_on_unmigrated(),
     };
     if ctx.option(req, b"http", b"protocol_version").is_none() {
         ctx.set_option(req, b"http", b"protocol_version", &Value::float(1.1))?;
@@ -1378,7 +1380,7 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
         );
         let value = string(req, &headers)?;
         let set = ctx.set_option(req, b"http", b"header", &value);
-        req.release(value);
+        value.give_up(req);
         set?;
     }
     let orig_context = php_ext_libxml::switch_stream_ctx(req, Some(ctx.resource().as_value()));
@@ -1391,7 +1393,13 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
     // left for `error_get_last()`.
     let mute = mutes_wsdl_diagnostics(req);
     let shown = mute.then(|| {
-        let had = req.last_error().ok().flatten().is_some();
+        let had = match req.last_error() {
+            Ok(Some(last)) => {
+                last.give_up(req);
+                true
+            }
+            _ => false,
+        };
         (had, req.set_display_errors(0))
     });
     let loaded = load_wsdl(req, uri);

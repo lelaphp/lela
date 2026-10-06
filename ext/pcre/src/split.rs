@@ -7,7 +7,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::constants::{
     PREG_GREP_INVERT, PREG_INTERNAL_ERROR, PREG_NO_ERROR, PREG_SPLIT_DELIM_CAPTURE,
@@ -130,7 +130,7 @@ fn preg_split(
     subject: PhpString,
     #[php(default = -1)] limit: i64,
     #[php(default = 0)] flags: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(pattern) = compiled(req, pattern.as_bytes()) else {
         return Ok(OrFalse::False);
     };
@@ -145,7 +145,7 @@ pub(super) fn split_impl(
     bytes: &[u8],
     mut limit: i64,
     flags: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let no_empty = flags & PREG_SPLIT_NO_EMPTY != 0;
     let delimiters = flags & PREG_SPLIT_DELIM_CAPTURE != 0;
     let offsets = flags & PREG_SPLIT_OFFSET_CAPTURE != 0;
@@ -153,20 +153,20 @@ pub(super) fn split_impl(
     let len = bytes.len();
     let mut last = 0;
     set_error(req, PREG_NO_ERROR);
-    let add = |req: &mut Request, out: &mut PhpArray, start: usize, end: usize| {
+    let add = |req: &mut Request, out: &mut Owner<PhpArray>, start: usize, end: usize| {
         let value = if offsets {
             offset_pair(req, bytes, (start, end), false)?
         } else {
             piece(req, bytes, start, end)?
         };
-        out.append(req, value)
+        out.append(req, value.hand_on_unmigrated())
     };
     if limit == 0 {
         limit = -1;
     }
     if limit == -1 || limit > 1 {
         let Some(mut scratch) = Scratch::take(req, pattern) else {
-            req.release(out.to_value());
+            out.give_up(req);
             return Ok(OrFalse::False);
         };
         let mut subject = Subject::new(bytes);
@@ -239,7 +239,7 @@ pub(super) fn split_impl(
         scratch.give_back(req);
         walked?;
         if error_code(req) != PREG_NO_ERROR {
-            req.release(out.to_value());
+            out.give_up(req);
             return Ok(OrFalse::False);
         }
     }
@@ -284,7 +284,7 @@ fn preg_grep(
     pattern: PhpString,
     array: PhpArray,
     #[php(default = 0)] flags: i64,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(pattern) = compiled(req, pattern.as_bytes()) else {
         return Ok(OrFalse::False);
     };
@@ -306,7 +306,7 @@ fn preg_grep(
         };
         let mut subject = Subject::new(text.as_bytes());
         let rc = scratch.run(&pattern, &mut subject, 0, 0, true);
-        req.release(Value::string(text));
+        text.give_up(req);
         let keep = if rc >= 0 {
             if rc == 0 {
                 docref(req, Level::Notice, "Matched, but too many substrings");
@@ -330,6 +330,9 @@ fn preg_grep(
         }
     }
     scratch.give_back(req);
-    kept?;
+    if let Err(thrown) = kept {
+        out.give_up(req);
+        return Err(thrown);
+    }
     Ok(OrFalse::Value(out))
 }

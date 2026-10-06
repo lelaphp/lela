@@ -8,7 +8,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::doc::{NODE, Obj, doc_id, fixed};
 use crate::ffi::{
@@ -33,23 +33,27 @@ pub(crate) fn text(req: &mut Request, object: PhpObject) -> Result<Option<Vec<u8
 
 fn write(req: &mut Request, object: PhpObject, name: &[u8], value: Value) -> Result<(), Thrown> {
     let name = PhpString::new(req, name)?;
-    object.set_prop(req, name, value)
+    object.set_prop(req, name.hand_on_unmigrated(), value)
 }
 
 /// `zend_string_init`, which `zend_update_property_string` and
 /// `add_assoc_string` allocate with, one byte or none included.
-fn init(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown> {
+fn init(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
     PhpString::filled(req, bytes.len(), |out| out.copy_from_slice(bytes))
 }
 
-fn string(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    init(req, bytes).map(Value::string)
+fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    init(req, bytes).map(Owner::into_value)
 }
 
 /// `tidy_create_node_object`: a `tidyNode` naming `node`, the document
 /// one owner more, and its properties, its children's objects among
 /// them, written.
-pub(crate) fn create(req: &mut Request, id: DocId, node: ffi::Node) -> Result<PhpObject, Thrown> {
+pub(crate) fn create(
+    req: &mut Request,
+    id: DocId,
+    node: ffi::Node,
+) -> Result<Owner<PhpObject>, Thrown> {
     let class = lookup_class(req, b"tidyNode")?;
     let class = class.ok_or_else(|| fatal(req, "InternalError: tidyNode is not linked"))?;
     let object = new_object(req, class)?;
@@ -58,8 +62,8 @@ pub(crate) fn create(req: &mut Request, id: DocId, node: ffi::Node) -> Result<Ph
         obj.node = Some(node);
     }
     retain(req, id);
-    if let Err(thrown) = properties(req, object, id, node) {
-        req.release(object.as_value());
+    if let Err(thrown) = properties(req, *object, id, node) {
+        object.give_up(req);
         return Err(thrown);
     }
     Ok(object)
@@ -76,9 +80,9 @@ fn properties(
         return Ok(());
     };
     let value = string(req, fixed(&facts.text.unwrap_or_default()))?;
-    write(req, object, b"value", value)?;
+    write(req, object, b"value", value.hand_on_unmigrated())?;
     let name = string(req, &facts.name.unwrap_or_default())?;
-    write(req, object, b"name", name)?;
+    write(req, object, b"name", name.hand_on_unmigrated())?;
     write(req, object, b"type", Value::int(facts.kind))?;
     write(req, object, b"line", Value::int(facts.line))?;
     write(req, object, b"column", Value::int(facts.column))?;
@@ -92,14 +96,14 @@ fn properties(
         Some(rows) => {
             let mut array = PhpArray::new(req)?;
             for (name, value) in rows {
-                let key = Key::from_string(init(req, &name)?);
+                let key = Key::from_string(init(req, &name)?.hand_on_unmigrated());
                 let value = match value {
                     Some(value) => string(req, &value)?,
-                    None => Value::string(PhpString::new(req, b"")?),
+                    None => PhpString::new(req, b"")?.into_value(),
                 };
-                array.set(req, key, value)?;
+                array.set(req, key, value.hand_on_unmigrated())?;
             }
-            Value::array(array)
+            Value::array(array.hand_on_unmigrated())
         }
         None => Value::null(),
     };
@@ -109,10 +113,16 @@ fn properties(
     } else {
         let mut array = PhpArray::new(req)?;
         for child in facts.children {
-            let made = create(req, id, child)?;
-            array.append(req, made.as_value())?;
+            let made = match create(req, id, child) {
+                Ok(made) => made,
+                Err(thrown) => {
+                    array.give_up(req);
+                    return Err(thrown);
+                }
+            };
+            array.append(req, made.into_value().hand_on_unmigrated())?;
         }
-        Value::array(array)
+        Value::array(array.hand_on_unmigrated())
     };
     write(req, object, b"child", child)
 }
@@ -122,13 +132,13 @@ fn walk(
     req: &mut Request,
     object: PhpObject,
     to: Step,
-) -> Result<Option<Instance<tidyNode>>, Thrown> {
+) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
     let (id, node) = of(req, object)?;
     let Some(node) = node else {
         return Ok(None);
     };
     match with_doc(req, id, |_, doc| Ok(doc.step(node, to)))?.flatten() {
-        Some(next) => create(req, id, next).map(|made| Some(Instance::of(made))),
+        Some(next) => create(req, id, next).map(|made| Some(made.into_instance())),
         None => Ok(None),
     }
 }
@@ -345,7 +355,7 @@ impl tidyNode {
     fn getParent(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<tidyNode>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
         walk(req, this.object(), Step::Parent)
     }
 
@@ -361,7 +371,7 @@ impl tidyNode {
     fn getPreviousSibling(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<tidyNode>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
         walk(req, this.object(), Step::Prev)
     }
 
@@ -376,7 +386,7 @@ impl tidyNode {
     fn getNextSibling(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<tidyNode>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
         walk(req, this.object(), Step::Next)
     }
 }

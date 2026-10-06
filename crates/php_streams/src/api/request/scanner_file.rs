@@ -4,7 +4,7 @@
 
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream, StreamOption};
-use crate::api::values::{Emalloc, PhpString, Value};
+use crate::api::values::{Emalloc, Owner, PhpString, Value};
 use crate::streams::OpenOptions;
 use crate::streams::StreamLayer;
 
@@ -68,7 +68,7 @@ impl ScannerFile {
         );
         Ok(Some(ScannerFile {
             stream,
-            opened_path,
+            opened_path: opened_path.map(Owner::hand_on_unmigrated),
             buf: None,
         }))
     }

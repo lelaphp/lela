@@ -21,7 +21,7 @@ use php_ext::raising::arity;
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{Forked, Request};
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::{State, failed, ffi};
 
@@ -165,7 +165,7 @@ fn waited(
         if child > 0 {
             usage_into(req, &mut array, &usage)?;
         }
-        resource_usage.set(req, Untyped(array.to_value()))?;
+        resource_usage.set(req, Untyped(array.into_value().hand_on_unmigrated()))?;
     }
     status.set(req, Untyped(Value::int(word.into())))?;
     Ok(child.into())
@@ -206,7 +206,11 @@ fn long(member: impl Into<i64>) -> i64 {
 }
 
 /// `PHP_RUSAGE_TO_ARRAY`: the special members, then the two times.
-fn usage_into(req: &mut Request, array: &mut PhpArray, usage: &ffi::Usage) -> Result<(), Thrown> {
+fn usage_into(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    usage: &ffi::Usage,
+) -> Result<(), Thrown> {
     let fields: [(&[u8], i64); 17] = [
         (b"ru_oublock", long(usage.ru_oublock)),
         (b"ru_inblock", long(usage.ru_inblock)),
@@ -228,7 +232,7 @@ fn usage_into(req: &mut Request, array: &mut PhpArray, usage: &ffi::Usage) -> Re
     ];
     for (name, value) in fields {
         let key = PhpString::new(req, name)?;
-        array.set(req, Key::Str(key), Value::int(value))?;
+        array.set(req, Key::Str(key.hand_on_unmigrated()), Value::int(value))?;
     }
     Ok(())
 }
@@ -288,7 +292,7 @@ pub(crate) fn pcntl_waitid(
     };
     if info.is_given() {
         let array = crate::signals::siginfo(req, libc::SIGCHLD, &posted)?;
-        info.set(req, Untyped(array.to_value()))?;
+        info.set(req, Untyped(array.into_value().hand_on_unmigrated()))?;
     }
     Ok(true)
 }
@@ -443,7 +447,7 @@ pub(crate) fn pcntl_exec(
     for (_, element) in &args {
         let string = to_string(req, &element)?;
         let bytes = string.as_bytes().to_vec();
-        req.release(Value::string(string));
+        string.give_up(req);
         let Ok(argument) = CString::new(bytes) else {
             return Err(argument_error(
                 req,
@@ -460,7 +464,7 @@ pub(crate) fn pcntl_exec(
             for (key, element) in &env_vars {
                 let string = to_string(req, &element)?;
                 let value = string.as_bytes().to_vec();
-                req.release(Value::string(string));
+                string.give_up(req);
                 if value.contains(&0) {
                     return Err(argument_error(
                         req,
@@ -720,7 +724,10 @@ fn priority_refused(
 /// string(20) "Unknown error: 12345"
 /// ```
 #[php_function]
-pub(crate) fn pcntl_strerror(req: &mut Request, error_code: i64) -> Result<PhpString, Thrown> {
+pub(crate) fn pcntl_strerror(
+    req: &mut Request,
+    error_code: i64,
+) -> Result<Owner<PhpString>, Thrown> {
     #[allow(clippy::cast_possible_truncation)]
     let sentence = strerror(error_code as i32);
     PhpString::new(req, sentence.as_bytes())

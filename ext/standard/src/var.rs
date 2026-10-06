@@ -17,7 +17,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{HeldRow, Key, PhpString, RecursionGuard, Value};
+use php_ext::values::{HeldRow, Key, Owner, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
 pub(crate) mod serialize;
@@ -667,7 +667,7 @@ fn print_r(
     req: &mut Request,
     value: Value,
     #[php(default = false)] r#return: bool,
-) -> Result<Union<PhpString, True>, Thrown> {
+) -> Result<Union<Owner<PhpString>, True>, Thrown> {
     let returned = r#return;
     let mut out = Vec::new();
     // A throwable a class's debug table left pending is thrown once the
@@ -799,7 +799,7 @@ pub(super) fn render(
     // `Resource id #N`.
     let string = to_string(req, &value)?;
     out.extend_from_slice(string.as_bytes());
-    req.release(Value::string(string));
+    string.give_up(req);
     Ok(())
 }
 
@@ -992,7 +992,7 @@ fn var_export(
     req: &mut Request,
     value: Value,
     #[php(default = false)] r#return: bool,
-) -> Result<Option<PhpString>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let returned = r#return;
     let mut out = Vec::new();
     export(req, &mut out, &value, 1)?;

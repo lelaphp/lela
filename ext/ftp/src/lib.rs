@@ -39,7 +39,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, throw, throw_error,
 };
 use php_ext::request::{Request, Stream, Streams as _, Whence};
-use php_ext::values::{PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ftp::{Ftp, Kind, Progress, Verb, cstr};
 
@@ -343,7 +343,7 @@ fn positive_timeout(req: &mut Request, timeout: i64) -> Result<(), Thrown> {
 }
 
 /// The new connection over an open session.
-fn connection(req: &mut Request, session: Ftp) -> Result<Instance<Connection>, Thrown> {
+fn connection(req: &mut Request, session: Ftp) -> Result<Owner<Instance<Connection>>, Thrown> {
     let Some(class) = lookup_class(req, b"FTP\\Connection")? else {
         session.close(req);
         return Err(throw_error(
@@ -352,8 +352,14 @@ fn connection(req: &mut Request, session: Ftp) -> Result<Instance<Connection>, T
             "Class \"FTP\\Connection\" not found",
         ));
     };
-    let ftp: Instance<Connection> = Instance::of(new_object(req, class)?);
-    **ftp.payload_mut(req)? = Conn::Open(session);
+    let ftp = new_object(req, class)?.into_instance::<Connection>();
+    match ftp.payload_mut(req) {
+        Ok(payload) => **payload = Conn::Open(session),
+        Err(thrown) => {
+            ftp.give_up(req);
+            return Err(thrown);
+        }
+    }
     Ok(ftp)
 }
 
@@ -376,7 +382,7 @@ fn ftp_connect(
     hostname: PhpString,
     #[php(default = 21)] port: i64,
     #[php(default = 90)] timeout: i64,
-) -> Result<OrFalse<Instance<Connection>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
     // `PHP_TIMEOUT_ULL_MAX / 1000000.0`, as a `uint64_t`.
     const MAX: i64 = 18_446_744_073_709;
     positive_timeout(req, timeout)?;
@@ -406,7 +412,7 @@ fn ftp_ssl_connect(
     hostname: PhpString,
     #[php(default = 21)] port: i64,
     #[php(default = 90)] timeout: i64,
-) -> Result<OrFalse<Instance<Connection>>, Thrown> {
+) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
     positive_timeout(req, timeout)?;
     match Ftp::open(req, hostname.as_bytes(), port, timeout, true)? {
         Some(session) => Ok(OrFalse::Value(connection(req, session)?)),
@@ -446,7 +452,7 @@ fn text_or_false(
     req: &mut Request,
     ftp: Instance<Connection>,
     f: impl FnOnce(&mut Request, &mut Ftp) -> Result<Option<Vec<u8>>, Thrown>,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let text = lend(req, ftp, |req, session| {
         let text = f(req, session)?;
         if text.is_none() {
@@ -483,7 +489,10 @@ fn text_or_false(
 /// bool(false)
 /// ```
 #[php_function]
-fn ftp_pwd(req: &mut Request, ftp: Instance<Connection>) -> Result<OrFalse<PhpString>, Thrown> {
+fn ftp_pwd(
+    req: &mut Request,
+    ftp: Instance<Connection>,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     text_or_false(req, ftp, |req, session| session.pwd(req))
 }
 
@@ -558,11 +567,11 @@ fn ftp_exec(
 }
 
 /// A list of lines as an array of strings.
-fn lines_array(req: &mut Request, lines: Vec<Vec<u8>>) -> Result<PhpArray, Thrown> {
+fn lines_array(req: &mut Request, lines: Vec<Vec<u8>>) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for line in lines {
         let line = PhpString::new(req, &line)?;
-        array.append(req, Value::string(line))?;
+        array.append(req, Value::string(line.hand_on_unmigrated()))?;
     }
     Ok(array)
 }
@@ -592,7 +601,7 @@ fn ftp_raw(
     req: &mut Request,
     ftp: Instance<Connection>,
     command: PhpString,
-) -> Result<Option<PhpArray>, Thrown> {
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let lines = lend(req, ftp, |req, session| {
         session.raw(req, command.as_bytes())
     })?
@@ -630,7 +639,7 @@ fn ftp_mkdir(
     req: &mut Request,
     ftp: Instance<Connection>,
     directory: PhpString,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     text_or_false(req, ftp, |req, session| {
         session.mkdir(req, directory.as_bytes())
     })
@@ -725,7 +734,7 @@ fn ftp_alloc(
         && response.is_given()
     {
         let text = PhpString::new(req, &text)?;
-        response.set(req, Untyped(Value::string(text)))?;
+        response.set(req, Untyped(Value::string(text.hand_on_unmigrated())))?;
     }
     Ok(done)
 }
@@ -785,7 +794,7 @@ fn ftp_nlist(
     req: &mut Request,
     ftp: Instance<Connection>,
     directory: Path,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     match listing(req, ftp, b"NLST", directory.0.as_bytes())? {
         Some(lines) => Ok(OrFalse::Value(lines_array(req, lines)?)),
         None => Ok(OrFalse::False),
@@ -827,7 +836,7 @@ fn ftp_rawlist(
     ftp: Instance<Connection>,
     directory: PhpString,
     #[php(default = false)] recursive: bool,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let cmd: &[u8] = if recursive { b"LIST -R" } else { b"LIST" };
     match listing(req, ftp, cmd, directory.as_bytes())? {
         Some(lines) => Ok(OrFalse::Value(lines_array(req, lines)?)),
@@ -870,14 +879,21 @@ fn ftp_mlsd(
     req: &mut Request,
     ftp: Instance<Connection>,
     directory: PhpString,
-) -> Result<OrFalse<PhpArray>, Thrown> {
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let Some(lines) = listing(req, ftp, b"MLSD", directory.as_bytes())? else {
         return Ok(OrFalse::False);
     };
     let mut array = PhpArray::new(req)?;
     for line in lines {
-        if let Some(entry) = ftp::mlsd_line(req, &line)? {
-            array.append(req, Value::array(entry))?;
+        let entry = match ftp::mlsd_line(req, &line) {
+            Ok(entry) => entry,
+            Err(thrown) => {
+                array.give_up(req);
+                return Err(thrown);
+            }
+        };
+        if let Some(entry) = entry {
+            array.append(req, entry.into_value().hand_on_unmigrated())?;
         }
     }
     Ok(OrFalse::Value(array))
@@ -897,7 +913,10 @@ fn ftp_mlsd(
 /// string(4) "UNIX"
 /// ```
 #[php_function]
-fn ftp_systype(req: &mut Request, ftp: Instance<Connection>) -> Result<OrFalse<PhpString>, Thrown> {
+fn ftp_systype(
+    req: &mut Request,
+    ftp: Instance<Connection>,
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     text_or_false(req, ftp, |req, session| session.syst(req))
 }
 
@@ -1099,7 +1118,8 @@ fn local_out(
         }
     } else {
         req.open_stream(path, write, false)?
-    };
+    }
+    .map(Owner::hand_on_unmigrated);
     let Some(stream) = stream else {
         let text = format!("Error opening {}", String::from_utf8_lossy(cstr(path)));
         docref(req, Level::Warning, &text);
@@ -1388,7 +1408,9 @@ fn local_in(req: &mut Request, path: &[u8], kind: Kind) -> Result<Option<Stream>
         Kind::Ascii => b"rt",
         Kind::Image => b"rb",
     };
-    req.open_stream(path, mode, false)
+    Ok(req
+        .open_stream(path, mode, false)?
+        .map(Owner::hand_on_unmigrated))
 }
 
 /// `ftp_put(FTP\Connection $ftp, string $remote_filename, string`

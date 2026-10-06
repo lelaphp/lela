@@ -19,7 +19,7 @@ use php_unit::AutoGlobal;
 
 use super::{Request, Symbol};
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::values::{Key, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value};
 use crate::exec::TableId;
 
 /// Where a variable php registers came from, php's `PARSE_*` as
@@ -109,10 +109,14 @@ impl Request {
             let mut words = PhpArray::new(self)?;
             for word in self.description.argv.clone() {
                 let word = PhpString::new(self, &word)?;
-                words.append(self, Value::string(word))?;
+                words.append(self, Value::string(word.hand_on_unmigrated()))?;
             }
             let count = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
-            self.symbol_update(TableId::GLOBAL, b"argv".to_vec(), Value::array(words));
+            self.symbol_update(
+                TableId::GLOBAL,
+                b"argv".to_vec(),
+                words.into_value().hand_on(),
+            );
             self.symbol_update(TableId::GLOBAL, b"argc".to_vec(), Value::int(count));
         }
         // `php_startup_auto_globals` (`Z/main/php_variables.c:973`): with
@@ -224,9 +228,9 @@ impl Request {
         let mut words = PhpArray::new(self)?;
         for word in self.description.argv.clone() {
             let word = PhpString::new(self, &word)?;
-            words.append(self, Value::string(word))?;
+            words.append(self, Value::string(word.hand_on_unmigrated()))?;
         }
-        let words = Value::array(words);
+        let words = words.into_value().hand_on();
         let count = Value::int(i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX));
         if !self.description.argv.is_empty() {
             self.addref(&words);
@@ -323,8 +327,8 @@ impl Request {
             return Ok(());
         };
         let name = PhpString::new(self, name)?;
-        self.array_update(server.heap(), Key::Str(name).heap(), value)?;
-        self.release(Value::string(name));
+        self.array_update(server.heap(), Key::Str(*name).heap(), value)?;
+        name.give_up(self);
         Ok(())
     }
 
@@ -392,7 +396,7 @@ impl Request {
             AutoGlobal::Server if order.contains(&b'S') => self.create_server()?,
             AutoGlobal::Env if order.contains(&b'E') => {
                 let env = self.environment()?;
-                self.register_params(env)?;
+                self.register_params(*env)?;
                 env
             }
             AutoGlobal::Get if order.contains(&b'G') => {
@@ -413,7 +417,7 @@ impl Request {
                     }) =>
             {
                 let array = PhpArray::new(self)?;
-                self.handle_post(array, &BodyLimits::default())?;
+                self.handle_post(*array, &BodyLimits::default())?;
                 array
             }
             AutoGlobal::Files => match self.http_globals.files {
@@ -431,6 +435,7 @@ impl Request {
             AutoGlobal::Request => self.form_variables()?,
             _ => PhpArray::new(self)?,
         };
+        let array = array.hand_on();
         let value = Value::array(array);
         if let Some(track) = self.http_globals.track(global) {
             let kept = track.replace(array);
@@ -470,7 +475,7 @@ impl Request {
     ///
     /// [{"a":"1"},[],""]
     /// ```
-    fn form_variables(&mut self) -> Result<PhpArray, Thrown> {
+    fn form_variables(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let order = match self.ini_value(b"request_order") {
             Some(order) => order.to_vec(),
             None => self
@@ -501,14 +506,18 @@ impl Request {
     /// of `source` into `dest`, where both hold an array under the key the
     /// two merged the same way, and every other element written over what
     /// `dest` held.
-    fn merge(&mut self, mut dest: PhpArray, source: PhpArray) -> Result<PhpArray, Thrown> {
+    fn merge(
+        &mut self,
+        mut dest: Owner<PhpArray>,
+        source: PhpArray,
+    ) -> Result<Owner<PhpArray>, Thrown> {
         for (key, value) in source.snapshot() {
             let into = dest.get(&key).and_then(|had| had.as_array().copied());
             if let (Some(nested), Some(into)) = (value.as_array().copied(), into) {
                 let into = into.copy(self)?;
                 let merged = self.merge(into, nested)?;
                 let key = self.owned_key(&key);
-                dest.set(self, key, Value::array(merged))?;
+                dest.set(self, key, merged.into_value().hand_on_unmigrated())?;
             } else {
                 self.addref(&value);
                 let key = self.owned_key(&key);
@@ -582,24 +591,24 @@ impl Request {
     ///   string(4) "argc"
     /// }
     /// ```
-    fn create_server(&mut self) -> Result<PhpArray, Thrown> {
+    fn create_server(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let mut server = self.environment()?;
-        self.register_params(server)?;
+        self.register_params(*server)?;
         // The host's rows each through the input filter, `PARSE_SERVER`,
         // as `cli_register_variables` and `sapi_cgi_register_variables`
         // hand them, and registered as `php_register_variable_safe` does.
         for (name, value) in self.description.server.clone() {
             if let Some(value) = self.filter_input(Input::Server, &name, &value)? {
-                self.register_in(server, &name, value, false)?;
+                self.register_in(*server, &name, value, false)?;
             }
         }
         // `sapi_get_request_time`, when the request started.
         let now = self.started().as_secs_f64();
         let name = PhpString::new(self, b"REQUEST_TIME_FLOAT")?;
-        server.set(self, Key::Str(name), Value::float(now))?;
+        server.set(self, Key::Str(name.hand_on_unmigrated()), Value::float(now))?;
         let name = PhpString::new(self, b"REQUEST_TIME")?;
         let whole = self.request_time();
-        server.set(self, Key::Str(name), Value::int(whole))?;
+        server.set(self, Key::Str(name.hand_on_unmigrated()), Value::int(whole))?;
         // `zend_hash_find_ex_ind` of both, and neither where one is
         // missing: the zval as the table holds it, a reference kept one.
         let found = |req: &mut Request, name: &[u8]| {
@@ -611,7 +620,7 @@ impl Request {
                 for (name, value) in [(b"argv".as_slice(), words), (b"argc", count)] {
                     self.addref(&value);
                     let name = PhpString::new(self, name)?;
-                    server.set(self, Key::Str(name), value)?;
+                    server.set(self, Key::Str(name.hand_on_unmigrated()), value)?;
                 }
             }
         } else if self.ini_flag(b"register_argc_argv") {
@@ -631,16 +640,20 @@ impl Request {
             if !query.is_empty() {
                 for word in query.split(|b| *b == b'+') {
                     let word = PhpString::new(self, word)?;
-                    words.append(self, Value::string(word))?;
+                    words.append(self, Value::string(word.hand_on_unmigrated()))?;
                     count += 1;
                 }
             }
             let name = PhpString::new(self, b"argv")?;
-            server.set(self, Key::Str(name), Value::array(words))?;
+            server.set(
+                self,
+                Key::Str(name.hand_on_unmigrated()),
+                words.into_value().hand_on_unmigrated(),
+            )?;
             let name = PhpString::new(self, b"argc")?;
-            server.set(self, Key::Str(name), Value::int(count))?;
+            server.set(self, Key::Str(name.hand_on_unmigrated()), Value::int(count))?;
         }
-        self.check_http_proxy(server)?;
+        self.check_http_proxy(&mut server)?;
         Ok(server)
     }
 
@@ -648,14 +661,14 @@ impl Request {
     /// the request brought replaced by the environment's, or dropped
     /// where the environment has none, lest a request name the process's
     /// proxy (bug #72573).
-    fn check_http_proxy(&mut self, mut server: PhpArray) -> Result<(), Thrown> {
+    fn check_http_proxy(&mut self, server: &mut Owner<PhpArray>) -> Result<(), Thrown> {
         let named = |rows: &[(Vec<u8>, Vec<u8>)]| rows.iter().any(|(n, _)| n == b"HTTP_PROXY");
         if !named(&self.description.params) && !named(&self.description.env) {
             return Ok(());
         }
         let name = PhpString::new(self, b"HTTP_PROXY")?;
-        let key = Key::Str(name);
-        if server.get(&key).is_none() {
+        if server.get(&Key::Str(*name)).is_none() {
+            name.give_up(self);
             return Ok(());
         }
         let local = self
@@ -664,14 +677,13 @@ impl Request {
             .iter()
             .find(|(n, _)| n.as_slice() == b"HTTP_PROXY")
             .map(|(_, v)| v.clone());
-        match local {
-            Some(value) => {
-                let value = PhpString::new(self, &value)?;
-                server.set(self, key, Value::string(value))?;
-            }
-            None => {
-                server.unset(self, &key)?;
-            }
+        if let Some(value) = local {
+            let value = PhpString::new(self, &value)?;
+            let key = Key::Str(name.hand_on_unmigrated());
+            server.set(self, key, Value::string(value.hand_on_unmigrated()))?;
+        } else {
+            server.unset(self, &Key::Str(*name))?;
+            name.give_up(self);
         }
         Ok(())
     }
@@ -694,7 +706,7 @@ impl Request {
     /// name that reads as an integer as that integer, in the order the
     /// environment has them. What `$_ENV` is under a `variables_order`
     /// that names `E`, and the first rows of `$_SERVER`.
-    fn environment(&mut self) -> Result<PhpArray, Thrown> {
+    fn environment(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let mut array = PhpArray::new(self)?;
         for (name, value) in self.description.env.clone() {
             if name.is_empty() || name.iter().any(|b| matches!(b, b' ' | b'.' | b'[')) {
@@ -702,7 +714,11 @@ impl Request {
             }
             let value = PhpString::new(self, &value)?;
             let name = PhpString::new(self, &name)?;
-            array.set(self, Key::from_string(name), Value::string(value))?;
+            array.set(
+                self,
+                Key::from_string(name.hand_on_unmigrated()),
+                Value::string(value.hand_on_unmigrated()),
+            )?;
         }
         Ok(array)
     }
@@ -734,9 +750,9 @@ impl Request {
     ///   string(1) "4"
     /// }
     /// ```
-    pub fn parse_query(&mut self, string: &[u8]) -> Result<PhpArray, Thrown> {
+    pub fn parse_query(&mut self, string: &[u8]) -> Result<Owner<PhpArray>, Thrown> {
         let array = PhpArray::new(self)?;
-        self.treat_into(Input::String, Some(string), array, &BodyLimits::default())?;
+        self.treat_into(Input::String, Some(string), *array, &BodyLimits::default())?;
         Ok(array)
     }
 
@@ -763,9 +779,9 @@ impl Request {
         &mut self,
         input: Input,
         source: Option<&[u8]>,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Owner<PhpArray>, Thrown> {
         let array = PhpArray::new(self)?;
-        self.treat_into(input, source, array, &BodyLimits::default())?;
+        self.treat_into(input, source, *array, &BodyLimits::default())?;
         Ok(array)
     }
 
@@ -843,11 +859,9 @@ impl Request {
             // name `$_COOKIE` already holds is passed over whole, before
             // the filter sees it (`php_sapi_filter`).
             if input == Input::Cookie {
-                let key = Key::from_string(PhpString::new(self, &name)?);
-                let held = into.get(&key).is_some();
-                if let Key::Str(key) = key {
-                    self.release(Value::string(key));
-                }
+                let key = PhpString::new(self, &name)?;
+                let held = into.get(&Key::from_string(*key)).is_some();
+                key.give_up(self);
                 if held {
                     continue;
                 }
@@ -945,7 +959,11 @@ impl Request {
         let shared = std::sync::Arc::clone(&self.shared);
         match shared.supplied.input_filter.get() {
             Some(hook) => hook(self, input, name, value),
-            None => Ok(Some(Value::string(PhpString::new(self, value)?))),
+            None => Ok(Some(
+                PhpString::new(self, value)?
+                    .into_value()
+                    .hand_on_unmigrated(),
+            )),
         }
     }
 
@@ -1000,12 +1018,10 @@ impl Request {
         loop {
             nest += 1;
             if nest > max_nesting {
-                let top = Key::from_string(PhpString::new(self, &var[..var_len])?);
+                let top = PhpString::new(self, &var[..var_len])?;
                 let mut top_level = track;
-                top_level.unset(self, &top)?;
-                if let Key::Str(name) = top {
-                    self.release(Value::string(name));
-                }
+                top_level.unset(self, &Key::from_string(*top))?;
+                top.give_up(self);
                 self.release(value);
                 if !self.ini_flag(b"display_errors") {
                     docref(
@@ -1056,7 +1072,9 @@ impl Request {
                         self.release(value);
                         return Ok(());
                     }
-                    Some(Key::from_string(PhpString::new(self, index)?))
+                    Some(Key::from_string(
+                        PhpString::new(self, index)?.hand_on_unmigrated(),
+                    ))
                 }
             };
             let Some(key) = self.enter(track, &path, key)? else {
@@ -1084,7 +1102,7 @@ impl Request {
         let mut parent = descend(track, path);
         let Some(key) = key else {
             let fresh = PhpArray::new(self)?;
-            if !parent.try_append(self, Value::array(fresh))? {
+            if !parent.try_append(self, fresh.into_value().hand_on_unmigrated())? {
                 return Ok(None);
             }
             let last = parent.snapshot().last().map(|(k, _)| k.clone());
@@ -1093,7 +1111,7 @@ impl Request {
         if parent.get(&key).is_none_or(|v| v.as_array().is_none()) {
             let fresh = PhpArray::new(self)?;
             let slot = self.owned_key(&key);
-            parent.set(self, slot, Value::array(fresh))?;
+            parent.set(self, slot, fresh.into_value().hand_on_unmigrated())?;
         }
         Ok(Some(key))
     }
@@ -1117,20 +1135,18 @@ impl Request {
             self.release(value);
             return Ok(());
         }
-        let key = Key::from_string(PhpString::new(self, index)?);
-        if place.cookie && path.is_empty() && container.get(&key).is_some() {
-            if let Key::Str(name) = key {
-                self.release(Value::string(name));
-            }
+        let name = PhpString::new(self, index)?;
+        if place.cookie && path.is_empty() && container.get(&Key::from_string(*name)).is_some() {
+            name.give_up(self);
             self.release(value);
             return Ok(());
         }
-        container.set(self, key, value)
+        container.set(self, Key::from_string(name.hand_on_unmigrated()), value)
     }
 
     /// The request headers the host received, `getallheaders()`, as
     /// strings of the request's.
-    pub fn request_headers(&mut self) -> Result<PhpArray, Thrown> {
+    pub fn request_headers(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let mut array = PhpArray::new(self)?;
         let headers = self
             .description
@@ -1139,8 +1155,10 @@ impl Request {
             .map(|web| web.headers.clone())
             .unwrap_or_default();
         for (name, value) in &headers {
-            let key = Key::Str(PhpString::new(self, name)?);
-            let value = Value::string(PhpString::new(self, value)?);
+            let key = Key::Str(PhpString::new(self, name)?.hand_on_unmigrated());
+            let value = PhpString::new(self, value)?
+                .into_value()
+                .hand_on_unmigrated();
             array.set(self, key, value)?;
         }
         Ok(array)

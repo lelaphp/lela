@@ -14,7 +14,7 @@ use php_ext::attr::php_function;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString};
 use php_sapi::EngineBuilder;
 
 use crate::Origin;
@@ -229,7 +229,7 @@ fn apache_child_terminate(req: &mut Request) {
 /// bool(true)
 /// ```
 #[php_function(aliases(getallheaders))]
-fn apache_request_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     req.request_headers()
 }
 
@@ -261,7 +261,7 @@ fn apache_request_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
 /// )
 /// ```
 #[php_function]
-fn apache_response_headers(req: &mut Request) -> Result<PhpArray, Thrown> {
+fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     req.response_headers()
 }
 

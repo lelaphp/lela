@@ -428,7 +428,10 @@ fn tmp_stream(req: &mut Request, id: ArchiveId, slot: usize) -> Result<Option<St
     let Some(tmp) = entry.tmp.clone() else {
         return Ok(None);
     };
-    let stream = req.open_stream_with(&tmp, b"rb", php_ext::request::Opening::default())?;
+    // The entry keeps the stream, and its owner with it.
+    let stream = req
+        .open_stream_with(&tmp, b"rb", php_ext::request::Opening::default())?
+        .map(php_ext::values::Owner::hand_on_unmigrated);
     if let Some(entry) = archives(req)
         .get_mut(id)
         .and_then(|a| a.manifest.at_mut(slot))

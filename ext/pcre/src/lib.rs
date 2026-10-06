@@ -42,7 +42,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use constants::{
     PREG_BACKTRACK_LIMIT_ERROR, PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR,
@@ -354,7 +354,7 @@ fn preg_last_error(req: &mut Request) -> i64 {
 /// string(8) "No error"
 /// ```
 #[php_function]
-fn preg_last_error_msg(req: &mut Request) -> Result<PhpString, Thrown> {
+fn preg_last_error_msg(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     let code = error_code(req);
     PhpString::new(req, error_message(code).as_bytes())
 }
@@ -380,7 +380,7 @@ fn preg_quote(
     req: &mut Request,
     str: PhpString,
     #[php(default = null)] delimiter: Option<PhpString>,
-) -> Result<PhpString, Thrown> {
+) -> Result<Owner<PhpString>, Thrown> {
     let text = str;
     let delimiter = delimiter.map(|s| s.as_bytes().first().copied().unwrap_or(0));
     let mut quoted = Vec::with_capacity(text.len());
@@ -400,7 +400,7 @@ fn preg_quote(
         }
     }
     if quoted.len() == text.len() {
-        return Ok(text);
+        return Ok(Owner::take(req, text));
     }
     PhpString::new(req, &quoted)
 }

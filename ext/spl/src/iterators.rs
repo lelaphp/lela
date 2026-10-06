@@ -28,7 +28,7 @@ use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, arity, throw, throw_error, throwing_warnings,
 };
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Key, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pcre::Regex;
 
 use crate::array::ArrayIterator;
@@ -298,13 +298,15 @@ impl Tree {
     /// The constructor's: `""`, `"| "`, `"  "`, `"|-"`, `"\\-"`, `""`,
     /// and the empty postfix.
     fn new(req: &mut Request) -> Result<Tree, Thrown> {
-        let mut prefix = [PhpString::new(req, b"")?; 6];
+        // The strings are the tree's own, given up as it is freed.
+        let mut prefix = [PhpString::new(req, b"")?.hand_on_unmigrated(); 6];
         for (part, text) in [(1, &b"| "[..]), (2, b"  "), (3, b"|-"), (4, b"\\-")] {
-            prefix[part] = PhpString::filled(req, text.len(), |bytes| bytes.copy_from_slice(text))?;
+            prefix[part] = PhpString::filled(req, text.len(), |bytes| bytes.copy_from_slice(text))?
+                .hand_on_unmigrated();
         }
         Ok(Tree {
             prefix,
-            postfix: PhpString::new(req, b"")?,
+            postfix: PhpString::new(req, b"")?.hand_on_unmigrated(),
         })
     }
 
@@ -557,11 +559,14 @@ impl RecursiveIteratorIterator {
     fn getInnerIterator(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Raw<Instance<RecursiveIterator>>, Thrown> {
+    ) -> Result<Owner<Raw<Instance<RecursiveIterator>>>, Thrown> {
         let this = rec_checked(req, this.object())?;
         let level = top(req, this)?;
-        let inner = level.map_or_else(Value::null, |l| crate::copied(req, l.iterator.as_value()));
-        crate::answered(req, inner)
+        let inner = match level {
+            Some(l) => Owner::take(req, l.iterator.as_value()),
+            None => Owner::take(req, Value::null()),
+        };
+        Ok(crate::answered(inner))
     }
 
     /// `beginIteration(): void`, and `endIteration`, `beginChildren`,
@@ -577,13 +582,13 @@ impl RecursiveIteratorIterator {
 
     /// `callHasChildren(): bool`, the sub-iterator's `hasChildren()`.
     #[php(tentative)]
-    fn callHasChildren(req: &mut Request, this: This<Self>) -> Result<Raw<bool>, Thrown> {
+    fn callHasChildren(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<bool>>, Thrown> {
         let this = this.object();
         let answered = match top(req, this)? {
             Some(level) => crate::method(req, level.iterator, b"hasChildren")?,
-            None => Value::bool(false),
+            None => Owner::take(req, Value::bool(false)),
         };
-        crate::answered(req, answered)
+        Ok(crate::answered(answered))
     }
 
     /// `callGetChildren(): ?RecursiveIterator`, the sub-iterator's
@@ -592,13 +597,13 @@ impl RecursiveIteratorIterator {
     fn callGetChildren(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Raw<Option<Instance<RecursiveIterator>>>, Thrown> {
+    ) -> Result<Owner<Raw<Option<Instance<RecursiveIterator>>>>, Thrown> {
         let this = rec_checked(req, this.object())?;
         let answered = match top(req, this)? {
             Some(level) => crate::method(req, level.iterator, b"getChildren")?,
-            None => Value::null(),
+            None => Owner::take(req, Value::null()),
         };
-        crate::answered(req, answered)
+        Ok(crate::answered(answered))
     }
 
     #[php(tentative, implementation = RecursiveIteratorIterator::beginIteration)]
@@ -748,7 +753,7 @@ impl IteratorIterator {
                 .copied()
                 .filter(|o| crate::is_a(req, o.class(), b"Traversable"))
             else {
-                req.release(answered);
+                answered.give_up(req);
                 let name = String::from_utf8_lossy(&crate::class_name(req, cast)).into_owned();
                 return Err(throw(
                     req,
@@ -758,6 +763,8 @@ impl IteratorIterator {
                     ),
                 ));
             };
+            // The iterator holds the owner the call answered from here.
+            let _inner = answered.hand_on_unmigrated();
             dual(req, this, |it| {
                 it.kind = Kind::IteratorIterator;
                 it.inner = Some(iterator);
@@ -935,13 +942,13 @@ impl RecursiveFilterIterator {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn hasChildren(req: &mut Request, this: This<Self>) -> Result<Raw<bool>, Thrown> {
+    fn hasChildren(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<bool>>, Thrown> {
         let this = checked(req, this.object())?;
         let answered = match inner(req, this)? {
             Some(inner) => crate::method(req, inner, b"hasChildren")?,
-            None => Value::null(),
+            None => Owner::take(req, Value::null()),
         };
-        crate::answered(req, answered)
+        Ok(crate::answered(answered))
     }
 
     /// `RecursiveFilterIterator::getChildren(): ?RecursiveFilterIterator`:
@@ -951,15 +958,15 @@ impl RecursiveFilterIterator {
     fn getChildren(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Option<Instance<RecursiveFilterIterator>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<RecursiveFilterIterator>>>, Thrown> {
         let this = checked(req, this.object())?;
         let Some(inner) = inner(req, this)? else {
             return Ok(None);
         };
         let children = crate::method(req, inner, b"getChildren")?;
-        let made = instantiate(req, this.class(), &[children]);
-        req.release(children);
-        Ok(Some(Instance::of(made?)))
+        let made = instantiate(req, this.class(), &[*children]);
+        children.give_up(req);
+        Ok(Some(made?.into_instance()))
     }
 }
 
@@ -1002,18 +1009,19 @@ impl CallbackFilterIterator {
     /// the element, its key and the inner iterator, its answer handed back
     /// as it came.
     #[php(tentative)]
-    fn accept(req: &mut Request, this: This<Self>) -> Result<Raw<bool>, Thrown> {
+    fn accept(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<bool>>, Thrown> {
         let this = checked(req, this.object())?;
         let (data, key, inner, callback) = dual(req, this, |it| {
             (it.data, it.key, it.inner, it.callback.clone())
         })?;
         let (Some(data), Some(key), Some(callback)) = (data, key, callback) else {
-            return crate::answered(req, Value::bool(false));
+            return Ok(crate::answered(Owner::take(req, Value::bool(false))));
         };
         let inner = inner.map_or_else(Value::null, |o| o.as_value());
         let answered = call(req, &callback, &[data, key, inner])?;
-        let answered = crate::owned(req, answered);
-        crate::answered(req, answered)
+        let bare = Owner::take(req, (*answered).deref());
+        answered.give_up(req);
+        Ok(crate::answered(bare))
     }
 }
 
@@ -1063,7 +1071,7 @@ impl RecursiveCallbackFilterIterator {
     fn getChildren(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<RecursiveCallbackFilterIterator>, Thrown> {
+    ) -> Result<Owner<Instance<RecursiveCallbackFilterIterator>>, Thrown> {
         let this = checked(req, this.object())?;
         let (Some(inner), Some(callback)) = dual(req, this, |it| (it.inner, it.callback_value))?
         else {
@@ -1073,9 +1081,9 @@ impl RecursiveCallbackFilterIterator {
             ));
         };
         let children = crate::method(req, inner, b"getChildren")?;
-        let made = instantiate(req, this.class(), &[children, callback]);
-        req.release(children);
-        Ok(Instance::of(made?))
+        let made = instantiate(req, this.class(), &[*children, callback]);
+        children.give_up(req);
+        Ok(made?.into_instance())
     }
 }
 
@@ -1298,7 +1306,8 @@ impl CachingIterator {
         if let Some(old) = old {
             req.release(Value::array(old));
         }
-        let fresh = PhpArray::new(req)?;
+        // The iterator's own cache from here.
+        let fresh = PhpArray::new(req)?.hand_on_unmigrated();
         dual(req, this, |it| it.cache = Some(fresh))?;
         caching_next_step(req, this)
     }
@@ -1325,7 +1334,7 @@ impl CachingIterator {
     }
 
     /// `__toString(): string`, what the flags name.
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = checked(req, this.object())?;
         let (flags, key, data, string) =
             dual(req, this, |it| (it.flags, it.key, it.data, it.string))?;
@@ -1397,7 +1406,8 @@ impl CachingIterator {
             ));
         }
         if flags & Self::FULL_CACHE != 0 && old & Self::FULL_CACHE == 0 {
-            let fresh = PhpArray::new(req)?;
+            // The iterator's own cache from here.
+            let fresh = PhpArray::new(req)?.hand_on_unmigrated();
             if let Some(cache) = dual(req, this, |it| it.cache.replace(fresh))? {
                 req.release(Value::array(cache));
             }
@@ -1679,7 +1689,8 @@ impl AppendIterator {
                 "InternalError: AppendIterator::__construct served with ArrayIterator unlinked",
             ));
         };
-        let list = instantiate(req, class, &[])?;
+        // The iterator's own list from here.
+        let list = instantiate(req, class, &[])?.hand_on_unmigrated();
         dual(req, this, |it| {
             it.kind = Kind::Append;
             it.appended = Some(list);
@@ -1699,7 +1710,7 @@ impl AppendIterator {
         let list_valid = crate::valid(req, list)?;
         let inner_valid = dual_valid(req, this)?;
         let answered = call_method(req, &list, b"append", &[iterator.as_value()])?;
-        req.release(answered);
+        answered.give_up(req);
         if list_valid && !inner_valid {
             crate::effect(req, list, b"next")?;
         }
@@ -1754,11 +1765,14 @@ impl AppendIterator {
 
     /// `getIteratorIndex(): ?int`, the list's key.
     #[php(tentative)]
-    fn getIteratorIndex(req: &mut Request, this: This<Self>) -> Result<Raw<Option<i64>>, Thrown> {
+    fn getIteratorIndex(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Raw<Option<i64>>>, Thrown> {
         let this = checked(req, this.object())?;
         let list = appended(req, this)?;
         let key = crate::method(req, list, b"key")?;
-        crate::answered(req, key)
+        Ok(crate::answered(key))
     }
 
     /// `getArrayIterator(): ArrayIterator`.
@@ -2021,7 +2035,7 @@ impl RegexIterator {
     /// string(10) "/^x(\d)$/i"
     /// ```
     #[php(tentative)]
-    fn getRegex(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getRegex(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let regex = regex_of(req, this.object())?;
         PhpString::new(req, &regex.source)
     }
@@ -2153,7 +2167,7 @@ impl RecursiveRegexIterator {
     fn getChildren(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<RecursiveRegexIterator>, Thrown> {
+    ) -> Result<Owner<Instance<RecursiveRegexIterator>>, Thrown> {
         let this = this.object();
         let regex = regex_of(req, this)?;
         let Some(inner) = inner(req, this)? else {
@@ -2166,21 +2180,21 @@ impl RecursiveRegexIterator {
         let source = match crate::string_value(req, &regex.source) {
             Ok(source) => source,
             Err(thrown) => {
-                req.release(children);
+                children.give_up(req);
                 return Err(thrown);
             }
         };
         let arguments = [
-            children,
-            source,
+            *children,
+            *source,
             Value::int(regex.mode.number()),
             Value::int(regex.flags.0),
             Value::int(regex.preg_flags),
         ];
         let made = instantiate(req, this.class(), &arguments);
-        req.release(children);
-        req.release(source);
-        Ok(Instance::of(made?))
+        children.give_up(req);
+        source.give_up(req);
+        Ok(made?.into_instance())
     }
 }
 
@@ -2303,7 +2317,7 @@ impl RecursiveTreeIterator {
             match answered.as_object().copied() {
                 Some(o) if crate::is_a(req, o.class(), b"Traversable") => o,
                 _ => {
-                    req.release(answered);
+                    answered.give_up(req);
                     return Err(throw(
                         req,
                         "LogicException",
@@ -2325,8 +2339,8 @@ impl RecursiveTreeIterator {
         let caching = instantiate(req, class, &[source.as_value(), Value::int(caching_flags)]);
         req.release(source.as_value());
         let caching = caching?;
-        let built = rec_construct(req, this, caching, mode, flags);
-        req.release(caching.as_value());
+        let built = rec_construct(req, this, *caching, mode, flags);
+        caching.give_up(req);
         built?;
         let tree = Tree::new(req)?;
         if let Some(old) = rec(req, this, |it| it.tree.replace(tree))? {
@@ -2353,17 +2367,29 @@ impl RecursiveTreeIterator {
     /// }
     /// ```
     #[php(tentative)]
-    fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
         let Some(level) = top(req, this)? else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let key = level.sub.key(req)?;
         let key = crate::owned(req, key);
         if rec(req, this, |it| it.flags & Self::BYPASS_KEY != 0)? {
-            return Ok(key);
+            // The key the inner iterator answered is its one owner.
+            let owner = Owner::take(req, key);
+            req.release(key);
+            return Ok(owner);
         }
-        let text = to_string(req, &key)?.as_bytes().to_vec();
+        let text = match to_string(req, &key) {
+            Ok(text) => text,
+            Err(thrown) => {
+                req.release(key);
+                return Err(thrown);
+            }
+        };
+        let bytes = text.as_bytes().to_vec();
+        text.give_up(req);
+        let text = bytes;
         req.release(key);
         let mut out = tree_prefix(req, this)?;
         out.extend(text);
@@ -2374,13 +2400,17 @@ impl RecursiveTreeIterator {
     /// `current(): mixed`: the entry drawn with the prefix and postfix, or
     /// the element under `BYPASS_CURRENT`.
     #[php(tentative)]
-    fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
         if rec(req, this, |it| it.flags & Self::BYPASS_CURRENT != 0)? {
-            return rec_current(req, this);
+            // The element the inner iterator answered is its one owner.
+            let current = rec_current(req, this)?;
+            let owner = Owner::take(req, current);
+            req.release(current);
+            return Ok(owner);
         }
         let Some(entry) = tree_entry(req, this)? else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let mut out = tree_prefix(req, this)?;
         out.extend(entry);
@@ -2390,7 +2420,7 @@ impl RecursiveTreeIterator {
 
     /// `getPrefix(): string`; the witness is the constructor's.
     #[php(tentative)]
-    fn getPrefix(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPrefix(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = rec_checked(req, this.object())?;
         let prefix = tree_prefix(req, this)?;
         PhpString::new(req, &prefix)
@@ -2439,18 +2469,18 @@ impl RecursiveTreeIterator {
 
     /// `getEntry(): string`.
     #[php(tentative)]
-    fn getEntry(req: &mut Request, this: This<Self>) -> Result<Raw<PhpString>, Thrown> {
+    fn getEntry(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<PhpString>>, Thrown> {
         let this = rec_checked(req, this.object())?;
         let entry = match tree_entry(req, this)? {
             Some(entry) => crate::string_value(req, &entry)?,
-            None => Value::null(),
+            None => Owner::take(req, Value::null()),
         };
-        crate::answered(req, entry)
+        Ok(crate::answered(entry))
     }
 
     /// `getPostfix(): string`.
     #[php(tentative)]
-    fn getPostfix(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPostfix(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = rec_checked(req, this.object())?;
         let postfix = postfix(req, this)?;
         PhpString::new(req, &postfix)
@@ -2668,7 +2698,12 @@ fn construct_caching(
         return Err(arg_value_error(req, 2, CIT_FLAGS_MESSAGE));
     }
     let cache = PhpArray::new(req)?;
-    dual_set(req, this, kind, inner)?;
+    if let Err(thrown) = dual_set(req, this, kind, inner) {
+        cache.give_up(req);
+        return Err(thrown);
+    }
+    // The iterator's own cache from here.
+    let cache = cache.hand_on_unmigrated();
     dual(req, this, |it| {
         it.flags |= flags & CIT_PUBLIC;
         it.cache = Some(cache);
@@ -2817,7 +2852,7 @@ fn filter_fetch(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     while dual_fetch(req, this, true)? {
         let answered = call_method(req, &this, b"accept", &[])?;
         let accepted = truthy(req, &answered);
-        req.release(answered);
+        answered.give_up(req);
         if accepted {
             return Ok(());
         }
@@ -2852,7 +2887,7 @@ fn limit_seek_to(req: &mut Request, this: PhpObject, pos: i64) -> Result<(), Thr
         && crate::is_a(req, inner.class(), b"SeekableIterator")
     {
         let answered = call_method(req, &inner, b"seek", &[Value::int(pos)])?;
-        req.release(answered);
+        answered.give_up(req);
         dual(req, this, |it| it.pos = pos)?;
         if limit_in_range(req, this)? && dual_valid(req, this)? {
             dual_fetch(req, this, false)?;
@@ -2908,8 +2943,13 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     if flags & CachingIterator::FULL_CACHE != 0
         && let (Some(key), Some(data)) = (key, data)
     {
-        let mut cache = dual(req, this, |it| it.cache)?.map_or_else(|| PhpArray::new(req), Ok)?;
-        crate::set_key(req, &mut cache, &key, crate::copied(req, data))?;
+        // The iterator's own cache, made where there is none yet.
+        let mut cache = match dual(req, this, |it| it.cache)? {
+            Some(cache) => cache,
+            None => PhpArray::new(req)?.hand_on_unmigrated(),
+        };
+        let (key, value) = crate::keyed(req, &key, crate::copied(req, data))?;
+        cache.set(req, key, value)?;
         dual(req, this, |it| it.cache = Some(cache))?;
     }
     if kind == Kind::RecursiveCaching
@@ -2918,18 +2958,19 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         let children = (|| -> Result<Option<PhpObject>, Thrown> {
             let answered = crate::method(req, inner, b"hasChildren")?;
             let has = truthy(req, &answered);
-            req.release(answered);
+            answered.give_up(req);
             if !has {
                 return Ok(None);
             }
             let children = crate::method(req, inner, b"getChildren")?;
             let Some(class) = lookup_class(req, b"RecursiveCachingIterator")? else {
-                req.release(children);
+                children.give_up(req);
                 return Ok(None);
             };
-            let made = instantiate(req, class, &[children, Value::int(flags & CIT_PUBLIC)]);
-            req.release(children);
-            made.map(Some)
+            let made = instantiate(req, class, &[*children, Value::int(flags & CIT_PUBLIC)]);
+            children.give_up(req);
+            // The iterator's own children from here.
+            made.map(|made| Some(made.hand_on_unmigrated()))
         })();
         match children {
             Ok(children) => dual(req, this, |it| it.children = children)?,
@@ -2945,8 +2986,9 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         } else {
             data.unwrap_or_default()
         };
-        let string = to_string(req, &source)?;
-        dual(req, this, |it| it.string = Some(Value::string(string)))?;
+        // The iterator's own string from here.
+        let string = to_string(req, &source)?.into_value().hand_on_unmigrated();
+        dual(req, this, |it| it.string = Some(string))?;
     }
     dual_next(req, this, false)
 }
@@ -3002,9 +3044,11 @@ fn append_next_iterator(req: &mut Request, this: PhpObject) -> Result<bool, Thro
     }
     let current = crate::method(req, list, b"current")?;
     let Some(next) = current.as_object().copied() else {
-        req.release(current);
+        current.give_up(req);
         return Ok(false);
     };
+    // The append iterator holds the owner `current()` answered from here.
+    let _inner = current.hand_on_unmigrated();
     dual(req, this, |it| it.inner = Some(next))?;
     inner_iterate(req, this, next)?;
     dual_rewind(req, this)?;
@@ -3043,8 +3087,8 @@ fn regex_accept(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
         data
     };
     let subject = to_string(req, &subject)?;
-    let matched = regex_run(req, this, &regex, subject);
-    req.release(Value::string(subject));
+    let matched = regex_run(req, this, &regex, *subject);
+    subject.give_up(req);
     Ok(match matched? {
         Some(matched) => matched != regex.flags.inverted(),
         None => false,
@@ -3092,7 +3136,7 @@ fn regex_run(
             regex_replace_data(req, this, None)?;
             let global = regex.mode == Mode::AllMatches;
             let (count, matches) = pattern.match_impl(req, subject, global, regex.preg_flags, 0)?;
-            regex_replace_data(req, this, Some(Value::array(matches)))?;
+            regex_replace_data(req, this, Some(matches.into_value().hand_on_unmigrated()))?;
             Ok(Some(count.as_int().is_some_and(|n| n > 0)))
         }
         Mode::Split => {
@@ -3108,11 +3152,11 @@ fn regex_run(
             let mut count = 0;
             let replaced =
                 pattern.replace_impl(req, subject, replacement.as_bytes(), -1, &mut count);
-            req.release(Value::string(replacement));
+            replacement.give_up(req);
             let Some(replaced) = replaced? else {
                 return Ok(None);
             };
-            let replaced = Some(Value::string(replaced));
+            let replaced = Some(replaced.into_value().hand_on_unmigrated());
             let old = dual(req, this, |it| {
                 if regex.flags.use_key() {
                     std::mem::replace(&mut it.key, replaced)
@@ -3324,7 +3368,7 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                     let has_children = match answered {
                         Ok(answered) => {
                             let has = truthy(req, &answered);
-                            req.release(answered);
+                            answered.give_up(req);
                             has
                         }
                         Err(thrown) => {
@@ -3392,13 +3436,15 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                         .copied()
                         .filter(|o| crate::is_a(req, o.class(), b"RecursiveIterator"))
                     else {
-                        req.release(child);
+                        child.give_up(req);
                         return Err(throw(
                             req,
                             "UnexpectedValueException",
                             "Objects returned by RecursiveIterator::getChildren() must implement RecursiveIterator",
                         ));
                     };
+                    // The level holds the child's owner from here.
+                    let _held_by_the_level = child.hand_on_unmigrated();
                     let mode = rec(req, this, |it| it.mode)?;
                     set_state(
                         req,
@@ -3708,7 +3754,7 @@ fn rec_construct(
         match answered.as_object().copied() {
             Some(o) if crate::is_a(req, o.class(), b"Traversable") => o,
             _ => {
-                req.release(answered);
+                answered.give_up(req);
                 let name =
                     String::from_utf8_lossy(&crate::class_name(req, given.class())).into_owned();
                 return Err(throw(
@@ -3760,7 +3806,7 @@ fn tree_prefix(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
     for (at, level) in levels.iter().enumerate() {
         let answered = crate::method(req, level.iterator, b"hasNext")?;
         let more = answered.as_bool() == Some(true);
-        req.release(answered);
+        answered.give_up(req);
         let part = match (at == last, more) {
             (false, true) => 1,
             (false, false) => 2,
@@ -3793,7 +3839,10 @@ fn tree_entry(req: &mut Request, this: PhpObject) -> Result<Option<Vec<u8>>, Thr
     let entry = if bare.as_array().is_some() {
         b"Array".to_vec()
     } else {
-        to_string(req, &bare)?.as_bytes().to_vec()
+        let text = to_string(req, &bare)?;
+        let bytes = text.as_bytes().to_vec();
+        text.give_up(req);
+        bytes
     };
     req.release(data);
     Ok(Some(entry))

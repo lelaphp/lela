@@ -8,7 +8,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::raising::{Thrown, arity, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::cpp::{CName, Text};
@@ -58,9 +58,9 @@ fn clone_generator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
     };
     let new = clone_with(req, &object, payload)?;
     if message.is_empty() {
-        return Ok(new);
+        return Ok(new.hand_on_unmigrated());
     }
-    req.release(Value::object(new));
+    new.give_up(req);
     Err(throw_error(req, "Error", message))
 }
 
@@ -108,7 +108,7 @@ fn construct(
 fn create(
     req: &mut Request,
     locale: &Raw<Option<PhpString>>,
-) -> Result<Option<Instance<IntlDatePatternGenerator>>, Thrown> {
+) -> Result<Option<Owner<Instance<IntlDatePatternGenerator>>>, Thrown> {
     let Some(class) = lookup_class(req, b"IntlDatePatternGenerator")? else {
         return Err(fatal(
             req,
@@ -116,14 +116,14 @@ fn create(
         ));
     };
     let object = new_object(req, class)?;
-    match construct(req, object, locale) {
-        Ok(true) => Ok(Some(Instance::of(object))),
+    match construct(req, *object, locale) {
+        Ok(true) => Ok(Some(object.into_instance())),
         Ok(false) => {
-            req.release(Value::object(object));
+            object.give_up(req);
             Ok(None)
         }
         Err(thrown) => {
-            req.release(Value::object(object));
+            object.give_up(req);
             Err(thrown)
         }
     }
@@ -145,7 +145,7 @@ fn best_pattern(
     req: &mut Request,
     object: PhpObject,
     skeleton: &[u8],
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     error::reset(req);
     error::reset_object::<GeneratorObject>(req, object);
     let units = ffi::to_utf16(skeleton);
@@ -235,7 +235,7 @@ impl IntlDatePatternGenerator {
     fn create(
         req: &mut Request,
         #[php(default = null)] locale: Raw<Option<PhpString>>,
-    ) -> Result<Option<Instance<IntlDatePatternGenerator>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<IntlDatePatternGenerator>>>, Thrown> {
         create(req, &locale)
     }
 
@@ -243,7 +243,7 @@ impl IntlDatePatternGenerator {
         req: &mut Request,
         this: This<Self>,
         skeleton: PhpString,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         best_pattern(req, this.object(), skeleton.as_bytes())
     }
 }

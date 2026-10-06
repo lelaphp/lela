@@ -12,7 +12,7 @@ use php_unit::decl::ClassKind;
 use super::{Request, Symbol};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, PhpObject, TypeTag, Value};
 use crate::exec::{self, TableId};
 use crate::tier::{Called, Class, Code, Evaluated, Named, Shape, Under};
 
@@ -332,11 +332,11 @@ impl Request {
     /// The function named `name` called with `arguments`, each given
     /// up after, as `zend_call_function` calls one by name.
     pub(crate) fn call_named(&mut self, name: &[u8], arguments: &[Value]) -> Result<Value, Thrown> {
-        let name = PhpString::new(self, name)?;
+        let name = self.string(name)?;
         let callable = crate::api::coerce::to_callable(self, &Value::string(name));
         self.release(Value::string(name));
         let callable = callable?;
-        let called = crate::api::call::call(self, &callable, arguments);
+        let called = crate::api::call::call_made(self, &callable, arguments);
         for argument in arguments {
             self.release(*argument);
         }
@@ -392,7 +392,7 @@ impl Request {
         for argument in arguments {
             let value = match argument {
                 crate::tier::Argument::Int(n) => Value::int(*n),
-                crate::tier::Argument::Str(bytes) => match PhpString::new(self, bytes) {
+                crate::tier::Argument::Str(bytes) => match self.string(bytes) {
                     Ok(string) => Value::string(string),
                     Err(_) => return Called::Returned,
                 },
@@ -640,12 +640,12 @@ impl Request {
     /// `line`, and what `__toString` answered, the status 255.
     pub(crate) fn keep_uncaught(&mut self) {
         self.user_exception_handler();
-        let Some(throwable) = self.take_pending() else {
+        let Some(throwable) = self.take_pending_view() else {
             self.raised = None;
             return;
         };
         let class = self.class_name(throwable.class()).into_bytes();
-        let text = match crate::api::call::call_method(self, &throwable, b"__tostring", &[]) {
+        let text = match crate::api::call::call_method_made(self, &throwable, b"__tostring", &[]) {
             Ok(returned) => {
                 let text = returned
                     .deref()

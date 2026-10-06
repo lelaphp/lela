@@ -10,7 +10,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, argument_error, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, Value, ValueRef};
 
 use crate::addr::{addr4_to_if_index, if_index_named, if_index_to_addr4, inet46_addr};
 use crate::conv::{Conv, find, put};
@@ -19,7 +19,7 @@ use crate::natives::c_int;
 use crate::socket::{Socket, sock, socket_error, valid};
 
 /// What `socket_get_option` answers: a structure's fields, or an `int`.
-type Answer = OrFalse<Union<PhpArray, i64>>;
+type Answer = OrFalse<Union<Owner<PhpArray>, i64>>;
 
 /// `struct timeval` as the platform lays it out.
 fn timeval_bytes(sec: i64, usec: i64) -> Vec<u8> {
@@ -90,10 +90,7 @@ fn get_option(
             return failed(req, errno, "unable to get socket option");
         }
         let value = Conv::in6_pktinfo_value(req, &buf)?;
-        return Ok(match value.as_ref() {
-            ValueRef::Array(array) => OrFalse::Value(Union::A(*array)),
-            _ => OrFalse::False,
-        });
+        return Ok(OrFalse::Value(Union::A(value)));
     }
     if level == i64::from(libc::SOL_SOCKET) {
         if is_linger(option) {
@@ -191,12 +188,19 @@ fn socket_get_option(
 
 /// The table an option's array or object reads, `Z_ARRVAL_P` or
 /// `Z_OBJPROP_P`, and php's `TypeError` for anything else.
-fn table(req: &mut Request, value: &Value, option: &str) -> Result<PhpArray, Thrown> {
+fn table(req: &mut Request, value: &Value, option: &str) -> Result<Owner<PhpArray>, Thrown> {
     match value.as_ref() {
-        ValueRef::Array(array) => Ok(*array),
+        ValueRef::Array(array) => Ok(Owner::take(req, *array)),
         ValueRef::Object(object) => {
             let mut out = PhpArray::new(req)?;
-            for (key, element) in object.entries(req)? {
+            let entries = match object.entries(req) {
+                Ok(entries) => entries,
+                Err(thrown) => {
+                    out.give_up(req);
+                    return Err(thrown);
+                }
+            };
+            for (key, element) in entries {
                 req.addref(&element);
                 if let php_ext::values::Key::Str(s) = &key {
                     req.addref(&Value::string(*s));
@@ -235,7 +239,9 @@ fn if_index(req: &mut Request, value: &Value) -> Result<Option<u32>, Thrown> {
         };
     }
     let name = to_string(req, value)?;
-    Ok(if_index_named(req, name.as_bytes()))
+    let index = if_index_named(req, name.as_bytes());
+    name.give_up(req);
+    Ok(index)
 }
 
 /// What a set answered: done, refused after php's warning or
@@ -256,8 +262,21 @@ fn mcast(
     join: bool,
     value: &Value,
 ) -> Result<Set, Thrown> {
-    let object = socket.object();
     let table = table(req, value, "MCAST_LEAVE_GROUP")?;
+    let set = mcast_table(req, socket, fd, (level, join), *table);
+    table.give_up(req);
+    set
+}
+
+/// [`mcast`] over the option's table.
+fn mcast_table(
+    req: &mut Request,
+    socket: Instance<Socket>,
+    fd: i32,
+    (level, join): (i32, bool),
+    table: PhpArray,
+) -> Result<Set, Thrown> {
+    let object = socket.object();
     let Some(group) = find(table, "group") else {
         return Err(throw_error(
             req,
@@ -266,8 +285,16 @@ fn mcast(
         ));
     };
     let group = to_string(req, &group)?;
-    let family = sock(req, socket)?.family;
-    let Some(group) = inet46_addr(req, object, family, group.as_bytes())? else {
+    let family = match sock(req, socket) {
+        Ok(sock) => sock.family,
+        Err(thrown) => {
+            group.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let addr = inet46_addr(req, object, family, group.as_bytes());
+    group.give_up(req);
+    let Some(group) = addr? else {
         return Ok(Set::Done(false));
     };
     let index = match find(table, "interface") {
@@ -458,13 +485,18 @@ fn set_option(
     }
     let bytes = if is_linger(option) {
         let table = table(req, value, "SO_LINGER")?;
-        key(req, table, "l_onoff")?;
-        key(req, table, "l_linger")?;
-        let onoff = ushort_key(req, table, "l_onoff", "l_onoff")?;
-        let linger = ushort_key(req, table, "l_linger", "l_linger")?;
-        let mut out = c_int(onoff).to_ne_bytes().to_vec();
-        out.extend_from_slice(&c_int(linger).to_ne_bytes());
-        out
+        let read = |req: &mut Request, table: PhpArray| -> Result<Vec<u8>, Thrown> {
+            key(req, table, "l_onoff")?;
+            key(req, table, "l_linger")?;
+            let onoff = ushort_key(req, table, "l_onoff", "l_onoff")?;
+            let linger = ushort_key(req, table, "l_linger", "l_linger")?;
+            let mut out = c_int(onoff).to_ne_bytes().to_vec();
+            out.extend_from_slice(&c_int(linger).to_ne_bytes());
+            Ok(out)
+        };
+        let read = read(req, *table);
+        table.give_up(req);
+        read?
     } else if option == i64::from(libc::SO_RCVTIMEO) || option == i64::from(libc::SO_SNDTIMEO) {
         let name = if option == i64::from(libc::SO_RCVTIMEO) {
             "SO_RCVTIMEO"
@@ -472,11 +504,16 @@ fn set_option(
             "SO_SNDTIMEO"
         };
         let table = table(req, value, name)?;
-        let sec = key(req, table, "sec")?;
-        let usec = key(req, table, "usec")?;
-        let sec = to_long(req, &sec)?;
-        let usec = to_long(req, &usec)?;
-        timeval_bytes(sec, usec)
+        let read = |req: &mut Request, table: PhpArray| -> Result<Vec<u8>, Thrown> {
+            let sec = key(req, table, "sec")?;
+            let usec = key(req, table, "usec")?;
+            let sec = to_long(req, &sec)?;
+            let usec = to_long(req, &usec)?;
+            Ok(timeval_bytes(sec, usec))
+        };
+        let read = read(req, *table);
+        table.give_up(req);
+        read?
     } else if is_bindtodevice(option) {
         let ValueRef::Str(s) = value.as_ref() else {
             let given = value_name(req, value);

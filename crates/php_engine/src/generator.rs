@@ -34,7 +34,7 @@ use crate::api::abi::{CloneObj, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
-use crate::api::values::{Key, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::classes::{Exception, Throwable};
 use crate::exec::{self, CallState, FrameState};
 use crate::interfaces::Iterator;
@@ -1274,7 +1274,7 @@ fn resumed(req: &mut Request, generator: PhpObject) -> Result<(), Thrown> {
 }
 
 fn pending_as_err(req: &mut Request) -> Result<(), Thrown> {
-    if let Some(pending) = req.take_pending() {
+    if let Some(pending) = req.take_pending_view() {
         return Err(Thrown::of(Some(pending)));
     }
     if req.is_pending() {
@@ -1996,7 +1996,7 @@ impl Generator {
     ///   string(4) "C::m"
     /// }
     /// ```
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         let mut out = PhpArray::new(req)?;
         let function = read(req, this, |g| g.function).flatten();
@@ -2016,8 +2016,10 @@ impl Generator {
             }
         });
         if let Some(name) = name {
-            let key = Key::from_string(PhpString::new(req, b"function")?);
-            let value = Value::string(PhpString::new(req, &name)?);
+            let key = Key::from_string(PhpString::new(req, b"function")?.hand_on_unmigrated());
+            let value = PhpString::new(req, &name)?
+                .into_value()
+                .hand_on_unmigrated();
             out.set(req, key, value)?;
         }
         Ok(out)

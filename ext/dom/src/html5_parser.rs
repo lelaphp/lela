@@ -7,7 +7,7 @@
 
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,
 };
@@ -830,11 +830,11 @@ fn finish(
     encoding: Encoding,
     options: i64,
     url: Option<Vec<u8>>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let doc = new_html_doc(req)?;
     let object = crate::modern::document_object(req, "Dom\\HTMLDocument", doc)?;
     let create_default_ns = options & crate::modern_constants::HTML_NO_DEFAULT_NS == 0;
-    let converted = dom_mut(req, object).and_then(|d| {
+    let converted = dom_mut(req, *object).and_then(|d| {
         convert(
             &mut d.obj,
             parsed.node().last_child(),
@@ -844,7 +844,7 @@ fn finish(
         )
     });
     if converted.is_none() {
-        req.release(object.as_value());
+        object.give_up(req);
         return Err(dom_throw(req, Code::InvalidState));
     }
     let seen = parsed.observations();
@@ -853,10 +853,10 @@ fn finish(
     if let Some(url) = url {
         doc.set_doc_string(DocString::Url, Some(&url));
     }
-    if let Some(d) = dom_mut(req, object) {
+    if let Some(d) = dom_mut(req, *object) {
         d.obj.set_quirks(quirks_of(seen.quirks));
     }
-    Ok(object.as_value())
+    Ok(object.into_value())
 }
 
 /// The override encoding argument, `None` where none was given.
@@ -959,7 +959,7 @@ pub(crate) fn create_from_string(
     source: &[u8],
     options: i64,
     given_encoding: Option<PhpString>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     check_options(req, 2, options)?;
     let encoding = override_encoding(req, 3, given_encoding)?;
     let (parsed, found) = parse(req, b"Entity", &Input::String(source), options, encoding)?;
@@ -972,7 +972,7 @@ pub(crate) fn create_from_file(
     path: &[u8],
     options: i64,
     given_encoding: Option<PhpString>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let path = path.to_vec();
     if path.contains(&0) {
         return Err(arg_value_error(req, 1, "not contain any null bytes"));
@@ -997,25 +997,34 @@ pub(crate) fn create_from_file(
     // The MIME sniff: the charset of the http headers the stream carries,
     // where no encoding was given and lexbor knows the one named.
     let mut encoding = encoding;
-    if encoding.is_none()
-        && let Some(charset) = php_ext_libxml::sniff_charset_from_stream(req, stream)?
-    {
-        encoding = Encoding::by_name(&charset);
+    if encoding.is_none() {
+        match php_ext_libxml::sniff_charset_from_stream(req, *stream) {
+            Ok(Some(charset)) => encoding = Encoding::by_name(&charset),
+            Ok(None) => {}
+            Err(thrown) => {
+                stream.hand_on_unmigrated().free(req);
+                return Err(thrown);
+            }
+        }
     }
     let mut source = Vec::new();
     let mut chunks = Vec::new();
     let read = loop {
         match stream.read(req, BUFFER) {
-            Ok(Some(chunk)) if !chunk.is_empty() => {
-                chunks.push(chunk.len());
+            Ok(Some(chunk)) => {
+                let len = chunk.len();
                 source.extend_from_slice(chunk.as_bytes());
-                req.release(Value::string(chunk));
+                chunk.give_up(req);
+                if len == 0 {
+                    break Ok(());
+                }
+                chunks.push(len);
             }
-            Ok(_) => break Ok(()),
+            Ok(None) => break Ok(()),
             Err(thrown) => break Err(thrown),
         }
     };
-    stream.free(req);
+    stream.hand_on_unmigrated().free(req);
     read?;
     let (parsed, found) = parse(req, &path, &Input::File(&source, chunks), options, encoding)?;
     let url = if crate::modern::is_stream_path(&path) {
@@ -1036,7 +1045,7 @@ pub(crate) fn create_from_file(
 }
 
 /// `Dom\HTMLDocument::createEmpty`'s body.
-pub(crate) fn create_empty(req: &mut Request, encoding: &[u8]) -> Result<PhpObject, Thrown> {
+pub(crate) fn create_empty(req: &mut Request, encoding: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     if Encoding::by_name(encoding).is_none() {
         return Err(arg_value_error(req, 1, "be a valid document encoding"));
     }

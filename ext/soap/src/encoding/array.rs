@@ -5,7 +5,7 @@
 use php_ext::call::{iterate, lookup_class};
 use php_ext::coerce::key_of;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{Kind, Node, Ns};
 
 use super::{
@@ -336,11 +336,11 @@ fn add_xml_array_elements(
 }
 
 /// `to_xml_array`'s copy of a `Traversable`'s elements, the caller's.
-fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<PhpArray> {
+fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Owner<PhpArray>> {
     let mut copy = PhpArray::new(req)?;
-    let fill = |req: &mut Request, copy: &mut PhpArray| -> Res<()> {
+    let fill = |req: &mut Request, copy: &mut Owner<PhpArray>| -> Res<()> {
         let it = iterate(req, &o)?;
-        let walk = |req: &mut Request, copy: &mut PhpArray| -> Res<()> {
+        let walk = |req: &mut Request, copy: &mut Owner<PhpArray>| -> Res<()> {
             it.rewind(req)?;
             while it.valid(req)? {
                 let val = it.value(req)?;
@@ -354,7 +354,7 @@ fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Php
                 let k = key_of(req, &key);
                 req.release(key);
                 match k {
-                    Ok(k) => copy.set(req, k, val)?,
+                    Ok(k) => copy.set(req, k.hand_on_unmigrated(), val)?,
                     Err(t) => {
                         req.release(val);
                         return Err(t.into());
@@ -371,7 +371,7 @@ fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Php
     match fill(req, &mut copy) {
         Ok(()) => Ok(copy),
         Err(err) => {
-            req.release(Value::array(copy));
+            copy.give_up(req);
             Err(err)
         }
     }
@@ -415,10 +415,10 @@ pub(super) fn to_xml_array(
     {
         array_copy = Some(traversable_copy(req, *o)?);
     }
-    let data = array_copy.map_or(data, Value::array);
+    let data = array_copy.as_ref().map_or(data, |c| Value::array(**c));
     let out = array_body(req, cx, e, data, style, x_param, soap_version);
     if let Some(c) = array_copy {
-        req.release(Value::array(c));
+        c.give_up(req);
     }
     out?;
     if style == Use::Encoded {
@@ -810,10 +810,10 @@ pub(super) fn to_zval_array(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node)
         get_position_ex(end.unwrap_or(&content), &mut pos)?;
     }
     let ret = PhpArray::new(req)?;
-    match fill_array(req, cx, ret, shape.found, data, &dims, &mut pos) {
-        Ok(()) => Ok(Value::array(ret)),
+    match fill_array(req, cx, *ret, shape.found, data, &dims, &mut pos) {
+        Ok(()) => Ok(ret.into_value().hand_on_unmigrated()),
         Err(err) => {
-            req.release(Value::array(ret));
+            ret.give_up(req);
             Err(err)
         }
     }
@@ -853,8 +853,9 @@ fn fill_array(
                 Some(a2) => ar = a2,
                 None => {
                     let fresh = PhpArray::new(req)?;
-                    ar.set(req, k, Value::array(fresh))?;
-                    ar = fresh;
+                    let view = *fresh;
+                    ar.set(req, k, fresh.into_value().hand_on_unmigrated())?;
+                    ar = view;
                 }
             }
         }
@@ -941,10 +942,10 @@ pub(super) fn to_zval_map(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Val
         return Ok(Value::null());
     }
     let ret = PhpArray::new(req)?;
-    match fill_map(req, cx, ret, data) {
-        Ok(()) => Ok(Value::array(ret)),
+    match fill_map(req, cx, *ret, data) {
+        Ok(()) => Ok(ret.into_value().hand_on_unmigrated()),
         Err(err) => {
-            req.release(Value::array(ret));
+            ret.give_up(req);
             Err(err)
         }
     }
@@ -976,7 +977,7 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
         let k = match key.as_ref() {
             ValueRef::Str(s) => {
                 let s = PhpString::new(req, s.as_bytes())?;
-                Some(Key::from_string(s))
+                Some(Key::from_string(s.hand_on_unmigrated()))
             }
             ValueRef::Int(n) => Some(Key::Int(n)),
             _ => None,

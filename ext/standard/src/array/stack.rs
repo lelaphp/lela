@@ -12,7 +12,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::to_array;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpRef, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value};
 
 use super::{copied, key_copy};
 
@@ -41,10 +41,10 @@ impl Stack {
             });
         }
         let array = match given.get() {
-            Some(array) => array.copy(req)?,
-            None => PhpArray::new(req)?,
+            Some(array) => array.copy(req)?.hand_on_unmigrated(),
+            None => PhpArray::new(req)?.hand_on_unmigrated(),
         };
-        let cell = PhpRef::new(req, array.to_value())?;
+        let cell = PhpRef::new(req, array.to_value())?.hand_on_unmigrated();
         Ok(Stack {
             array,
             owned: Some(cell),
@@ -336,7 +336,7 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Value, Thrown>
     }
     shifted_iterators(req, stack.array);
     stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt)?;
+    stack.replace(req, rebuilt.hand_on_unmigrated())?;
     stack.finish(req);
     Ok(unwrapped(req, first))
 }
@@ -448,7 +448,7 @@ fn array_unshift(
     let argc = u32::try_from(argc).unwrap_or(u32::MAX);
     stack.array.iterators_advance(req, argc);
     stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt)?;
+    stack.replace(req, rebuilt.hand_on_unmigrated())?;
     stack.finish(req);
     Ok(count)
 }
@@ -600,14 +600,11 @@ fn array_splice(
     offset: i64,
     #[php(default = null)] length: Option<i64>,
     #[php(default = [])] replacement: Passed<Value>,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut stack = Stack::of(req, array)?;
     let replacement = match replacement {
         Passed::Given(given) => Some(match given.as_array() {
-            Some(array) => {
-                req.addref(&given);
-                *array
-            }
+            Some(array) => Owner::take(req, *array),
             None => to_array(req, &given)?,
         }),
         Passed::Omitted => None,
@@ -658,7 +655,7 @@ fn array_splice(
     if !packed {
         walk.iter_pos = stack.array.iterators_lower_pos(req, walk.iter_pos);
     }
-    if let Some(replacement) = replacement {
+    if let Some(replacement) = &replacement {
         for (_, value) in replacement.snapshot_refs() {
             req.addref(&value);
             rebuilt.append(req, value)?;
@@ -671,15 +668,15 @@ fn array_splice(
         walk.moved(req, stack.array, at);
     }
     if let Some(replacement) = replacement {
-        req.release(replacement.to_value());
+        replacement.give_up(req);
     }
     if holder == Holder::Alone {
         // `GC_DELREF(in_hash) == 0`: nothing but the splice holds the
         // table any more, so what the reference holds now stands.
         req.release(stack.array.to_value());
-        req.release(rebuilt.to_value());
+        rebuilt.give_up(req);
         if let Some(removed) = removed {
-            req.release(removed.to_value());
+            removed.give_up(req);
         }
         stack.finish(req);
         return Err(throw_error(
@@ -692,7 +689,7 @@ fn array_splice(
         rebuilt.set_next_free(req, 0)?;
     }
     stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt)?;
+    stack.replace(req, rebuilt.hand_on_unmigrated())?;
     stack.finish(req);
     match removed {
         Some(removed) => Ok(removed),
@@ -708,7 +705,7 @@ fn remove_range(
     req: &mut Request,
     stack: &mut Stack,
     walk: &mut Walk,
-    mut removed: Option<&mut PhpArray>,
+    mut removed: Option<&mut Owner<PhpArray>>,
     range: (i64, i64),
     packed: bool,
 ) -> Result<(i64, Holder), Thrown> {
@@ -790,7 +787,7 @@ impl Walk {
 /// an integer one renumbered.
 fn keep(
     req: &mut Request,
-    rebuilt: &mut PhpArray,
+    rebuilt: &mut Owner<PhpArray>,
     key: &Key,
     element: Value,
 ) -> Result<(), Thrown> {
@@ -894,15 +891,15 @@ fn array_slice(
     offset: i64,
     #[php(default = null)] length: Option<i64>,
     #[php(default = false)] preserve_keys: bool,
-) -> Result<PhpArray, Thrown> {
+) -> Result<Owner<PhpArray>, Thrown> {
     let (input, preserve) = (array, preserve_keys);
     let num_in = i64::try_from(input.len()).unwrap_or(i64::MAX);
     if offset > num_in {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let (start, taken) = clamp_splice(num_in, offset, length.unwrap_or(num_in));
     if taken <= 0 {
-        return Ok(PhpArray::empty());
+        return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
     let rows = input.snapshot_refs();

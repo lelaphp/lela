@@ -32,7 +32,7 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
-use crate::api::values::{Emalloc, ResourceType};
+use crate::api::values::{Emalloc, Owner, ResourceType};
 
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
@@ -45,7 +45,6 @@ pub(crate) mod filters;
 pub(crate) mod persistent;
 mod rfc2397;
 pub(crate) mod sockets;
-use crate::api::request::Streams;
 use crate::state::Layer;
 use crate::wrapper::PlainFiles;
 pub(crate) use filters::FilterCall;
@@ -1289,11 +1288,12 @@ impl PhpStream {
     /// 10816 2080
     /// 40000
     /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn copy_to_mem(
         &mut self,
         req: &mut Request,
         maxlen: Option<usize>,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         if maxlen == Some(0) {
             return Ok(None);
         }
@@ -1317,7 +1317,7 @@ impl PhpStream {
             if len < max / 2 {
                 out = out.truncate(req, len)?;
             }
-            return Ok(Some(out.finish()));
+            return Ok(Some(out.finish(req)));
         }
         let size = self.stat(req).map_or(0, |sb| sb[7]);
         let mut buflen = if size > 0 {
@@ -1351,7 +1351,7 @@ impl PhpStream {
             out.free(req);
             return Ok(None);
         }
-        Ok(Some(out.truncate(req, len)?.finish()))
+        Ok(Some(out.truncate(req, len)?.finish(req)))
     }
 
     /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the
@@ -2957,7 +2957,7 @@ pub(crate) fn standard_handles(
         (b"php://stdout", b"wb"),
         (b"php://stderr", b"wb"),
     ] {
-        opened.push(req.open_stream(path, mode, false)?);
+        opened.push(req.open_stream_wrapper(path, mode, false)?);
     }
     let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
         for stream in opened.into_iter().flatten() {
@@ -3561,6 +3561,10 @@ fn same_wrapper(a: &Located, b: &Located) -> bool {
     }
 }
 
+/// What an open answers: the stream, and the path its opener named,
+/// php's `*opened_path`, as a string of the request's.
+pub(crate) type OpenedNamed = (Stream, Option<Owner<PhpString>>);
+
 pub(crate) trait StreamLayer {
     fn global_wrappers(&self) -> Vec<Registered>;
     fn add_url_wrapper(&mut self, row: Registered) -> bool;
@@ -3594,14 +3598,14 @@ pub(crate) trait StreamLayer {
         path: &[u8],
         mode: &[u8],
         options: OpenOptions,
-    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown>;
+    ) -> Result<Option<OpenedNamed>, Thrown>;
     fn open_located(
         &mut self,
         to_open: &[u8],
         mode: &[u8],
         options: OpenOptions,
         resolved: bool,
-    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown>;
+    ) -> Result<Option<OpenedNamed>, Thrown>;
     fn plain_opener(
         &mut self,
         path: &[u8],
@@ -3625,7 +3629,7 @@ pub(crate) trait StreamLayer {
     ) -> Result<Option<Stream>, Thrown>;
     fn copy_all(&mut self, from: Stream, to: Stream) -> bool;
     fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown>;
-    fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown>;
+    fn stream_meta_data(&mut self, stream: Stream) -> Result<Owner<PhpArray>, Thrown>;
     fn set_stream_context(&mut self, stream: Stream, context: Option<StreamCtx>);
     fn stream_context(&self, stream: Stream) -> Option<StreamCtx>;
     fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Value>, Thrown>;
@@ -3645,7 +3649,7 @@ pub(crate) trait StreamLayer {
         &mut self,
         stream: Stream,
         len: usize,
-    ) -> Result<Option<PhpString>, Thrown>;
+    ) -> Result<Option<Owner<PhpString>>, Thrown>;
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown>;
     fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool;
     fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool;
@@ -3901,9 +3905,13 @@ impl StreamLayer for Request {
         mode: &[u8],
         options: OpenOptions,
     ) -> Result<Option<Stream>, Thrown> {
-        Ok(self
-            .open_wrapper_named(path, mode, options)?
-            .map(|(stream, _)| stream))
+        let Some((stream, named)) = self.open_wrapper_named(path, mode, options)? else {
+            return Ok(None);
+        };
+        if let Some(name) = named {
+            name.give_up(self);
+        }
+        Ok(Some(stream))
     }
 
     /// `_php_stream_open_wrapper_ex` with the `*opened_path` beside the
@@ -3919,7 +3927,7 @@ impl StreamLayer for Request {
         path: &[u8],
         mode: &[u8],
         options: OpenOptions,
-    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown> {
+    ) -> Result<Option<OpenedNamed>, Thrown> {
         if path.is_empty() {
             return Err(throw_error(self, "ValueError", "Path must not be empty"));
         }
@@ -3935,7 +3943,9 @@ impl StreamLayer for Request {
                 Err(crate::api::request::Unresolved::Missing(_)) => {}
             }
         }
-        let to_open = resolved.map_or_else(|| path.to_vec(), |found| found.as_bytes().to_vec());
+        let to_open = resolved
+            .as_ref()
+            .map_or_else(|| path.to_vec(), |found| found.as_bytes().to_vec());
         let opened = self.open_located(&to_open, mode, options, resolved.is_some());
         match opened {
             Ok(Some((stream, None))) if options.for_zend_stream && resolved.is_some() => {
@@ -3943,7 +3953,7 @@ impl StreamLayer for Request {
             }
             opened => {
                 if let Some(found) = resolved {
-                    self.release(Value::string(found));
+                    found.give_up(self);
                 }
                 opened
             }
@@ -3959,7 +3969,7 @@ impl StreamLayer for Request {
         mode: &[u8],
         options: OpenOptions,
         resolved: bool,
-    ) -> Result<Option<(Stream, Option<PhpString>)>, Thrown> {
+    ) -> Result<Option<OpenedNamed>, Thrown> {
         let use_path = options.use_path && !resolved;
         let (wrapper, path_to_open) = self.locate(to_open, options);
         if options.use_url && !wrapper.is_url(self) {
@@ -4027,14 +4037,29 @@ impl StreamLayer for Request {
         };
         match opened {
             Ok(stream) => {
-                self.stream_op(stream, |req, s| {
-                    s.wrapper = label;
-                    s.set_orig_path(req, to_open)
-                })
-                .transpose()?;
+                let labelled = self
+                    .stream_op(stream, |req, s| {
+                        s.wrapper = label;
+                        s.set_orig_path(req, to_open)
+                    })
+                    .transpose();
+                if let Err(thrown) = labelled {
+                    if let Some(name) = named {
+                        name.give_up(self);
+                    }
+                    return Err(thrown);
+                }
                 if options.must_seek {
-                    let seekable = self.make_seekable(stream, to_open, options)?;
-                    return Ok(seekable.map(|stream| (stream, named)));
+                    let seekable = self.make_seekable(stream, to_open, options);
+                    return match seekable {
+                        Ok(Some(stream)) => Ok(Some((stream, named))),
+                        failed => {
+                            if let Some(name) = named {
+                                name.give_up(self);
+                            }
+                            failed.map(|_| None)
+                        }
+                    };
                 }
                 if mode.contains(&b'a') {
                     self.learn_append_position(stream);
@@ -4310,7 +4335,8 @@ impl StreamLayer for Request {
     /// `timed_out`, `blocked` and `eof`; then `wrapper_type` where a
     /// wrapper opened it, `stream_type`, `mode`, `unread_bytes`,
     /// `seekable` and, where it was opened by path, `uri`.
-    fn stream_meta_data(&mut self, stream: Stream) -> Result<PhpArray, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn stream_meta_data(&mut self, stream: Stream) -> Result<Owner<PhpArray>, Thrown> {
         let mut out = PhpArray::new(self)?;
         let crypto = self.crypto_meta(stream)?;
         let head = if let Some(mut head) = self.kind_meta_data(stream) {
@@ -4362,13 +4388,15 @@ impl StreamLayer for Request {
             let value = match value {
                 MetaValue::Bool(b) => Value::bool(b),
                 MetaValue::Int(n) => Value::int(n),
-                MetaValue::Str(bytes) => Value::string(PhpString::new(self, &bytes)?),
+                MetaValue::Str(bytes) => PhpString::new(self, &bytes)?
+                    .into_value()
+                    .hand_on_unmigrated(),
                 MetaValue::Value(value) => {
                     self.addref(&value);
                     value
                 }
             };
-            let key = Key::Str(PhpString::new(self, &key)?);
+            let key = Key::Str(PhpString::new(self, &key)?.hand_on_unmigrated());
             out.set(self, key, value)?;
         }
         if let Some(crypto) = crypto {
@@ -4516,7 +4544,8 @@ impl StreamLayer for Request {
         } else {
             stream.ops.lay_down(self)?;
             Resource::sized(self, kind, Some(stream), PHP_STREAM_SIZE)?
-        };
+        }
+        .hand_on_unmigrated();
         if let Some(Some(stream)) = res.native_mut::<Option<PhpStream>>(self) {
             stream.res = Some(res);
             stream.ops.adopt(Stream::of(res));
@@ -4585,11 +4614,12 @@ impl StreamLayer for Request {
     /// 110592 110624 70000
     /// string(0) ""
     /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
     fn stream_read_to_str(
         &mut self,
         stream: Stream,
         len: usize,
-    ) -> Result<Option<PhpString>, Thrown> {
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let mut out = FreshString::new(self, len)?;
         let Some(Some(read)) = self.stream_op(stream, |req, s| s.read(req, out.bytes_mut())) else {
             out.free(self);
@@ -4599,7 +4629,7 @@ impl StreamLayer for Request {
         if read < len / 2 {
             out = out.truncate(self, read)?;
         }
-        Ok(Some(out.finish()))
+        Ok(Some(out.finish(self)))
     }
 
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {

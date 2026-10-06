@@ -12,7 +12,7 @@ use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{PhpString, ValueRef};
+use php_ext::values::{Owner, PhpString, ValueRef};
 
 use crate::State;
 use crate::encode::{DEFAULT_STRATEGY, MAX_MEM_LEVEL, size_guess};
@@ -144,15 +144,17 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
         .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {
         let text = to_string(req, &value)?;
-        let text = text.as_bytes();
-        let has = |word: &[u8]| text.windows(word.len()).any(|w| w == word);
-        globals(req).coding = if has(b"gzip") {
+        let bytes = text.as_bytes();
+        let has = |word: &[u8]| bytes.windows(word.len()).any(|w| w == word);
+        let coding = if has(b"gzip") {
             Coding::Gzip
         } else if has(b"deflate") {
             Coding::Deflate
         } else {
             Coding::None
         };
+        text.give_up(req);
+        globals(req).coding = coding;
     }
     Ok(globals(req).coding)
 }
@@ -305,12 +307,14 @@ fn init(req: &mut Request, chunk_size: usize) -> Result<bool, Thrown> {
 /// `php_output_handler_started`.
 fn started(req: &mut Request, name: &str) -> Result<bool, Thrown> {
     let list = req.output_buffer_op(&OutputOp::ListHandlers)?;
-    let ValueRef::Array(list) = list.as_ref() else {
-        return Ok(false);
+    let found = match list.as_ref() {
+        ValueRef::Array(handlers) => handlers.iter().any(
+            |(_, value)| matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == name.as_bytes()),
+        ),
+        _ => false,
     };
-    Ok(list.iter().any(
-        |(_, value)| matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == name.as_bytes()),
-    ))
+    list.give_up(req);
+    Ok(found)
 }
 
 /// `php_zlib_output_compression_start`: with a chunk size and a coding,
@@ -331,18 +335,35 @@ fn compression_start(req: &mut Request) -> Result<(), Thrown> {
         flags: STDFLAGS,
     })?;
     let user = req.ini_get(HANDLER.as_bytes()).unwrap_or_default().to_vec();
-    if matches!(begun.as_ref(), ValueRef::Bool(true)) && !user.is_empty() {
+    let started = matches!(begun.as_ref(), ValueRef::Bool(true));
+    begun.give_up(req);
+    if started && !user.is_empty() {
+        let mut name = None;
         let handler = if let Some(registered) = req.buffer_handler(&user) {
             StartHandler::Registered(registered)
         } else {
-            let name = php_ext::values::Value::string(PhpString::new(req, &user)?);
-            StartHandler::User(php_ext::coerce::to_callable(req, &name)?)
+            let made = PhpString::new(req, &user)?;
+            let value = php_ext::values::Value::string(*made);
+            match php_ext::coerce::to_callable(req, &value) {
+                Ok(callable) => {
+                    name = Some(made);
+                    StartHandler::User(callable)
+                }
+                Err(thrown) => {
+                    made.give_up(req);
+                    return Err(thrown);
+                }
+            }
         };
-        req.output_buffer_op(&OutputOp::Start {
+        let done = req.output_buffer_op(&OutputOp::Start {
             handler,
             chunk_size,
             flags: STDFLAGS,
-        })?;
+        });
+        if let Some(made) = name {
+            made.give_up(req);
+        }
+        done?.give_up(req);
     }
     Ok(())
 }
@@ -447,7 +468,7 @@ pub(crate) fn ob_gzhandler(
     req: &mut Request,
     data: PhpString,
     flags: i64,
-) -> Result<OrFalse<PhpString>, Thrown> {
+) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let coding = encoding(req)?;
     if coding == Coding::None {
         return Ok(OrFalse::False);
@@ -485,7 +506,7 @@ pub(crate) fn ob_gzhandler(
 /// bool(false)
 /// ```
 #[php_function]
-pub(crate) fn zlib_get_coding_type(req: &mut Request) -> Result<OrFalse<PhpString>, Thrown> {
+pub(crate) fn zlib_get_coding_type(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let name: &[u8] = match globals(req).coding {
         Coding::Gzip => b"gzip",
         Coding::Deflate => b"deflate",

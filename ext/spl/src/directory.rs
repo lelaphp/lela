@@ -21,7 +21,9 @@ use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
 use php_ext::request::{Request, Stream, Streams as _, Whence};
-use php_ext::values::{ClassId, Key, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+};
 
 use crate::{Countable, RecursiveIterator, SeekableIterator, Stringable};
 
@@ -84,7 +86,16 @@ impl Open {
 
 /// What `FilesystemIterator::current()` answers by its flags: the path
 /// name, an `SplFileInfo`, or the iterator itself.
-type FsCurrent = Union<PhpString, Union<Instance<SplFileInfo>, Instance<FilesystemIterator>>>;
+type FsCurrent = Union<
+    Owner<PhpString>,
+    Union<Owner<Instance<SplFileInfo>>, Owner<Instance<FilesystemIterator>>>,
+>;
+
+/// What `SplFileObject::fscanf` answers, the inner `sscanf`'s.
+type ScanAnswer = Owner<Raw<Option<Union<PhpArray, i64>>>>;
+
+/// What `SplFileObject::current` answers: the line, the row, or `false`.
+type FileLine = OrFalse<Union<Owner<PhpString>, Owner<PhpArray>>>;
 
 /// `spl_other_handler` with the `oth` it serves (`spl_directory.h`): what
 /// a class extending one of these lays on the object, as phar lays its
@@ -328,21 +339,21 @@ impl SplFileInfo {
 
     /// `getPath(): string`.
     #[php(tentative)]
-    fn getPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let path = object_path(req, this.object())?.unwrap_or_default();
         PhpString::new(req, &path)
     }
 
     /// `getFilename(): string`.
     #[php(tentative)]
-    fn getFilename(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getFilename(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = short_name(req, this.object())?;
         PhpString::new(req, &name)
     }
 
     /// `getExtension(): string`.
     #[php(tentative)]
-    fn getExtension(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getExtension(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = short_name(req, this.object())?;
         PhpString::new(req, &extension(&name))
     }
@@ -353,14 +364,14 @@ impl SplFileInfo {
         req: &mut Request,
         this: This<Self>,
         #[php(default = "")] suffix: PhpString,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         let name = short_name(req, this.object())?;
         PhpString::new(req, &basename(&name, suffix.as_bytes()))
     }
 
     /// `getPathname(): string`, and `__toString()`.
     #[php(tentative)]
-    fn getPathname(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getPathname(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let name = pathname(req, this.object())?.unwrap_or_default();
         PhpString::new(req, &name)
     }
@@ -435,7 +446,7 @@ impl SplFileInfo {
 
     /// `getType(): string|false`, of the link itself for a link.
     #[php(tentative)]
-    fn getType(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getType(req: &mut Request, this: This<Self>) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let this = this.object();
         if let Some((_, s)) = stat(req, this, true)? {
             return Ok(OrFalse::Value(PhpString::new(req, kind_name(s[2]))?));
@@ -453,19 +464,19 @@ impl SplFileInfo {
 
     /// `isWritable(): bool`.
     #[php(tentative)]
-    fn isWritable(req: &mut Request, this: This<Self>) -> Result<Raw<bool>, Thrown> {
+    fn isWritable(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<bool>>, Thrown> {
         access(req, this.object(), php_ext_standard::Fs::IsW)
     }
 
     /// `isReadable(): bool`.
     #[php(tentative)]
-    fn isReadable(req: &mut Request, this: This<Self>) -> Result<Raw<bool>, Thrown> {
+    fn isReadable(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<bool>>, Thrown> {
         access(req, this.object(), php_ext_standard::Fs::IsR)
     }
 
     /// `isExecutable(): bool`.
     #[php(tentative)]
-    fn isExecutable(req: &mut Request, this: This<Self>) -> Result<Raw<bool>, Thrown> {
+    fn isExecutable(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<bool>>, Thrown> {
         access(req, this.object(), php_ext_standard::Fs::IsX)
     }
 
@@ -501,7 +512,10 @@ impl SplFileInfo {
     /// bool(false)
     /// ```
     #[php(tentative)]
-    fn getLinkTarget(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getLinkTarget(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let name = file_name(req, this.object())?;
         let host = req.absolutize(&name);
         match std::fs::read_link(&host) {
@@ -551,7 +565,10 @@ impl SplFileInfo {
     /// 'glob:///*.no-such-extension'
     /// ```
     #[php(tentative)]
-    fn getRealPath(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn getRealPath(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let this = this.object();
         let (kind, known, entry, orig) = fs(req, this, |it| {
             (
@@ -602,7 +619,7 @@ impl SplFileInfo {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] class: Raw<Option<PhpString>>,
-    ) -> Result<Instance<SplFileInfo>, Thrown> {
+    ) -> Result<Owner<Instance<SplFileInfo>>, Thrown> {
         let this = this.object();
         let base = info_base(req, this)?;
         let chosen = class_argument(req, class.value(), 1, &base, true)?;
@@ -616,7 +633,7 @@ impl SplFileInfo {
             return Err(throw(req, "RuntimeException", "Could not open file"));
         }
         let name = file_name(req, this)?;
-        create_info(req, &name, class).map(Instance::of)
+        create_info(req, &name, class).map(Owner::into_instance)
     }
 
     /// `getPathInfo(?string $class = null): ?SplFileInfo`; the witness is
@@ -626,7 +643,7 @@ impl SplFileInfo {
         req: &mut Request,
         this: This<Self>,
         #[php(default = null)] class: Raw<Option<PhpString>>,
-    ) -> Result<Option<Instance<SplFileInfo>>, Thrown> {
+    ) -> Result<Option<Owner<Instance<SplFileInfo>>>, Thrown> {
         let this = this.object();
         let chosen = class_argument(req, class.value(), 1, b"SplFileInfo", true)?;
         let chosen = match chosen {
@@ -636,7 +653,7 @@ impl SplFileInfo {
         let class = info_class(req, chosen)?;
         match pathname(req, this)? {
             Some(path) if !path.is_empty() => {
-                create_info(req, &dirname(&path), class).map(|o| Some(Instance::of(o)))
+                create_info(req, &dirname(&path), class).map(|o| Some(o.into_instance()))
             }
             _ => Ok(None),
         }
@@ -666,7 +683,7 @@ impl SplFileInfo {
         #[php(default = "r")] mode: PhpString,
         #[php(default = false)] useIncludePath: bool,
         #[php(default = null)] context: Option<Resource>,
-    ) -> Result<Instance<SplFileObject>, Thrown> {
+    ) -> Result<Owner<Instance<SplFileObject>>, Thrown> {
         let _ = context;
         let this = this.object();
         let chosen = fs(req, this, |it| it.file_class)?;
@@ -685,11 +702,11 @@ impl SplFileInfo {
         let opened = instantiate(
             req,
             class,
-            &[name_value, mode_value, Value::bool(useIncludePath)],
+            &[*name_value, mode_value, Value::bool(useIncludePath)],
         );
-        req.release(name_value);
+        name_value.give_up(req);
         req.release(mode_value);
-        opened.map(Instance::of)
+        opened.map(Owner::into_instance)
     }
 
     /// `setFileClass(string $class = SplFileObject::class): void`: an
@@ -747,7 +764,7 @@ impl SplFileInfo {
     /// }
     /// ```
     #[php(tentative)]
-    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn __debugInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         debug_info(req, this.object())
     }
 
@@ -814,7 +831,7 @@ impl DirectoryIterator {
     /// `DirectoryIterator::getFilename(): string` and `__toString()`, the
     /// entry's name.
     #[php(tentative)]
-    fn getFilename(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getFilename(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = dir_checked(req, this.object())?;
         let entry = fs(req, this, |it| it.entry.clone())?;
         PhpString::new(req, &entry)
@@ -822,7 +839,7 @@ impl DirectoryIterator {
 
     /// `DirectoryIterator::getExtension(): string`.
     #[php(tentative)]
-    fn getExtension(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getExtension(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = dir_checked(req, this.object())?;
         let entry = fs(req, this, |it| it.entry.clone())?;
         PhpString::new(req, &extension(&entry))
@@ -834,7 +851,7 @@ impl DirectoryIterator {
         req: &mut Request,
         this: This<Self>,
         #[php(default = "")] suffix: PhpString,
-    ) -> Result<PhpString, Thrown> {
+    ) -> Result<Owner<PhpString>, Thrown> {
         let this = dir_checked(req, this.object())?;
         let entry = fs(req, this, |it| it.entry.clone())?;
         PhpString::new(req, &basename(&entry, suffix.as_bytes()))
@@ -975,7 +992,7 @@ impl FilesystemIterator {
 
     /// `FilesystemIterator::key(): string`, by the key flags.
     #[php(tentative)]
-    fn key(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = this.object();
         let (flags, entry) = fs(req, this, |it| (it.flags, it.entry.clone()))?;
         if flags & Self::KEY_AS_FILENAME != 0 {
@@ -996,14 +1013,13 @@ impl FilesystemIterator {
             return Ok(Union::A(PhpString::new(req, &name)?));
         }
         if flags & Self::CURRENT_AS_SELF != 0 {
-            req.addref(&this.as_value());
-            return Ok(Union::B(Union::B(Instance::of(this))));
+            return Ok(Union::B(Union::B(Owner::take(req, this).into_instance())));
         }
         let name = file_name(req, this)?;
         let chosen = fs(req, this, |it| it.info_class)?;
         let class = info_class(req, chosen)?;
         let info = create_info(req, &name, class)?;
-        Ok(Union::B(Union::A(Instance::of(info))))
+        Ok(Union::B(Union::A(info.into_instance())))
     }
 
     /// `getFlags(): int`, the flags under `SPL_FILE_DIR_KEY_MODE_MASK`,
@@ -1096,7 +1112,7 @@ impl RecursiveDirectoryIterator {
     fn getChildren(
         req: &mut Request,
         this: This<Self>,
-    ) -> Result<Instance<RecursiveDirectoryIterator>, Thrown> {
+    ) -> Result<Owner<Instance<RecursiveDirectoryIterator>>, Thrown> {
         let this = this.object();
         let name = file_name(req, this)?;
         let (flags, entry, sub, info, file) = fs(req, this, |it| {
@@ -1109,31 +1125,31 @@ impl RecursiveDirectoryIterator {
             )
         })?;
         let arg = crate::string_value(req, &name)?;
-        let made = instantiate(req, this.class(), &[arg, Value::int(flags)]);
-        req.release(arg);
+        let made = instantiate(req, this.class(), &[*arg, Value::int(flags)]);
+        arg.give_up(req);
         let child = made?;
         let sub_path = match sub {
             Some(sub) if !sub.is_empty() => [sub.as_slice(), b"/", entry.as_slice()].concat(),
             _ => entry,
         };
-        fs(req, child, |it| {
+        fs(req, *child, |it| {
             it.sub_path = Some(sub_path);
             it.info_class = info;
             it.file_class = file;
         })?;
-        Ok(Instance::of(child))
+        Ok(child.into_instance())
     }
 
     /// `getSubPath(): string`.
     #[php(tentative)]
-    fn getSubPath(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getSubPath(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let sub = fs(req, this.object(), |it| it.sub_path.clone())?.unwrap_or_default();
         PhpString::new(req, &sub)
     }
 
     /// `getSubPathname(): string`.
     #[php(tentative)]
-    fn getSubPathname(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn getSubPathname(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (sub, entry) = fs(req, this.object(), |it| {
             (it.sub_path.clone(), it.entry.clone())
         })?;
@@ -1380,7 +1396,7 @@ impl SplFileObject {
     /// Cannot read from file php://temp
     /// ```
     #[php(tentative)]
-    fn fgets(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn fgets(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (this, _) = file_checked(req, this.object())?;
         read_line_raw(req, this, false, 1, false)?;
         let line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
@@ -1409,7 +1425,7 @@ impl SplFileObject {
         req: &mut Request,
         this: This<Self>,
         length: i64,
-    ) -> Result<OrFalse<PhpString>, Thrown> {
+    ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let (_, stream) = file_checked(req, this.object())?;
         if length <= 0 {
             return Err(arg_value_error(req, 1, "be greater than 0"));
@@ -1553,14 +1569,14 @@ impl SplFileObject {
     /// `getCsvControl(): array`; the witness is `setCsvControl`'s and the
     /// class's.
     #[php(tentative)]
-    fn getCsvControl(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
+    fn getCsvControl(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let (d, e, x) = fs(req, this.object(), |it| {
             (it.delimiter, it.enclosure, it.escape)
         })?;
         let mut out = PhpArray::new(req)?;
         for bytes in [vec![d], vec![e], x.map(|x| vec![x]).unwrap_or_default()] {
             let value = crate::string_value(req, &bytes)?;
-            out.append(req, value)?;
+            out.append(req, value.hand_on_unmigrated())?;
         }
         Ok(out)
     }
@@ -1624,7 +1640,7 @@ impl SplFileObject {
 
     /// `fgetc(): string|false`: one byte, the line count moved on a `\n`.
     #[php(tentative)]
-    fn fgetc(req: &mut Request, this: This<Self>) -> Result<OrFalse<PhpString>, Thrown> {
+    fn fgetc(req: &mut Request, this: This<Self>) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
         let (this, stream) = file_checked(req, this.object())?;
         free_line(req, this)?;
         match stream.read(req, 1)? {
@@ -1635,7 +1651,7 @@ impl SplFileObject {
                 Ok(OrFalse::Value(s))
             }
             Some(s) => {
-                req.release(Value::string(s));
+                s.give_up(req);
                 Ok(OrFalse::False)
             }
             None => Ok(OrFalse::False),
@@ -1649,7 +1665,7 @@ impl SplFileObject {
         let rest = stream.copy_to_mem(req, None)?;
         let n = rest.len();
         req.write(rest.as_bytes());
-        req.release(Value::string(rest));
+        rest.give_up(req);
         Ok(i64::try_from(n).unwrap_or(i64::MAX))
     }
 
@@ -1676,13 +1692,13 @@ impl SplFileObject {
         this: This<Self>,
         format: PhpString,
         vars: Variadic<Ref<Value>>,
-    ) -> Result<Raw<Option<Union<PhpArray, i64>>>, Thrown> {
+    ) -> Result<ScanAnswer, Thrown> {
         let (this, _) = file_checked(req, this.object())?;
         read_line_counted(req, this, false, false)?;
         let line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
         let scanned =
             php_ext_standard::php_sscanf_internal(req, &line, format.as_bytes(), 2, vars.0.len())?;
-        crate::answered(req, scanned)
+        Ok(crate::answered(scanned))
     }
 
     /// `fwrite(string $data, ?int $length = null): int|false`.
@@ -1724,10 +1740,10 @@ impl SplFileObject {
     /// int(32768)
     /// ```
     #[php(tentative)]
-    fn fstat(req: &mut Request, this: This<Self>) -> Result<Raw<PhpArray>, Thrown> {
+    fn fstat(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<PhpArray>>, Thrown> {
         let (_, stream) = file_checked(req, this.object())?;
         let stat = php_ext_standard::php_fstat(req, stream)?;
-        crate::answered(req, stat)
+        Ok(crate::answered(stat))
     }
 
     /// `ftruncate(int $size): bool`.
@@ -1764,10 +1780,7 @@ impl SplFileObject {
     /// `current(): string|array|false`: the line, read where none is, or
     /// its fields under `READ_CSV`.
     #[php(tentative)]
-    fn current(
-        req: &mut Request,
-        this: This<Self>,
-    ) -> Result<OrFalse<Union<PhpString, PhpArray>>, Thrown> {
+    fn current(req: &mut Request, this: This<Self>) -> Result<FileLine, Thrown> {
         let (this, _) = file_checked(req, this.object())?;
         if fs(req, this, |it| it.line.is_none() && it.csv.is_none())? {
             read_line(req, this, true)?;
@@ -1779,10 +1792,7 @@ impl SplFileObject {
             return Ok(OrFalse::Value(Union::A(PhpString::new(req, &line)?)));
         }
         Ok(match csv.and_then(|c| c.as_array().copied()) {
-            Some(csv) => {
-                req.addref(&Value::array(csv));
-                OrFalse::Value(Union::B(csv))
-            }
+            Some(csv) => OrFalse::Value(Union::B(Owner::take(req, csv))),
             None => OrFalse::False,
         })
     }
@@ -1896,7 +1906,7 @@ impl SplFileObject {
     fn getCurrentLine(this: This<Self>) -> PhpString;
 
     /// `__toString(): string`, the current line.
-    fn __toString(req: &mut Request, this: This<Self>) -> Result<PhpString, Thrown> {
+    fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let (this, _) = file_checked(req, this.object())?;
         if fs(req, this, |it| it.line.is_none())? {
             read_line(req, this, false)?;
@@ -2243,13 +2253,20 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     if kind == Type::Dir
         && let Some(path) = path
     {
-        dir_open(req, cloned, &path)?;
-        for _ in 0..index {
-            dir_step(req, cloned)?;
+        let reopened = (|| {
+            dir_open(req, *cloned, &path)?;
+            for _ in 0..index {
+                dir_step(req, *cloned)?;
+            }
+            fs(req, *cloned, |it| it.index = index)
+        })();
+        if let Err(thrown) = reopened {
+            cloned.give_up(req);
+            return Err(thrown);
         }
-        fs(req, cloned, |it| it.index = index)?;
     }
-    Ok(cloned)
+    // The `clone_obj` slot's return, the one owner the copy was made with.
+    Ok(cloned.hand_on_unmigrated())
 }
 
 /// A file's name beside its stat, `php_fstat`'s thirteen fields.
@@ -2310,12 +2327,12 @@ fn access(
     req: &mut Request,
     this: PhpObject,
     ty: php_ext_standard::Fs,
-) -> Result<Raw<bool>, Thrown> {
+) -> Result<Owner<Raw<bool>>, Thrown> {
     let name = file_name(req, this)?;
     let answered = php_ext::raising::throwing_warnings(req, "RuntimeException", |req| {
         php_ext_standard::php_stat(req, &name, ty)
     })?;
-    crate::answered(req, answered)
+    Ok(crate::answered(answered))
 }
 
 /// `S_IFMT`'s kinds, `php_stat`'s `FS_TYPE` names.
@@ -2389,21 +2406,21 @@ fn info_class(req: &mut Request, chosen: Option<ClassId>) -> Result<ClassId, Thr
 /// `path`, its constructor served where it is not `SplFileInfo`'s own
 /// (`ce->constructor->common.scope != spl_ce_SplFileInfo`), a user
 /// class's or an extension's, as phar's `PharFileInfo` declares one.
-fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<PhpObject, Thrown> {
+fn create_info(req: &mut Request, path: &[u8], class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
     let object = new_object(req, class)?;
-    if crate::overridden(req, object, b"__construct") || declares_constructor(req, class)? {
+    if crate::overridden(req, *object, b"__construct") || declares_constructor(req, class)? {
         let arg = crate::string_value(req, path)?;
-        let served = call_method(req, &object, b"__construct", &[arg]);
-        req.release(arg);
+        let served = call_method(req, &object, b"__construct", &[*arg]);
+        arg.give_up(req);
         match served {
-            Ok(answered) => req.release(answered),
+            Ok(answered) => answered.give_up(req),
             Err(thrown) => {
-                req.release(object.as_value());
+                object.give_up(req);
                 return Err(thrown);
             }
         }
     } else {
-        set_filename(req, object, path)?;
+        set_filename(req, *object, path)?;
     }
     Ok(object)
 }
@@ -2439,13 +2456,21 @@ fn info_base(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
 }
 
 /// `SplFileInfo::__debugInfo`'s array.
-fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
+fn debug_info(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = crate::members(req, this)?;
     let path_name = pathname(req, this)?.unwrap_or_default();
-    let set = |req: &mut Request, out: &mut PhpArray, class: &[u8], field: &[u8], value: Value| {
+    let set = |req: &mut Request,
+               out: &mut Owner<PhpArray>,
+               class: &[u8],
+               field: &[u8],
+               value: Owner<Value>| {
         let name = [b"\0".as_slice(), class, b"\0", field].concat();
         let name = PhpString::new(req, &name)?;
-        out.set(req, Key::Str(name), value)
+        out.set(
+            req,
+            Key::Str(name.hand_on_unmigrated()),
+            value.hand_on_unmigrated(),
+        )
     };
     let value = crate::string_value(req, &path_name)?;
     set(req, &mut out, b"SplFileInfo", b"pathName", value)?;
@@ -2470,7 +2495,7 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
         // `spl_filesystem_dir_open` was handed it, `glob://` first.
         let value = match path {
             Some(pattern) if glob => crate::string_value(req, &pattern)?,
-            _ => Value::bool(false),
+            _ => Owner::take(req, Value::bool(false)),
         };
         set(req, &mut out, b"DirectoryIterator", b"glob", value)?;
         let value = crate::string_value(req, &sub_path.unwrap_or_default())?;
@@ -2502,7 +2527,14 @@ fn dir_read(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         it.dir.as_ref().map(Open::stream)
     })?;
     let entry = match dir {
-        Some(dir) => dir.read_dir(req)?.map(|s| s.as_bytes().to_vec()),
+        Some(dir) => match dir.read_dir(req)? {
+            Some(name) => {
+                let bytes = name.as_bytes().to_vec();
+                name.give_up(req);
+                Some(bytes)
+            }
+            None => None,
+        },
         None => None,
     };
     fs(req, this, |it| it.entry = entry.unwrap_or_default())
@@ -2551,6 +2583,8 @@ fn dir_open(req: &mut Request, this: PhpObject, path: &[u8]) -> Result<(), Throw
             &format!("Failed to open directory \"{shown}\""),
         ));
     };
+    // The object's own handle on the directory from here.
+    let dir = dir.hand_on_unmigrated();
     fs(req, this, |it| it.dir = Some(Open(dir)))?;
     dir_step(req, this)
 }
@@ -2630,6 +2664,8 @@ fn file_open(
     // path resolved where it was searched.
     stream.forbid_fclose(req);
     let orig = stream.orig_path(req).unwrap_or_else(|| name.to_vec());
+    // The object's own handle on the stream from here.
+    let stream = stream.hand_on_unmigrated();
     fs(req, this, |it| {
         it.stream = Some(Open(stream));
         it.file_name = Some(trimmed.to_vec());
@@ -2700,7 +2736,14 @@ fn read_line_raw(
     }
     let max = usize::try_from(max).ok().filter(|m| *m > 0).map(|m| m + 1);
     let line = stream.get_line(req, max)?;
-    let mut line = line.map(|l| l.as_bytes().to_vec()).unwrap_or_default();
+    let mut line = match line {
+        Some(read) => {
+            let bytes = read.as_bytes().to_vec();
+            read.give_up(req);
+            bytes
+        }
+        None => Vec::new(),
+    };
     if !csv && flags & SplFileObject::DROP_NEW_LINE != 0 && line.last() == Some(&b'\n') {
         line.pop();
         if line.last() == Some(&b'\r') {
@@ -2762,7 +2805,11 @@ fn read_csv(
     let mut more = || {
         let stream = stream?;
         match stream.get_line(req, None) {
-            Ok(next) => next.map(|s| s.as_bytes().to_vec()),
+            Ok(next) => next.map(|s| {
+                let bytes = s.as_bytes().to_vec();
+                s.give_up(req);
+                bytes
+            }),
             Err(thrown) => {
                 failed = Some(thrown);
                 None
@@ -2779,11 +2826,13 @@ fn read_csv(
         Some(fields) => {
             for field in fields {
                 let value = crate::string_value(req, &field)?;
-                parsed.append(req, value)?;
+                parsed.append(req, value.hand_on_unmigrated())?;
             }
         }
     }
-    if let Some(old) = fs(req, this, |it| it.csv.replace(Value::array(parsed)))? {
+    if let Some(old) = fs(req, this, |it| {
+        it.csv.replace(parsed.into_value().hand_on_unmigrated())
+    })? {
         req.release(old);
     }
     Ok(true)
@@ -2813,7 +2862,7 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
         let Some(line) = answered.as_str_bytes().map(<[u8]>::to_vec) else {
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
             let name = php_ext::coerce::value_name(req, &answered);
-            req.release(answered);
+            answered.give_up(req);
             return Err(throw_error(
                 req,
                 "TypeError",
@@ -2822,7 +2871,7 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
                 ),
             ));
         };
-        req.release(answered);
+        answered.give_up(req);
         fs(req, this, |it| {
             if it.line.is_some() || it.csv.is_some() {
                 it.line_num += 1;

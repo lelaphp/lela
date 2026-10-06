@@ -54,7 +54,7 @@ impl Algo for User<'_> {
             .take(size)
             .enumerate()
             .fold(0_u64, |acc, (i, b)| acc | (u64::from(*b) << (8 * i)));
-        self.req.release(answered);
+        answered.give_up(self.req);
         if size == 0 {
             return Err(Failure::Thrown(throw_error(
                 self.req,
