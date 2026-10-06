@@ -64,19 +64,17 @@ pub(crate) enum Sensed {
         bytes: usize,
         blocks: usize,
         first: Held,
-        by: String,
+        named: String,
         trace: Option<String>,
     },
 }
 
-/// One block a heap held where the request ended: where it stands, the
-/// bytes it takes and the origin it was allocated for, what php's
-/// `zend_leak_info` names first.
+/// One block a heap held where the request ended: where it stands and the
+/// bytes it takes, what php's `zend_leak_info` names first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Held {
     pub(crate) at: usize,
     pub(crate) size: usize,
-    pub(crate) origin: Origin,
 }
 
 /// Whose code a debug build's heap allocates for: a number the engine
@@ -90,7 +88,9 @@ pub(crate) struct Held {
 /// than in it, so `memory_get_usage()` reads what a release build's
 /// does, which is what the oracle's release build reads. The default is
 /// zero, `Core`'s number, which the engine's own code allocates under.
+/// One `u16`, so a chunk's zeroed table of them reads as `Core`'s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[repr(transparent)]
 pub struct Origin(u16);
 
 impl Origin {
@@ -131,10 +131,10 @@ impl Sensed {
                 bytes,
                 blocks,
                 first,
-                by,
+                named,
                 trace,
             } => Fatal::Error(format!(
-                "InternalError: the request ended with {blocks} {} of its heap never freed, {bytes} bytes, the first of {} bytes at {:#x}, allocated by {by}{}",
+                "InternalError: the request ended with {blocks} {} of its heap never freed, {bytes} bytes, the first of {} bytes at {:#x}, allocated by {named}{}",
                 if blocks == 1 { "block" } else { "blocks" },
                 first.size,
                 first.at,

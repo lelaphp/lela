@@ -17,18 +17,10 @@ use std::ptr::NonNull;
 
 use super::origins;
 use super::{
-    BIN_DATA_SIZE, BIN_ELEMENTS, BIN_PAGES, Chunk, FIRST_PAGE, IS_SRUN, LRUN_PAGES_MASK, Mm,
-    PAGE_SIZE, SRUN_BIN_NUM_MASK, bitset_is_set,
+    BIN_DATA_SIZE, BIN_ELEMENTS, BIN_PAGES, FIRST_PAGE, IS_SRUN, LRUN_PAGES_MASK, Mm, PAGE_SIZE,
+    SRUN_BIN_NUM_MASK, bitset_is_set,
 };
 use crate::sensed::{Held, Origin, Sensed};
-
-/// The origin of the block at `at` of `chunk`, an address the walk met
-/// in it, reached through the chunk's own pointer.
-fn origin_at(chunk: NonNull<Chunk>, at: usize) -> Origin {
-    std::num::NonZeroUsize::new(at).map_or_else(Origin::default, |at| {
-        origins::read(chunk.cast::<u8>().with_addr(at))
-    })
-}
 
 impl Mm {
     /// `zend_mm_check_leaks`: every block this heap still holds, recorded
@@ -54,7 +46,7 @@ impl Mm {
         let mut first = None;
         let mut held = |at: usize, size: usize, origin: Origin| {
             blocks += 1;
-            first.get_or_insert(Held { at, size, origin });
+            first.get_or_insert((Held { at, size }, origin));
         };
         for huge in &self.huge {
             // The node is the block's own and goes with it, as php's walk
@@ -77,7 +69,7 @@ impl Mm {
                 let run = base + page_num as usize * PAGE_SIZE;
                 if info & IS_SRUN == 0 {
                     let pages = (info & LRUN_PAGES_MASK).max(1);
-                    held(run, pages as usize * PAGE_SIZE, origin_at(chunk, run));
+                    held(run, pages as usize * PAGE_SIZE, origins::read(header, run));
                     page_num += pages;
                     continue;
                 }
@@ -85,18 +77,18 @@ impl Mm {
                 let size = BIN_DATA_SIZE[bin_num];
                 for slot in (0..BIN_ELEMENTS[bin_num]).map(|i| run + i * size) {
                     if !free.contains(&slot) {
-                        held(slot, size, origin_at(chunk, slot));
+                        held(slot, size, origins::read(header, slot));
                     }
                 }
                 page_num += BIN_PAGES[bin_num];
             }
         }
-        if let Some(first) = first {
+        if let Some((first, origin)) = first {
             self.sensed.record(Sensed::Leak {
                 bytes: self.size,
                 blocks,
                 first,
-                by: name(first.origin),
+                named: name(origin),
                 trace: self.trace_of(first.at),
             });
         }

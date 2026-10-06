@@ -35,7 +35,7 @@ fn faulty() -> Extension {
 /// [`dropped_owner`] is: a string made at `RSHUTDOWN` and its owner
 /// dropped.
 fn rshutdown_dropping_an_owner(req: &mut Request) {
-    let _dropped = PhpString::new(req, b"dropped");
+    let _dropped = PhpString::new(req, b"in hook");
 }
 
 fn faulty_at_rshutdown() -> Extension {

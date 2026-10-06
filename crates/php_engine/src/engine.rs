@@ -2471,6 +2471,14 @@ pub enum LeakSensor {
     Traced,
 }
 
+#[cfg(debug_assertions)]
+impl LeakSensor {
+    /// Whether a request ends in php's debug shutdown and its walk.
+    pub(crate) fn armed(self) -> bool {
+        self != LeakSensor::Off
+    }
+}
+
 impl EngineBuilder {
     /// A debug build's request leak sensor, for every request of the
     /// engine ([`LeakSensor`]). The hosts arm it from `PHP_SENSE_LEAKS=1`
@@ -4285,7 +4293,7 @@ impl Engine {
         req.destroy_static_vars();
         req.free_default_arguments();
         #[cfg(debug_assertions)]
-        if self.shared.sense_leaks != LeakSensor::Off {
+        if self.shared.sense_leaks.armed() {
             req.free_executor_values();
             req.shutdown_collect();
         }
@@ -4305,7 +4313,7 @@ impl Engine {
         // leak sensor recorded as it raises every other sensor's defect.
         #[cfg(debug_assertions)]
         {
-            if self.shared.sense_leaks != LeakSensor::Off {
+            if self.shared.sense_leaks.armed() {
                 req.sense_leaks(report_memleaks);
             }
             req.end_in_sensed();

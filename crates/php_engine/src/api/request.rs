@@ -164,6 +164,13 @@ impl ExtensionId {
     pub(crate) fn origin(self) -> php_heap::Origin {
         php_heap::Origin::new(u16::try_from(self.0).unwrap_or(u16::MAX))
     }
+
+    /// The extension a debug build's heap names by `origin`, the inverse
+    /// of [`ExtensionId::origin`].
+    #[cfg(debug_assertions)]
+    pub(crate) fn of_origin(origin: php_heap::Origin) -> ExtensionId {
+        ExtensionId(u32::from(origin.number()))
+    }
 }
 
 pub use crate::interrupt::Periodic;

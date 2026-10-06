@@ -185,7 +185,7 @@ struct Chunk {
     /// A debug build's table of the origins of the chunk's blocks
     /// ([`origins`]), null where the system could not give it.
     #[cfg(debug_assertions)]
-    origins: *mut u16,
+    origins: Option<NonNull<crate::sensed::Origin>>,
 }
 
 /// The header takes page zero and nothing more, which is what
@@ -1288,7 +1288,7 @@ fn chunk_init(
     chunk: NonNull<Chunk>,
     num: u32,
     #[cfg(debug_assertions)] sensed: *const crate::sensed::Record,
-    #[cfg(debug_assertions)] origins: *mut u16,
+    #[cfg(debug_assertions)] origins: Option<NonNull<crate::sensed::Origin>>,
 ) {
     let mut header = Chunk {
         free_pages: PAGES - FIRST_PAGE,

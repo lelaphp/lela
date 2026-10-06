@@ -34,14 +34,12 @@ const GRAIN: usize = 8;
 const GRAINS: usize = CHUNK_SIZE / GRAIN;
 
 /// One chunk's table, zeroed, so every block reads as `Core`'s until it
-/// is handed out; null where the system could not give it, and the
+/// is handed out; none where the system could not give it, and the
 /// chunk's blocks then read as `Core`'s.
-pub(super) fn table() -> *mut u16 {
-    match Layout::array::<u16>(GRAINS) {
-        // SAFETY: the layout has a non-zero size.
-        Ok(layout) => unsafe { alloc_zeroed(layout) }.cast(),
-        Err(_) => std::ptr::null_mut(),
-    }
+pub(super) fn table() -> Option<NonNull<Origin>> {
+    let layout = Layout::array::<Origin>(GRAINS).ok()?;
+    // SAFETY: the layout has a non-zero size.
+    NonNull::new(unsafe { alloc_zeroed(layout) }.cast())
 }
 
 /// The table of `chunk` given back, as the chunk leaves its heap's list.
@@ -49,38 +47,38 @@ pub(super) fn give_back(chunk: NonNull<Chunk>) {
     // SAFETY: the chunk is one its heap initialised, and nothing else
     // reads its header while the heap gives it up.
     let header = unsafe { &mut *chunk.as_ptr() };
-    let origins = std::mem::replace(&mut header.origins, std::ptr::null_mut());
-    if let (false, Ok(layout)) = (origins.is_null(), Layout::array::<u16>(GRAINS)) {
+    if let (Some(origins), Ok(layout)) = (header.origins.take(), Layout::array::<Origin>(GRAINS)) {
         // SAFETY: the table came from `table` with this layout, and the
         // header named it alone.
-        unsafe { dealloc(origins.cast(), layout) };
+        unsafe { dealloc(origins.as_ptr().cast(), layout) };
     }
 }
 
-/// Where the origin of the block at `at`, in a chunk, stands.
-fn slot(at: NonNull<u8>) -> Option<*mut u16> {
-    let chunk = chunk_of(at);
-    // SAFETY: `at` is a block of a chunk its heap holds, whose page zero
-    // is the header `chunk_init` wrote.
-    let origins = unsafe { (*chunk.as_ptr()).origins };
-    let grain = (at.as_ptr().addr() & (CHUNK_SIZE - 1)) / GRAIN;
+/// Where the origin of the block at address `at` of the chunk `header`
+/// heads stands in the chunk's table.
+fn slot(header: &Chunk, at: usize) -> Option<NonNull<Origin>> {
+    let grain = (at & (CHUNK_SIZE - 1)) / GRAIN;
     // SAFETY: a block's offset in its chunk is under `CHUNK_SIZE`, so its
     // grain is inside the table.
-    (!origins.is_null()).then(|| unsafe { origins.add(grain) })
+    header.origins.map(|origins| unsafe { origins.add(grain) })
 }
 
 /// The block at `at`, in a chunk, allocated for `origin`.
 pub(super) fn write(at: NonNull<u8>, origin: Origin) {
-    if let Some(slot) = slot(at) {
+    // SAFETY: `at` is a block of a chunk its heap holds, whose page zero
+    // is the header `chunk_init` wrote, and nothing writes it meanwhile.
+    let header = unsafe { &*chunk_of(at).as_ptr() };
+    if let Some(slot) = slot(header, at.as_ptr().addr()) {
         // SAFETY: the slot is the block's in its chunk's table.
-        unsafe { slot.write(origin.number()) };
+        unsafe { slot.write(origin) };
     }
 }
 
-/// The origin the block at `at`, in a chunk, was allocated for.
-pub(super) fn read(at: NonNull<u8>) -> Origin {
+/// The origin the block at address `at` of the chunk `header` heads was
+/// allocated for.
+pub(super) fn read(header: &Chunk, at: usize) -> Origin {
     // SAFETY: the slot is the block's in its chunk's table.
-    slot(at).map_or_else(Origin::default, |slot| Origin::new(unsafe { slot.read() }))
+    slot(header, at).map_or_else(Origin::default, |slot| unsafe { slot.read() })
 }
 
 impl Mm {
