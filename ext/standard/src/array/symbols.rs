@@ -14,7 +14,8 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef, walk};
+use php_ext::values::walk::{self, Reached};
+use php_ext::values::{Key, PhpArray, PhpRef, PhpString, Value, ValueRef};
 
 use super::constants::{
     EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
@@ -228,12 +229,13 @@ fn extract(
     // passed that variable by reference, so an element written through
     // it would give up the owner the variable held; the held walk holds
     // the array it reaches through that reference, and what writes the
-    // array separates it.
+    // array separates it. A temporary nobody else can reach is held by
+    // the call, and no code tells the owner php takes of it apart.
     let reached = given
         .reference()
-        .map_or_else(|| array.to_value(), |cell| cell.as_value());
+        .map_or(Reached::Held(array), |cell| Reached::Through(cell, array));
     let mut count = 0i64;
-    walk::held(req, &reached, |req, key, entry| {
+    walk::held(req, reached, |req, key, entry| {
         if let Some(target) = target(req, kind, &prefix, key)? {
             assign(req, &target, *entry)?;
             count += 1;

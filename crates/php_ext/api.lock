@@ -1271,6 +1271,9 @@ values::Value::unpassed
 values::ValueRef
 values::View
 values::walk::Guarded
+values::walk::Reached
+values::walk::Reached::of
+values::walk::Reached::table
 values::walk::Step
 values::walk::held
 values::walk::held_guarded

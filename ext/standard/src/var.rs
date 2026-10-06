@@ -19,7 +19,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Guarded};
+use php_ext::values::walk::{self, Guarded, Reached};
 use php_ext::values::{HeldRow, Key, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
@@ -729,7 +729,7 @@ pub(super) fn render(
     // php asks no stack limit here and runs to the thread's end; this
     // walk is held to the floor short of it.
     call_stack_end(req)?;
-    if value.as_array().is_some() {
+    if let Some(array) = value.as_array().copied() {
         out.extend_from_slice(b"Array\n");
         // `GC_IS_RECURSIVE` and `GC_PROTECT_RECURSION`, which php takes
         // only where the array is refcounted; an immutable one is marked
@@ -739,12 +739,16 @@ pub(super) fn render(
         // program shares, which an element's `__debugInfo` may assign
         // over; the test
         // `print_r_holds_a_nested_array_a_debug_info_method_gives_up`
-        // says why there is no divergence row. The `(` is laid down
+        // says why there is no divergence row. A table an object's row
+        // holds alone is no held walk's row, and the program can still
+        // give it up from a nested `__debugInfo`, as php can (#2105). The
+        // `(` is laid down
         // before the walk and taken back where the walk found the table
         // marked, since that walk wrote nothing after it.
         let opened = out.len();
         let mut printed = Printed::open(out, indent, false);
-        let walked = walk::held_guarded(req, &reached, |req, key, element| {
+        let reached = Reached::of(&reached).unwrap_or(Reached::Held(array));
+        let walked = walk::held_guarded(req, reached, |req, key, element| {
             printed.row(req, out, key, element)?;
             Ok(ControlFlow::<()>::Continue(()))
         })?;
