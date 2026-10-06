@@ -1400,6 +1400,23 @@ impl PhpObject {
         Ok(HeldProperties { rows, held, count })
     }
 
+    /// php's `Z_OBJPROP_P`, `zend_std_get_properties`: the object's
+    /// property table laid down for a walk ([`walk::foreach`]), a lazy
+    /// object initialised first and the class's `get_properties` called, as
+    /// the pointer natives read it, so the table is the instance's and a
+    /// class that writes its fields into the table at that call
+    /// (`DateInterval`) has written them. A class whose `get_properties`
+    /// answers a table of its own making
+    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties))
+    /// is read at the object's own table, as the pointer natives read it.
+    /// The table stays laid down, as php's object keeps the table
+    /// `rebuild_object_properties` built. The `Err` is what the lazy
+    /// initializer threw or the memory limit refusing a name.
+    pub fn property_table(&self, req: &mut Request) -> Result<walk::ObjectTable, Thrown> {
+        let (owner, _) = req.pointer_table(*self, false)?;
+        req.object_table(owner)
+    }
+
     /// The object's property table as `get_properties` holds it,
     /// php's `zobj->properties`: the declared slots that hold a value,
     /// each keyed by the name `zend_mangle_property_name` makes (`\0*\0p`

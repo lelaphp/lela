@@ -30,6 +30,7 @@ use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
 use crate::api::raising::Thrown;
+use crate::api::values::walk::ObjectTable;
 use crate::api::values::{
     ClassId, Key, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
 };
@@ -286,6 +287,26 @@ impl Request {
         handlers.get_properties(self, object)?;
         let table = self.heap.object_property_table(object.heap());
         Ok((object, self.fatal_of(table)?))
+    }
+
+    /// [`PhpObject::property_table`]'s table once `owner`'s is laid
+    /// down: the table in php's positions, each declared slot named by
+    /// the key [`Request::slot_names`] interns for it. The `Err` is the
+    /// memory limit refusing the table or a name.
+    pub(crate) fn object_table(&mut self, owner: PhpObject) -> Result<ObjectTable, Thrown> {
+        let table = self.heap.object_property_table(owner.heap());
+        let table = self.fatal_of(table)?;
+        let names = if table.declared() > 0 {
+            self.slot_names(owner.class())?
+        } else {
+            Vec::new()
+        };
+        if names.len() < usize::try_from(table.declared()).unwrap_or(usize::MAX) {
+            return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
+                "InternalError: a declared slot of an object's table with no name",
+            ))));
+        }
+        Ok(ObjectTable::of(owner, table, names.into_boxed_slice()))
     }
 
     /// [`PhpObject::pointer_move`]: `reset`, `end`, `next` or `prev`
