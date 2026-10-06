@@ -171,6 +171,26 @@ fn serialize_holds_a_nested_array_a_serialize_method_gives_up() {
     );
 }
 
+/// `print_r` holds a nested array while it walks it when it reached the
+/// array through a shared reference, as `serialize` does. An element's
+/// `__debugInfo` that assigns over that reference gives up the array's
+/// only owner, and the rows after the element are still the array's, so
+/// a string of their size allocated in `__debugInfo` is not handed their
+/// blocks.
+///
+/// Here dax departs from php on purpose: dax prints
+/// the row the array held. No divergence row records it, as #1989's
+/// test says for `serialize`: no witness or phpt compares this input
+/// (#2044).
+#[test]
+fn print_r_holds_a_nested_array_a_debug_info_method_gives_up() {
+    let (stdout, fatal) = served(
+        "<?php class C { function __debugInfo() { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v];\n$outer = [&$r];\nprint_r($outer);",
+    );
+    assert_eq!(fatal, None);
+    assert!(stdout.contains("[1] => vvvvvvvvvv\n"), "{stdout}");
+}
+
 /// What `conn` sent until it went quiet for a moment.
 fn sent(conn: &mut std::net::TcpStream) -> Vec<u8> {
     use std::io::Read;
