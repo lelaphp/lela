@@ -237,6 +237,7 @@ ObserveAllocations::observe
 PropBit
 PropertyTable
 PropertyTable::backward
+PropertyTable::declared
 PropertyTable::end
 PropertyTable::forward
 PropertyTable::is_empty
@@ -329,6 +330,7 @@ Zval::double
 Zval::fe_pos
 Zval::indirect
 Zval::is_refcounted
+Zval::is_same_value
 Zval::is_undef
 Zval::kind
 Zval::long
