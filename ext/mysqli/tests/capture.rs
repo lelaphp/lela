@@ -1,6 +1,7 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
 //! fresh engine with this crate alone, never the bundle.
 
+use php_ext::abi::Extension;
 use php_ext::test::{Capture, Engine};
 
 #[test]
@@ -189,5 +190,214 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "init init|i:1;\np p|i:1;\n"
+    );
+}
+
+/// An engine of `extensions` with `ini` set and the request leak sensor
+/// armed (#1992), for a test against the server of
+/// `ci/mysql/compose.yaml`; `None` where none listens, said on stderr,
+/// and the test passes.
+#[cfg(debug_assertions)]
+fn armed(extensions: &[Extension], ini: &[(&str, &str)]) -> Option<Engine> {
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return None;
+    }
+    let mut builder = Engine::builder().extensions(extensions);
+    for (name, value) in ini {
+        builder = builder.ini(name, value);
+    }
+    Some(
+        builder
+            .sense_leaks(php_ext::test::LeakSensor::Armed)
+            .build(),
+    )
+}
+
+/// What mysqlnd reads off the wire is read into the buffer it parses, as
+/// php's `mysqlnd_vio::network_read` reads into its caller's, and the
+/// file a `LOAD DATA LOCAL INFILE` sends is read the same way
+/// (`mysqlnd_local_infile_read`), so a request that connects, queries,
+/// fetches, executes a prepared statement and loads a local file leaves
+/// no block of its heap held: armed, the sensor ends a request that
+/// kept a packet's string in an `InternalError` (#2092). Against the
+/// server of `ci/mysql/compose.yaml`; with none listening the test says
+/// so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[("mysqli.allow_local_infile", "1")],
+    ) else {
+        return;
+    };
+    let file = std::env::temp_dir().join(format!("t2092-{}.csv", std::process::id()));
+    std::fs::write(&file, "1,a\n2,b\n").expect("the file the server asks for");
+    let source = format!(
+        "<?php $l = mysqli_init();
+        mysqli_options($l, MYSQLI_OPT_LOCAL_INFILE, true);
+        mysqli_real_connect($l, '127.0.0.1', 'root', '', 'test');
+        mysqli_query($l, 'SET GLOBAL local_infile = 1');
+        mysqli_query($l, 'CREATE TEMPORARY TABLE li (id INT, l CHAR(1))');
+        var_dump(mysqli_query($l, \"LOAD DATA LOCAL INFILE '{}' INTO TABLE li FIELDS TERMINATED BY ','\"));
+        mysqli_query($l, 'SET GLOBAL local_infile = 0');
+        $r = mysqli_query($l, 'SELECT id, l FROM li ORDER BY id');
+        while ($row = mysqli_fetch_row($r)) echo $row[0], ' ', $row[1], \"\\n\";
+        mysqli_free_result($r);
+        $s = mysqli_prepare($l, 'SELECT ? + 1, CAST(1.5 AS DOUBLE), ?');
+        $n = 41; $t = 'text';
+        mysqli_stmt_bind_param($s, 'is', $n, $t);
+        mysqli_stmt_execute($s);
+        mysqli_stmt_bind_result($s, $a, $b, $c);
+        mysqli_stmt_fetch($s);
+        var_dump($a, $b, $c);
+        mysqli_stmt_close($s);
+        mysqli_close($l);",
+        file.display()
+    );
+    let served = engine.serve_capture(&source, Capture::default());
+    std::fs::remove_file(&file).ok();
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\n1 a\n2 b\nint(42)\nfloat(1.5)\nstring(4) \"text\"\n"
+    );
+}
+
+/// `mysqli_get_warnings()` reads `SHOW WARNINGS` off the connection and
+/// keeps each row's code and message, the message's string given back
+/// once its bytes are copied, so an armed request that reads a warning
+/// leaves no block of its heap held (#2092). Against the server of
+/// `ci/mysql/compose.yaml`; with none listening the test says so and
+/// passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_reading_its_warnings_leaves_none_held() {
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "<?php $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        mysqli_query($l, 'SELECT 1/0');
+        $w = mysqli_get_warnings($l);
+        var_dump($w->errno, $w->message);";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "int(1365)\nstring(13) \"Division by 0\"\n"
+    );
+}
+
+/// A user the server does not know is answered over a plain socket by
+/// `caching_sha2_password`'s full authentication, the password encrypted
+/// under the server's public key through openssl's natives, and the
+/// lookup of the key's size in `openssl_pkey_get_details()`'s answer
+/// allocates nothing of its own, so an armed request whose connect is
+/// refused leaves no block of its heap held (#2092). Against the server
+/// of `ci/mysql/compose.yaml`; with none listening the test says so and
+/// passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_refused_by_the_server_leaves_none_held() {
+    let Some(engine) = armed(
+        &[
+            php_ext_openssl::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
+        var_dump(@mysqli_connect('127.0.0.1', 'nobody', 'x'), mysqli_connect_errno());";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(false)\nint(1045)\n"
+    );
+}
+
+/// `mysqli_stmt_error_list()` answers the list it builds and allocates
+/// no other array beside it, so an armed request that reads a failed
+/// prepare's errors leaves no block of its heap held (#2092). Against
+/// the server of `ci/mysql/compose.yaml`; with none listening the test
+/// says so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
+        $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        $s = mysqli_stmt_init($l);
+        mysqli_stmt_prepare($s, 'SELECT nope');
+        var_dump(mysqli_stmt_error_list($s)[0]['errno']);";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "int(1054)\n");
+}
+
+/// A text option of `mysqli_options()` given as a number, and the class
+/// name `mysqli_result::fetch_object()` is given, are read through
+/// `zval_get_string`, whose string is the caller's, and given back once
+/// read, so an armed request that passes either leaves no block of its
+/// heap held (#2092). Against the server of `ci/mysql/compose.yaml`;
+/// with none listening the test says so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
+        return;
+    };
+    let source = "<?php var_dump(mysqli_options(mysqli_init(), MYSQLI_INIT_COMMAND, 5));
+        $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        $class = 'std'; $class .= 'Class';
+        var_dump(get_class(mysqli_query($l, 'SELECT 1 AS a')->fetch_object($class)));";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\nstring(8) \"stdClass\"\n"
+    );
+}
+
+/// The server's public key read from the file `MYSQLI_SERVER_PUBLIC_KEY`
+/// names, as `caching_sha2_password`'s full authentication reads it over
+/// a plain socket, is copied out of the string the stream's
+/// `copy_to_mem` answered and the string given back, so an armed
+/// request whose connect reads the file leaves no block of its heap held
+/// (#2092). Against the server of `ci/mysql/compose.yaml`; with none
+/// listening the test says so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
+    let Some(engine) = armed(
+        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[],
+    ) else {
+        return;
+    };
+    let file = std::env::temp_dir().join(format!("t2092-{}.pem", std::process::id()));
+    std::fs::write(&file, "not a key\n").expect("the key file");
+    let source = format!(
+        "<?php mysqli_report(MYSQLI_REPORT_OFF);
+        $l = mysqli_init();
+        mysqli_options($l, MYSQLI_SERVER_PUBLIC_KEY, '{}');
+        var_dump(@mysqli_real_connect($l, '127.0.0.1', 'nobody', 'x'), mysqli_connect_errno());",
+        file.display()
+    );
+    let served = engine.serve_capture(&source, Capture::default());
+    std::fs::remove_file(&file).ok();
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(false)\nint(1045)\n"
     );
 }

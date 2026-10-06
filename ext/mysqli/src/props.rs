@@ -202,7 +202,7 @@ pub(crate) fn gone(
 pub(crate) fn error_list(
     req: &mut Request,
     list: &[(u32, [u8; 5], Vec<u8>)],
-) -> Result<Value, Thrown> {
+) -> Result<PhpArray, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (errno, sqlstate, error) in list {
         let mut row = PhpArray::new(req)?;
@@ -217,5 +217,5 @@ pub(crate) fn error_list(
         }
         out.append(req, Value::array(row))?;
     }
-    Ok(Value::array(out))
+    Ok(out)
 }

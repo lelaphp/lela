@@ -1435,12 +1435,17 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Value, Thrown> {
         let back = req.fatal_of(back)?;
         if payload(req, fiber)?.destroyed {
             // Destroyed by the store's walk at the request's end: the
-            // collector's owner is dropped with the store, as php's
-            // `GC_DELREF` drops it without freeing what it is running on.
+            // collector's owner given up and the fiber a possible root
+            // again, php's `GC_DELREF` and `gc_check_possible_root`, so
+            // the shutdown collection frees it. What destroys a fiber
+            // holds an owner of its own across the destroy (the store's
+            // walk and the destructor phase both do), so the release
+            // frees nothing this is running on.
             let gc = &mut req.fibers_mut().gc;
             if gc.fiber.map(|gc| gc.index()) == Some(fiber.index()) {
                 gc.fiber = None;
             }
+            req.release(fiber.as_value());
             return delegate(req, back);
         }
         if let Transfer::Value(value) = back {
