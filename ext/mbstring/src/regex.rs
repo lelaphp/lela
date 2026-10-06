@@ -766,9 +766,11 @@ fn replace(
                 let returned = php_ext::call::call(req, callback, &[Value::array(subpats)]);
                 req.release(Value::array(subpats));
                 let returned = returned?;
-                let text = php_ext::coerce::to_string(req, &returned)?;
-                out.extend_from_slice(text.as_bytes());
+                let text = php_ext::coerce::to_string(req, &returned);
                 req.release(returned);
+                let text = text?;
+                out.extend_from_slice(text.as_bytes());
+                req.release(Value::string(text));
             }
         }
         let n = usize::try_from(end0).unwrap_or(pos);
