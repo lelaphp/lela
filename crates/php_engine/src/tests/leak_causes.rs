@@ -115,3 +115,33 @@ $f->start();
     assert_eq!(stdout, "1: start\n1: end\n0: start\n0: end\n");
     assert_eq!(exit, 0);
 }
+
+/// A generator's frame given a symbol table by a variable named by a
+/// variable gives the table up when it is closed, so a generator held
+/// only there is collected, and the table follows the frame to wherever
+/// it is resumed; a frame popping at the place another stack's frame
+/// stands frees none of that frame's table (#2073).
+#[test]
+fn a_frames_symbol_table_is_its_own_wherever_it_stands() {
+    let (stdout, exit) = armed(
+        r#"<?php
+function gen() { $n = 'a'; $$n = yield; $m = 'n'; yield; echo $a === null ? 'gone' : 'held', ' ', $$m, "\n"; yield; }
+$g = gen(); $g->send($g); unset($g);
+echo gc_collect_cycles(), "\n";
+function deep($x) { $y = 'y'; $GLOBALS['h']->next(); }
+$h = gen(); $h->send(null); deep(1);
+function other() { $q = 'q'; $$q = 1; }
+$k = gen(); $k->send(null); other(); $k->next();
+foreach (gen() as $v) {}
+function inFiber() { $n = 'a'; $$n = 'A'; $m = 'n'; Fiber::suspend(); echo $a, ' ', $$m, "\n"; }
+function inFiber2() { inFiber(); }
+$f = new Fiber('inFiber'); $f->start();
+$e = new Fiber('inFiber2'); $e->start();
+function other2() { other(); }
+other(); other2();
+$f->resume(); $e->resume();
+"#,
+    );
+    assert_eq!(stdout, "1\ngone a\ngone a\ngone a\nA a\nA a\n");
+    assert_eq!(exit, 0);
+}

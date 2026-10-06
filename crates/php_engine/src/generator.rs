@@ -612,8 +612,12 @@ fn push(req: &mut Request, generator: PhpObject) -> Option<FrameRef> {
         calls,
     } = *suspended;
     state.caller = crate::exec::Caller::Outside;
+    let table = state.symbol_table;
     let frame = req.stack_mut().resume_frame(slots);
     req.vm_mut().resume(state, calls);
+    if let Some(table) = table {
+        req.resume_generator_table(table, frame);
+    }
     Some(frame)
 }
 
@@ -1378,17 +1382,42 @@ fn finish_on_stack(req: &mut Request, generator: PhpObject, finished: bool) {
 }
 
 /// What a closed frame held, given up in `zend_generator_close`'s
-/// order: the CVs, the extra named arguments, the receiver, the extra
-/// arguments, then for an unfinished frame the calls it was building and
-/// the temporaries live where it stood, and last whatever else a slot
-/// still holds. The closure it ran is the generator's to give up
+/// order: the symbol table the frame was given, the CVs, the extra
+/// named arguments, the receiver, the extra arguments, then for an
+/// unfinished frame the calls it was building and the temporaries live
+/// where it stood, and last whatever else a slot still holds. The
+/// closure it ran is the generator's to give up
 /// ([`ZendGenerator::closure`]).
+///
+/// A variable named by a variable lives in the table and not in a CV,
+/// and is the table's to give up, so a generator that holds itself
+/// there is freed by the collector, the table given up as the
+/// collector's destructor phase closes it; a variable named by a
+/// variable reads the frame's CVs wherever the generator is resumed:
+///
+/// ```php
+/// function gen() { $n = 'a'; $$n = yield; $m = 'n'; yield; echo $a === null ? 'gone' : 'held', ' ', $$m, "\n"; yield; }
+/// $g = gen(); $g->send($g); unset($g);
+/// var_dump(gc_collect_cycles());
+/// function deep($x) { $y = 'y'; $GLOBALS['h']->next(); }
+/// $h = gen(); $h->send(null); deep(1);
+/// function other() { $q = 'q'; $$q = 1; }
+/// $k = gen(); $k->send(null); other(); $k->next();
+/// ```
+/// ```expect
+/// int(1)
+/// gone a
+/// gone a
+/// ```
 fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
     let Suspended {
         mut slots,
         state,
         calls,
     } = suspended;
+    if let Some(table) = state.symbol_table {
+        req.free_generator_table(table);
+    }
     let unit = std::sync::Arc::clone(&state.unit);
     let code = exec::body_of(&unit, state.body);
     let num_cvs = code.map_or(0, |code| code.num_cvs);

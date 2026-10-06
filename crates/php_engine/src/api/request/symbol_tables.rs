@@ -162,6 +162,28 @@ impl Request {
     /// kept in `EG(symtable_cache)`. A bucket still pointing at a CV
     /// points at a slot the pop is giving up, and owns nothing.
     ///
+    /// The table is the one the frame names, php's `EX(symbol_table)`,
+    /// and only where it was rebuilt for this frame: a code frame shares
+    /// its includer's. A frame is named by its place on a stack, which a
+    /// frame on a fiber's stack shares with one on the request's, and
+    /// which a generator's frame leaves at every `yield`, so the table
+    /// is never found by the place alone:
+    ///
+    /// ```php
+    /// function inFiber() { $n = 'a'; $$n = 'A'; $m = 'n'; Fiber::suspend(); echo $a, ' ', $$m, "\n"; }
+    /// function inFiber2() { inFiber(); }
+    /// $f = new Fiber('inFiber'); $f->start();
+    /// $g = new Fiber('inFiber2'); $g->start();
+    /// function other() { $q = 'q'; }
+    /// function other2() { other(); }
+    /// other(); other2();
+    /// $f->resume(); $g->resume();
+    /// ```
+    /// ```expect
+    /// A a
+    /// A a
+    /// ```
+    ///
     /// A table is named by its place among the request's, so one freed
     /// below a table that still stands is left in its place, owned by no
     /// frame and empty, and taken off with the last one above it: tables
@@ -169,13 +191,60 @@ impl Request {
     /// below the innermost is given one, as an evaluation in a paused
     /// frame gives it ([`Request::eval_in_frame`]).
     pub(super) fn free_rebuilt_table(&mut self, frame: FrameRef) {
-        let Some(at) = self
-            .tables
-            .iter()
-            .rposition(|table| table.owner == Some(frame))
-        else {
+        let Some(table) = self.vm.at(frame).and_then(|state| state.symbol_table) else {
             return;
         };
+        let at = table.0 as usize;
+        if self
+            .tables
+            .get(at)
+            .is_some_and(|rebuilt| rebuilt.owner == Some(frame))
+        {
+            self.free_table_at(at);
+        }
+    }
+
+    /// The table a generator's frame was given, as the frame comes back
+    /// on the stack at `frame`, wherever it stood before: the frame's at
+    /// its new place, each bucket that pointed at a CV where the frame
+    /// stood before pointing at it where it stands now, as php's
+    /// `IS_INDIRECT` buckets point into the `zend_execute_data` the
+    /// generator keeps.
+    pub(crate) fn resume_generator_table(&mut self, table: TableId, frame: FrameRef) {
+        let Some(rebuilt) = self.tables.get_mut(table.0 as usize) else {
+            return;
+        };
+        let Some(before) = rebuilt.owner else {
+            return;
+        };
+        rebuilt.owner = Some(frame);
+        for (_, symbol) in &mut rebuilt.entries {
+            if let Symbol::Indirect(at, slot) = *symbol
+                && at == before
+            {
+                *symbol = Symbol::Indirect(frame, slot);
+            }
+        }
+    }
+
+    /// `zend_clean_and_cache_symbol_table` in `zend_generator_close`,
+    /// over the table a generator's frame was given, before its CVs are
+    /// freed, wherever the frame stands, on the stack or off it.
+    pub(crate) fn free_generator_table(&mut self, table: TableId) {
+        let at = table.0 as usize;
+        if self
+            .tables
+            .get(at)
+            .is_some_and(|rebuilt| rebuilt.owner.is_some())
+        {
+            self.free_table_at(at);
+        }
+    }
+
+    /// The rebuilt table at `at` freed: its values released and its
+    /// bytes kept in `EG(symtable_cache)`, the place left empty and owned
+    /// by none, and every such place on top taken off.
+    fn free_table_at(&mut self, at: usize) {
         let freed = self.tables.get_mut(at).map(|table| SymbolTable {
             owner: table.owner.take(),
             entries: std::mem::take(&mut table.entries),
