@@ -31,6 +31,9 @@ pub struct LinkedClass<H> {
     /// nothing above declared (`do_inherit_property`). A row's holder is
     /// the property's `ce`, the class whose declaration it is.
     pub properties: Rows<Row<H>, Exact>,
+    /// `ce->interfaces`: every interface the class implements, each once
+    /// and in php's order, so `instanceof` scans one slice.
+    pub interfaces: Box<[H]>,
 }
 
 impl<H> Default for LinkedClass<H> {
@@ -39,6 +42,7 @@ impl<H> Default for LinkedClass<H> {
             methods: Rows::default(),
             constants: Rows::default(),
             properties: Rows::default(),
+            interfaces: Box::default(),
         }
     }
 }
