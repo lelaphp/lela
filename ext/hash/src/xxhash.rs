@@ -442,7 +442,9 @@ impl Xxh3 {
                 "Passing a secret of a type other than string is deprecated because it implicitly converts to a string, potentially hiding bugs",
             );
         }
-        let mut bytes = to_string(req, &secret)?.as_bytes().to_vec();
+        let text = to_string(req, &secret)?;
+        let mut bytes = text.as_bytes().to_vec();
+        req.release(Value::string(text));
         let given = bytes.len();
         if given > 256 {
             bytes.truncate(256);
