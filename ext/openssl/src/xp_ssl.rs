@@ -1612,9 +1612,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
     }
     let mut added = 0;
     let mut block: Option<Vec<u8>> = None;
-    while let Ok(Some(line)) = stream.get_line(req, None) {
-        let bytes = line.as_bytes().to_vec();
-        req.release(Value::string(line));
+    while let Ok(Some(bytes)) = stream.get_line(req, None) {
         match &mut block {
             None => {
                 if bytes == b"-----BEGIN CERTIFICATE-----\n"

@@ -79,7 +79,7 @@ use std::process::{Command, Stdio};
 
 use php_ext::abi::{OrFalse, Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_string, value_name};
+use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
 use php_ext::values::{Key, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
@@ -399,7 +399,7 @@ fn process_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource
 /// of the command array as a string, the first not empty and none with a
 /// null byte, each refusal php's `ValueError`.
 fn arg_string(req: &mut Request, value: &Value, elem_num: usize) -> Result<Vec<u8>, Thrown> {
-    let text = to_string(req, &value.deref())?.as_bytes().to_vec();
+    let text = crate::tmp_string_bytes(req, &value.deref())?;
     if elem_num == 1 && text.is_empty() {
         return Err(throw_error(
             req,
@@ -426,7 +426,7 @@ fn string_parameter(
     let Some(value) = ht.get(&Key::Int(index)) else {
         return Err(throw_error(req, "ValueError", &format!("Missing {name}")));
     };
-    Ok(to_string(req, &value.deref())?.as_bytes().to_vec())
+    crate::tmp_string_bytes(req, &value.deref())
 }
 
 /// `set_proc_descriptor_to_pipe` (`Z/ext/standard/proc_open.c:883`): a
@@ -695,7 +695,7 @@ type Env = Vec<(Vec<u8>, Vec<u8>)>;
 fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
     let mut pairs = Vec::new();
     for (key, value) in env.snapshot() {
-        let text = to_string(req, &value)?.as_bytes().to_vec();
+        let text = crate::tmp_string_bytes(req, &value)?;
         if text.is_empty() {
             continue;
         }

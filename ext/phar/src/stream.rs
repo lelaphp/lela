@@ -605,8 +605,7 @@ fn list_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
     };
     let mut out = Vec::new();
     while let Some(name) = dir.read_dir(req)? {
-        out.push(name.as_bytes().to_vec());
-        req.release(Value::string(name));
+        out.push(name);
     }
     dir.free(req);
     Ok(Some(out))

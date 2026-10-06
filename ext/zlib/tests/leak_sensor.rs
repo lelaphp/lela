@@ -1,0 +1,31 @@
+//! The request leak sensor (#1992) over this extension's natives: each
+//! request below gives up everything its natives took, so an armed
+//! engine ends it without the `InternalError` naming a block still held.
+#![cfg(debug_assertions)]
+
+use php_ext::test::{Capture, Engine, LeakSensor};
+
+/// What one request of an armed engine with this extension and the
+/// standard one it writes files through wrote.
+fn armed(source: &str) -> String {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_standard::extension(), php_ext_zlib::extension()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(source, Capture::default());
+    String::from_utf8_lossy(&served.stdout).into_owned()
+}
+
+/// `gzfile` keeps each line it reads only in the array it returns
+/// (#2086).
+#[test]
+fn a_line_gzfile_reads_is_given_up() {
+    let stdout = armed(
+        r#"<?php
+$f = sys_get_temp_dir() . '/leak-sensor-gzfile-' . getmypid() . '.gz';
+file_put_contents($f, gzencode("one\ntwo\n"));
+echo implode('|', gzfile($f)); unlink($f);
+"#,
+    );
+    assert_eq!(stdout, "one\n|two\n");
+}

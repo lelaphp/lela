@@ -126,20 +126,32 @@ fn get_headers(
         .find(b"wrapper_data")
         .and_then(|value| value.deref().as_array().copied());
     let Some(lines) = lines else {
+        req.release(Value::array(meta));
         stream.free(req);
         return Ok(OrFalse::False);
     };
     // The lines read first, as bytes: what `add_header` writes is the
-    // answer, never the stream's `wrapper_data`.
+    // answer, never the stream's `wrapper_data`, so the meta data is
+    // given up before the answer is built.
     let lines: Vec<Vec<u8>> = walk::rows(req, lines)
         .filter_map(|(_, line)| line.deref().as_str_bytes().map(<[u8]>::to_vec))
         .collect();
+    req.release(Value::array(meta));
+    stream.free(req);
+    Ok(OrFalse::Value(header_array(req, &lines, associative)?))
+}
+
+/// The header lines of `wrapper_data` as `get_headers` answers them.
+fn header_array(
+    req: &mut Request,
+    lines: &[Vec<u8>],
+    associative: bool,
+) -> Result<PhpArray, Thrown> {
     let mut headers = PhpArray::new(req)?;
     for line in lines {
-        add_header(req, &mut headers, &line, associative)?;
+        add_header(req, &mut headers, line, associative)?;
     }
-    stream.free(req);
-    Ok(OrFalse::Value(headers))
+    Ok(headers)
 }
 
 /// One header line into `get_headers`' answer: appended as it is, or

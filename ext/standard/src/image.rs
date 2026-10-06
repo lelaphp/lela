@@ -1841,7 +1841,9 @@ fn getimagesize(
     };
     let bytes = stream.copy_to_mem(req, None)?;
     stream.free(req);
-    answer(req, bytes.as_bytes(), filename.as_bytes(), image_info)
+    let answered = answer(req, bytes.as_bytes(), filename.as_bytes(), image_info);
+    req.release(php::Value::string(bytes));
+    answered
 }
 
 /// `getimagesizefromstring(string $string, &$image_info = null): array|false`,

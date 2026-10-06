@@ -194,7 +194,7 @@ fn pcre(req: &mut Request, regexp: &[u8], path: &[u8]) -> Result<Found, Thrown> 
     };
     let mut names: Vec<Vec<u8>> = Vec::new();
     while let Some(name) = dir.read_dir(req)? {
-        names.push(name.as_bytes().to_vec());
+        names.push(name);
     }
     dir.free(req);
     names.sort();

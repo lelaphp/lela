@@ -418,12 +418,7 @@ fn target(uri: &UriStruct, out: &mut Vec<u8>) {
 /// `php_stream_gets(stream, headerbuf, sizeof(headerbuf))`: the next
 /// line, at most 8191 bytes of it, none at the end.
 fn gets(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
-    let Some(line) = stream.get_line(req, Some(HEADER_BUF))? else {
-        return Ok(None);
-    };
-    let bytes = line.as_bytes().to_vec();
-    req.release(Value::string(line));
-    Ok(Some(bytes))
+    stream.get_line(req, Some(HEADER_BUF))
 }
 
 /// `php_stream_getc`: one byte, none for php's `EOF`.

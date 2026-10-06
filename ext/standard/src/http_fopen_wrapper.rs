@@ -496,12 +496,7 @@ fn get_line(
     stream: Stream,
     maxlen: Option<usize>,
 ) -> Result<Option<Vec<u8>>, Thrown> {
-    let Some(line) = stream.get_line(req, maxlen)? else {
-        return Ok(None);
-    };
-    let bytes = line.as_bytes().to_vec();
-    req.release(Value::string(line));
-    Ok(Some(bytes))
+    stream.get_line(req, maxlen)
 }
 
 /// How a request's socket is secured: not at all, by the `ssl`
