@@ -42,7 +42,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, PhpString};
+use php_ext::values::{PhpArray, PhpString, Value};
 
 use constants::{
     PREG_BACKTRACK_LIMIT_ERROR, PREG_BAD_UTF8_ERROR, PREG_BAD_UTF8_OFFSET_ERROR,
@@ -362,7 +362,8 @@ fn preg_last_error_msg(req: &mut Request) -> Result<PhpString, Thrown> {
 /// `preg_quote(string $str, ?string $delimiter = null): string`: each
 /// byte of `. \ + * ? [ ^ ] $ ( ) { } = ! > < | : - #` and the
 /// delimiter's first byte behind a backslash, and NUL as `\000`; the
-/// string itself where nothing needed quoting.
+/// string itself, with an owner of its own, where nothing needed quoting
+/// (`RETURN_STR_COPY(str)`).
 ///
 /// ```php
 /// var_dump(preg_quote('Hello.World?(1+1=2) #x'), preg_quote('a/b', '/'), preg_quote("a\0b"), preg_quote(''), preg_quote('abc', null), preg_quote('a-b:c', 'bc'));
@@ -374,6 +375,21 @@ fn preg_last_error_msg(req: &mut Request) -> Result<PhpString, Thrown> {
 /// string(0) ""
 /// string(3) "abc"
 /// string(8) "a\-\b\:c"
+/// ```
+///
+/// So a string that is not interned outlives every call that handed it
+/// back: each call's return is given up, and the variable's string is
+/// still its own.
+///
+/// ```php
+/// function f($x) { $x = preg_quote($x, '#'); }
+/// $p = trim('/up', '/'); for ($i = 0; $i < 3; $i++) f($p);
+/// var_dump($p, preg_quote($p), $p);
+/// ```
+/// ```expect
+/// string(2) "up"
+/// string(2) "up"
+/// string(2) "up"
 /// ```
 #[php_function]
 fn preg_quote(
@@ -400,6 +416,7 @@ fn preg_quote(
         }
     }
     if quoted.len() == text.len() {
+        req.addref(&Value::string(text));
         return Ok(text);
     }
     PhpString::new(req, &quoted)
