@@ -188,7 +188,7 @@ fn socket_addrinfo_lookup(
     }
     let want = match hints_wanted(req, hints) {
         Ok(want) => want,
-        Err((kind, tail)) => return Err(argument_error(req, kind, 3, &tail)),
+        Err(refused) => return Err(refused.raise(req)),
     };
     let cut = |bytes: &[u8]| CString::new(crate::addr::c_str(bytes)).unwrap_or_default();
     let host = cut(host.as_bytes());
@@ -211,15 +211,15 @@ fn socket_addrinfo_lookup(
     Ok(OrFalse::Value(out))
 }
 
-/// The four `hints` `getaddrinfo(3)` is handed, by key, read in one walk;
-/// the `Err` is the kind and the text of php's refusal of the first row
-/// that is not one, raised once the walk has ended.
-fn hints_wanted(req: &Request, hints: PhpArray) -> Result<[i32; 4], (&'static str, String)> {
+/// The four `hints` `getaddrinfo(3)` is handed, by key, read in one
+/// walk; the `Err` is php's refusal of the first row that is not one,
+/// raised once the walk has ended ([`Refused::raise`]).
+fn hints_wanted(req: &Request, hints: PhpArray) -> Result<[i32; 4], Refused> {
     let mut want = [0i32; 4];
     for (key, hint) in walk::rows(req, hints) {
         let hint = hint.deref();
         let Key::Str(key) = key else {
-            return Err(("ValueError", HINT_KEYS.to_owned()));
+            return Err(Refused::Keys);
         };
         let name = String::from_utf8_lossy(key.as_bytes()).into_owned();
         let slot = match name.as_str() {
@@ -227,31 +227,58 @@ fn hints_wanted(req: &Request, hints: PhpArray) -> Result<[i32; 4], (&'static st
             "ai_family" => 1,
             "ai_socktype" => 2,
             "ai_protocol" => 3,
-            _ => return Err(("ValueError", HINT_KEYS.to_owned())),
+            _ => return Err(Refused::Keys),
         };
         let Some(n) = try_long(&hint) else {
             let given = type_name(req, &hint);
-            return Err((
-                "TypeError",
-                format!("\"{name}\" key must be of type int, {given} given"),
-            ));
+            return Err(Refused::NotInt { name, given });
         };
         if slot == 1 {
             if n != i64::from(libc::AF_INET) && n != i64::from(libc::AF_INET6) {
-                return Err((
-                    "ValueError",
-                    "\"ai_family\" key must be AF_INET or AF_INET6".to_owned(),
-                ));
+                return Err(Refused::Family);
             }
         } else if !(0..=i64::from(i32::MAX)).contains(&n) {
-            return Err((
-                "ValueError",
-                format!("\"{name}\" key must be between 0 and {}", i32::MAX),
-            ));
+            return Err(Refused::Range { name });
         }
         want[slot] = i32::try_from(n).unwrap_or(0);
     }
     Ok(want)
+}
+
+/// Why [`hints_wanted`] refused a row of `hints`, read in the walk and
+/// raised after it.
+enum Refused {
+    /// A key that is no hint's name.
+    Keys,
+    /// A hint whose value is no int, with its type's name.
+    NotInt { name: String, given: String },
+    /// An `ai_family` that is neither `AF_INET` nor `AF_INET6`.
+    Family,
+    /// A hint outside `0..=i32::MAX`.
+    Range { name: String },
+}
+
+impl Refused {
+    /// php's refusal of argument 3.
+    fn raise(self, req: &mut Request) -> Thrown {
+        match self {
+            Refused::Keys => argument_error(req, "ValueError", 3, HINT_KEYS),
+            Refused::NotInt { name, given } => {
+                let tail = format!("\"{name}\" key must be of type int, {given} given");
+                argument_error(req, "TypeError", 3, &tail)
+            }
+            Refused::Family => argument_error(
+                req,
+                "ValueError",
+                3,
+                "\"ai_family\" key must be AF_INET or AF_INET6",
+            ),
+            Refused::Range { name } => {
+                let tail = format!("\"{name}\" key must be between 0 and {}", i32::MAX);
+                argument_error(req, "ValueError", 3, &tail)
+            }
+        }
+    }
 }
 
 /// The entry an `AddressInfo` holds, and an `InternalError` for one
