@@ -110,12 +110,12 @@ third-engine-design.md
 | process | process.lock | 17 |  | pass |
 | unit | unit.lock | 122 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1303 | 1500 | pass |
+| api | api.lock | 1309 | 1500 | pass |
 | sapi | sapi.lock | 35 |  | pass |
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=95a395fa6a41eaac6ee473b7db0553eafb3a529807c6585c32a9230f276a478c out=a9a1479e97c747c84efbcf8ca93238e2c7cb701d972d99d0067a62695f5ba8b3 -->
+<!-- /computed in=18c334969ed75174fb8a78493d3efd0f6777f88bb241ca27763ac6dd1c6c06aa out=909fabead0b333c26cab7ac7bd785fbf5d0886a367a286f3437cbf94a91a7a55 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -146,8 +146,9 @@ third-engine-design.md
 | computed.force |  | deny_pattern | no reading |
 | harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
+| owner.no-assign-discard |  | deny_pattern | fail |
 
-<!-- /computed in=20bb5515d95c9ce1417e1cc956d4e856bfb9fcc5df95c1da37e6b98db8c8acd3 out=6038e7364920afa63f4780852abfb2752f866f0c2935909accf6ebd5e1a421c8 -->
+<!-- /computed in=41b262995fd0534786112bfcf420ba6e61149ceba2c66a087720baabdcecca5d out=37d2841e1c624e9d804f3b375c92dc0d330fe3b72df8eba45023ab6930446199 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
