@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api_check;
+mod batch;
 pub mod bench;
 pub mod budget;
 mod built;
