@@ -738,6 +738,7 @@ request::Request::ini_value
 request::Request::input_bytes
 request::Request::input_variables
 request::Request::instantiable
+request::Request::interfaces
 request::Request::interrupt
 request::Request::is_pending
 request::Request::is_uploaded_file

@@ -106,7 +106,7 @@ fn class_implements(
     let Some(class) = subject(req, object_or_class.0, autoload)? else {
         return Ok(OrFalse::False);
     };
-    let interfaces = crate::interfaces_of(req, class);
+    let interfaces = req.interfaces(class).to_vec();
     class_names(req, &interfaces)
 }
 
