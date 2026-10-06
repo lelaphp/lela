@@ -19,10 +19,10 @@ use std::fmt::Write as _;
 
 use php_ext::abi::This;
 use php_ext::attr::php_class;
-use php_ext::call::{attribute_object, eval_const_expr, eval_declared, lookup_class};
+use php_ext::call::{attribute_object, autoload, eval_const_expr, eval_declared};
 use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
-use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, throw, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, FreshString, Owner, PhpArray, PhpObject, PhpString};
 
@@ -167,6 +167,37 @@ pub(super) fn declared_in(file: &[u8]) -> Option<Vec<u8>> {
 /// int(0)
 /// Class "Nope" not found
 /// ```
+///
+/// Both lookups are `zend_lookup_class`'s, so the autoloader is asked
+/// for the class filtered by and for each attribute's own; one it does
+/// not load is passed over, and one it throws through is thrown with
+/// the array built so far given up:
+///
+/// ```php
+/// spl_autoload_register(function ($c) {
+///     echo "load $c\n";
+///     if ($c === 'Marker') eval('#[Attribute] class Marker {}');
+///     if ($c === 'Sub') eval('#[Attribute] class Sub extends Marker {}');
+///     if ($c === 'Boom') throw new RuntimeException("boom");
+/// });
+/// #[Sub] #[Missing] #[Marker] function f() {}
+/// #[Marker] #[Boom] function g() {}
+/// var_dump(count((new ReflectionFunction('f'))->getAttributes('Marker', ReflectionAttribute::IS_INSTANCEOF)));
+/// foreach (['Marker', 'Boom'] as $base) {
+///     try { (new ReflectionFunction('g'))->getAttributes($base, ReflectionAttribute::IS_INSTANCEOF); }
+///     catch (RuntimeException $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// load Marker
+/// load Sub
+/// load Missing
+/// int(2)
+/// load Boom
+/// boom
+/// load Boom
+/// boom
+/// ```
 pub(super) fn reflect_attributes(
     req: &mut Request,
     attributes: &[Attribute],
@@ -179,7 +210,7 @@ pub(super) fn reflect_attributes(
         return Err(arg_value_error(req, 2, "be a valid attribute filter flag"));
     }
     let base = match (&wanted, flags & IS_INSTANCEOF != 0) {
-        (Some(name), true) => match lookup_class(req, name)? {
+        (Some(name), true) => match autoload(req, name)? {
             Some(class) => Some(class),
             None => {
                 return Err(throw_error(
@@ -205,43 +236,53 @@ pub(super) fn reflect_attributes(
         })
         .collect();
     let mut out = PhpArray::new(req)?;
-    for (at, attribute) in attributes.iter().enumerate() {
-        if !matches(req, attribute, wanted.as_deref(), base) {
-            continue;
+    let filled = (|| {
+        for (at, attribute) in attributes.iter().enumerate() {
+            if !matches(req, attribute, wanted.as_deref(), base)? {
+                continue;
+            }
+            let kept = AttributeRef {
+                attribute: attribute.clone(),
+                scope: subject.scope,
+                target: subject.target,
+                hook: subject.hook,
+                repeated: repeated.get(at).copied().unwrap_or(false),
+                file: subject.file.map(<[u8]>::to_vec),
+            };
+            let object = attribute_factory(req, &kept)?;
+            out.append(req, object.into_value())?;
         }
-        let kept = AttributeRef {
-            attribute: attribute.clone(),
-            scope: subject.scope,
-            target: subject.target,
-            hook: subject.hook,
-            repeated: repeated.get(at).copied().unwrap_or(false),
-            file: subject.file.map(<[u8]>::to_vec),
-        };
-        let object = attribute_factory(req, &kept)?;
-        out.append(req, object.into_value())?;
+        Ok(())
+    })();
+    // `read_attributes`' `FAILURE`: the array built so far is given up
+    // with the attributes in it, as the VM frees the return value
+    // `RETURN_THROWS()` leaves.
+    if let Err(thrown) = filled {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }
 
 /// `read_attributes`'s two filters: the name as written, or the class
-/// every match must be an instance of.
+/// every match must be an instance of. The attribute's own class is
+/// autoloaded for the second (`zend_lookup_class_ex(attr->name,
+/// attr->lcname, 0)`): one still not found is passed over, and what the
+/// autoloader threw is handed on.
 fn matches(
     req: &mut Request,
     attribute: &Attribute,
     wanted: Option<&[u8]>,
     base: Option<ClassId>,
-) -> bool {
+) -> Result<bool, Thrown> {
     let written = bare_name(&attribute.name.0);
     if let Some(base) = base {
-        return match lookup_class(req, written) {
-            Ok(Some(class)) => class_is(req, class, base, 0),
-            _ => false,
-        };
+        return Ok(autoload(req, written)?.is_some_and(|class| class_is(req, class, base, 0)));
     }
-    match wanted {
+    Ok(match wanted {
         Some(asked) => written.eq_ignore_ascii_case(bare_name(asked)),
         None => true,
-    }
+    })
 }
 
 /// A class name with the leading `\` a written one may carry dropped,
@@ -587,16 +628,45 @@ impl ReflectionAttribute {
     /// ```expect
     /// 2520 32
     /// ```
+    ///
+    /// The class is `zend_lookup_class`'s, so the autoloader is asked
+    /// for it, and what it throws is the refusal's `previous`:
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) {
+    ///     echo "load $c\n";
+    ///     if ($c === 'Marker') eval('#[Attribute] class Marker {}');
+    ///     if ($c === 'Boom') throw new RuntimeException("boom");
+    /// });
+    /// #[Marker] #[Boom] function f() {}
+    /// [$marker, $boom] = (new ReflectionFunction('f'))->getAttributes();
+    /// var_dump(get_class($marker->newInstance()));
+    /// try { $boom->newInstance(); }
+    /// catch (Error $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// load Marker
+    /// string(6) "Marker"
+    /// load Boom
+    /// Attribute class "Boom" not found / boom
+    /// ```
     fn newInstance(req: &mut Request, this: This<Self>) -> Result<Owner<PhpObject>, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
         let looked_up = bare_name(&kept.attribute.name.0).to_vec();
-        let Some(class) = lookup_class(req, &looked_up)? else {
-            return Err(throw_error(
-                req,
-                "Error",
-                &format!("Attribute class \"{written}\" not found"),
-            ));
+        // `zend_lookup_class`, whose autoloader may throw: php's
+        // `zend_throw_error` over it chains what was thrown as the
+        // refusal's `previous`.
+        let class = match autoload(req, &looked_up) {
+            Ok(Some(class)) => class,
+            Ok(None) => {
+                let message = format!("Attribute class \"{written}\" not found");
+                return Err(throw_error(req, "Error", &message));
+            }
+            Err(thrown) => {
+                let message = format!("Attribute class \"{written}\" not found");
+                return Err(throw_chained(req, thrown, "Error", &message));
+            }
         };
         let flags = marker_flags(req, class, &written)?;
         if kept.target & flags == 0 {

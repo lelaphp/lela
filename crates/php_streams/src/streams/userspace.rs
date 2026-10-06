@@ -228,7 +228,7 @@ pub(crate) fn open(
     path: &[u8],
     mode: &[u8],
     options: i64,
-) -> Result<Result<Stream, String>, Thrown> {
+) -> Result<Result<Owner<Stream>, String>, Thrown> {
     if req.streams().user_stream_current.as_deref() == Some(path) {
         return Ok(Err(String::from("infinite recursion prevented")));
     }
@@ -263,7 +263,7 @@ fn open_with(
     path: &[u8],
     mode: &[u8],
     options: i64,
-) -> Result<Result<Stream, String>, Thrown> {
+) -> Result<Result<Owner<Stream>, String>, Thrown> {
     let Some(object) = create_object(req, user)? else {
         return Ok(Err(String::from("operation failed")));
     };
@@ -313,8 +313,7 @@ fn open_with(
         no_seek: false,
         own: None,
     };
-    let stream = req.stream_alloc(PhpStream::new(Box::new(kind), mode))?;
-    Ok(Ok(stream))
+    Ok(Ok(req.stream_alloc(PhpStream::new(Box::new(kind), mode))?))
 }
 
 /// `user_wrapper_opendir` (`Z/main/streams/userspace.c:377`): as the
@@ -324,7 +323,7 @@ pub(crate) fn open_dir(
     req: &mut Request,
     user: &UserWrapper,
     path: &[u8],
-) -> Result<Result<Stream, String>, Thrown> {
+) -> Result<Result<Owner<Stream>, String>, Thrown> {
     if req.streams().user_stream_current.as_deref() == Some(path) {
         return Ok(Err(String::from("infinite recursion prevented")));
     }
@@ -338,7 +337,7 @@ fn open_dir_with(
     req: &mut Request,
     user: &UserWrapper,
     path: &[u8],
-) -> Result<Result<Stream, String>, Thrown> {
+) -> Result<Result<Owner<Stream>, String>, Thrown> {
     let Some(object) = create_object(req, user)? else {
         return Ok(Err(String::from("operation failed")));
     };
@@ -373,8 +372,10 @@ fn open_dir_with(
         }
         return Ok(Err(message));
     }
-    let stream = req.stream_alloc(PhpStream::new(Box::new(UserDir { object }), b"r"))?;
-    Ok(Ok(stream))
+    Ok(Ok(req.stream_alloc(PhpStream::new(
+        Box::new(UserDir { object }),
+        b"r",
+    ))?))
 }
 
 /// `php_userstream_data_t` under `php_stream_userspace_ops`: the

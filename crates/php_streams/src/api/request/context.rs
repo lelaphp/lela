@@ -189,11 +189,7 @@ impl StreamCtx {
             options: Some(options),
             notifier: None,
         };
-        let made = Resource::sized(req, kind, context, CONTEXT_SIZE)?;
-        let context = StreamCtx(*made);
-        let owner = Owner::take(req, context);
-        made.give_up(req);
-        Ok(owner)
+        Ok(Resource::sized(req, kind, context, CONTEXT_SIZE)?.into_typed(StreamCtx))
     }
 
     /// `FG(default_context)`, made on first use and kept for the request:

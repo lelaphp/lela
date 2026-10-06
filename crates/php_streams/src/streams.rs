@@ -36,8 +36,9 @@ use crate::api::values::{Emalloc, Owner, ResourceType};
 
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
-    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notification,
-    OptionAnswer, Request, Standard, Stream, StreamCtx, StreamOption, TemporaryGuard, Whence,
+    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, FreeOwned, HostPath,
+    Notification, OptionAnswer, Request, Standard, Stream, StreamCtx, StreamOption, TemporaryGuard,
+    Whence,
 };
 use crate::api::values::{ClassId, FreshString, PhpArray, PhpString, Resource, Value};
 
@@ -2110,6 +2111,7 @@ impl Temp {
             warning(req, &text);
             return Ok(false);
         };
+        let file = file.hand_on_unmigrated();
         req.stream_op(file, |req, f| f.write(req, &membuf));
         inner.free(req);
         self.inner = Some(file);
@@ -2297,7 +2299,7 @@ pub(crate) fn temporary_file(
     req: &mut Request,
     dir: Option<&[u8]>,
     prefix: &[u8],
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let Some((file, path)) = req.open_temporary_fd(dir, prefix, TemporaryGuard::Never) else {
         return Ok(None);
     };
@@ -2316,9 +2318,35 @@ pub(crate) fn temporary_file(
     );
     stream.wrapper = PLAIN_FILES;
     let stream = req.stream_alloc(stream)?;
-    req.stream_op(stream, |req, s| s.set_orig_path(req, &orig_path))
-        .transpose()?;
-    Ok(Some(stream))
+    Ok(Some(orig_path_set(req, stream, &orig_path)?))
+}
+
+/// `stream->orig_path` set on a stream an open has just made, the stream
+/// freed where that threw.
+pub(crate) fn orig_path_set(
+    req: &mut Request,
+    stream: Owner<Stream>,
+    path: &[u8],
+) -> Result<Owner<Stream>, Thrown> {
+    let named = req.stream_op(*stream, |req, s| s.set_orig_path(req, path));
+    Ok(freed_on_throw(req, stream, named.transpose())?.0)
+}
+
+/// The stream an open has just made beside what the open did after it,
+/// `done`, or the stream freed where that threw, so no owner is left
+/// behind.
+pub(crate) fn freed_on_throw<T>(
+    req: &mut Request,
+    stream: Owner<Stream>,
+    done: Result<T, Thrown>,
+) -> Result<(Owner<Stream>, T), Thrown> {
+    match done {
+        Ok(done) => Ok((stream, done)),
+        Err(thrown) => {
+            stream.free(req);
+            Err(thrown)
+        }
+    }
 }
 
 // -------------------------------------------------------- plain files
@@ -2951,19 +2979,37 @@ pub(crate) fn standard_handles(
     if stdin_replaced {
         req.streams().standard_closed[0] = false;
     }
-    let mut opened = Vec::with_capacity(3);
-    for (path, mode) in [
+    let free = |req: &mut Request, opened: [Option<Owner<Stream>>; 3]| {
+        opened
+            .into_iter()
+            .flatten()
+            .for_each(|stream| stream.free(req));
+    };
+    let mut opened = [None, None, None];
+    for (at, (path, mode)) in [
         (&b"php://stdin"[..], &b"rb"[..]),
         (b"php://stdout", b"wb"),
         (b"php://stderr", b"wb"),
-    ] {
-        opened.push(req.open_stream_wrapper(path, mode, false)?);
-    }
-    let [Some(stdin), Some(stdout), Some(stderr)] = opened[..] else {
-        for stream in opened.into_iter().flatten() {
-            stream.free(req);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match req.open_stream_wrapper(path, mode, false) {
+            Ok(stream) => opened[at] = stream,
+            Err(thrown) => {
+                free(req, opened);
+                return Err(thrown);
+            }
         }
-        return Ok(None);
+    }
+    let [stdin, stdout, stderr] = match opened {
+        [Some(stdin), Some(stdout), Some(stderr)] => {
+            [stdin, stdout, stderr].map(Owner::hand_on_unmigrated)
+        }
+        opened => {
+            free(req, opened);
+            return Ok(None);
+        }
     };
     req.streams().standard_streams = [
         Some(stdin.resource()),
@@ -3008,7 +3054,7 @@ impl Ops for Output {
 /// (`php_stream_wrapper_log_error`), `strerror(errno)` for the plain
 /// files wrapper, and `operation failed` for any other that logged
 /// nothing.
-type Opened = Result<Stream, String>;
+type Opened = Result<Owner<Stream>, String>;
 
 /// `php_stream_open_wrapper_ex`'s `options`, the bits of it this engine
 /// reads.
@@ -3372,7 +3418,7 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
 /// The stream a `php://` fd opens as: over a socket, the `tcp_socket` kind
 /// php swaps its ops to ([`Request::php_socket_stream`]); over anything
 /// else, the plain file's kind.
-fn fd_stream(req: &mut Request, fd: OwnedFd, mode: &[u8]) -> Result<Stream, Thrown> {
+fn fd_stream(req: &mut Request, fd: OwnedFd, mode: &[u8]) -> Result<Owner<Stream>, Thrown> {
     match fd_kind(&fd, mode) {
         FdStream::Socket => req.php_socket_stream(fd),
         kind => StreamLayer::stream_from_fd(req, fd, kind),
@@ -3439,7 +3485,7 @@ fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<O
     let seeks = standard == Standard::Stdin || matches!(fd_kind(&fd, mode), FdStream::Socket);
     let stream = fd_stream(req, fd, mode)?;
     if !seeks {
-        req.stream_op(stream, |_, opened| {
+        req.stream_op(*stream, |_, opened| {
             opened.flags.no_seek = true;
             opened.position = -1;
         });
@@ -3492,7 +3538,7 @@ fn strtol(bytes: &[u8]) -> i64 {
 /// `_php_stream_temp_create_ex` (`Z/main/streams/memory.c:519`): the
 /// temp stream registered first, then the memory stream it encloses, so
 /// the two ids come out in php's order.
-fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Stream, Thrown> {
+fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Owner<Stream>, Thrown> {
     temp_stream(req, mode, smax, "TEMP", Vec::new())
 }
 
@@ -3505,7 +3551,7 @@ fn temp_stream(
     smax: usize,
     label: &'static str,
     meta: Vec<(Vec<u8>, MetaValue)>,
-) -> Result<Stream, Thrown> {
+) -> Result<Owner<Stream>, Thrown> {
     let kind = Temp {
         inner: None,
         own: None,
@@ -3516,8 +3562,10 @@ fn temp_stream(
     let mut outer = PhpStream::new(Box::new(kind), mode.as_mode());
     outer.flags.no_buffer = true;
     let outer = req.stream_alloc(outer)?;
-    let inner = req.stream_alloc(memory(mode))?;
-    req.stream_op(outer, |_, stream| stream.ops.enclose(inner));
+    let inner = req.stream_alloc(memory(mode));
+    let (outer, inner) = freed_on_throw(req, outer, inner)?;
+    let inner = inner.hand_on_unmigrated();
+    req.stream_op(*outer, |_, stream| stream.ops.enclose(inner));
     Ok(outer)
 }
 
@@ -3591,7 +3639,7 @@ fn same_wrapper(a: &Located, b: &Located) -> bool {
 
 /// What an open answers: the stream, and the path its opener named,
 /// php's `*opened_path`, as a string of the request's.
-pub(crate) type OpenedNamed = (Stream, Option<Owner<PhpString>>);
+pub(crate) type OpenedNamed = (Owner<Stream>, Option<Owner<PhpString>>);
 
 pub(crate) trait StreamLayer {
     fn global_wrappers(&self) -> Vec<Registered>;
@@ -3607,20 +3655,24 @@ pub(crate) trait StreamLayer {
         path: &[u8],
         mode: &[u8],
         use_include_path: bool,
-    ) -> Result<Option<Stream>, Thrown>;
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
     fn open_wrapper_with(
         &mut self,
         path: &[u8],
         mode: &[u8],
         opening: crate::api::request::Opening,
-    ) -> Result<Option<Stream>, Thrown>;
-    fn open_url_wrapper(&mut self, path: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown>;
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
+    fn open_url_wrapper(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
     fn open_wrapper_ex(
         &mut self,
         path: &[u8],
         mode: &[u8],
         options: OpenOptions,
-    ) -> Result<Option<Stream>, Thrown>;
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
     fn open_wrapper_named(
         &mut self,
         path: &[u8],
@@ -3647,16 +3699,16 @@ pub(crate) trait StreamLayer {
         mode: &[u8],
         use_path: bool,
         options: OpenOptions,
-    ) -> Result<(&'static str, Result<Stream, String>), Thrown>;
+    ) -> Result<(&'static str, Result<Owner<Stream>, String>), Thrown>;
     fn learn_append_position(&mut self, stream: Stream);
     fn make_seekable(
         &mut self,
-        stream: Stream,
+        stream: Owner<Stream>,
         path: &[u8],
         options: OpenOptions,
-    ) -> Result<Option<Stream>, Thrown>;
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
     fn copy_all(&mut self, from: Stream, to: Stream) -> bool;
-    fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown>;
+    fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Owner<Stream>>, Thrown>;
     fn stream_meta_data(&mut self, stream: Stream) -> Result<Owner<PhpArray>, Thrown>;
     fn set_stream_context(&mut self, stream: Stream, context: Option<StreamCtx>);
     fn stream_context(&self, stream: Stream) -> Option<StreamCtx>;
@@ -3664,8 +3716,12 @@ pub(crate) trait StreamLayer {
     fn kind_meta_data(&self, stream: Stream) -> Option<Vec<(Vec<u8>, MetaValue)>>;
     fn wrapper_errors_text(&self, logged: &[String]) -> String;
     fn display_wrapper_errors(&mut self, path: &[u8], caption: &str, message: &str);
-    fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown>;
-    fn stream_alloc_as(&mut self, stream: PhpStream, persistent: bool) -> Result<Stream, Thrown>;
+    fn stream_alloc(&mut self, stream: PhpStream) -> Result<Owner<Stream>, Thrown>;
+    fn stream_alloc_as(
+        &mut self,
+        stream: PhpStream,
+        persistent: bool,
+    ) -> Result<Owner<Stream>, Thrown>;
     fn stream_op<R>(
         &mut self,
         stream: Stream,
@@ -3678,7 +3734,7 @@ pub(crate) trait StreamLayer {
         stream: Stream,
         len: usize,
     ) -> Result<Option<Owner<PhpString>>, Thrown>;
-    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown>;
+    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown>;
     fn wrapper_register(&mut self, protocol: &[u8], class: ClassId, flags: i64) -> bool;
     fn wrapper_unregister(&mut self, protocol: &[u8]) -> bool;
     fn wrapper_restore(&mut self, protocol: &[u8]) -> bool;
@@ -3870,7 +3926,7 @@ impl StreamLayer for Request {
         path: &[u8],
         mode: &[u8],
         use_include_path: bool,
-    ) -> Result<Option<Stream>, Thrown> {
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
         let options = OpenOptions {
             use_path: use_include_path,
             ..OpenOptions::REPORT
@@ -3884,7 +3940,7 @@ impl StreamLayer for Request {
         path: &[u8],
         mode: &[u8],
         opening: crate::api::request::Opening,
-    ) -> Result<Option<Stream>, Thrown> {
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
         let options = OpenOptions {
             use_path: opening.use_path,
             report: opening.warn,
@@ -3915,7 +3971,11 @@ impl StreamLayer for Request {
     /// bool(false)
     /// int(0)
     /// ```
-    fn open_url_wrapper(&mut self, path: &[u8], mode: &[u8]) -> Result<Option<Stream>, Thrown> {
+    fn open_url_wrapper(
+        &mut self,
+        path: &[u8],
+        mode: &[u8],
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
         let options = OpenOptions {
             use_url: true,
             only_get_headers: true,
@@ -3932,7 +3992,7 @@ impl StreamLayer for Request {
         path: &[u8],
         mode: &[u8],
         options: OpenOptions,
-    ) -> Result<Option<Stream>, Thrown> {
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
         let Some((stream, named)) = self.open_wrapper_named(path, mode, options)? else {
             return Ok(None);
         };
@@ -3991,6 +4051,7 @@ impl StreamLayer for Request {
     /// The wrapper `to_open` names located and asked, past
     /// `_php_stream_open_wrapper_ex`'s `USE_PATH`; `resolved` is whether
     /// that found the path, php's `STREAM_ASSUME_REALPATH`.
+    #[expect(clippy::too_many_lines, reason = "one php function, kept whole")]
     fn open_located(
         &mut self,
         to_open: &[u8],
@@ -4057,16 +4118,18 @@ impl StreamLayer for Request {
             Some(outer) => std::mem::replace(&mut self.streams().opened_path, outer),
             None => None,
         };
-        let named = match (&opened, named) {
-            (Ok(_), Some(name)) => Some(PhpString::filled(self, name.len(), |b| {
-                b.copy_from_slice(&name);
-            })?),
-            _ => None,
+        let (opened, named) = match (opened, named) {
+            (Ok(stream), Some(name)) => {
+                let filled = PhpString::filled(self, name.len(), |b| b.copy_from_slice(&name));
+                let (stream, named) = freed_on_throw(self, stream, filled)?;
+                (Ok(stream), Some(named))
+            }
+            (opened, _) => (opened, None),
         };
         match opened {
             Ok(stream) => {
                 let labelled = self
-                    .stream_op(stream, |req, s| {
+                    .stream_op(*stream, |req, s| {
                         s.wrapper = label;
                         s.set_orig_path(req, to_open)
                     })
@@ -4075,6 +4138,7 @@ impl StreamLayer for Request {
                     if let Some(name) = named {
                         name.give_up(self);
                     }
+                    stream.free(self);
                     return Err(thrown);
                 }
                 if options.must_seek {
@@ -4090,7 +4154,7 @@ impl StreamLayer for Request {
                     };
                 }
                 if mode.contains(&b'a') {
-                    self.learn_append_position(stream);
+                    self.learn_append_position(*stream);
                 }
                 Ok(Some((stream, named)))
             }
@@ -4136,7 +4200,7 @@ impl StreamLayer for Request {
         mode: &[u8],
         use_path: bool,
         options: OpenOptions,
-    ) -> Result<(&'static str, Result<Stream, String>), Thrown> {
+    ) -> Result<(&'static str, Result<Owner<Stream>, String>), Thrown> {
         let wrapper = &self.streams().wrappers[at];
         let (label, open, stream_stat) = (wrapper.label, wrapper.open, wrapper.stream_stat);
         let Some(open) = open else {
@@ -4157,10 +4221,18 @@ impl StreamLayer for Request {
         let outer = std::mem::take(&mut self.streams().wrapper_errors);
         let opened = open(self, path, mode, opening);
         let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
-        let opened = opened?;
-        if let Some(stream) = opened {
-            self.stream_op(stream, |_, s| s.set_wrapper_stat(stream_stat));
-        }
+        // The opener hands its owner on with the view, the hook's debt
+        // until #2102 has it return the owner: the owner taken here stands
+        // for that one, whose count is released.
+        let opened = match opened? {
+            Some(stream) => {
+                let owner = Owner::take(self, stream);
+                self.release(stream.as_value());
+                self.stream_op(stream, |_, s| s.set_wrapper_stat(stream_stat));
+                Some(owner)
+            }
+            None => None,
+        };
         Ok((
             label,
             opened.ok_or_else(|| self.wrapper_errors_text(&logged)),
@@ -4216,27 +4288,27 @@ impl StreamLayer for Request {
     /// ```
     fn make_seekable(
         &mut self,
-        stream: Stream,
+        stream: Owner<Stream>,
         path: &[u8],
         options: OpenOptions,
-    ) -> Result<Option<Stream>, Thrown> {
-        if self.stream_ref(stream).is_some_and(|s| s.ops.seekable()) {
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
+        if self.stream_ref(*stream).is_some_and(|s| s.ops.seekable()) {
             return Ok(Some(stream));
         }
         let copy = if options.will_cast {
-            temporary_file(self, None, b"php")?
+            temporary_file(self, None, b"php")
         } else {
-            Some(temp(self, TempMode::Default, PHP_STREAM_MAX_MEM)?)
+            temp(self, TempMode::Default, PHP_STREAM_MAX_MEM).map(Some)
         };
+        let (stream, copy) = freed_on_throw(self, stream, copy)?;
         if let Some(copy) = copy {
-            if self.copy_all(stream, copy) {
+            if self.copy_all(*stream, *copy) {
                 stream.free(self);
-                self.stream_op(copy, |req, s| {
+                let sought = self.stream_op(*copy, |req, s| {
                     s.seek(req, 0, Some(Whence::Set));
                     s.set_orig_path(req, path)
-                })
-                .transpose()?;
-                return Ok(Some(copy));
+                });
+                return Ok(Some(freed_on_throw(self, copy, sought.transpose())?.0));
             }
             copy.free(self);
         }
@@ -4286,7 +4358,7 @@ impl StreamLayer for Request {
     /// and one not opened is `php_stream_display_wrapper_errors`'s
     /// warning, `Failed to open directory: ` and the message, at the path
     /// as written.
-    fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Stream>, Thrown> {
+    fn open_dir_wrapper(&mut self, path: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
         if path.is_empty() {
             return Ok(None);
         }
@@ -4344,7 +4416,7 @@ impl StreamLayer for Request {
         };
         match opened {
             Ok(stream) => {
-                self.stream_op(stream, |_, s| {
+                self.stream_op(*stream, |_, s| {
                     s.wrapper = label;
                     s.flags.no_buffer = true;
                     s.flags.is_dir = true;
@@ -4536,7 +4608,7 @@ impl StreamLayer for Request {
     /// `php_stream_alloc`'s `zend_register_resource(ret, le_stream)`: the
     /// stream as the payload of a resource of the `stream` type, one
     /// owner, under the next id.
-    fn stream_alloc(&mut self, stream: PhpStream) -> Result<Stream, Thrown> {
+    fn stream_alloc(&mut self, stream: PhpStream) -> Result<Owner<Stream>, Thrown> {
         self.stream_alloc_as(stream, false)
     }
 
@@ -4548,7 +4620,7 @@ impl StreamLayer for Request {
         &mut self,
         mut stream: PhpStream,
         persistent: bool,
-    ) -> Result<Stream, Thrown> {
+    ) -> Result<Owner<Stream>, Thrown> {
         // `_php_stream_alloc`'s `FG(auto_detect_line_endings)`
         // (`Z/main/streams/streams.c:326`).
         if self
@@ -4568,18 +4640,18 @@ impl StreamLayer for Request {
         // persistent stream's is `pemalloc`'d persistent, off the
         // request's count.
         stream.flags.persistent = persistent;
-        let res = if persistent {
+        let owner = if persistent {
             Resource::persistent(self, kind, Some(stream), PHP_STREAM_SIZE)?
         } else {
             stream.ops.lay_down(self)?;
             Resource::sized(self, kind, Some(stream), PHP_STREAM_SIZE)?
-        }
-        .hand_on_unmigrated();
+        };
+        let res = *owner;
         if let Some(Some(stream)) = res.native_mut::<Option<PhpStream>>(self) {
             stream.res = Some(res);
             stream.ops.adopt(Stream::of(res));
         }
-        Ok(Stream::of(res))
+        Ok(owner.into_typed(Stream::of))
     }
 
     /// One operation on a stream with the request free beside it: the
@@ -4661,7 +4733,7 @@ impl StreamLayer for Request {
         Ok(Some(out.finish(self)))
     }
 
-    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Stream, Thrown> {
+    fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown> {
         let (mode, process, kept) = match kind {
             FdStream::File { mode } => (mode, None, None),
             FdStream::Kept { mode, position } => (mode, None, Some(position)),
