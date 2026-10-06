@@ -239,7 +239,7 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
         file.display()
     );
     let served = engine.serve_capture(&source, Capture::default());
-    let _ = std::fs::remove_file(&file);
+    std::fs::remove_file(&file).ok();
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "bool(true)\n1 a\n2 b\nint(42)\nfloat(1.5)\nstring(4) \"text\"\n"
@@ -392,7 +392,7 @@ fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
         file.display()
     );
     let served = engine.serve_capture(&source, Capture::default());
-    let _ = std::fs::remove_file(&file);
+    std::fs::remove_file(&file).ok();
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
         "bool(false)\nint(1045)\n"
