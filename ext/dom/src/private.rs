@@ -18,7 +18,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Emalloc;
+use php_ext::values::{Emalloc, PhpObject};
 use php_ext_libxml::ffi::{Kind, Node, NodeObject, Ns, PrivateData};
 
 use crate::document::XMLNS_NS;
@@ -358,6 +358,17 @@ impl Mapper {
 /// ```
 pub(crate) fn of(obj: &mut NodeObject) -> Option<&mut Private> {
     obj.private_data_mut::<Private>()
+}
+
+/// `intern->document->private_data = php_dom_libxml_private_data_header(private)`:
+/// `private` laid down on the document `object` counts, or given up
+/// where it counts none, so no private data is dropped with no request
+/// at hand.
+pub(crate) fn lay_down(req: &mut Request, object: PhpObject, private: Private) {
+    match crate::dom_mut(req, object) {
+        Some(d) if d.obj.has_document() => d.obj.set_private_data(Box::new(private)),
+        _ => private.free(req),
+    }
 }
 
 /// `php_dom_ensure_templated_content`: a template element's contents,

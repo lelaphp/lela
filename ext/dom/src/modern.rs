@@ -40,8 +40,9 @@ pub(crate) fn follows_spec(req: &Request, object: PhpObject) -> bool {
 /// private data: `php_dom_instantiate_object_helper`, `dom_set_xml_class`
 /// and the `private_data` its caller made with
 /// `php_dom_private_data_create`. The one private data a document has
-/// is the one handed in, so a caller that filled a mapper keeps it; the
-/// `Err` gives `private` up.
+/// is the one handed in, so a caller that filled a mapper keeps it. The
+/// `Err`, and an object with no libxml half to lay it on, give `private`
+/// up; on the `Err` `doc` is still the caller's.
 ///
 /// ```php
 /// $d = Dom\XMLDocument::createEmpty();
