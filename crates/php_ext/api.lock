@@ -633,6 +633,7 @@ request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::bailing_out
 request::Request::buffer_handler
+request::Request::buffer_handler_started
 request::Request::buffer_status
 request::Request::build_defs
 request::Request::called_scope

@@ -629,6 +629,19 @@ impl Chunk<'_> {
     }
 }
 
+/// `PHP_RSHUTDOWN_FUNCTION(url_scanner)`
+/// (`Z/ext/standard/url_scanner_ex.re:1000`): both rewriters' query
+/// pairs and hidden inputs `smart_str_free`d, which
+/// `output_reset_rewrite_vars` only empties.
+pub(crate) fn rshutdown(req: &mut Request) {
+    for context in [Context::Session, Context::Output] {
+        let mut url_app = std::mem::take(&mut context.rewriter(req).url_app);
+        let mut form_app = std::mem::take(&mut context.rewriter(req).form_app);
+        form_app.free(req);
+        url_app.free(req);
+    }
+}
+
 /// `php_url_scanner_session_handler_impl`: with pairs to add, the chunk
 /// through the scanner, and on a flush or the last call what it had not
 /// decided after it; with none, the chunk after whatever the scanner had

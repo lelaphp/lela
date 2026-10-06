@@ -12,7 +12,7 @@ use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
 };
-use php_ext::values::{PhpString, ValueRef};
+use php_ext::values::{PhpString, Value, ValueRef};
 
 use crate::State;
 use crate::encode::{DEFAULT_STRATEGY, MAX_MEM_LEVEL, size_guess};
@@ -144,15 +144,19 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
         .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {
         let text = to_string(req, &value)?;
-        let text = text.as_bytes();
-        let has = |word: &[u8]| text.windows(word.len()).any(|w| w == word);
-        globals(req).coding = if has(b"gzip") {
+        let has = |word: &[u8]| text.as_bytes().windows(word.len()).any(|w| w == word);
+        let coding = if has(b"gzip") {
             Coding::Gzip
         } else if has(b"deflate") {
             Coding::Deflate
         } else {
             Coding::None
         };
+        // `convert_to_string(enc)` converts the element in place and
+        // takes no owner; the string `to_string` answered with one is
+        // given up.
+        req.release(Value::string(text));
+        globals(req).coding = coding;
     }
     Ok(globals(req).coding)
 }
@@ -301,18 +305,6 @@ fn init(req: &mut Request, chunk_size: usize) -> Result<bool, Thrown> {
     Ok(true)
 }
 
-/// Whether a handler of `name` is on the stack,
-/// `php_output_handler_started`.
-fn started(req: &mut Request, name: &str) -> Result<bool, Thrown> {
-    let list = req.output_buffer_op(&OutputOp::ListHandlers)?;
-    let ValueRef::Array(list) = list.as_ref() else {
-        return Ok(false);
-    };
-    Ok(list.iter().any(
-        |(_, value)| matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == name.as_bytes()),
-    ))
-}
-
 /// `php_zlib_output_compression_start`: with a chunk size and a coding,
 /// the handler started, and `zlib.output_handler`'s after it.
 fn compression_start(req: &mut Request) -> Result<(), Thrown> {
@@ -405,7 +397,7 @@ pub(crate) fn on_compression(req: &mut Request, value: Option<&[u8]>) -> Result<
         return Ok(false);
     }
     globals(req).compression = compression;
-    if compression != 0 && !started(req, HANDLER_NAME)? {
+    if compression != 0 && !req.buffer_handler_started(HANDLER_NAME.as_bytes()) {
         compression_start(req)?;
     }
     Ok(true)

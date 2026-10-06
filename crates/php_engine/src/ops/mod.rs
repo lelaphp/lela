@@ -4118,6 +4118,23 @@ pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
 /// #0 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// The object is held across its `count()` method, `GC_ADDREF` and
+/// `OBJ_RELEASE` (GH-21605), so a method that frees the variable
+/// holding it reads a live `$this`, destroyed only after the call:
+///
+/// ```php
+/// class C implements Countable { public $p = 1; function count(): int { global $c; $c = null; var_dump($this); return 42; } function __destruct() { echo "gone\n"; } }
+/// $c = new C; var_dump(count($c));
+/// ```
+/// ```expect
+/// object(C)#1 (1) {
+///   ["p"]=>
+///   int(1)
+/// }
+/// gone
+/// int(42)
+/// ```
 pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i64, Thrown> {
     let value = &value.deref();
     if let Some(array) = value.as_array() {
@@ -4133,7 +4150,13 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
             && req.instance_of(class, countable)
             && let Some(method) = req.method_named(class, b"count")
         {
-            let returned = req.serve_method(method, Some(object), class, &[], &[])?;
+            // `GC_ADDREF(zobj)` before the call and `OBJ_RELEASE` after
+            // (GH-21605): a method that frees the variable holding the
+            // object still has its `$this`.
+            let held = Owner::take(req, object);
+            let returned = req.serve_method(method, Some(object), class, &[], &[]);
+            held.give_up(req);
+            let returned = returned?;
             let count = get_long(req, &returned);
             req.release(returned);
             return Ok(count);
