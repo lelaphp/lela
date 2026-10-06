@@ -14,8 +14,8 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Reached};
-use php_ext::values::{Key, Owner, PhpArray, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::walk::{self, Hold};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
     EXTR_IF_EXISTS, EXTR_OVERWRITE, EXTR_PREFIX_ALL, EXTR_PREFIX_IF_EXISTS, EXTR_PREFIX_SAME,
@@ -118,9 +118,49 @@ fn reassign_this(req: &mut Request) -> Thrown {
 ///
 /// The walk holds an owner of the array, as php's `ZVAL_COPY` of it
 /// does, so an element written over the variable that held the array
-/// leaves the elements after it standing. Under `EXTR_REFS` the
-/// reference the call passed holds it, and an element made a reference
-/// over that variable replaces the variable, not the reference's value.
+/// leaves the elements after it standing, and a destructor that runs as
+/// a variable is overwritten counts that owner:
+///
+/// ```php
+/// class D { function __destruct() { debug_zval_dump($GLOBALS['arr']); } }
+/// $o = new D; $arr = ['o' => 1]; $arr['k'] = 'v';
+/// echo extract($arr), "\n";
+/// ```
+/// ```expect
+/// array(2) refcount(3){
+///   ["o"]=>
+///   int(1)
+///   ["k"]=>
+///   string(1) "v" interned
+/// }
+/// 2
+/// ```
+///
+/// Under `EXTR_REFS` php separates the array first, before it checks
+/// the flags, so a shared array is separated in the caller's variable
+/// even where the flags are refused:
+///
+/// ```php
+/// $a = ['x' => 1]; $a['y'] = 2; $b = $a;
+/// try { extract($a, EXTR_REFS | 99); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// debug_zval_dump($b);
+/// echo extract(array_merge(['p' => 1], ['q' => 2]), EXTR_REFS), ',', $p, $q, "\n";
+/// ```
+/// ```expect
+/// extract(): Argument #2 ($flags) must be a valid extract type
+/// array(2) refcount(2){
+///   ["x"]=>
+///   int(1)
+///   ["y"]=>
+///   int(2)
+/// }
+/// 2,12
+/// ```
+///
+/// Under `EXTR_REFS` the walk holds nothing, as php's `php_extract_ref_*`
+/// functions hold nothing: the reference the call passed holds the array, and an
+/// element made a reference over that variable replaces the variable,
+/// not the reference's value.
 ///
 /// ```php
 /// function f($flags) { $k = 'kkkkk'; $v = 'vvvvv'; $z = 'ZZZZZ';
@@ -160,47 +200,42 @@ fn extract(
         Passed::Given(prefix) => Some(prefix.as_bytes().to_vec()),
         Passed::Omitted => None,
     };
-    let refs = flags & EXTR_REFS != 0;
+    // `SEPARATE_ARRAY(var_array_param)` (`Z/ext/standard/array.c:2594`),
+    // before php checks the flags.
+    let separated = if flags & EXTR_REFS != 0 {
+        match Separated::of(req, &given)? {
+            Some(separated) => Some(separated),
+            None => return Ok(0),
+        }
+    } else {
+        None
+    };
     let kind = flags & 0xff;
-    if !(EXTR_OVERWRITE..=EXTR_IF_EXISTS).contains(&kind) {
-        return Err(arg_value_error(req, 2, "be a valid extract type"));
-    }
-    if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
-        return Err(argument_error(
-            req,
-            "ValueError",
-            3,
-            "is required when using this extract type",
-        ));
-    }
-    if let Some(prefix) = &prefix
-        && !prefix.is_empty()
-        && !valid_var_name(prefix)
-    {
-        return Err(arg_value_error(req, 3, "be a valid identifier"));
-    }
-    req.forbid_dynamic_call()?;
-    let prefix = prefix.unwrap_or_default();
-    if refs {
-        return extracted_refs(req, &given, kind, &prefix);
+    let checked = checked(req, kind, prefix_given, prefix);
+    let prefix = match checked {
+        Ok(prefix) => prefix,
+        Err(thrown) => {
+            if let Some(separated) = separated {
+                separated.give_up(req);
+            }
+            return Err(thrown);
+        }
+    };
+    if let Some(separated) = separated {
+        return extracted_refs(req, separated, kind, &prefix);
     }
     let Some(array) = given.get().copied() else {
         return Ok(0);
     };
-    // `ZVAL_COPY(&array_copy, var_array_param)`: "The array might be
-    // stored in a local variable that will be overwritten". The call
-    // passed that variable by reference, so an element written through
-    // it would give up the owner the variable held; the held walk holds
-    // the array it reaches through that reference, and what writes the
-    // array separates it. A temporary nobody else can reach is held by
-    // the call, and no code tells the owner php takes of it apart.
-    let reached = given
-        .reference()
-        .map_or(Reached::Held(array), |cell| Reached::Through(cell, array));
     let mut count = 0i64;
-    walk::held(req, reached, |req, key, entry| {
-        if let Some(target) = target(req, kind, &prefix, key)? {
-            assign(req, &target, *entry)?;
+    // `ZVAL_COPY(&array_copy, var_array_param)`
+    // (`Z/ext/standard/array.c:2649`): "The array might be stored in a
+    // local variable that will be overwritten". The walk holds that
+    // owner, so an element written over the variable leaves the rows
+    // after it standing.
+    walk::foreach(req, array, Hold::Owner, |req, row| {
+        if let Some(target) = target(req, kind, &prefix, row.key())? {
+            assign(req, &target, *row.value())?;
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))
@@ -210,15 +245,15 @@ fn extract(
 
 /// `extract` under `EXTR_REFS`, php's `php_extract_ref_*` helpers: the
 /// array the call's reference holds walked by its buckets as their
-/// `ZEND_HASH_MAP_FOREACH` walks them ([`walk::buckets`]), each row a
+/// `ZEND_HASH_MAP_FOREACH` walks them ([`walk::foreach`]), each row a
 /// variable takes made a reference in place (`ZVAL_MAKE_REF_EX`) and the
 /// variable bound to it. Overwriting a variable can serve a destructor
 /// that writes the array: a row it unsets ahead is not visited, one it
 /// rewrites is read as it now stands, one it appends is past the end,
 /// and an array it puts in the variable is not the one walked. A
 /// destructor that throws leaves the rows after it bound, as php's loop
-/// tests no `EG(exception)`. A temporary passed where a reference was asked
-/// for is walked in a cell of its own, which nobody reads after.
+/// tests no `EG(exception)`. A temporary passed where a reference was
+/// asked for is walked in a copy of its own, which nobody reads after.
 ///
 /// ```php
 /// class D { function __destruct() { unset($GLOBALS['arr']['kkkkkkkkkk']); echo "d,"; } }
@@ -248,21 +283,17 @@ fn extract(
 /// ```
 fn extracted_refs(
     req: &mut Request,
-    given: &Ref<PhpArray>,
+    separated: Separated,
     kind: i64,
     prefix: &[u8],
 ) -> Result<i64, Thrown> {
-    let holder = if let Some(reference) = given.reference() {
-        reference
-    } else {
-        let Some(array) = given.get().copied() else {
-            return Ok(0);
-        };
-        req.addref(&array.to_value());
-        PhpRef::new(req, array.to_value())?.hand_on_unmigrated()
-    };
+    let table = separated.table;
     let mut count = 0i64;
-    let walked = walk::buckets(req, holder, |req, row| {
+    // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(arr, ...)` in each of the
+    // `php_extract_ref_*` helpers (`php_extract_ref_overwrite`,
+    // `Z/ext/standard/array.c:1936`), which holds nothing: the
+    // reference holds the table.
+    let walked = walk::foreach(req, table, Hold::None, |req, row| {
         if let Some(target) = target(req, kind, prefix, row.key())? {
             let cell = row.make_ref(req)?;
             req.addref(&cell.as_value());
@@ -271,10 +302,87 @@ fn extracted_refs(
         }
         Ok(ControlFlow::<()>::Continue(()))
     });
-    if given.reference().is_none() {
-        req.release(holder.as_value());
-    }
+    separated.give_up(req);
     walked.map(|_| count)
+}
+
+/// `extract`'s checks of its flags and prefix, php's order, and
+/// `zend_forbid_dynamic_call`: the prefix to put before a name, empty
+/// where none was passed.
+fn checked(
+    req: &mut Request,
+    kind: i64,
+    prefix_given: bool,
+    prefix: Option<Vec<u8>>,
+) -> Result<Vec<u8>, Thrown> {
+    if !(EXTR_OVERWRITE..=EXTR_IF_EXISTS).contains(&kind) {
+        return Err(arg_value_error(req, 2, "be a valid extract type"));
+    }
+    if kind > EXTR_SKIP && kind <= EXTR_PREFIX_IF_EXISTS && !prefix_given {
+        return Err(argument_error(
+            req,
+            "ValueError",
+            3,
+            "is required when using this extract type",
+        ));
+    }
+    if let Some(prefix) = &prefix
+        && !prefix.is_empty()
+        && !valid_var_name(prefix)
+    {
+        return Err(arg_value_error(req, 3, "be a valid identifier"));
+    }
+    req.forbid_dynamic_call()?;
+    Ok(prefix.unwrap_or_default())
+}
+
+/// The array `extract` under `EXTR_REFS` makes its rows references in,
+/// after php's `SEPARATE_ARRAY`: the array the call's reference holds,
+/// separated in the reference where it was shared, or a temporary as
+/// the call holds it where nothing else does and otherwise a copy of it
+/// the call owns, which nobody reads after.
+struct Separated {
+    table: PhpArray,
+    /// The call's copy of a shared temporary.
+    copy: Option<Owner<PhpArray>>,
+}
+
+impl Separated {
+    /// `SEPARATE_ARRAY(var_array_param)`; `None` where the argument
+    /// holds no array.
+    fn of(req: &mut Request, given: &Ref<PhpArray>) -> Result<Option<Separated>, Thrown> {
+        if let Some(reference) = given.reference() {
+            return Ok(reference
+                .separate_array(req)?
+                .map(|table| Separated { table, copy: None }));
+        }
+        let Some(array) = given.get().copied() else {
+            return Ok(None);
+        };
+        let held = array.to_value();
+        if held.is_refcounted() && held.refcount() == 1 {
+            return Ok(Some(Separated {
+                table: array,
+                copy: None,
+            }));
+        }
+        let mut copy = Owner::take(req, array);
+        if let Err(thrown) = copy.separate(req) {
+            copy.give_up(req);
+            return Err(thrown);
+        }
+        Ok(Some(Separated {
+            table: *copy,
+            copy: Some(copy),
+        }))
+    }
+
+    /// The call's copy given up, where it made one.
+    fn give_up(self, req: &mut Request) {
+        if let Some(copy) = self.copy {
+            copy.give_up(req);
+        }
+    }
 }
 
 /// The variable `extract` writes the element under `key` into, one arm
