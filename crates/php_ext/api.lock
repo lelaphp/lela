@@ -1062,6 +1062,7 @@ test::Engine::strip
 test::Engine::unit
 test::Engine::zend_version_info
 test::Entered
+test::LeakSensor
 values::ArrayIter
 values::ArrayIter::advance
 values::ArrayIter::key

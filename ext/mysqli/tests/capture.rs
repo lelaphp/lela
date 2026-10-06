@@ -191,3 +191,57 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
         "init init|i:1;\np p|i:1;\n"
     );
 }
+
+/// What mysqlnd reads off the wire is read into the buffer it parses, as
+/// php's `mysqlnd_vio::network_read` reads into its caller's, and the
+/// file a `LOAD DATA LOCAL INFILE` sends is read the same way
+/// (`mysqlnd_local_infile_read`), so a request that connects, queries,
+/// fetches, executes a prepared statement and loads a local file leaves
+/// no block of its heap held: armed, the sensor ends a request that
+/// kept a packet's string in an `InternalError` (#2092). Against the
+/// server of `ci/mysql/compose.yaml`; with none listening the test says
+/// so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
+    use php_ext::test::LeakSensor;
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let file = std::env::temp_dir().join(format!("t2092-{}.csv", std::process::id()));
+    std::fs::write(&file, "1,a\n2,b\n").expect("the file the server asks for");
+    let engine = Engine::builder()
+        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .ini("mysqli.allow_local_infile", "1")
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let source = format!(
+        "<?php $l = mysqli_init();
+        mysqli_options($l, MYSQLI_OPT_LOCAL_INFILE, true);
+        mysqli_real_connect($l, '127.0.0.1', 'root', '', 'test');
+        mysqli_query($l, 'SET GLOBAL local_infile = 1');
+        mysqli_query($l, 'CREATE TEMPORARY TABLE li (id INT, l CHAR(1))');
+        var_dump(mysqli_query($l, \"LOAD DATA LOCAL INFILE '{}' INTO TABLE li FIELDS TERMINATED BY ','\"));
+        mysqli_query($l, 'SET GLOBAL local_infile = 0');
+        $r = mysqli_query($l, 'SELECT id, l FROM li ORDER BY id');
+        while ($row = mysqli_fetch_row($r)) echo $row[0], ' ', $row[1], \"\\n\";
+        mysqli_free_result($r);
+        $s = mysqli_prepare($l, 'SELECT ? + 1, CAST(1.5 AS DOUBLE), ?');
+        $n = 41; $t = 'text';
+        mysqli_stmt_bind_param($s, 'is', $n, $t);
+        mysqli_stmt_execute($s);
+        mysqli_stmt_bind_result($s, $a, $b, $c);
+        mysqli_stmt_fetch($s);
+        var_dump($a, $b, $c);
+        mysqli_stmt_close($s);
+        mysqli_close($l);",
+        file.display()
+    );
+    let served = engine.serve_capture(&source, Capture::default());
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\n1 a\n2 b\nint(42)\nfloat(1.5)\nstring(4) \"text\"\n"
+    );
+}

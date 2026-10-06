@@ -3,7 +3,7 @@
 //! decoded once, into the type here, from the bytes the frame codec
 //! handed over; `mysql_common` serves the scrambles (`auth`).
 
-use php_ext::raising::{Level, Thrown, docref};
+use php_ext::raising::{Level, docref};
 use php_ext::request::Request;
 
 use crate::conn::ConnData;
@@ -589,39 +589,36 @@ pub(crate) struct PrepareResponse {
 
 /// What reading one packet came to: the parse, or php's `FAIL`, after
 /// whatever php set or warned.
-pub(crate) type Read<T> = Result<Option<T>, Thrown>;
+pub(crate) type Read<T> = Option<T>;
 
 impl ConnData {
     /// `mysqlnd_read_packet_header_and_body`: one packet's body, counted
     /// under its kind, the connection marked gone where the server is.
     pub(crate) fn read_packet(&mut self, req: &mut Request, kind: Prot) -> Read<Vec<u8>> {
-        let Some(size) = self
-            .net
-            .read_header(req, &mut self.stats, &mut self.error)?
-        else {
+        let Some(size) = self.net.read_header(req, &mut self.stats, &mut self.error) else {
             self.state = ConnState::QuitSent;
             if self.error.errno == 0 {
                 self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
             }
-            return Ok(None);
+            return None;
         };
         if self.net.cmd_buffer < size {
             self.error.client(
                 cr::INVALID_BUFFER_USE,
                 "Packet buffer wasn't big enough; as a workaround consider increasing value of net_cmd_buffer_size",
             );
-            return Ok(None);
+            return None;
         }
-        let Some(body) = self.net.receive(req, size, &mut self.stats)? else {
+        let Some(body) = self.net.receive(req, size, &mut self.stats) else {
             self.state = ConnState::QuitSent;
             self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
-            return Ok(None);
+            return None;
         };
         if let Some((bytes, packets)) = kind.stats() {
             self.stats.add(bytes, (HEADER_SIZE + size) as u64);
             self.stats.inc(packets);
         }
-        Ok(Some(body))
+        Some(body)
     }
 
     /// A packet read and parsed, the premature end warned as php warns
@@ -632,19 +629,17 @@ impl ConnData {
         kind: Prot,
         parse: impl FnOnce(&mut Request, &[u8], usize) -> Result<T, Short>,
     ) -> Read<T> {
-        let Some(body) = self.read_packet(req, kind)? else {
-            return Ok(None);
-        };
+        let body = self.read_packet(req, kind)?;
         match parse(req, &body, self.net.cmd_buffer) {
-            Ok(packet) => Ok(Some(packet)),
-            Err(Short(usize::MAX | 0)) => Ok(None),
+            Ok(packet) => Some(packet),
+            Err(Short(usize::MAX | 0)) => None,
             Err(Short(short)) => {
                 docref(
                     req,
                     Level::Warning,
                     &format!("{} packet {short} bytes shorter than expected", kind.name()),
                 );
-                Ok(None)
+                None
             }
         }
     }
@@ -681,9 +676,7 @@ impl ConnData {
 
     /// `php_mysqlnd_prepare_read`.
     pub(crate) fn read_prepare_response(&mut self, req: &mut Request) -> Read<PrepareResponse> {
-        let Some(body) = self.read_packet(req, Prot::PrepareResponse)? else {
-            return Ok(None);
-        };
+        let body = self.read_packet(req, Prot::PrepareResponse)?;
         let mut p = Body::new(&body);
         let mut r = PrepareResponse::default();
         if body.is_empty() {
@@ -692,12 +685,12 @@ impl ConnData {
                 Level::Warning,
                 "PREPARE packet 1 bytes shorter than expected",
             );
-            return Ok(None);
+            return None;
         }
         let code = p.u8();
         if code == ERROR_MARKER {
             r.error = Some(PacketError::read_from(p.rest()));
-            return Ok(Some(r));
+            return Some(r);
         }
         let size = body.len();
         if size != 9 && size < 12 {
@@ -706,7 +699,7 @@ impl ConnData {
                 Level::Warning,
                 &format!("Wrong COM_STMT_PREPARE response size. Received {size}"),
             );
-            return Ok(None);
+            return None;
         }
         r.stmt_id = p.u32();
         r.field_count = u32::from(p.u16());
@@ -715,7 +708,7 @@ impl ConnData {
             p.skip(1);
             r.warning_count = u32::from(p.u16());
         }
-        Ok(Some(r))
+        Some(r)
     }
 
     /// `php_mysqlnd_chg_user_read`.
