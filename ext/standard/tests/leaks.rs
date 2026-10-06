@@ -37,3 +37,23 @@ proc_close($p);
     assert_eq!(fatal, None);
     assert_eq!(stdout, "aaa -aaa\n");
 }
+
+/// The ini parser gives up the string it converted a constant's value
+/// to once it has copied the bytes, as `zend_ini_get_constant` releases
+/// its `convert_to_string` copy, whether the constant is the value, an
+/// operand, a `${…}` fallback, an offset or a concatenation's right
+/// side (#2065).
+#[test]
+fn the_ini_parser_gives_up_the_strings_of_the_constants_it_expands() {
+    let (stdout, fatal) = armed(
+        r#"<?php
+echo serialize(parse_ini_string("a = E_ALL\nb = E_ALL & ~E_NOTICE\nc = \${nope:-E_ALL}\nd[E_ALL] = x\ne = \"v\" E_ALL")), "\n";
+"#,
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(
+        stdout,
+        "a:5:{s:1:\"a\";s:5:\"30719\";s:1:\"b\";s:5:\"30711\";s:1:\"c\";s:5:\"30719\";\
+         s:1:\"d\";a:1:{i:30719;s:1:\"x\";}s:1:\"e\";s:6:\"v30719\";}\n"
+    );
+}

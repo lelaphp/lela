@@ -146,6 +146,16 @@ impl<F> InRequest<'_, F> {
     }
 }
 
+/// `convert_to_string` of a value read for its bytes, the string given
+/// up once they are copied, as `zend_ini_get_constant` releases its copy
+/// (`Z/Zend/zend_ini_parser.y:162`).
+fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
+    let string = to_string(req, value)?;
+    let bytes = string.as_bytes().to_vec();
+    req.release(Value::string(string));
+    Ok(bytes)
+}
+
 impl<F> Host for InRequest<'_, F>
 where
     F: FnMut(&mut Request, IniEvent<Value>) -> Result<(), Thrown>,
@@ -153,7 +163,7 @@ where
     type Error = Thrown;
     fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         match constant(self.req, name)? {
-            Some(value) => Ok(Some(to_string(self.req, &value)?.as_bytes().to_vec())),
+            Some(value) => string_bytes(self.req, &value).map(Some),
             None => Ok(None),
         }
     }
@@ -167,7 +177,7 @@ where
     }
 
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Thrown> {
-        Ok(to_string(self.req, &Value::float(d))?.as_bytes().to_vec())
+        string_bytes(self.req, &Value::float(d))
     }
 
     fn event(&mut self, event: IniEvent<Val>) -> Result<(), Thrown> {
