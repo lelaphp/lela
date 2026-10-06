@@ -26,12 +26,12 @@ fn table(req: &mut Request, array: &Ref<PhpArray>) -> Result<PhpArray, Thrown> {
         .ok_or_else(|| throw_error(req, "Exception", "no array"))
 }
 
-/// The hold the test natives' `$hold` names.
+/// The hold the test natives' `$owner` names: [`Hold::Owner`] where true.
 fn hold(owner: bool) -> Hold {
     if owner { Hold::Owner } else { Hold::None }
 }
 
-/// `foreach_rows(array &$array, int $stop, bool $hold): int`: the rows a
+/// `foreach_rows(array &$array, int $stop, bool $owner): int`: the rows a
 /// foreach walk visits, or a hundred times `$stop` where the walk breaks
 /// at the row keyed `$stop`.
 #[php_function]
@@ -54,7 +54,7 @@ fn foreach_rows(
     Ok(broke.unwrap_or(visited))
 }
 
-/// `foreach_throws(array &$array, bool $hold): void`: a foreach walk
+/// `foreach_throws(array &$array, bool $owner): void`: a foreach walk
 /// whose body throws at its first row, handed on with `?`.
 #[php_function]
 fn foreach_throws(req: &mut Request, array: Ref<PhpArray>, owner: bool) -> Result<(), Thrown> {
@@ -99,7 +99,7 @@ fn guarded(req: &mut Request, array: Ref<PhpArray>) -> Result<bool, Thrown> {
     Ok(walked == Guarded::Recursive)
 }
 
-/// `foreach_calls(array &$array, callable $f, bool $hold): string`: a
+/// `foreach_calls(array &$array, callable $f, bool $owner): string`: a
 /// guarded foreach walk that calls `$f` with each row's key and then
 /// reads the row's value, which `$f` may have unset, or freed with the
 /// whole table.

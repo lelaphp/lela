@@ -431,12 +431,15 @@ impl Watch {
         }
     }
 
-    /// Whether a row of `table` may be written in place: the table
-    /// stands and is not immutable.
+    /// Whether a row of `table` may be written in place: the walk's
+    /// iterator still names it. A table the walk holds is written by no
+    /// php native's walk, and a write there could land in the walk's own
+    /// copy once the program's write separated it; an immutable one is
+    /// written by nothing.
     fn writable(self, req: &mut Request, table: Arr) -> bool {
         match self {
-            Watch::Iterator(_) | Watch::Held => self.stands(req, table),
-            Watch::Immutable => false,
+            Watch::Iterator(_) => self.stands(req, table),
+            Watch::Held | Watch::Immutable => false,
         }
     }
 }
@@ -493,7 +496,10 @@ impl Row {
     /// here the walk owns the reference for the step. Asked before the
     /// body runs any code of the program, as php's walk makes it before
     /// its call; once that code has moved the row, the answer is the
-    /// `InternalError` it is, never a write elsewhere.
+    /// `InternalError` it is, never a write elsewhere. A row of a
+    /// [`Hold::Owner`] walk or of an immutable table is never written,
+    /// as no php native's walk writes one, and is that `InternalError`
+    /// too.
     pub fn make_ref(&mut self, req: &mut Request) -> Result<PhpRef, Thrown> {
         if let Some(cell) = self.value.as_php_ref() {
             return Ok(*cell);
@@ -504,10 +510,10 @@ impl Row {
                 "InternalError: a walk's row was made a reference after its table moved",
             )
         };
-        // The table stands while the walk holds it or its iterator still
-        // names it: a table destroyed under the walk poisons it. An
-        // immutable table is written by nothing. An object's slot stands
-        // while the reference still holds the object too.
+        // The table is written while the walk's iterator still names it:
+        // a table destroyed under the walk poisons it ([`Watch::writable`]).
+        // An object's slot stands while the reference still holds the
+        // object too.
         let watch = self.watch;
         let place = match self.at {
             At::Bucket(table, pos) if watch.writable(req, table) => table.value_ref_at(pos),

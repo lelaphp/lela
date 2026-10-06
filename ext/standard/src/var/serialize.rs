@@ -466,8 +466,8 @@ fn nested(
     out.extend_from_slice(b":{");
     let mut skip_magic = incomplete;
     // `ZEND_HASH_FOREACH_KEY_VAL_IND(ht, ...)` (`Z/ext/standard/var.c:991`),
-    // and the same loop over what `__serialize()` answered
-    // (`Z/ext/standard/var.c:1159`), which hold nothing: a row a
+    // and `ZEND_HASH_FOREACH_KEY_VAL` over what `__serialize()` answered
+    // (`Z/ext/standard/var.c:1160`), which hold nothing: a row a
     // `__serialize` rewrites in place is written as it now is, and a
     // table the program gives up mid-walk ends the walk, where php reads
     // it freed, and the brace is closed after the rows written, whatever

@@ -159,13 +159,13 @@ fn extract_refs_walks_the_array_live_under_a_destructor() {
 }
 
 /// `source` served by an engine of this extension alone with the leak
-/// sensor armed: what it wrote, and the fatal that ended it, if any.
-#[cfg(debug_assertions)]
+/// sensor armed where the build has one, a debug build's: what it wrote,
+/// and the fatal that ended it, if any.
 fn armed(source: &str) -> (String, Option<String>) {
-    let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension()])
-        .sense_leaks(php_ext::test::LeakSensor::Armed)
-        .build();
+    let engine = Engine::builder().extensions(&[php_ext_standard::extension()]);
+    #[cfg(debug_assertions)]
+    let engine = engine.sense_leaks(php_ext::test::LeakSensor::Armed);
+    let engine = engine.build();
     let served = engine.serve_capture(source, Capture::default());
     (
         String::from_utf8_lossy(&served.stdout).into_owned(),
@@ -189,7 +189,6 @@ fn armed(source: &str) -> (String, Option<String>) {
 /// 4 GB allocation. No divergence row records it:
 /// `docs/divergence.toml` is keyed by a compared site, and no witness or
 /// phpt compares this input. A row is added if one ever does (#1989).
-#[cfg(debug_assertions)]
 #[test]
 fn serialize_ends_a_nested_array_s_walk_where_a_serialize_method_destroys_it() {
     let (stdout, fatal) = armed(
@@ -208,7 +207,6 @@ fn serialize_ends_a_nested_array_s_walk_where_a_serialize_method_destroys_it() {
 ///
 /// No divergence row records the walk's end: no witness or phpt
 /// compares this input.
-#[cfg(debug_assertions)]
 #[test]
 fn print_r_ends_a_nested_array_s_walk_where_a_debug_info_method_destroys_it() {
     let (stdout, fatal) = armed(
@@ -231,7 +229,6 @@ fn print_r_ends_a_nested_array_s_walk_where_a_debug_info_method_destroys_it() {
 ///
 /// No divergence row records the walk's end: no witness or phpt
 /// compares this input.
-#[cfg(debug_assertions)]
 #[test]
 fn print_r_ends_an_object_s_nested_array_where_a_debug_info_method_destroys_it() {
     let (stdout, fatal) = armed(
