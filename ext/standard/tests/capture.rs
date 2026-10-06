@@ -158,57 +158,87 @@ fn extract_refs_walks_the_array_live_under_a_destructor() {
     assert_eq!(stdout, "d,2,new");
 }
 
-/// `serialize` holds an owner of a nested array while it walks it when
-/// it reached the array through a shared reference. An element's
-/// `__serialize` that assigns over that reference gives up the array's
-/// only owner. The rows after the element are still the array's, so a
-/// string of their size allocated in `__serialize` is not handed their
-/// blocks.
+/// `source` served by an engine of this extension alone with the leak
+/// sensor armed where the build has one, a debug build's: what it wrote,
+/// and the fatal that ended it, if any.
+fn armed(source: &str) -> (String, Option<String>) {
+    let engine = Engine::builder().extensions(&[php_ext_standard::extension()]);
+    #[cfg(debug_assertions)]
+    let engine = engine.sense_leaks(php_ext::test::LeakSensor::Armed);
+    let engine = engine.build();
+    let served = engine.serve_capture(source, Capture::default());
+    (
+        String::from_utf8_lossy(&served.stdout).into_owned(),
+        served.fatal,
+    )
+}
+
+/// `serialize` walks a nested array with the foreach walk holding
+/// nothing, as `php_var_serialize_nested_data` holds nothing. An
+/// element's `__serialize` that assigns over the reference holding the
+/// array's only owner destroys it mid-walk, and the walk ends there: the
+/// element it was lent is written, no row after it is read, and the
+/// brace is closed though the count said two. The strings allocated in
+/// `__serialize` are the size of the rows after it, so a walk that read
+/// on would read their blocks. Without the walk's end the debug build
+/// read the freed rows (#1989, #2150).
 ///
-/// Here dax departs from php on purpose. php's
-/// `php_var_serialize_nested_data` walks the table with no owner of it,
-/// so on this input it reads freed memory. The pinned php prints
-/// `s:10:"ZZZZZZZZZZ"` for the last row, and what it prints changes
-/// with the allocator; on #1989's own input it dies on a 4 GB
-/// allocation. dax writes the row the array held. On the same kind of
-/// input, the owner also shows where php is deterministic. A row that
-/// `__serialize` rewrites in place separates the array instead, so dax
-/// writes the old row and php the new one. An array freed at that
-/// assignment is freed when the walk ends, after php would free it.
-/// Whether those stand is #2043's ruling. No divergence row records
-/// any of these: `docs/divergence.toml` is keyed by a compared site, and
-/// no witness or phpt compares these inputs. A row is added if one ever
-/// does (#1989).
+/// Here dax departs from php on purpose. php reads the freed table: the
+/// pinned php prints `s:10:"ZZZZZZZZZZ"` for the last row, and what it
+/// prints changes with the allocator; on #1989's own input it dies on a
+/// 4 GB allocation. No divergence row records it:
+/// `docs/divergence.toml` is keyed by a compared site, and no witness or
+/// phpt compares this input. A row is added if one ever does (#1989).
 #[test]
-fn serialize_holds_a_nested_array_a_serialize_method_gives_up() {
-    let (stdout, fatal) = served(
-        "<?php class C { function __serialize(): array { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v];\n$outer = [&$r];\necho serialize($outer);",
+fn serialize_ends_a_nested_array_s_walk_where_a_serialize_method_destroys_it() {
+    let (stdout, fatal) = armed(
+        "<?php class C { function __serialize(): array { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; $GLOBALS['y'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v];\n$outer = [&$r];\necho serialize($outer);",
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "a:1:{i:0;a:2:{i:0;O:1:\"C\":0:{}}}");
+}
+
+/// `print_r` walks a nested array with the foreach walk holding nothing,
+/// as `print_hash` holds nothing. An element's `__debugInfo` that
+/// assigns over the reference holding the array's only owner destroys
+/// it mid-walk, and the walk ends there: the element it was lent is
+/// printed, no row after it is read, and the `)` is written (#2044,
+/// #2150).
+///
+/// No divergence row records the walk's end: no witness or phpt
+/// compares this input.
+#[test]
+fn print_r_ends_a_nested_array_s_walk_where_a_debug_info_method_destroys_it() {
+    let (stdout, fatal) = armed(
+        "<?php class C { function __debugInfo() { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v];\n$outer = [&$r];\nprint_r($outer);",
     );
     assert_eq!(fatal, None);
     assert_eq!(
         stdout,
-        "a:1:{i:0;a:2:{i:0;O:1:\"C\":0:{}i:1;s:10:\"vvvvvvvvvv\";}}"
+        "Array\n(\n    [0] => Array\n        (\n            [0] => C Object\n                (\n                )\n\n        )\n\n)\n"
     );
 }
 
-/// `print_r` holds a nested array while it walks it when it reached the
-/// array through a shared reference, as `serialize` does. An element's
-/// `__debugInfo` that assigns over that reference gives up the array's
-/// only owner, and the rows after the element are still the array's, so
-/// a string of their size allocated in `__debugInfo` is not handed their
-/// blocks.
+/// `print_r` over an object whose property holds a reference to a
+/// nested array: an element's `__debugInfo` that assigns over the
+/// variable the reference names destroys the array mid-walk, and the
+/// foreach walk, holding nothing as `print_hash` holds nothing, ends
+/// there, so the strings allocated after are not read as its rows. The
+/// debug build read the freed rows and faulted before the foreach walk
+/// (#2105, #2150).
 ///
-/// Here dax departs from php on purpose: dax prints
-/// the row the array held. No divergence row records it, as #1989's
-/// test says for `serialize`: no witness or phpt compares this input
-/// (#2044).
+/// No divergence row records the walk's end: no witness or phpt
+/// compares this input.
 #[test]
-fn print_r_holds_a_nested_array_a_debug_info_method_gives_up() {
-    let (stdout, fatal) = served(
-        "<?php class C { function __debugInfo() { $GLOBALS['r'] = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$r = [new C, $v . $v];\n$outer = [&$r];\nprint_r($outer);",
+fn print_r_ends_an_object_s_nested_array_where_a_debug_info_method_destroys_it() {
+    let (stdout, fatal) = armed(
+        "<?php class C { function __debugInfo() { $GLOBALS['o']->p = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\nclass O { public $p; }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$o = new O; $o->p = [new C, $v . $v];\nprint_r($o);",
     );
     assert_eq!(fatal, None);
-    assert!(stdout.contains("[1] => vvvvvvvvvv\n"), "{stdout}");
+    assert_eq!(
+        stdout,
+        "O Object\n(\n    [p] => Array\n        (\n            [0] => C Object\n                (\n                )\n\n        )\n\n)\n"
+    );
 }
 
 /// What `conn` sent until it went quiet for a moment.

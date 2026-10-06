@@ -11,7 +11,7 @@ use php_unit::decl::{ClassKind, MethodDecl, Visibility};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpString};
-use crate::engine::{MethodAt, NativeMethod};
+use crate::engine::{FunctionTable, MethodAt, NativeMethod};
 
 use super::{Member, MemberAt, Request, lowered_key};
 
@@ -40,12 +40,14 @@ impl Request {
             .map(|member| member.class)
     }
 
-    /// `zend_hash_find_ptr(&ce->function_table, lcname)` over the
-    /// class's native methods: the method under the lowered name, by
-    /// identity, the class's own first and then each parent's, since
-    /// `zend_do_inheritance` copies a parent's table into the child's
-    /// (`ReflectionObject` answers `getName` with `ReflectionClass`'s);
-    /// none where no class of the chain has an entry of that name.
+    /// `zend_hash_find_ptr(&ce->function_table, lcname)`: the method
+    /// under the lowered name, by identity, the class's own first and
+    /// then each parent's, since `zend_do_inheritance` copies a parent's
+    /// table into the child's (`ReflectionObject` answers `getName` with
+    /// `ReflectionClass`'s); none where no class of the chain has an
+    /// entry of that name. Each class is one lookup in its function
+    /// table ([`FunctionTable`]), a name not yet lowered lowered on the
+    /// stack.
     pub fn method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
         let mut at = Some(class);
         let mut depth = 0;
@@ -62,43 +64,23 @@ impl Request {
         None
     }
 
-    /// [`Request::method_named`] over one class's own declarations: a
-    /// native class's among the native methods, a user class's among the
-    /// user functions declared with it.
+    /// [`Request::method_named`] over one class's own function table,
+    /// one lookup of the lowered name: a native class's built at
+    /// startup, a declared class's as it bound
+    /// ([`Request::bind_members`]).
     fn own_method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        let decl = self.class_decl(class)?;
-        let at = usize::try_from(class.0).ok()?;
-        if let Some(declared) = at.checked_sub(self.shared.classes.len()) {
-            if decl.kind == ClassKind::Enum
-                && let Some(method) = crate::enums::EnumMethod::of(lowered, decl.backing)
-            {
-                return self.enum_function(class, method);
-            }
-            self.declared.get(declared)?;
-            let at = decl
-                .methods
-                .iter()
-                .position(|method| method.function.name.0.eq_ignore_ascii_case(lowered))?;
-            let member = Member {
-                class,
-                at: MemberAt::Method(u32::try_from(at).ok()?),
-            };
-            return self.member_function(member);
-        }
-        let table = self.shared.function_tables.get(at)?;
+        let table = self.function_table(class)?;
         lowered_key(lowered, |key| table.get(key).copied())
     }
 
-    /// The function number `zend_enum_register_funcs` gave `method` of
-    /// the enum `class` a program declared.
-    fn enum_function(&self, class: ClassId, method: crate::enums::EnumMethod) -> Option<Function> {
-        let at = self
-            .enum_functions
-            .iter()
-            .position(|held| *held == (class, method))?;
-        crate::enums::ENUM_FUNCTIONS
-            .checked_add(u32::try_from(at).ok()?)
-            .map(Function)
+    /// `ce->function_table` of a linked class, its own methods by their
+    /// lowered names ([`FunctionTable`]).
+    fn function_table(&self, class: ClassId) -> Option<&FunctionTable> {
+        let at = usize::try_from(class.0).ok()?;
+        match at.checked_sub(self.shared.classes.len()) {
+            None => self.shared.function_tables.get(at),
+            Some(declared) => Some(&self.declared.get(declared)?.bound.function_table),
+        }
     }
 
     /// The enum method a function number past
@@ -190,12 +172,14 @@ impl Request {
 
     /// The number of the user function a class's declaration holds at
     /// `member`, a method or a hook, among the functions the request
-    /// declared with it.
+    /// declared with it: one of the rows the class took as it bound.
     pub(crate) fn member_function(&self, member: Member) -> Option<Function> {
-        let position = self
-            .user_functions
-            .iter()
-            .position(|user| user.member == Some(member))?;
+        let members = self.declared_row(member.class)?.bound.members.clone();
+        let position = members.into_iter().find(|&row| {
+            self.user_functions
+                .get(row)
+                .is_some_and(|user| user.member == Some(member))
+        })?;
         self.user_function_id(position)
     }
 
@@ -250,11 +234,18 @@ impl Request {
     }
 
     /// `ce->parent`: the linked parent of a class, none at a root; an
-    /// engine's class's as startup linked it.
+    /// engine's class's as startup linked it, a declared class's as it
+    /// bound ([`super::Bound`]), and by its name where it bound first.
     pub(crate) fn class_parent(&self, class: ClassId) -> Option<ClassId> {
         let at = usize::try_from(class.0).ok()?;
         if let Some(parent) = self.shared.parents.get(at) {
             return *parent;
+        }
+        if let Some(parent) = self
+            .declared_row(class)
+            .and_then(|declared| declared.bound.parent)
+        {
+            return Some(parent);
         }
         self.class_decl(class)?
             .parent

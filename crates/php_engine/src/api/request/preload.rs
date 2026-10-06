@@ -16,7 +16,7 @@ use php_unit::decl::{ClassDecl, Name, shown};
 use php_unit::link::{Linked, Obligation};
 use php_unit::{AutoGlobal, Level, Unit};
 
-use super::{Declared, PreloadStatistics, Request, UserFunction, user_function_decl};
+use super::{Bound, Declared, PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::values::ClassId;
 use crate::engine::Cached;
 use crate::enums::EnumMethod;
@@ -56,6 +56,12 @@ impl<T> Stacked<T> {
 
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.preloaded.iter().chain(self.own.iter())
+    }
+
+    /// The row at `at` to change, where it is the request's own; none
+    /// for the preload's, which are published and shared.
+    fn own_mut(&mut self, at: usize) -> Option<&mut T> {
+        self.own.get_mut(at.checked_sub(self.preloaded.len())?)
     }
 
     pub(crate) fn push(&mut self, row: T) {
@@ -147,6 +153,12 @@ impl<T: Key> Keyed<T> {
 
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
         self.rows.iter()
+    }
+
+    /// The row at `at` to change, where it is the request's own
+    /// ([`Stacked::own_mut`]); what changes must leave its key as it is.
+    pub(crate) fn own_mut(&mut self, at: usize) -> Option<&mut T> {
+        self.rows.own_mut(at)
     }
 
     /// The row filed under the lowered `key`, and where it stands.
@@ -686,10 +698,12 @@ impl Request {
                     renumbered.push((*old, class_id(natives + self.declared.len())));
                     let place = self.buckets.take();
                     // Renumbered, so the placed rows are built again
-                    // under the new numbers.
+                    // under the new numbers, and the members bound again
+                    // below.
                     self.declared.push(Declared {
                         place,
                         placed: std::sync::OnceLock::new(),
+                        bound: Bound::default(),
                         ..declared
                     });
                 }

@@ -63,7 +63,9 @@ mod lazy;
 mod member;
 mod signature;
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use php_ext::abi::{
     DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers, OrFalse,
@@ -91,6 +93,11 @@ struct State {
     /// `REFLECTION_G(key)`, the request's secret `getId` hashes a
     /// reference's identity under so no address is shown.
     reference_key: std::hash::RandomState,
+    /// The function table of each linked class as reflection reads it,
+    /// built the first time the request reflects on the class
+    /// ([`linked_table`]); what a link left never changes, so it stands
+    /// for the rest of the request.
+    linked: HashMap<ClassId, Arc<LinkedTable>>,
 }
 
 /// The extension value (design §7.1): the twenty-six classes in the
@@ -4493,6 +4500,9 @@ pub(crate) struct ReflectedState {
     /// method table lists: the reflector's `$name`, `$prop::get` or
     /// `$prop::set`, names it among the hooks of `$class`'s property.
     hook: bool,
+    /// php's `intern->ptr` of a `ReflectionMethod`: the method its
+    /// constructor or factory found, which each accessor reads.
+    method: Option<MethodPtr>,
 }
 
 /// The payload: the reflector's fields, boxed, inside the `sizeof` of
@@ -4791,6 +4801,21 @@ fn this_attribute(req: &mut Request, this: PhpObject) -> Result<attr::AttributeR
 fn kept_closure(req: &Request, this: PhpObject) -> Option<PhpObject> {
     let kept = kept_object(req, this)?;
     kept.closure(req).map(|_| kept)
+}
+
+/// `intern->ptr` as `reflection_method_factory` and
+/// `ReflectionMethod::__construct` write it: the method found, held, or
+/// none where nothing was found ([`MethodPtr`]).
+fn keep_method(req: &mut Request, this: PhpObject, method: Option<MethodPtr>) {
+    if let Some(reflected) = this.native_mut::<Reflected>(req) {
+        reflected.method = method;
+    }
+}
+
+/// The method a `ReflectionMethod` holds ([`keep_method`]); none for one
+/// whose constructor never ran, and for a hook's.
+fn kept_method(req: &Request, this: PhpObject) -> Option<MethodPtr> {
+    this.native::<Reflected>(req)?.method.clone()
 }
 
 /// `intern->ce`, the class the reflector was asked about; `None` for a
@@ -5633,13 +5658,14 @@ fn class_string(
         return Ok(out);
     };
     let sub_indent = format!("{indent}    ");
-    let methods = linked_methods(req, class);
+    let table = linked_table(req, class);
+    let methods = &table.rows;
     class_header(
         req,
         &mut out,
         class,
         &decl,
-        &methods,
+        methods,
         object.is_some(),
         indent,
     );
@@ -6707,10 +6733,16 @@ fn method_or_invoke(
 /// `zend_hash_find_ptr(&ce->function_table, lcname)` alone: the linked
 /// method of that name, with no `__invoke` made for a `Closure`.
 fn table_method(req: &mut Request, class: ClassId, name: &[u8]) -> Option<LinkedMethod> {
-    let lowered = name.to_ascii_lowercase();
-    linked_methods(req, class)
-        .into_iter()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
+    linked_table(req, class).named(name).cloned()
+}
+
+/// `zend_hash_find_ptr(&ce->function_table, lcname)` as a
+/// `ReflectionMethod` keeps it: the row of the linked table of `class`
+/// under the name, held ([`MethodPtr`]).
+fn method_ptr(req: &mut Request, class: ClassId, name: &[u8]) -> Option<MethodPtr> {
+    let table = linked_table(req, class);
+    let at = table.place(name)?;
+    Some(MethodPtr { table, at })
 }
 
 /// `zend_get_closure_invoke_method`: `Closure::__invoke` over one
@@ -6808,35 +6840,187 @@ fn is_constructor(method: &MethodDecl) -> bool {
 /// `do_inheritance_check_on_method` gives it: the parent method's
 /// prototype, or the parent method itself, unless the parent's is
 /// private and not abstract, or a constructor with no abstract
-/// prototype, which leaves none.
+/// prototype, which leaves none. The rows, copied out of the table
+/// [`linked_table`] keeps.
 fn linked_methods(req: &mut Request, class: ClassId) -> Vec<LinkedMethod> {
-    linked_methods_at(req, class, 0)
+    linked_table(req, class).rows.clone()
 }
 
-fn linked_methods_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<LinkedMethod> {
-    let Some(decl) = req.class_decl(class).cloned() else {
-        return Vec::new();
+/// A linked class's function table as reflection reads it
+/// ([`linked_methods`]): its rows in php's order, which a listing
+/// walks, and where each stands by its lowered name, which a lookup by
+/// name reads, as `zend_hash_find` reads php's.
+#[derive(Default)]
+pub(crate) struct LinkedTable {
+    rows: Vec<LinkedMethod>,
+    places: HashMap<Box<[u8]>, usize>,
+}
+
+impl LinkedTable {
+    /// The row under `name`, any case.
+    fn named(&self, name: &[u8]) -> Option<&LinkedMethod> {
+        self.rows.get(self.place(name)?)
+    }
+
+    /// Where the row under `name`, any case, stands.
+    fn place(&self, name: &[u8]) -> Option<usize> {
+        if name.iter().any(u8::is_ascii_uppercase) {
+            return self
+                .places
+                .get(name.to_ascii_lowercase().as_slice())
+                .copied();
+        }
+        self.places.get(name).copied()
+    }
+
+    /// `do_inherit_method`: the child's row of the same name takes the
+    /// prototype the check gives it, or the parent's row is appended.
+    fn inherit(&mut self, parent: &LinkedMethod, is_interface: bool) {
+        let key = parent.decl.function.name.0.to_ascii_lowercase();
+        let Some(child) = self.places.get(key.as_slice()).copied() else {
+            self.places.insert(key.into_boxed_slice(), self.rows.len());
+            self.rows.push(parent.clone());
+            return;
+        };
+        let Some(child) = self.rows.get_mut(child) else {
+            return;
+        };
+        if is_interface && child.scope == parent.scope {
+            // The same method in an interface may be inherited a few times.
+            return;
+        }
+        let flags_private_alone = parent.decl.visibility == Visibility::Private
+            && !parent.decl.is_abstract
+            && !is_constructor(&parent.decl);
+        if flags_private_alone {
+            return;
+        }
+        let proto_is_abstract = parent.prototype.is_some() || parent.decl.is_abstract;
+        if is_constructor(&parent.decl) && !proto_is_abstract {
+            return;
+        }
+        child.prototype = Some(parent.prototype.unwrap_or(parent.scope));
+    }
+}
+
+/// php's `intern->ptr` for a `ReflectionMethod`: one row of the linked
+/// table of the class the reflector was asked about, held with the
+/// table, so an accessor reads the method rather than finding it again.
+#[derive(Clone)]
+pub(crate) struct MethodPtr {
+    table: Arc<LinkedTable>,
+    at: usize,
+}
+
+impl MethodPtr {
+    /// The method held.
+    fn method(&self) -> Option<&LinkedMethod> {
+        self.table.rows.get(self.at)
+    }
+}
+
+/// The linked table of `class` ([`linked_methods`]), built once per
+/// request and kept for every read after: it is what the link of
+/// `class` left, which nothing after changes.
+///
+/// ```php
+/// interface I { function i(); }
+/// abstract class B { function b() {} abstract function a(); }
+/// abstract class C extends B implements I { function A() {} protected function hidden() {} }
+/// $m = new ReflectionMethod("C", "I");
+/// $n = (new ReflectionClass("C"))->getMethod("B");
+/// $o = new ReflectionMethod("C", "a");
+/// var_dump($m->getName(), $m->class, $m->isAbstract(), $n->class, $n->isStatic(), $o->getPrototype()->class);
+/// var_dump(array_map(fn ($m) => $m->class . "::" . $m->name, (new ReflectionClass("C"))->getMethods()));
+/// var_dump((new ReflectionClass("C"))->hasMethod("HIDDEN"), (new ReflectionMethod("C", "hidden"))->isProtected());
+/// ```
+/// ```expect
+/// string(1) "i"
+/// string(1) "I"
+/// bool(true)
+/// string(1) "B"
+/// bool(false)
+/// string(1) "B"
+/// array(4) {
+///   [0]=>
+///   string(4) "C::A"
+///   [1]=>
+///   string(9) "C::hidden"
+///   [2]=>
+///   string(4) "B::b"
+///   [3]=>
+///   string(4) "I::i"
+/// }
+/// bool(true)
+/// bool(true)
+/// ```
+fn linked_table(req: &mut Request, class: ClassId) -> Arc<LinkedTable> {
+    linked_table_at(req, class, 0).0
+}
+
+/// [`linked_table`] at `depth` of the walk up the parents and
+/// interfaces, cut at a depth no declaration can make, and whether the
+/// table is whole. A table is kept only when it is whole: one the cut
+/// left short, or one built while a parent or an interface it names
+/// was not yet declared, is built again at the next read.
+fn linked_table_at(req: &mut Request, class: ClassId, depth: u32) -> (Arc<LinkedTable>, bool) {
+    if let Some(table) = req.state::<State>().linked.get(&class) {
+        return (Arc::clone(table), true);
+    }
+    let (table, whole) = link_table(req, class, depth);
+    let table = Arc::new(table);
+    if whole {
+        req.state::<State>()
+            .linked
+            .insert(class, Arc::clone(&table));
+    }
+    (table, whole)
+}
+
+/// The linked table of `class` from its declaration, its parent's
+/// table and its new interfaces' ([`linked_methods`]), and whether it
+/// is whole ([`linked_table_at`]).
+fn link_table(req: &mut Request, class: ClassId, depth: u32) -> (LinkedTable, bool) {
+    let Some(decl) = req.class_decl(class) else {
+        return (LinkedTable::default(), true);
     };
-    let mut table: Vec<LinkedMethod> = decl
-        .methods
-        .iter()
-        .map(|method| LinkedMethod {
+    let parent = decl.parent.clone();
+    let interfaces = decl.interfaces.clone();
+    let mut table = LinkedTable {
+        rows: Vec::with_capacity(decl.methods.len()),
+        places: HashMap::with_capacity(decl.methods.len()),
+    };
+    for method in &decl.methods {
+        let key = method
+            .function
+            .name
+            .0
+            .to_ascii_lowercase()
+            .into_boxed_slice();
+        table.places.entry(key).or_insert(table.rows.len());
+        table.rows.push(LinkedMethod {
             decl: method.clone(),
             scope: class,
             prototype: None,
             via_handler: false,
-        })
-        .collect();
-    if depth > 64 {
-        return table;
+        });
     }
-    let parent = decl
-        .parent
-        .as_ref()
-        .and_then(|name| lookup_class(req, &name.0).ok().flatten());
+    if depth > 64 {
+        return (table, false);
+    }
+    // A class bound before a class it names was declared is linked
+    // without it, which the next read after that class is declared sees.
+    let mut whole = interfaces
+        .iter()
+        .all(|name| lookup_class(req, &name.0).ok().flatten().is_some());
+    let named_parent = parent.is_some();
+    let parent = parent.and_then(|name| lookup_class(req, &name.0).ok().flatten());
+    whole &= parent.is_some() || !named_parent;
     if let Some(parent) = parent {
-        for inherited in linked_methods_at(req, parent, depth + 1) {
-            inherit_method(&mut table, inherited, false);
+        let (inherited, parent_whole) = linked_table_at(req, parent, depth + 1);
+        whole &= parent_whole;
+        for method in &inherited.rows {
+            table.inherit(method, false);
         }
     }
     let parent_interfaces = parent.map_or_else(Vec::new, |p| linked_interfaces(req, p));
@@ -6845,39 +7029,13 @@ fn linked_methods_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<Linke
         .filter(|i| !parent_interfaces.contains(i))
         .collect();
     for interface in own_interfaces {
-        for inherited in linked_methods_at(req, interface, depth + 1) {
-            inherit_method(&mut table, inherited, true);
+        let (inherited, interface_whole) = linked_table_at(req, interface, depth + 1);
+        whole &= interface_whole;
+        for method in &inherited.rows {
+            table.inherit(method, true);
         }
     }
-    table
-}
-
-/// `do_inherit_method`: the child's entry of the same name takes the
-/// prototype the check gives it, or the parent's row is appended.
-fn inherit_method(table: &mut Vec<LinkedMethod>, parent: LinkedMethod, is_interface: bool) {
-    let name = parent.decl.function.name.0.to_ascii_lowercase();
-    let child = table
-        .iter_mut()
-        .find(|m| m.decl.function.name.0.to_ascii_lowercase() == name);
-    let Some(child) = child else {
-        table.push(parent);
-        return;
-    };
-    if is_interface && child.scope == parent.scope {
-        // The same method in an interface may be inherited a few times.
-        return;
-    }
-    let flags_private_alone = parent.decl.visibility == Visibility::Private
-        && !parent.decl.is_abstract
-        && !is_constructor(&parent.decl);
-    if flags_private_alone {
-        return;
-    }
-    let proto_is_abstract = parent.prototype.is_some() || parent.decl.is_abstract;
-    if is_constructor(&parent.decl) && !proto_is_abstract {
-        return;
-    }
-    child.prototype = Some(parent.prototype.unwrap_or(parent.scope));
+    (table, whole)
 }
 
 /// `ce->interfaces` after linking, in php's order. An internal class
@@ -7232,13 +7390,13 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         let scope = class_name_of(req, method.scope);
         words.push(format!("inherits {}", String::from_utf8_lossy(&scope)));
     } else if let Some(parent) = class_chain(req, ce).get(1).copied() {
-        let lowered = method.decl.function.name.0.to_ascii_lowercase();
-        let overwrites = linked_methods(req, parent)
-            .into_iter()
-            .find(|m| m.decl.function.name.0.to_ascii_lowercase() == lowered)
-            .filter(|m| m.scope != method.scope && m.decl.visibility != Visibility::Private);
+        let table = linked_table(req, parent);
+        let overwrites = table
+            .named(&method.decl.function.name.0)
+            .filter(|m| m.scope != method.scope && m.decl.visibility != Visibility::Private)
+            .map(|m| m.scope);
         if let Some(overwritten) = overwrites {
-            let scope = class_name_of(req, overwritten.scope);
+            let scope = class_name_of(req, overwritten);
             words.push(format!("overwrites {}", String::from_utf8_lossy(&scope)));
         }
     }
