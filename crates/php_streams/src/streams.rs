@@ -4534,7 +4534,8 @@ impl StreamLayer for Request {
             })
             .flatten();
         match meta {
-            Some(Ok(Some(array))) => Ok(Some(Value::array(array))),
+            // The meta-data row the array is written into takes its owner.
+            Some(Ok(Some(array))) => Ok(Some(array.into_value().hand_on_unmigrated())),
             Some(Err(thrown)) => Err(thrown),
             Some(Ok(None)) | None => Ok(None),
         }

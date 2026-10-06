@@ -23,7 +23,7 @@ pub use crate::api::net::Readiness;
 
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream, StreamCtx};
-use crate::api::values::PhpArray;
+use crate::api::values::{Owner, PhpArray};
 
 /// One socket `transport` an extension hands the engine with
 /// [`ExtensionBuilder::register`], php's `php_stream_xport_register(name,
@@ -189,9 +189,9 @@ pub trait Crypto: Any + Send {
     fn alive(&mut self, req: &mut Request, socket: &mut CryptoSocket<'_>) -> bool;
 
     /// What `PHP_STREAM_OPTION_META_DATA_API` adds under `crypto`, ahead
-    /// of the socket's `timed_out`, `blocked` and `eof`; `None` while the
-    /// layer is not active.
-    fn meta(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown>;
+    /// of the socket's `timed_out`, `blocked` and `eof`, its one owner the
+    /// caller's; `None` while the layer is not active.
+    fn meta(&self, req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown>;
 
     /// `STREAM_XPORT_OP_CONNECT`'s tail, and `php_openssl_tcp_sockop_accept`'s
     /// for a client: asked once the socket connected or was accepted,
