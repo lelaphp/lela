@@ -3,7 +3,8 @@
 //! php's two conversions between an array's table and an object's,
 //! which share the table where its keys allow it.
 //!
-//! The rule is `zend_array_dup_element`'s (`Z/Zend/zend_hash.c:2293`):
+//! The rule is `zend_array_dup_value`'s (`Z/Zend/zend_hash.c:2293`),
+//! which `zend_array_dup_element` (`:2330`) runs for each bucket:
 //! a reference nothing but the table holds is copied as the value it
 //! holds, so the copy shares no cell the original's last holder left
 //! behind, unless that value is the table being copied; anything else
@@ -18,12 +19,17 @@
 //! builds a copy under the rule with each key spelt as the other kind
 //! spells it.
 //!
-//! Every builder of a copy calls here and keeps no rule of its own:
-//! [`Heap::array_dup`], a clone's members, the separation of an object's
-//! table ([`Heap::object_properties_copy`]), and the engine's
-//! `$GLOBALS`, `get_defined_vars()`, `(object)` and `(array)` casts,
-//! whose symbol tables and declared rows are the engine's and whose
-//! elements are each copied by [`Heap::dup_value`].
+//! Every copy of a table the engine makes calls here and keeps no rule
+//! of its own: [`Heap::array_dup`], a clone's members, the separation of
+//! an object's table ([`Heap::object_properties_copy`]), and the
+//! engine's `$GLOBALS`, `get_defined_vars()`, `(object)` and `(array)`
+//! casts, `get_object_vars()` and `get_mangled_object_vars()`, whose
+//! symbol tables and declared rows are the engine's and whose elements
+//! are each copied by [`Heap::dup_value`]. php writes the same unwrap
+//! inline in algorithms that copy no table (an array spread, a
+//! closure's debug statics, the array natives), and those keep php's
+//! inline form; `ext/mysqli`'s `fetch_object` conversion moves here
+//! with #2110.
 
 use crate::array::{Arr, DeclaredRows, Key, canonical_int};
 use crate::hooks::{Fatal, HeapHooks};
