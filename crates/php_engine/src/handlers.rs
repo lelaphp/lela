@@ -4908,6 +4908,32 @@ pub(crate) fn new<T: Tier>(
 /// m2
 /// ```
 ///
+/// The pair is read back only in the scope that wrote it: a trait's
+/// method runs in the scope of each class that uses it, and a closure
+/// in the scope it is bound to, over one op array and so one slot,
+/// where php gives each scope a cache of its own. The private method
+/// one scope may call is the access rule's `Error` from the next.
+///
+/// ```php
+/// trait T { function call() { return A::p(); } }
+/// class A { use T; private static function p() { return "A::p"; } }
+/// class B { use T; }
+/// foreach ([new A, new B, new A] as $by) {
+///     try { echo $by->call(), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// $f = function () { return A::p(); };
+/// foreach ([Closure::bind($f, null, A::class), $f] as $g) {
+///     try { echo $g(), "\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// A::p
+/// Call to private method A::p() from scope B
+/// A::p
+/// A::p
+/// Call to private method A::p() from global scope
+/// ```
+///
 /// A method named on a trait itself, and never one a class took from
 /// it, is php's deprecation on every pass, since php caches no such
 /// callee, and an abstract one is `zend_abstract_method_call`'s `Error`
@@ -4970,14 +4996,17 @@ pub(crate) fn init_static_method_call<T: Tier>(
             class
         }
     };
+    // The pair answers where it holds this pass's class and was written
+    // from this frame's scope ([`Cached::ClassAndCallee`]).
     let cached_callee = match (op.op2_type, primed) {
         (
             OperandKind::Const,
             Cached::ClassAndCallee {
                 class: held,
+                scope,
                 function,
             },
-        ) if held == class => Some(function),
+        ) if held == class && scope == req.frame_scope(frame) => Some(function),
         _ => None,
     };
     if let Some(function) = cached_callee {
@@ -5032,10 +5061,19 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // rule, and before the rule that the callee is no instance method,
     // which php applies on the cached pass too. php holds the write off
     // a callee reached through a trampoline, one marked
-    // `ZEND_ACC_NEVER_CACHE` and one a trait declared; this engine has
-    // only the last, whose deprecation is raised on every pass.
+    // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
+    // is raised on every pass.
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
-        req.prime(frame, slot, Cached::ClassAndCallee { class, function });
+        let scope = req.frame_scope(frame);
+        req.prime(
+            frame,
+            slot,
+            Cached::ClassAndCallee {
+                class,
+                scope,
+                function,
+            },
+        );
     }
     static_call_frame(req, frame, op, class, function, name)
 }
@@ -22412,7 +22450,7 @@ mod tests {
             assert!(
                 matches!(
                     req.cached(frame, CacheSlot(0)),
-                    Cached::ClassAndCallee { class, function }
+                    Cached::ClassAndCallee { class, scope: None, function }
                         if Some(class) == closure && Some(function) == callee
                 ),
                 "the class and the callee are in the slot after pass {pass}"
