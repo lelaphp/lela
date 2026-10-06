@@ -15,13 +15,13 @@ use php_unit::{FramelessEntry, Opcode, Unit};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Key, PhpArray, PhpString, Value};
-use crate::engine::Shared;
+use crate::engine::{FunctionTable, Shared};
 use crate::exec;
 use crate::observer::LinkedAtLoad;
 
 use super::{
-    Declared, Deprecations, Keyed, Member, MemberAt, Request, UserFunction, lowered_key, preload,
-    user_function_decl,
+    Bound, Declared, Deprecations, Keyed, Member, MemberAt, Request, UserFunction, lowered_key,
+    preload, user_function_decl,
 };
 
 /// The classes a load bound early, whose field no file but this one
@@ -416,50 +416,82 @@ impl Request {
             composed: composed.map(Box::new),
             place,
             placed: OnceLock::new(),
+            bound: Bound::default(),
         });
         self.bind_members(class);
     }
 
     /// The members of `class`, bound, into the function table beside it:
     /// an enum's own `cases`, `from` and `tryFrom`, each method, and
-    /// each hook of the class's own properties.
+    /// each hook of the class's own properties; and the class's own
+    /// function table, built once here and read by every lookup by name
+    /// after ([`Request::method_named`]), each method under its lowered
+    /// name as `zend_hash_add_ptr` files it, an enum's three as the
+    /// functions that serve them:
+    ///
+    /// ```php
+    /// trait T { function fromTrait() { return "t"; } }
+    /// class P { function Inherited() { return "p"; } private function hidden() {} }
+    /// class C extends P { use T; function OWN() { return "c"; } }
+    /// enum E: string { case A = "a"; function label() { return "l"; } }
+    /// $c = new C;
+    /// echo $c->own(), $c->INHERITED(), $c->FromTrait(), E::FROM("a")->Label(), "\n";
+    /// var_dump(method_exists($c, "HIDDEN"), method_exists("C", "nope"), is_callable([$c, "fromtrait"]), E::tryfrom("z"));
+    /// var_dump(get_class_methods("C"));
+    /// ```
+    /// ```expect
+    /// cptl
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// NULL
+    /// array(3) {
+    ///   [0]=>
+    ///   string(3) "OWN"
+    ///   [1]=>
+    ///   string(9) "fromTrait"
+    ///   [2]=>
+    ///   string(9) "Inherited"
+    /// }
+    /// ```
     pub(super) fn bind_members(&mut self, class: ClassId) {
         let Some(decl) = self.class_decl(class) else {
             return;
         };
-        // `zend_enum_register_funcs` at the link: the enum's own
-        // `cases`, `from` and `tryFrom`, which the compiler declared
-        // after its methods and which no body of the unit serves.
-        let mut enum_functions = Vec::new();
-        if decl.kind == ClassKind::Enum {
-            for method in &decl.methods {
-                let lowered = method.function.name.0.to_ascii_lowercase();
-                if let Some(method) = crate::enums::EnumMethod::of(&lowered, decl.backing) {
-                    enum_functions.push((class, method));
+        let first = self.user_functions.len();
+        let enum_backing = (decl.kind == ClassKind::Enum).then_some(decl.backing);
+        let keys: Vec<Box<[u8]>> = decl
+            .methods
+            .iter()
+            .map(|method| {
+                method
+                    .function
+                    .name
+                    .0
+                    .to_ascii_lowercase()
+                    .into_boxed_slice()
+            })
+            .collect();
+        let mut function_table = FunctionTable::with_capacity(keys.len());
+        for (method, key) in (0u32..).zip(keys) {
+            let numbered = self.bind_method(class, method);
+            // `zend_enum_register_funcs` at the link: the enum's own
+            // `cases`, `from` and `tryFrom`, which the compiler declared
+            // after its methods and which no body of the unit serves.
+            let served =
+                enum_backing.and_then(|backing| crate::enums::EnumMethod::of(&key, backing));
+            let function = match served {
+                Some(served) => {
+                    let at = u32::try_from(self.enum_functions.len()).ok();
+                    self.enum_functions.push((class, served));
+                    at.and_then(|at| crate::enums::ENUM_FUNCTIONS.checked_add(at))
+                        .map(Function)
                 }
-            }
-        }
-        self.enum_functions.extend(enum_functions);
-        let methods = self.class_decl(class).map_or(0, |decl| decl.methods.len());
-        for method in 0..methods {
-            let method = u32::try_from(method).unwrap_or(u32::MAX);
-            let Some((unit, body)) = self.method_body(class, method) else {
-                continue;
+                None => numbered,
             };
-            let flags = self
-                .class_decl(class)
-                .and_then(|decl| decl.methods.get(usize::try_from(method).ok()?))
-                .map(|method| crate::attributes::Flags::of(&method.function.attributes))
-                .unwrap_or_default();
-            self.user_functions.push(UserFunction {
-                unit,
-                body,
-                member: Some(Member {
-                    class,
-                    at: MemberAt::Method(method),
-                }),
-                flags,
-            });
+            if let Some(function) = function {
+                function_table.entry(key).or_insert(function);
+            }
         }
         // Each hook of the class's own properties, `prop_info->hooks`,
         // a function of its own that php's function table never lists.
@@ -499,6 +531,60 @@ impl Request {
                 flags,
             });
         }
+        let bound = Bound {
+            function_table,
+            members: first..self.user_functions.len(),
+            parent: self
+                .class_decl(class)
+                .and_then(|decl| self.class_named(&decl.parent.as_ref()?.0)),
+        };
+        if let Some(declared) = self.declared_mut(class) {
+            declared.bound = bound;
+        }
+    }
+
+    /// The method at `method` of `class` into the function table: its
+    /// body and flags as a user function's row, and the number it is
+    /// known by; none where the declaration has no body for it.
+    fn bind_method(&mut self, class: ClassId, method: u32) -> Option<Function> {
+        let (unit, body) = self.method_body(class, method)?;
+        let flags = self
+            .class_decl(class)
+            .and_then(|decl| decl.methods.get(usize::try_from(method).ok()?))
+            .map(|method| crate::attributes::Flags::of(&method.function.attributes))
+            .unwrap_or_default();
+        let function = self.user_function_id(self.user_functions.len());
+        self.user_functions.push(UserFunction {
+            unit,
+            body,
+            member: Some(Member {
+                class,
+                at: MemberAt::Method(method),
+            }),
+            flags,
+        });
+        function
+    }
+
+    /// The row of a class the request declared, or the preload did;
+    /// none for an engine's class.
+    pub(super) fn declared_row(&self, class: ClassId) -> Option<&Declared> {
+        self.declared.get(self.declared_at(class)?)
+    }
+
+    /// The row of a class the request declared, to bind; none for an
+    /// engine's class and for one the preload published.
+    fn declared_mut(&mut self, class: ClassId) -> Option<&mut Declared> {
+        let at = self.declared_at(class)?;
+        self.declared.own_mut(at)
+    }
+
+    /// Where a declared class's row stands among the declared rows: its
+    /// number past the engine's classes.
+    fn declared_at(&self, class: ClassId) -> Option<usize> {
+        usize::try_from(class.0)
+            .ok()?
+            .checked_sub(self.shared.classes.len())
     }
 
     /// Where the op array of a hook of the property at `property` of a

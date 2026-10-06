@@ -953,14 +953,11 @@ impl Request {
     /// rendering lists it. `zend_get_closure_invoke_method` is the one
     /// the engine makes, `Closure::__invoke`.
     pub(crate) fn trampoline_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        self.native_method_id(|m| {
-            matches!(m.at, MethodAt::Trampoline { class: held, at: index }
-                    if held == class && self
-                        .shared
-                        .trampolines
-                        .get(usize::try_from(index).unwrap_or(usize::MAX))
-                        .is_some_and(|method| method.function.name.0.eq_ignore_ascii_case(lowered)))
-        })
+        let table = self
+            .shared
+            .trampoline_tables
+            .get(usize::try_from(class.0).ok()?)?;
+        super::lowered_key(lowered, |key| table.get(key).copied())
     }
 
     /// Serve the native the call frame on top of [`Vm`] names: its entry

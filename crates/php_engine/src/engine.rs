@@ -621,7 +621,12 @@ pub(crate) struct Shared {
     /// Each class's `ce->function_table`, one row per row of `classes`
     /// ([`function_tables`]): its own methods under their lowered
     /// names, each the `Function` its row of `methods` is.
-    pub(crate) function_tables: Vec<HashMap<Box<[u8]>, Function>>,
+    pub(crate) function_tables: Vec<FunctionTable>,
+    /// Each class's trampolines, one row per row of `classes`
+    /// ([`trampoline_tables`]): what its `get_method` synthesises under
+    /// a name its function table has no row for, each under its lowered
+    /// name.
+    pub(crate) trampoline_tables: Vec<FunctionTable>,
     /// Each class's `ce->parent`, one row per row of `classes`, resolved
     /// once as `zend_register_internal_class_ex` links it: a native
     /// class's parent is a native class.
@@ -926,6 +931,16 @@ fn class_keys(classes: &[ClassDecl]) -> HashMap<Box<[u8]>, ClassId> {
     keys
 }
 
+/// A class's `ce->function_table`: its own methods, each under its
+/// lowered name, so a lookup is one `zend_hash_find` over the lowered
+/// name and never a walk of the methods. A parent's rows are not copied
+/// in as `zend_do_inheritance` copies them; a lookup walks up the chain
+/// instead ([`Request::method_named`]). Iteration reads the declaration,
+/// whose order is php's, never the table.
+///
+/// [`Request::method_named`]: crate::api::request::Request::method_named
+pub(crate) type FunctionTable = HashMap<Box<[u8]>, Function>;
+
 /// Each native class's `ce->function_table` as `zend_register_functions`
 /// fills it: every row of `methods` a class declares, under the lowered
 /// name of its declaration, numbered past the `functions` natives. The
@@ -934,22 +949,53 @@ fn function_tables(
     classes: &[ClassDecl],
     methods: &[NativeMethod],
     functions: usize,
-) -> Vec<HashMap<Box<[u8]>, Function>> {
-    let mut tables: Vec<HashMap<Box<[u8]>, Function>> = vec![HashMap::new(); classes.len()];
+) -> Vec<FunctionTable> {
+    tables_of(classes.len(), methods, functions, |at| match at {
+        MethodAt::Declared { class, at } => {
+            let decl = classes.get(usize::try_from(class.0).ok()?)?;
+            Some((class, decl.methods.get(usize::try_from(at).ok()?)?))
+        }
+        _ => None,
+    })
+}
+
+/// Each native class's trampolines by name: every row of `methods` a
+/// class's `get_method` answers ([`MethodAt::Trampoline`]), under the
+/// lowered name of its row of `trampolines`, the first of a name kept.
+fn trampoline_tables(
+    classes: usize,
+    methods: &[NativeMethod],
+    trampolines: &[MethodDecl],
+    functions: usize,
+) -> Vec<FunctionTable> {
+    tables_of(classes, methods, functions, |at| match at {
+        MethodAt::Trampoline { class, at } => {
+            Some((class, trampolines.get(usize::try_from(at).ok()?)?))
+        }
+        _ => None,
+    })
+}
+
+/// One table per class, `classes` of them: each row of `methods` that
+/// `place` gives a class and a declaration, filed among that class's
+/// rows under the declaration's lowered name and numbered past the
+/// `functions` natives; the first of a name stays.
+fn tables_of<'a>(
+    classes: usize,
+    methods: &[NativeMethod],
+    functions: usize,
+    place: impl Fn(MethodAt) -> Option<(ClassId, &'a MethodDecl)>,
+) -> Vec<FunctionTable> {
+    let mut tables = vec![FunctionTable::new(); classes];
     for (row, method) in (functions..).zip(methods) {
-        let MethodAt::Declared { class, at } = method.at else {
+        let Some((class, decl)) = place(method.at) else {
             continue;
         };
-        let (Ok(class), Ok(at), Ok(row)) = (
-            usize::try_from(class.0),
-            usize::try_from(at),
+        let (Some(table), Ok(row)) = (
+            usize::try_from(class.0)
+                .ok()
+                .and_then(|class| tables.get_mut(class)),
             u32::try_from(row),
-        ) else {
-            continue;
-        };
-        let (Some(table), Some(decl)) = (
-            tables.get_mut(class),
-            classes.get(class).and_then(|decl| decl.methods.get(at)),
         ) else {
             continue;
         };
@@ -2793,6 +2839,8 @@ impl EngineBuilder {
         } = link_classes(&core, &extensions);
         let class_keys = class_keys(&classes);
         let function_tables = function_tables(&classes, &methods, functions.len());
+        let trampoline_tables =
+            trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
         let parents = classes
             .iter()
             .map(|decl| {
@@ -2837,6 +2885,7 @@ impl EngineBuilder {
                 trampolines,
                 class_keys,
                 function_tables,
+                trampoline_tables,
                 parents,
                 placed,
                 constants,
