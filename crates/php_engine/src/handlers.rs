@@ -4997,16 +4997,11 @@ pub(crate) fn init_static_method_call<T: Tier>(
         }
     };
     // The pair answers where it holds this pass's class and was written
-    // from this frame's scope ([`Cached::ClassAndCallee`]).
+    // from this frame's scope ([`Request::cached_callee`]).
     let cached_callee = match (op.op2_type, primed) {
-        (
-            OperandKind::Const,
-            Cached::ClassAndCallee {
-                class: held,
-                scope,
-                function,
-            },
-        ) if held == class && scope == req.frame_scope(frame) => Some(function),
+        (OperandKind::Const, Cached::ClassAndCallee { .. }) => {
+            req.cached_callee(frame, slot, class)
+        }
         _ => None,
     };
     if let Some(function) = cached_callee {
@@ -5064,16 +5059,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     // `ZEND_ACC_NEVER_CACHE` and one a trait declared, whose deprecation
     // is raised on every pass.
     if op.op1_type == OperandKind::Const && op.op2_type == OperandKind::Const && !uncached {
-        let scope = req.frame_scope(frame);
-        req.prime(
-            frame,
-            slot,
-            Cached::ClassAndCallee {
-                class,
-                scope,
-                function,
-            },
-        );
+        req.prime_callee(frame, slot, class, function);
     }
     static_call_frame(req, frame, op, class, function, name)
 }
@@ -5086,8 +5072,8 @@ pub(crate) fn init_static_method_call<T: Tier>(
 /// the calling frame's receiver), and php's `Error` where neither
 /// serves, `Call to undefined method` or the access rule's; then the
 /// end [`Request::static_method_found`] holds a method to. The `bool`
-/// is whether php keeps the callee out of the cache slot: a
-/// trampoline, and a method named on a trait.
+/// is whether php keeps the callee out of the cache slot: one
+/// [`Request::never_cached`] names, and a method named on a trait.
 fn static_method(
     req: &mut Request,
     class: crate::api::values::ClassId,
@@ -5111,9 +5097,9 @@ fn static_method(
             None => return Err(undefined_method(req, class, written)),
         },
     };
-    let trampoline = req.trampoline_of(function).is_some();
+    let never_cached = req.never_cached(function);
     let of_trait = req.static_method_found(function)?;
-    Ok((function, trampoline || of_trait))
+    Ok((function, never_cached || of_trait))
 }
 
 /// `INIT_STATIC_METHOD_CALL` over a method the program names, once the
@@ -5640,29 +5626,12 @@ fn method_of_call(
     let slot = CacheSlot(op.out);
     let class = object.class();
     let named = op.op2_type == OperandKind::Const;
-    if named
-        && let Cached::ClassAndCallee {
-            class: held,
-            scope,
-            function,
-        } = req.cached(frame, slot)
-        && held == class
-        && scope == req.frame_scope(frame)
-    {
+    if named && let Some(function) = req.cached_callee(frame, slot, class) {
         return Ok((function, None));
     }
     let (function, receiver) = method_on(req, object, method)?;
     if named && receiver.is_none() && !req.never_cached(function) {
-        let scope = req.frame_scope(frame);
-        req.prime(
-            frame,
-            slot,
-            Cached::ClassAndCallee {
-                class,
-                scope,
-                function,
-            },
-        );
+        req.prime_callee(frame, slot, class, function);
     }
     Ok((function, receiver))
 }
@@ -22660,6 +22629,7 @@ mod tests {
                 .into_boxed_slice(),
                 vars: vec![php_unit::decl::Name::from("o")].into_boxed_slice(),
                 num_cvs: 1,
+                // `zend_alloc_cache_slots(2)`: the class and the callee.
                 cache_size: 16,
                 ..OpArray::default()
             },

@@ -579,7 +579,8 @@ pub(crate) fn observer_slot_of<'map>(
 /// A closure rebound to another scope, and a trait's method in each
 /// class that uses it, reads the cache its op array has, where php
 /// gives each a cache of its own (`zend_create_closure`,
-/// `Z/Zend/zend_closures.c:793`; `zend_add_trait_method`) because its
+/// `Z/Zend/zend_closures.c:794`; `zend_add_trait_method`,
+/// `Z/Zend/zend_inheritance.c:2369`) because its
 /// slots hold what the scope decides. A function, a class and a
 /// constant resolve the same in every scope; a method's callee does
 /// not, so [`Cached::ClassAndCallee`] carries the scope it was resolved
@@ -645,15 +646,18 @@ pub(crate) enum Cached {
     ///
     /// `scope` is the calling scope the callee was resolved from, which
     /// the access rule reads, and the private method of the scope that
-    /// stands in for another class's (`zend_std_get_method`). php keys
-    /// on no scope because its cache is one per scope: a trait's method
-    /// is copied into each class that uses it with a cache of its own
-    /// (`zend_add_trait_method`), and a closure bound to another scope
-    /// is given a fresh one (`zend_create_closure`,
-    /// `Z/Zend/zend_closures.c:793`). This engine's cache is one per op
-    /// array, so the pair is read back only in the scope that wrote it.
-    /// What the slot holds is what was asked and what answered, never
-    /// how the answer was found.
+    /// stands in for another class's (`zend_std_get_method`,
+    /// `Z/Zend/zend_object_handlers.c:1939`). php keys on no scope
+    /// because its cache is one per scope: a trait's method is copied
+    /// into each class that uses it with a cache of its own
+    /// (`zend_add_trait_method`, `Z/Zend/zend_inheritance.c:2369`), and
+    /// a closure bound to another scope is given a fresh one
+    /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). This
+    /// engine's cache is one per op array, so the pair is read back only
+    /// in the scope that wrote it, and two scopes calling through one
+    /// opline take the slot in turn where php's keep one each. What the
+    /// slot holds is what was asked and what answered, never how the
+    /// answer was found.
     ClassAndCallee {
         class: ClassId,
         scope: Option<ClassId>,
@@ -776,8 +780,9 @@ pub(crate) struct Vm {
     /// The sites standing, `zend_get_attribute_object`'s dummy frames.
     sites: Vec<Site>,
     /// How many times a kernel has looked a name up among the linked
-    /// functions or the linked classes, which is what a primed cache
-    /// slot spares: the tests count it across two passes of one opline.
+    /// functions, the linked classes or a receiver's methods, which is
+    /// what a primed cache slot spares: the tests count it across two
+    /// passes of one opline.
     #[cfg(test)]
     pub(crate) lookups: u32,
 }
