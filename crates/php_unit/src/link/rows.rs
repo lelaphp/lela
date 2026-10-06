@@ -19,12 +19,19 @@ pub struct LinkedClass<H> {
     /// declare, then the traits' abstract methods it took, then the
     /// interfaces' methods nothing above declared.
     pub methods: Rows<Row<H>, Folded>,
+    /// `ce->properties_info` in php's order: the class's own properties,
+    /// a trait's among them, then each of the parent's table it does not
+    /// declare, a private one among them, then the interfaces' properties
+    /// nothing above declared (`do_inherit_property`). A row's holder is
+    /// the property's `ce`, the class whose declaration it is.
+    pub properties: Rows<Row<H>, Exact>,
 }
 
 impl<H> Default for LinkedClass<H> {
     fn default() -> Self {
         LinkedClass {
             methods: Rows::default(),
+            properties: Rows::default(),
         }
     }
 }

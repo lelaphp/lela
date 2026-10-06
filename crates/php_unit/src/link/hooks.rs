@@ -530,11 +530,10 @@ impl<'a, H: Copy> Linker<'a, H> {
 
     /// The abstract hooks a linked class is left with, each named as
     /// `zend_verify_abstract_class` names one, its scope and its name:
-    /// for every property the class holds, its own, then each
-    /// parent's it does not redeclare, then each interface's, the hook
-    /// of each kind the table's entry carries once
-    /// `inherit_property_hook` has done its work, which an abstract one a backed
-    /// declaration implements is not.
+    /// for every property the class holds, in `properties_info`'s order
+    /// ([`Linker::properties_above`]), the hook of each kind the table's
+    /// entry carries once `inherit_property_hook` has done its work,
+    /// which an abstract one a backed declaration implements is not.
     ///
     /// ```php
     /// interface I { public $prop { get; set; } }
@@ -543,8 +542,22 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// ```expect exit=255
     /// Fatal error: Class C contains 2 abstract methods and must therefore be declared abstract or implement the remaining methods (I::$prop::get, I::$prop::set) in %s on line 3
     /// ```
+    ///
+    /// The parent's table holds its interfaces' properties after its
+    /// chain's, and the class's own interfaces' come after the whole of
+    /// it:
+    ///
+    /// ```php
+    /// interface I { public $a { get; } }
+    /// abstract class P implements I { abstract public $p { get; } }
+    /// interface J { public $b { get; } }
+    /// abstract class Q extends P {}
+    /// class C extends Q implements J {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class C contains 3 abstract methods and must therefore be declared abstract or implement the remaining methods (P::$p::get, I::$a::get, J::$b::get) in %s on line 6
+    /// ```
     pub(super) fn abstract_hooks(&self, child: &'a ClassDecl) -> Vec<String> {
-        let mut names: Vec<&'a [u8]> = Vec::new();
         let mut sources: Vec<&'a ClassDecl> = vec![child];
         let mut above = self.class_parent(child);
         let mut depth = 0;
@@ -559,15 +572,9 @@ impl<'a, H: Copy> Linker<'a, H> {
         for class in &sources {
             self.interfaces_of(&class.interfaces, &mut interfaces, 0);
         }
-        for class in sources.iter().chain(interfaces.iter()) {
-            for property in &class.properties {
-                if !names.contains(&&*property.name.0) {
-                    names.push(&property.name.0);
-                }
-            }
-        }
         let mut out = Vec::new();
-        for name in names {
+        for &(_, property) in self.properties_above(child).rows() {
+            let name = &property.name.0;
             for kind in HookKind::ALL {
                 if let Some((class, hook)) = self.abstract_hook_of(child, name, kind, &interfaces) {
                     out.push(format!(

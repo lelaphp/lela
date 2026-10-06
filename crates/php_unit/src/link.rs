@@ -1400,11 +1400,10 @@ enum Check {
     TraitAbstract,
 }
 
-/// The property and constant tables of the chain above a class, the
-/// way php's tables hold them after `zend_do_inheritance`: each class's
-/// own members, then what it inherited that it does not redeclare.
+/// The constant table of the chain above a class, the way php's table
+/// holds it after `zend_do_inheritance`: each class's own constants,
+/// then what it inherited that it does not redeclare.
 struct Tables<'a> {
-    properties: Vec<(&'a ClassDecl, &'a PropertyDecl)>,
     constants: Vec<(&'a ClassDecl, &'a ClassConstDecl)>,
 }
 
@@ -1421,6 +1420,15 @@ fn method_name<'a>(row: &(Option<&'a ClassDecl>, &'a MethodDecl)) -> &'a [u8] {
 /// `methods` under its name, unless one of its name stands already.
 fn put<'a>(methods: &mut Methods<'a>, by: Option<&'a ClassDecl>, method: &'a MethodDecl) {
     methods.add((by, method), &method.function.name.0, method_name);
+}
+
+/// `properties_info` as a class's link reads it, each property beside
+/// the class that declared it, indexed by name.
+type Properties<'a> = Rows<(&'a ClassDecl, &'a PropertyDecl), Exact>;
+
+/// A property of [`Properties`] by its name.
+fn property_name<'a>(row: &(&'a ClassDecl, &'a PropertyDecl)) -> &'a [u8] {
+    &row.1.name.0
 }
 
 /// The class being linked, the table it is linked against and the
@@ -1656,25 +1664,14 @@ impl<'a, H: Copy> Linker<'a, H> {
             .any(|up| self.instance_of_at(up, of, depth + 1))
     }
 
-    /// The properties and constants `class` has with what it inherited,
-    /// its own first.
+    /// The constants `class` has with what it inherited, its own first.
     fn tables(&self, class: &'a ClassDecl) -> Tables<'a> {
         let mut tables = Tables {
-            properties: Vec::new(),
             constants: Vec::new(),
         };
         let mut at = Some(class);
         let mut depth = 0;
         while let Some(here) = at {
-            for property in &here.properties {
-                if !tables
-                    .properties
-                    .iter()
-                    .any(|(_, p)| p.name == property.name)
-                {
-                    tables.properties.push((here, property));
-                }
-            }
             for constant in &here.constants {
                 if !tables
                     .constants
@@ -1752,6 +1749,7 @@ impl<'a, H: Copy> Linker<'a, H> {
     fn linked_class(&self, child: &'a ClassDecl, abstracts: usize) -> Option<LinkedClass<H>> {
         Some(LinkedClass {
             methods: self.method_rows(child, abstracts)?,
+            properties: self.property_rows(child)?,
         })
     }
 
@@ -1824,6 +1822,110 @@ impl<'a, H: Copy> Linker<'a, H> {
     ) -> Option<(&'a ClassDecl, &'a MethodDecl)> {
         let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
         Some((by, by.methods.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `ce->properties_info` as `zend_do_link_class` leaves it, in its
+    /// order: the class's own properties, a trait's among them; each of
+    /// the parent's table it does not declare, a private one among them
+    /// (`do_inherit_property` appends whatever it does not find); then
+    /// each of its interfaces', in `zend_do_implement_interfaces`' order,
+    /// that nothing above put there. None where the parent or an
+    /// interface is held with no record.
+    fn property_rows(&self, child: &'a ClassDecl) -> Option<Rows<Row<H>, Exact>> {
+        let named = |row: &Row<H>| self.row_property_name(child, row);
+        let mut rows = Rows::default();
+        for (at, property) in (0u32..).zip(&child.properties) {
+            rows.add(Row { holder: None, at }, &property.name.0, named);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
+        let above = child
+            .parent
+            .iter()
+            .chain(interfaces.iter().map(|i| &i.name));
+        for name in above {
+            let Some(held) = (self.lookup)(&name.0) else {
+                continue;
+            };
+            let (handle, record) = held.record?;
+            rows.inherit(
+                &record.properties,
+                |row| Row {
+                    holder: Some(row.holder_in(handle)),
+                    at: row.at,
+                },
+                named,
+                |row| self.row_property_name(held.decl, row),
+            );
+        }
+        Some(rows)
+    }
+
+    /// The name of the property a row of `class`'s record stands for.
+    fn row_property_name(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
+        self.row_property(class, row)
+            .map_or(&[][..], |(_, p)| &p.name.0)
+    }
+
+    /// The property a row of `class`'s record stands for, beside the
+    /// class that declared it.
+    fn row_property(
+        &self,
+        class: &'a ClassDecl,
+        row: &Row<H>,
+    ) -> Option<(&'a ClassDecl, &'a PropertyDecl)> {
+        let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
+        Some((by, by.properties.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `class`'s `properties_info` as php holds it once linked, each
+    /// property beside the class that declared it: read off its record
+    /// where the table holds one, and otherwise, for a class under way
+    /// or one the caller keeps no record of, its own properties, then
+    /// its parent's table, then its interfaces', as [`Linker::methods_above`]
+    /// reads the function table. A parent's table holds what its
+    /// interfaces declare, so a class redeclaring such a property is
+    /// held to the interface's through its parent (`zend_do_inheritance`):
+    ///
+    /// ```php
+    /// interface I { public int $x { get; } }
+    /// abstract class P implements I {}
+    /// class C extends P { protected int $x = 1; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Access level to C::$x must be public (as in class I) in %s on line 4
+    /// ```
+    fn properties_above(&self, class: &'a ClassDecl) -> Properties<'a> {
+        let mut table = Rows::default();
+        self.properties_into(class, &mut table, 0);
+        table
+    }
+
+    fn properties_into(&self, class: &'a ClassDecl, table: &mut Properties<'a>, depth: u32) {
+        let held = (self.lookup)(&class.name.0).filter(|held| same(held.decl, class));
+        if let Some((_, record)) = held.and_then(|held| held.record) {
+            for row in record.properties.rows() {
+                if let Some(found) = self.row_property(class, row) {
+                    table.add(found, &found.1.name.0, property_name);
+                }
+            }
+            return;
+        }
+        for property in &class.properties {
+            table.add((class, property), &property.name.0, property_name);
+        }
+        if depth < 64
+            && let Some(parent) = self.class_parent(class)
+        {
+            self.properties_into(parent, table, depth + 1);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&class.interfaces, &mut interfaces, 0);
+        for interface in interfaces {
+            for property in &interface.properties {
+                table.add((interface, property), &property.name.0, property_name);
+            }
+        }
     }
 
     /// Every interface `class` implements, its own list and each one's
@@ -2753,7 +2855,7 @@ impl<'a, H: Copy> Linker<'a, H> {
                 .any(|a| a.name.0.eq_ignore_ascii_case(b"Override"))
         };
         let parent = self.class_parent(child);
-        let inherited = parent.map(|parent| self.tables(parent));
+        let inherited = parent.map(|parent| self.properties_above(parent));
         let mut names = child.interfaces.clone();
         let mut above = parent;
         let mut depth = 0;
@@ -2802,11 +2904,10 @@ impl<'a, H: Copy> Linker<'a, H> {
             if !marked(&property.attributes) {
                 continue;
             }
-            let by_parent = inherited.as_ref().is_some_and(|tables| {
-                tables
-                    .properties
-                    .iter()
-                    .any(|(_, p)| p.name == property.name && p.visibility != Visibility::Private)
+            let by_parent = inherited.as_ref().is_some_and(|table| {
+                table
+                    .find(&property.name.0, property_name)
+                    .is_some_and(|(_, p)| p.visibility != Visibility::Private)
             });
             let by_interface = interfaces
                 .iter()
@@ -3051,7 +3152,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         }
         let tables = self.tables(parent);
         let inherited = self.methods_above(parent);
-        for &(declaring, property) in &tables.properties {
+        for &(declaring, property) in self.properties_above(parent).rows() {
             if let Some(own) = child.properties.iter().find(|p| p.name == property.name)
                 && let Some(linked) =
                     self.inherited_property_refused(child, own, property, declaring, Check::Parent)
