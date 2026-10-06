@@ -161,6 +161,7 @@ impl Emit<'_> {
                 decl,
                 bodies: None,
                 linked: true,
+                record: None,
             })
         };
         match php_unit::link::set_hook_refused(scope, hooked.name, hooked.declared, set, &lookup) {

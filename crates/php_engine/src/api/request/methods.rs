@@ -7,13 +7,14 @@
 //! the engine's linked classes and the classes the request declared.
 
 use php_unit::decl::{ClassKind, MethodDecl, Visibility};
+use php_unit::link::{LinkedClass, Row};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpString};
-use crate::engine::{FunctionTable, MethodAt, NativeMethod};
+use crate::engine::{MethodAt, NativeMethod};
 
-use super::{Member, MemberAt, Request, lowered_key};
+use super::{Member, MemberAt, Request};
 
 impl Request {
     /// The class a method belongs to, `func->common.scope`: a native
@@ -41,46 +42,126 @@ impl Request {
     }
 
     /// `zend_hash_find_ptr(&ce->function_table, lcname)`: the method
-    /// under the lowered name, by identity, the class's own first and
-    /// then each parent's, since `zend_do_inheritance` copies a parent's
-    /// table into the child's (`ReflectionObject` answers `getName` with
-    /// `ReflectionClass`'s); none where no class of the chain has an
-    /// entry of that name. Each class is one lookup in its function
-    /// table ([`FunctionTable`]), a name not yet lowered lowered on the
-    /// stack.
-    pub fn method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        let mut at = Some(class);
-        let mut depth = 0;
-        while let Some(class) = at {
-            if let Some(function) = self.own_method_named(class, lowered) {
-                return Some(function);
-            }
-            depth += 1;
-            if depth > 64 {
-                return None;
-            }
-            at = self.class_parent(class);
-        }
-        None
+    /// under the name, whatever its case, in the class's linked record,
+    /// which holds what the class declares and what it inherited from
+    /// its parents and its interfaces, as `zend_do_inheritance` and
+    /// `do_interface_implementation` copy them in; none where the table
+    /// has no entry of that name. One lookup, the name compared through
+    /// the row, so nothing is lowered or allocated.
+    ///
+    /// ```php
+    /// interface I1 { function m(); }
+    /// interface I2 extends I1 { function n(); }
+    /// abstract class A implements I2 { function n() {} }
+    /// abstract class B extends A {}
+    /// var_dump(method_exists('I2', 'm'), method_exists('I2', 'N'), method_exists('A', 'm'), method_exists('B', 'M'), method_exists('B', 'x'));
+    /// var_dump(get_class_methods('B'));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// array(2) {
+    ///   [0]=>
+    ///   string(1) "n"
+    ///   [1]=>
+    ///   string(1) "m"
+    /// }
+    /// ```
+    ///
+    /// A method inherited through three levels, one overridden in the
+    /// middle, and a parent's private one, which the child's table holds
+    /// and only the parent's scope may call, beside the child's own of
+    /// that name:
+    ///
+    /// ```php
+    /// class G { function inherited() { return "G::inherited"; } function over() { return "G::over"; } private function hidden() { return "G::hidden"; } function callHidden() { return $this->hidden(); } }
+    /// class P extends G { function over() { return "P::over"; } }
+    /// class C extends P { private function hidden() { return "C::hidden"; } function mine() { return $this->hidden(); } }
+    /// $c = new C;
+    /// echo $c->inherited(), " ", $c->over(), " ", $c->callHidden(), " ", $c->mine(), "\n";
+    /// var_dump(method_exists('P', 'hidden'), method_exists(new P, 'hidden'));
+    /// class D extends P { function probe() { return $this->hidden(); } }
+    /// try { (new D)->probe(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// G::inherited P::over G::hidden C::hidden
+    /// bool(false)
+    /// bool(true)
+    /// Call to private method G::hidden() from scope D
+    /// ```
+    pub fn method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
+        let row = self.method_row(class, name)?;
+        self.method_function(row.holder_in(class), row.at)
     }
 
-    /// [`Request::method_named`] over one class's own function table,
-    /// one lookup of the lowered name: a native class's built at
-    /// startup, a declared class's as it bound
-    /// ([`Request::bind_members`]).
-    fn own_method_named(&self, class: ClassId, lowered: &[u8]) -> Option<Function> {
-        let table = self.function_table(class)?;
-        lowered_key(lowered, |key| table.get(key).copied())
+    /// [`Request::method_named`] for a method `class` declares itself,
+    /// none where the entry under the name is one it inherited.
+    fn own_method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
+        let row = self.method_row(class, name)?;
+        self.method_function(class, row.at)
+            .filter(|_| row.holder.is_none())
     }
 
-    /// `ce->function_table` of a linked class, its own methods by their
-    /// lowered names ([`FunctionTable`]).
-    fn function_table(&self, class: ClassId) -> Option<&FunctionTable> {
+    /// The row of `class`'s function table under the name.
+    fn method_row(&self, class: ClassId, name: &[u8]) -> Option<Row<ClassId>> {
+        let record = self.linked_class(class)?;
+        record
+            .methods
+            .find(name, |row| self.row_method_name(class, *row))
+            .copied()
+    }
+
+    /// The name of the method a row of `class`'s function table is.
+    fn row_method_name(&self, class: ClassId, row: Row<ClassId>) -> &[u8] {
+        self.row_method(class, row)
+            .map_or(&[][..], |(_, method)| &method.function.name.0)
+    }
+
+    /// The method a row of `class`'s function table is, beside the class
+    /// that declared it.
+    fn row_method(&self, class: ClassId, row: Row<ClassId>) -> Option<(ClassId, &MethodDecl)> {
+        let holder = row.holder_in(class);
+        let decl = self.class_decl(holder)?;
+        Some((holder, decl.methods.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `ce->function_table` of a linked class in php's order, each method
+    /// beside the class that declared it, `common.scope`.
+    pub(crate) fn methods_in_order(&self, class: ClassId) -> Vec<(ClassId, &MethodDecl)> {
+        let Some(record) = self.linked_class(class) else {
+            return Vec::new();
+        };
+        record
+            .methods
+            .rows()
+            .iter()
+            .filter_map(|row| self.row_method(class, *row))
+            .collect()
+    }
+
+    /// The linked record of a class: a native class's as startup linked
+    /// it, a declared class's as it bound ([`Request::bind_members`]).
+    pub(crate) fn linked_class(&self, class: ClassId) -> Option<&LinkedClass<ClassId>> {
         let at = usize::try_from(class.0).ok()?;
         match at.checked_sub(self.shared.classes.len()) {
-            None => self.shared.function_tables.get(at),
-            Some(declared) => Some(&self.declared.get(declared)?.bound.function_table),
+            None => self.shared.records.get(at),
+            Some(declared) => self.declared.get(declared)?.bound.record.as_ref(),
         }
+    }
+
+    /// The function the method at `at` among `class`'s own declarations
+    /// is.
+    fn method_function(&self, class: ClassId, at: u32) -> Option<Function> {
+        let class_at = usize::try_from(class.0).ok()?;
+        let at = usize::try_from(at).ok()?;
+        let functions = match class_at.checked_sub(self.shared.classes.len()) {
+            None => self.shared.method_functions.get(class_at)?,
+            Some(declared) => &self.declared.get(declared)?.bound.functions,
+        };
+        functions.get(at).copied().flatten()
     }
 
     /// The enum method a function number past
