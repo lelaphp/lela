@@ -990,8 +990,10 @@ impl HeldProperties {
     /// standing after the dump (`Z/ext/standard/var.c:184`).
     pub fn release(self, req: &mut Request) -> Result<(), Thrown> {
         match self.held {
+            // `zend_array_release`: one owner fewer, the table destroyed at
+            // the last, and no possible root of the cycle collector.
             Held::Table(_, table) => {
-                table.give_up(req);
+                req.release_nogc(table.hand_on_counted());
                 Ok(())
             }
             Held::Rows(rows) => {
@@ -1004,7 +1006,7 @@ impl HeldProperties {
                 Ok(())
             }
             Held::Debug(table, thrown) => {
-                table.give_up(req);
+                req.release_nogc(table.hand_on_counted());
                 thrown.map_or(Ok(()), Err)
             }
         }
