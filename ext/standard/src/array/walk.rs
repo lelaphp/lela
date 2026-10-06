@@ -361,6 +361,23 @@ struct Walk<'a> {
 /// stands; and an object a callback put in the cell is walked from its
 /// table's pointer.
 ///
+/// A callback that throws and leaves the variable holding no array or
+/// object meets the walk's reading of it all the same, as php reads it
+/// before it tests `EG(exception)`: the `TypeError` is raised with the
+/// throwable as its `previous`. A walk a throw ended has given its hash
+/// iterator back, so the object can be reset.
+///
+/// ```php
+/// $a = [1, 2]; try { array_walk($a, function () use (&$a) { $a = 1; throw new Exception('mine'); }); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), ' / ', $e->getPrevious()?->getMessage(), "\n"; }
+/// class C { public $a = 1; }
+/// $o = new C; try { array_walk($o, function () { throw new Exception('x'); }); } catch (Exception $e) {}
+/// (new ReflectionClass($o))->resetAsLazyGhost($o, function () {}); echo "reset\n";
+/// ```
+/// ```expect
+/// TypeError: Iterated value is no longer an array or object / mine
+/// reset
+/// ```
+///
 /// ```php
 /// $a = [1, 2]; array_walk($a, function (&$v, $k) use (&$a, &$copy) { if ($k == 0) { $copy = $a; } $v = $v * 10; }); echo json_encode($copy), "\n";
 /// $o = new stdClass; $o->a = 1; $o->b = 2; $o->c = 3; array_walk($o, function ($v, $k) { global $o; echo " $k"; if ($k === 'c') { unset($o->a); $o->a = 1; } }); echo "\n";

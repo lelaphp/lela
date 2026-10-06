@@ -28,7 +28,7 @@ use std::ops::ControlFlow;
 
 use php_heap::{Arr, PropertyTable, TableRow};
 
-use crate::api::raising::{Thrown, fatal, throw_error};
+use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value};
 
@@ -385,7 +385,12 @@ fn registered(req: &mut Request, holder: PhpRef) -> Result<Option<u32>, Thrown> 
 }
 
 /// [`live`]'s loop over iterator `at`, until a step finds no row, the
-/// body breaks or throws, or a step leaves a throwable pending.
+/// body breaks or throws, or a step leaves a throwable pending. A
+/// throwable does not end the step at once: `zend_call_function`
+/// answers `SUCCESS` with `EG(exception)` set, and php's loop reads the
+/// holder again before it tests `EG(exception)`, so a holder left holding
+/// no array or object raises the `TypeError` with the throwable as its
+/// `previous`.
 fn steps<B>(
     req: &mut Request,
     holder: PhpRef,
@@ -398,14 +403,25 @@ fn steps<B>(
         };
         let step = body(req, &mut row);
         row.give_up(req);
-        if let ControlFlow::Break(broke) = step? {
-            return Ok(Some(broke));
+        let thrown = match step {
+            Ok(ControlFlow::Break(broke)) => return Ok(Some(broke)),
+            Ok(ControlFlow::Continue(())) if !req.is_pending() => continue,
+            Ok(ControlFlow::Continue(())) => match req.take_pending() {
+                Some(throwable) => Thrown::of(Some(throwable)),
+                None => return Err(Thrown::of(None)),
+            },
+            Err(thrown) => thrown,
+        };
+        let now = holder.get();
+        if thrown.exception().is_some() && now.as_array().is_none() && now.as_object().is_none() {
+            return Err(throw_chained(req, thrown, "TypeError", NO_TABLE));
         }
-        if req.is_pending() {
-            return Err(Thrown::of(None));
-        }
+        return Err(thrown);
     }
 }
+
+/// php's `TypeError` once a live walk's holder holds no array or object.
+const NO_TABLE: &str = "Iterated value is no longer an array or object";
 
 /// The row iterator `at` stands at in what `holder` holds now, the
 /// iterator moved past it; `None` past the last row.
@@ -437,11 +453,7 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
         let (owner, table) = req.pointer_table(held, false)?;
         return object_row(req, holder, at, held, owner, table);
     }
-    Err(throw_error(
-        req,
-        "TypeError",
-        "Iterated value is no longer an array or object",
-    ))
+    Err(throw_error(req, "TypeError", NO_TABLE))
 }
 
 /// [`next_row`] over an object's property table in php's positions: the
