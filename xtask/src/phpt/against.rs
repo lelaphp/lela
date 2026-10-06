@@ -60,6 +60,7 @@ use super::miss::Miss;
 use super::target::Target;
 use super::{CORPUS, INSTRUMENT, Judgement, Lane, Scope, Tally};
 use crate::git;
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Pin, Runner};
 use crate::reading::{Reading, Status, listed};
@@ -69,10 +70,10 @@ use crate::track;
 /// What the engine's binary is built from: the crates, extensions and
 /// hosts it links ([`crate::layout::CRATE_DIRS`]), the workspace's lock,
 /// and `ops.toml`, which two `build.rs` read.
-fn built_from() -> Vec<&'static str> {
+fn built_from() -> Vec<PathBuf> {
     let files = ["Cargo.toml", "Cargo.lock", "ops.toml"];
     let dirs = crate::layout::CRATE_DIRS.iter().map(|d| d.dir);
-    files.into_iter().chain(dirs).collect()
+    files.into_iter().chain(dirs).map(PathBuf::from).collect()
 }
 /// Where a workspace keeps its runs, relative to its root.
 pub(crate) const RUNS: &str = "target/phpt-runs";
@@ -117,6 +118,9 @@ pub(crate) struct Diff {
 /// keys its own by, what names them, and the commit asked for.
 pub(crate) struct Runs {
     root: PathBuf,
+    /// The tree before any subset ran: what the run's readings are
+    /// stamped with and what [`Runs::tree`] keys its own by.
+    snapshot: Snapshot,
     /// The workspaces a base's run and a target are looked for in,
     /// [`roots`].
     roots: Vec<PathBuf>,
@@ -134,15 +138,23 @@ struct Base {
 }
 
 impl Runs {
+    /// The tree before any subset ran, which every reading of the run is
+    /// stamped with.
+    pub(crate) fn snapshot(&self) -> &Snapshot {
+        &self.snapshot
+    }
+
     /// The runs of the workspace at `root`, held against `against` when
     /// one is named; a commit the repository does not have is refused.
     pub(crate) fn new(root: &Path, manifest: &Manifest, against: Option<&str>) -> Result<Runs> {
         let base = against.map(|named| Base::at(root, named)).transpose()?;
         let source = &manifest.pin.source;
+        let snapshot = Snapshot::disk(root)?;
         Ok(Runs {
             root: root.to_path_buf(),
             roots: roots(root),
-            tree: git::tracked_hash(root, &built_from(), None)?,
+            tree: snapshot.tracked_over(&built_from())?,
+            snapshot,
             commit: git::head_commit(root)?,
             corpus: format!("{} {}", source.tag, source.commit),
             base,
@@ -191,7 +203,7 @@ impl Runs {
     ) -> Result<Option<Reading>> {
         let scope = &held_as.to_string();
         let run = self.run_of(tally, runner);
-        let moved = git::tracked_hash(&self.root, &built_from(), None)? != self.tree;
+        let moved = Snapshot::disk(&self.root)?.tracked_over(&built_from())? != self.tree;
         if let (Some(run), false) = (&run, moved) {
             let file = path(&self.root, &self.tree, scope);
             let text = serde_json::to_string_pretty(run).context("rendering the run")?;
@@ -216,7 +228,7 @@ impl Runs {
             (Ok(_), None) => Err(format!("this run measured no engine: {}", subset.message)),
             (Ok(was), Some(run)) => diff(&was, &run, target),
         };
-        held(manifest, &self.root, held_as, &base.commit, diff).map(Some)
+        held(manifest, &self.snapshot, held_as, &base.commit, diff).map(Some)
     }
 
     /// The run a tally is where the engine judged every test the subset
@@ -282,7 +294,7 @@ impl Base {
         let full = track::rev(root, named).with_context(|| format!("--against {named}"))?;
         Ok(Base {
             commit: track::short(&full).to_owned(),
-            tree: git::tracked_hash(root, &built_from(), Some(&full))?,
+            tree: Snapshot::commit(root, &full)?.tracked_over(&built_from())?,
         })
     }
 
@@ -425,13 +437,13 @@ pub(crate) fn diff(was: &Run, run: &Run, target: Option<&Target>) -> Result<Diff
 /// reading has, [`Scope::held_against`].
 fn held(
     manifest: &Manifest,
-    root: &Path,
+    snapshot: &Snapshot,
     scope: &Scope,
     commit: &str,
     diff: Result<Diff, String>,
 ) -> Result<Reading> {
     let scope = scope.held_against().to_string();
-    let reading = Reading::for_scope(INSTRUMENT, &scope, manifest, root)?.under(&manifest.pin);
+    let reading = Reading::for_scope(INSTRUMENT, &scope, manifest, snapshot)?.under(&manifest.pin);
     compared(reading, commit, diff)
 }
 

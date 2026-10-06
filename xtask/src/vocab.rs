@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::glossary::{self, Avoided, Glossary};
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::reading::{self, Outcome, Reading, Status, Store};
 
@@ -141,6 +142,7 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
             bail!("the manifest has no crate named {name:?}");
         }
     }
+    let snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
@@ -157,7 +159,7 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
         for finding in &scan.findings {
             println!("{}/{finding}", krate.path().display());
         }
-        readings.push(reading_of(&scan, root, rule, krate)?);
+        readings.push(reading_of(&scan, &snapshot, rule, krate)?);
     }
     Ok(readings)
 }
@@ -191,8 +193,8 @@ fn rule_over<'a>(
 
 /// The reading of one crate's scan: `numbers` are the counts and the hits,
 /// `message` lists every finding under the rule's text.
-fn reading_of(scan: &Scan, root: &Path, rule: &Rule, krate: &Crate) -> Result<Reading> {
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
+fn reading_of(scan: &Scan, snapshot: &Snapshot, rule: &Rule, krate: &Crate) -> Result<Reading> {
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     reading.rule.clone_from(&rule.id);
     reading.adr = rule.adr.iter().collect::<Vec<_>>().join(", ");
     reading.numbers = BTreeMap::from([

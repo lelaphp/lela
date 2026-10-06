@@ -21,7 +21,12 @@ fn scratch(name: &str) -> Tree {
 /// sources hash to today.
 fn reading(status: Status, failed: i64) -> Reading {
     let krate = Crate::named("ext/pcre");
-    let mut reading = Reading::for_crate("witness", &krate, workspace()).unwrap();
+    let mut reading = Reading::for_crate(
+        "witness",
+        &krate,
+        &xtask::key::Snapshot::disk(workspace()).unwrap(),
+    )
+    .unwrap();
     reading.rule = "witness.coverage".into();
     reading.status = status;
     reading.numbers.insert("run".into(), 212.into());
@@ -194,12 +199,22 @@ fn the_time_is_utc_to_the_second_and_reads_back_as_epoch_seconds() {
 #[test]
 fn a_crate_not_yet_created_gets_a_reading_without_a_stamp() {
     let krate = Crate::named("ext/absent");
-    let reading = Reading::for_crate("budget", &krate, workspace()).unwrap();
+    let reading = Reading::for_crate(
+        "budget",
+        &krate,
+        &xtask::key::Snapshot::disk(workspace()).unwrap(),
+    )
+    .unwrap();
     assert_eq!(reading.tree(), "");
     assert_eq!(reading.commit, "");
     assert_eq!(reading.at.to_string(), "1970-01-01T00:00:00Z");
     let existing = Crate::named("xtask");
-    let stamped = Reading::for_crate("budget", &existing, workspace()).unwrap();
+    let stamped = Reading::for_crate(
+        "budget",
+        &existing,
+        &xtask::key::Snapshot::disk(workspace()).unwrap(),
+    )
+    .unwrap();
     assert_eq!(stamped.tree().len(), 40);
     assert!(stamped.at.to_string().ends_with('Z'));
 }

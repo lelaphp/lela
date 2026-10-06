@@ -60,6 +60,9 @@ done::run
 done::run_hook
 done::scopes_of
 generated::write_all
+key::Snapshot
+key::Snapshot::disk
+key::Snapshot::key
 manifest::AvoidFrom
 manifest::AvoidFrom::file
 manifest::AvoidFrom::section

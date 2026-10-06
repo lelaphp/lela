@@ -77,6 +77,7 @@ use anyhow::{Context, Result};
 
 use crate::carried::Carried;
 use crate::divergence::{Kind, Registry};
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{self, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked};
 use crate::reading::{Reading, Status, Store, listed, plural};
@@ -222,6 +223,16 @@ fn kept_at(store: &Store, digest: &str, scope: &str, column: Column) -> PathBuf 
         .join(format!("{digest}.{}", column.kept()))
 }
 
+/// The oracle's rendering written at `path`, [`kept_at`], and the path.
+fn keep(path: PathBuf, rendering: &[u8]) -> Result<PathBuf> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(&path, rendering)
+        .with_context(|| format!("keeping the oracle's rendering at {}", path.display()))?;
+    Ok(path)
+}
+
 /// The verdict on one extension: the engine's rendering held to the
 /// oracle's through the one comparison every lane uses.
 pub(crate) fn judge(registry: &Registry, id: &str, oracle: &[u8], engine: &Rendering) -> Judgement {
@@ -359,6 +370,8 @@ pub fn run(
         linked: Carried::linked()?,
         binary: Binary::of(root),
     };
+    // The tree before anything renders: what each reading is stamped with.
+    let snapshot = Snapshot::disk(root)?;
     extensions(manifest, &Carried::binary(root)?, ask)
         .iter()
         .flat_map(|name| {
@@ -367,7 +380,7 @@ pub fn run(
                 .flat_map(move |host| Column::ALL.iter().map(move |column| (name, *host, *column)))
         })
         .map(|(name, host, column)| {
-            let mut reading = reading_of(root, manifest, name, host, column)?;
+            let mut reading = reading_of(&snapshot, manifest, name, host, column)?;
             let recipe = recipe(manifest, name, host, column);
             // A row whose crate the linked engine's workspace has not
             // created yet has no rendering to hold, as `budget` and
@@ -417,17 +430,10 @@ pub fn run(
                 );
                 return told(reading);
             }
-            let path = kept_at(
-                store,
-                &pin.oracle.md5,
-                &host.scope(name, Column::Re),
-                column,
-            );
-            if let Some(dir) = path.parent() {
-                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            }
-            fs::write(&path, &observed.stdout)
-                .with_context(|| format!("keeping the oracle's rendering at {}", path.display()))?;
+            let path = keep(
+                kept_at(store, &pin.oracle.md5, &host.scope(name, Column::Re), column),
+                &observed.stdout,
+            )?;
             let engine = rendering(manifest, ask, &engines, oracle, name, host, column)?;
             let judgement = judge(
                 registry,
@@ -568,7 +574,7 @@ fn said(observed: &Observation) -> String {
 /// together, and over the workspace for a name it has not, which the
 /// oracle may still render or refuse.
 fn reading_of(
-    root: &Path,
+    snapshot: &Snapshot,
     manifest: &Manifest,
     name: &str,
     host: Host,
@@ -576,7 +582,7 @@ fn reading_of(
 ) -> Result<Reading> {
     let scope = host.scope(name, column);
     let path = stamped_path(manifest, name, host);
-    Ok(Reading::stamped_over(INSTRUMENT, &scope, root, &path)?.under(&manifest.pin))
+    Ok(Reading::stamped_over(INSTRUMENT, &scope, snapshot, &path)?.under(&manifest.pin))
 }
 
 /// The path both columns of `name` through `host` are stamped over: the
@@ -592,7 +598,7 @@ fn stamped_path(manifest: &Manifest, name: &str, host: Host) -> PathBuf {
 }
 
 /// What one rendering reads, as directories of the workspace (#1159).
-/// The stamp's key ([`key::of`] over [`stamped_path`], #1318) covers the
+/// The stamp's key ([`Snapshot::key`] over [`stamped_path`], #1318) covers the
 /// extension's crate and its workspace dependency closure: its own
 /// declarations, `php_ext`, `php_engine` and what that is built from.
 /// The rendering reads three more things the closure does not reach:
