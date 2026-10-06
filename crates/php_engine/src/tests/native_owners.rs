@@ -68,3 +68,26 @@ fn an_enum_argument_and_return_keep_no_case() {
         "Light Dark same\n",
     );
 }
+
+/// A typed class constant whose value its type refuses gives the value
+/// up with the `TypeError`, as `zend_update_class_constant` gives up
+/// `tmp`, and keeps nothing, so the next read evaluates and refuses it
+/// again (#2080).
+#[test]
+fn a_class_constant_its_type_refuses_keeps_no_value() {
+    served(
+        &[],
+        "<?php\n\
+         class A { const array C1 = C; const int C2 = [B]; }\n\
+         define('B', new stdClass);\n\
+         define('C', new stdClass);\n\
+         try { A::C1; } catch (TypeError $e) { echo $e->getMessage(), \"\\n\"; }\n\
+         try { A::C1; } catch (TypeError $e) { echo $e->getMessage(), \"\\n\"; }\n\
+         try { A::C2; } catch (TypeError $e) { echo $e->getMessage(), \"\\n\"; }\n\
+         try { A::{'C1'}; } catch (TypeError $e) { echo $e->getMessage(), \"\\n\"; }\n",
+        "Cannot assign stdClass to class constant A::C1 of type array\n\
+         Cannot assign stdClass to class constant A::C1 of type array\n\
+         Cannot assign array to class constant A::C2 of type int\n\
+         Cannot assign stdClass to class constant A::C1 of type array\n",
+    );
+}
