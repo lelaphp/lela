@@ -126,9 +126,18 @@ fn get_headers(
         .find(b"wrapper_data")
         .and_then(|value| value.deref().as_array().copied());
     let Some(lines) = lines else {
+        req.release(Value::array(meta));
         stream.free(req);
         return Ok(OrFalse::False);
     };
+    let headers = header_array(req, lines, associative);
+    req.release(Value::array(meta));
+    stream.free(req);
+    Ok(OrFalse::Value(headers?))
+}
+
+/// The header lines of `wrapper_data` as `get_headers` answers them.
+fn header_array(req: &mut Request, lines: PhpArray, associative: bool) -> Result<PhpArray, Thrown> {
     let mut headers = PhpArray::new(req)?;
     for (_, line) in lines.snapshot() {
         let line = line.deref();
@@ -137,8 +146,7 @@ fn get_headers(
         };
         add_header(req, &mut headers, line.as_bytes(), associative)?;
     }
-    stream.free(req);
-    Ok(OrFalse::Value(headers))
+    Ok(headers)
 }
 
 /// One header line into `get_headers`' answer: appended as it is, or

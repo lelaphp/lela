@@ -148,3 +148,18 @@ echo count(range(1, 3)), count(range(3.0, 1.0)), count(range('a', 'c')), "\n";
     );
     assert_eq!(stdout, "eeeeee333\n");
 }
+
+/// `get_headers` over a user wrapper's stream keeps neither the meta
+/// data it read the headers from nor the wrapper's object that data
+/// holds (#2091).
+#[test]
+fn the_meta_data_get_headers_reads_is_given_up() {
+    let stdout = armed(
+        r"<?php
+class W { public $context; function stream_open($p, $m, $o, &$op) { return true; } function stream_eof() { return true; } }
+stream_wrapper_register('web', 'W', STREAM_IS_URL);
+var_dump(get_headers('web://x'));
+",
+    );
+    assert_eq!(stdout, "bool(false)\n");
+}
