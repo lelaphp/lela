@@ -307,3 +307,29 @@ fn an_armed_request_refused_by_the_server_leaves_none_held() {
         "bool(false)\nint(1045)\n"
     );
 }
+
+/// `mysqli_stmt_error_list()` answers the list it builds and allocates
+/// no other array beside it, so an armed request that reads a failed
+/// prepare's errors leaves no block of its heap held (#2092). Against
+/// the server of `ci/mysql/compose.yaml`; with none listening the test
+/// says so and passes.
+#[cfg(debug_assertions)]
+#[test]
+fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
+    use php_ext::test::LeakSensor;
+    if std::net::TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let engine = Engine::builder()
+        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let source = "<?php mysqli_report(MYSQLI_REPORT_OFF);
+        $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+        $s = mysqli_stmt_init($l);
+        mysqli_stmt_prepare($s, 'SELECT nope');
+        var_dump(mysqli_stmt_error_list($s)[0]['errno']);";
+    let served = engine.serve_capture(source, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "int(1054)\n");
+}

@@ -547,8 +547,7 @@ pub(crate) fn attr_get(req: &mut Request, on: On, attr: i64) -> Result<i64, Thro
 /// `mysqli_stmt_error_list`.
 pub(crate) fn error_list(req: &mut Request, on: On) -> Result<PhpArray, Thrown> {
     let status = facts(req, on, Need::Made)?;
-    let list = props::error_list(req, &status.error_list)?;
-    Ok(list.as_array().copied().unwrap_or(PhpArray::new(req)?))
+    props::error_list(req, &status.error_list)
 }
 
 /// The connection a statement runs over, for its warnings.
@@ -887,7 +886,7 @@ impl Props for StmtProps {
             "field_count" => Value::int(i64::from(status.field_count)),
             "errno" => Value::int(i64::from(status.errno)),
             "error" => string(req, &status.error)?,
-            "error_list" => props::error_list(req, &status.error_list)?,
+            "error_list" => Value::array(props::error_list(req, &status.error_list)?),
             "sqlstate" => string(req, &status.sqlstate)?,
             "id" => Value::int(i64::from(status.id)),
             _ => return Ok(None),

@@ -1693,7 +1693,7 @@ impl Props for LinkProps {
             "affected_rows" => affected(req, s.affected_rows)?,
             "errno" => Value::int(i64::from(s.errno)),
             "error" => string(req, &s.error)?,
-            "error_list" => props::error_list(req, &s.error_list)?,
+            "error_list" => Value::array(props::error_list(req, &s.error_list)?),
             "field_count" => Value::int(i64::from(s.field_count)),
             "host_info" => string(req, s.host_info.as_deref().unwrap_or_default())?,
             "info" => match s.info {
