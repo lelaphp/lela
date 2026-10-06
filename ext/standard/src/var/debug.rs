@@ -313,7 +313,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     return Err(thrown);
                 }
             };
-            let props = held.rows().to_vec();
+            let props = held.rows(req);
             // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an
             // anonymous class's name.
             let full = object.handlers(req).get_class_name(req, *object);

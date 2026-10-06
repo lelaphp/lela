@@ -22,11 +22,13 @@ use php_heap::{
 };
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, PropertyDecl, Visibility};
+use php_unit::link::LinkedClass;
 
+use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, PhpRef, Resource, Value};
 pub use crate::engine::Standard;
-use crate::engine::{FunctionTable, RequestDescription, Shared};
+use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, TableId, Vm};
 pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
@@ -87,6 +89,7 @@ mod load_file;
 mod memory;
 pub use memory::{Allocation, AllocationObserverId, ObserveAllocations};
 mod methods;
+pub use methods::MethodRow;
 use methods::visibility_string;
 mod objects;
 mod observing;
@@ -553,8 +556,13 @@ pub(crate) struct Declared {
 /// to read rather than walk ([`Request::bind_members`]).
 #[derive(Default)]
 pub(crate) struct Bound {
-    /// `ce->function_table`: the class's own methods by lowered name.
-    function_table: FunctionTable,
+    /// The class's linked record: `ce->function_table` whole, its own
+    /// methods and what it inherited, in php's order. None only while
+    /// the class is bound again under a new number.
+    record: Option<LinkedClass<ClassId>>,
+    /// The function each of the class's own methods is, by its index
+    /// among them, which a row of a record naming the class reads.
+    functions: Box<[Option<Function>]>,
     /// The rows of the request's user functions the class's methods and
     /// hooks took, first to last.
     members: Range<usize>,

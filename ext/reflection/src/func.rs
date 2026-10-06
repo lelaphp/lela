@@ -26,9 +26,9 @@ use super::signature::{FunctionRef, parameter_factory, this_function, type_facto
 use super::{
     at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
     function_string, is_constructor, keep, keep_closure, keep_method, kept_class, kept_closure,
-    kept_method, kept_object, linked_table, method_or_invoke, method_ptr, method_string,
-    namespace_end, new_object, reflection_class_factory, required_parameters, set_name,
-    set_string_prop, signature, string_value, this_name,
+    kept_method, kept_object, method_or_invoke, method_string, namespace_end, new_object,
+    reflection_class_factory, required_parameters, row_prototype, set_name, set_string_prop,
+    signature, string_value, this_name,
 };
 
 /// `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and `ZEND_ACC_PRIVATE`, the
@@ -65,9 +65,9 @@ fn this_method(
     this: PhpObject,
 ) -> Result<(ClassId, MethodDecl, ClassId), Thrown> {
     if let Some(held) = kept_method(req, this)
-        && let Some(method) = held.method()
+        && let Some(method) = req.row_method(held)
     {
-        return Ok((method.scope, method.decl.clone(), method.scope));
+        return Ok((held.scope(), method.clone(), held.scope()));
     }
     let name = this_name(req, this, "ReflectionMethod")?;
     let Some(class) = req
@@ -111,7 +111,8 @@ pub(super) fn is_internal(decl: &FunctionDecl) -> bool {
 /// One method of a linked class by its name, `zend_hash_find_ptr` over
 /// the function table.
 fn method_decl(req: &mut Request, class: ClassId, name: &[u8]) -> Option<MethodDecl> {
-    linked_table(req, class).named(name).map(|m| m.decl.clone())
+    let row = req.method_row(class, name)?;
+    req.row_method(row).cloned()
 }
 
 /// Whether the declared return type is the tentative one a native
@@ -176,10 +177,8 @@ fn prototype_of(
     this: PhpObject,
     name: &[u8],
 ) -> Result<Option<ClassId>, Thrown> {
-    if let Some(held) = kept_method(req, this)
-        && let Some(method) = held.method()
-    {
-        return Ok(method.prototype);
+    if let Some(held) = kept_method(req, this) {
+        return Ok(row_prototype(req, held));
     }
     let named = (this.prop(req, b"class")).and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
     let class = match (super::kept_class(req, this), named) {
@@ -187,9 +186,9 @@ fn prototype_of(
         (None, Some(named)) => class_named(req, &named)?,
         (None, None) => return Ok(None),
     };
-    Ok(linked_table(req, class)
-        .named(name)
-        .and_then(|m| m.prototype))
+    Ok(req
+        .method_row(class, name)
+        .and_then(|row| row_prototype(req, row)))
 }
 
 /// `ZEND_PARSE_PARAMETERS_START(n, -1)`'s count check: php's
@@ -1890,7 +1889,10 @@ impl ReflectionGenerator {
                 keep_closure(req, *object, closure);
                 object
             }
-            (None, Some(scope)) => crate::class::method_factory(req, &name, scope, scope)?,
+            (None, Some(scope)) => {
+                let held = req.method_row(scope, &name);
+                crate::class::method_factory(req, &name, scope, scope, held)?
+            }
             (None, None) => {
                 let class = class_named(req, b"ReflectionFunction")?;
                 let object = new_object(req, class)?;
@@ -2126,9 +2128,9 @@ impl ReflectionMethod {
             Union::A(object) => Some(object).filter(|o| o.closure(req).is_some()),
             Union::B(_) => None,
         };
-        let held = method_ptr(req, class, &method_name);
-        let found = match (closure, &held) {
-            (_, Some(held)) => held.method().cloned(),
+        let held = req.method_row(class, &method_name);
+        let found = match (closure, held) {
+            (_, Some(held)) => super::LinkedMethod::of_row(req, held),
             (Some(closure), None) => method_or_invoke(req, class, &method_name, Some(closure)),
             (None, None) => None,
         };
@@ -2196,8 +2198,8 @@ impl ReflectionMethod {
         };
         let class = class_named(req, &given[..at])?;
         let name = given[at + 2..].to_vec();
-        let held = method_ptr(req, class, &name);
-        let Some(found) = held.as_ref().and_then(|held| held.method()).cloned() else {
+        let held = req.method_row(class, &name);
+        let Some(found) = held.and_then(|held| super::LinkedMethod::of_row(req, held)) else {
             let named = class_name_of(req, class);
             return Err(throw(
                 req,
@@ -2324,14 +2326,14 @@ impl ReflectionMethod {
             super::LinkedMethod {
                 decl,
                 scope,
-                prototype: None,
+                row: None,
                 via_handler: false,
             }
         });
         let held = kept_method(req, this.object());
         let kept = kept_closure(req, this.object());
         let Some(found) = hook
-            .or_else(|| held.as_ref()?.method().cloned())
+            .or_else(|| super::LinkedMethod::of_row(req, held?))
             .or_else(|| method_or_invoke(req, class, &name, kept))
         else {
             let class = class_name_of(req, class);

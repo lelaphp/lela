@@ -87,6 +87,7 @@ impl Request {
                     decl,
                     bodies: None,
                     linked: true,
+                    record: None,
                 })
         };
         resolve_property(decl, name, &lookup)
@@ -115,6 +116,7 @@ impl Request {
                     decl,
                     bodies: None,
                     linked: true,
+                    record: None,
                 })
         };
         let resolved = resolve_property(self.class_decl(class)?, name, &lookup)?;
@@ -155,6 +157,7 @@ impl Request {
                     decl,
                     bodies: None,
                     linked: true,
+                    record: None,
                 })
         };
         let resolved = resolve_property(self.class_decl(class)?, name, &lookup)?;
@@ -1403,6 +1406,7 @@ impl Request {
                     decl,
                     bodies: None,
                     linked: true,
+                    record: None,
                 })
         };
         let resolved = resolve_property(decl, name, &lookup)?;

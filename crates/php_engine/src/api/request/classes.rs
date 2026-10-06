@@ -10,12 +10,13 @@ use std::sync::{Arc, OnceLock};
 
 use php_heap::{FrameRef, Heap};
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
+use php_unit::link::LinkedClass;
 use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, Value, adopted};
-use crate::engine::{FunctionTable, Shared};
+use crate::engine::Shared;
 use crate::exec;
 use crate::observer::LinkedAtLoad;
 
@@ -233,7 +234,7 @@ impl Request {
                 return None;
             }
             let at = u32::try_from(at).ok()?;
-            self.bind_declared(unit, at, None);
+            self.bind_declared(unit, at, None, None);
             linked.classes.push(at);
         }
         for (at, decl) in tried {
@@ -378,9 +379,9 @@ impl Request {
     }
 
     /// The class at `at` of `unit` into the request's table, with its
-    /// methods into the function table beside it, which is the whole of
-    /// what binding a class is here: the parent chain is walked from the
-    /// declaration on every lookup, so nothing is copied. It stands in
+    /// methods into the function table beside it and `record`, the
+    /// record its link made, kept as it bound ([`Request::bind_members`]),
+    /// which is the whole of what binding a class is here. It stands in
     /// the bucket its unit's load took for it, where php's runtime
     /// definition key stood, or in the next:
     ///
@@ -402,6 +403,7 @@ impl Request {
         unit: &Arc<Unit>,
         at: u32,
         composed: Option<php_unit::link::Composed>,
+        record: Option<LinkedClass<ClassId>>,
     ) {
         let class = self
             .shared
@@ -418,16 +420,15 @@ impl Request {
             placed: OnceLock::new(),
             bound: Bound::default(),
         });
-        self.bind_members(class);
+        self.bind_members(class, record);
     }
 
     /// The members of `class`, bound, into the function table beside it:
     /// an enum's own `cases`, `from` and `tryFrom`, each method, and
-    /// each hook of the class's own properties; and the class's own
-    /// function table, built once here and read by every lookup by name
-    /// after ([`Request::method_named`]), each method under its lowered
-    /// name as `zend_hash_add_ptr` files it, an enum's three as the
-    /// functions that serve them:
+    /// each hook of the class's own properties; and the class's record,
+    /// the one its link made or else made here, which every lookup by
+    /// name after reads ([`Request::method_named`]), an enum's three as
+    /// the functions that serve them:
     ///
     /// ```php
     /// trait T { function fromTrait() { return "t"; } }
@@ -454,33 +455,28 @@ impl Request {
     ///   string(9) "Inherited"
     /// }
     /// ```
-    pub(super) fn bind_members(&mut self, class: ClassId) {
+    pub(super) fn bind_members(&mut self, class: ClassId, record: Option<LinkedClass<ClassId>>) {
         let Some(decl) = self.class_decl(class) else {
             return;
         };
         let first = self.user_functions.len();
         let enum_backing = (decl.kind == ClassKind::Enum).then_some(decl.backing);
-        let keys: Vec<Box<[u8]>> = decl
+        let keys: Vec<Option<crate::enums::EnumMethod>> = decl
             .methods
             .iter()
             .map(|method| {
-                method
-                    .function
-                    .name
-                    .0
-                    .to_ascii_lowercase()
-                    .into_boxed_slice()
+                // `zend_enum_register_funcs` at the link: the enum's own
+                // `cases`, `from` and `tryFrom`, which the compiler
+                // declared after its methods and which no body of the
+                // unit serves.
+                let key = method.function.name.0.to_ascii_lowercase();
+                enum_backing.and_then(|backing| crate::enums::EnumMethod::of(&key, backing))
             })
             .collect();
-        let mut function_table = FunctionTable::with_capacity(keys.len());
-        for (method, key) in (0u32..).zip(keys) {
+        let mut functions = Vec::with_capacity(keys.len());
+        for (method, served) in (0u32..).zip(keys) {
             let numbered = self.bind_method(class, method);
-            // `zend_enum_register_funcs` at the link: the enum's own
-            // `cases`, `from` and `tryFrom`, which the compiler declared
-            // after its methods and which no body of the unit serves.
-            let served =
-                enum_backing.and_then(|backing| crate::enums::EnumMethod::of(&key, backing));
-            let function = match served {
+            functions.push(match served {
                 Some(served) => {
                     let at = u32::try_from(self.enum_functions.len()).ok();
                     self.enum_functions.push((class, served));
@@ -488,10 +484,7 @@ impl Request {
                         .map(Function)
                 }
                 None => numbered,
-            };
-            if let Some(function) = function {
-                function_table.entry(key).or_insert(function);
-            }
+            });
         }
         // Each hook of the class's own properties, `prop_info->hooks`,
         // a function of its own that php's function table never lists.
@@ -531,8 +524,10 @@ impl Request {
                 flags,
             });
         }
+        let record = record.or_else(|| self.record_at_bind(class));
         let bound = Bound {
-            function_table,
+            record,
+            functions: functions.into_boxed_slice(),
             members: first..self.user_functions.len(),
             parent: self
                 .class_decl(class)
@@ -1159,7 +1154,7 @@ impl Request {
 
     /// A class as the link reads the table: its declaration, and the
     /// bodies of its methods where it was composed with traits.
-    pub(super) fn held_class(&self, name: &[u8]) -> Option<php_unit::link::Held<'_>> {
+    pub(super) fn held_class(&self, name: &[u8]) -> Option<php_unit::link::Held<'_, ClassId>> {
         let class = self.class_named(name)?;
         let decl = self.class_decl(class)?;
         let bodies = usize::try_from(class.0)
@@ -1172,7 +1167,28 @@ impl Request {
             decl,
             bodies,
             linked: true,
+            record: self.linked_class(class).map(|record| (class, record)),
         })
+    }
+
+    /// The record of `class`, bound by no link of the engine's, which the
+    /// compiler's early bind checked: made over the table as it stands,
+    /// whose every class the class names is linked. The traits' abstract
+    /// methods a composed class took stand after its parent's.
+    fn record_at_bind(&self, class: ClassId) -> Option<LinkedClass<ClassId>> {
+        let decl = self.class_decl(class)?;
+        let abstracts = self
+            .declared_row(class)
+            .and_then(|declared| declared.composed.as_ref())
+            .map_or(0, |composed| composed.abstracts);
+        let lookup = |name: &[u8]| self.held_class(name);
+        let holder = |holder: ClassId| self.class_decl(holder);
+        php_unit::link::linked_class(
+            decl,
+            usize::try_from(abstracts).unwrap_or(usize::MAX),
+            &lookup,
+            &holder,
+        )
     }
 
     /// `zend_fetch_class_by_name` under `ZEND_FETCH_CLASS_EXCEPTION`, as

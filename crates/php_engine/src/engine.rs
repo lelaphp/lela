@@ -27,6 +27,7 @@ use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
 };
+use php_unit::link::LinkedClass;
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
@@ -618,10 +619,13 @@ pub(crate) struct Shared {
     /// classes in one hash lookup, as `zend_hash_find` does, before the
     /// request's own rows.
     pub(crate) class_keys: HashMap<Box<[u8]>, ClassId>,
-    /// Each class's `ce->function_table`, one row per row of `classes`
-    /// ([`function_tables`]): its own methods under their lowered
-    /// names, each the `Function` its row of `methods` is.
-    pub(crate) function_tables: Vec<FunctionTable>,
+    /// Each class's linked record, one row per row of `classes`
+    /// ([`native_records`]): `ce->function_table` whole, in php's order.
+    pub(crate) records: Vec<LinkedClass<ClassId>>,
+    /// The function each class's own methods are, one row per row of
+    /// `classes` ([`method_functions`]), by their index among its
+    /// declaration.
+    pub(crate) method_functions: Vec<Box<[Option<Function>]>>,
     /// Each class's trampolines, one row per row of `classes`
     /// ([`trampoline_tables`]): what its `get_method` synthesises under
     /// a name its function table has no row for, each under its lowered
@@ -890,8 +894,21 @@ fn link_classes(core: &Extension, extensions: &[Extension]) -> LinkedClasses {
         let mut decl = decl.clone();
         let class = ClassId(u32::try_from(classes.len()).unwrap_or(u32::MAX));
         for (method, entry) in entries {
-            let index = u32::try_from(decl.methods.len()).unwrap_or(u32::MAX);
-            decl.methods.push(method.clone());
+            // A method the declaration carries already is the one the
+            // entry serves, so the table holds the name once, as
+            // `zend_register_functions` registers each name once.
+            let name = &method.function.name.0;
+            let held = (decl.methods.iter_mut())
+                .enumerate()
+                .find(|(_, held)| held.function.name.0.eq_ignore_ascii_case(name));
+            let index = if let Some((at, held)) = held {
+                *held = method.clone();
+                at
+            } else {
+                decl.methods.push(method.clone());
+                decl.methods.len().saturating_sub(1)
+            };
+            let index = u32::try_from(index).unwrap_or(u32::MAX);
             methods.push(NativeMethod {
                 at: MethodAt::Declared { class, at: index },
                 entry: *entry,
@@ -931,32 +948,86 @@ fn class_keys(classes: &[ClassDecl]) -> HashMap<Box<[u8]>, ClassId> {
     keys
 }
 
-/// A class's `ce->function_table`: its own methods, each under its
-/// lowered name, so a lookup is one `zend_hash_find` over the lowered
-/// name and never a walk of the methods. A parent's rows are not copied
-/// in as `zend_do_inheritance` copies them; a lookup walks up the chain
-/// instead ([`Request::method_named`]). Iteration reads the declaration,
-/// whose order is php's, never the table.
-///
-/// [`Request::method_named`]: crate::api::request::Request::method_named
+/// A class's trampolines by their lowered names, which its `get_method`
+/// answers past its function table ([`trampoline_tables`]): one lookup of
+/// the lowered name.
 pub(crate) type FunctionTable = HashMap<Box<[u8]>, Function>;
 
-/// Each native class's `ce->function_table` as `zend_register_functions`
-/// fills it: every row of `methods` a class declares, under the lowered
-/// name of its declaration, numbered past the `functions` natives. The
-/// first of a name stays, as `zend_hash_add_ptr` keeps it.
-fn function_tables(
+/// The function each native class's own methods are, by their index
+/// among its declaration: every row of `methods` a class declares,
+/// numbered past the `functions` natives, which a row of a record
+/// naming the class reads.
+fn method_functions(
     classes: &[ClassDecl],
     methods: &[NativeMethod],
     functions: usize,
-) -> Vec<FunctionTable> {
-    tables_of(classes.len(), methods, functions, |at| match at {
-        MethodAt::Declared { class, at } => {
-            let decl = classes.get(usize::try_from(class.0).ok()?)?;
-            Some((class, decl.methods.get(usize::try_from(at).ok()?)?))
+) -> Vec<Box<[Option<Function>]>> {
+    let mut tables: Vec<Vec<Option<Function>>> = classes
+        .iter()
+        .map(|decl| vec![None; decl.methods.len()])
+        .collect();
+    for (row, method) in (functions..).zip(methods) {
+        let MethodAt::Declared { class, at } = method.at else {
+            continue;
+        };
+        let slot = usize::try_from(class.0)
+            .ok()
+            .and_then(|class| tables.get_mut(class))
+            .and_then(|table| table.get_mut(usize::try_from(at).ok()?));
+        if let (Some(slot), Ok(row)) = (slot, u32::try_from(row)) {
+            *slot = Some(Function(row));
         }
-        _ => None,
-    })
+    }
+    tables.into_iter().map(Vec::into_boxed_slice).collect()
+}
+
+/// Each native class's linked record, as `zend_register_internal_class_ex`
+/// links a class it registers to its parent and
+/// `zend_class_implements` to its interfaces: each built once every
+/// class it names is, a class standing before what it names waiting a
+/// round. One whose names never resolve has its own methods alone.
+fn native_records(
+    classes: &[ClassDecl],
+    keys: &HashMap<Box<[u8]>, ClassId>,
+) -> Vec<LinkedClass<ClassId>> {
+    let mut records: Vec<Option<LinkedClass<ClassId>>> = vec![None; classes.len()];
+    let mut progress = true;
+    while progress {
+        progress = false;
+        for (at, decl) in classes.iter().enumerate() {
+            if records.get(at).is_none_or(Option::is_some) {
+                continue;
+            }
+            let built = {
+                let lookup = |name: &[u8]| {
+                    let class = *keys.get(&*lowered(name))?;
+                    let at = usize::try_from(class.0).ok()?;
+                    Some(php_unit::link::Held {
+                        decl: classes.get(at)?,
+                        bodies: None,
+                        linked: true,
+                        record: records.get(at)?.as_ref().map(|record| (class, record)),
+                    })
+                };
+                php_unit::link::linked_class(decl, 0, &lookup, &|class| {
+                    classes.get(usize::try_from(class.0).ok()?)
+                })
+            };
+            if let (Some(record), Some(slot)) = (built, records.get_mut(at)) {
+                *slot = Some(record);
+                progress = true;
+            }
+        }
+    }
+    records
+        .into_iter()
+        .zip(classes)
+        .map(|(record, decl)| {
+            record
+                .or_else(|| php_unit::link::linked_class(decl, 0, &|_| None, &|_| None))
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// Each native class's trampolines by name: every row of `methods` a
@@ -2838,7 +2909,8 @@ impl EngineBuilder {
             trampolines,
         } = link_classes(&core, &extensions);
         let class_keys = class_keys(&classes);
-        let function_tables = function_tables(&classes, &methods, functions.len());
+        let records = native_records(&classes, &class_keys);
+        let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
             trampoline_tables(classes.len(), &methods, &trampolines, functions.len());
         let parents = classes
@@ -2884,7 +2956,8 @@ impl EngineBuilder {
                 methods,
                 trampolines,
                 class_keys,
-                function_tables,
+                records,
+                method_functions,
                 trampoline_tables,
                 parents,
                 placed,

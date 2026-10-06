@@ -2,10 +2,12 @@
 //! `zend_do_inheritance_ex` makes of a class against its parent and
 //! `do_interface_implementation` against each interface, in php's order
 //! and in php's words, over the declarations the linker binds (design
-//! §6.2). Linking copies nothing here, since an inherited member is
-//! found by walking the chain, so what php reads off a parent's tables
-//! is read off the chain in the order those tables hold it: a class's
-//! own members first, then what it inherited.
+//! §6.2). A class that links has its record ([`LinkedClass`]): the
+//! tables php leaves in the class entry, built once, which a child's link
+//! reads off its parent's record rather than walking the chain. A
+//! member the record does not carry yet is read off the chain in the
+//! order php's tables hold it: a class's own members first, then what
+//! it inherited.
 //!
 //! One function answers for both of php's binds: the early bind
 //! while the file compiles, where `zend_try_early_bind` runs these
@@ -39,7 +41,10 @@ use crate::type_to_string;
 use std::fmt;
 
 mod hooks;
+mod rows;
 mod traits;
+
+pub use rows::{Case, Exact, Folded, LinkedClass, Row, Rows};
 
 pub use hooks::{
     Resolved, ResolvedHook, Variance, resolve_property, set_hook_refused, verify_hooked_property,
@@ -992,15 +997,30 @@ pub struct Body {
 /// one [`Body`] per method in order, none for a class whose every
 /// method is its own; and whether it is `ZEND_ACC_LINKED`, which a
 /// class the table holds while its own link is under way is not
-/// (`ZEND_FETCH_CLASS_ALLOW_UNLINKED`).
+/// (`ZEND_FETCH_CLASS_ALLOW_UNLINKED`); and for a linked class the
+/// caller keeps the record of, the key it names the class by and its record, which a
+/// child's link starts from.
 #[derive(Debug, Clone, Copy)]
-pub struct Held<'a> {
+pub struct Held<'a, H = ()> {
     pub decl: &'a ClassDecl,
     pub bodies: Option<&'a [Body]>,
     pub linked: bool,
+    pub record: Option<(H, &'a LinkedClass<H>)>,
 }
 
-impl Held<'_> {
+impl<'a, H> Held<'a, H> {
+    /// The class as a lookup that reads no record holds it.
+    pub(crate) fn plain(self) -> Held<'a> {
+        Held {
+            decl: self.decl,
+            bodies: self.bodies,
+            linked: self.linked,
+            record: None,
+        }
+    }
+}
+
+impl<H> Held<'_, H> {
     /// The body of the class's method at `at`.
     #[must_use]
     pub(crate) fn body(&self, at: usize) -> Body {
@@ -1017,11 +1037,15 @@ impl Held<'_> {
 /// A class composed with the traits it uses, what `zend_do_bind_traits`
 /// leaves in its tables: the declaration with the traits' methods,
 /// constants and properties as its own, in php's order, and the body of
-/// each of its methods.
+/// each of its methods; and how many of its methods, its last, are the
+/// traits' abstract methods it took, which php binds after the parent's
+/// (`zend_do_traits_method_binding`'s second pass), so its function
+/// table holds them after the parent's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Composed {
     pub decl: ClassDecl,
     pub bodies: Vec<Body>,
+    pub abstracts: u32,
 }
 
 /// What linking one class came to, `zend_do_link_class`'s outcome.
@@ -1054,14 +1078,17 @@ pub enum Obligation {
 /// composed with them; the obligations left, which a bind at load
 /// reads as `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, and each
 /// class a check could not find, in the order
-/// `register_unresolved_classes` puts them in `CG(delayed_autoloads)`.
+/// `register_unresolved_classes` puts them in `CG(delayed_autoloads)`;
+/// and the class's record, where it links and every class it names is
+/// held with a record ([`linked_class`]).
 #[derive(Debug, Clone, PartialEq)]
-pub struct Linking {
+pub struct Linking<H = ()> {
     pub outcome: Linked,
     pub raised: Vec<Raised>,
     pub composed: Option<Composed>,
     pub obligations: Vec<Obligation>,
     pub autoloads: Vec<Vec<u8>>,
+    pub record: Option<LinkedClass<H>>,
 }
 
 /// What the checks left for later, `CG(delayed_autoloads)`'s names and
@@ -1373,36 +1400,75 @@ enum Check {
     TraitAbstract,
 }
 
-/// The member tables of the chain above a class, the way php's tables
-/// hold them after `zend_do_inheritance`: each class's own members,
-/// then what it inherited that it does not redeclare.
+/// The property table of the chain above a class, the way php's
+/// table holds it after `zend_do_inheritance`: each class's own
+/// members, then what it inherited that it does not redeclare.
 struct Tables<'a> {
-    methods: Vec<(&'a ClassDecl, &'a MethodDecl)>,
     properties: Vec<(&'a ClassDecl, &'a PropertyDecl)>,
-    constants: Vec<(&'a ClassDecl, &'a ClassConstDecl)>,
 }
 
-/// The class being linked, the table it is linked against, what was
-/// raised so far and what the checks left for later.
-struct Linker<'a> {
-    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
+/// The function table a class holds as it links, each method with the
+/// class that put it there, none for the class's own, indexed by name.
+type Methods<'a> = Rows<(Option<&'a ClassDecl>, &'a MethodDecl), Folded>;
+
+/// A method of [`Methods`] by its name.
+fn method_name<'a>(row: &(Option<&'a ClassDecl>, &'a MethodDecl)) -> &'a [u8] {
+    &row.1.function.name.0
+}
+
+/// `method`, which `by` put there, none for the class's own, into
+/// `methods` under its name, unless one of its name stands already.
+fn put<'a>(methods: &mut Methods<'a>, by: Option<&'a ClassDecl>, method: &'a MethodDecl) {
+    methods.add((by, method), &method.function.name.0, method_name);
+}
+
+/// The constant table a class holds as it links, each constant with the
+/// class that put it there, none for the class's own, indexed by name.
+type Constants<'a> = Rows<(Option<&'a ClassDecl>, &'a ClassConstDecl), Exact>;
+
+/// `constant`, which `by` put there, into `constants` under its name,
+/// unless one of its name stands already.
+fn put_constant<'a>(
+    constants: &mut Constants<'a>,
+    by: Option<&'a ClassDecl>,
+    constant: &'a ClassConstDecl,
+) {
+    constants.add((by, constant), &constant.name.0, constant_name);
+}
+
+/// A constant of [`Constants`] by its name.
+fn constant_name<'a>(row: &(Option<&'a ClassDecl>, &'a ClassConstDecl)) -> &'a [u8] {
+    &row.1.name.0
+}
+
+/// The class being linked, the table it is linked against and the
+/// class each key of a record's rows names, what was raised so far
+/// and what the checks left for later.
+struct Linker<'a, H = ()> {
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a, H>>,
+    holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
     raised: Vec<Raised>,
     deferred: std::cell::RefCell<Deferred>,
 }
 
-/// `zend_do_link_class`'s checks of `child` against the classes
-/// `lookup` finds by name, its traits, its parent and its interfaces
-/// among them: the traits bound first ([`traits`]), then every refusal
-/// `zend_do_inheritance_ex` and `do_interface_implementation` make,
-/// the first in php's order.
-pub fn link<'a>(
+/// `zend_do_link_class` over `child` and the classes `lookup` finds by
+/// name, its traits, its parent and its interfaces among them, a row
+/// of a held record naming its class by a key `holder` reads: the
+/// traits bound first ([`traits`]), then every refusal
+/// `zend_do_inheritance_ex` and `do_interface_implementation` make, the
+/// first in php's order; and the class's record where it links.
+pub fn link<'a, H: Copy>(
     child: &'a ClassDecl,
-    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>,
+    lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a, H>>,
+    holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
     values: &'a dyn Fn(&ConstExpr) -> Option<ConstExpr>,
-) -> Linking {
+) -> Linking<H> {
     if child.traits.is_empty() {
-        let mut linker = Linker::over(lookup, Vec::new());
+        let mut linker = Linker::over(lookup, holder, Vec::new());
         let settled = linker.link_refused(child, &[]);
+        let record = (settled.outcome == Linked::Linked)
+            .then(|| linker.linked_class(child, 0))
+            .flatten();
         let deferred = linker.deferred.into_inner();
         return Linking {
             outcome: settled.outcome,
@@ -1410,9 +1476,11 @@ pub fn link<'a>(
             composed: None,
             obligations: deferred.obligations,
             autoloads: deferred.autoloads,
+            record,
         };
     }
-    let composition = match traits::compose(child, lookup, values) {
+    let plain = |name: &[u8]| lookup(name).map(Held::plain);
+    let composition = match traits::compose(child, &plain, values) {
         Ok(composition) => composition,
         Err(failed) => {
             let (refused, raised) = *failed;
@@ -1422,6 +1490,7 @@ pub fn link<'a>(
                 composed: None,
                 obligations: Vec::new(),
                 autoloads: Vec::new(),
+                record: None,
             };
         }
     };
@@ -1431,8 +1500,14 @@ pub fn link<'a>(
         abstracts,
         raised,
     } = composition;
-    let (settled, raised, deferred) =
-        link_composed(&|name| lookup(name), &decl, &abstracts, raised);
+    let (settled, raised, deferred) = link_composed(
+        &|name| lookup(name),
+        &|h| holder(h),
+        &decl,
+        &abstracts,
+        raised,
+    );
+    let taken = settled.added.len();
     for at in settled.added {
         if let Some(copy) = abstracts.get(at) {
             decl.methods.push(copy.method.clone());
@@ -1442,25 +1517,50 @@ pub fn link<'a>(
     if settled.stringable {
         decl.interfaces.push(Name::from("Stringable"));
     }
-    let composed = (settled.outcome == Linked::Linked).then_some(Composed { decl, bodies });
+    let record = (settled.outcome == Linked::Linked)
+        .then(|| linked_class(&decl, taken, &|name| lookup(name), &|h| holder(h)))
+        .flatten();
+    let composed = (settled.outcome == Linked::Linked).then_some(Composed {
+        decl,
+        bodies,
+        abstracts: u32::try_from(taken).unwrap_or(u32::MAX),
+    });
     Linking {
         outcome: settled.outcome,
         raised,
         composed,
         obligations: deferred.obligations,
         autoloads: deferred.autoloads,
+        record,
     }
+}
+
+/// The record of `child` once linked, whose last `abstracts` methods
+/// are the traits' abstract ones it took ([`Composed::abstracts`]),
+/// over the classes `lookup` finds and the keys `holder` reads: none
+/// where its parent or an interface is held with no record, which a
+/// class under way is. [`link`]'s answer carries it; this is the record
+/// alone, of a class whose checks were made elsewhere, at the early
+/// bind.
+pub fn linked_class<'b, H: Copy>(
+    child: &'b ClassDecl,
+    abstracts: usize,
+    lookup: &dyn Fn(&[u8]) -> Option<Held<'b, H>>,
+    holder: &dyn Fn(H) -> Option<&'b ClassDecl>,
+) -> Option<LinkedClass<H>> {
+    Linker::over(&|name| lookup(name), &|h| holder(h), Vec::new()).linked_class(child, abstracts)
 }
 
 /// [`Linker::link_refused`] over a composed declaration, which lives
 /// shorter than the table: the lookup narrowed to its lifetime.
-fn link_composed<'b>(
-    lookup: &'b dyn Fn(&[u8]) -> Option<Held<'b>>,
+fn link_composed<'b, H: Copy>(
+    lookup: &'b dyn Fn(&[u8]) -> Option<Held<'b, H>>,
+    holder: &'b dyn Fn(H) -> Option<&'b ClassDecl>,
     decl: &'b ClassDecl,
     abstracts: &'b [traits::Copy],
     raised: Vec<Raised>,
 ) -> (Settled, Vec<Raised>, Deferred) {
-    let mut linker = Linker::over(lookup, raised);
+    let mut linker = Linker::over(lookup, holder, raised);
     let settled = linker.link_refused(decl, abstracts);
     (settled, linker.raised, linker.deferred.into_inner())
 }
@@ -1485,10 +1585,15 @@ impl Settled {
     }
 }
 
-impl<'a> Linker<'a> {
-    fn over(lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a>>, raised: Vec<Raised>) -> Linker<'a> {
+impl<'a, H: Copy> Linker<'a, H> {
+    fn over(
+        lookup: &'a dyn Fn(&[u8]) -> Option<Held<'a, H>>,
+        holder: &'a dyn Fn(H) -> Option<&'a ClassDecl>,
+        raised: Vec<Raised>,
+    ) -> Linker<'a, H> {
         Linker {
             lookup,
+            holder,
             raised,
             deferred: std::cell::RefCell::default(),
         }
@@ -1569,9 +1674,40 @@ impl<'a> Linker<'a> {
             .any(|up| self.instance_of_at(up, of, depth + 1))
     }
 
-    /// The members `class` has with what it inherited, its own first,
-    /// and the methods of the interfaces the chain implements, which
-    /// php's table holds after its own and its parents':
+    /// The properties `class` has with what it inherited, its own first.
+    fn tables(&self, class: &'a ClassDecl) -> Tables<'a> {
+        let mut tables = Tables {
+            properties: Vec::new(),
+        };
+        let mut at = Some(class);
+        let mut depth = 0;
+        while let Some(here) = at {
+            for property in &here.properties {
+                if !tables
+                    .properties
+                    .iter()
+                    .any(|(_, p)| p.name == property.name)
+                {
+                    tables.properties.push((here, property));
+                }
+            }
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            at = self.class_parent(here);
+        }
+        tables
+    }
+
+    /// `class`'s function table as php holds it once linked, each method
+    /// beside the class that declared it: read off its record where the
+    /// table holds one, and otherwise, for a class under way or one the
+    /// caller keeps no record of, its own methods, then its parent's
+    /// table, then the methods of the interfaces it names, which
+    /// `do_interface_implementation` put in the table a child inherits.
+    /// A composed class's traits' abstract methods count among its own
+    /// there, which only the order of a refusal's list could tell:
     ///
     /// ```php
     /// interface I { function __construct(); }
@@ -1581,61 +1717,226 @@ impl<'a> Linker<'a> {
     /// ```expect exit=255
     /// Fatal error: Declaration of C::__construct($a) must be compatible with I::__construct() in %s on line 4
     /// ```
-    fn tables(&self, class: &'a ClassDecl) -> Tables<'a> {
-        let mut tables = Tables {
-            methods: Vec::new(),
-            properties: Vec::new(),
-            constants: Vec::new(),
-        };
-        let mut at = Some(class);
-        let mut depth = 0;
-        while let Some(here) = at {
-            let decl = here;
-            for method in &decl.methods {
-                if !tables.methods.iter().any(|(_, m)| {
-                    m.function
-                        .name
-                        .0
-                        .eq_ignore_ascii_case(&method.function.name.0)
-                }) {
-                    tables.methods.push((here, method));
+    fn methods_above(&self, class: &'a ClassDecl) -> Vec<(&'a ClassDecl, &'a MethodDecl)> {
+        let mut table: Methods<'a> = Rows::default();
+        self.methods_into(class, &mut table, 0);
+        table
+            .rows()
+            .iter()
+            .map(|&(by, method)| (by.unwrap_or(class), method))
+            .collect()
+    }
+
+    fn methods_into(&self, class: &'a ClassDecl, table: &mut Methods<'a>, depth: u32) {
+        let held = (self.lookup)(&class.name.0).filter(|held| same(held.decl, class));
+        if let Some((_, record)) = held.and_then(|held| held.record) {
+            for row in record.methods.rows() {
+                if let Some((by, method)) = self.row_method(class, row) {
+                    put(table, Some(by), method);
                 }
             }
-            for property in &decl.properties {
-                if !tables
-                    .properties
-                    .iter()
-                    .any(|(_, p)| p.name == property.name)
-                {
-                    tables.properties.push((here, property));
-                }
-            }
-            for constant in &decl.constants {
-                if !tables
-                    .constants
-                    .iter()
-                    .any(|(_, c)| c.name == constant.name)
-                {
-                    tables.constants.push((here, constant));
-                }
-            }
-            depth += 1;
-            if depth > 64 {
-                break;
-            }
-            at = self.class_parent(here);
+            return;
         }
-        // `do_interface_implementation` put each interface's methods the
-        // chain did not declare in the class's table too, so the table a
-        // child inherits holds them.
-        for interface in self.all_interfaces(class) {
+        for method in &class.methods {
+            put(table, Some(class), method);
+        }
+        if depth < 64
+            && let Some(parent) = self.class_parent(class)
+        {
+            self.methods_into(parent, table, depth + 1);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&class.interfaces, &mut interfaces, 0);
+        for interface in interfaces {
             for method in &interface.methods {
-                if !tables.methods.iter().any(|(_, m)| same_method(m, method)) {
-                    tables.methods.push((interface, method));
-                }
+                put(table, Some(interface), method);
             }
         }
-        tables
+    }
+
+    /// [`linked_class`] of `child`, whose last `abstracts` methods are
+    /// its traits' abstract ones.
+    fn linked_class(&self, child: &'a ClassDecl, abstracts: usize) -> Option<LinkedClass<H>> {
+        Some(LinkedClass {
+            methods: self.method_rows(child, abstracts)?,
+            constants: self.constant_rows(child)?,
+        })
+    }
+
+    /// `ce->function_table` as `zend_do_link_class` leaves it, in its
+    /// order: the class's own methods, a trait's among them; each of the
+    /// parent's table it does not declare (`do_inherit_method`); the
+    /// traits' abstract methods it took; then each of its interfaces',
+    /// in `zend_do_implement_interfaces`' order, that nothing above put
+    /// there. None where the parent or an interface is held with no
+    /// record.
+    fn method_rows(&self, child: &'a ClassDecl, abstracts: usize) -> Option<Rows<Row<H>, Folded>> {
+        let own = child.methods.len().saturating_sub(abstracts);
+        let named = |row: &Row<H>| self.row_name(child, row);
+        let mut rows = Rows::default();
+        for (at, method) in (0u32..).zip(&child.methods).take(own) {
+            rows.add(Row { holder: None, at }, &method.function.name.0, named);
+        }
+        if let Some(parent) = &child.parent {
+            self.inherit_rows(&mut rows, child, &parent.0)?;
+        }
+        for (at, method) in (0u32..).zip(&child.methods).skip(own) {
+            rows.add(Row { holder: None, at }, &method.function.name.0, named);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
+        for interface in interfaces {
+            self.inherit_rows(&mut rows, child, &interface.name.0)?;
+        }
+        Some(rows)
+    }
+
+    /// The rows of the record of the class `name` names into `child`'s,
+    /// each it holds no method of the name of, its own rows naming it by
+    /// its key. None where the class is held with no record; nothing
+    /// where no class has the name.
+    fn inherit_rows(
+        &self,
+        rows: &mut Rows<Row<H>, Folded>,
+        child: &'a ClassDecl,
+        name: &[u8],
+    ) -> Option<()> {
+        let Some(held) = (self.lookup)(name) else {
+            return Some(());
+        };
+        let (handle, record) = held.record?;
+        rows.inherit(
+            &record.methods,
+            |row| Row {
+                holder: Some(row.holder_in(handle)),
+                at: row.at,
+            },
+            |row| self.row_name(child, row),
+            |row| self.row_name(held.decl, row),
+        );
+        Some(())
+    }
+
+    /// The name of the method a row of `class`'s record stands for.
+    fn row_name(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
+        self.row_method(class, row)
+            .map_or(&[][..], |(_, method)| &method.function.name.0)
+    }
+
+    /// The method a row of `class`'s record stands for, beside the class
+    /// that declared it.
+    fn row_method(
+        &self,
+        class: &'a ClassDecl,
+        row: &Row<H>,
+    ) -> Option<(&'a ClassDecl, &'a MethodDecl)> {
+        let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
+        Some((by, by.methods.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `CE_CONSTANTS_TABLE` as `zend_do_link_class` leaves it, in its
+    /// order: the class's own constants, a trait's among them; each of
+    /// the parent's table it does not declare, but the parent's private
+    /// ones (`do_inherit_class_constant`); then each of its interfaces',
+    /// in `zend_do_implement_interfaces`' order, that nothing above put
+    /// there (`do_inherit_iface_constant`). None where the parent or an
+    /// interface is held with no record.
+    fn constant_rows(&self, child: &'a ClassDecl) -> Option<Rows<Row<H>, Exact>> {
+        let named = |row: &Row<H>| self.row_constant_name(child, row);
+        let mut rows = Rows::default();
+        for (at, constant) in (0u32..).zip(&child.constants) {
+            rows.add(Row { holder: None, at }, &constant.name.0, named);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&child.interfaces, &mut interfaces, 0);
+        for name in child
+            .parent
+            .iter()
+            .chain(interfaces.iter().map(|i| &i.name))
+        {
+            let Some(held) = (self.lookup)(&name.0) else {
+                continue;
+            };
+            let (handle, record) = held.record?;
+            rows.inherit(
+                &record.constants,
+                |row| {
+                    let (_, constant) = self.row_constant(held.decl, row)?;
+                    (constant.visibility != Visibility::Private).then(|| Row {
+                        holder: Some(row.holder_in(handle)),
+                        at: row.at,
+                    })
+                },
+                named,
+                |row| self.row_constant_name(held.decl, row),
+            );
+        }
+        Some(rows)
+    }
+
+    /// The name of the constant a row of `class`'s record stands for.
+    fn row_constant_name(&self, class: &'a ClassDecl, row: &Row<H>) -> &'a [u8] {
+        self.row_constant(class, row)
+            .map_or(&[][..], |(_, constant)| &constant.name.0)
+    }
+
+    /// The constant a row of `class`'s record stands for, beside the
+    /// class that declared it.
+    fn row_constant(
+        &self,
+        class: &'a ClassDecl,
+        row: &Row<H>,
+    ) -> Option<(&'a ClassDecl, &'a ClassConstDecl)> {
+        let by = row.holder.map_or(Some(class), |h| (self.holder)(h))?;
+        Some((by, by.constants.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `class`'s constant table as php holds it once linked, into
+    /// `table`, each constant beside the class that declared it: read
+    /// off its record where the table holds one, and otherwise, for a
+    /// class under way or one the caller keeps no record of, its own
+    /// constants, then its parent's table, then the constants of the
+    /// interfaces it names. An ancestor's private constant, `depth`
+    /// above the class asked, is in no table below it:
+    ///
+    /// ```php
+    /// interface I { final const F = 1; }
+    /// class G { private const X = 1; }
+    /// class P extends G implements I {}
+    /// class C extends P { private const X = 2; }
+    /// class D extends P { const F = 2; }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: D::F cannot override final constant I::F in %s on line 6
+    /// ```
+    fn constants_into(&self, class: &'a ClassDecl, table: &mut Constants<'a>, depth: u32) {
+        let inherited = |c: &ClassConstDecl| depth == 0 || c.visibility != Visibility::Private;
+        let held = (self.lookup)(&class.name.0).filter(|held| same(held.decl, class));
+        if let Some((_, record)) = held.and_then(|held| held.record) {
+            for row in record.constants.rows() {
+                if let Some((by, constant)) = self.row_constant(class, row)
+                    && inherited(constant)
+                {
+                    put_constant(table, Some(by), constant);
+                }
+            }
+            return;
+        }
+        for constant in class.constants.iter().filter(|c| inherited(c)) {
+            put_constant(table, Some(class), constant);
+        }
+        if depth < 64
+            && let Some(parent) = self.class_parent(class)
+        {
+            self.constants_into(parent, table, depth + 1);
+        }
+        let mut interfaces = Vec::new();
+        self.interfaces_of(&class.interfaces, &mut interfaces, 0);
+        for interface in interfaces {
+            for constant in &interface.constants {
+                put_constant(table, Some(interface), constant);
+            }
+        }
     }
 
     /// Every interface `class` implements, its own list and each one's
@@ -2454,9 +2755,14 @@ impl<'a> Linker<'a> {
     fn link_refused(&mut self, child: &'a ClassDecl, abstracts: &'a [traits::Copy]) -> Settled {
         // What the child's table holds as the checks go, each with the
         // class that put it there, none for the child's own.
-        let mut constants: Table<'a, ClassConstDecl> =
-            child.constants.iter().map(|c| (None, c)).collect();
-        let mut methods: Table<'a, MethodDecl> = child.methods.iter().map(|m| (None, m)).collect();
+        let mut constants: Constants<'a> = Rows::default();
+        for constant in &child.constants {
+            put_constant(&mut constants, None, constant);
+        }
+        let mut methods: Methods<'a> = Rows::default();
+        for method in &child.methods {
+            put(&mut methods, None, method);
+        }
         if let Some(parent_name) = &child.parent
             && let Some(parent) = self.class_named(&parent_name.0)
         {
@@ -2474,7 +2780,7 @@ impl<'a> Linker<'a> {
         }
         self.serializable_deprecated(child, &methods);
         let hooks = self.abstract_hooks(child);
-        if let Some(refusal) = abstract_left(child, &methods, hooks) {
+        if let Some(refusal) = abstract_left(child, methods.rows(), hooks) {
             return Settled::of(Linked::Refused(at_class(child, refusal)));
         }
         if let Some(refusal) = enum_properties(child).or_else(|| self.enum_refused(child)) {
@@ -2575,16 +2881,18 @@ impl<'a> Linker<'a> {
         }
         let mut interfaces = Vec::new();
         self.interfaces_of(&names, &mut interfaces, 0);
+        let parent_methods = parent
+            .filter(|_| child.methods.iter().any(|m| marked(&m.function.attributes)))
+            .map(|parent| self.methods_above(parent))
+            .unwrap_or_default();
         for method in &child.methods {
             if !marked(&method.function.attributes) {
                 continue;
             }
             let is_ctor = method.function.name.0.eq_ignore_ascii_case(b"__construct");
-            let by_parent = inherited.as_ref().is_some_and(|tables| {
-                tables.methods.iter().any(|(_, p)| {
-                    same_method(p, method)
-                        && (p.is_abstract || (!is_ctor && p.visibility != Visibility::Private))
-                })
+            let by_parent = parent_methods.iter().any(|(_, p)| {
+                same_method(p, method)
+                    && (p.is_abstract || (!is_ctor && p.visibility != Visibility::Private))
             });
             let by_interface = interfaces
                 .iter()
@@ -2650,7 +2958,7 @@ impl<'a> Linker<'a> {
         parent: Option<&'a ClassDecl>,
         interfaces: &[&'a ClassDecl],
     ) -> Option<Refused> {
-        let lookup = |name: &[u8]| (self.lookup)(name);
+        let lookup = |name: &[u8]| (self.lookup)(name).map(Held::plain);
         for property in &child.properties {
             let Some(hooks) = &property.hooks else {
                 continue;
@@ -2745,15 +3053,12 @@ impl<'a> Linker<'a> {
         &mut self,
         child: &'a ClassDecl,
         copies: &'a [traits::Copy],
-        methods: &mut Table<'a, MethodDecl>,
+        methods: &mut Methods<'a>,
     ) -> Result<Vec<usize>, Box<Linked>> {
         let mut added: Vec<usize> = Vec::new();
         for (at, copy) in copies.iter().enumerate() {
-            let Some(&(holder, existing)) = methods
-                .iter()
-                .find(|(_, m)| m.function.name.0.eq_ignore_ascii_case(&copy.key))
-            else {
-                methods.push((None, &copy.method));
+            let Some(&(holder, existing)) = methods.find(&copy.key, method_name) else {
+                methods.add((None, &copy.method), &copy.key, method_name);
                 added.push(at);
                 continue;
             };
@@ -2816,15 +3121,12 @@ impl<'a> Linker<'a> {
     fn stringable(
         &mut self,
         child: &'a ClassDecl,
-        methods: &Table<'a, MethodDecl>,
+        methods: &Methods<'a>,
     ) -> Result<bool, Box<Linked>> {
         if child.traits.is_empty() || child.kind == ClassKind::Trait {
             return Ok(false);
         }
-        let Some(&(None, own)) = methods
-            .iter()
-            .find(|(_, m)| m.function.name.0.eq_ignore_ascii_case(b"__toString"))
-        else {
+        let Some(&(None, own)) = methods.find(b"__toString", method_name) else {
             return Ok(false);
         };
         let Some(stringable) = self.class_named(b"Stringable") else {
@@ -2856,13 +3158,14 @@ impl<'a> Linker<'a> {
         &mut self,
         child: &'a ClassDecl,
         parent: &'a ClassDecl,
-        constants: &mut Table<'a, ClassConstDecl>,
-        methods: &mut Table<'a, MethodDecl>,
+        constants: &mut Constants<'a>,
+        methods: &mut Methods<'a>,
     ) -> Option<Linked> {
         if let Some(refusal) = Self::parent_refused(child, parent) {
             return Some(Linked::Refused(at_class(child, refusal)));
         }
         let tables = self.tables(parent);
+        let inherited = self.methods_above(parent);
         for &(declaring, property) in &tables.properties {
             if let Some(own) = child.properties.iter().find(|p| p.name == property.name)
                 && let Some(linked) =
@@ -2874,23 +3177,26 @@ impl<'a> Linker<'a> {
         if let Some(linked) = self.hooked_properties_refused(child) {
             return Some(linked);
         }
-        for &(declaring, constant) in &tables.constants {
-            match constants.iter().find(|(_, c)| c.name == constant.name) {
+        let mut above: Constants<'a> = Rows::default();
+        self.constants_into(parent, &mut above, 0);
+        for &(declaring, constant) in above.rows() {
+            let declaring = declaring.unwrap_or(parent);
+            match constants.find(&constant.name.0, constant_name).copied() {
                 Some((held_by, held)) => {
                     if let Some(linked) =
-                        self.constant_refused(child, held, *held_by, constant, declaring)
+                        self.constant_refused(child, held, held_by, constant, declaring)
                     {
                         return Some(linked);
                     }
                 }
                 None if constant.visibility != Visibility::Private => {
-                    constants.push((Some(declaring), constant));
+                    put_constant(constants, Some(declaring), constant);
                 }
                 None => {}
             }
         }
-        for &(declaring, method) in &tables.methods {
-            match methods.iter().find(|(_, m)| same_method(m, method)) {
+        for (declaring, method) in inherited {
+            match methods.find(&method.function.name.0, method_name).copied() {
                 Some((None, own)) => {
                     let (declaring, method) = self.prototype(declaring, method);
                     let (fe_side, proto_side) = Self::own_over(child, declaring);
@@ -2901,7 +3207,7 @@ impl<'a> Linker<'a> {
                     }
                 }
                 Some(_) => {}
-                None => methods.push((Some(declaring), method)),
+                None => put(methods, Some(declaring), method),
             }
         }
         None
@@ -2976,8 +3282,8 @@ impl<'a> Linker<'a> {
     fn implement(
         &mut self,
         child: &'a ClassDecl,
-        constants: &mut Table<'a, ClassConstDecl>,
-        methods: &mut Table<'a, MethodDecl>,
+        constants: &mut Constants<'a>,
+        methods: &mut Methods<'a>,
     ) -> Option<Linked> {
         let mut named: Vec<&ClassDecl> = Vec::new();
         for name in &child.interfaces {
@@ -3014,20 +3320,20 @@ impl<'a> Linker<'a> {
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
             for constant in &interface.constants {
-                match constants.iter().find(|(_, c)| c.name == constant.name) {
+                match constants.find(&constant.name.0, constant_name).copied() {
                     Some((held_by, _)) if held_by.is_some_and(|by| same(by, interface)) => {}
                     Some((held_by, held)) => {
                         if let Some(linked) =
-                            self.constant_refused(child, held, *held_by, constant, interface)
+                            self.constant_refused(child, held, held_by, constant, interface)
                         {
                             return Some(linked);
                         }
                     }
-                    None => constants.push((Some(interface), constant)),
+                    None => put_constant(constants, Some(interface), constant),
                 }
             }
             for method in &interface.methods {
-                match methods.iter().find(|(_, m)| same_method(m, method)) {
+                match methods.find(&method.function.name.0, method_name).copied() {
                     Some((None, own)) => {
                         let (fe_side, proto_side) = Self::own_over(child, interface);
                         if let Some(linked) = self.method_refused(
@@ -3046,7 +3352,6 @@ impl<'a> Linker<'a> {
                     // the interface's as php holds it, unless it is that
                     // very method.
                     Some((Some(held_by), held)) if !same(held_by, interface) => {
-                        let (held_by, held) = (*held_by, *held);
                         let fe_side = Side {
                             scope: Self::scope_of(child, Cls::Linked(held_by)),
                             shown: &held_by.name.0,
@@ -3060,7 +3365,7 @@ impl<'a> Linker<'a> {
                         }
                     }
                     Some(_) => {}
-                    None => methods.push((Some(interface), method)),
+                    None => put(methods, Some(interface), method),
                 }
             }
             for property in &interface.properties {
@@ -3238,7 +3543,7 @@ impl<'a> Linker<'a> {
     }
 }
 
-impl<'a> Linker<'a> {
+impl<'a, H: Copy> Linker<'a, H> {
     /// `zend_implement_serializable`'s deprecation: a class that is
     /// `Serializable`, through its own interfaces or its parent's, and is
     /// not declared abstract, left without `__serialize()` or
@@ -3258,7 +3563,7 @@ impl<'a> Linker<'a> {
     /// Deprecated: B implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary) in %s on line 3
     /// linked
     /// ```
-    fn serializable_deprecated(&mut self, child: &'a ClassDecl, methods: &Table<'a, MethodDecl>) {
+    fn serializable_deprecated(&mut self, child: &'a ClassDecl, methods: &Methods<'a>) {
         if matches!(child.kind, ClassKind::Interface | ClassKind::Trait) || child.flags.is_abstract
         {
             return;
@@ -3266,11 +3571,7 @@ impl<'a> Linker<'a> {
         let serializable = self
             .class_named(b"serializable")
             .is_some_and(|interface| self.instance_of(child, interface));
-        let has = |name: &[u8]| {
-            methods
-                .iter()
-                .any(|(_, m)| m.function.name.0.eq_ignore_ascii_case(name))
-        };
+        let has = |name: &[u8]| methods.find(name, method_name).is_some();
         if serializable && !(has(b"__serialize") && has(b"__unserialize")) {
             self.raised.push(Raised::Serializable {
                 class: text(&child.name.0),
@@ -3283,7 +3584,7 @@ impl<'a> Linker<'a> {
     }
 }
 
-impl<'a> Linker<'a> {
+impl<'a, H: Copy> Linker<'a, H> {
     /// `zend_verify_enum_magic_methods` and `zend_verify_enum_interfaces`,
     /// after `zend_verify_enum_properties`: an enum holding a magic
     /// method php keeps off one, its own or a trait's, and an enum that
@@ -3349,10 +3650,6 @@ impl<'a> Linker<'a> {
             .then_some(Refusal::EnumSerializable { class })
     }
 }
-
-/// The constants or the methods a class holds as it links, each with
-/// the class that put it there, none for the class's own.
-type Table<'a, T> = Vec<(Option<&'a ClassDecl>, &'a T)>;
 
 /// A refusal at the class's own line, where php raises what is not
 /// about one method.
