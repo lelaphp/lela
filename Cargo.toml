@@ -20,6 +20,25 @@ split-debuginfo = "packed"
 debug = "line-tables-only"
 incremental = false  # rustc's incremental cache was ~70% of a checkout's target/; off, a worktree builds in ~12G, not ~39G (#1609)
 
+# The third-party crates the harness spends its time in, optimised in the
+# dev profile `cargo xtask` runs: a sample of `xtask unsafe-audit` put about
+# three quarters of its stacks in sha1_smol at opt-level 0, hashing a
+# reading's key, and the store's readers spend theirs in serde_json (#2162).
+# They build once and stay cached, so the edit loop pays nothing for them;
+# `xtask` itself stays at 0, so a harness edit rebuilds as fast as before.
+[profile.dev.package.sha1_smol]
+opt-level = 3
+[profile.dev.package.serde_json]
+opt-level = 3
+[profile.dev.package.serde]
+opt-level = 3
+[profile.dev.package.toml]
+opt-level = 3
+[profile.dev.package.regex-lite]
+opt-level = 3
+[profile.dev.package.syn]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"
