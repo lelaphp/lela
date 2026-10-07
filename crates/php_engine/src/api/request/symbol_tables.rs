@@ -320,22 +320,91 @@ impl Request {
         Ok(cell)
     }
 
-    /// One symbol written, `zend_hash_update`: `value` is the table's
-    /// and what stood under the name is released after the write, the
-    /// name keeping the position it had, as php's update keeps a
-    /// bucket's and only a name the table has not appends. A bucket
-    /// that pointed at a CV owned nothing.
+    /// One symbol written, `zend_hash_update`: `value` is the table's,
+    /// the name keeping the position it had, as php's update keeps a
+    /// bucket's and only a name the table has not appends. What stood
+    /// there is released where it stands and the write comes after
+    /// (`pDestructor` then `ZVAL_COPY_VALUE`, `Z/Zend/zend_hash.c:871`),
+    /// [`Overwrite::InPlace`]. A bucket that pointed at a CV owned
+    /// nothing, and is replaced by the value, as php's update replaces
+    /// the `IS_INDIRECT`.
     pub(super) fn symbol_update(&mut self, table: TableId, name: Vec<u8>, value: Value) {
         let Some(entries) = self.table_mut(table) else {
             return;
         };
-        if let Some(at) = entries.iter().position(|(key, _)| *key == name) {
+        let Some(at) = entries.iter().position(|(key, _)| *key == name) else {
+            entries.push((name, Symbol::Value(value)));
+            self.table_bytes(table, true, false);
+            return;
+        };
+        let Symbol::Value(held) = entries[at].1 else {
             let old = std::mem::replace(&mut entries[at].1, Symbol::Value(value));
             self.release_symbol(old);
             return;
+        };
+        self.release(held);
+        self.symbol_settle(table, name, value, held);
+    }
+
+    /// The write after a release in place, which can have served a
+    /// destructor that wrote or deleted the name: `value` written where
+    /// the name stands now, and what the program left there, other than
+    /// `expected`, released; a name it deleted is added again.
+    fn symbol_settle(&mut self, table: TableId, name: Vec<u8>, value: Value, expected: Value) {
+        let Some(entries) = self.table_mut(table) else {
+            self.release(value);
+            return;
+        };
+        let Some(at) = entries.iter().position(|(key, _)| *key == name) else {
+            entries.push((name, Symbol::Value(value)));
+            self.table_bytes(table, true, false);
+            return;
+        };
+        let old = std::mem::replace(&mut entries[at].1, Symbol::Value(value));
+        match old {
+            Symbol::Value(left) if left.to_zval() == expected.to_zval() => {}
+            old => self.release_symbol(old),
         }
-        entries.push((name, Symbol::Value(value)));
-        self.table_bytes(table, true, false);
+    }
+
+    /// `value` written into the place `place` finds, what it held given
+    /// up in `order`. The place is found again after a release that can
+    /// have served program code, and what the program left there, other
+    /// than what the release left, is released after the write; where
+    /// the place is gone, `value` is given up.
+    pub(super) fn overwrite_place(
+        &mut self,
+        place: impl Fn(&mut Request) -> Option<ZvalRef>,
+        value: Value,
+        order: Overwrite,
+    ) {
+        let Some(at) = place(self) else {
+            self.release(value);
+            return;
+        };
+        let held = Value::of_zval(at.read());
+        let expected = match order {
+            Overwrite::After => {
+                at.write(value.to_zval());
+                self.release(held);
+                return;
+            }
+            Overwrite::InPlace => held,
+            Overwrite::Nulled => {
+                at.write(Value::null().to_zval());
+                Value::null()
+            }
+        };
+        self.release(held);
+        let Some(at) = place(self) else {
+            self.release(value);
+            return;
+        };
+        let left = Value::of_zval(at.read());
+        at.write(value.to_zval());
+        if left.to_zval() != expected.to_zval() {
+            self.release(left);
+        }
     }
 
     /// One symbol deleted, `zend_hash_del`: the name gone and what it
@@ -517,40 +586,46 @@ impl Request {
     /// One symbol written, `zend_hash_update_ind`: into the CV a frame
     /// attached to the name where one is, and as
     /// [`Request::symbol_update`] writes it otherwise; `value` is the
-    /// table's, and what stood there is released after the write.
-    pub(super) fn symbol_update_ind(&mut self, table: TableId, name: &[u8], value: Value) {
-        let attached = self.table_mut(table).and_then(|entries| {
+    /// table's. What stood there is given up in `order`: php's
+    /// `zend_hash_update_ind` releases in place, [`Overwrite::InPlace`],
+    /// and a caller that writes the variable as php's natives do through
+    /// the `zval *` they found names its own.
+    pub(super) fn symbol_update_ind(
+        &mut self,
+        table: TableId,
+        name: &[u8],
+        value: Value,
+        order: Overwrite,
+    ) {
+        let found = self.table_mut(table).and_then(|entries| {
             entries
                 .iter()
                 .find(|(key, _)| key == name)
-                .and_then(|(_, symbol)| match symbol {
-                    Symbol::Indirect(frame, at) => Some((*frame, *at)),
-                    Symbol::Value(_) | Symbol::Held(_) => None,
-                })
+                .map(|(_, symbol)| *symbol)
         });
-        match attached {
-            Some((frame, at)) => {
-                let previous = self.set_attached(table, frame, at, value);
-                self.release(previous);
+        match found {
+            Some(Symbol::Indirect(frame, at)) => {
+                self.overwrite_place(|req| req.attached_ptr(table, frame, at), value, order);
             }
-            None => self.symbol_update(table, name.to_vec(), value),
+            Some(Symbol::Value(held)) if order != Overwrite::InPlace => {
+                let Some(entries) = self.table_mut(table) else {
+                    self.release(value);
+                    return;
+                };
+                let Some(entry) = entries.iter_mut().find(|(key, _)| key == name) else {
+                    return;
+                };
+                if order == Overwrite::After {
+                    entry.1 = Symbol::Value(value);
+                    self.release(held);
+                    return;
+                }
+                entry.1 = Symbol::Value(Value::null());
+                self.release(held);
+                self.symbol_settle(table, name.to_vec(), value, Value::null());
+            }
+            _ => self.symbol_update(table, name.to_vec(), value),
         }
-    }
-
-    /// `value` into an attached name's CV, what it held handed back.
-    pub(crate) fn set_attached(
-        &mut self,
-        table: TableId,
-        frame: FrameRef,
-        at: u32,
-        value: Value,
-    ) -> Value {
-        let Some(place) = self.attached_ptr(table, frame, at) else {
-            return value;
-        };
-        let held = Value::of_zval(place.read());
-        place.write(value.to_zval());
-        held
     }
 
     /// `zend_hash_find` in a symbol table for a fetch by name that
@@ -700,4 +775,32 @@ impl Request {
         }
         rows
     }
+}
+
+/// The order a write gives up what the variable it writes held, each
+/// one php's: what a destructor that the release serves reads under the
+/// name.
+///
+/// ```php
+/// class D { function __construct(public $n) {} function __destruct() { echo "dtor {$this->n} sees: "; var_dump($GLOBALS[$this->n]); } }
+/// $x = new D('x'); extract(['x' => 5]);
+/// $z = new D('z'); $src = ['z' => 7]; extract($src, EXTR_REFS);
+/// ```
+/// ```expect
+/// dtor x sees: NULL
+/// dtor z sees: int(7)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overwrite {
+    /// `zend_hash_update`'s `pDestructor` and `zend_set_local_var`'s
+    /// `zval_ptr_dtor`: released where it stands, so the destructor reads
+    /// the value it is serving, and the write after.
+    InPlace,
+    /// `zval_ptr_safe_dtor`, which `ZEND_TRY_ASSIGN_COPY_EX` calls
+    /// (`Z/Zend/zend_API.h:1457`): the variable `null` while the old value
+    /// is released, and the write after.
+    Nulled,
+    /// `php_extract_ref_overwrite`'s `garbage`: the write, and the old
+    /// value released after it.
+    After,
 }

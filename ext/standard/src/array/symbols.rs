@@ -13,7 +13,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
-use php_ext::request::Request;
+use php_ext::request::{Overwrite, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -41,7 +41,18 @@ fn prefixed(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 
 /// `ZEND_TRY_ASSIGN_COPY_EX` into the variable, or a new one: through a
 /// reference the variable holds, held to the types it is typed by, else
-/// in its place.
+/// in its place, the variable `null` while what it held is released
+/// (`zval_ptr_safe_dtor`).
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor sees: "; var_dump($GLOBALS['x']); } }
+/// $x = new D; extract(['x' => 5]);
+/// var_dump($x);
+/// ```
+/// ```expect
+/// dtor sees: NULL
+/// int(5)
+/// ```
 fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
     let value = Owner::take(req, value.deref());
     if let Some(cell) = req
@@ -50,7 +61,7 @@ fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
     {
         return cell.set(req, value);
     }
-    req.set_caller_var(name, value);
+    req.set_caller_var(name, value, Overwrite::Nulled);
     Ok(())
 }
 
@@ -315,7 +326,9 @@ fn extracted_refs(
         if let Some(target) = target(req, kind, prefix, row.key())? {
             let cell = row.make_ref(req)?;
             let cell = Owner::take(req, cell.as_value());
-            req.set_caller_var(&target, cell);
+            // `php_extract_ref_overwrite`'s `garbage`: the reference
+            // written, and what the variable held released after.
+            req.set_caller_var(&target, cell, Overwrite::After);
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))
