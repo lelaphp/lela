@@ -775,7 +775,7 @@ impl Request {
     /// The handler table `class` itself declares, none where it declares
     /// none of its own.
     fn handler_row(&self, class: ClassId) -> Option<&'static dyn ObjectHandlers> {
-        let at = usize::try_from(class.0).ok()?;
+        let at = self.native_class_at(class)?;
         self.shared.handlers.get(at).copied().flatten()
     }
 
@@ -806,7 +806,7 @@ impl Request {
     /// is `zend_objects_new`.
     pub(crate) fn native_new_of(&self, class: ClassId) -> Option<NativeNew> {
         self.lineage(class).find_map(|class| {
-            let at = usize::try_from(class.0).ok()?;
+            let at = self.native_class_at(class)?;
             self.shared.natives.get(at).copied().flatten()
         })
     }

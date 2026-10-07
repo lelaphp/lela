@@ -373,15 +373,7 @@ impl Request {
         {
             return self.interfaces(class).contains(&of);
         }
-        let mut at = class;
-        for _ in 0..64 {
-            match self.linked_parent(at) {
-                Some(parent) if parent == of => return true,
-                Some(parent) => at = parent,
-                None => return false,
-            }
-        }
-        false
+        self.ancestors(class).any(|parent| parent == of)
     }
 
     /// `ce->interfaces` of a linked class: every interface it implements,
@@ -405,29 +397,23 @@ impl Request {
         std::iter::successors(self.class_parent(class), move |&at| self.class_parent(at)).take(64)
     }
 
-    /// `ce->parent`: the linked parent of a class, none at a root; an
-    /// engine's class's as startup linked it, a declared class's as it
-    /// bound ([`super::Bound`]), and by its name where it bound first.
+    /// `ce->parent`: the linked parent of a class, none at a root, read
+    /// by number and never by name: an engine's class's as startup
+    /// linked it, a declared or a published class's as it bound
+    /// ([`super::Bound`]).
+    ///
+    /// ```php
+    /// class P {} class C extends P {} class E extends RuntimeException {}
+    /// var_dump(get_parent_class(new C), get_parent_class("E"), get_parent_class("RuntimeException"), get_parent_class("P"), new E instanceof Exception);
+    /// ```
+    /// ```expect
+    /// string(1) "P"
+    /// string(16) "RuntimeException"
+    /// string(9) "Exception"
+    /// bool(false)
+    /// bool(true)
+    /// ```
     pub(crate) fn class_parent(&self, class: ClassId) -> Option<ClassId> {
-        let at = usize::try_from(class.0).ok()?;
-        if let Some(parent) = self.shared.parents.get(at) {
-            return *parent;
-        }
-        if let Some(parent) = self
-            .declared_row(class)
-            .and_then(|declared| declared.bound.parent)
-        {
-            return Some(parent);
-        }
-        self.class_decl(class)?
-            .parent
-            .as_ref()
-            .and_then(|name| self.class_named(&name.0))
-    }
-
-    /// `ce->parent` as the link left it, read by number: an engine's
-    /// class's as startup linked it, a declared class's as it bound.
-    fn linked_parent(&self, class: ClassId) -> Option<ClassId> {
         match self.native_class_at(class) {
             Some(at) => self.shared.parents.get(at).copied().flatten(),
             None => self.declared_row(class)?.bound.parent,
