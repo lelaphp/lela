@@ -37,8 +37,8 @@ use php_ext::values::{
 };
 
 use crate::{
-    ArrayAccess, Countable, Iterator, IteratorAggregate, RecursiveIterator, SeekableIterator,
-    Serializable,
+    ArrayAccess, Countable, Iterator, IteratorAggregate, Record, RecursiveIterator,
+    SeekableIterator, Serializable,
 };
 
 const IS_SELF: i64 = 0x0100_0000;
@@ -630,6 +630,22 @@ impl ArrayObject {
     /// Error at offset 0 of 6 bytes
     /// Error at offset 12 of 20 bytes
     /// ```
+    ///
+    /// A read that throws breaks the record too, the throwable chained
+    /// under the `UnexpectedValueException` at the offset the reader
+    /// stopped at.
+    ///
+    /// ```php
+    /// class T { public int $p; }
+    /// spl_autoload_register(function ($c) { throw new Exception("auto $c"); });
+    /// $p = function ($e) { echo get_class($e), ": ", $e->getMessage(), " <- ", get_class($e->getPrevious()), ": ", $e->getPrevious()->getMessage(), "\n"; };
+    /// try { (new ArrayObject)->unserialize('x:i:0;a:1:{i:0;O:1:"T":1:{s:1:"p";s:1:"x";}};m:a:0:{}'); } catch (Throwable $e) { $p($e); }
+    /// try { (new ArrayObject)->unserialize('x:i:0;O:1:"Q":0:{};m:a:0:{}'); } catch (Throwable $e) { $p($e); }
+    /// ```
+    /// ```expect
+    /// UnexpectedValueException: Error at offset 42 of 53 bytes <- TypeError: Cannot assign string to property T::$p of type int
+    /// UnexpectedValueException: Error at offset 6 of 27 bytes <- Exception: auto Q
+    /// ```
     #[php(tentative)]
     fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
         let this = this.object();
@@ -641,31 +657,17 @@ impl ArrayObject {
         let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let mut pending = None;
         let read = read_record(req, this, &mut reader, &data, &mut pending);
+        let (read, broke_at) = crate::record_read(req, this, &reader, read);
         // What `spl_array_set_array` threw stands over the rest of the
         // read and the var hash's destruction, as `EG(exception)` does, so
         // no delayed call is made under it.
-        let (read, broke_at) = match (read, pending) {
-            (Ok(broke_at), None) => (Ok(()), broke_at),
-            (Ok(broke_at), Some(stands)) => (Err(stands), broke_at),
-            (Err(thrown), None) => (Err(thrown), None),
-            (Err(thrown), Some(stands)) => (Err(stands.chain(req, thrown)), None),
+        let read = match (read, pending) {
+            (read, None) => read,
+            (Ok(()), Some(stands)) => Err(stands),
+            (Err(thrown), Some(stands)) => Err(stands.chain(req, thrown)),
         };
         let finished = reader.finish(req, read);
-        let Some(at) = broke_at else {
-            return finished;
-        };
-        // `outexcept`, after `PHP_VAR_UNSERIALIZE_DESTROY`: chained onto
-        // whatever stands.
-        let len = data.len();
-        let broke = throw(
-            req,
-            "UnexpectedValueException",
-            &format!("Error at offset {at} of {len} bytes"),
-        );
-        match finished {
-            Ok(()) => Err(broke),
-            Err(stands) => Err(stands.chain(req, broke)),
-        }
+        crate::record_end(req, finished, broke_at, data.len())
     }
 
     /// `serialize(): string`, php's `x:i:flags;storage;m:members`; the
@@ -2770,9 +2772,10 @@ fn storage(req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown>
     Ok(Owner::take(req, value))
 }
 
-/// The body of `ArrayObject::unserialize` over one reader: `None` once
-/// the record is read, or the offset php's `outexcept` reports; a
-/// refusal of the storage is left in `pending`. Each value read is the
+/// The body of `ArrayObject::unserialize` over one reader: the members
+/// once the record is read, or the offset php's `outexcept` reports, a
+/// read that threw going there too; a refusal of the storage is left in
+/// `pending`. Each value read is the
 /// var hash's, php's `var_tmp_var`, so a later `R:` may name it.
 fn read_record(
     req: &mut Request,
@@ -2780,59 +2783,58 @@ fn read_record(
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
     pending: &mut Option<Thrown>,
-) -> Result<Option<usize>, Thrown> {
+) -> Result<Record, Thrown> {
     if !data.starts_with(b"x:") {
-        return Ok(Some(0));
+        return Ok(Record::Broke(0));
     }
     reader.set_offset(2);
     let Some(flags) = reader.value(req)? else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     let Some(flags) = flags.as_int() else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     // `--p` back onto the `;` the flags' own value ended with.
     let at = reader.offset().saturating_sub(1);
     if data.get(at) != Some(&b';') {
-        return Ok(Some(at));
+        return Ok(Record::Broke(at));
     }
     if flags & IS_SELF != 0 {
         set_flags_and_self(req, this, flags)?;
     } else {
         if !matches!(data.get(reader.offset()), Some(b'a' | b'O' | b'C' | b'r')) {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         }
         let Some(stored) = reader.value(req)? else {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         };
         if stored.as_array().is_none() && stored.as_object().is_none() {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         }
         set_flags_and_self(req, this, flags)?;
         if let Err(thrown) = set_array(req, this, &stored, 0, true) {
             *pending = Some(thrown);
         }
         if data.get(reader.offset()) != Some(&b';') {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         }
         reader.set_offset(reader.offset() + 1);
     }
     let at = reader.offset();
     if data.get(at) != Some(&b'm') {
-        return Ok(Some(at));
+        return Ok(Record::Broke(at));
     }
     if data.get(at + 1) != Some(&b':') {
-        return Ok(Some(at + 1));
+        return Ok(Record::Broke(at + 1));
     }
     reader.set_offset(at + 2);
     let Some(members) = reader.value(req)? else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     if members.as_array().is_none() {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     }
-    crate::load_members(req, this, &members)?;
-    Ok(None)
+    Ok(Record::Read(Some(members)))
 }
 
 /// The flags an unserialization read, `ar_flags &= ~SPL_ARRAY_CLONE_MASK;

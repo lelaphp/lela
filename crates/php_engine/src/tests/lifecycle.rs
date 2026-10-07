@@ -4,10 +4,12 @@
 //! request a request state is built for and at engine drop.
 
 use super::test_ext::{Event, Events, Phase, Recording, TestExt, record};
-use crate::api::abi::{Extension, PostStartup as Answer};
+use crate::api::abi::{Extension, ExtensionBuilder, PostStartup as Answer, Refusal, Start};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::engine::{Engine, RequestDescription};
+use crate::engine::{
+    Engine, HostPage, HostServes, IniOrigin, Method, RequestDescription, WebRequest,
+};
 use crate::test::Capture;
 
 use Event::{Ext, Mark};
@@ -498,6 +500,160 @@ fn an_error_from_rinit_fails_the_request_start_with_no_request_end_phase() {
             Ext(0, RequestStateDropped),
         ]
     );
+}
+
+/// A request-start function that sets a header, as session's `RINIT`
+/// under `session.auto_start` sends its cookie.
+#[allow(clippy::unnecessary_wraps)] // a `rinit`'s signature
+fn sets_header<const N: u8>(req: &mut Request) -> Result<(), Thrown> {
+    record(N, Rinit(Some(0)));
+    req.header_add(b"X-Rinit: 1", true, 0);
+    Ok(())
+}
+
+/// `program` as php-fpm describes a `GET` of the web.
+fn fetched(program: &str) -> RequestDescription {
+    RequestDescription {
+        sapi_name: String::from("fpm-fcgi"),
+        web: Some(WebRequest {
+            method: Some(Method::Get),
+            response_code: 200,
+            ..WebRequest::default()
+        }),
+        ..piped(program)
+    }
+}
+
+/// A host that looks at its request once it has started, as php-fpm's
+/// loop answers its ping page after `php_request_startup`
+/// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1852`), is asked after every
+/// extension's `rinit`, and its page's lines replace those of their
+/// names that `rinit` set; the code is the page's, the body its own, and
+/// the program is not served.
+#[test]
+fn a_host_looks_at_its_request_after_every_rinit() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .rinit(sets_header::<0>)
+            .build("test_ext_0")])
+        .build();
+    let mut sink = Capture::default();
+    rec.mark("built");
+    let observed = engine.serve_started(fetched("<?php echo 'ran';"), &mut sink, || {
+        rec.mark("looked");
+        HostServes::Page(HostPage {
+            code: 404,
+            headers: vec![b"X-Rinit: 2".to_vec(), b"Content-Type: text/plain".to_vec()],
+            body: b"pong".to_vec(),
+        })
+    });
+    rec.mark("served");
+    assert!(!observed.start_failed);
+    assert_eq!(
+        rec.events().between("built", "looked").0,
+        [Ext(0, RequestStateBuilt), Ext(0, Rinit(Some(0)))]
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&sink.headers),
+        "X-Powered-By: PHP/8.5.9\r\nX-Rinit: 2\r\nContent-type: text/plain;charset=UTF-8\r\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&sink.stdout), "pong");
+}
+
+/// A request whose start failed is never looked at: php-fpm's loop ends
+/// the child before its ping page, its `Primary script unknown` and its
+/// `Unable to open primary script` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`),
+/// and the host is handed the failure.
+#[test]
+fn a_request_whose_start_failed_is_not_looked_at() {
+    let _rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .rinit(throws::<0>)
+            .build("test_ext_0")])
+        .build();
+    let mut sink = Capture::default();
+    let mut looked = false;
+    let observed = engine.serve_started(fetched("<?php echo 'ran';"), &mut sink, || {
+        looked = true;
+        HostServes::Nothing
+    });
+    assert!(observed.start_failed);
+    assert!(!looked);
+}
+
+/// What the engine start of [`starts_from_ini`] was handed for its two
+/// entries.
+static STARTED_WITH: std::sync::Mutex<Vec<Option<Vec<u8>>>> = std::sync::Mutex::new(Vec::new());
+
+/// An `on_modify` that takes every value.
+#[allow(clippy::unnecessary_wraps)] // an `on_modify`'s signature
+fn takes_every_value(_: &mut Request, _: Option<&[u8]>) -> Result<bool, Thrown> {
+    Ok(true)
+}
+
+/// An engine start that records what its startup ini holds for
+/// `t.plain` and `t.handled` in [`STARTED_WITH`].
+#[allow(clippy::unnecessary_wraps)] // an engine start's signature
+fn records_startup_ini(start: &Start) -> Result<(), Refusal> {
+    let value = |name: &[u8]| {
+        start
+            .ini()
+            .entries
+            .iter()
+            .find(|(entry, _)| entry.as_slice() == name)
+            .and_then(|(_, value)| value.clone())
+    };
+    let mut seen = STARTED_WITH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    seen.clear();
+    seen.extend([value(b"t.plain"), value(b"t.handled")]);
+    Ok(())
+}
+
+/// An extension of two system entries, `t.plain` and `t.handled`, the
+/// second with an `on_modify` that takes every value, whose engine start
+/// records what its startup ini holds for each.
+fn starts_from_ini() -> Extension {
+    let entry = |name: &str| php_unit::decl::IniDecl {
+        name: php_unit::decl::Name(name.as_bytes().into()),
+        default: Some(b"default"[..].into()),
+        user: false,
+        per_dir: false,
+        system: true,
+    };
+    ExtensionBuilder::default()
+        .ini(vec![entry("t.plain"), entry("t.handled")])
+        .on_modify(b"t.handled", takes_every_value)
+        .engine_state(records_startup_ini)
+        .build("starts_from_ini")
+}
+
+/// A host's own entries are laid over at `ZEND_INI_STAGE_ACTIVATE`, as
+/// php-fpm's child applies its pool's `php_value` and `php_admin_value`
+/// to an engine whose `MINIT` ran once in the master: an extension's
+/// engine start sees the startup ini without them, the `-d` value where
+/// one was given and the default where none was, whether or not the
+/// entry has an `on_modify`, while the master value every request
+/// starts with is the host's (#1944).
+#[test]
+fn an_engine_start_sees_the_startup_ini_without_the_host_s_entries() {
+    let _rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[starts_from_ini()])
+        .ini(b"t.plain", b"line")
+        .host_ini(b"t.plain", b"pool", IniOrigin::Admin)
+        .host_ini(b"t.handled", b"pool", IniOrigin::Value)
+        .build();
+    let seen = STARTED_WITH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(seen, [Some(b"line".to_vec()), Some(b"default".to_vec())]);
+    assert_eq!(engine.ini_get(b"t.plain"), Some(b"pool".to_vec()));
+    assert_eq!(engine.ini_get(b"t.handled"), Some(b"pool".to_vec()));
 }
 
 /// The built-in server is the one host that shuts a request whose start

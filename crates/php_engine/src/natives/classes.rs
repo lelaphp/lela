@@ -238,15 +238,8 @@ fn is_a(
 /// order, which is where `zend_do_inheritance` appends them. Each row
 /// names the class that declared it, `property_info->ce`.
 fn properties_info(req: &Request, class: ClassId) -> Vec<(ClassId, PropertyDecl)> {
-    let mut chain = Vec::new();
-    let mut at = Some(class);
-    for _ in 0..64 {
-        let Some(here) = at else { break };
-        chain.push(here);
-        at = req.class_parent(here);
-    }
     let mut table: Vec<(ClassId, PropertyDecl)> = Vec::new();
-    for here in chain {
+    for here in req.lineage(class) {
         let Some(decl) = req.class_decl(here) else {
             continue;
         };

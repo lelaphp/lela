@@ -13,7 +13,7 @@
 //! parent, by the linker, from the copies made here.
 
 use super::{Body, Collision, Held, Raised, Refusal, Refused, Site, at_class, text};
-use crate::decl::{
+use php_unit::decl::{
     AliasModifier, ClassConstDecl, ClassDecl, ClassKind, ConstExpr, MethodDecl, Name, PropertyDecl,
     TraitAdaptation, TraitMethodRef, Visibility,
 };
@@ -936,7 +936,7 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decl::Type;
+    use php_unit::decl::Type;
 
     #[test]
     fn a_nan_is_not_identical_to_itself_and_an_untyped_property_defaults_to_null() {

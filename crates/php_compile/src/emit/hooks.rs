@@ -139,7 +139,7 @@ impl Emit<'_> {
     /// `zend_compile_property_hooks`' check of a `set` hook as soon as
     /// it has compiled, before the next hook: its parameter's type held
     /// to the property's against the classes bound while the file
-    /// compiles ([`php_unit::link::set_hook_refused`]), a refusal being
+    /// compiles ([`php_link::set_hook_refused`]), a refusal being
     /// the compile error it is in php, raised before anything runs.
     ///
     /// ```php
@@ -157,14 +157,14 @@ impl Emit<'_> {
             return Err(self.fatal("InternalError: a set hook of a class the unit has not"));
         };
         let lookup = |name: &[u8]| {
-            self.bound_class(name).map(|decl| php_unit::link::Held {
+            self.bound_class(name).map(|decl| php_link::Held {
                 decl,
                 bodies: None,
                 linked: true,
                 record: None,
             })
         };
-        match php_unit::link::set_hook_refused(scope, hooked.name, hooked.declared, set, &lookup) {
+        match php_link::set_hook_refused(scope, hooked.name, hooked.declared, set, &lookup) {
             Some(refusal) => Err(self.compile_error(refusal.to_string())),
             None => Ok(()),
         }

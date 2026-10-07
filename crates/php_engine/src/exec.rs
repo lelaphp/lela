@@ -238,6 +238,40 @@ impl Receiver {
 }
 
 impl CallState {
+    /// A call an `INIT_*` lays down for its `SEND_*` oplines to place
+    /// `count` arguments on: no receiver, no scope, no closure, a static
+    /// callee's, the rest for the opline to name.
+    pub(crate) fn building(function: Function, name: Option<PhpString>, count: usize) -> Self {
+        CallState {
+            function,
+            name,
+            arguments: Vec::new(),
+            count,
+            receiver: None,
+            called_scope: None,
+            closure: None,
+            extra_named: ExtraNamed::default(),
+            stage: CallStage::Building,
+            send_arg_by_ref: false,
+            frameless: false,
+            return_value: ReturnValue::Used,
+            dynamic: false,
+            coerced: Vec::new(),
+            beneath: 0,
+        }
+    }
+
+    /// A call already serving over `arguments`, placed whole by the one
+    /// laying it down, under no name a constant spelled.
+    pub(crate) fn serving(function: Function, arguments: Vec<Value>) -> Self {
+        let count = arguments.len();
+        CallState {
+            stage: CallStage::Serving,
+            arguments,
+            ..CallState::building(function, None, count)
+        }
+    }
+
     /// `Z_OBJ(call->This)`: the receiver, a view.
     pub(crate) fn this(&self) -> Option<PhpObject> {
         self.receiver.map(Receiver::object)

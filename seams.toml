@@ -20,7 +20,7 @@
 pin = "oracle.toml"                        # the only statement of version, digest, recipe
 
 [budget]
-total = 440000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this
+total = 480000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 5000                                # design §10; `docs/**` plus the three living documents
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
@@ -58,11 +58,15 @@ name = "php_unit"
 budget = 6000
 lock = "unit.lock"
 [[crate]]
+name = "php_link"
+budget = 5500                               # the linker and the linked class record, moved out of php_unit (ADR-0012; #2193, #2228)
+lock = "link.lock"
+[[crate]]
 name = "php_compile"
-budget = 22000
+budget = 24000
 [[crate]]
 name = "php_engine"
-budget = 65000
+budget = 75000
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -87,12 +91,12 @@ name = "php_sapi"
 budget = 2000                              # the hosts' facade and what php-src shares between its SAPIs (ADR-0008); the hosts' phpt subsets are their rows'
 [[crate]]
 name = "php_streams"
-budget = 9000                              # php's main/streams/ and main/network.c, split from php_engine (#1773, #1874)
+budget = 10000                              # php's main/streams/ and main/network.c, split from php_engine (#1773, #1874)
 porting = true
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 31000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
+budget = 34000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -145,7 +149,7 @@ budget = 5500
 porting = true
 [[crate]]
 name = "ext/pdo"
-budget = 6000
+budget = 7000
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
@@ -179,7 +183,7 @@ budget = 1500
 porting = true
 [[crate]]
 name = "ext/json"
-budget = 1500
+budget = 1700
 # The port is partial: the corpus reads 9 of 88 failing, and the crate is
 # touched by anything that changes the shape of a declaration (#376), so
 # `phpt` is the meter here too (harness §4.5 condition 1, #383).
@@ -296,7 +300,7 @@ budget = 1500     # php_xmlreader.c over libxml2's xmlTextReader, bound in ext/l
 porting = true
 [[crate]]
 name = "ext/xmlwriter"
-budget = 1000     # php_xmlwriter.c over libxml2's xmlTextWriter, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 769 lines of C (#1166, #727's rule, #1323)
+budget = 1150     # php_xmlwriter.c over libxml2's xmlTextWriter, bound in ext/libxml's src/ffi/, the bindings pool's, and reached through its safe types; 769 lines of C (#1166, #727's rule, #1323)
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
 [[crate]]
@@ -344,7 +348,7 @@ feature = "mysqlnd"
 porting = true
 [[crate]]
 name = "ext/mysqli"
-budget = 5000     # mysqli*.c, 3,713 lines of C, over ext/mysqlnd (#1345)
+budget = 5500     # mysqli*.c, 3,713 lines of C, over ext/mysqlnd (#1345)
 feature = "mysqli"
 # The port is partial: `phpt` is the meter, not a condition of done, until the no-regression rule replaces the key (#652, #664).
 porting = true
@@ -432,7 +436,7 @@ feature = "ffi"
 porting = true
 [[crate]]
 name = "ext/zend_test"
-budget = 1500
+budget = 4000
 feature = "zend_test"                      # off by default, as php's --enable-zend-test (#1782)
 oracle = "zend-test"                       # the oracle variant that loads it (#1782)
 # ---------------------------------------------------------------- sapi/
@@ -501,6 +505,12 @@ consumers = ["php_compile", "php_engine", "php_jit", "php_link"]
 lock = "unit.lock"
 adr = "0001"
 [[seam]]
+name = "link"
+producer = "php_link"
+consumers = ["php_compile", "php_engine", "php_jit"]
+lock = "link.lock"
+adr = "0012"
+[[seam]]
 name = "ops"
 producer = "ops.toml"
 consumers = ["php_unit", "php_engine", "php_compile", "xtask"]
@@ -547,6 +557,9 @@ lock = "xtask.lock"
 [[edge]]
 from = "php_unit"
 to = ["php_heap"]
+[[edge]]
+from = "php_link"
+to = ["php_unit", "php_heap"]
 [[edge]]
 from = "php_compile"
 to = ["php_syntax", "php_unit", "php_link", "php_heap"]

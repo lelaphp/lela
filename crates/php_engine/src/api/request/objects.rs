@@ -10,8 +10,8 @@
 use std::any::Any;
 
 use php_heap::{Fatal, Heap, Obj, Zval};
+use php_link::{LinkedClass, Row};
 use php_unit::decl::{ClassDecl, ClassKind, PropertyDecl, Visibility};
-use php_unit::link::{LinkedClass, Row};
 
 use crate::api::abi::{DimensionRead, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
@@ -767,20 +767,16 @@ impl Request {
     /// answers what its own C handler does (`spl_array_read_dimension_ex`
     /// answers `&EG(uninitialized_zval)`).
     pub(crate) fn std_dimensions(&self, class: ClassId) -> bool {
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(class) = at else {
-                return true;
-            };
-            if let Some(Some(_)) = usize::try_from(class.0)
-                .ok()
-                .and_then(|i| self.shared.handlers.get(i))
-            {
-                return false;
-            }
-            at = self.class_parent(class);
-        }
-        true
+        !self
+            .lineage(class)
+            .any(|class| self.handler_row(class).is_some())
+    }
+
+    /// The handler table `class` itself declares, none where it declares
+    /// none of its own.
+    fn handler_row(&self, class: ClassId) -> Option<&'static dyn ObjectHandlers> {
+        let at = usize::try_from(class.0).ok()?;
+        self.shared.handlers.get(at).copied().flatten()
     }
 
     /// The handler table an object of `class` is reached through
@@ -796,18 +792,8 @@ impl Request {
     /// `std_object_handlers`: its own or the nearest parent's, or an
     /// enum's; `None` where its objects are served by [`Std`].
     pub(crate) fn own_handlers(&self, class: ClassId) -> Option<&'static dyn ObjectHandlers> {
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(class) = at else {
-                break;
-            };
-            if let Some(Some(table)) = usize::try_from(class.0)
-                .ok()
-                .and_then(|i| self.shared.handlers.get(i))
-            {
-                return Some(*table);
-            }
-            at = self.class_parent(class);
+        if let Some(table) = self.lineage(class).find_map(|at| self.handler_row(at)) {
+            return Some(table);
         }
         self.class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Enum)
@@ -819,18 +805,10 @@ impl Request {
     /// `None` for a class whose objects carry no native payload, which
     /// is `zend_objects_new`.
     pub(crate) fn native_new_of(&self, class: ClassId) -> Option<NativeNew> {
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let class = at?;
-            if let Some(Some(new)) = usize::try_from(class.0)
-                .ok()
-                .and_then(|i| self.shared.natives.get(i))
-            {
-                return Some(*new);
-            }
-            at = self.class_parent(class);
-        }
-        None
+        self.lineage(class).find_map(|class| {
+            let at = usize::try_from(class.0).ok()?;
+            self.shared.natives.get(at).copied().flatten()
+        })
     }
 
     /// Whether objects of `class` are made by `zend_default_exception_new`,
@@ -839,21 +817,9 @@ impl Request {
     /// subclass, whose `create_object` wraps it as php's
     /// `ce->create_object` wraps `zend_ce_exception->create_object`.
     pub(crate) fn records_throw_site(&self, class: ClassId) -> bool {
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(class) = at else {
-                return false;
-            };
-            if let Some(Some(table)) = usize::try_from(class.0)
-                .ok()
-                .and_then(|i| self.shared.handlers.get(i))
-                && crate::classes::records_throw_site(*table)
-            {
-                return true;
-            }
-            at = self.class_parent(class);
-        }
-        false
+        self.lineage(class)
+            .filter_map(|class| self.handler_row(class))
+            .any(crate::classes::records_throw_site)
     }
 
     /// [`Request::handlers_of`] for the object's class, php's

@@ -697,24 +697,14 @@ fn session_start(
     answer(req, true)
 }
 
-/// `zend_hash_clean` over the session's array, separated first, where
-/// there is one.
+/// `SEPARATE_ARRAY` and `zend_hash_clean` over the session's array, where
+/// there is one (`Z/ext/session/session.c:2702`): no owner of the table
+/// taken, the session's reference holding it.
 fn clean(req: &mut Request) -> Result<(), Thrown> {
-    let Some(array) = crate::session_array_mut(req)? else {
-        return Ok(());
-    };
-    // `zend_hash_clean` (`Z/ext/session/session.c:2702`,
-    // `Z/Zend/zend_hash.c:1875`) over the separated table, each row destroyed in
-    // order and its destructor served as it goes; no owner of the table
-    // taken, the session's reference holding it. A destructor that
-    // assigns over `$_SESSION` frees the table under php's loop, which
-    // reads it freed; this walk ends there instead.
-    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-        let mut table = array;
-        table.unset(req, row.key())?;
-        Ok(ControlFlow::Continue(()))
-    })?;
-    Ok(())
+    match crate::session_array_mut(req)? {
+        Some(mut array) => array.clean(req),
+        None => Ok(()),
+    }
 }
 
 /// `session_destroy(): bool`.
@@ -770,6 +760,30 @@ fn session_destroy(req: &mut Request) -> Result<bool, Thrown> {
 /// Warning: session_encode(): Cannot encode non-existent session in %s on line 4
 /// bool(false)
 /// bool(false)
+/// ```
+///
+/// The variables go as `zend_hash_clean` destroys them: each value in
+/// order, its destructor served as it goes, every key standing until
+/// the last is destroyed, and the next free index back to the start.
+///
+/// ```php
+/// ob_start(); session_start(["save_path" => sys_get_temp_dir(), "use_cookies" => 0, "cache_limiter" => ""]);
+/// class D { function __construct(public $n) {} function __destruct() { echo "d{$this->n}\n"; } }
+/// class E { function __destruct() { echo "E sees ", implode(',', array_keys($_SESSION)), "\n"; } }
+/// $_SESSION['a'] = new D(1); $_SESSION['b'] = new D(2); $_SESSION['e'] = new E; $_SESSION[5] = new D(3);
+/// var_dump(session_unset()); $_SESSION[] = 0; var_dump($_SESSION);
+/// session_destroy(); ob_end_flush();
+/// ```
+/// ```expect
+/// d1
+/// d2
+/// E sees a,b,e,5
+/// d3
+/// bool(true)
+/// array(1) {
+///   [0]=>
+///   int(0)
+/// }
 /// ```
 #[php_function]
 fn session_unset(req: &mut Request) -> Result<bool, Thrown> {

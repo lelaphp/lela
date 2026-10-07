@@ -24,11 +24,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
+use php_link::LinkedClass;
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
     PropertyDecl,
 };
-use php_unit::link::LinkedClass;
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
@@ -508,6 +508,31 @@ pub enum Routed {
     Taken,
     /// The router returned `false`: the request is the file's to serve.
     Declined,
+}
+
+/// What a host serves in a request it looks at once the request has
+/// started ([`Engine::serve_started`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostServes {
+    /// The program the request description names, served as
+    /// [`Engine::serve`] serves it.
+    Program,
+    /// A page the host answers with in place of a program: php-fpm's ping
+    /// and status pages, and its `File not found.` and its kin.
+    Page(HostPage),
+    /// Nothing: php-fpm's request with no `REQUEST_METHOD`, not a request
+    /// of the web.
+    Nothing,
+}
+
+/// A page a host answers a started request with: its response code, the
+/// header lines it sets, each replacing the lines of its name, and its
+/// body, written through the `php_output` layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostPage {
+    pub code: i64,
+    pub headers: Vec<Vec<u8>>,
+    pub body: Vec<u8>,
 }
 
 /// What `serve` reports of one request.
@@ -1011,14 +1036,14 @@ fn native_records(
                 let lookup = |name: &[u8]| {
                     let class = *keys.get(&*lowered(name))?;
                     let at = usize::try_from(class.0).ok()?;
-                    Some(php_unit::link::Held {
+                    Some(php_link::Held {
                         decl: classes.get(at)?,
                         bodies: None,
                         linked: true,
                         record: records.get(at)?.as_ref().map(|record| (class, record)),
                     })
                 };
-                php_unit::link::linked_class(decl, 0, &lookup, &|class| {
+                php_link::linked_class(decl, 0, &lookup, &|class| {
                     classes.get(usize::try_from(class.0).ok()?)
                 })
             };
@@ -1033,7 +1058,7 @@ fn native_records(
         .zip(classes)
         .map(|(record, decl)| {
             record
-                .or_else(|| php_unit::link::linked_class(decl, 0, &|_| None, &|_| None))
+                .or_else(|| php_link::linked_class(decl, 0, &|_| None, &|_| None))
                 .unwrap_or_default()
         })
         .collect()
@@ -2783,7 +2808,9 @@ impl EngineBuilder {
     /// `php_value` and `php_admin_value` (`fpm_php_apply_defines_ex`):
     /// the value as given, not read again by the INI grammar, through the
     /// entry's `on_modify`, with [`IniOrigin`]'s reach; one php does not
-    /// know is left, so [`Engine::ini_get`] answers `None` for it.
+    /// know is left, so [`Engine::ini_get`] answers `None` for it. It is
+    /// the master value every request starts with, and never in the
+    /// startup ini an extension's engine start is handed.
     #[must_use]
     pub fn host_ini(mut self, name: &[u8], value: &[u8], mode: IniOrigin) -> EngineBuilder {
         self.host_ini.push((name.to_vec(), value.to_vec(), mode));
@@ -2937,6 +2964,10 @@ impl EngineBuilder {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, Some(value)));
         }
+        // The startup ini an extension's engine start is handed: the
+        // entries as php's `MINIT` meets them in the master, before a
+        // host's values are laid over at `ZEND_INI_STAGE_ACTIVATE`.
+        let startup = ini.clone();
         let locked = host_ini(self.host_ini, &extensions, &mut ini, &mut held);
         let on = |name: &str| {
             ini.iter()
@@ -3059,7 +3090,7 @@ impl EngineBuilder {
             }),
             end: Arc::default(),
         };
-        engine.register_ini(held, &configuration.loads, self.sapi_name);
+        engine.register_ini(held, startup, &configuration.loads, self.sapi_name);
         engine.end.arm(&engine.shared, self.sapi_name);
         engine
     }
@@ -3538,6 +3569,7 @@ impl Engine {
     fn register_ini(
         &mut self,
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+        mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
         loads: &Loads,
         sapi_name: &'static str,
     ) {
@@ -3572,6 +3604,7 @@ impl Engine {
         // the bundle: a refused start shows what php raised before it,
         // which is nothing of a later extension's (`Engine::refused`).
         let mut marks = Vec::new();
+        let mut activated = Vec::new();
         for (name, value, activate) in held {
             let owner = (self.shared.extensions.iter())
                 .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name));
@@ -3585,7 +3618,11 @@ impl Engine {
                 .is_some_and(|handler| matches!(handler(&mut req, Some(&value)), Ok(true)));
             if accepted {
                 req.take_startup_value(&name, &value);
-                taken.push((name, Some(value)));
+                if activate {
+                    activated.push((name, Some(value)));
+                } else {
+                    taken.push((name, Some(value)));
+                }
             }
         }
         req.set_ini_stage(IniStage::Startup);
@@ -3608,9 +3645,19 @@ impl Engine {
         // it; one without a handler always takes.
         let extensions = &shared.extensions;
         shared.locked.retain(|name| {
-            on_modify(extensions, name).is_none() || taken.iter().any(|(n, _)| n == name)
+            on_modify(extensions, name).is_none() || activated.iter().any(|(n, _)| n == name)
         });
+        // What the startup stage took is the master value and the startup
+        // ini alike; what the host's activate stage took is the master
+        // value alone, as php-fpm's child alters the master value of an
+        // engine whose `MINIT` has run (`fpm_php_zend_ini_alter_master`).
         for (name, value) in taken {
+            startup.retain(|(n, _)| *n != name);
+            startup.push((name.clone(), value.clone()));
+            shared.ini.retain(|(n, _)| *n != name);
+            shared.ini.push((name, value));
+        }
+        for (name, value) in activated {
             shared.ini.retain(|(n, _)| *n != name);
             shared.ini.push((name, value));
         }
@@ -3618,9 +3665,7 @@ impl Engine {
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
         let mut start = Start {
-            ini: StartupIni {
-                entries: shared.ini.clone(),
-            },
+            ini: StartupIni { entries: startup },
             host: sapi_name,
             process: Vec::new(),
         };
@@ -3977,6 +4022,52 @@ impl Engine {
         self.transaction(description, sink, Work::Serve, false).0
     }
 
+    /// [`Engine::serve`] for a host that looks at its request only once
+    /// it has started, as php-fpm's loop does
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1903`): `php_request_startup`,
+    /// every extension's `rinit` among it, then `look`, whose answer is
+    /// what the request serves. Where the start failed or was refused,
+    /// `look` is never called, so nothing the host would have logged or
+    /// answered is, and the host is handed the failure as [`Engine::serve`]
+    /// hands it.
+    pub fn serve_started(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+        look: impl FnOnce() -> HostServes,
+    ) -> Observables {
+        let source = description.source.clone();
+        let mut req = match self.begin(description, sink, false) {
+            Ok(req) => req,
+            Err(refused) => return refused,
+        };
+        self.serve_in(&mut req, source.as_deref(), look());
+        self.shutdown(&mut req, sink).0
+    }
+
+    /// What a started request serves, then each extension's hook for the
+    /// moment after it, which php-fpm's `fastcgi_request_done` stands at
+    /// for a page as for a program.
+    fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
+        match serves {
+            HostServes::Program => {
+                self.execute_script(req, source);
+            }
+            // `sapi_add_header_ex(.., replace = 1)` for each line, the
+            // code, and `PUTS` of the body, as `fpm_status_handle_request`
+            // and the loop's refusals write them.
+            HostServes::Page(page) => {
+                for line in &page.headers {
+                    req.header_add(line, true, 0);
+                }
+                req.set_response_code(page.code);
+                req.write(&page.body);
+            }
+            HostServes::Nothing => {}
+        }
+        req.program_ended();
+    }
+
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
     /// `Z/sapi/cli/php_cli.c:955-960`): the request started, the program
     /// compiled as [`Engine::serve`] compiles it, what the compiler raised
@@ -4064,8 +4155,7 @@ impl Engine {
             return self.shutdown(&mut req, sink);
         }
         if work == Work::Serve {
-            self.execute_script(&mut req, source.as_deref());
-            req.program_ended();
+            self.serve_in(&mut req, source.as_deref(), HostServes::Program);
             return self.shutdown(&mut req, sink);
         }
         // `php_lint_script` compiles and drops the op array, and what

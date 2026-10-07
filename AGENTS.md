@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=a24afc6b5497fe28c5a171a745a7c37647af310c468bf7e17540fcf50ad892db out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -101,8 +101,9 @@ third-engine-design.md
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 - ADR-0011 (accepted, 2026-10-06): A reading's key covers its crate's whole dependency closure, not the locks of the crates it depends on
+- ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 
-<!-- /computed in=5529edd9c45b6b0b1813b2ed64be47761bec3e13fe0055e19aa53743db32499a out=a717c7dcef6bb51d05f58dcc2aaebb45f624853d7634b25efa867cd7428ec528 -->
+<!-- /computed in=cdde5a55c0d2e56a5af707bbc3e086f4e00eefcc15e5bece29d9686f5ed4e362 out=fae392bd0f8f57b71c3f942b943934350316907e133b235a4b1f431a8bfc99ed -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -116,7 +117,7 @@ third-engine-design.md
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 372 |  | pass |
 
-<!-- /computed in=1475933d41c12353e7edeecc846f5811f88f269e5498d5aec6d822fe20b7cfe7 out=963ffb6697bcffb9f7e6655a9cfe50615553ad7878b8156332641fc7e0d17bf0 -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -150,7 +151,7 @@ third-engine-design.md
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=f0bb570c0adadbf224b0833b32f89c91a63d2916cf9e57b37b2487a3cb34bace out=5a3c8b61cd7733e742bd972f81247dd3635cd268320c2a08a6dd03e8bb33315b -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -197,6 +198,7 @@ Options:
 ├── php_engine
 ├── php_ext
 ├── php_heap
+├── php_link
 ├── php_macros
 ├── php_process
 ├── php_proto
@@ -205,7 +207,7 @@ Options:
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=f0c7b431c0b09dd1f77217aa12a1df01ec11c8acda891c0c220c5b01f645a614 out=41028121a5904b9375f2470827c829ad35eb7f8905d93b9e3304c072dee99ea0 -->
+<!-- /computed in=a6ae36102f3fb2438f430e76078d6bc209005a653df755e1364367643b4e3fd2 out=2aea06da2e5135b2c82210bff019bf591f30d1a7eb6d65c5346cbb72921b7485 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

@@ -30,8 +30,8 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
 use std::sync::{Arc, PoisonError, RwLock};
 
+use php_link::Raised;
 use php_unit::Unit;
-use php_unit::link::Raised;
 
 use crate::api::values::ClassId;
 
