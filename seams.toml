@@ -581,9 +581,6 @@ from = "php_sapi"
 to = ["php_proto", "php_engine"]
 lock = "sapi.lock" # the host face only; php_sapi never sees api
 [[edge]]
-from = "xtask"
-to = ["php_bundle", "php_sapi"]
-[[edge]]
 from = "php_engine::{executor,kernels}"
 to = "php_engine::{serve,headers,gpc,output}"
 deny = true # design §4.2: keeps a later main/-style split possible

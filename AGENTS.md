@@ -114,9 +114,9 @@ third-engine-design.md
 | api | api.lock | 1317 | 1500 | pass |
 | sapi | sapi.lock | 35 |  | pass |
 | tier | tier.lock | 67 |  | pass |
-| harness | xtask.lock | 364 |  | pass |
+| harness | xtask.lock | 372 |  | pass |
 
-<!-- /computed in=eb1680d579edbd221d77c6451b3bcd7d1c69fb7c86224d8983f3a1b0c7ba152e out=19b4332785ec68be5dd65297f41ebd4ace9ed4bb9b0e80cbcd297b692895ce94 -->
+<!-- /computed in=54c402c600c445a2e05b26b925dc01f7549be3edcc9576f63bc77685ab2f8b9c out=963ffb6697bcffb9f7e6655a9cfe50615553ad7878b8156332641fc7e0d17bf0 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -149,7 +149,7 @@ third-engine-design.md
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=a7e379cf76613fcb2910bb3ad77e5f37f64b770022932b5799a1ef2f8d7866f5 out=81c5fd38e09d43769bfaa6193fe7a3818a0a3c60900153d819318d78cf805a3e -->
+<!-- /computed in=264816a7ea9a5cb0964a15c52ba6ac697c4093df2a81319ede7106ae4f27d6c0 out=81c5fd38e09d43769bfaa6193fe7a3818a0a3c60900153d819318d78cf805a3e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
