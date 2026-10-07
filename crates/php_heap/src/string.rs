@@ -386,6 +386,11 @@ impl Str {
         unsafe { self.0.as_ref() }
     }
 
+    /// `zend_refcounted_h gc`: the count and the flags.
+    pub(crate) fn gc(&self) -> &Refcounted {
+        &self.header().gc
+    }
+
     /// The bytes, `ZSTR_VAL` over `ZSTR_LEN`, without the NUL.
     ///
     /// This is the whole path from a zval of type `String` to what it
