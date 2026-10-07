@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cd ../dax-php-worktrees/t1 && git checkout main -- docs/divergence.toml"}}

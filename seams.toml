@@ -761,6 +761,32 @@ deny = true
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
 
 [[rule]]
+id = "harness.self-shell"
+tool = "Bash"
+# The six paths of harness.self, written by a shell line (#625, ruled
+# 2026-09-28): a redirection into one, `tee` naming one, `sed -i` or
+# `perl -i` over one, `cp`, `mv`, `ln` or `install` with one as the
+# destination, `git apply` or `patch` naming one, `git checkout` or
+# `git restore` of one. A path is the root's, bare or `./`, and under
+# `.claude/` anything but `skills/` (#626). Reading one (`cat`, `grep`,
+# `head`, `diff`, `git show`) is none of these; `permit --after` holds
+# what a pattern cannot see (#1516).
+deny_pattern = '''(?x)
+  [0-9&]?>>?\|?\s*['"]?
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/\.claude-plugin/plugin\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]))
+| \btee\b[^|;&\n]*[\s'"]
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/\.claude-plugin/plugin\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]))
+| \b(?:sed|perl)\b[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place)[^|;&\n]*[\s'"]
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/\.claude-plugin/plugin\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]))
+| \b(?:cp|mv|ln|install)\b[^|;&\n]*[\s'"]
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/\.claude-plugin/plugin\.json)|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/])[^\s'"|;&)<>]*)
+    ['"]?(?:\s+(?:-\S*|[0-9]*>&?\S*))*\s*(?:$|[|;&\n)])
+| \b(?:git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore)|patch)\b[^|;&\n]*[\s'"=]
+    (?:(?:\./)?(?:seams\.toml|oracle\.toml|docs/divergence\.toml|harness-plugins/hooks/hooks\.json|harness-plugins/\.claude-plugin/plugin\.json)(?:$|[\s'"|;&)<>])|(?:\./)?\.claude/(?:[^s\s'"]|s[^k]|sk[^i]|ski[^l]|skil[^l]|skill[^s]|skills[^/]))
+'''
+text = "Harness configuration, the oracle pin and the divergence registry are edited by a person, through a shell as through Edit and Write."
+
+[[rule]]
 id = "divergence.reason"
 scope = "docs/divergence.toml"
 check = "divergence-reason"

@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "mv /tmp/settings.json .claude/settings.json"}}

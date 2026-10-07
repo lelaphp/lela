@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "grep -n api_items seams.toml | head -5"}}

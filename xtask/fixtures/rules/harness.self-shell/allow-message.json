@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "git commit -F - -- seams.toml <<'EOF'\nseams.toml: cp x seams.toml > oracle.toml\nEOF"}}

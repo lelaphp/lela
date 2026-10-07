@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "sed -i '' 's/a person closes it/the session closes it/' .claude/skills/frontier/SKILL.md"}}
