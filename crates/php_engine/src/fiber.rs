@@ -1404,7 +1404,7 @@ fn start_gc_fiber(req: &mut Request) {
 /// the program finds the fiber the collector's no more, and the
 /// function returns, the object a possible root again. A fiber
 /// destroyed at the request's end while it waits returns too.
-fn gc_destructor_fiber(req: &mut Request) -> Result<Value, Thrown> {
+fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(fiber) = req.fibers().gc.fiber else {
         return Err(throw_error(
             req,
@@ -1425,7 +1425,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Value, Thrown> {
                 // What the destructor left, the graceful exit of a destroy
                 // among it, is what the fiber ends in.
                 crate::api::raising::pending(req)?;
-                return Ok(Value::null());
+                return Ok(Owner::take(req, Value::null()));
             }
         }
         req.fibers_mut().gc.running = false;
@@ -1444,7 +1444,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Value, Thrown> {
                 gc.fiber = None;
             }
             req.release(fiber.as_value());
-            return delegate(req, back).map(Owner::hand_on);
+            return delegate(req, back);
         }
         if let Transfer::Value(value) = back {
             req.release(value);

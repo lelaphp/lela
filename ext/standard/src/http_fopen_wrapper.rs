@@ -105,8 +105,22 @@ fn open(
     path: &[u8],
     mode: &[u8],
     opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     url_wrap_http(req, "http", path, mode, opening)
+}
+
+/// `$result?` where the opener holds `$stream`: the stream closed and
+/// its owner given up before the throwable is handed on.
+macro_rules! held {
+    ($req:expr, $stream:expr, $result:expr) => {
+        match $result {
+            Ok(answer) => answer,
+            Err(thrown) => {
+                closed($req, $stream);
+                return Err(thrown);
+            }
+        }
+    };
 }
 
 /// `php_stream_url_wrap_http` (`Z/ext/standard/http_fopen_wrapper.c:1200`),
@@ -156,7 +170,7 @@ pub(crate) fn url_wrap_http(
     path: &[u8],
     mode: &[u8],
     opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     clear_last_headers(req);
     let ctx = req.stream_ctx();
     let options = HttpOptions::read(req, ctx, label)?;
@@ -180,7 +194,7 @@ pub(crate) fn url_wrap_http(
             None => return Ok(stream),
             Some(thrown) => {
                 if let Some(stream) = stream {
-                    stream.free(req);
+                    closed(req, stream);
                 }
                 thrown
             }
@@ -602,9 +616,9 @@ const SSLV23_CLIENT: i64 = (1 << 3) | (1 << 4) | (1 << 5) | 1;
 fn tunnel(
     req: &mut Request,
     chain: &Chain,
-    stream: Stream,
+    stream: Owner<Stream>,
     resource: &UriStruct,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let host = resource
         .host
         .as_deref()
@@ -618,10 +632,12 @@ fn tunnel(
     let context = stream.ctx(req);
     let reset = match context {
         Some(context) if !given => {
-            let value = PhpString::new(req, &host)?;
-            let set = context.set_option(req, b"ssl", b"peer_name", &Value::string(*value));
-            value.give_up(req);
-            set?;
+            let set = PhpString::new(req, &host).and_then(|value| {
+                let set = context.set_option(req, b"ssl", b"peer_name", &Value::string(*value));
+                value.give_up(req);
+                set
+            });
+            held!(req, stream, set);
             true
         }
         _ => false,
@@ -656,12 +672,18 @@ fn tunnel(
         }
     };
     if stream.write(req, &header) != Some(header.len()) {
-        unset(req)?;
-        log(req, "Cannot connect to HTTPS server through proxy");
-        stream.free(req);
-        return Ok(None);
+        let unsetting = unset(req);
+        if unsetting.is_ok() {
+            log(req, "Cannot connect to HTTPS server through proxy");
+        }
+        closed(req, stream);
+        return unsetting.map(|()| None);
     }
-    while let Some(line) = get_line(req, stream, Some(HTTP_HEADER_BLOCK_SIZE - 1))? {
+    while let Some(line) = held!(
+        req,
+        stream,
+        get_line(req, *stream, Some(HTTP_HEADER_BLOCK_SIZE - 1))
+    ) {
         if matches!(line.first(), None | Some(b'\n' | b'\r' | 0)) {
             break;
         }
@@ -675,11 +697,23 @@ fn tunnel(
         Some(stream)
     } else {
         log(req, "Cannot connect to HTTPS server through proxy");
-        stream.free(req);
+        closed(req, stream);
         None
     };
-    unset(req)?;
+    if let Err(thrown) = unset(req) {
+        if let Some(stream) = stream {
+            closed(req, stream);
+        }
+        return Err(thrown);
+    }
     Ok(stream)
+}
+
+/// `php_stream_close` over the stream an opener holds: closed, and its
+/// owner given up.
+pub(crate) fn closed(req: &mut Request, stream: Owner<Stream>) {
+    stream.close(req);
+    stream.give_up(req);
 }
 
 /// `php_stream_wrapper_log_error` from the opener, which the open shows
@@ -710,7 +744,7 @@ fn wrap_http_ex(
     path: &[u8],
     redirect_max: i64,
     hop: Hop,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let mut redirect_max = redirect_max;
     if redirect_max < 1 {
         log(req, "Redirection limit reached, aborting");
@@ -763,10 +797,7 @@ fn wrap_http_ex(
             };
             let mode = chain.mode.clone();
             let ctx = chain.ctx;
-            return req.with_stream_ctx(ctx, |req| {
-                req.open_stream_with(path, &mode, opening)
-                    .map(|opened| opened.map(Owner::hand_on_unmigrated))
-            });
+            return req.with_stream_ctx(ctx, |req| req.open_stream_with(path, &mode, opening));
         };
         // Called from a non-http wrapper with http proxying asked for
         // (ftp).
@@ -799,7 +830,6 @@ fn wrap_http_ex(
     };
     let stream = match req.xport_create(&transport, xport)? {
         Ok(stream) => {
-            let stream = stream.hand_on_unmigrated();
             if let Some(timeout) = timeout {
                 stream.set_option(req, StreamOption::ReadTimeout(timeout));
             }
@@ -845,22 +875,22 @@ fn wrap_http_ex(
         hop,
     );
     stream.write(req, &request);
-    chain.headers(req)?;
-    let status = read_status(req, chain, stream)?;
+    held!(req, stream, chain.headers(req));
+    let status = held!(req, stream, read_status(req, chain, *stream));
     let Some(status) = status else {
-        stream.free(req);
+        closed(req, stream);
         log(req, "HTTP request failed!");
         return out(req, chain, None, hop, &info, chunk_size);
     };
     let mut last: Option<Vec<u8>> = None;
     while !stream.eof(req) {
-        let Some(mut line) = get_line(req, stream, None)? else {
+        let Some(mut line) = held!(req, stream, get_line(req, *stream, None)) else {
             break;
         };
         let last_line = match line.first() {
             Some(b'\r') => {
                 if line.get(1) != Some(&b'\n') {
-                    stream.free(req);
+                    closed(req, stream);
                     log(
                         req,
                         "HTTP invalid header name (cannot start with CR character)!",
@@ -873,17 +903,18 @@ fn wrap_http_ex(
             _ => false,
         };
         if let Some(previous) = last.take() {
-            match headers_parse(
+            let parsed = headers_parse(
                 req,
                 chain,
-                stream,
+                *stream,
                 previous,
                 Some(&mut line),
                 status.code,
                 &mut info,
-            )? {
+            );
+            match held!(req, stream, parsed) {
                 None if info.error => {
-                    stream.free(req);
+                    closed(req, stream);
                     return out(req, chain, None, hop, &info, chunk_size);
                 }
                 None => {}
@@ -894,7 +925,7 @@ fn wrap_http_ex(
             }
         } else if !last_line {
             if matches!(line.first(), Some(b' ' | b'\t')) {
-                stream.free(req);
+                closed(req, stream);
                 log(
                     req,
                     "HTTP invalid response format (folding header at the start)!",
@@ -909,7 +940,8 @@ fn wrap_http_ex(
         last = Some(line);
     }
     if let Some(previous) = last {
-        headers_parse(req, chain, stream, previous, None, status.code, &mut info)?;
+        let parsed = headers_parse(req, chain, *stream, previous, None, status.code, &mut info);
+        held!(req, stream, parsed);
     }
     if !status.ok || (info.location.is_some() && info.follow_location) {
         let lenient = chain.opening.only_get_headers || chain.options.ignore_errors;
@@ -919,7 +951,7 @@ fn wrap_http_ex(
         if let Some(location) = info.location.clone() {
             chain.notify_info(req, NotifyCode::Redirected, Some(&location), 0);
         }
-        stream.free(req);
+        closed(req, stream);
         info.chunked = false;
         let Some(location) = info.location.take() else {
             log_bytes(req, "HTTP request failed! ", &status.line);
@@ -1395,11 +1427,11 @@ fn redirect_path(resource: &UriStruct, location: &[u8], use_ssl: bool) -> Vec<u8
 fn out(
     req: &mut Request,
     chain: &mut Chain,
-    stream: Option<Stream>,
+    stream: Option<Owner<Stream>>,
     hop: Hop,
     info: &HeaderInfo,
     chunk_size: Option<usize>,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let Some(stream) = stream else {
         return Ok(None);
     };
@@ -1426,11 +1458,15 @@ fn out(
     }
     stream.rewind_as(req, &chain.mode);
     if info.chunked
-        && let Some(filter) = stream.add_filter(req, b"dechunk", None, 1, true)?
+        && let Some(filter) = held!(
+            req,
+            stream,
+            stream.add_filter(req, b"dechunk", None, 1, true)
+        )
     {
         filter.give_up(req);
     }
-    let unread = unread_bytes(req, stream)?;
+    let unread = held!(req, stream, unread_bytes(req, *stream));
     if unread > 0 && chain.thrown.is_none() {
         let answered = notify(
             req,

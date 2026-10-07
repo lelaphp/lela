@@ -251,7 +251,7 @@ impl ObjectHandlers for Handlers {
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {
-        Some(clone_curl)
+        Some(copied)
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
@@ -289,7 +289,7 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         cast_object(req, object, to)
     }
 }
@@ -305,13 +305,13 @@ pub(crate) fn cast_object(
     req: &mut Request,
     object: PhpObject,
     to: TypeTag,
-) -> Result<Option<Value>, Thrown> {
-    let _ = req;
-    Ok(match to {
-        TypeTag::Int => Some(Value::int(i64::from(object.index()))),
-        TypeTag::Bool => Some(Value::bool(true)),
-        _ => None,
-    })
+) -> Result<Option<Owner<Value>>, Thrown> {
+    let cast = match to {
+        TypeTag::Int => Value::int(i64::from(object.index())),
+        TypeTag::Bool => Value::bool(true),
+        _ => return Ok(None),
+    };
+    Ok(Some(Owner::take(req, cast)))
 }
 
 /// A new object of a class this extension declares.
@@ -342,12 +342,8 @@ pub(crate) fn easy_of(req: &mut Request, object: PhpObject) -> Result<Easy, Thro
 
 /// `curl_clone_obj`: a new `CurlHandle` over `curl_easy_duphandle`, the
 /// callables, streams and private value copied, and a file upload's
-/// MIME tree built again for the copy.
-fn clone_curl(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
-    copied(req, object).map(Owner::hand_on_unmigrated)
-}
-
-/// [`clone_curl`]'s copy, its owner.
+/// MIME tree built again for the copy, its owner the caller's; what
+/// `curl_copy_handle` returns too.
 fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let copy = made(req, b"CurlHandle")?;
     let failed = |req: &mut Request, copy: Owner<PhpObject>| {

@@ -1485,8 +1485,7 @@ impl PhpObject {
             // of until its release.
             Answered::Debug(info) => {
                 let count = info.table.len();
-                let table = Owner::adopt(req, info.table);
-                (Held::Debug(table, info.thrown), count)
+                (Held::Debug(info.table, info.thrown), count)
             }
         };
         Ok(HeldProperties { held, count })

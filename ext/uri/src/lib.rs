@@ -271,7 +271,7 @@ pub(crate) struct Handlers<P>(PhantomData<fn() -> P>);
 
 impl<P: UriParser> ObjectHandlers for Handlers<P> {
     fn clone_obj(&self) -> Option<CloneObj> {
-        Some(|req, object| clone_uri::<P>(req, object).map(Owner::hand_on_unmigrated))
+        Some(clone_uri::<P>)
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {

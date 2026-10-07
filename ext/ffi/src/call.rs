@@ -41,10 +41,10 @@ pub(crate) struct Callback {
 /// Incorrect number of arguments for C function 'abs', expecting exactly 1 parameter
 /// Attempt to call undefined C function 'nope'
 /// ```
-pub(crate) fn trampoline(req: &mut Request) -> Result<Value, Thrown> {
+pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let name = req.active_function_name();
     let Some(this) = req.this() else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let Some((ty, addr)) = function_symbol(req, this, name.as_bytes()) else {
         let message = format!("Attempt to call undefined C function '{name}'");
@@ -64,9 +64,9 @@ pub(crate) fn trampoline(req: &mut Request) -> Result<Value, Thrown> {
 /// ```expect
 /// int(3)
 /// ```
-pub(crate) fn invoke(req: &mut Request) -> Result<Value, Thrown> {
+pub(crate) fn invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(this) = req.this() else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let v = view(req, this);
     let Some(func) = func_pointee(req, v.ty) else {
@@ -126,7 +126,7 @@ impl Frame {
 
 /// `zend_ffi_trampoline`: the arity held to the declaration, each
 /// argument passed, the call, and the return read back.
-fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Value, Thrown> {
+fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Owner<Value>, Thrown> {
     let Some(shape) = shape(req, func) else {
         return Err(fatal(
             req,
@@ -181,7 +181,7 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Valu
         return Err(thrown);
     }
     if matches!(types(req).get(shape.ret).kind, Kind::Void) {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     }
     to_value(
         req,
@@ -193,7 +193,6 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Valu
         true,
         false,
     )
-    .map(Owner::hand_on_unmigrated)
 }
 
 /// `zend_ffi_return_unsupported`.

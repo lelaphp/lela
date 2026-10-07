@@ -526,7 +526,7 @@ impl ClassIterator for TokenIter {
         Ok(at < used)
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let pos = self.pos;
         let token = with_set(req, object, |set| {
             let at = set.valid_from(pos);
@@ -534,12 +534,12 @@ impl ClassIterator for TokenIter {
         })
         .flatten();
         match token {
-            Some(token) => Ok(string(req, &token)?.hand_on_unmigrated()),
-            None => Ok(Value::null()),
+            Some(token) => string(req, &token),
+            None => Ok(Owner::take(req, Value::null())),
         }
     }
 
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let (pos, tag) = (self.pos, self.tag);
         let counted = with_set(req, object, |set| {
             (set.tag != tag).then(|| {
@@ -553,7 +553,7 @@ impl ClassIterator for TokenIter {
         if let Some(counted) = counted {
             self.index = i64::try_from(counted).unwrap_or(i64::MAX);
         }
-        Ok(Value::int(self.index))
+        Ok(Owner::take(req, Value::int(self.index)))
     }
 
     /// `dom_token_list_it_move_forward`: where a change under the walk
@@ -660,7 +660,7 @@ impl ObjectHandlers for TokenListHandlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         crate::read_property(req, object, name, read)
     }
 
@@ -716,12 +716,12 @@ impl ObjectHandlers for TokenListHandlers {
         object: PhpObject,
         offset_value: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let Some(offset_value) = offset_value else {
             return Err(throw_error(req, "Error", "Cannot append to Dom\\TokenList"));
         };
         match offset(req, offset_value)? {
-            Some(index) => item_value(req, object, index).map(Owner::hand_on_unmigrated),
+            Some(index) => item_value(req, object, index),
             None => Err(illegal_offset(
                 req,
                 object,

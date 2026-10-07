@@ -12,14 +12,14 @@ use php_unit::decl::{
 use crate::api::abi::{Cases, Class, ClassRef, ExtensionBuilder, ObjectHandlers};
 use crate::api::raising::{Thrown, fatal};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, Value, ValueRef};
+use crate::api::values::{ClassId, Owner, Value, ValueRef};
 
 /// A native's entry: the concrete request, off which it reads its
 /// arguments as `ZEND_FUNCTION` reads them off `execute_data`, and the
-/// value or the pending throwable (ADR-0002). The call frame holding the
+/// value's owner, the engine's, or the pending throwable (ADR-0002). The call frame holding the
 /// arguments stays on the VM stack while the entry runs, which is what
 /// lets a backtrace taken inside it print them.
-pub type Entry = fn(&mut Request) -> Result<Value, Thrown>;
+pub type Entry = fn(&mut Request) -> Result<Owner<Value>, Thrown>;
 
 /// A function declaration named `name`, the rest for the expansion to
 /// fill.
@@ -146,7 +146,7 @@ pub fn arity(req: &mut Request, min: usize, max: Option<usize>) -> Result<(), Th
 
 /// The entry of an abstract or interface method, which the engine never
 /// serves: a call reaches the class that implements it.
-pub fn abstract_entry(req: &mut Request) -> Result<Value, Thrown> {
+pub fn abstract_entry(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     Err(fatal(req, "InternalError: an abstract method served"))
 }
 
@@ -169,12 +169,13 @@ fn linked<E: Class>(req: &mut Request) -> Result<ClassId, Thrown> {
 /// float(2)
 /// float(3)
 /// ```
-pub fn case_value<E: Cases>(req: &mut Request, variant: E) -> Result<Value, Thrown> {
+pub fn case_value<E: Cases>(req: &mut Request, variant: E) -> Result<Owner<Value>, Thrown> {
     let class = linked::<E>(req)?;
     let Some((name, _)) = E::CASES.iter().find(|(_, case)| *case == variant) else {
         return Err(fatal(req, "InternalError: a variant that is no case"));
     };
-    req.enum_case(class, name).map(|case| case.as_value())
+    let case = req.enum_case(class, name)?;
+    Ok(Owner::adopt(req, case.as_value()))
 }
 
 /// The Rust variant a case object of `E` is, read off its `name` as

@@ -18,10 +18,10 @@ use php_ext::request::{
     Closer, DirListing, Handshake, Notification, NotifyCode, Opening, Request, SocketOptions,
     Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
 
-use crate::http_fopen_wrapper::{file_ini, url_wrap_http};
+use crate::http_fopen_wrapper::{closed, file_ini, url_wrap_http};
 use crate::sockets::{default_timeout, timeval};
 use crate::streamsfuncs::{notify, notify_error, notify_info};
 use crate::url::{UriParser, php_raw_url_decode};
@@ -381,8 +381,8 @@ fn secure_control(
 
 /// A data connection the server opened: `php_stream_context_set` of the
 /// `context`, and, where `ssl_on_data`, its crypto set up and enabled; a
-/// connection that could not be secured is closed after php's log, and
-/// `false`.
+/// connection that could not be secured is `false` after php's log, for
+/// the caller to close with the owner it holds.
 fn data_secured(
     req: &mut Request,
     data: Stream,
@@ -392,7 +392,6 @@ fn data_secured(
     data.set_ctx(req, ctx);
     if ssl_on_data && !secured(req, data) {
         req.wrapper_log_error("Unable to activate SSL mode");
-        data.free(req);
         return false;
     }
     true
@@ -655,7 +654,7 @@ fn open(
     path: &[u8],
     mode: &[u8],
     opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let transfer = match Transfer::of(mode) {
         Ok(transfer) => transfer,
         Err(refusal) => {
@@ -685,7 +684,7 @@ fn open(
     let refused = |req: &mut Request,
                    reply: Reply,
                    data_error: Option<String>|
-     -> Result<Option<Stream>, Thrown> {
+     -> Result<Option<Owner<Stream>>, Thrown> {
         notify_error(req, ctx, NotifyCode::Failure, Some(&reply.line), reply.code)?;
         control.free(req);
         if !cstr(&reply.line).is_empty() {
@@ -734,29 +733,40 @@ fn open(
         context: ctx,
     };
     let data = match req.xport_create(&transport, xport)? {
-        Ok(data) => data.hand_on_unmigrated(),
+        Ok(data) => data,
         Err(XportFailure { text, .. }) => return refused(req, Reply::default(), Some(text)),
     };
-    let reply = get_result(req, control)?;
+    let reply = match get_result(req, control) {
+        Ok(reply) => reply,
+        Err(thrown) => {
+            closed(req, data);
+            return Err(thrown);
+        }
+    };
     if reply.code != 150 && reply.code != 125 {
-        data.free(req);
+        closed(req, data);
         return refused(req, reply, None);
     }
     let init = Notification::ProgressInit {
         sofar: 0,
         max: file_size,
     };
-    notify(req, ctx, init)?;
-    if !data_secured(req, data, ctx, ssl_on_data) {
+    if let Err(thrown) = notify(req, ctx, init) {
+        closed(req, data);
+        return Err(thrown);
+    }
+    if !data_secured(req, *data, ctx, ssl_on_data) {
+        closed(req, data);
         return refused(req, Reply::default(), None);
     }
-    data.set_closer(
-        req,
-        Box::new(Control {
-            stream: control,
-            transfer,
-        }),
-    )?;
+    let closer = Box::new(Control {
+        stream: control,
+        transfer,
+    });
+    if let Err(thrown) = data.set_closer(req, closer) {
+        closed(req, data);
+        return Err(thrown);
+    }
     Ok(Some(data))
 }
 
@@ -835,6 +845,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
         return refused(req, reply);
     }
     if !data_secured(req, data, ctx, ssl_on_data) {
+        data.free(req);
         return refused(req, Reply::default());
     }
     let mut names = Vec::new();
@@ -887,7 +898,7 @@ const S_IXALL: i64 = 0o111;
 /// ```expect
 /// bool(false)
 /// ```
-fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<PhpArray>, Thrown> {
+fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let ctx = req.stream_ctx();
     let Some(Session {
         control, resource, ..
@@ -931,7 +942,7 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<PhpArray>, Thrown> {
         let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
         out.set(req, key, Value::int(field))?;
     }
-    Ok(Some(out.hand_on_unmigrated()))
+    Ok(Some(out))
 }
 
 /// The time `MDTM` answers, `YYYYMMDDhhmmss` after the code, as a Unix

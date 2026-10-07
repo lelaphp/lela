@@ -7364,7 +7364,9 @@ fn fetch_obj(
     let read = if let Some(object) = container.as_object().copied() {
         name.bytes(req, frame, code, op).and_then(|name| {
             let table = req.object_handlers(object.heap());
-            table.read_property(req, object, &name, fetch)
+            table
+                .read_property(req, object, &name, fetch)
+                .map(Owner::hand_on)
         })
     } else if fetch == PropertyRead::Warning {
         name.bytes(req, frame, code, op).map(|name| {
@@ -8203,7 +8205,9 @@ fn fetch_obj_read(
     } else {
         PropertyRead::Write
     };
-    let read = table.read_property(req, object, name, mode);
+    let read = table
+        .read_property(req, object, name, mode)
+        .map(Owner::hand_on);
     let value = match read {
         // `if (Z_ISREF_P(ptr) && Z_REFCOUNT_P(ptr) == 1) ZVAL_UNREF(ptr)`:
         // a reference nothing else holds, a `&__get`'s local, is the
@@ -8616,7 +8620,9 @@ fn read_dimension(
                 DimRead::Warning => DimensionRead::Warning,
                 DimRead::Silent => DimensionRead::Silent,
             };
-            table.read_dimension(req, object, dim.as_ref(), fetch)
+            table
+                .read_dimension(req, object, dim.as_ref(), fetch)
+                .map(Owner::hand_on)
         }));
     }
     if mode == DimRead::Silent {
@@ -9979,7 +9985,10 @@ fn object_place(
             Ok(php_heap::Zval::indirect(at))
         }
         Err(thrown) => Err(thrown),
-        Ok(None) => match table.read_dimension(req, object, dim.as_ref(), fetch) {
+        Ok(None) => match table
+            .read_dimension(req, object, dim.as_ref(), fetch)
+            .map(Owner::hand_on)
+        {
             // `zend_fetch_dimension_address`'s object arm: a
             // reference is the place itself and warns of
             // nothing, and one the `VAR` is the last owner of is
@@ -10098,7 +10107,7 @@ pub(crate) fn clone<T: Tier>(
     }
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let cloned = match operand.as_object().copied() {
-        Some(object) => req.clone_object(object, None),
+        Some(object) => req.clone_object(object, None).map(Owner::hand_on),
         None => Err(crate::api::raising::throw_error(
             req,
             "TypeError",
@@ -11406,7 +11415,7 @@ fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Th
     let table = req.object_handlers(object.heap());
     match table.read_property(req, object, name, PropertyRead::Write) {
         Ok(value) => {
-            req.release(value);
+            value.give_up(req);
             crate::api::raising::throw_error(
                 req,
                 "Error",
@@ -13140,9 +13149,9 @@ fn assign_object_dim(
 ) -> Result<(), Thrown> {
     let dim = object_dim(req, frame, code, op);
     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-    req.addref(&value);
     let table = req.object_handlers(object.heap());
-    let served = table.write_dimension(req, object, dim.as_ref(), value);
+    let given = Owner::take(req, value);
+    let served = table.write_dimension(req, object, dim.as_ref(), given);
     let answer = match served {
         Ok(()) => {
             write_out(req, frame, code, op, &value);
@@ -14003,7 +14012,7 @@ fn binary_assign_op_obj_dim(
     let value = exec::operand(req, frame, code, data.op1_type, data.op1);
     let table = req.object_handlers(object.heap());
     let read = table.read_dimension(req, object, dim.as_ref(), DimensionRead::Warning);
-    let held = match read {
+    let held = match read.map(Owner::hand_on) {
         Ok(held) => held,
         // `zend_use_object_as_array`: php's `read_dimension` answered
         // `NULL`, so the `Error` is raised over what it raised, chained.
@@ -14027,10 +14036,11 @@ fn binary_assign_op_obj_dim(
     // `FREE_OP_DATA` after it: a destructor the value's release serves
     // is served after `offsetSet`, and over what the operator raised.
     let stepped = computed?;
-    // `write_dimension` gives its value up, where php's copies it, so
-    // the owner the temporary and the release below read is taken first.
-    req.addref(&stepped);
-    let written = table.write_dimension(req, object, dim.as_ref(), stepped);
+    // `write_dimension` takes an owner of its own, where php's copies
+    // the value, so the one the temporary and the release below read
+    // stays.
+    let given = Owner::take(req, stepped);
+    let written = table.write_dimension(req, object, dim.as_ref(), given);
     if let Err(thrown) = written {
         req.release(stepped);
         return Err(thrown);
@@ -14302,7 +14312,7 @@ fn withheld_step(
     let computed = match table.read_property(req, object, name, PropertyRead::Warning) {
         Ok(held) => {
             let computed = kernel(req, &held, &value);
-            req.release(held);
+            held.give_up(req);
             computed
         }
         Err(thrown) => Err(thrown),
@@ -14771,7 +14781,7 @@ fn served_property_step(
         }
     };
     let computed = kernel(req, &held, &value);
-    req.release(held);
+    held.give_up(req);
     exec::free_operand(req, frame, code, data.op1_type, data.op1);
     let stepped = match computed {
         Ok(stepped) => stepped,
@@ -15374,7 +15384,7 @@ fn served_incdec(
     };
     let copy = held.deref();
     req.addref(&copy);
-    req.release(held);
+    held.give_up(req);
     // A step `increment_function` refuses leaves the copy as it was,
     // and php writes it back all the same, the refusal standing.
     let (stepped, refused) = match step.kernel()(req, &copy) {
@@ -22934,8 +22944,8 @@ mod tests {
     fn with_a_nullary_frameless_native() -> Engine {
         use crate::api::abi::ExtensionBuilder;
         use php_unit::decl::{FunctionDecl, Name};
-        fn seven(_: &mut Request) -> Result<Value, Thrown> {
-            Ok(Value::int(7))
+        fn seven(req: &mut Request) -> Result<Owner<Value>, Thrown> {
+            Ok(Owner::take(req, Value::int(7)))
         }
         let decl = FunctionDecl {
             name: Name::from("seven"),

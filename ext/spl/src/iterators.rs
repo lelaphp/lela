@@ -495,16 +495,14 @@ impl RecursiveIteratorIterator {
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
-        let key = rec_key(req, this)?;
-        Ok(crate::owner_of(req, key))
+        rec_key(req, this)
     }
 
     /// `current(): mixed`, the sub-iterator's.
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
-        let current = rec_current(req, this)?;
-        Ok(crate::owner_of(req, current))
+        rec_current(req, this)
     }
 
     /// `next(): void`.
@@ -2395,8 +2393,7 @@ impl RecursiveTreeIterator {
         let this = rec_checked(req, this.object())?;
         if rec(req, this, |it| it.flags & Self::BYPASS_CURRENT != 0)? {
             // The element the inner iterator answered is its one owner.
-            let current = rec_current(req, this)?;
-            return Ok(crate::owner_of(req, current));
+            return rec_current(req, this);
         }
         let Some(entry) = tree_entry(req, this)? else {
             return Ok(Owner::take(req, Value::null()));
@@ -3125,14 +3122,16 @@ fn regex_run(
             regex_replace_data(req, this, None)?;
             let global = regex.mode == Mode::AllMatches;
             let (count, matches) = pattern.match_impl(req, subject, global, regex.preg_flags, 0)?;
+            let found = count.as_int().is_some_and(|n| n > 0);
+            count.give_up(req);
             regex_replace_data(req, this, Some(matches.into_value().hand_on_unmigrated()))?;
-            Ok(Some(count.as_int().is_some_and(|n| n > 0)))
+            Ok(Some(found))
         }
         Mode::Split => {
             regex_replace_data(req, this, None)?;
             let pieces = pattern.split_impl(req, subject.as_bytes(), -1, regex.preg_flags)?;
             let count = pieces.as_array().map_or(0, PhpArray::len);
-            regex_replace_data(req, this, Some(pieces))?;
+            regex_replace_data(req, this, Some(pieces.hand_on_unmigrated()))?;
             Ok(Some(count > 1))
         }
         Mode::Replace => {
@@ -3203,22 +3202,30 @@ fn rec_checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> 
 }
 
 /// The sub-iterator's `key()`.
-fn rec_key(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
+fn rec_key(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let Some(level) = top(req, this)? else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let key = level.sub.key(req)?;
-    Ok(crate::owned(req, key))
+    Ok(owned_bare(req, key))
+}
+
+/// The value the sub-iterator answered, its one owner, with a reference
+/// followed: the owner moved to what the reference holds.
+fn owned_bare(req: &mut Request, value: Value) -> Owner<Value> {
+    let bare = Owner::take(req, value.deref());
+    req.release(value);
+    bare
 }
 
 /// The sub-iterator's `current()`, what `RecursiveIteratorIterator` and a
 /// `BYPASS_CURRENT` tree answer.
-fn rec_current(req: &mut Request, this: PhpObject) -> Result<Value, Thrown> {
+fn rec_current(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let Some(level) = top(req, this)? else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let current = level.sub.value(req)?;
-    Ok(crate::owned(req, current))
+    Ok(owned_bare(req, current))
 }
 
 fn top(req: &mut Request, this: PhpObject) -> Result<Option<Level>, Thrown> {
@@ -3702,11 +3709,11 @@ impl ClassIterator for RecWalk {
         rec_valid(req, object)
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         rec_current(req, object)
     }
 
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         rec_key(req, object)
     }
 

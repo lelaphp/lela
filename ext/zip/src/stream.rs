@@ -219,7 +219,7 @@ fn open(
     path: &[u8],
     mode: &[u8],
     _opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let Some(hash) = path.iter().position(|b| *b == b'#') else {
         return Ok(None);
     };
@@ -270,10 +270,7 @@ fn open(
     };
     let dir = path.last() == Some(&b'/');
     let file = archive.data.as_mut().and_then(|d| d.stdio.take());
-    Ok(
-        open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)), file)?
-            .map(Owner::hand_on_unmigrated),
-    )
+    open_entry(req, zf, None, mode, Some((st.size, st.mtime, dir)), file)
 }
 
 /// `php_stream_zip_wrapper`, `zip wrapper`: an opener and nothing else.

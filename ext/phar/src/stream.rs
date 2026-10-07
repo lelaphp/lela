@@ -235,7 +235,7 @@ fn open_url(
     path: &[u8],
     mode: &[u8],
     opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let Some(url) = parse_url(req, path, mode, Report::Log)? else {
         return Ok(None);
     };
@@ -246,8 +246,9 @@ fn open_url(
             return Ok(None);
         };
         opened_path(req, &data);
-        let stream = req.new_stream(Box::new(EntryStream { data: Some(data) }), mode)?;
-        return Ok(Some(stream.hand_on_unmigrated()));
+        return req
+            .new_stream(Box::new(EntryStream { data: Some(data) }), mode)
+            .map(Some);
     }
     let data = if internal.is_empty() && opening.for_include {
         let Ok(id) = archive::get_archive(req, &host, None) else {
@@ -305,8 +306,8 @@ fn open_url(
             }
         }
     };
-    let stream = req.new_stream(Box::new(EntryStream { data: Some(data) }), mode)?;
-    Ok(Some(stream.hand_on_unmigrated()))
+    req.new_stream(Box::new(EntryStream { data: Some(data) }), mode)
+        .map(Some)
 }
 
 /// `*opened_path = "phar://<archive>/<entry>"`, the name an entry's
@@ -454,11 +455,11 @@ fn stat_array(req: &mut Request, sb: [i64; 13]) -> Result<Owner<PhpArray>, Throw
 /// `phar_wrapper_stat`: an entry, a directory under which entries stand,
 /// the archive's root, or a file of a mounted directory, mounted as it is
 /// found.
-fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<PhpArray>, Thrown> {
+fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let Some(sb) = stat(req, url)? else {
         return Ok(None);
     };
-    Ok(Some(stat_array(req, sb)?.hand_on_unmigrated()))
+    stat_array(req, sb).map(Some)
 }
 
 /// The stat [`url_stat`] answers, as a stat.

@@ -23,7 +23,8 @@ use php_heap::Obj;
 use php_macros::php_class;
 
 use crate::api::abi::{
-    ClassIterator, CloneObj, DebugInfo, DimensionRead, Instance, ObjectHandlers, This, Untyped,
+    ClassIterator, CloneObj, DebugInfo, DimensionRead, Instance, IteratorElement, ObjectHandlers,
+    This, Untyped,
 };
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
@@ -252,7 +253,7 @@ impl ObjectHandlers for WeakReferenceHandlers {
         req.addref(&value);
         let key = Key::Str(PhpString::new(req, b"object")?.hand_on_unmigrated());
         table.set(req, key, value)?;
-        Ok(Some(table.hand_on_unmigrated().into()))
+        Ok(Some(table.into()))
     }
 }
 
@@ -356,7 +357,7 @@ impl ObjectHandlers for WeakMapHandlers {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let Some(offset) = offset else {
             return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
         };
@@ -364,7 +365,7 @@ impl ObjectHandlers for WeakMapHandlers {
         let found = entries_of(req, object).and_then(|e| e.get(&Key::Int(i64::from(key.index()))));
         let Some(value) = found else {
             if read == DimensionRead::Silent {
-                return Ok(Value::null());
+                return Ok(Owner::take(req, Value::null()));
             }
             let class = req.class_name(key.class());
             return Err(throw_error(
@@ -373,9 +374,7 @@ impl ObjectHandlers for WeakMapHandlers {
                 &format!("Object {class}#{} not contained in WeakMap", key.index()),
             ));
         };
-        let value = value.deref();
-        req.addref(&value);
-        Ok(value)
+        Ok(Owner::take(req, value.deref()))
     }
 
     /// `zend_weakmap_read_dimension` under `BP_VAR_W` and `BP_VAR_RW`
@@ -424,16 +423,16 @@ impl ObjectHandlers for WeakMapHandlers {
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let Some(offset) = offset else {
-            req.release(value);
+            value.give_up(req);
             return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
         };
         let key = match map_key(req, offset) {
             Ok(key) => key,
             Err(thrown) => {
-                req.release(value);
+                value.give_up(req);
                 return Err(thrown);
             }
         };
@@ -450,7 +449,7 @@ impl ObjectHandlers for WeakMapHandlers {
         if !entries.contains(&at) {
             register(req, key, Holder::Map(object.index()));
         }
-        entries.set(req, at, value)
+        entries.set(req, at, value.hand_on_unmigrated())
     }
 
     /// `zend_weakmap_has_dimension` (`Z/Zend/zend_weakrefs.c:409`): the
@@ -513,7 +512,7 @@ impl ObjectHandlers for WeakMapHandlers {
         req: &mut Request,
         object: PhpObject,
         index: usize,
-    ) -> Result<Option<(Value, Value)>, Thrown> {
+    ) -> Result<Option<IteratorElement>, Thrown> {
         let entry = entries_of(req, object).and_then(|entries| {
             entries
                 .iter()
@@ -526,11 +525,11 @@ impl ObjectHandlers for WeakMapHandlers {
                 })
                 .nth(index)
         });
-        Ok(entry.map(|(owner, value)| {
-            let value = value.deref();
-            req.addref(&owner.as_value());
-            req.addref(&value);
-            (owner.as_value(), value)
+        Ok(entry.map(|(key, value)| {
+            (
+                Owner::take(req, key.as_value()),
+                Owner::take(req, value.deref()),
+            )
         }))
     }
 
@@ -566,7 +565,7 @@ impl ObjectHandlers for WeakMapHandlers {
             pair.set(req, at, value)?;
             table.append(req, pair.into_value().hand_on_unmigrated())?;
         }
-        Ok(Some(table.hand_on_unmigrated().into()))
+        Ok(Some(table.into()))
     }
 
     /// `zend_weakmap_get_gc`: the values, which the map owns; the keys it
@@ -639,35 +638,37 @@ impl ClassIterator for MapIter {
     /// `zend_weakmap_iterator_get_current_data`, made a reference in
     /// place under a walk by reference, as `FE_FETCH_RW` makes the zval
     /// it points at one.
-    fn current(&mut self, req: &mut Request, map: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, map: PhpObject) -> Result<Owner<Value>, Thrown> {
         let Some((_, key, value)) = self.here(req, map) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         if !self.by_ref || value.as_php_ref().is_some() {
-            req.addref(&value);
-            return Ok(value);
+            return Ok(Owner::take(req, value));
         }
         let Some(mut entries) = entries_of(req, map) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         req.addref(&value);
+        // The cell's one owner is the caller's, and the entry takes a
+        // second.
         let cell = req.reference(value)?;
-        req.addref(&cell.as_value());
-        entries.set(req, key, cell.as_value())?;
-        Ok(cell.as_value())
+        let cell = Owner::adopt(req, cell.as_value());
+        if let Err(thrown) = entries.set(req, key, Owner::take(req, *cell).hand_on_unmigrated()) {
+            cell.give_up(req);
+            return Err(thrown);
+        }
+        Ok(cell)
     }
 
     /// `zend_weakmap_iterator_get_current_key`: the object the entry is
     /// keyed by, `null` past the last.
-    fn key(&mut self, req: &mut Request, map: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, map: PhpObject) -> Result<Owner<Value>, Thrown> {
         let object = match self.here(req, map) {
             Some((_, Key::Int(id), _)) => u32::try_from(id).ok().and_then(|id| stored(req, id)),
             _ => None,
         };
-        Ok(object.map_or_else(Value::null, |object| {
-            req.addref(&object.as_value());
-            object.as_value()
-        }))
+        let key = object.map_or_else(Value::null, |object| object.as_value());
+        Ok(Owner::take(req, key))
     }
 
     /// `zend_weakmap_iterator_move_forward`: past the entry it stands at.
@@ -716,7 +717,7 @@ fn weakmap_place(
 
 /// `zend_weakmap_clone_obj`: the new map's entries a copy, every value
 /// one more owner, and the copy registered against every key.
-fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let copy = match entries_of(req, object) {
         Some(entries) => Some(entries.copy(req)?.hand_on()),
         None => None,
@@ -727,7 +728,7 @@ fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
             register(req, owner, Holder::Map(made.index()));
         }
     }
-    Ok(made)
+    Ok(Owner::adopt(req, made))
 }
 
 /// `final class WeakReference`, `@strict-properties` and
@@ -948,7 +949,7 @@ impl WeakMap {
         req: &mut Request,
         this: This<Self>,
         object: Untyped<Value>,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         WEAK_MAP.read_dimension(req, this.object(), Some(&object.0), DimensionRead::Warning)
     }
 
@@ -981,7 +982,7 @@ impl WeakMap {
         object: Untyped<Value>,
         value: Value,
     ) -> Result<(), Thrown> {
-        req.addref(&value);
+        let value = Owner::take(req, value);
         WEAK_MAP.write_dimension(req, this.object(), Some(&object.0), value)
     }
 

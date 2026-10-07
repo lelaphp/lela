@@ -387,17 +387,16 @@ impl ClassIterator for Shared {
         Ok(cursor(req, object).is_some_and(|c| c.current.is_some()))
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let current = cursor(req, object)
             .and_then(|c| c.current)
             .unwrap_or_else(Value::null);
-        req.addref(&current);
-        Ok(current)
+        Ok(Owner::take(req, current))
     }
 
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let key = cursor(req, object).map_or(0, |c| c.walk.key(c.index).unwrap_or(c.index));
-        Ok(Value::int(key))
+        Ok(Owner::take(req, Value::int(key)))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
