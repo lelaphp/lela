@@ -55,6 +55,8 @@
 // safepoint or a fatal are the ones that name the tier or return an `Err`.
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
+use std::ops::ControlFlow;
+
 use php_heap::{Fatal, FrameRef};
 use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
@@ -62,6 +64,7 @@ use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::{Opened, Raised, Request};
+use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
@@ -2784,8 +2787,12 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
         return Err(no_call_under(req));
     };
     let mut have_named = false;
-    for (key, value) in array.snapshot_refs() {
-        let (slot, number) = match key {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, name, arg)`
+    // (`Z/Zend/zend_vm_def.h:5583`), no owner of the table taken: the
+    // operand holds it while a by-reference warning reaches the program.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let value = *row.value();
+        let (slot, number) = match row.key().clone() {
             crate::api::values::Key::Str(name) => {
                 have_named = true;
                 let offset = crate::api::call::arg_offset_by_name(req, function, name.as_bytes());
@@ -2826,7 +2833,8 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
             }
         };
         send_array_element(req, slot, number, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -2869,15 +2877,28 @@ fn send_array_slice(
         return Ok(());
     }
     let length = usize::try_from(length.min(rest)).unwrap_or(0);
-    for (_, value) in array.snapshot_refs().into_iter().skip(skip).take(length) {
+    // `ZEND_HASH_FOREACH_VAL(ht, arg)` (`Z/Zend/zend_vm_def.h:5541`), the
+    // first `skip` rows stepped over, no owner of the table taken: the
+    // operand holds it while a by-reference warning reaches the program.
+    let (mut skip, mut sent) = (skip, 0);
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        if skip > 0 {
+            skip -= 1;
+            return Ok(ControlFlow::Continue(()));
+        }
+        if sent >= length {
+            return Ok(ControlFlow::Break(()));
+        }
+        sent += 1;
         let Some(call) = req.vm_mut().building_call() else {
             return Err(no_call_under(req));
         };
         let at = call.count;
         call.count += 1;
         let number = u32::try_from(call.count).unwrap_or(u32::MAX);
-        send_array_element(req, ArgSlot::Positional(at), number, value)?;
-    }
+        send_array_element(req, ArgSlot::Positional(at), number, *row.value())?;
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -16220,17 +16241,23 @@ pub(crate) fn add_array_unpack<T: Tier>(
 fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(), Thrown> {
     let a = array.heap();
     if let Some(source) = spread.as_array().copied() {
-        for (key, value) in source.snapshot_refs() {
-            let value = match value.as_php_ref() {
-                Some(cell) if value.refcount() == 1 => cell.get(),
-                _ => value,
+        // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, key, val)`
+        // (`Z/Zend/zend_vm_def.h:6369`), no owner of the table taken: the
+        // operand holds it while an update releases what it overwrites. A
+        // reference's count is read as php reads it, less the walk's own
+        // owner of the row.
+        walk::foreach(req, source, Hold::None, |req, row| -> walk::Step {
+            let value = match row.value().as_php_ref() {
+                Some(cell) if row.refcount() == 1 => cell.get(),
+                _ => *row.value(),
             };
             req.addref(&value);
-            match key {
-                crate::api::values::Key::Str(_) => req.array_update(a, key.heap(), value)?,
+            match row.key() {
+                key @ crate::api::values::Key::Str(_) => req.array_update(a, key.heap(), value)?,
                 crate::api::values::Key::Int(_) => append_unpacked(req, a, value)?,
             }
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         return Ok(());
     }
     let Some(object) = spread.as_object().copied() else {
@@ -16488,19 +16515,30 @@ fn send_unpacked_array(
         }
     }
     let mut named = false;
-    for (key, element) in array.snapshot_refs() {
+    // A fatal ends the walk as its break and is handed on after it.
+    let fatal = |fatal: Fatal| -> walk::Step<Fatal> { Ok(ControlFlow::Break(fatal)) };
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, name, arg)`
+    // (`Z/Zend/zend_vm_def.h:5309`), no owner of the table taken: the
+    // operand holds it, separated first where an element is bound.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<Fatal> {
+        let key = row.key().clone();
+        let element = *row.value();
         let reserved = match key {
             crate::api::values::Key::Str(name) => {
                 named = true;
-                match reserve_named(req, name)? {
-                    Ok(reserved) => reserved,
-                    Err(thrown) => return Ok(Err(thrown)),
+                match reserve_named(req, name) {
+                    Ok(Ok(reserved)) => reserved,
+                    Ok(Err(thrown)) => return Err(thrown),
+                    Err(ended) => return fatal(ended),
                 }
             }
             crate::api::values::Key::Int(_) if named => {
-                return Ok(Err(positional_after_named(req)));
+                return Err(positional_after_named(req));
             }
-            crate::api::values::Key::Int(_) => reserve_next(req)?,
+            crate::api::values::Key::Int(_) => match reserve_next(req) {
+                Ok(reserved) => reserved,
+                Err(ended) => return fatal(ended),
+            },
         };
         let value = if !should_be_sent_by_ref(req, reserved.number) {
             let value = element.deref();
@@ -16510,27 +16548,25 @@ fn send_unpacked_array(
             req.addref(&element);
             element
         } else if variable {
-            let entry = match req.array_lookup(array.heap(), key.heap()) {
-                Ok(Some(entry)) => entry,
-                Ok(None) => {
-                    return Err(Fatal::Error(String::from(
-                        "InternalError: SEND_UNPACK lost an element of the array it spreads",
-                    )));
-                }
-                Err(thrown) => return Ok(Err(thrown)),
+            let Some(entry) = req.array_lookup(array.heap(), key.heap())? else {
+                return fatal(Fatal::Error(String::from(
+                    "InternalError: SEND_UNPACK lost an element of the array it spreads",
+                )));
             };
-            match bound_at(req, entry) {
-                Ok(bound) => bound,
-                Err(thrown) => return Ok(Err(thrown)),
-            }
+            bound_at(req, entry)?
         } else {
             req.addref(&element);
-            match req.reference(element) {
-                Ok(cell) => cell.as_value(),
-                Err(thrown) => return Ok(Err(thrown)),
-            }
+            req.reference(element)?.as_value()
         };
-        put_argument(req, reserved.slot, value)?;
+        match put_argument(req, reserved.slot, value) {
+            Ok(()) => Ok(ControlFlow::Continue(())),
+            Err(ended) => fatal(ended),
+        }
+    });
+    match walked {
+        Ok(None) => {}
+        Ok(Some(ended)) => return Err(ended),
+        Err(thrown) => return Ok(Err(thrown)),
     }
     Ok(Ok(()))
 }

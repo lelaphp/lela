@@ -60,3 +60,24 @@ var_export($outer);
     );
     assert_eq!(stderr, "");
 }
+
+/// `SEND_ARRAY`, what `call_user_func_array` compiles to, spreads the
+/// array walking it holding nothing: where the program frees the array
+/// under the walk, the walk ends there, and the call is made with the
+/// arguments placed so far.
+#[test]
+fn send_array_ends_where_a_warning_frees_the_array() {
+    let (stdout, stderr) = armed(
+        r#"<?php
+function f(&$a, $b = 'B', $c = 'C') { echo "$a $b $c\n"; }
+set_error_handler(function ($n, $m) { global $args; echo "W: $m\n"; $args = null; return true; });
+$args = [1, str_repeat('b', 2), str_repeat('c', 2)];
+call_user_func_array('f', $args);
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "W: f(): Argument #1 ($a) must be passed by reference, value given\n1 B C\n"
+    );
+    assert_eq!(stderr, "");
+}
