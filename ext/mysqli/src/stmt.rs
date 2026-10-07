@@ -10,6 +10,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{FieldType, Mysqlnd, Stmt, StmtAttr, StmtFetch, StmtStatus};
 
@@ -249,10 +250,12 @@ fn bind_list(
         );
         return Err(arg_value_error(req, position, &tail));
     }
-    let values: Vec<(Value, FieldType)> = params
-        .snapshot()
-        .into_iter()
+    // `ZEND_HASH_FOREACH_VAL(input_params, tmp)`
+    // (`Z/ext/mysqli/mysqli_api.c:441`), read only: each value bound one
+    // owner more, as `mysqlnd_stmt_bind_param` takes it.
+    let values: Vec<(Value, FieldType)> = walk::rows(req, params)
         .map(|(_, value)| {
+            let value = value.deref();
             req.addref(&value);
             (value, FieldType::VarString)
         })
