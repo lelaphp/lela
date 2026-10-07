@@ -1136,7 +1136,15 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
     assert_eq!(tally.found, 1);
     assert_eq!(manifest.pin.digests_asserted(), 0);
     let source = manifest.pin.source.tree().unwrap_or_default();
-    let reading = reading(&tally, &workspace(), &manifest, &source, &subset, under).unwrap();
+    let reading = reading(
+        &tally,
+        &crate::key::Snapshot::disk(&workspace()).unwrap(),
+        &manifest,
+        &source,
+        &subset,
+        under,
+    )
+    .unwrap();
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert!(reading.message.contains(&why), "{}", reading.message);
     assert_eq!(reading.numbers["run"], 0i64.into());
@@ -1565,7 +1573,15 @@ fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran()
         locks: locks.path(),
     };
     let source = manifest.pin.source.tree().unwrap_or_default();
-    let reading = reading(&tally, &workspace(), &manifest, &source, &subset, under).unwrap();
+    let reading = reading(
+        &tally,
+        &crate::key::Snapshot::disk(&workspace()).unwrap(),
+        &manifest,
+        &source,
+        &subset,
+        under,
+    )
+    .unwrap();
     assert_eq!(
         (&reading.numbers["tests"], &reading.numbers["files"]),
         (&3i64.into(), &2i64.into()),
