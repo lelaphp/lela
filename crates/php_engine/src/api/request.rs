@@ -36,7 +36,7 @@ pub use crate::virtual_cwd::Resolve;
 pub(crate) use callable::{Deprecations, Refusal, compound_split};
 pub use execution::Execution;
 pub use unit_cache::{
-    CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
+    CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
 };
 
 mod autoload;
@@ -665,7 +665,11 @@ impl Request {
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
         let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
-        let arena = Arc::clone(&shared.arena);
+        // `accel_activate`'s restart, where one is pending and no request
+        // holds the arena: the unit cache and the arena emptied together.
+        let arena = shared
+            .arena
+            .enter(|| shared.units.restart_pending(), || shared.units.restart());
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             paths: paths::Paths::startup(&shared),

@@ -340,8 +340,8 @@ fn api_allowed(req: &mut Request) -> bool {
 }
 
 /// `opcache_reset(): bool`: `zend_accel_schedule_restart(ACCEL_RESTART_USER)`,
-/// the cache emptied at the next request's start and nothing new held
-/// until then; `false` where the cache is not running or a restart is
+/// the cache emptied at the start of the first request no other request
+/// runs beside, `accel_is_inactive`, and nothing new held until then; `false` where the cache is not running or a restart is
 /// pending already.
 ///
 /// ```php
@@ -369,6 +369,56 @@ fn api_allowed(req: &mut Request) -> bool {
 /// bool(true)
 /// bool(true)
 /// bool(false)
+/// ```
+///
+/// Served by the built-in server, whose requests share the cache: an
+/// invalidated file's weight is wasted, out of what was used and none
+/// of what was free, until the reset, which the next request's start
+/// carries out once no request runs beside it, and which empties the
+/// cache and the published arena (design §5.14) and wastes nothing:
+///
+/// ```php
+/// $dir = realpath(sys_get_temp_dir()) . '/reset' . bin2hex(random_bytes(8));
+/// mkdir($dir);
+/// file_put_contents("$dir/held.inc", '<?php class Held { function m() { return 1; } }');
+/// file_put_contents("$dir/index.php", '<?php $f = __DIR__ . "/held.inc";
+/// if ($_GET["step"] == "a") {
+///     include $f;
+///     $s = opcache_get_status(); $was = $s["memory_usage"]; $weight = $s["scripts"][$f]["memory_consumption"];
+///     var_dump($was["wasted_memory"], $was["current_wasted_percentage"], opcache_invalidate($f, true));
+///     $now = opcache_get_status(false)["memory_usage"];
+///     var_dump($now["wasted_memory"] === $weight, $now["used_memory"] === $was["used_memory"] - $weight, $now["free_memory"] === $was["free_memory"]);
+///     var_dump($now["current_wasted_percentage"] === $weight / (128 * 1024 * 1024) * 100);
+///     var_dump(opcache_reset(), opcache_get_status(false)["restart_pending"]);
+/// } else {
+///     $s = opcache_get_status(false);
+///     var_dump($s["restart_pending"], $s["opcache_statistics"]["manual_restarts"], $s["memory_usage"]["wasted_memory"], $s["memory_usage"]["current_wasted_percentage"]);
+///     include $f; var_dump((new Held)->m());
+/// }');
+/// touch("$dir/held.inc", time() - 60); touch("$dir/index.php", time() - 60);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $ready = [$pipes[2]]; $none = null;
+/// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+/// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+/// foreach (['a', 'b'] as $step) { echo file_get_contents("http://127.0.0.1:$port/?step=$step"); }
+/// proc_terminate($p); proc_close($p);
+/// unlink("$dir/held.inc"); unlink("$dir/index.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// int(0)
+/// float(0)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// bool(false)
+/// int(1)
+/// int(0)
+/// float(0)
+/// int(1)
 /// ```
 #[php_function]
 fn opcache_reset(req: &mut Request) -> bool {
@@ -409,7 +459,7 @@ fn int(n: u64) -> Value {
 
 /// `zend_accel_hash_init`'s table size: the first of its primes that
 /// `opcache.max_accelerated_files` does not exceed.
-fn max_cached_keys(req: &Request) -> i64 {
+pub(crate) fn max_cached_keys(req: &Request) -> i64 {
     const PRIMES: [i64; 18] = [
         5, 11, 19, 53, 107, 223, 463, 983, 1979, 3907, 7963, 16229, 32531, 65407, 130_987, 262_237,
         524_521, 1_048_793,
@@ -419,7 +469,7 @@ fn max_cached_keys(req: &Request) -> i64 {
 }
 
 /// The megabytes `opcache.memory_consumption` gives the cache, in bytes.
-fn consumption(req: &Request) -> i64 {
+pub(crate) fn consumption(req: &Request) -> i64 {
     ini::atoi(value(req, "opcache.memory_consumption")).saturating_mul(1 << 20)
 }
 
@@ -454,9 +504,10 @@ pub(crate) fn now() -> i64 {
 /// `opcache_get_status(bool $include_scripts = true): array|false`: the
 /// cache's state as php's accelerator reports it, `false` where the
 /// cache never started. The memory figures are the configuration's, the
-/// engine keeping no shared segment to measure: nothing is wasted, a
-/// file held weighs what the file does, and the interned strings the
-/// engine's table holds are counted and weigh nothing. The `jit` row
+/// engine keeping no shared segment to measure: a file held weighs what
+/// the file does, a file discarded is wasted at that weight until a
+/// restart, and the interned strings the engine's table holds are
+/// counted and weigh nothing. The `jit` row
 /// speaks for the compiled tier, and this engine's compiles nothing.
 ///
 /// ```php
@@ -517,7 +568,7 @@ fn opcache_get_status(
         put(req, &mut out, "file_cache_only", Value::bool(true))?;
         return Ok(OrFalse::Value(out));
     }
-    put(req, &mut out, "cache_full", Value::bool(false))?;
+    put(req, &mut out, "cache_full", Value::bool(status.cache_full))?;
     put(
         req,
         &mut out,
@@ -589,18 +640,23 @@ fn used_memory(status: &CacheStatus) -> i64 {
         .fold(0, i64::saturating_add)
 }
 
-/// `memory_usage`: the configured memory less what the files held weigh,
-/// nothing wasted.
+/// `memory_usage`: what the files held weigh, the configured memory
+/// less that and what is wasted, `ZSMMG(wasted_shared_memory)`, and
+/// the wasted part of the configured memory as a percentage.
 fn memory_usage(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, Thrown> {
     let used = used_memory(status);
-    let free = consumption(req).saturating_sub(used);
+    let total = consumption(req);
+    let wasted = i64::try_from(status.wasted).unwrap_or(i64::MAX);
+    let free = total.saturating_sub(used).saturating_sub(wasted);
+    #[allow(clippy::cast_precision_loss)] // php divides two doubles
+    let percentage = wasted as f64 / total as f64 * 100.0;
     assoc(
         req,
         vec![
             ("used_memory", Value::int(used)),
             ("free_memory", Value::int(free)),
-            ("wasted_memory", Value::int(0)),
-            ("current_wasted_percentage", Value::float(0.0)),
+            ("wasted_memory", Value::int(wasted)),
+            ("current_wasted_percentage", Value::float(percentage)),
         ],
     )
 }
@@ -660,8 +716,8 @@ fn statistics(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>
             ("hits", int(status.hits)),
             ("start_time", Value::int(status.start_time)),
             ("last_restart_time", Value::int(status.last_restart_time)),
-            ("oom_restarts", Value::int(0)),
-            ("hash_restarts", Value::int(0)),
+            ("oom_restarts", int(status.oom_restarts)),
+            ("hash_restarts", int(status.hash_restarts)),
             ("manual_restarts", int(status.manual_restarts)),
             ("misses", int(status.misses)),
             ("blacklist_misses", int(status.blacklist_misses)),

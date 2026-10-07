@@ -502,6 +502,7 @@ request::BuildDefs::configure
 request::BuildDefs::date
 request::BuildDefs::provider
 request::BuildDefs::system
+request::CacheBudget
 request::CacheStatus
 request::CachedFile
 request::Cast
@@ -982,6 +983,7 @@ request::Syslog
 request::TemporaryGuard
 request::TimeLimitSuspended
 request::UnitCache
+request::UnitCache::bound
 request::UnitCache::compile
 request::UnitCache::holds
 request::UnitCache::invalidate
