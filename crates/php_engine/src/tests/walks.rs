@@ -497,3 +497,25 @@ fn a_row_freed_during_its_own_step_is_freed_as_the_step_ends() {
     assert_eq!(served.fatal, None);
     assert_eq!(served.exit_code, 0);
 }
+
+/// A row the callback appends to in place, the string's one owner the
+/// table's, is not grown where it stands while the walk pins it: the
+/// append makes the table a new string, as it would for a shared one,
+/// and the native reads the bytes the row held, the old string freed as
+/// the step ends. Grown where it stands, the string could move and the
+/// pin name the block it left.
+#[test]
+fn a_pinned_row_appended_to_is_copied_not_moved() {
+    let served = armed().serve_capture(
+        "<?php function s($c) { return $c . PHP_INT_MAX; }\n\
+         $a = ['k' => s('v')];\n\
+         echo foreach_calls($a, function ($k) { global $a; $a['k'] .= s('x') . s('x') . s('x') . s('x'); $GLOBALS['y'] = s('z'); }, false), $a['k'] === s('v') . s('x') . s('x') . s('x') . s('x') ? 'appended' : 'not appended', \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "v9223372036854775807 appended\n"
+    );
+    assert_eq!(served.fatal, None);
+    assert_eq!(served.exit_code, 0);
+}
