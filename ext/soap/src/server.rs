@@ -2155,108 +2155,125 @@ fn deserialize_function_call_in<'a>(
         }
     }
     let mut headers: Vec<HeaderCall<'a>> = Vec::new();
-    if let Some(head) = head {
-        check_env_attributes(req, head, version, "Header", true)?;
-        let mut trav = head.children();
-        while let Some(hdr_func) = trav {
-            trav = hdr_func.next();
-            if hdr_func.kind() != Kind::Element {
-                continue;
+    // What a header refused or failed to read ends the call, and the
+    // headers read before it are given up with what they hold.
+    let read: Res<()> = 'headers: {
+        if let Some(head) = head {
+            if let Err(err) = check_env_attributes(req, head, version, "Header", true) {
+                break 'headers Err(err);
             }
-            if version == SOAP_1_1 {
-                if let Some(a) = get_attribute(
-                    hdr_func.properties(),
-                    b"encodingStyle",
-                    Some(SOAP_1_1_ENV_NAMESPACE),
-                ) && attr_content(a) != SOAP_1_1_ENC_NAMESPACE
-                {
-                    return Err(server_fault_en(
-                        req,
-                        "Client",
-                        "Unknown Data Encoding Style",
-                    ));
+            let mut trav = head.children();
+            while let Some(hdr_func) = trav {
+                trav = hdr_func.next();
+                if hdr_func.kind() != Kind::Element {
+                    continue;
                 }
-                if let Some(a) = get_attribute(hdr_func.properties(), b"actor", Some(envelope_ns)) {
-                    let c = attr_content(a);
-                    if c != SOAP_1_1_ACTOR_NEXT && actor.is_none_or(|ac| c != ac) {
-                        continue;
-                    }
-                }
-            } else {
-                if let Some(a) = get_attribute(
-                    hdr_func.properties(),
-                    b"encodingStyle",
-                    Some(SOAP_1_2_ENV_NAMESPACE),
-                ) && attr_content(a) != SOAP_1_2_ENC_NAMESPACE
-                {
-                    return Err(server_fault_en(
-                        req,
-                        "DataEncodingUnknown",
-                        "Unknown Data Encoding Style",
-                    ));
-                }
-                if let Some(a) = get_attribute(hdr_func.properties(), b"role", Some(envelope_ns)) {
-                    let c = attr_content(a);
-                    if c != SOAP_1_2_ACTOR_UNLIMATERECEIVER
-                        && c != SOAP_1_2_ACTOR_NEXT
-                        && actor.is_none_or(|ac| c != ac)
+                if version == SOAP_1_1 {
+                    if let Some(a) = get_attribute(
+                        hdr_func.properties(),
+                        b"encodingStyle",
+                        Some(SOAP_1_1_ENV_NAMESPACE),
+                    ) && attr_content(a) != SOAP_1_1_ENC_NAMESPACE
                     {
-                        continue;
-                    }
-                }
-            }
-            let mut must_understand = false;
-            if let Some(a) =
-                get_attribute(hdr_func.properties(), b"mustUnderstand", Some(envelope_ns))
-            {
-                match attr_content(a).as_slice() {
-                    b"1" | b"true" => must_understand = true,
-                    b"0" | b"false" => must_understand = false,
-                    _ => {
-                        return Err(server_fault_en(
+                        break 'headers Err(server_fault_en(
                             req,
                             "Client",
-                            "mustUnderstand value is not boolean",
+                            "Unknown Data Encoding Style",
                         ));
                     }
+                    if let Some(a) =
+                        get_attribute(hdr_func.properties(), b"actor", Some(envelope_ns))
+                    {
+                        let c = attr_content(a);
+                        if c != SOAP_1_1_ACTOR_NEXT && actor.is_none_or(|ac| c != ac) {
+                            continue;
+                        }
+                    }
+                } else {
+                    if let Some(a) = get_attribute(
+                        hdr_func.properties(),
+                        b"encodingStyle",
+                        Some(SOAP_1_2_ENV_NAMESPACE),
+                    ) && attr_content(a) != SOAP_1_2_ENC_NAMESPACE
+                    {
+                        break 'headers Err(server_fault_en(
+                            req,
+                            "DataEncodingUnknown",
+                            "Unknown Data Encoding Style",
+                        ));
+                    }
+                    if let Some(a) =
+                        get_attribute(hdr_func.properties(), b"role", Some(envelope_ns))
+                    {
+                        let c = attr_content(a);
+                        if c != SOAP_1_2_ACTOR_UNLIMATERECEIVER
+                            && c != SOAP_1_2_ACTOR_NEXT
+                            && actor.is_none_or(|ac| c != ac)
+                        {
+                            continue;
+                        }
+                    }
                 }
-            }
-            let (hfunction, hname) = find_function(sdl, hdr_func);
-            let mut hdr = None;
-            if hfunction.is_none()
-                && sdl.is_some()
-                && let Some(fnb) = soap_binding(sdl, function)
-                && let Some(ih) = &fnb.input.headers
-            {
-                let mut key = Vec::new();
-                if let Some(ns) = hdr_func.ns() {
-                    key.extend_from_slice(&crate::xml::href(ns));
-                    key.push(b':');
-                }
-                key.extend_from_slice(&hname);
-                hdr = ih.get_str(&key);
-            }
-            let parameters = if let Some(h) = hdr {
-                vec![master_to_zval(req, cx, h.encode, hdr_func)?.hand_on_unmigrated()]
-            } else {
-                let mut node = Some(hdr_func);
-                if let Some(fnb) = soap_binding(sdl, hfunction)
-                    && fnb.style == Style::Rpc
+                let mut must_understand = false;
+                if let Some(a) =
+                    get_attribute(hdr_func.properties(), b"mustUnderstand", Some(envelope_ns))
                 {
-                    node = hdr_func.children();
+                    match attr_content(a).as_slice() {
+                        b"1" | b"true" => must_understand = true,
+                        b"0" | b"false" => must_understand = false,
+                        _ => {
+                            break 'headers Err(server_fault_en(
+                                req,
+                                "Client",
+                                "mustUnderstand value is not boolean",
+                            ));
+                        }
+                    }
                 }
-                deserialize_parameters(req, cx, sdl, node, hfunction)?
-            };
-            headers.push(HeaderCall {
-                function: hfunction,
-                function_name: Some(hname),
-                must_understand,
-                parameters,
-                retval: Value::null(),
-                hdr,
-            });
+                let (hfunction, hname) = find_function(sdl, hdr_func);
+                let mut hdr = None;
+                if hfunction.is_none()
+                    && sdl.is_some()
+                    && let Some(fnb) = soap_binding(sdl, function)
+                    && let Some(ih) = &fnb.input.headers
+                {
+                    let mut key = Vec::new();
+                    if let Some(ns) = hdr_func.ns() {
+                        key.extend_from_slice(&crate::xml::href(ns));
+                        key.push(b':');
+                    }
+                    key.extend_from_slice(&hname);
+                    hdr = ih.get_str(&key);
+                }
+                let parameters = if let Some(h) = hdr {
+                    match master_to_zval(req, cx, h.encode, hdr_func) {
+                        Ok(value) => vec![value.hand_on_unmigrated()],
+                        Err(err) => break 'headers Err(err),
+                    }
+                } else {
+                    let mut node = Some(hdr_func);
+                    if let Some(fnb) = soap_binding(sdl, hfunction)
+                        && fnb.style == Style::Rpc
+                    {
+                        node = hdr_func.children();
+                    }
+                    match deserialize_parameters(req, cx, sdl, node, hfunction) {
+                        Ok(parameters) => parameters,
+                        Err(err) => break 'headers Err(err),
+                    }
+                };
+                headers.push(HeaderCall {
+                    function: hfunction,
+                    function_name: Some(hname),
+                    must_understand,
+                    parameters,
+                    retval: Value::null(),
+                    hdr,
+                });
+            }
         }
-    }
+        Ok(())
+    };
     let mut params_node = func;
     if let Some(fnb) = soap_binding(sdl, function) {
         if fnb.style == Style::Rpc {
@@ -2265,7 +2282,16 @@ fn deserialize_function_call_in<'a>(
     } else {
         params_node = func.and_then(Node::children);
     }
-    let params = deserialize_parameters(req, cx, sdl, params_node, function)?;
+    let params =
+        match read.and_then(|()| deserialize_parameters(req, cx, sdl, params_node, function)) {
+            Ok(params) => params,
+            Err(err) => {
+                for h in headers {
+                    release_all(req, h.parameters);
+                }
+                return Err(err);
+            }
+        };
     if function.is_none()
         && function_name.is_empty()
         && let Some(f) = func

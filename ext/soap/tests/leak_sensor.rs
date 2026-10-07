@@ -56,3 +56,23 @@ $a = $c->f()->a; echo $a[0], ',', $a[1], "\n";
     );
     assert_eq!(stdout, "Sa,Hello\n");
 }
+
+/// A header the server refuses after it read another, here a
+/// `mustUnderstand` that is no boolean, ends the call, and what the
+/// headers read before it hold is given up (`soap12/T23.phpt`,
+/// `soap12/T56.phpt`).
+#[test]
+fn a_refused_header_gives_up_the_headers_read_before_it() {
+    let stdout = armed(
+        r#"<?php
+class S { function echoOk($x) { return $x; } }
+$s = new SoapServer(null, ['uri' => 'http://example.org/ts-tests', 'soap_version' => SOAP_1_2]);
+$s->setClass('S');
+$s->handle('<?xml version="1.0"?><env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope"><env:Header><test:Unknown xmlns:test="http://example.org/ts-tests" env:mustUnderstand="1">foo</test:Unknown><test:echoOk xmlns:test="http://example.org/ts-tests" env:mustUnderstand="wrong">foo</test:echoOk></env:Header><env:Body><test:echoOk xmlns:test="http://example.org/ts-tests"><x>bar</x></test:echoOk></env:Body></env:Envelope>');
+"#,
+    );
+    assert!(
+        stdout.ends_with("mustUnderstand value is not boolean</env:Text></env:Reason></env:Fault></env:Body></env:Envelope>\n"),
+        "{stdout}"
+    );
+}
