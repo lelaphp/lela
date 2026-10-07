@@ -101,8 +101,9 @@ third-engine-design.md
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 - ADR-0011 (accepted, 2026-10-06): A reading's key covers its crate's whole dependency closure, not the locks of the crates it depends on
+- ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 
-<!-- /computed in=5529edd9c45b6b0b1813b2ed64be47761bec3e13fe0055e19aa53743db32499a out=a717c7dcef6bb51d05f58dcc2aaebb45f624853d7634b25efa867cd7428ec528 -->
+<!-- /computed in=cdde5a55c0d2e56a5af707bbc3e086f4e00eefcc15e5bece29d9686f5ed4e362 out=fae392bd0f8f57b71c3f942b943934350316907e133b235a4b1f431a8bfc99ed -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
