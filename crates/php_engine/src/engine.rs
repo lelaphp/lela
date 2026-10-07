@@ -510,6 +510,31 @@ pub enum Routed {
     Declined,
 }
 
+/// What a host serves in a request it looks at once the request has
+/// started ([`Engine::serve_started`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostServes {
+    /// The program the request description names, served as
+    /// [`Engine::serve`] serves it.
+    Program,
+    /// A page the host answers with in place of a program: php-fpm's ping
+    /// and status pages, and its `File not found.` and its kin.
+    Page(HostPage),
+    /// Nothing: php-fpm's request with no `REQUEST_METHOD`, not a request
+    /// of the web.
+    Nothing,
+}
+
+/// A page a host answers a started request with: its response code, the
+/// header lines it sets, each replacing the lines of its name, and its
+/// body, written through the `php_output` layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostPage {
+    pub code: i64,
+    pub headers: Vec<Vec<u8>>,
+    pub body: Vec<u8>,
+}
+
 /// What `serve` reports of one request.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Observables {
@@ -3977,6 +4002,52 @@ impl Engine {
         self.transaction(description, sink, Work::Serve, false).0
     }
 
+    /// [`Engine::serve`] for a host that looks at its request only once
+    /// it has started, as php-fpm's loop does
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1838-1903`): `php_request_startup`,
+    /// every extension's `rinit` among it, then `look`, whose answer is
+    /// what the request serves. Where the start failed or was refused,
+    /// `look` is never called, so nothing the host would have logged or
+    /// answered is, and the host is handed the failure as [`Engine::serve`]
+    /// hands it.
+    pub fn serve_started(
+        &self,
+        description: RequestDescription,
+        sink: &mut dyn OutputSink,
+        look: impl FnOnce() -> HostServes,
+    ) -> Observables {
+        let source = description.source.clone();
+        let mut req = match self.begin(description, sink, false) {
+            Ok(req) => req,
+            Err(refused) => return refused,
+        };
+        self.serve_in(&mut req, source.as_deref(), look());
+        self.shutdown(&mut req, sink).0
+    }
+
+    /// What a started request serves, then each extension's hook for the
+    /// moment after it, which php-fpm's `fastcgi_request_done` stands at
+    /// for a page as for a program.
+    fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
+        match serves {
+            HostServes::Program => {
+                self.execute_script(req, source);
+            }
+            // `sapi_add_header_ex(.., replace = 1)` for each line, the
+            // code, and `PUTS` of the body, as `fpm_status_handle_request`
+            // and the loop's refusals write them.
+            HostServes::Page(page) => {
+                for line in &page.headers {
+                    req.header_add(line, true, 0);
+                }
+                req.set_response_code(page.code);
+                req.write(&page.body);
+            }
+            HostServes::Nothing => {}
+        }
+        req.program_ended();
+    }
+
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
     /// `Z/sapi/cli/php_cli.c:955-960`): the request started, the program
     /// compiled as [`Engine::serve`] compiles it, what the compiler raised
@@ -4064,8 +4135,7 @@ impl Engine {
             return self.shutdown(&mut req, sink);
         }
         if work == Work::Serve {
-            self.execute_script(&mut req, source.as_deref());
-            req.program_ended();
+            self.serve_in(&mut req, source.as_deref(), HostServes::Program);
             return self.shutdown(&mut req, sink);
         }
         // `php_lint_script` compiles and drops the op array, and what

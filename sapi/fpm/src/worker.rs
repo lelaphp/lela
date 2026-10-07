@@ -18,8 +18,8 @@ use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::cgi::ini_text;
 use php_sapi::{
-    Aborted, Body, Engine, HostValue, IniEvent, IniOrigin, OutputSink, RequestDescription,
-    ResponseHead, WebRequest,
+    Aborted, Body, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, OutputSink,
+    RequestDescription, ResponseHead, WebRequest,
 };
 
 use crate::access::AccessLog;
@@ -716,27 +716,6 @@ fn get_keys(query: &[u8], separators: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// `sapi_header_op`'s `Content-Type:` line: a `text/` type without a
-/// charset gets `default_charset`'s, the line then `Content-type: `.
-fn content_type(line: Vec<u8>, charset: &[u8]) -> Vec<u8> {
-    const NAME: &[u8] = b"Content-Type:";
-    if line.len() < NAME.len() || !line[..NAME.len()].eq_ignore_ascii_case(NAME) {
-        return line;
-    }
-    let mime = line[NAME.len()..].trim_ascii_start();
-    if charset.is_empty()
-        || !mime.starts_with(b"text/")
-        || crate::conf::find(mime, b"charset=").is_some()
-    {
-        return line;
-    }
-    let mut out = b"Content-type: ".to_vec();
-    out.extend_from_slice(mime);
-    out.extend_from_slice(b";charset=");
-    out.extend_from_slice(charset);
-    out
-}
-
 /// `php_url_decode`.
 fn url_decode(text: &[u8]) -> Vec<u8> {
     let hex = |c: u8| char::from(c).to_digit(16);
@@ -785,25 +764,9 @@ enum Served {
     StartFailed,
 }
 
-/// What a request is, past the variables: the program the engine
-/// serves, a page the host answers, or php's refusal text.
-enum Program {
-    /// No `REQUEST_METHOD`: not a request of the web; the engine starts
-    /// and ends it with nothing to serve.
-    Nothing,
-    /// The ping or the status page.
-    Page(crate::status::Page),
-    /// `File not found.`, `Access denied.` or `No input file
-    /// specified.`, under its code.
-    Refused(i64, &'static [u8]),
-    /// The file.
-    File(Vec<u8>),
-}
-
 impl Worker {
     /// One request, from its variables to its access log line, and how
     /// it ended.
-    #[allow(clippy::too_many_lines)] // `fpm_main`'s loop body, kept as one
     fn serve(
         &mut self,
         params: Environment,
@@ -836,84 +799,25 @@ impl Worker {
             );
         }
         let head_only = info.method.as_deref() == Some(b"HEAD");
-        let program = if info.method.is_none() {
-            Program::Nothing
-        } else if let Some(page) = self.page(&info, head_only, env.get(b"QUERY_STRING")) {
-            Program::Page(page)
-        } else if let Some(path) = &info.path_translated {
-            if self.extension_allowed(path) {
-                match std::fs::File::open(crate::conf::path(path)) {
-                    Ok(_) => Program::File(path.clone()),
-                    Err(e) => {
-                        zlog!(
-                            Error @ main:1881,
-                            "Unable to open primary script: {} ({})",
-                            String::from_utf8_lossy(path),
-                            crate::conf::errno(&e).desc()
-                        );
-                        if e.kind() == std::io::ErrorKind::PermissionDenied {
-                            Program::Refused(403, b"Access denied.\n")
-                        } else {
-                            Program::Refused(404, b"No input file specified.\n")
-                        }
-                    }
-                }
-            } else {
-                Program::Refused(403, b"Access denied.\n")
-            }
-        } else {
-            zlog!(Debug @ main:1858, "Primary script unknown");
-            Program::Refused(404, b"File not found.\n")
-        };
+        let description = self.describe(&env, &info, wire);
         let mut response = Response {
             wire: Arc::clone(wire),
             board: Some(self.board()),
         };
-        let (status, memory) = match program {
-            Program::Page(page) => {
-                let mut lines = Vec::new();
-                if self.flag(b"expose_php", true) {
-                    lines.push(format!("X-Powered-By: PHP/{}", php_sapi::PHP_VERSION).into_bytes());
-                }
-                let charset = self.engine.ini_get(b"default_charset").unwrap_or_default();
-                lines.extend(
-                    page.headers
-                        .into_iter()
-                        .map(|line| content_type(line, &charset)),
-                );
-                let head = ResponseHead {
-                    code: page.code,
-                    status_line: None,
-                    lines,
-                    ini: php_sapi::cgi::HEAD_INI
-                        .iter()
-                        .filter_map(|name| Some((*name, self.engine.ini_get(name)?)))
-                        .collect(),
-                };
-                response.send_headers(&head);
-                response.write(&page.body).ok();
-                (page.code, 0)
-            }
-            program => {
-                let executing = matches!(program, Program::File(_));
-                let description = self.describe(&env, &info, program, wire);
-                if executing && let Some(proc) = self.proc() {
-                    proc.set_stage(Stage::Executing, crate::master::clock_us());
-                }
-                let served = self.engine.serve(description, &mut response);
-                if served.start_failed {
-                    return Served::StartFailed;
-                }
-                let status = wire
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .head
-                    .as_ref()
-                    .map_or(200, |h| h.code);
-                (status, served.memory_peak)
-            }
-        };
-        let memory = u64::try_from(memory).unwrap_or(0);
+        let query = env.get(b"QUERY_STRING");
+        let served = self.engine.serve_started(description, &mut response, || {
+            self.look(&info, head_only, query)
+        });
+        if served.start_failed {
+            return Served::StartFailed;
+        }
+        let (status, headers) = wire
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .head
+            .as_ref()
+            .map_or((200, Vec::new()), |h| (h.code, h.lines.clone()));
+        let memory = u64::try_from(served.memory_peak).unwrap_or(0);
         if let Some(proc) = self.proc() {
             proc.end(crate::master::clock_us(), cpu_us(), memory);
         }
@@ -924,13 +828,6 @@ impl Worker {
             },
             Action::Set,
         );
-        let headers = wire
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .head
-            .as_ref()
-            .map(|h| h.lines.clone())
-            .unwrap_or_default();
         let board = self.scoreboard.copy(false);
         let proc = self
             .proc()
@@ -952,6 +849,63 @@ impl Worker {
             );
         }
         Served::Ended
+    }
+
+    /// What the loop serves once `php_request_startup` has run
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1845-1903`): nothing for a request
+    /// with no `REQUEST_METHOD`; the ping or the status page; `File not
+    /// found.` for a request with no path translated, `Access denied.`
+    /// past `security.limit_extensions`, and `Access denied.` or `No
+    /// input file specified.` for a file that does not open, each logged
+    /// as php logs it; and otherwise the file, the child's stage then
+    /// `Executing`.
+    fn look(
+        &self,
+        info: &php_proto::cgi::RequestInfo,
+        head_only: bool,
+        query: Option<&[u8]>,
+    ) -> HostServes {
+        let refused = |code, body: &[u8]| {
+            HostServes::Page(HostPage {
+                code,
+                headers: Vec::new(),
+                body: body.to_vec(),
+            })
+        };
+        if info.method.is_none() {
+            return HostServes::Nothing;
+        }
+        if let Some(page) = self.page(info, head_only, query) {
+            return HostServes::Page(page);
+        }
+        let Some(path) = &info.path_translated else {
+            zlog!(Debug @ main:1858, "Primary script unknown");
+            return refused(404, b"File not found.\n");
+        };
+        if !self.extension_allowed(path) {
+            return refused(403, b"Access denied.\n");
+        }
+        match std::fs::File::open(crate::conf::path(path)) {
+            Ok(_) => {
+                if let Some(proc) = self.proc() {
+                    proc.set_stage(Stage::Executing, crate::master::clock_us());
+                }
+                HostServes::Program
+            }
+            Err(e) => {
+                zlog!(
+                    Error @ main:1881,
+                    "Unable to open primary script: {} ({})",
+                    String::from_utf8_lossy(path),
+                    crate::conf::errno(&e).desc()
+                );
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    refused(403, b"Access denied.\n")
+                } else {
+                    refused(404, b"No input file specified.\n")
+                }
+            }
+        }
     }
 
     /// An entry read as `OnUpdateBool` reads it.
@@ -990,7 +944,7 @@ impl Worker {
         info: &php_proto::cgi::RequestInfo,
         head_only: bool,
         query: Option<&[u8]>,
-    ) -> Option<crate::status::Page> {
+    ) -> Option<HostPage> {
         let uri = info.request_uri.as_deref()?;
         let executing = || {
             if let Some(proc) = self.proc() {
@@ -1105,7 +1059,6 @@ impl Worker {
         &mut self,
         env: &Environment,
         info: &php_proto::cgi::RequestInfo,
-        program: Program,
         wire: &Arc<Mutex<Wire>>,
     ) -> RequestDescription {
         let mut ini = self.sticky.clone();
@@ -1131,31 +1084,20 @@ impl Worker {
             .map(|(n, v)| (n.into_encoded_bytes(), v.into_encoded_bytes()))
             .collect();
         let newest = Environment(fcgi::newest_first(env).cloned().collect());
-        let (code, source, script_name, cwd) = match program {
-            Program::File(path) => {
-                let file = crate::conf::path(&path);
-                let cwd = file
+        // The file's directory, which `php_execute_script` moves to; the
+        // child's own where the request names no file.
+        let cwd = info
+            .path_translated
+            .as_deref()
+            .and_then(|path| {
+                crate::conf::path(path)
                     .parent()
                     .map(std::path::Path::to_path_buf)
-                    .unwrap_or_default();
-                (info.response_code, None, Some(path), cwd)
-            }
-            Program::Refused(code, text) => (
-                code,
-                Some(text.to_vec()),
-                info.path_translated.clone(),
-                std::env::current_dir().unwrap_or_default(),
-            ),
-            Program::Nothing | Program::Page(_) => (
-                info.response_code,
-                Some(Vec::new()),
-                None,
-                std::env::current_dir().unwrap_or_default(),
-            ),
-        };
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
         let web = WebRequest {
             body,
-            response_code: code,
+            response_code: info.response_code,
             headers: php_proto::cgi::request_headers(&Environment(
                 fcgi::newest_first(env).cloned().collect(),
             )),
@@ -1168,8 +1110,7 @@ impl Worker {
             server: rows,
             sapi_name: String::from(NAME),
             web: Some(web),
-            script_name,
-            source,
+            script_name: info.path_translated.clone(),
             ini,
             ..RequestDescription::default()
         }

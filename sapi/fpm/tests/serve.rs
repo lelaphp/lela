@@ -105,7 +105,14 @@ fn request(stream: UnixStream, pairs: &[(&str, &str)]) -> Vec<u8> {
 }
 
 /// [`request`], waiting up to `wait` for each read.
-fn request_within(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> Vec<u8> {
+fn request_within(stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> Vec<u8> {
+    exchange(stream, pairs, wait).0
+}
+
+/// What request 1 with `pairs` as its parameters writes on
+/// `FCGI_STDOUT` and on `FCGI_STDERR`, read off `stream` to its end,
+/// waiting up to `wait` for each read.
+fn exchange(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration) -> (Vec<u8>, Vec<u8>) {
     let mut params = Vec::new();
     for &(name, value) in pairs {
         params.push(u8::try_from(name.len()).unwrap());
@@ -119,11 +126,11 @@ fn request_within(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration
     out.extend(record(5, &[]));
     stream.write_all(&out).unwrap();
     stream.set_read_timeout(Some(wait)).unwrap();
-    let mut body = Vec::new();
+    let (mut body, mut stderr) = (Vec::new(), Vec::new());
     loop {
         let mut header = [0u8; 8];
         if stream.read_exact(&mut header).is_err() {
-            return body;
+            return (body, stderr);
         }
         let len = usize::from(u16::from_be_bytes([header[4], header[5]]));
         let mut content = vec![0u8; len + usize::from(header[6])];
@@ -131,7 +138,8 @@ fn request_within(mut stream: UnixStream, pairs: &[(&str, &str)], wait: Duration
         content.truncate(len);
         match header[1] {
             6 => body.extend_from_slice(&content),
-            3 => return body,
+            7 => stderr.extend_from_slice(&content),
+            3 => return (body, stderr),
             _ => {}
         }
     }
@@ -311,6 +319,164 @@ fn a_child_whose_request_start_fails_finishes_the_request_and_ends() {
         .collect();
     assert_eq!(ended.len(), 1, "{log}");
     assert!(ended[0].contains(" exited with code 70 after "), "{log}");
+}
+
+/// The session data whose `DateTime` does not unserialize, which fails
+/// the start of a request that names it under `session.auto_start`
+/// (#1775), written again before each such request, since php destroys
+/// the session the failure read.
+const UNREADABLE: &str = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}";
+
+/// A pool of one child with a ping and a status page, its master started
+/// with every request opening a session in `dir`.
+fn sessions_pool(dir: &Path, socket: &Path) -> std::process::Child {
+    let path = conf(dir, &socket.display().to_string());
+    let mut written = std::fs::read_to_string(&path).unwrap();
+    written.push_str("ping.path = /ping\nping.response = pong\npm.status_path = /status\n");
+    std::fs::write(&path, written).unwrap();
+    php_fpm()
+        .args(["-n", "-F", "-d", "session.auto_start=1", "-d"])
+        .arg(format!("session.save_path={}", dir.display()))
+        .arg("-y")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// `body` with the session id after `PHPSESSID=` read as `ID`.
+fn session_masked(body: &[u8]) -> String {
+    let body = String::from_utf8_lossy(body).into_owned();
+    match body.split_once("PHPSESSID=") {
+        Some((head, rest)) if rest.len() >= 32 => format!("{head}PHPSESSID=ID{}", &rest[32..]),
+        _ => body,
+    }
+}
+
+/// php-fpm's loop answers its ping and status pages after
+/// `php_request_startup` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1852`), so
+/// session's `RINIT` under `session.auto_start` has sent its cookie and
+/// its cache headers before the page's lines, which replace those of
+/// their names: the oracle's php-fpm's bytes under the same configuration
+/// and line (#1968), the session id masked.
+#[test]
+fn a_ping_and_a_status_page_are_answered_once_the_request_started() {
+    let dir = tree("pages-started");
+    let socket = socket(&dir);
+    let mut master = sessions_pool(&dir, &socket);
+    let started = Instant::now();
+    let nope = dir.join("nope.php").display().to_string();
+    let page = |name: &str| {
+        let pairs = [
+            ("REQUEST_METHOD", "GET"),
+            ("SCRIPT_NAME", name),
+            ("SCRIPT_FILENAME", nope.as_str()),
+        ];
+        connect(&socket, started)
+            .map(|s| request(s, &pairs))
+            .unwrap_or_default()
+    };
+    let ping = page("/ping");
+    let status = page("/status");
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        session_masked(&ping),
+        "X-Powered-By: PHP/8.5.9\r\nSet-Cookie: PHPSESSID=ID; path=/\r\nPragma: no-cache\r\n\
+         Content-type: text/plain;charset=UTF-8\r\nExpires: Thu, 01 Jan 1970 00:00:00 GMT\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n\r\npong"
+    );
+    let status = session_masked(&status);
+    assert!(
+        status.starts_with(
+            "X-Powered-By: PHP/8.5.9\r\nSet-Cookie: PHPSESSID=ID; path=/\r\nPragma: no-cache\r\n\
+             Expires: Thu, 01 Jan 1970 00:00:00 GMT\r\n\
+             Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n\
+             Content-type: text/plain;charset=UTF-8\r\n\r\npool:                 www\n"
+        ),
+        "{status:?}"
+    );
+}
+
+/// A request whose start fails ends the child before php-fpm's loop
+/// looks at its script (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`), so
+/// neither `Primary script unknown` nor `Unable to open primary script`
+/// reaches the request's `FCGI_STDERR`, where the same requests with a
+/// session that reads write each: the oracle's
+/// php-fpm's under the same configuration and line (#1968). A file
+/// that does not open is one no reader may open, which a test run as
+/// root opens anyway, so its line is held only where the file stays
+/// shut.
+#[test]
+fn a_request_whose_start_fails_logs_no_line_of_its_script() {
+    let dir = tree("start-failed-script");
+    let socket = socket(&dir);
+    let mut master = sessions_pool(&dir, &socket);
+    let started = Instant::now();
+    let shut = dir.join("shut.php");
+    std::fs::write(&shut, "<?php echo 'ran';").unwrap();
+    std::fs::set_permissions(&shut, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let opens = std::fs::File::open(&shut).is_ok();
+    let shut = shut.display().to_string();
+    let nope = dir.join("nope.php").display().to_string();
+    let served = |script: &str, failing: bool| {
+        let mut pairs = vec![
+            ("REQUEST_METHOD", "GET"),
+            ("SCRIPT_NAME", "/t.php"),
+            ("SCRIPT_FILENAME", script),
+        ];
+        if failing {
+            std::fs::write(dir.join("sess_t1968"), UNREADABLE).unwrap();
+            pairs.push(("HTTP_COOKIE", "PHPSESSID=t1968"));
+        }
+        connect(&socket, started)
+            .map(|s| exchange(s, &pairs, Duration::from_secs(10)))
+            .unwrap_or_default()
+    };
+    let unknown = served(&nope, false);
+    let unknown_failed = served(&nope, true);
+    let unopened = served(&shut, false);
+    let unopened_failed = served(&shut, true);
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
+    let fatal = "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<br />\n\
+        <b>Fatal error</b>:  Uncaught Error: Invalid serialization data for DateTime object in [no active file]:0\n\
+        Stack trace:\n#0 [internal function]: DateTime-&gt;__unserialize(Array)\n#1 {main}\n  \
+        thrown in <b>[no active file]</b> on line <b>0</b><br />\n<br />\n<b>Warning</b>:  \
+        PHP Request Startup: Failed to decode session object. Session has been destroyed in <b>Unknown</b> on line <b>0</b><br />\n";
+    assert_eq!(
+        String::from_utf8_lossy(&unknown.1),
+        "Primary script unknown"
+    );
+    assert!(
+        session_masked(&unknown.0).ends_with("\r\n\r\nFile not found.\n"),
+        "{unknown:?}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&unknown_failed.0),
+        format!("Status: 404 Not Found\r\n{fatal}")
+    );
+    assert_eq!(String::from_utf8_lossy(&unknown_failed.1), "");
+    if !opens {
+        assert_eq!(
+            String::from_utf8_lossy(&unopened.1),
+            format!("Unable to open primary script: {shut} (Permission denied)")
+        );
+    }
+    assert_eq!(String::from_utf8_lossy(&unopened_failed.0), fatal);
+    assert_eq!(String::from_utf8_lossy(&unopened_failed.1), "");
 }
 
 /// A log line with its time, the pids and a child's lifetime masked: the
