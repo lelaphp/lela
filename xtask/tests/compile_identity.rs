@@ -6,10 +6,11 @@
 //! judge and the verdict on two dumps are held beside them, in the lane's
 //! own tests.
 //!
-//! The engine's side is the compiler linked into this process, reached
-//! through `php_bundle` (design §6.1), which is what a run with no
-//! `--engine` takes and what the tracked corpus is measured by. The tests
-//! that name a binary run the pinned oracle behind a shell file standing
+//! The engine's side is the engine's own binary, `sapi/cli`'s `php`,
+//! which honours php's dump flags; the harness links no compiler of its
+//! own (harness §8, revision 84; #2166), so the tests that hold the
+//! compiler build that binary once ([`php`]). The tests that hold the
+//! lane's plumbing run the pinned oracle behind a shell file standing
 //! where the engine's own binary would: the runner reads the file as an
 //! engine, its bytes not being the oracle's, which is how a dump on disk
 //! is made measurable. They say so on stderr and return when the pinned
@@ -24,6 +25,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
 
 use xtask::compile_identity::{self, Ask};
 use xtask::divergence::Registry;
@@ -41,6 +44,23 @@ fn workspace() -> &'static Path {
 
 fn manifest() -> Manifest {
     Manifest::load(workspace()).unwrap()
+}
+
+/// The engine's own binary, `sapi/cli`'s `php`, built once for these
+/// tests in the workspace's target: what the lane dumps the engine's side
+/// with (#2166).
+fn php() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let status = Command::new(cargo)
+            .args(["build", "--quiet", "-p", "php_sapi_cli", "--bin", "php"])
+            .current_dir(workspace())
+            .status()
+            .unwrap();
+        assert!(status.success(), "cargo could not build php");
+        workspace().join("target/debug/php")
+    })
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
@@ -282,18 +302,12 @@ fn a_compiler_that_emits_nothing_is_red_on_every_file_with_the_denominator() {
 /// the compiler that dumps nothing at all, and is exercised there while
 /// the corpus stands green here.
 #[test]
-fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
+fn the_engines_binary_dumps_the_corpus_at_its_reach() {
     if oracle().is_none() {
         return;
     }
-    let scratch = Scratch::new("linked");
-    let reading = scratch.ask(
-        &registry(""),
-        &Ask {
-            corpus: Some(scratch.corpus.clone()),
-            ..Ask::default()
-        },
-    );
+    let scratch = Scratch::new("engine");
+    let reading = scratch.run(&registry(""), php());
     assert_eq!(reading.scope, "corpus");
     // The same four files the binary of a compiler that emits nothing is
     // held to: two php dumps an op array for and two it dumps nothing
@@ -342,12 +356,12 @@ fn the_linked_compiler_dumps_where_no_engine_binary_is_built() {
 
 /// The floor is a sensor and not a comment (#389, harness-design.md §7,
 /// ledger 49): the reading of a compiler that emits nothing is below it
-/// and the failure names both numbers, and the linked compiler's is not
+/// and the failure names both numbers, and the engine's binary's is not
 /// below it. So a commit that carries `php_compile` further through the
 /// corpus leaves the harness's own suite green and one that carries it
 /// back does not.
 #[test]
-fn a_reach_under_the_floor_is_named_and_the_linked_compilers_is_not() {
+fn a_reach_under_the_floor_is_named_and_the_engines_is_not() {
     if oracle().is_none() {
         return;
     }
@@ -358,14 +372,8 @@ fn a_reach_under_the_floor_is_named_and_the_linked_compilers_is_not() {
         why.contains("0 of") && why.contains(&REACHED.to_string()),
         "{why}"
     );
-    let linked = scratch.ask(
-        &registry(""),
-        &Ask {
-            corpus: Some(scratch.corpus.clone()),
-            ..Ask::default()
-        },
-    );
-    assert_eq!(below_the_floor(&linked), Ok(()), "{linked:#?}");
+    let engine = scratch.run(&registry(""), php());
+    assert_eq!(below_the_floor(&engine), Ok(()), "{engine:#?}");
 }
 
 /// The lane's plumbing, measured: php's dump against php's dump is
@@ -526,25 +534,28 @@ fn a_regimes_args_reach_both_binaries() {
     assert_eq!(count(&without, "differ"), 2, "{without:#?}");
 }
 
-/// The linked compiler has no command line, so a `dump` regime that
-/// carries an argument it does not take is refused before anything is
-/// dumped, naming the regime and its arguments, rather than the argument
-/// dropped from the engine's side alone (#1780: no flag is swallowed
-/// silently). `-e` it takes, as every host takes it (#1822).
+/// With no engine binary built, and none named, nothing dumps the
+/// engine's side: the harness links no compiler to fall back to (#2166),
+/// so every file is found and none is run, and the run says why.
 #[test]
-fn the_linked_compiler_refuses_a_dump_regime_that_carries_args_it_does_not_take() {
-    let mut scratch = Scratch::new("linked-args");
-    scratch.dump_with_args(&["-e", "-H"]);
-    let ask = Ask {
-        corpus: Some(scratch.corpus.clone()),
-        ..Ask::default()
-    };
-    let refused =
-        compile_identity::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap_err();
-    let refused = format!("{refused:#}");
+fn with_no_engine_binary_nothing_is_dumped_and_the_reading_says_so() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new("no-engine");
+    let reading = scratch.ask(
+        &registry(""),
+        &Ask {
+            corpus: Some(scratch.corpus.clone()),
+            ..Ask::default()
+        },
+    );
+    assert_eq!(count(&reading, "files"), 4, "{reading:#?}");
+    assert_ne!(reading.status, Status::Pass, "{reading:#?}");
     assert!(
-        refused.contains("[regime.dump]") && refused.contains("\"-H\""),
-        "{refused}"
+        !reading.message.contains("byte-identical"),
+        "{}",
+        reading.message
     );
 }
 
@@ -560,13 +571,13 @@ const EXTENDED: &str = "<?php\nfunction f($a) { return $a + 1; }\n\
 
 /// A second regime beside `dump` (#1822): `--regime extended-info`, the
 /// tracked pin's row of php's `-e`, is handed to both sides after `dump`,
-/// so the oracle dumps with extended info and the linked compiler is
-/// built with it as a host's `-e` builds it, and the reading keeps a
-/// scope of its own beside the plain run's. The plain run of the same
+/// so the oracle and the engine's binary each dump with extended info,
+/// php's `-e` on both command lines, and the reading keeps a scope of its
+/// own beside the plain run's. The plain run of the same
 /// corpus is its control: what differs between the two is the regime,
 /// and both are byte-identical.
 #[test]
-fn a_second_regime_holds_the_linked_compiler_under_extended_info() {
+fn a_second_regime_holds_the_engines_binary_under_extended_info() {
     if oracle().is_none() {
         return;
     }
@@ -577,6 +588,7 @@ fn a_second_regime_holds_the_linked_compiler_under_extended_info() {
             &registry(""),
             &Ask {
                 corpus: Some(scratch.corpus.clone()),
+                engine: Some(php().to_path_buf()),
                 regime: regime.map(str::to_owned),
                 ..Ask::default()
             },

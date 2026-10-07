@@ -1,15 +1,24 @@
 //! `xtask clippy` (harness-design.md §4.5 condition 1, §6): `cargo clippy`
-//! with every warning denied, on every target of one crate, as a reading.
-//! Clippy's verdict is cargo's; what this instrument adds is the reading
-//! `done` reads, stamped with the crate's tree, so a crate changed since
-//! its last clean run is stale and not clean. One reading per crate that
-//! exists; `--crate` narrows it to the ones named.
+//! on every target of each crate, every warning a failure, as a reading
+//! per crate. What this instrument adds is the reading `done` reads,
+//! stamped with the crate's tree, so a crate changed since its last clean
+//! run is stale and not clean. One reading per crate that exists;
+//! `--crate` narrows it to the ones named.
+//!
+//! One `cargo clippy --keep-going --all-targets` checks every crate at
+//! once, cargo checking crates side by side (#2165). Warnings are not
+//! denied on the command line, so a lint stays a warning and the crates
+//! built on the one that carries it are still checked; each warning is
+//! counted against the crate it is of, by its package ([`batch::Run`]), and
+//! a crate fails on any. The verdict over a crate is the one `-D warnings`
+//! gave it, and one crate's lint no longer blocks the crates above it.
 
 use std::path::Path;
-use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
+use crate::batch::{Run, Targets, tail};
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status, Store};
 use crate::sources;
@@ -18,24 +27,35 @@ use crate::sources;
 pub(crate) const INSTRUMENT: &str = "clippy";
 
 /// Run clippy over every crate that exists, or over `only`; one reading
-/// each. The cargo invocation is the one CI and the pre-commit hook run.
+/// each.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
     for name in only {
         if manifest.crate_named(name).is_none() {
             bail!("the manifest has no crate named {name:?}");
         }
     }
-    let mut readings = Vec::new();
-    for krate in &manifest.crates {
-        if !only.is_empty() && !only.iter().any(|n| n == &krate.name) {
-            continue;
-        }
-        if !sources::exists(root, krate) {
-            continue;
-        }
-        readings.push(check(root, krate)?);
+    // The key each reading carries is the tree's before cargo built it,
+    // so a file written while the crates are measured stales the reading.
+    let snapshot = Snapshot::disk(root)?;
+    let crates: Vec<&Crate> = manifest
+        .crates
+        .iter()
+        .filter(|k| only.is_empty() || only.iter().any(|n| n == &k.name))
+        .filter(|k| sources::exists(root, k))
+        .collect();
+    if crates.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(readings)
+    let checked = Run::of(
+        root,
+        &["clippy", "--keep-going", "--all-targets"],
+        &crates,
+        Targets::All,
+    )?;
+    crates
+        .iter()
+        .map(|krate| reading(&snapshot, krate, &checked))
+        .collect()
 }
 
 /// `--staged`: the crates with a staged change, pre-commit's touched
@@ -66,54 +86,34 @@ pub(crate) fn command(
     crate::record(store, &readings)
 }
 
-/// One crate's reading: pass when cargo exits 0, fail with the tail of
-/// what clippy printed otherwise.
-pub(crate) fn check(root: &Path, krate: &Crate) -> Result<Reading> {
-    let package = krate.package();
-    let out = Command::new("cargo")
-        .args([
-            "clippy",
-            "-q",
-            "-p",
-            &package,
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ])
-        .current_dir(root)
-        .output()
-        .with_context(|| format!("running cargo clippy -p {package}"))?;
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
-    if out.status.success() {
-        reading.status = Status::Pass;
-        reading.message = format!("{}: clippy clean, warnings denied", krate.name);
-    } else {
-        let text = String::from_utf8_lossy(&out.stderr);
-        let warnings = text.lines().filter(|l| l.starts_with("warning:")).count();
-        let errors = text.lines().filter(|l| l.starts_with("error")).count();
-        reading.count("warnings", warnings as u64)?;
-        reading.count("errors", errors as u64)?;
+/// One crate's reading: pass when every target was checked and clippy
+/// said nothing of the crate, fail with what it said otherwise.
+fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run) -> Result<Reading> {
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
+    let name = &krate.name;
+    let Some(checked) = run.crates.get(name) else {
         reading.status = Status::Fail;
-        reading.message = format!("{}: clippy is not clean\n{}", krate.name, tail(&text, 40));
+        reading.message = format!("{name}: clippy did not check it\n{}", tail(&run.stderr, 40));
+        return Ok(reading);
+    };
+    let warnings = checked.count("warning");
+    let errors = checked.count("error");
+    if checked.whole && warnings == 0 && errors == 0 {
+        reading.status = Status::Pass;
+        reading.message = format!("{name}: clippy clean, warnings denied");
+        return Ok(reading);
     }
+    reading.count("warnings", warnings as u64)?;
+    reading.count("errors", errors as u64)?;
+    reading.status = Status::Fail;
+    let said = checked.rendered();
+    reading.message = if said.is_empty() {
+        format!(
+            "{name}: clippy did not check it: a crate it is built from did not compile\n{}",
+            tail(&run.stderr, 40)
+        )
+    } else {
+        format!("{name}: clippy is not clean\n{}", tail(&said, 40))
+    };
     Ok(reading)
-}
-
-/// The last `n` lines of `text`.
-fn tail(text: &str, n: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.len().saturating_sub(n);
-    lines[start..].join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_tail_is_the_last_lines() {
-        assert_eq!(tail("a\nb\nc", 2), "b\nc");
-        assert_eq!(tail("a", 5), "a");
-    }
 }

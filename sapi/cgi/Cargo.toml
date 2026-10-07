@@ -20,19 +20,6 @@ workspace = true
 name = "php-cgi"
 path = "src/main.rs"
 
-# The same binary with `php_engine`'s `witness-trace` on, which the witness
-# lane builds and serves a fence with a `request` through, and nothing else
-# does (harness §8, revision 61; #1197).
-[[bin]]
-name = "php-cgi-witness"
-path = "src/witness.rs"
-required-features = ["witness-trace"]
-
-[features]
-# Every request the binary serves appends the natives it entered to the file
-# `PHP_WITNESS_TRACE` names (harness §4.5 condition 2, revision 61).
-witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
-
 [dependencies]
 # The CLI's set (sapi/cli/Cargo.toml says why each): php's configure
 # builds an extension of the `cli` class for the CLI, CGI, embed and

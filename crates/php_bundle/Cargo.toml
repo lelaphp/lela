@@ -44,9 +44,6 @@ jit = []
 # engine of `enabled()`, which an extension's own tests and the harness's
 # witness lane serve a snippet through. Off by default.
 test = ["php_ext/test"]
-# The witness runner's trace (harness §4.5 condition 2, revision 58); xtask
-# alone enables it.
-witness-trace = ["test", "php_ext/witness-trace"]
 # The engine the harness links, which serves the witness and crosscheck lanes
 # (harness §7, revision 43): every extension feature but pcntl, whose fences
 # the `php` binary serves so that nothing forks the harness (revision 61).
@@ -213,4 +210,4 @@ php_ext_zend_test = { path = "../../ext/zend_test", optional = true }
 # are already this crate's edges; `php_macros` depends on no workspace
 # crate (ADR-0007).
 [dev-dependencies]
-php_ext = { path = "../php_ext", features = ["test", "witness-trace"] }
+php_ext = { path = "../php_ext", features = ["test"] }

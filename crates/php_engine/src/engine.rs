@@ -699,7 +699,6 @@ pub(crate) struct Shared {
     /// Where every request of this engine appends the natives it
     /// entered, one line each, where a host asked for it
     /// ([`EngineBuilder::trace_natives_to`]).
-    #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
     /// Whether a debug build's request leak sensor is armed, and whether
     /// it traces allocations ([`EngineBuilder::sense_leaks`]).
@@ -2618,7 +2617,6 @@ pub struct EngineBuilder {
     shebang_while: Option<&'static str>,
     cli_shell: bool,
     configure: &'static [&'static str],
-    #[cfg(feature = "witness-trace")]
     trace_to: Option<std::path::PathBuf>,
     #[cfg(debug_assertions)]
     sense_leaks: LeakSensor,
@@ -2672,13 +2670,11 @@ impl EngineBuilder {
 
     /// Every request of the engine records the natives it enters and
     /// appends them to `path` as it ends, one line each,
-    /// [`Entered::line`](crate::test::Entered::line): what the `php`
-    /// binary built for the witness lane does where the harness names a
-    /// file, so a fence served by the binary is covered by what it
+    /// [`Entered::line`](crate::trace::Entered::line): what a host's
+    /// binary does where the harness names a file in `PHP_WITNESS_TRACE`, so a fence served by the binary is covered by what it
     /// entered as one served by the linked engine is (harness §4.5
     /// condition 2, revisions 58 and 61). A forked child's request
     /// appends its own.
-    #[cfg(feature = "witness-trace")]
     #[must_use]
     pub fn trace_natives_to(mut self, path: std::path::PathBuf) -> EngineBuilder {
         self.trace_to = Some(path);
@@ -3044,7 +3040,6 @@ impl EngineBuilder {
                 configuration: configuration.table,
                 sections: configuration.sections,
                 ini_files,
-                #[cfg(feature = "witness-trace")]
                 trace_to: self.trace_to,
                 #[cfg(debug_assertions)]
                 sense_leaks: self.sense_leaks,
@@ -3493,7 +3488,6 @@ impl Engine {
             shebang_while: None,
             cli_shell: false,
             configure: &[],
-            #[cfg(feature = "witness-trace")]
             trace_to: None,
             #[cfg(debug_assertions)]
             sense_leaks: LeakSensor::default(),
@@ -4132,12 +4126,9 @@ impl Engine {
         }
         let web = description.web.is_some();
         let mut req = Request::new(Arc::clone(&self.shared), description);
-        #[cfg(feature = "witness-trace")]
         if traced || self.shared.trace_to.is_some() {
             req.trace_natives();
         }
-        #[cfg(not(feature = "witness-trace"))]
-        let _ = traced;
         if let Some(held) = sink.held() {
             req.hold(held);
         }
@@ -4527,14 +4518,10 @@ impl Engine {
         }
         // What the request entered, taken last, so a destructor or a
         // shutdown function served above is in it.
-        #[cfg(feature = "witness-trace")]
         let trace = req.take_trace();
-        #[cfg(feature = "witness-trace")]
         if let Some(path) = &self.shared.trace_to {
-            crate::test::append_trace(path, &trace);
+            crate::trace::append_trace(path, &trace);
         }
-        #[cfg(not(feature = "witness-trace"))]
-        let trace = ();
         (
             Observables {
                 exit_code,
@@ -4551,7 +4538,7 @@ impl Engine {
     /// [`Engine::serve`] with the natives the request enters recorded
     /// and handed back beside what it observed: the witness runner's
     /// switch (harness §4.5 condition 2, revision 58).
-    #[cfg(feature = "witness-trace")]
+    #[cfg(any(feature = "test", test))]
     pub(crate) fn serve_traced(
         &self,
         description: RequestDescription,
@@ -4582,11 +4569,8 @@ fn end_phase(
 }
 
 /// What a transaction hands back beside its observables: the natives the
-/// request entered, under `witness-trace`, and nothing in any other build.
-#[cfg(feature = "witness-trace")]
-pub(crate) type Trace = Vec<crate::test::Entered>;
-#[cfg(not(feature = "witness-trace"))]
-pub(crate) type Trace = ();
+/// request entered, where it was asked to record them, and none where not.
+pub(crate) type Trace = Vec<crate::trace::Entered>;
 
 /// What a transaction is for once the request has started: the program
 /// served, linted, or written as `zend_highlight` or `zend_strip` writes

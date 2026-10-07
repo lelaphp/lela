@@ -32,9 +32,8 @@
 //! `php` binary and php-fpm's children.
 //!
 //! **Its witnesses** are served by that binary for the same reason: every
-//! fence here is marked `process`, and `xtask witness` runs it in
-//! `php-witness`, the binary built with `witness-trace`, in a process of
-//! its own, never in the engine linked into the harness, which carries no
+//! fence here is marked `process`, and `xtask witness` runs it in the
+//! `php` binary, in a process of its own, never in the engine linked into the harness, which carries no
 //! pcntl (harness-design.md §8, revision 61).
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).

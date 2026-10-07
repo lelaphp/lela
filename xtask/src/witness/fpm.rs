@@ -1,6 +1,6 @@
 //! A fence with a `request fpm` (#1291): the snippet served as a request
 //! of the web by a php-fpm, php-fpm's pin in `[sapi]` for the oracle and
-//! `sapi/fpm`'s `php-fpm-witness` for the engine. The master runs in the
+//! `sapi/fpm`'s `php-fpm` for the engine. The master runs in the
 //! foreground over a pool of one child listening on a Unix socket in the
 //! fence's own scratch tree, under the recipe's ini as `-d`; the request the fence describes goes to it as
 //! `FastCGI` records, its variables the ones [`cgi::request`] makes of a

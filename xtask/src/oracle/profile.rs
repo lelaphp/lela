@@ -7,6 +7,9 @@
 //! read it, and none spells a profile.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
 
 /// One profile of the workspace's `Cargo.toml` a lane's binary is built in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +82,49 @@ impl Profile {
             )
         })
     }
+}
+
+/// `cargo build --profile <this build's> -p <package> --bin <binary>`,
+/// with `--features <features>` where there are any, in `root`, and where
+/// cargo put the binary: the
+/// target directory cargo was told of, or `root`'s own. A lane whose
+/// harness is the correctness lanes' build builds what it serves through
+/// in that build too (#1994).
+pub(crate) fn build(
+    root: &Path,
+    package: &str,
+    binary: &str,
+    features: Option<&str>,
+) -> Result<PathBuf> {
+    let profile = Profile::this_build().map_err(anyhow::Error::msg)?;
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .args([
+            "build",
+            "--quiet",
+            "--profile",
+            profile.name(),
+            "--package",
+            package,
+            "--bin",
+            binary,
+        ])
+        .args(features.into_iter().flat_map(|names| ["--features", names]))
+        .current_dir(root)
+        .status()
+        .with_context(|| format!("running cargo to build {binary}"))?;
+    if !status.success() {
+        bail!(
+            "cargo could not build {binary} ({status}); its errors are on the harness's second stream"
+        );
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), |dir| root.join(dir));
+    let built = profile.binary(&target, binary);
+    if !built.is_file() {
+        bail!("cargo built {binary} and it is not at {}", built.display());
+    }
+    Ok(built)
 }
 
 #[cfg(test)]

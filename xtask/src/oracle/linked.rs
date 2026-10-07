@@ -36,40 +36,50 @@
 //! a `stderr` fence is held to what the engine wrote and a witness with
 //! no such fence asserts the engine wrote nothing there (#248).
 //!
-//! **Nothing here forks.** The bundle this harness links carries no
-//! pcntl, and a fence whose snippet forks, signals or changes the process
-//! is marked `process` and served by the `php` binary instead
-//! (`witness::process`; harness-design.md §8, revision 61).
+//! **A process of its own.** The engine is `sapi/cli`'s `php-linked`,
+//! built with the bundle's `linked` set in this harness's profile at the
+//! first snippet that asks for it, from the workspace this harness was
+//! built in, and the harness links no engine of its own (harness §8,
+//! revision 84; #2166): an edit under `crates/` or `ext/` rebuilds that
+//! binary, never the one every hook runs. A thread that serves takes an
+//! idle `php-linked --serve`, or starts one, hands it the snippet as a
+//! request of files in a directory of its own, and leaves it idle again
+//! for the next, so as many run as threads serve at once and they outlive
+//! one crate's pool into the next crate's; the binary builds a fresh
+//! engine per snippet, the isolation a process
+//! of its own gave, and writes back the streams, the status and the
+//! natives the snippet entered. A snippet that forks, signals or changes
+//! the process is still marked `process` and served by the `php` binary
+//! (`witness::process`; revision 61).
 //!
-//! **A panic is a failure, not the harness's end** (design §8): the serve
-//! is caught, and a panic comes back as the trouble that makes the witness
-//! bork, naming the crate of the engine rather than ending the lane.
+//! **A death or a panic is a failure, not the harness's end** (design §8):
+//! a panic leaves the binary standing and the snippet borks on it, naming
+//! the crate of the engine; a snippet that ends the binary, on an abort,
+//! a stack overflow or a signal, borks naming how it ended, and the next
+//! snippet is served by a binary started again.
 
-use std::panic::{self, AssertUnwindSafe};
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
-use anyhow::{Result, bail};
-
-use php_bundle::test::{Capture, Entered};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::{Linked, Observation, Program, Recipe, Regime, Scratch};
+use crate::scratch::Tree;
 
-/// The `php` binary's own layer under the line's entries: the CLI's
-/// `ini_defaults` and its `HARDCODED_INI`, which with no php.ini read
-/// between them come to what php's CLI reads before its `-d`s.
-pub(crate) fn cli_layer<'a>() -> impl Iterator<Item = (&'a str, &'a str)> {
-    let layer = php_sapi::ini::CLI_DEFAULTS
-        .iter()
-        .chain(&php_sapi::ini::CLI_HARDCODED);
-    layer.map(|&(name, value)| (name, value))
-}
+/// The host whose binary serves the snippets, its package and binary.
+const PACKAGE: &str = "php_sapi_cli";
+const BINARY: &str = "php-linked";
 
 /// One snippet through the linked engine under `recipe`, and under
 /// `regime` after it where a run names one, refused where the regime
 /// carries an argument the linked engine does not take ([`Linked`]),
-/// answered as the
-/// fresh-process adapter answers it: the program written where that
-/// adapter writes it and served in that directory, both streams
+/// answered as the fresh-process adapter answers it: the program written
+/// where that adapter writes it and served in that directory, both streams
 /// normalised by the recipe's rules with the directory as the token, and
 /// the exit code the request ended on.
 pub(crate) fn serve(
@@ -77,67 +87,162 @@ pub(crate) fn serve(
     regime: Option<&Regime>,
     snippet: &str,
 ) -> Result<Observation> {
-    run(recipe, regime, snippet, false).map(|(observed, _)| observed)
+    run(recipe, regime, snippet).map(|(observed, _)| observed)
 }
 
-/// [`serve`] with the natives the request entered recorded beside what
-/// it observed, in the order it entered them: what witness coverage
-/// counts (harness §4.5 condition 2, revision 58).
+/// [`serve`] with the natives the request entered beside what it
+/// observed, in the order it entered them, one per line as the trace file
+/// holds them: what witness coverage counts (harness §4.5 condition 2,
+/// revision 58).
 pub(crate) fn serve_traced(
     recipe: &Recipe,
     regime: Option<&Regime>,
     snippet: &str,
-) -> Result<(Observation, Vec<Entered>)> {
-    run(recipe, regime, snippet, true)
+) -> Result<(Observation, String)> {
+    run(recipe, regime, snippet)
 }
 
-fn run(
-    recipe: &Recipe,
-    regime: Option<&Regime>,
-    snippet: &str,
-    traced: bool,
-) -> Result<(Observation, Vec<Entered>)> {
-    let source = format!("{}{snippet}", recipe.preamble);
+fn run(recipe: &Recipe, regime: Option<&Regime>, snippet: &str) -> Result<(Observation, String)> {
     let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
-    // The engine here has no command line, so a regime's arguments other
+    // The engine has no command line here, so a regime's arguments other
     // than `-e` are refused rather than dropped from this side of the
     // comparison alone. The witness lane reads this before anything runs,
     // naming the regime (`witness::under`); this is the adapter's own
     // backstop.
     let linked = Linked::of(regime)?;
-    // The CLI's layer first, the recipe's entries after it and the
-    // regime's last, so an entry both name is the regime's, as the later
-    // `-d` is under the fresh-process adapter.
-    let ini: Vec<(&str, &str)> = cli_layer()
-        .chain(
-            recipe
-                .ini
-                .iter()
-                .chain(&linked.ini)
-                .filter_map(|entry| entry.split_once('=')),
-        )
+    // The recipe's entries, the regime's after them, so an entry both name
+    // is the regime's, as the later `-d` is under the fresh-process
+    // adapter; the binary lays both over the CLI's own layer.
+    let ini: String = recipe
+        .ini
+        .iter()
+        .chain(&linked.ini)
+        .flat_map(|entry| [entry.as_str(), "\n"])
         .collect();
-    let started = Instant::now();
-    // A fresh engine per snippet, which is the isolation a process gave
-    // (design §8).
-    let served = panic::catch_unwind(AssertUnwindSafe(|| {
-        let engine = php_bundle::test::engine(&ini, linked.extended_info);
-        let name = recipe.script_name.as_bytes();
-        if traced {
-            engine.serve_capture_traced_in(&scratch.dir, name, &source, Capture::default())
-        } else {
-            engine.serve_capture_in(&scratch.dir, name, &source, Capture::default())
-        }
-    }));
-    let wall = started.elapsed();
-    let Ok(served) = served else {
-        bail!("the linked engine panicked; the panic itself is on the harness's second stream");
+    let request = Tree::new("linked-request")?;
+    let write = |name: &str, text: &[u8]| {
+        fs::write(request.join(name), text).with_context(|| format!("writing the request's {name}"))
     };
+    write("source", format!("{}{snippet}", recipe.preamble).as_bytes())?;
+    write("script_name", recipe.script_name.as_bytes())?;
+    write("cwd", scratch.dir.as_os_str().as_encoded_bytes())?;
+    write("ini", ini.as_bytes())?;
+    write("extended", if linked.extended_info { b"1" } else { b"0" })?;
+    let started = Instant::now();
+    ask(&request)?;
+    let wall = started.elapsed();
+    if request.join("panicked").exists() {
+        bail!("the linked engine panicked; the panic itself is on the harness's second stream");
+    }
+    let read = |name: &str| fs::read(request.join(name)).unwrap_or_default();
+    let exit = String::from_utf8_lossy(&read("exit"))
+        .trim()
+        .parse()
+        .context("the linked engine wrote no status")?;
     let observed = Observation {
-        stdout: scratch.normalise(&recipe.normalise, served.stdout),
-        stderr: scratch.normalise(&recipe.normalise, served.stderr),
-        exit: Some(served.exit_code),
+        stdout: scratch.normalise(&recipe.normalise, read("stdout")),
+        stderr: scratch.normalise(&recipe.normalise, read("stderr")),
+        exit: Some(exit),
         wall,
     };
-    Ok((observed, served.entered))
+    Ok((
+        observed,
+        String::from_utf8_lossy(&read("entered")).into_owned(),
+    ))
+}
+
+/// The binaries standing idle, each returned after the snippet it served:
+/// as many run as threads serve at once, and they outlive the pool of one
+/// crate's fences into the next crate's.
+static IDLE: Mutex<Vec<Server>> = Mutex::new(Vec::new());
+
+/// The request at `dir` served by an idle binary, or one started where
+/// none is idle; one the request ended is dropped, so the next starts
+/// afresh.
+fn ask(dir: &Path) -> Result<()> {
+    let idle = IDLE.lock().unwrap_or_else(PoisonError::into_inner).pop();
+    let mut server = match idle {
+        Some(server) => server,
+        None => Server::start()?,
+    };
+    server.ask(dir)?;
+    IDLE.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(server);
+    Ok(())
+}
+
+/// A running `php-linked --serve` and the two ends of its pipes.
+struct Server {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Server {
+    fn start() -> Result<Server> {
+        let mut child = Command::new(binary()?)
+            .arg("--serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("starting {BINARY}"))?;
+        let stdin = child.stdin.take().context("the server's stdin")?;
+        let stdout = child.stdout.take().context("the server's stdout")?;
+        Ok(Server {
+            child,
+            stdin: Some(stdin),
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    /// The request at `dir` handed over and its answer awaited; the
+    /// binary's end, where it ends instead, is the error.
+    fn ask(&mut self, dir: &Path) -> Result<()> {
+        let mut line = String::new();
+        let handed = self
+            .stdin
+            .as_mut()
+            .context("the server's stdin is closed")
+            .and_then(|stdin| {
+                writeln!(stdin, "{}", dir.display())
+                    .and_then(|()| stdin.flush())
+                    .context("handing the server its request")
+            });
+        let answered = handed.and_then(|()| {
+            self.stdout
+                .read_line(&mut line)
+                .context("reading the server's answer")
+        });
+        if matches!(answered, Ok(n) if n > 0) && line.trim() == "served" {
+            return Ok(());
+        }
+        self.stdin = None;
+        let status = self.child.wait().context("waiting for the linked engine")?;
+        Err(match status.signal() {
+            Some(signal) => anyhow!("the linked engine died on signal {signal} serving it"),
+            None => anyhow!("the linked engine ended serving it, {status}"),
+        })
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // End of input is the binary's end; waiting keeps no zombie.
+        self.stdin = None;
+        self.child.wait().ok();
+    }
+}
+
+/// The binary, built at the first snippet of this process from the
+/// workspace this harness was built in, in this harness's profile.
+fn binary() -> Result<PathBuf> {
+    static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            super::profile::build(&crate::built_root(), PACKAGE, BINARY, Some("linked"))
+                .map_err(|e| format!("{e:#}"))
+        })
+        .clone()
+        .map_err(|why| anyhow!("{why}"))
 }

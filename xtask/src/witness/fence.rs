@@ -130,17 +130,17 @@ pub enum Served {
     /// revision 48).
     #[default]
     Linked,
-    /// The `php` binary built with `witness-trace`, in a process of its
-    /// own: the fence carries `process` (harness §8, revision 61).
+    /// The `php` binary, in a process of its own: the fence carries
+    /// `process` (harness §8, revision 61).
     Binary,
-    /// The engine's `php-cgi` built the same way, beside php-cgi for the
+    /// The engine's `php-cgi`, beside php-cgi for the
     /// oracle: a `request` fence describes what the CGI host is handed
     /// (#1197).
     Cgi,
-    /// The engine's `php-fpm` built the same way, beside php-fpm for the
+    /// The engine's `php-fpm`, beside php-fpm for the
     /// oracle: the fence is `request fpm` (#1291).
     Fpm,
-    /// The engine's `phpdbg` built the same way, beside phpdbg for the
+    /// The engine's `phpdbg`, beside phpdbg for the
     /// oracle: the fence is `request phpdbg`, its body the commands the
     /// prompt reads (#1348).
     Phpdbg,

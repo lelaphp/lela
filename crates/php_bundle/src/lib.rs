@@ -301,7 +301,6 @@ pub type Tier = php_ext::Nop;
 /// snippet here where the binary is not built.
 #[cfg(feature = "test")]
 pub mod test {
-    #[cfg(feature = "witness-trace")]
     pub use php_ext::test::Entered;
     pub use php_ext::test::{Capture, Engine};
 

@@ -60,6 +60,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::key::Snapshot;
 use crate::manifest::{Edge, Manifest, Seam, Section};
 use crate::reading::{Number, Reading, Status, Store};
 use crate::sources::Standing;
@@ -125,6 +126,7 @@ pub(crate) fn measure(
     write: bool,
     standing: &Standing,
 ) -> Result<Vec<Reading>> {
+    let snapshot = Snapshot::disk(root)?;
     let crates = Crates::scan(manifest, root)?;
     let mut inventory = Inventory::new(&crates);
     let surfaces = Surfaces::read(root)?;
@@ -132,6 +134,7 @@ pub(crate) fn measure(
     for seam in &manifest.seams {
         readings.push(seam_reading(
             manifest,
+            &snapshot,
             &crates,
             &mut inventory,
             seam,
@@ -148,6 +151,7 @@ pub(crate) fn measure(
         }
         readings.push(crate_reading(
             manifest,
+            &snapshot,
             &crates,
             &mut inventory,
             &surfaces,
@@ -209,15 +213,17 @@ fn lock_kind(manifest: &Manifest, seam: &Seam) -> LockKind {
 
 fn seam_reading(
     manifest: &Manifest,
+    snapshot: &Snapshot,
     crates: &Crates,
     inventory: &mut Inventory<'_>,
     seam: &Seam,
     write: bool,
 ) -> Result<Reading> {
     // Stamped over the lock's home, the manifest's mapping of the seam;
-    // taken again after a rewrite, which the stamp is then over.
-    let stamped = || -> Result<Reading> {
-        let mut reading = Reading::for_scope(INSTRUMENT, &seam.name, manifest, crates.root())?;
+    // taken again after a rewrite, over a snapshot taken after it, which
+    // the stamp is then over.
+    let stamped = |snapshot: &Snapshot| -> Result<Reading> {
+        let mut reading = Reading::for_scope(INSTRUMENT, &seam.name, manifest, snapshot)?;
         reading.adr = adrs(&seam.adr);
         // The manifest's `on = "pub"` rule over the lock's home, the note at
         // the tool call that a new public item needs its line: the reading
@@ -227,7 +233,7 @@ fn seam_reading(
         }
         Ok(reading)
     };
-    let mut reading = stamped()?;
+    let mut reading = stamped(snapshot)?;
     let skip = |mut reading: Reading, message: String| {
         reading.status = Status::Skip;
         reading.message = message;
@@ -278,7 +284,7 @@ fn seam_reading(
         seam, kind, &path, &shown, &subject, committed, &blocks, write,
     )?);
     if write {
-        let mut rewritten = stamped()?;
+        let mut rewritten = stamped(&Snapshot::disk(crates.root())?)?;
         rewritten.numbers = std::mem::take(&mut reading.numbers);
         rewritten.groups = std::mem::take(&mut reading.groups);
         reading = rewritten;
@@ -520,12 +526,13 @@ fn sections(
 
 fn crate_reading(
     manifest: &Manifest,
+    snapshot: &Snapshot,
     crates: &Crates,
     inventory: &mut Inventory<'_>,
     surfaces: &Surfaces,
     krate: &Present,
 ) -> Result<Reading> {
-    let mut reading = Reading::for_scope(INSTRUMENT, &krate.name, manifest, crates.root())?;
+    let mut reading = Reading::for_scope(INSTRUMENT, &krate.name, manifest, snapshot)?;
     let rows: Vec<&Edge> = manifest
         .edges
         .iter()

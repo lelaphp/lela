@@ -166,6 +166,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::carried::{BINARY, Carried};
 use crate::divergence::Registry;
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Oracle, Oracles, Pin, Runner, Source};
 use crate::reading::{Reading, listed, plural};
@@ -646,7 +647,7 @@ pub(crate) struct Under<'a> {
 /// the message, and the status the ladder allows.
 pub(crate) fn reading(
     tally: &Tally,
-    root: &Path,
+    snapshot: &Snapshot,
     manifest: &Manifest,
     source: &Path,
     subset: &Subset,
@@ -677,7 +678,7 @@ pub(crate) fn reading(
     let uncreated = !matches!(runner, Runner::Control(_))
         && manifest
             .crate_named(&subset.scope)
-            .is_some_and(|krate| !sources::exists(root, krate));
+            .is_some_and(|krate| !sources::exists(snapshot.root(), krate));
     // A directory the row names and the pinned tree has not: the manifest
     // and the pin disagree, and no run can settle it. It is the reading,
     // ahead of whether an engine is built, because building one would not
@@ -715,7 +716,7 @@ pub(crate) fn reading(
     // Stamped through the manifest's scope mapping: the crate whose subset
     // it is, so `done` can tell a stale reading from a fresh one.
     let mut reading = tally.reading(
-        Reading::for_scope(INSTRUMENT, &scope, manifest, root)?.under(&manifest.pin),
+        Reading::for_scope(INSTRUMENT, &scope, manifest, snapshot)?.under(&manifest.pin),
         &outcome,
         message,
     )?;
@@ -1021,7 +1022,7 @@ pub fn run(
                 .map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
-        let mut reading = reading(&tally, root, manifest, &source, subset, under)?;
+        let mut reading = reading(&tally, runs.snapshot(), manifest, &source, subset, under)?;
         around(&mut reading, runner, removed, waited)?;
         let pin = side.oracle.pin();
         let (target, kept) = runs.target_of(pin, &subset.scope, (&tally, runner), ask.lane)?;
@@ -1066,7 +1067,7 @@ pub fn run(
             .map_err(|unknown| anyhow::anyhow!("{unknown:#}"));
         match side.and_then(|side| taken(subset, side, &scope)) {
             Ok(taken) => readings.extend(taken),
-            Err(why) => readings.push(refused(root, manifest, &scope.to_string(), &why)?),
+            Err(why) => readings.push(refused(&runs, manifest, &scope.to_string(), &why)?),
         }
     }
     // One subset's census is the census; a lane's is worth a second line
@@ -1279,8 +1280,14 @@ fn asked(root: &Path, manifest: &Manifest, source: &Path, ask: &Ask) -> Result<V
 /// The reading of a subset the lane could not run, a fail whose message
 /// is the cause and whose `refused` counts it, so the lane's other
 /// readings are written beside it and its exit says it (#1612).
-fn refused(root: &Path, manifest: &Manifest, scope: &str, why: &anyhow::Error) -> Result<Reading> {
-    let mut reading = Reading::for_scope(INSTRUMENT, scope, manifest, root)?.under(&manifest.pin);
+fn refused(
+    runs: &against::Runs,
+    manifest: &Manifest,
+    scope: &str,
+    why: &anyhow::Error,
+) -> Result<Reading> {
+    let mut reading =
+        Reading::for_scope(INSTRUMENT, scope, manifest, runs.snapshot())?.under(&manifest.pin);
     reading.status = crate::reading::Status::Fail;
     reading.message = format!("{why:#}");
     reading.count("refused", 1)?;

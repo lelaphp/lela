@@ -8,15 +8,13 @@
 //! serves one request on the one thread it has, as design revision 35
 //! requires of pcntl.
 //!
-//! The binary is `php-witness`, `sapi/cli`'s host built with
-//! `php_engine`'s `witness-trace`, which this module builds once per run
-//! with cargo where the run meets its first such fence, in the profile
-//! this harness was built in (`Profile::this_build`, #1994). A lane whose
-//! harness is the correctness lanes' build serves its `process` fences in
-//! that build too. The build shares the engine's compiled crates with
-//! this harness's, since both turn the same features on in one profile:
-//! it is the bundle, the host and a link. It
-//! runs under the recipe exactly as the oracle does
+//! The binary is `php`, `sapi/cli`'s host as it is built for every other
+//! lane (#2168), which this module builds once per run with cargo where
+//! the run meets its first such fence, in the profile this harness was
+//! built in (`Profile::this_build`, #1994). A lane whose harness is the
+//! correctness lanes' build serves its `process` fences in that build
+//! too, and a phpt run in the same profile has built it already. It runs
+//! under the recipe exactly as the oracle does
 //! ([`Oracle::run_under`]), and every request it serves appends the
 //! natives it entered to the file `PHP_WITNESS_TRACE` names, a forked
 //! child's request its own beside its parent's: so coverage is observed
@@ -24,28 +22,26 @@
 //! §4.5 condition 2, revision 58), what a fence entered and nothing it
 //! only spells.
 //!
-//! A fence with a `request` is served by `php-cgi-witness`, `sapi/cgi`'s
-//! host built the same way, through a link of the name php-cgi, beside
-//! php-cgi for the oracle ([`served_as_cgi`], #1197, ADR-0008); a fence
-//! with a `request fpm` by `php-fpm-witness`, `sapi/fpm`'s, beside php-fpm
-//! (`served_as_fpm`, #1291).
+//! A fence with a `request` is served by `sapi/cgi`'s php-cgi, through a
+//! link of that name, beside php-cgi for the oracle ([`served_as_cgi`],
+//! #1197, ADR-0008); a fence with a `request fpm` by `sapi/fpm`'s
+//! php-fpm, beside php-fpm (`served_as_fpm`, #1291).
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 
 use super::anchor::Entry;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
-use crate::oracle::profile::Profile;
+use crate::oracle::profile;
 use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
 use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
 
-// The hosts a fence is served by, each its witness build: `sapi/cli`'s
+// The hosts a fence is served by, each its own binary: `sapi/cli`'s
 // serves a fence marked `process`, `sapi/cgi`'s one with a `request`,
 // `sapi/fpm`'s one with a `request fpm` (#1291) and `sapi/phpdbg`'s one
 // with a `request phpdbg` (#1348); `oracle::hosts` states each once.
@@ -78,7 +74,7 @@ impl Binary {
     }
 
     /// The binaries of the workspace at `root`, with `fpm` standing in for
-    /// its `php-fpm-witness`, so a test serves a `request fpm` fence by a
+    /// its `php-fpm`, so a test serves a `request fpm` fence by a
     /// host whose failure it chooses.
     #[cfg(test)]
     pub(crate) fn with_fpm(root: &Path, fpm: PathBuf) -> Binary {
@@ -255,39 +251,10 @@ fn built<'a>(
         .map_err(|why| anyhow!("{why}"))
 }
 
-/// `cargo build --profile <this build's> -p <package> --bin <binary>
-/// --features witness-trace` in `root`, and where cargo put the binary:
-/// the target directory cargo was told of, or `root`'s own.
+/// The host's own binary, built in this harness's profile
+/// ([`profile::build`]): every request it serves records the natives it
+/// entered where `PHP_WITNESS_TRACE` names a file, with no build of its
+/// own for the lane (#2168).
 fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
-    let (package, binary) = (host.package(), host.witness);
-    let profile = Profile::this_build().map_err(anyhow::Error::msg)?;
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .args([
-            "build",
-            "--quiet",
-            "--profile",
-            profile.name(),
-            "--package",
-            &package,
-            "--bin",
-            binary,
-            "--features",
-            "witness-trace",
-        ])
-        .current_dir(root)
-        .status()
-        .with_context(|| format!("running cargo to build {binary}"))?;
-    if !status.success() {
-        bail!(
-            "cargo could not build {binary} ({status}); its errors are on the harness's second stream"
-        );
-    }
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root.join("target"), |dir| root.join(dir));
-    let built = profile.binary(&target, binary);
-    if !built.is_file() {
-        bail!("cargo built {binary} and it is not at {}", built.display());
-    }
-    Ok(built)
+    profile::build(root, &host.package(), host.binary, None)
 }

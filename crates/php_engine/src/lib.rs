@@ -60,6 +60,7 @@ mod tests;
 #[cfg(any(feature = "test", test))]
 pub mod test;
 pub mod tier;
+mod trace;
 mod trampoline;
 mod unit_cache;
 mod virtual_cwd;

@@ -20,18 +20,6 @@ pub struct Stamp {
     pub commit: String,
 }
 
-impl Stamp {
-    /// Stamp the sources under `scope` (relative to `root`) now, with the
-    /// key [`crate::key::of`] takes over the working tree: the scope's
-    /// files and, for a crate, its dependency closure's (#1318).
-    pub fn take(root: &Path, scope: &Path) -> Result<Stamp> {
-        Ok(Stamp {
-            tree: crate::key::of(root, scope, crate::key::Content::Disk)?,
-            commit: head_commit(root)?,
-        })
-    }
-}
-
 /// The short id of `HEAD`, seven characters, read from the repository's
 /// files; `git rev-parse --short=7` when the layout is one this reader does
 /// not know. Seven is fixed, not git's own `--short`, which grows with the
@@ -133,8 +121,11 @@ fn files_under(root: &Path, scopes: &[PathBuf]) -> Result<Vec<String>> {
 /// tracked or not, with its content as it is on disk: the blob id of each
 /// file, then the blob id of the sorted `<id> <path>` listing, which is
 /// what `git hash-object` would print for the same bytes. A reading's key
-/// is this over its scope's closure ([`crate::key::of`]).
-pub fn tree_hash(root: &Path, scopes: &[PathBuf]) -> Result<String> {
+/// was this over its scope's closure until #2163 made it a lookup on a
+/// [`crate::key::Snapshot`]; it stays as the reference the tests hold
+/// every snapshot's key to, file by file read and hashed.
+#[cfg(test)]
+pub(crate) fn tree_hash(root: &Path, scopes: &[PathBuf]) -> Result<String> {
     let mut listing = Vec::new();
     for path in files_under(root, scopes)? {
         let file = root.join(&path);
@@ -144,9 +135,9 @@ pub fn tree_hash(root: &Path, scopes: &[PathBuf]) -> Result<String> {
     Ok(listing_id(&listing))
 }
 
-/// [`tree_hash`] of a scope that is the one file `path`, from its blob id
-/// alone: what a reading stamped over that file carries, for content that
-/// is no longer on disk.
+/// The key ([`crate::key::Snapshot::key`]) of a scope that is the one
+/// file `path`, from its blob id alone: what a reading stamped over that
+/// file carries, for content that is no longer on disk.
 pub(crate) fn file_hash(path: &str, blob: &str) -> String {
     listing_id(&[(path.to_owned(), blob.to_owned())])
 }
@@ -180,26 +171,16 @@ impl Index {
         Ok(Index(entries))
     }
 
-    /// [`tree_hash`] over what the index holds under `scopes`: the hash
-    /// they would have on disk were the working tree the index, with no
-    /// untracked file beside it.
-    pub fn hash(&self, scopes: &[PathBuf]) -> String {
-        let whole = scopes
-            .iter()
-            .any(|s| s == Path::new(".") || s.as_os_str().is_empty());
-        let under: Vec<(String, String)> = self
-            .0
-            .iter()
-            .filter(|(path, _)| whole || scopes.iter().any(|s| Path::new(path).starts_with(s)))
-            .cloned()
-            .collect();
-        listing_id(&under)
+    /// Each staged file and its blob id, sorted by path: what
+    /// [`crate::key::Snapshot::index`] keys a scope over.
+    pub(crate) fn entries(&self) -> &[(String, String)] {
+        &self.0
     }
 }
 
 /// The blob id of the sorted `<id> <path>` listing of `(path, id)` pairs:
 /// the one shape every hash of a scope here is taken in.
-fn listing_id(listing: &[(String, String)]) -> String {
+pub(crate) fn listing_id(listing: &[(String, String)]) -> String {
     let mut text = String::new();
     for (path, id) in listing {
         text.push_str(id);
@@ -218,6 +199,9 @@ fn listing_id(listing: &[(String, String)]) -> String {
 /// untracked one the build reads is reached by an edit to a tracked one,
 /// and an untracked `.DS_Store` would otherwise leave a clean checkout
 /// matching no commit. A tracked file gone from disk is listed as gone.
+/// The reference [`crate::key::Snapshot::tracked_over`] and
+/// [`crate::key::Snapshot::commit`] are held to (#2163).
+#[cfg(test)]
 pub(crate) fn tracked_hash(root: &Path, paths: &[&str], at: Option<&str>) -> Result<String> {
     let mut listing = Vec::new();
     if let Some(commit) = at {
@@ -397,14 +381,18 @@ mod tests {
     }
     use std::path::{Path, PathBuf};
 
-    use super::{Stamp, files, head_commit, tree_hash};
+    use super::{files, head_commit, tree_hash};
     use crate::built_root;
+    use crate::key::Snapshot;
     use crate::manifest::Manifest;
     use crate::reading::{Outcome, Reading, Status, Store};
 
     #[test]
     fn a_stamp_has_a_tree_hash_and_a_commit() {
-        let stamp = Stamp::take(&built_root(), Path::new("xtask")).unwrap();
+        let stamp = Snapshot::disk(&built_root())
+            .unwrap()
+            .stamp(Path::new("xtask"))
+            .unwrap();
         assert_eq!(stamp.tree.len(), 40, "{}", stamp.tree);
         assert!(stamp.tree.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!stamp.commit.is_empty());
@@ -412,11 +400,11 @@ mod tests {
 
     #[test]
     fn the_tree_hash_follows_the_sources_it_covers() {
-        let root = built_root();
-        let a = Stamp::take(&root, Path::new("xtask")).unwrap();
-        let b = Stamp::take(&root, Path::new("docs")).unwrap();
+        let now = Snapshot::disk(&built_root()).unwrap();
+        let a = now.stamp(Path::new("xtask")).unwrap();
+        let b = now.stamp(Path::new("docs")).unwrap();
         assert_ne!(a.tree, b.tree);
-        assert_eq!(a.tree, Stamp::take(&root, Path::new("xtask")).unwrap().tree);
+        assert_eq!(a.tree, now.stamp(Path::new("xtask")).unwrap().tree);
     }
 
     /// The stamp computed in process is the one git would compute: the
@@ -498,11 +486,19 @@ mod tests {
         let workspace = built_root();
         let root = crate::scratch::Tree::new("instrument").unwrap();
         let manifest = Manifest::load(&workspace).unwrap();
-        let mut reading = Reading::for_scope("test", "xtask", &manifest, &workspace).unwrap();
+        let mut reading = Reading::for_scope(
+            "test",
+            "xtask",
+            &manifest,
+            &crate::key::Snapshot::disk(&workspace).unwrap(),
+        )
+        .unwrap();
         reading.status = Status::Pass;
         assert_eq!(
             reading.tree(),
-            Stamp::take(&workspace, &manifest.scope_path("xtask").unwrap())
+            Snapshot::disk(&workspace)
+                .unwrap()
+                .stamp(&manifest.scope_path("xtask").unwrap())
                 .unwrap()
                 .tree
         );

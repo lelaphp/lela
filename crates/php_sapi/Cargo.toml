@@ -15,12 +15,6 @@ description = "The hosts' facade: the engine's host face and what php-src shares
 [lints]
 workspace = true
 
-[features]
-# A host's witness build: every request the engine serves appends the
-# natives it entered to the file `PHP_WITNESS_TRACE` names (harness §4.5
-# condition 2, revision 61).
-witness-trace = ["php_engine/witness-trace"]
-
 [dependencies]
 php_engine = { path = "../php_engine" }
 php_proto = { path = "../php_proto" }

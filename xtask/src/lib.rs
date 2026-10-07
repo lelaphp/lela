@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api_check;
+mod batch;
 pub mod bench;
 pub mod budget;
 mod built;
@@ -41,7 +42,7 @@ mod glossary;
 /// `xtask`'s own sources (harness-design.md §4.4, #16). Shared with
 /// `build.rs`, which includes the file rather than importing it.
 mod inputs;
-mod key;
+pub mod key;
 mod layout;
 mod lines;
 mod lock;

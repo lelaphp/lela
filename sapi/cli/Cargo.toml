@@ -20,19 +20,20 @@ workspace = true
 name = "php"
 path = "src/main.rs"
 
-# The same binary with `php_engine`'s `witness-trace` on, which the witness
-# lane builds and serves a fence marked `process` through, and nothing else
-# does: under a name of its own, so `target/*/php` stays the default build
-# the phpt lane runs (harness §8, revision 61).
+# The engine the witness and crosscheck lanes serve a snippet through, in a
+# process the harness starts and feeds snippet after snippet: the bundle's
+# `linked` set beside this host's own, a fresh engine per snippet, and the
+# natives each entered written beside what it printed (harness §8, revision
+# 84; #2166). The harness links no engine of its own.
 [[bin]]
-name = "php-witness"
-path = "src/witness.rs"
-required-features = ["witness-trace"]
+name = "php-linked"
+path = "src/linked.rs"
+required-features = ["linked"]
 
 [features]
-# Every request the binary serves appends the natives it entered to the file
-# `PHP_WITNESS_TRACE` names (harness §4.5 condition 2, revision 61).
-witness-trace = ["php_bundle/witness-trace", "php_sapi/witness-trace"]
+# `php-linked`: the bundle's `linked` set, every extension but pcntl, on top
+# of this host's own, which carries pcntl (harness §8, revision 84).
+linked = ["php_bundle/linked", "php_bundle/test"]
 
 [dependencies]
 # The bundle's default set and twenty it turns on: `pcntl` and `posix`,

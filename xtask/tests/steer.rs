@@ -66,6 +66,15 @@ fn a_proposal_that_only_adds_is_written() {
         added,
         "the proposal is the file now"
     );
+    // Stamped over what steer left, a snapshot taken after the write, so
+    // `permit --after` can tell steer's write from one beside it (#1516,
+    // #2163).
+    let now = xtask::key::Snapshot::disk(&root).expect("the tree");
+    assert_eq!(
+        reading.tree(),
+        now.key(std::path::Path::new("oracle.toml"))
+            .expect("the key")
+    );
 }
 
 #[test]

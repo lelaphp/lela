@@ -238,7 +238,7 @@ pub(super) fn serve(
 ) -> Result<(Observation, Vec<Entry>), String> {
     match witness.served {
         Served::Linked => linked::serve_traced(&oracle.pin().recipe, regime, &witness.snippet)
-            .map(|(out, natives)| (out, natives.into_iter().map(Entry::from).collect()))
+            .map(|(out, entered)| (out, entered.lines().filter_map(Entry::parse).collect()))
             .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}")),
         Served::Binary => binary
             .serve(oracle, &witness.snippet, witness.regime.as_deref())

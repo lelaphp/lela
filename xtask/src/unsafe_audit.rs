@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status, Store};
 use crate::rust;
@@ -45,13 +46,14 @@ fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Rea
         .flatten()
         .map(|h| Home::parse(h))
         .collect::<Result<_>>()?;
+    let snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
     for krate in &manifest.crates {
         if standing.get(&krate.name).is_some() {
             continue;
         }
         let created = sources::exists(root, krate);
-        let mut reading = Reading::for_crate("unsafe-audit", krate, root)?;
+        let mut reading = Reading::for_crate("unsafe-audit", krate, &snapshot)?;
         RULE.clone_into(&mut reading.rule);
         reading.adr = rule.adr.adr_field();
         if created {
