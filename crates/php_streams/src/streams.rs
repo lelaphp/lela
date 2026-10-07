@@ -4445,7 +4445,13 @@ impl StreamLayer for Request {
         let mut out = PhpArray::new(self)?;
         // The meta-data row the array is written into takes an owner of
         // its own; this one is given up once the rows are written.
-        let crypto = self.crypto_meta(stream)?;
+        let crypto = match self.crypto_meta(stream) {
+            Ok(crypto) => crypto,
+            Err(thrown) => {
+                out.give_up(self);
+                return Err(thrown);
+            }
+        };
         let head = if let Some(mut head) = self.kind_meta_data(stream) {
             if let Some(crypto) = &crypto {
                 head.insert(0, (b"crypto".to_vec(), MetaValue::Value(**crypto)));
