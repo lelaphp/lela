@@ -125,6 +125,10 @@ impl Code {
     pub(crate) const BUFFER_OVERFLOW: Code = Code(15);
     /// `U_UNSUPPORTED_ERROR`.
     pub(crate) const UNSUPPORTED: Code = Code(16);
+    /// `U_INVALID_STATE_ERROR`.
+    pub(crate) const INVALID_STATE: Code = Code(27);
+    /// `U_AMBIGUOUS_ALIAS_WARNING`.
+    pub(crate) const AMBIGUOUS_ALIAS: Code = Code(-122);
     /// `U_STRING_NOT_TERMINATED_WARNING`.
     pub(crate) const STRING_NOT_TERMINATED: Code = Code(-124);
 

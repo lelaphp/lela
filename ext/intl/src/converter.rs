@@ -21,11 +21,6 @@ type Answer<T> = Result<T, Thrown>;
 /// What a callback answers: `string|int|array|null`.
 type Substitute = Option<Union<Owner<PhpString>, Union<i64, Owner<PhpArray>>>>;
 
-/// `U_INVALID_STATE_ERROR`.
-const INVALID_STATE: Code = Code(27);
-/// `U_AMBIGUOUS_ALIAS_WARNING`.
-const AMBIGUOUS_ALIAS: Code = Code(-122);
-
 /// `php_converter_object` past its `zend_object`: the two converters and
 /// the error. php's two `zend_fcall_info_cache`s are the callbacks' names,
 /// looked up on the object's class as each is served.
@@ -56,6 +51,14 @@ impl ConverterObject {
             Side::Destination => &mut self.dest,
         }
     }
+}
+
+/// A share of the object's source and destination converters, each held
+/// for a call that lends their callbacks to PHP code.
+fn shares(req: &mut Request, object: PhpObject) -> (Option<Converter>, Option<Converter>) {
+    object
+        .native_mut::<ConverterObject>(req)
+        .map_or((None, None), |o| (o.src.clone(), o.dest.clone()))
 }
 
 /// What PHP code and failures left pending across one native's steps,
@@ -116,20 +119,21 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `php_converter_free_object`: each converter closed, a subclass's
-    /// callbacks told (`UCNV_CLOSE`).
+    /// callbacks told (`UCNV_CLOSE`) while the object still holds it.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let Some(o) = object.native_mut::<ConverterObject>(req) else {
-            return;
-        };
-        let (src, dest) = (o.src.take(), o.dest.take());
+        let (src, dest) = shares(req, object);
         let mut pending = Pending::default();
-        for converter in [src, dest].into_iter().flatten() {
-            lend(req, Some(object), &mut pending, |callbacks| {
-                converter.close(callbacks);
-            });
+        for converter in [&src, &dest] {
+            if converter.is_some() {
+                told(req, object, &mut pending, Reason::Close);
+            }
         }
+        if let Some(o) = object.native_mut::<ConverterObject>(req) {
+            (o.src, o.dest) = (None, None);
+        }
+        drop((src, dest));
         // php leaves what a callback threw in `EG(exception)`, raised after
-        // the free; a free here has no way to, so it is given up.
+        // the free; a free here has no way to, so it is given up (#2275).
         pending.give_up(req);
     }
 }
@@ -286,10 +290,12 @@ impl UConverter {
             .as_ref()
             .map_or(utf8, PhpString::as_bytes);
         error::constructing(req, |req| {
-            if !set_encoding(req, object, Side::Source, src)? {
-                return Ok(());
+            // An ambiguous alias's warning throws and php goes on.
+            let mut pending = Pending::default();
+            if set_encoding(req, object, Side::Source, src, &mut pending) {
+                set_encoding(req, object, Side::Destination, dest, &mut pending);
             }
-            set_encoding(req, object, Side::Destination, dest).map(|_| ())
+            pending.answer(req, Ok(()))
         })
     }
 
@@ -302,9 +308,7 @@ impl UConverter {
     ) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         error::errors_reset::<ConverterObject>(req, object);
-        let (src, dest) = this
-            .payload_mut(req)
-            .map(|o| (o.src.clone(), o.dest.clone()))?;
+        let (src, dest) = shares(req, object);
         let (src, dest) = if reverse { (dest, src) } else { (src, dest) };
         match convert(req, Some(object), dest, src, str.as_bytes())? {
             Some(bytes) => PhpString::new(req, &bytes).map(OrFalse::Value),
@@ -493,19 +497,11 @@ impl UConverter {
     #[php(tentative)]
     fn reasonText(req: &mut Request, reason: i64) -> Answer<Owner<PhpString>> {
         error::reset(req);
-        let text: &[u8] = match reason {
-            0 => b"REASON_UNASSIGNED",
-            1 => b"REASON_ILLEGAL",
-            2 => b"REASON_IRREGULAR",
-            3 => b"REASON_RESET",
-            4 => b"REASON_CLOSE",
-            5 => b"REASON_CLONE",
-            _ => {
-                let tail = "be a UConverter::REASON_* constant";
-                return Err(arg_value_error(req, 1, tail));
-            }
+        let Some(reason) = Reason::of(reason) else {
+            let tail = "be a UConverter::REASON_* constant";
+            return Err(arg_value_error(req, 1, tail));
         };
-        PhpString::new(req, text)
+        PhpString::new(req, reason.name().as_bytes())
     }
 
     #[php(tentative)]
@@ -516,23 +512,31 @@ impl UConverter {
     ) -> Answer<bool> {
         let object = this.object();
         error::errors_reset::<ConverterObject>(req, object);
-        set_encoding(req, object, Side::Destination, encoding.as_bytes())
+        let mut pending = Pending::default();
+        let set = set_encoding(
+            req,
+            object,
+            Side::Destination,
+            encoding.as_bytes(),
+            &mut pending,
+        );
+        pending.answer(req, Ok(set))
     }
 
     #[php(tentative)]
     fn setSourceEncoding(req: &mut Request, this: This<Self>, encoding: PhpString) -> Answer<bool> {
         let object = this.object();
         error::errors_reset::<ConverterObject>(req, object);
-        set_encoding(req, object, Side::Source, encoding.as_bytes())
+        let mut pending = Pending::default();
+        let set = set_encoding(req, object, Side::Source, encoding.as_bytes(), &mut pending);
+        pending.answer(req, Ok(set))
     }
 
     #[php(tentative)]
     fn setSubstChars(req: &mut Request, this: This<Self>, chars: PhpString) -> Answer<bool> {
         let object = this.object();
         error::errors_reset::<ConverterObject>(req, object);
-        let (src, dest) = this
-            .payload_mut(req)
-            .map(|o| (o.src.clone(), o.dest.clone()))?;
+        let (src, dest) = shares(req, object);
         let (mut set, mut pending) = (true, Pending::default());
         for (converter, which) in [(src, "Source"), (dest, "Destination")] {
             let raised = if let Some(converter) = converter {
@@ -543,7 +547,7 @@ impl UConverter {
                 failure(req, Some(object), code)
             } else {
                 let message = format!("{which} Converter has not been initialized yet");
-                error::errors_set::<ConverterObject>(req, object, INVALID_STATE, &message)
+                error::errors_set::<ConverterObject>(req, object, Code::INVALID_STATE, &message)
             };
             set = false;
             // php sets the destination's although the source's threw.
@@ -655,7 +659,7 @@ fn open(
     pending: &mut Pending,
 ) -> Option<Converter> {
     let (converter, code) = Converter::open(&c_string(name));
-    if code == AMBIGUOUS_ALIAS {
+    if code == Code::AMBIGUOUS_ALIAS {
         let actual = converter.as_ref().map(Converter::name);
         let actual = match &actual {
             Some(Ok(actual)) => String::from_utf8_lossy(actual),
@@ -678,23 +682,29 @@ fn open(
 }
 
 /// `php_converter_set_encoding` over one of the object's converters: the
-/// new one opened, the old one closed with the object's callbacks told,
-/// and `false` where the name opens none.
-fn set_encoding(req: &mut Request, object: PhpObject, side: Side, name: &[u8]) -> Answer<bool> {
-    let mut pending = Pending::default();
-    let Some(converter) = open(req, Some(object), name, &mut pending) else {
-        return pending.answer(req, Ok(false));
+/// new one opened, the old one closed with the object's callbacks told
+/// while the object still holds it, and `false` where the name opens
+/// none; what a warning or a callback threw left in `pending`.
+fn set_encoding(
+    req: &mut Request,
+    object: PhpObject,
+    side: Side,
+    name: &[u8],
+    pending: &mut Pending,
+) -> bool {
+    let Some(converter) = open(req, Some(object), name, pending) else {
+        return false;
     };
-    let old = match object.native_mut::<ConverterObject>(req) {
-        Some(o) => o.side(side).replace(converter),
-        None => None,
-    };
-    if let Some(old) = old {
-        lend(req, Some(object), &mut pending, |callbacks| {
-            old.close(callbacks);
-        });
+    let held = object
+        .native_mut::<ConverterObject>(req)
+        .is_some_and(|o| o.side(side).is_some());
+    if held {
+        told(req, object, pending, Reason::Close);
     }
-    pending.answer(req, Ok(true))
+    if let Some(o) = object.native_mut::<ConverterObject>(req) {
+        *o.side(side) = Some(converter);
+    }
+    true
 }
 
 /// `php_converter_do_get_encoding`: the converter's name, null where it
@@ -739,27 +749,30 @@ fn default_callback(
     reason: i64,
     error: &Ref<Untyped<Value>>,
 ) -> Answer<Substitute> {
-    if !(0..=2).contains(&reason) {
+    if !Reason::of(reason).is_some_and(Reason::is_error) {
         return Ok(None);
     }
-    let src = object
-        .native_mut::<ConverterObject>(req)
-        .and_then(|o| o.src.clone());
-    let (chars, code) = match src {
+    let (src, _) = shares(req, object);
+    let mut pending = Pending::default();
+    let (chars, code) = match src.map(|src| src.subst_chars()) {
         None => {
             let message = "Source Converter has not been initialized yet";
-            error::errors_set::<ConverterObject>(req, object, INVALID_STATE, message)?;
-            (vec![0x1A], INVALID_STATE)
+            let raised = fail(req, Some(object), Code::INVALID_STATE, message);
+            pending.raised(req, raised);
+            (vec![0x1A], Code::INVALID_STATE)
         }
-        Some(src) => match src.subst_chars() {
-            Ok(chars) => (chars, Code::ZERO),
-            Err(code) => {
-                failure(req, Some(object), code)?;
-                (vec![0x1A], code)
-            }
-        },
+        Some(Ok(chars)) => (chars, Code::ZERO),
+        Some(Err(code)) => {
+            let raised = failure(req, Some(object), code);
+            pending.raised(req, raised);
+            (vec![0x1A], code)
+        }
     };
-    error.set(req, i64::from(code.0))?;
+    // php assigns `$error` and answers the characters with what it threw
+    // pending.
+    let assigned = error.set(req, i64::from(code.0));
+    pending.raised(req, assigned);
+    pending.answer(req, Ok(()))?;
     PhpString::new(req, &chars).map(|s| Some(Union::A(s)))
 }
 
@@ -778,7 +791,7 @@ fn convert(
 ) -> Answer<Option<Vec<u8>>> {
     let (Some(src), Some(dest)) = (src, dest) else {
         let message = "Internal converters not initialized";
-        fail(req, object, INVALID_STATE, message)?;
+        fail(req, object, Code::INVALID_STATE, message)?;
         return Ok(None);
     };
     let mut pending = Pending::default();
@@ -835,7 +848,8 @@ fn lend<R>(
     op: impl FnOnce(Option<&mut dyn Callbacks>) -> R,
 ) -> R {
     let base = lookup_class(req, b"UConverter").ok().flatten();
-    let Some(object) = object.filter(|o| Some(o.class()) != base) else {
+    let hooked = |o: &PhpObject| base.is_some_and(|base| o.class() != base);
+    let Some(object) = object.filter(hooked) else {
         return op(None);
     };
     let mut served = Served {
@@ -844,6 +858,16 @@ fn lend<R>(
         pending,
     };
     op(Some(&mut served))
+}
+
+/// What ICU tells a subclass's callbacks as it closes or clones one of the
+/// object's converters ([`Callbacks::told`]).
+fn told(req: &mut Request, object: PhpObject, pending: &mut Pending, reason: Reason) {
+    lend(req, Some(object), pending, |callbacks| {
+        if let Some(callbacks) = callbacks {
+            callbacks.told(reason);
+        }
+    });
 }
 
 /// The callbacks of one object of a subclass, served on the request.
@@ -1005,7 +1029,11 @@ impl Callbacks for Served<'_> {
         status: &mut Code,
         target: &mut Target<'_, u16>,
     ) {
-        let (Some(source), Some(units)) = (self.string(source), self.string(units)) else {
+        let Some(source) = self.string(source) else {
+            return;
+        };
+        let Some(units) = self.string(units) else {
+            source.give_up(self.req);
             return;
         };
         if let Some(answer) = self.call(b"toUCallback", reason, [source, units], status) {
@@ -1051,18 +1079,15 @@ impl Callbacks for Served<'_> {
 }
 
 /// `php_converter_clone_object`: each converter cloned, a subclass's
-/// callbacks told (`UCNV_CLONE`), and the clone's error its own.
+/// callbacks told of each after (`UCNV_CLONE`), and the clone's error its
+/// own.
 fn clone_converter(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
-    let (src, dest) = match object.native_mut::<ConverterObject>(req) {
-        Some(o) => (o.src.clone(), o.dest.clone()),
-        None => (None, None),
-    };
+    let (src, dest) = shares(req, object);
     let mut pending = Pending::default();
     let mut cloned = |req: &mut Request, converter: Option<Converter>| {
-        let converter = converter.ok_or(Code::ILLEGAL_ARGUMENT)?;
-        lend(req, Some(object), &mut pending, |cb| {
-            converter.try_clone(cb)
-        })
+        let copy = converter.ok_or(Code::ILLEGAL_ARGUMENT)?.try_clone()?;
+        told(req, object, &mut pending, Reason::Clone);
+        Ok::<_, Code>(copy)
     };
     let copies = cloned(req, src).and_then(|src| Ok((src, cloned(req, dest)?)));
     let Ok((src, dest)) = copies else {

@@ -1,8 +1,11 @@
 //! `UConverter` (`ucnv.h`, `ucnv_err.h`), the C API php's converter
 //! calls. ICU calls a converter's two callbacks from inside a conversion,
-//! its reset, its clone and its close; [`Callbacks`] serves them for the
-//! span of one such call, and ICU's own are put back after it, so a
-//! converter at rest holds ICU's defaults and no pointer into a frame.
+//! for its reset and each character in error; [`Callbacks`] serves them
+//! for the span of one such call, and ICU's own are put back after it, so
+//! a converter at rest holds ICU's defaults and no pointer into a frame.
+//! What ICU tells the callbacks as it closes or clones a converter, with
+//! nothing in error, the caller tells them itself ([`Callbacks::told`]),
+//! so a close or a clone never runs with a frame's pointer installed.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
@@ -98,9 +101,10 @@ pub(crate) enum Reason {
 }
 
 impl Reason {
-    /// The reason ICU passes, `None` past `UCNV_CLONE`.
-    fn of(raw: i32) -> Option<Reason> {
-        Some(match raw {
+    /// The reason numbered so, `UConverter::REASON_*`; `None` past
+    /// `UCNV_CLONE`.
+    pub(crate) fn of(number: i64) -> Option<Reason> {
+        Some(match number {
             0 => Reason::Unassigned,
             1 => Reason::Illegal,
             2 => Reason::Irregular,
@@ -111,7 +115,7 @@ impl Reason {
         })
     }
 
-    /// The number ICU gives it, `UConverter::REASON_*`.
+    /// Its number, as ICU gives it.
     pub(crate) fn number(self) -> i64 {
         match self {
             Reason::Unassigned => 0,
@@ -122,6 +126,27 @@ impl Reason {
             Reason::Clone => 5,
         }
     }
+
+    /// Its constant's name, as `UConverter::reasonText` answers it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Reason::Unassigned => "REASON_UNASSIGNED",
+            Reason::Illegal => "REASON_ILLEGAL",
+            Reason::Irregular => "REASON_IRREGULAR",
+            Reason::Reset => "REASON_RESET",
+            Reason::Close => "REASON_CLOSE",
+            Reason::Clone => "REASON_CLONE",
+        }
+    }
+
+    /// A character in error, which a callback substitutes, rather than
+    /// news of a reset, close or clone (`reason <= UCNV_IRREGULAR`).
+    pub(crate) fn is_error(self) -> bool {
+        matches!(
+            self,
+            Reason::Unassigned | Reason::Illegal | Reason::Irregular
+        )
+    }
 }
 
 /// The room a callback writes its substitute into, `args->target` up to
@@ -129,6 +154,16 @@ impl Reason {
 pub(crate) struct Target<'a, T> {
     room: &'a mut [T],
     at: usize,
+}
+
+impl<T> Target<'_, T> {
+    /// No room, `args->target` and `args->targetLimit` both null.
+    fn none() -> Self {
+        Target {
+            room: &mut [],
+            at: 0,
+        }
+    }
 }
 
 impl<T: Copy> Target<'_, T> {
@@ -171,6 +206,16 @@ pub(crate) trait Callbacks {
         status: &mut Code,
         target: &mut Target<'_, u8>,
     );
+
+    /// What `ucnv_close` and `ucnv_safeClone` tell a converter's callbacks
+    /// of itself (`UCNV_CLOSE`, `UCNV_CLONE`): the to-Unicode one, then the
+    /// from-Unicode one, each with nothing in error, no room and its own
+    /// status, where the callbacks are not ICU's defaults.
+    fn told(&mut self, reason: Reason) {
+        let (mut to_u, mut from_u) = (Code::ZERO, Code::ZERO);
+        self.decoding(reason, &[], &[], &mut to_u, &mut Target::none());
+        self.encoding(reason, &[], 0, &mut from_u, &mut Target::none());
+    }
 }
 
 /// The slice ICU hands between two pointers, empty where it hands none.
@@ -222,7 +267,7 @@ unsafe extern "C" fn to_unicode(
     reason: i32,
     status: *mut Code,
 ) {
-    let Some(reason) = Reason::of(reason) else {
+    let Some(reason) = Reason::of(i64::from(reason)) else {
         return;
     };
     // SAFETY: ICU passes back the context `served` gave it.
@@ -253,7 +298,7 @@ unsafe extern "C" fn from_unicode(
     reason: i32,
     status: *mut Code,
 ) {
-    let Some(reason) = Reason::of(reason) else {
+    let Some(reason) = Reason::of(i64::from(reason)) else {
         return;
     };
     // SAFETY: ICU passes back the context `served` gave it.
@@ -365,7 +410,8 @@ impl Drop for Open {
     }
 }
 
-/// One `UConverter`, from `ucnv_open` to `ucnv_close`, shared: a call
+/// One `UConverter`, from `ucnv_open` to `ucnv_close`, which its last
+/// share's drop calls with ICU's own callbacks on it, shared: a call
 /// that lends the converter's callbacks to PHP code holds a second share
 /// for its span, so code that replaces or frees the object's converter
 /// meanwhile leaves the close to that call's end.
@@ -392,34 +438,13 @@ impl Converter {
         (open, status)
     }
 
-    /// `ucnv_close`, with its callbacks served by `callbacks` where this
-    /// is the converter's last share; otherwise the last one closes it.
-    pub(crate) fn close(self, callbacks: Option<&mut dyn Callbacks>) {
-        let Ok(open) = Rc::try_unwrap(self.0) else {
-            return;
-        };
-        let open = std::mem::ManuallyDrop::new(open);
-        let cnv = open.0.as_ptr();
-        if let Some(mut callbacks) = callbacks {
-            let context: *mut &mut dyn Callbacks = &raw mut callbacks;
-            install(cnv, context.cast_const().cast());
-            // SAFETY: the converter is open, its last handle given up here,
-            // and ICU calls back into the handler that is alive meanwhile.
-            unsafe { sys::ucnv_close(cnv) };
-            return;
-        }
-        // SAFETY: the converter is open and its last handle given up here.
-        unsafe { sys::ucnv_close(cnv) };
-    }
-
-    /// `ucnv_clone`, its callbacks told (`UCNV_CLONE`).
-    pub(crate) fn try_clone(&self, callbacks: Option<&mut dyn Callbacks>) -> Result<Self, Code> {
+    /// `ucnv_clone`. ICU tells the original's callbacks of it after
+    /// (`UCNV_CLONE`), which its caller does as [`Callbacks::told`] tells
+    /// them; the clone holds ICU's own.
+    pub(crate) fn try_clone(&self) -> Result<Self, Code> {
         let mut status = Code::ZERO;
-        let cnv = self.raw();
         // SAFETY: the converter is open.
-        let raw = served(cnv, callbacks, || unsafe {
-            sys::ucnv_clone(cnv, &mut status)
-        });
+        let raw = unsafe { sys::ucnv_clone(self.raw(), &mut status) };
         status.check()?;
         NonNull::new(raw)
             .map(|raw| Converter(Rc::new(Open(raw))))
