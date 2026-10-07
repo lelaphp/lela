@@ -1,0 +1,1079 @@
+//! `converter/`: `UConverter` over ICU's `ucnv_*` (`converter.c`). A
+//! subclass's `toUCallback` and `fromUCallback` are served from inside
+//! ICU's conversions, resets, clones and closes, as php installs
+//! `php_converter_to_u_callback` and `php_converter_from_u_callback` on
+//! the converters of every object whose class is not `UConverter` itself.
+
+use php_ext::abi::{CloneObj, ObjectHandlers, OrFalse, Ref, This, Union, Untyped};
+use php_ext::attr::php_class;
+use php_ext::call::{call_method, clone_with, lookup_class};
+use php_ext::raising::{Thrown, arg_value_error, clear, throw_error};
+use php_ext::request::Request;
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+
+use crate::error::{self, Carrier, IntlError};
+use crate::ffi::converter::{self as ucnv, Callbacks, Converter, Reason, Target};
+use crate::ffi::{Code, c_string};
+use crate::utf8;
+
+type Answer<T> = Result<T, Thrown>;
+
+/// What a callback answers: `string|int|array|null`.
+type Substitute = Option<Union<Owner<PhpString>, Union<i64, Owner<PhpArray>>>>;
+
+/// `U_INVALID_STATE_ERROR`.
+const INVALID_STATE: Code = Code(27);
+/// `U_AMBIGUOUS_ALIAS_WARNING`.
+const AMBIGUOUS_ALIAS: Code = Code(-122);
+
+/// `php_converter_object` past its `zend_object`: the two converters and
+/// the error. php's two `zend_fcall_info_cache`s are the callbacks' names,
+/// looked up on the object's class as each is served.
+#[derive(Default)]
+pub(crate) struct ConverterObject {
+    src: Option<Converter>,
+    dest: Option<Converter>,
+    error: IntlError,
+}
+
+impl Carrier for ConverterObject {
+    fn error(&mut self) -> &mut IntlError {
+        &mut self.error
+    }
+}
+
+/// Which of an object's two converters.
+#[derive(Clone, Copy)]
+enum Side {
+    Source,
+    Destination,
+}
+
+impl ConverterObject {
+    fn side(&mut self, side: Side) -> &mut Option<Converter> {
+        match side {
+            Side::Source => &mut self.src,
+            Side::Destination => &mut self.dest,
+        }
+    }
+}
+
+/// What PHP code and failures left pending across one native's steps,
+/// php's `EG(exception)`: a later throwable chained onto the earlier, as
+/// `zend_throw_exception_internal` chains it.
+#[derive(Default)]
+struct Pending(Option<Thrown>);
+
+impl Pending {
+    fn is_set(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// `later` raised with this pending.
+    fn keep(&mut self, req: &mut Request, later: Thrown) {
+        self.0 = Some(match self.0.take() {
+            Some(earlier) => earlier.chain(req, later),
+            None => later,
+        });
+    }
+
+    /// What a raise that may throw came to.
+    fn raised(&mut self, req: &mut Request, raised: Answer<()>) {
+        if let Err(later) = raised {
+            self.keep(req, later);
+        }
+    }
+
+    /// The native's answer where nothing is pending, and the pending
+    /// throwable otherwise, as php's return value is dropped with
+    /// `EG(exception)` set. `T` holds no owner.
+    fn answer<T>(self, req: &mut Request, answer: Answer<T>) -> Answer<T> {
+        match (self.0, answer) {
+            (None, answer) => answer,
+            (Some(earlier), Err(later)) => Err(earlier.chain(req, later)),
+            (Some(earlier), Ok(_)) => Err(earlier),
+        }
+    }
+
+    /// What is pending given up, where it has nowhere to go; a fatal or
+    /// an `exit` is the request's already.
+    fn give_up(self, req: &mut Request) {
+        if let Some(thrown) = self.0 {
+            clear(req, thrown).ok();
+        }
+    }
+}
+
+/// `php_converter_object_handlers`: the converters cloned and closed.
+pub(crate) static HANDLERS: Handlers = Handlers;
+
+/// The handlers of `UConverter` and its subclasses.
+pub(crate) struct Handlers;
+
+impl ObjectHandlers for Handlers {
+    fn clone_obj(&self) -> Option<CloneObj> {
+        Some(clone_converter)
+    }
+
+    /// `php_converter_free_object`: each converter closed, a subclass's
+    /// callbacks told (`UCNV_CLOSE`).
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let Some(o) = object.native_mut::<ConverterObject>(req) else {
+            return;
+        };
+        let (src, dest) = (o.src.take(), o.dest.take());
+        let mut pending = Pending::default();
+        for converter in [src, dest].into_iter().flatten() {
+            lend(req, Some(object), &mut pending, |callbacks| {
+                converter.close(callbacks);
+            });
+        }
+        // php leaves what a callback threw in `EG(exception)`, raised after
+        // the free; a free here has no way to, so it is given up.
+        pending.give_up(req);
+    }
+}
+
+/// `class UConverter`: a source and a destination converter of ICU's,
+/// and the callbacks a subclass overrides to substitute what one cannot
+/// convert.
+///
+/// ```php
+/// $c = new UConverter('utf-8', 'latin1');
+/// var_dump(bin2hex($c->convert("Espa\xF1ol")), bin2hex($c->convert("\xC3\xB1", true)), $c->getSourceEncoding(), $c->getDestinationEncoding());
+/// var_dump($c->getSourceType() === UConverter::LATIN_1, $c->getDestinationType() === UConverter::UTF8, bin2hex($c->getSubstChars()));
+/// var_dump($c->setSourceEncoding('ascii'), $c->getSourceEncoding(), $c->setDestinationEncoding('nope'), $c->getErrorCode(), $c->getErrorMessage(), $c->getDestinationEncoding());
+/// var_dump($c->setSubstChars('!'), $c->getSubstChars(), $c->setSubstChars('<x>'), $c->getErrorMessage(), bin2hex($c->convert("a\xFFb")), $c->getErrorCode());
+/// $d = clone $c; var_dump($d->getSourceEncoding(), bin2hex($d->convert("\xFF")));
+/// try { new UConverter('nope'); } catch (IntlException $e) { echo $e->getMessage(), "\n"; }
+/// $u = (new ReflectionClass('UConverter'))->newInstanceWithoutConstructor();
+/// var_dump($u->getSourceEncoding(), $u->getDestinationType(), $u->getSubstChars(), $u->convert('x'), $u->getErrorMessage(), $u->setSubstChars('?'), $u->getErrorMessage());
+/// try { clone $u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// string(16) "45737061c3b16f6c"
+/// string(2) "f1"
+/// string(10) "ISO-8859-1"
+/// string(5) "UTF-8"
+/// bool(true)
+/// bool(true)
+/// string(2) "1a"
+/// bool(true)
+/// string(8) "US-ASCII"
+/// bool(false)
+/// int(4)
+/// string(96) "UConverter::setDestinationEncoding(): returned error 4: U_FILE_ACCESS_ERROR: U_FILE_ACCESS_ERROR"
+/// string(5) "UTF-8"
+/// bool(true)
+/// string(1) "!"
+/// bool(false)
+/// string(97) "UConverter::setSubstChars(): returned error 1: U_ILLEGAL_ARGUMENT_ERROR: U_ILLEGAL_ARGUMENT_ERROR"
+/// string(10) "61efbfbd62"
+/// int(0)
+/// string(8) "US-ASCII"
+/// string(6) "efbfbd"
+/// UConverter::__construct(): returned error 4: U_FILE_ACCESS_ERROR
+/// NULL
+/// NULL
+/// NULL
+/// bool(false)
+/// string(81) "UConverter::convert(): Internal converters not initialized: U_INVALID_STATE_ERROR"
+/// bool(false)
+/// string(102) "UConverter::setSubstChars(): Destination Converter has not been initialized yet: U_INVALID_STATE_ERROR"
+/// Failed to clone UConverter
+/// ```
+///
+/// A subclass's callbacks are told of each reset, character in error and
+/// close, and what they answer is written in the character's place.
+///
+/// ```php
+/// class Loud extends UConverter {
+///     public function toUCallback($reason, $source, $codeUnits, &$error): string|int|array|null {
+///         echo 'to ', UConverter::reasonText($reason), ' ', bin2hex($source), ' ', bin2hex($codeUnits), ' ', $error, "\n";
+///         if ($reason == UConverter::REASON_ILLEGAL) { $error = U_ZERO_ERROR; return ['<', 0x1F600, '>']; }
+///         return parent::toUCallback($reason, $source, $codeUnits, $error);
+///     }
+///     public function fromUCallback($reason, $source, $codePoint, &$error): string|int|array|null {
+///         echo 'from ', UConverter::reasonText($reason), ' ', json_encode($source), ' ', $codePoint, ' ', $error, "\n";
+///         return parent::fromUCallback($reason, $source, $codePoint, $error);
+///     }
+/// }
+/// $c = new Loud('ascii', 'utf-8');
+/// var_dump(bin2hex($c->convert("a\xFFb\xC3\xA9")));
+/// $c = null;
+/// $u = (new ReflectionClass('UConverter'))->newInstanceWithoutConstructor();
+/// var_dump($u->toUCallback(UConverter::REASON_ILLEGAL, '', '', $error), $error, $u->fromUCallback(UConverter::REASON_RESET, [], 0, $error));
+/// ```
+/// ```expect
+/// to REASON_RESET   0
+/// to REASON_ILLEGAL 62c3a9 ff 12
+/// to REASON_RESET   0
+/// to REASON_ILLEGAL 62c3a9 ff 12
+/// from REASON_RESET [] 0 0
+/// from REASON_UNASSIGNED [128512] 128512 10
+/// from REASON_UNASSIGNED [233] 233 10
+/// from REASON_RESET [] 0 0
+/// from REASON_UNASSIGNED [128512] 128512 10
+/// from REASON_UNASSIGNED [233] 233 10
+/// string(20) "613cefbfbd3e62efbfbd"
+/// to REASON_CLOSE   0
+/// from REASON_CLOSE [] 0 0
+/// to REASON_CLOSE   0
+/// from REASON_CLOSE [] 0 0
+/// string(1) ""
+/// int(27)
+/// NULL
+/// ```
+#[php_class(not_serializable, size = 168, payload = ConverterObject, handlers = crate::converter::HANDLERS)]
+pub(crate) struct UConverter;
+
+#[php_class]
+#[allow(non_snake_case, non_upper_case_globals)]
+impl UConverter {
+    const REASON_UNASSIGNED: i64 = 0;
+    const REASON_ILLEGAL: i64 = 1;
+    const REASON_IRREGULAR: i64 = 2;
+    const REASON_RESET: i64 = 3;
+    const REASON_CLOSE: i64 = 4;
+    const REASON_CLONE: i64 = 5;
+    const UNSUPPORTED_CONVERTER: i64 = -1;
+    const SBCS: i64 = 0;
+    const DBCS: i64 = 1;
+    const MBCS: i64 = 2;
+    const LATIN_1: i64 = 3;
+    const UTF8: i64 = 4;
+    const UTF16_BigEndian: i64 = 5;
+    const UTF16_LittleEndian: i64 = 6;
+    const UTF32_BigEndian: i64 = 7;
+    const UTF32_LittleEndian: i64 = 8;
+    const EBCDIC_STATEFUL: i64 = 9;
+    const ISO_2022: i64 = 10;
+    const LMBCS_1: i64 = 11;
+    const LMBCS_2: i64 = 12;
+    const LMBCS_3: i64 = 13;
+    const LMBCS_4: i64 = 14;
+    const LMBCS_5: i64 = 15;
+    const LMBCS_6: i64 = 16;
+    const LMBCS_8: i64 = 17;
+    const LMBCS_11: i64 = 18;
+    const LMBCS_16: i64 = 19;
+    const LMBCS_17: i64 = 20;
+    const LMBCS_18: i64 = 21;
+    const LMBCS_19: i64 = 22;
+    const LMBCS_LAST: i64 = 22;
+    const HZ: i64 = 23;
+    const SCSU: i64 = 24;
+    const ISCII: i64 = 25;
+    const US_ASCII: i64 = 26;
+    const UTF7: i64 = 27;
+    const BOCU1: i64 = 28;
+    const UTF16: i64 = 29;
+    const UTF32: i64 = 30;
+    const CESU8: i64 = 31;
+    const IMAP_MAILBOX: i64 = 32;
+
+    fn __construct(
+        req: &mut Request,
+        this: This<Self>,
+        #[php(default = null)] destination_encoding: Option<PhpString>,
+        #[php(default = null)] source_encoding: Option<PhpString>,
+    ) -> Answer<()> {
+        error::reset(req);
+        let object = this.object();
+        let utf8 = b"utf-8".as_slice();
+        let src = source_encoding.as_ref().map_or(utf8, PhpString::as_bytes);
+        let dest = destination_encoding
+            .as_ref()
+            .map_or(utf8, PhpString::as_bytes);
+        error::constructing(req, |req| {
+            if !set_encoding(req, object, Side::Source, src)? {
+                return Ok(());
+            }
+            set_encoding(req, object, Side::Destination, dest).map(|_| ())
+        })
+    }
+
+    #[php(tentative)]
+    fn convert(
+        req: &mut Request,
+        this: This<Self>,
+        str: PhpString,
+        #[php(default = false)] reverse: bool,
+    ) -> Answer<OrFalse<Owner<PhpString>>> {
+        let object = this.object();
+        error::errors_reset::<ConverterObject>(req, object);
+        let (src, dest) = this
+            .payload_mut(req)
+            .map(|o| (o.src.clone(), o.dest.clone()))?;
+        let (src, dest) = if reverse { (dest, src) } else { (src, dest) };
+        match convert(req, Some(object), dest, src, str.as_bytes())? {
+            Some(bytes) => PhpString::new(req, &bytes).map(OrFalse::Value),
+            None => Ok(OrFalse::False),
+        }
+    }
+
+    #[php(tentative)]
+    fn fromUCallback(
+        req: &mut Request,
+        this: This<Self>,
+        reason: i64,
+        source: PhpArray,
+        codePoint: i64,
+        error: Ref<Untyped<Value>>,
+    ) -> Answer<Substitute> {
+        let _ = (source, codePoint);
+        default_callback(req, this.object(), reason, &error)
+    }
+
+    /// ```php
+    /// var_dump(UConverter::getAliases('latin1')[0], in_array('ISO-8859-1', UConverter::getAliases('latin1')), UConverter::getAliases('nope'), intl_get_error_message());
+    /// ```
+    /// ```expect
+    /// string(10) "ISO-8859-1"
+    /// bool(true)
+    /// array(0) {
+    /// }
+    /// string(12) "U_ZERO_ERROR"
+    /// ```
+    #[php(tentative)]
+    fn getAliases(req: &mut Request, name: PhpString) -> Answer<Option<OrFalse<Owner<PhpArray>>>> {
+        error::reset(req);
+        let name = c_string(name.as_bytes());
+        let count = match ucnv::count_aliases(&name) {
+            Ok(count) => count,
+            Err(code) => {
+                failure(req, None, code)?;
+                return Ok(Some(OrFalse::False));
+            }
+        };
+        let mut aliases = PhpArray::new(req)?;
+        for n in 0..count {
+            match ucnv::alias(&name, n) {
+                Ok(alias) => {
+                    let alias = PhpString::new(req, &alias)?;
+                    aliases.append(req, alias.into_value())?;
+                }
+                Err(code) => {
+                    aliases.give_up(req);
+                    failure(req, None, code)?;
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(OrFalse::Value(aliases)))
+    }
+
+    /// ```php
+    /// $all = UConverter::getAvailable();
+    /// var_dump(count($all) > 100, $all[0], in_array('UTF-7', $all), array_is_list($all));
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// string(5) "UTF-8"
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    #[php(tentative)]
+    fn getAvailable(req: &mut Request) -> Answer<Owner<PhpArray>> {
+        error::reset(req);
+        let mut names = PhpArray::new(req)?;
+        for name in ucnv::available() {
+            let name = PhpString::new(req, &name)?;
+            names.append(req, name.into_value())?;
+        }
+        Ok(names)
+    }
+
+    #[php(tentative)]
+    fn getDestinationEncoding(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Answer<Option<OrFalse<Owner<PhpString>>>> {
+        encoding(req, this.object(), Side::Destination)
+    }
+
+    #[php(tentative)]
+    fn getDestinationType(req: &mut Request, this: This<Self>) -> Option<OrFalse<i64>> {
+        kind(req, this.object(), Side::Destination)
+    }
+
+    #[php(tentative)]
+    fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
+        i64::from(error::object_code::<ConverterObject>(req, this.object()).0)
+    }
+
+    #[php(tentative)]
+    fn getErrorMessage(req: &mut Request, this: This<Self>) -> Answer<Option<Owner<PhpString>>> {
+        let message = error::object_message::<ConverterObject>(req, this.object());
+        PhpString::new(req, &message).map(Some)
+    }
+
+    #[php(tentative)]
+    fn getSourceEncoding(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Answer<Option<OrFalse<Owner<PhpString>>>> {
+        encoding(req, this.object(), Side::Source)
+    }
+
+    #[php(tentative)]
+    fn getSourceType(req: &mut Request, this: This<Self>) -> Option<OrFalse<i64>> {
+        kind(req, this.object(), Side::Source)
+    }
+
+    /// ```php
+    /// var_dump(UConverter::getStandards());
+    /// ```
+    /// ```expect
+    /// array(7) {
+    ///   [0]=>
+    ///   string(5) "UTR22"
+    ///   [1]=>
+    ///   string(3) "IBM"
+    ///   [2]=>
+    ///   string(7) "WINDOWS"
+    ///   [3]=>
+    ///   string(4) "JAVA"
+    ///   [4]=>
+    ///   string(4) "IANA"
+    ///   [5]=>
+    ///   string(4) "MIME"
+    ///   [6]=>
+    ///   string(0) ""
+    /// }
+    /// ```
+    #[php(tentative)]
+    fn getStandards(req: &mut Request) -> Answer<Option<Owner<PhpArray>>> {
+        error::reset(req);
+        let mut standards = PhpArray::new(req)?;
+        for n in 0..ucnv::count_standards() {
+            match ucnv::standard(n) {
+                Ok(name) => {
+                    let name = PhpString::new(req, &name)?;
+                    standards.append(req, name.into_value())?;
+                }
+                Err(code) => {
+                    standards.give_up(req);
+                    failure(req, None, code)?;
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(Some(standards))
+    }
+
+    #[php(tentative)]
+    fn getSubstChars(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Answer<Option<OrFalse<Owner<PhpString>>>> {
+        let object = this.object();
+        error::errors_reset::<ConverterObject>(req, object);
+        let Some(src) = this.payload_mut(req)?.src.clone() else {
+            return Ok(None);
+        };
+        match src.subst_chars() {
+            Ok(chars) => PhpString::new(req, &chars).map(|s| Some(OrFalse::Value(s))),
+            Err(code) => {
+                failure(req, Some(object), code)?;
+                Ok(Some(OrFalse::False))
+            }
+        }
+    }
+
+    /// ```php
+    /// var_dump(UConverter::reasonText(UConverter::REASON_UNASSIGNED), UConverter::reasonText(UConverter::REASON_CLONE));
+    /// try { UConverter::reasonText(6); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(17) "REASON_UNASSIGNED"
+    /// string(12) "REASON_CLONE"
+    /// UConverter::reasonText(): Argument #1 ($reason) must be a UConverter::REASON_* constant
+    /// ```
+    #[php(tentative)]
+    fn reasonText(req: &mut Request, reason: i64) -> Answer<Owner<PhpString>> {
+        error::reset(req);
+        let text: &[u8] = match reason {
+            0 => b"REASON_UNASSIGNED",
+            1 => b"REASON_ILLEGAL",
+            2 => b"REASON_IRREGULAR",
+            3 => b"REASON_RESET",
+            4 => b"REASON_CLOSE",
+            5 => b"REASON_CLONE",
+            _ => {
+                let tail = "be a UConverter::REASON_* constant";
+                return Err(arg_value_error(req, 1, tail));
+            }
+        };
+        PhpString::new(req, text)
+    }
+
+    #[php(tentative)]
+    fn setDestinationEncoding(
+        req: &mut Request,
+        this: This<Self>,
+        encoding: PhpString,
+    ) -> Answer<bool> {
+        let object = this.object();
+        error::errors_reset::<ConverterObject>(req, object);
+        set_encoding(req, object, Side::Destination, encoding.as_bytes())
+    }
+
+    #[php(tentative)]
+    fn setSourceEncoding(req: &mut Request, this: This<Self>, encoding: PhpString) -> Answer<bool> {
+        let object = this.object();
+        error::errors_reset::<ConverterObject>(req, object);
+        set_encoding(req, object, Side::Source, encoding.as_bytes())
+    }
+
+    #[php(tentative)]
+    fn setSubstChars(req: &mut Request, this: This<Self>, chars: PhpString) -> Answer<bool> {
+        let object = this.object();
+        error::errors_reset::<ConverterObject>(req, object);
+        let (src, dest) = this
+            .payload_mut(req)
+            .map(|o| (o.src.clone(), o.dest.clone()))?;
+        let (mut set, mut pending) = (true, Pending::default());
+        for (converter, which) in [(src, "Source"), (dest, "Destination")] {
+            let raised = if let Some(converter) = converter {
+                let code = converter.set_subst_chars(chars.as_bytes());
+                if !code.is_failure() {
+                    continue;
+                }
+                failure(req, Some(object), code)
+            } else {
+                let message = format!("{which} Converter has not been initialized yet");
+                error::errors_set::<ConverterObject>(req, object, INVALID_STATE, &message)
+            };
+            set = false;
+            // php sets the destination's although the source's threw.
+            pending.raised(req, raised);
+        }
+        pending.answer(req, Ok(set))
+    }
+
+    #[php(tentative)]
+    fn toUCallback(
+        req: &mut Request,
+        this: This<Self>,
+        reason: i64,
+        source: PhpString,
+        codeUnits: PhpString,
+        error: Ref<Untyped<Value>>,
+    ) -> Answer<Substitute> {
+        let _ = (source, codeUnits);
+        default_callback(req, this.object(), reason, &error)
+    }
+
+    /// ```php
+    /// var_dump(bin2hex(UConverter::transcode("\xE4", 'utf-8', 'koi8-r')), UConverter::transcode("Snow\xE2\x98\x83", 'ascii', 'utf-8', ['to_subst' => '?']));
+    /// var_dump(UConverter::transcode('x', 'ascii', 'utf-8', ['to_subst' => '??']), intl_get_error_message());
+    /// var_dump(UConverter::transcode('x', 'nope', 'utf-8'), intl_get_error_message());
+    /// var_dump(UConverter::transcode('x', 'utf-8', 'cp932'), intl_get_error_message());
+    /// ini_set('intl.use_exceptions', 1);
+    /// try { UConverter::transcode('x', 'utf-8', 'nope'); } catch (IntlException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// string(4) "d094"
+    /// string(5) "Snow?"
+    /// bool(false)
+    /// string(93) "UConverter::transcode(): returned error 1: U_ILLEGAL_ARGUMENT_ERROR: U_ILLEGAL_ARGUMENT_ERROR"
+    /// bool(false)
+    /// string(93) "UConverter::transcode(): Error setting encoding: 4 - U_FILE_ACCESS_ERROR: U_FILE_ACCESS_ERROR"
+    /// string(1) "x"
+    /// string(105) "UConverter::transcode(): Ambiguous encoding specified, using ibm-943_P15A-2003: U_AMBIGUOUS_ALIAS_WARNING"
+    /// UConverter::transcode(): Error setting encoding: 4 - U_FILE_ACCESS_ERROR
+    /// ```
+    #[php(tentative)]
+    fn transcode(
+        req: &mut Request,
+        str: PhpString,
+        toEncoding: PhpString,
+        fromEncoding: PhpString,
+        #[php(default = null)] options: Option<PhpArray>,
+    ) -> Answer<OrFalse<Owner<PhpString>>> {
+        error::reset(req);
+        let mut pending = Pending::default();
+        let src = open(req, None, fromEncoding.as_bytes(), &mut pending);
+        let dest = match src {
+            Some(_) => open(req, None, toEncoding.as_bytes(), &mut pending),
+            None => None,
+        };
+        let (Some(src), Some(dest)) = (src, dest) else {
+            return pending.answer(req, Ok(OrFalse::False));
+        };
+        let mut code = Code::ZERO;
+        for (key, converter) in [(&b"from_subst"[..], &src), (b"to_subst", &dest)] {
+            let found = options
+                .as_ref()
+                .and_then(|o| o.find(key))
+                .map(|v| v.deref());
+            if let Some(ValueRef::Str(chars)) = found.as_ref().map(Value::as_ref)
+                && !code.is_failure()
+            {
+                let chars = chars.as_bytes();
+                code = converter.set_subst_chars(&chars[..chars.len() & 0x7F]);
+            }
+        }
+        let answer = if code.is_failure() {
+            failure(req, None, code).map(|()| None)
+        } else {
+            // php leaves `return_value` null where the conversion fails;
+            // with ICU's substituting callbacks on both it does not.
+            convert(req, None, Some(dest), Some(src), str.as_bytes())
+        };
+        match pending.answer(req, answer)? {
+            Some(bytes) => PhpString::new(req, &bytes).map(OrFalse::Value),
+            None => Ok(OrFalse::False),
+        }
+    }
+}
+
+/// `THROW_UFAILURE(obj, error)`: `returned error <n>: <name>`, set on the
+/// object and the request, or the request alone.
+fn failure(req: &mut Request, object: Option<PhpObject>, code: Code) -> Answer<()> {
+    let message = format!("returned error {}: {}", code.0, code.name());
+    fail(req, object, code, &message)
+}
+
+/// `php_converter_throw_failure`: `intl_errors_set(obj ? &obj->error : NULL, ..)`.
+fn fail(req: &mut Request, object: Option<PhpObject>, code: Code, message: &str) -> Answer<()> {
+    match object {
+        Some(object) => error::errors_set::<ConverterObject>(req, object, code, message),
+        None => error::set(req, code, message),
+    }
+}
+
+/// `ucnv_open` as `php_converter_set_encoding` opens: an ambiguous alias
+/// warned of on the request and its converter kept, a failure set on the
+/// object or on the request alone and no converter; what either threw
+/// left in `pending`, as php leaves it pending and goes on.
+fn open(
+    req: &mut Request,
+    object: Option<PhpObject>,
+    name: &[u8],
+    pending: &mut Pending,
+) -> Option<Converter> {
+    let (converter, code) = Converter::open(&c_string(name));
+    if code == AMBIGUOUS_ALIAS {
+        let actual = converter.as_ref().map(Converter::name);
+        let actual = match &actual {
+            Some(Ok(actual)) => String::from_utf8_lossy(actual),
+            _ => "(unknown)".into(),
+        };
+        let message = format!("Ambiguous encoding specified, using {actual}");
+        let raised = error::set(req, code, &message);
+        pending.raised(req, raised);
+    } else if code.is_failure() {
+        let raised = if object.is_some() {
+            failure(req, object, code)
+        } else {
+            let message = format!("Error setting encoding: {} - {}", code.0, code.name());
+            error::set(req, code, &message)
+        };
+        pending.raised(req, raised);
+        return None;
+    }
+    converter
+}
+
+/// `php_converter_set_encoding` over one of the object's converters: the
+/// new one opened, the old one closed with the object's callbacks told,
+/// and `false` where the name opens none.
+fn set_encoding(req: &mut Request, object: PhpObject, side: Side, name: &[u8]) -> Answer<bool> {
+    let mut pending = Pending::default();
+    let Some(converter) = open(req, Some(object), name, &mut pending) else {
+        return pending.answer(req, Ok(false));
+    };
+    let old = match object.native_mut::<ConverterObject>(req) {
+        Some(o) => o.side(side).replace(converter),
+        None => None,
+    };
+    if let Some(old) = old {
+        lend(req, Some(object), &mut pending, |callbacks| {
+            old.close(callbacks);
+        });
+    }
+    pending.answer(req, Ok(true))
+}
+
+/// `php_converter_do_get_encoding`: the converter's name, null where it
+/// has none.
+fn encoding(
+    req: &mut Request,
+    object: PhpObject,
+    side: Side,
+) -> Answer<Option<OrFalse<Owner<PhpString>>>> {
+    error::errors_reset::<ConverterObject>(req, object);
+    let Some(converter) = object
+        .native_mut::<ConverterObject>(req)
+        .and_then(|o| o.side(side).clone())
+    else {
+        return Ok(None);
+    };
+    match converter.name() {
+        Ok(name) => PhpString::new(req, &name).map(|s| Some(OrFalse::Value(s))),
+        Err(code) => {
+            failure(req, Some(object), code)?;
+            Ok(Some(OrFalse::False))
+        }
+    }
+}
+
+/// `php_converter_do_get_type`: `ucnv_getType`, null where there is no
+/// converter.
+fn kind(req: &mut Request, object: PhpObject, side: Side) -> Option<OrFalse<i64>> {
+    error::errors_reset::<ConverterObject>(req, object);
+    let o = object.native_mut::<ConverterObject>(req)?;
+    o.side(side)
+        .as_ref()
+        .map(|c| OrFalse::Value(i64::from(c.kind())))
+}
+
+/// `php_converter_default_callback`, what `parent::toUCallback()` and
+/// `parent::fromUCallback()` answer: for a character in error, the source
+/// converter's substitute and `$error` cleared; nothing otherwise.
+fn default_callback(
+    req: &mut Request,
+    object: PhpObject,
+    reason: i64,
+    error: &Ref<Untyped<Value>>,
+) -> Answer<Substitute> {
+    if !(0..=2).contains(&reason) {
+        return Ok(None);
+    }
+    let src = object
+        .native_mut::<ConverterObject>(req)
+        .and_then(|o| o.src.clone());
+    let (chars, code) = match src {
+        None => {
+            let message = "Source Converter has not been initialized yet";
+            error::errors_set::<ConverterObject>(req, object, INVALID_STATE, message)?;
+            (vec![0x1A], INVALID_STATE)
+        }
+        Some(src) => match src.subst_chars() {
+            Ok(chars) => (chars, Code::ZERO),
+            Err(code) => {
+                failure(req, Some(object), code)?;
+                (vec![0x1A], code)
+            }
+        },
+    };
+    error.set(req, i64::from(code.0))?;
+    PhpString::new(req, &chars).map(|s| Some(Union::A(s)))
+}
+
+/// `php_converter_do_convert`: the source converted to UTF-16 and on to
+/// the destination, each with ICU's preflight first as php sizes its
+/// buffers, a subclass's callbacks served throughout; `None` with the
+/// error set where ICU fails. A throwable a callback raised is the
+/// answer, once the conversion has gone on to its end as php's does with
+/// one pending.
+fn convert(
+    req: &mut Request,
+    object: Option<PhpObject>,
+    dest: Option<Converter>,
+    src: Option<Converter>,
+    text: &[u8],
+) -> Answer<Option<Vec<u8>>> {
+    let (Some(src), Some(dest)) = (src, dest) else {
+        let message = "Internal converters not initialized";
+        fail(req, object, INVALID_STATE, message)?;
+        return Ok(None);
+    };
+    let mut pending = Pending::default();
+    let answer = convert_with(req, object, &mut pending, &dest, &src, text);
+    pending.answer(req, answer)
+}
+
+/// [`convert`]'s body, what a callback threw left in `pending`.
+fn convert_with(
+    req: &mut Request,
+    object: Option<PhpObject>,
+    pending: &mut Pending,
+    dest: &Converter,
+    src: &Converter,
+    text: &[u8],
+) -> Answer<Option<Vec<u8>>> {
+    let (needed, code) = lend(req, object, pending, |cb| src.decode(&mut [], text, cb));
+    if code.is_failure() && code != Code::BUFFER_OVERFLOW {
+        failure(req, object, code)?;
+        return Ok(None);
+    }
+    let capacity = usize::try_from(needed).unwrap_or(0) + 1;
+    let mut units = vec![0u16; capacity + 1];
+    let room = &mut units[..capacity];
+    let (len, code) = lend(req, object, pending, |cb| src.decode(room, text, cb));
+    if code.is_failure() {
+        failure(req, object, code)?;
+        return Ok(None);
+    }
+    units.truncate(usize::try_from(len).unwrap_or(0));
+    let (needed, code) = lend(req, object, pending, |cb| dest.encode(&mut [], &units, cb));
+    if code.is_failure() && code != Code::BUFFER_OVERFLOW {
+        failure(req, object, code)?;
+        return Ok(None);
+    }
+    let mut out = vec![0u8; usize::try_from(needed).unwrap_or(0) + 1];
+    let (len, code) = lend(req, object, pending, |cb| dest.encode(&mut out, &units, cb));
+    if code.is_failure() {
+        failure(req, object, code)?;
+        return Ok(None);
+    }
+    out.truncate(usize::try_from(len).unwrap_or(0));
+    Ok(Some(out))
+}
+
+/// `op` with the object's callbacks lent where its class is a subclass of
+/// `UConverter`, as `php_converter_set_callbacks` installs them; a
+/// throwable a callback raised left in `pending`, after which no more PHP
+/// code is served, as `zend_call_function` serves none with one pending.
+fn lend<R>(
+    req: &mut Request,
+    object: Option<PhpObject>,
+    pending: &mut Pending,
+    op: impl FnOnce(Option<&mut dyn Callbacks>) -> R,
+) -> R {
+    let base = lookup_class(req, b"UConverter").ok().flatten();
+    let Some(object) = object.filter(|o| Some(o.class()) != base) else {
+        return op(None);
+    };
+    let mut served = Served {
+        req,
+        object,
+        pending,
+    };
+    op(Some(&mut served))
+}
+
+/// The callbacks of one object of a subclass, served on the request.
+struct Served<'a> {
+    req: &'a mut Request,
+    object: PhpObject,
+    pending: &'a mut Pending,
+}
+
+impl Served<'_> {
+    /// `zend_call_known_fcc` with four arguments, the last `$error` by
+    /// reference: what the method answered, nothing where it threw or one
+    /// is pending, and ICU's status as the reference holds it after.
+    fn call(
+        &mut self,
+        method: &[u8],
+        reason: Reason,
+        middle: [Owner<Value>; 2],
+        status: &mut Code,
+    ) -> Option<Owner<Value>> {
+        if self.pending.is_set() {
+            for v in middle {
+                v.give_up(self.req);
+            }
+            return None;
+        }
+        let req = &mut *self.req;
+        let held = Owner::take(req, Value::int(i64::from(status.0)));
+        let error = match PhpRef::new(req, held) {
+            Ok(error) => error,
+            Err(thrown) => {
+                for v in middle {
+                    v.give_up(req);
+                }
+                self.pending.keep(req, thrown);
+                return None;
+            }
+        };
+        let [one, two] = middle;
+        let arguments = [Value::int(reason.number()), *one, *two, error.as_value()];
+        let answer = call_method(req, &self.object, method, &arguments);
+        if let ValueRef::Int(n) = error.get().as_ref() {
+            *status = crate::code_of(n);
+        }
+        for value in [one, two, error.into_value()] {
+            value.give_up(req);
+        }
+        match answer {
+            Ok(answer) => Some(answer),
+            Err(thrown) => {
+                self.pending.keep(req, thrown);
+                None
+            }
+        }
+    }
+
+    /// A failure a callback's answer met, `php_converter_throw_failure`
+    /// on the object; a throwable it raised stops the PHP code after it.
+    fn fail(&mut self, code: Code, message: &str) {
+        let raised = error::errors_set::<ConverterObject>(self.req, self.object, code, message);
+        self.pending.raised(self.req, raised);
+    }
+
+    /// `TARGET_CHECK`: whether `needed` units fit, the overrun set where not.
+    fn fits(&mut self, available: usize, needed: usize) -> bool {
+        if available < needed {
+            let message = format!("Buffer overrun {needed} bytes needed, {available} available");
+            self.fail(Code::BUFFER_OVERFLOW, &message);
+            return false;
+        }
+        true
+    }
+
+    /// `php_converter_append_toUnicode_target`.
+    fn append_to_unicode(&mut self, value: Value, target: &mut Target<'_, u16>) {
+        match value.as_ref() {
+            ValueRef::Null => {}
+            ValueRef::Int(c) => {
+                if !(0..=0x0010_FFFF).contains(&c) {
+                    self.fail(
+                        Code::ILLEGAL_ARGUMENT,
+                        &format!("Invalid codepoint U+{c:04x}"),
+                    );
+                } else if let Ok(unit) = u16::try_from(c) {
+                    if self.fits(target.available(), 1) {
+                        target.write(&[unit]);
+                    }
+                } else if self.fits(target.available(), 2) {
+                    let c = c - 0x10000;
+                    let pair = [(c >> 10) | 0xD800, (c & 0x3FF) | 0xDC00];
+                    target.write(&pair.map(|u| u16::try_from(u).unwrap_or(0)));
+                }
+            }
+            ValueRef::Str(s) => {
+                let bytes = s.as_bytes();
+                let mut i = 0;
+                while i != bytes.len() && self.fits(target.available(), 1) {
+                    let c = utf8::next(bytes, &mut i).to_le_bytes();
+                    target.write(&[u16::from_le_bytes([c[0], c[1]])]);
+                }
+            }
+            ValueRef::Array(array) => {
+                for (_, value) in array {
+                    self.append_to_unicode(value, target);
+                }
+            }
+            _ => self.fail(
+                Code::ILLEGAL_ARGUMENT,
+                "toUCallback() specified illegal type for substitution character",
+            ),
+        }
+    }
+
+    /// `php_converter_append_fromUnicode_target`.
+    fn append_from_unicode(&mut self, value: Value, target: &mut Target<'_, u8>) {
+        match value.as_ref() {
+            ValueRef::Null => {}
+            ValueRef::Int(n) => {
+                if self.fits(target.available(), 1) {
+                    target.write(&[n.to_le_bytes()[0]]);
+                }
+            }
+            ValueRef::Str(s) => {
+                if self.fits(target.available(), s.len()) {
+                    target.write(s.as_bytes());
+                }
+            }
+            ValueRef::Array(array) => {
+                for (_, value) in array {
+                    self.append_from_unicode(value, target);
+                }
+            }
+            _ => self.fail(
+                Code::ILLEGAL_ARGUMENT,
+                "fromUCallback() specified illegal type for substitution character",
+            ),
+        }
+    }
+
+    /// The bytes as a string argument, or nothing where it cannot be made.
+    fn string(&mut self, bytes: &[u8]) -> Option<Owner<Value>> {
+        match PhpString::new(self.req, bytes) {
+            Ok(s) => Some(s.into_value()),
+            Err(thrown) => {
+                self.pending.keep(self.req, thrown);
+                None
+            }
+        }
+    }
+}
+
+impl Callbacks for Served<'_> {
+    /// `php_converter_to_u_callback`.
+    fn decoding(
+        &mut self,
+        reason: Reason,
+        source: &[u8],
+        units: &[u8],
+        status: &mut Code,
+        target: &mut Target<'_, u16>,
+    ) {
+        let (Some(source), Some(units)) = (self.string(source), self.string(units)) else {
+            return;
+        };
+        if let Some(answer) = self.call(b"toUCallback", reason, [source, units], status) {
+            self.append_to_unicode(*answer, target);
+            answer.give_up(self.req);
+        }
+    }
+
+    /// `php_converter_from_u_callback`: the code units as code points,
+    /// `U16_NEXT` over them.
+    fn encoding(
+        &mut self,
+        reason: Reason,
+        units: &[u16],
+        code_point: i32,
+        status: &mut Code,
+        target: &mut Target<'_, u8>,
+    ) {
+        let mut source = match PhpArray::new(self.req) {
+            Ok(array) => array,
+            Err(thrown) => {
+                self.pending.keep(self.req, thrown);
+                return;
+            }
+        };
+        for c in char::decode_utf16(units.iter().copied()) {
+            let c = c.map_or_else(
+                |e| i64::from(e.unpaired_surrogate()),
+                |c| i64::from(u32::from(c)),
+            );
+            let c = Owner::take(self.req, Value::int(c));
+            if let Err(thrown) = source.append(self.req, c) {
+                self.pending.keep(self.req, thrown);
+            }
+        }
+        let point = Owner::take(self.req, Value::int(i64::from(code_point)));
+        let middle = [source.into_value(), point];
+        if let Some(answer) = self.call(b"fromUCallback", reason, middle, status) {
+            self.append_from_unicode(*answer, target);
+            answer.give_up(self.req);
+        }
+    }
+}
+
+/// `php_converter_clone_object`: each converter cloned, a subclass's
+/// callbacks told (`UCNV_CLONE`), and the clone's error its own.
+fn clone_converter(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
+    let (src, dest) = match object.native_mut::<ConverterObject>(req) {
+        Some(o) => (o.src.clone(), o.dest.clone()),
+        None => (None, None),
+    };
+    let mut pending = Pending::default();
+    let mut cloned = |req: &mut Request, converter: Option<Converter>| {
+        let converter = converter.ok_or(Code::ILLEGAL_ARGUMENT)?;
+        lend(req, Some(object), &mut pending, |cb| {
+            converter.try_clone(cb)
+        })
+    };
+    let copies = cloned(req, src).and_then(|src| Ok((src, cloned(req, dest)?)));
+    let Ok((src, dest)) = copies else {
+        let thrown = throw_error(req, "Error", "Failed to clone UConverter");
+        return pending.answer(req, Err(thrown));
+    };
+    pending.answer(req, Ok(()))?;
+    let payload = ConverterObject {
+        src: Some(src),
+        dest: Some(dest),
+        error: IntlError::default(),
+    };
+    clone_with(req, &object, payload)
+}
