@@ -4458,16 +4458,6 @@ pub(crate) fn string_dim_offset(
     mode: DimRead,
 ) -> Result<Option<i64>, Thrown> {
     let dim = dim.deref();
-    let illegal = |req: &mut Request, dim: &Value| {
-        throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Cannot access offset of type {} on string",
-                zval_type_name(req, dim)
-            ),
-        )
-    };
     match dim.as_ref() {
         ValueRef::Int(n) => Ok(Some(n)),
         ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
@@ -4486,7 +4476,7 @@ pub(crate) fn string_dim_offset(
             // `if (type == BP_VAR_IS) { ZVAL_NULL(result); return; }`,
             // the one arm that stands before `zend_illegal_string_offset`.
             _ if mode == DimRead::Silent => Ok(None),
-            _ => Err(illegal(req, &dim)),
+            _ => Err(illegal_offset(req, "access", &dim, "on string")),
         },
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
             if mode == DimRead::Warning {
@@ -4501,7 +4491,7 @@ pub(crate) fn string_dim_offset(
         ValueRef::Array(_)
         | ValueRef::Object(_)
         | ValueRef::Resource(_)
-        | ValueRef::Reference(_) => Err(illegal(req, &dim)),
+        | ValueRef::Reference(_) => Err(illegal_offset(req, "access", &dim, "on string")),
     }
 }
 
@@ -4635,18 +4625,8 @@ pub(crate) fn array_offset(
             Ok(php_heap::Key::Long(id))
         }
         ValueRef::Undef => empty(req),
-        ValueRef::Array(_) => Err(throw_error(
-            req,
-            "TypeError",
-            "Cannot access offset of type array on array",
-        )),
-        ValueRef::Object(o) => {
-            let class = req.class_name(o.class());
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot access offset of type {class} on array"),
-            ))
+        ValueRef::Array(_) | ValueRef::Object(_) => {
+            Err(illegal_offset(req, "access", offset, "on array"))
         }
     }
 }
@@ -4869,18 +4849,8 @@ pub(crate) fn isset_offset(
     // and the type's for everything else.
     let held = offset.deref();
     match held.as_ref() {
-        ValueRef::Array(_) => Err(throw_error(
-            req,
-            "TypeError",
-            "Cannot access offset of type array in isset or empty",
-        )),
-        ValueRef::Object(object) => {
-            let class = req.class_name(object.class());
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot access offset of type {class} in isset or empty"),
-            ))
+        ValueRef::Array(_) | ValueRef::Object(_) => {
+            Err(illegal_offset(req, "access", &held, "in isset or empty"))
         }
         _ => array_offset(req, &held, constant),
     }
@@ -4991,20 +4961,8 @@ pub(crate) fn unset_dim(
             req.release(Value::string(empty));
             return Ok(());
         }
-        ValueRef::Array(_) => {
-            return Err(throw_error(
-                req,
-                "TypeError",
-                "Cannot unset offset of type array on array",
-            ));
-        }
-        ValueRef::Object(o) => {
-            let class = req.class_name(o.class());
-            return Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot unset offset of type {class} on array"),
-            ));
+        ValueRef::Array(_) | ValueRef::Object(_) => {
+            return Err(illegal_offset(req, "unset", &offset.deref(), "on array"));
         }
         // `deref` followed the reference already.
         ValueRef::Reference(_) => return Ok(()),
@@ -5077,12 +5035,22 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
 /// ```
 fn zval_type_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
-        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
-            || String::from("object"),
-            |decl| php_unit::decl::shown(&decl.name.0).into_owned(),
-        ),
+        ValueRef::Object(o) => req.class_name(o.class()),
         _ => String::from(value.type_name()),
     }
+}
+
+/// `zend_illegal_container_offset` (`Z/Zend/zend.c:1846`):
+/// php's `TypeError` over an offset no container takes, an array or an
+/// object, named as `zend_zval_type_name` names it, `verb` the access
+/// and `container` what it was taken against.
+fn illegal_offset(req: &mut Request, verb: &str, offset: &Value, container: &str) -> Thrown {
+    let name = zval_type_name(req, offset);
+    throw_error(
+        req,
+        "TypeError",
+        &format!("Cannot {verb} offset of type {name} {container}"),
+    )
 }
 
 /// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:108`): `SIZE_MAX` less the
