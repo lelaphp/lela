@@ -115,7 +115,7 @@ third-engine-design.md
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=c4d533664867c7612b16fc14e22bd07c4e75b320794f3a0a6b0642c978dcccc6 out=ea9adcb184bfff90eb2734a8bc6d866cfd05aaa145bdc2a61344b45763ac8a9a -->
+<!-- /computed in=9432e88c408bdd52e026b9ac93b52cb9ab72b2a99693f7d00440044e991101d6 out=ea9adcb184bfff90eb2734a8bc6d866cfd05aaa145bdc2a61344b45763ac8a9a -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -136,19 +136,19 @@ third-engine-design.md
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | no reading |
-| ticket.close |  | deny_argv | no reading |
-| ticket.close-api |  | deny_pattern | no reading |
+| git.no-verify |  | deny_argv | fail |
+| ticket.close |  | deny_argv | fail |
+| ticket.close-api |  | deny_pattern | fail |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | no reading |
+| lanes.nightly |  | deny_pattern | fail |
 | lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | no reading |
+| lanes.builder-subset |  | require_argv | fail |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
+| harness.self |  | deny | pass |
 | divergence.reason |  | check | no reading |
-| owner.no-assign-discard |  | deny_pattern | fail |
+| owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=41b262995fd0534786112bfcf420ba6e61149ceba2c66a087720baabdcecca5d out=37d2841e1c624e9d804f3b375c92dc0d330fe3b72df8eba45023ab6930446199 -->
+<!-- /computed in=0916b61481da36955fa020014e903a526ac8ed66e898f448fe50bc079f318728 out=0525dffefe4ef93cd822f740f6b7b60297e1443e58837e618e2f02c32c1fdb9a -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
