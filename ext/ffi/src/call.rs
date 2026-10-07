@@ -6,7 +6,7 @@
 //! handed, which C calls back through `zend_ffi_callback_trampoline`.
 
 use php_ext::abi::Callable;
-use php_ext::coerce::{callable_checked, to_double, to_long, to_string, truthy, value_name};
+use php_ext::coerce::{callable_checked, to_double, to_long, truthy, value_name, with_string};
 use php_ext::raising::{Thrown, fatal, while_pending};
 use php_ext::request::Request;
 use php_ext::values::{Owner, Value, ValueRef};
@@ -300,11 +300,11 @@ fn pass_arg(
                 Layout::U8
             }
             Scalar::Char => {
-                let text = to_string(req, arg)?;
-                let bytes = text.as_bytes().to_vec();
-                text.give_up(req);
-                ffi::write(slot, bytes.first().copied().unwrap_or(0));
-                if bytes.len() != 1 && frame.pending.is_none() {
+                let (first, len) = with_string(req, arg, |bytes| {
+                    (bytes.first().copied().unwrap_or(0), bytes.len())
+                })?;
+                ffi::write(slot, first);
+                if len != 1 && frame.pending.is_none() {
                     frame.pending = Some(pass_incompatible(req, name, n, arg, ty)?);
                 }
                 Layout::I8

@@ -9,7 +9,7 @@
 //! the bound parameters and columns, are values with one owner each,
 //! given back on rebind, free and close.
 
-use php_ext::coerce::{to_double, to_long, to_string};
+use php_ext::coerce::{to_double, to_long, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, Value, ValueRef};
@@ -826,14 +826,6 @@ enum Wire {
     Other,
 }
 
-/// `zval_get_string`'s bytes, its owner given back.
-fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let s = to_string(req, value)?;
-    let bytes = s.as_bytes().to_vec();
-    s.give_up(req);
-    Ok(bytes)
-}
-
 /// `mysqlnd_stmt_execute_prepare_param_types`: each integer parameter
 /// that is not an integer made one, or a string where its value does not
 /// fit, which asks for the types to be sent now and with the next
@@ -856,7 +848,7 @@ fn prepare_param_types(
                 let (max, min) = (i64::MAX as f64, i64::MIN as f64);
                 if d >= max || d < min {
                     resend = true;
-                    Some(Wire::Str(string_of(req, v)?))
+                    Some(Wire::Str(with_string(req, v, <[u8]>::to_vec)?))
                 } else {
                     Some(Wire::Long(to_long(req, v)?))
                 }
@@ -933,7 +925,7 @@ fn generate_request(req: &mut Request, stmt: &mut StmtData) -> Result<Vec<u8>, T
             FieldType::LongBlob => Wire::Blob(*used),
             FieldType::VarString => match v.as_ref() {
                 ValueRef::Str(s) => Wire::Str(s.as_bytes().to_vec()),
-                _ => Wire::Str(string_of(req, v)?),
+                _ => Wire::Str(with_string(req, v, <[u8]>::to_vec)?),
             },
             _ => Wire::Other,
         });

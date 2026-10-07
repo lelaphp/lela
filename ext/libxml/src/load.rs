@@ -221,12 +221,8 @@ fn read_answer(req: &mut Request, retval: &Value, callable: &Callable, loader: &
             );
             Resolved::Thrown(throw_error(req, "TypeError", &text))
         }
-        _ => match php_ext::coerce::to_string(req, &retval) {
-            Ok(s) => {
-                let path = s.as_bytes().to_vec();
-                s.give_up(req);
-                Resolved::Path(path)
-            }
+        _ => match php_ext::coerce::with_string(req, &retval, <[u8]>::to_vec) {
+            Ok(path) => Resolved::Path(path),
             Err(thrown) => Resolved::Thrown(thrown),
         },
     }

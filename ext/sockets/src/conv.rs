@@ -12,7 +12,7 @@ use std::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use std::ops::ControlFlow;
 use std::os::fd::{AsRawFd, OwnedFd};
 
-use php_ext::coerce::{float_to_long, numeric_string, to_string};
+use php_ext::coerce::{float_to_long, numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -158,22 +158,19 @@ impl Conv {
         match value.as_ref() {
             ValueRef::Int(n) => Ok(n),
             ValueRef::Float(f) => Ok(float_to_long(f)),
-            ValueRef::Str(_) | ValueRef::Object(_) => {
-                let text = to_string(req, value)?;
-                let n = match numeric_string(text.as_bytes()).as_ref().map(Value::as_ref) {
+            ValueRef::Str(_) | ValueRef::Object(_) => with_string(req, value, |text| {
+                match numeric_string(text).as_ref().map(Value::as_ref) {
                     Some(ValueRef::Int(n)) => n,
                     Some(ValueRef::Float(f)) => float_to_long(f),
                     _ => {
-                        let shown = String::from_utf8_lossy(c_str(text.as_bytes())).into_owned();
+                        let shown = String::from_utf8_lossy(c_str(text)).into_owned();
                         self.fail(&format!(
                             "expected an integer, but got a non numeric string (possibly from a converted object): '{shown}'"
                         ));
                         0
                     }
-                };
-                text.give_up(req);
-                Ok(n)
-            }
+                }
+            }),
             _ => {
                 self.fail(
                     "expected an integer, either of a PHP integer type or of a convertible type",
@@ -228,17 +225,9 @@ impl Conv {
         Ok(())
     }
 
-    /// `zval_get_tmp_string`.
-    fn text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-        let text = to_string(req, value)?;
-        let bytes = text.as_bytes().to_vec();
-        text.give_up(req);
-        Ok(bytes)
-    }
-
     /// `from_zval_write_sin_addr`.
     fn sin_addr(&mut self, req: &mut Request, value: &Value) -> Result<std::net::Ipv4Addr, Thrown> {
-        let text = Conv::text(req, value)?;
+        let text = with_string(req, value, <[u8]>::to_vec)?;
         Ok(inet_addr(req, self.socket, &text).unwrap_or_else(|| {
             self.fail(&format!(
                 "could not resolve address '{}' to get an AF_INET address",
@@ -250,7 +239,7 @@ impl Conv {
 
     /// `from_zval_write_sin6_addr`.
     fn sin6_addr(&mut self, req: &mut Request, value: &Value) -> Result<Ipv6Addr, Thrown> {
-        let text = Conv::text(req, value)?;
+        let text = with_string(req, value, <[u8]>::to_vec)?;
         Ok(inet6_addr(req, self.socket, &text).map_or_else(
             || {
                 self.fail(&format!(
@@ -376,18 +365,18 @@ impl Conv {
                         if name == "family" {
                             return c.sa_family(req, value);
                         }
-                        let text = Conv::text(req, value)?;
-                        if text.is_empty() {
-                            c.fail("the path is must not be empty");
-                        } else if text.len() >= SUN_PATH {
-                            c.fail(&format!(
-                                "the path is too long, the maximum permitted length is {}",
-                                SUN_PATH - 1
-                            ));
-                        } else {
-                            path = c_str(&text).to_vec();
-                        }
-                        Ok(())
+                        with_string(req, value, |text| {
+                            if text.is_empty() {
+                                c.fail("the path is must not be empty");
+                            } else if text.len() >= SUN_PATH {
+                                c.fail(&format!(
+                                    "the path is too long, the maximum permitted length is {}",
+                                    SUN_PATH - 1
+                                ));
+                            } else {
+                                path = c_str(text).to_vec();
+                            }
+                        })
                     })?;
                 }
                 Ok(Some(Addr::Unix(path)))
@@ -412,18 +401,19 @@ impl Conv {
                 0
             }));
         }
-        let name = Conv::text(req, value)?;
-        let name = c_str(&name);
-        match nix::net::if_::if_nametoindex(name) {
-            Ok(index) if index != 0 => Ok(index),
-            _ => {
-                self.fail(&format!(
-                    "no interface with name \"{}\" could be found",
-                    String::from_utf8_lossy(name)
-                ));
-                Ok(0)
+        with_string(req, value, |name| {
+            let name = c_str(name);
+            match nix::net::if_::if_nametoindex(name) {
+                Ok(index) if index != 0 => index,
+                _ => {
+                    self.fail(&format!(
+                        "no interface with name \"{}\" could be found",
+                        String::from_utf8_lossy(name)
+                    ));
+                    0
+                }
             }
-        }
+        })
     }
 
     /// `from_zval_write_in6_pktinfo`: the 20 bytes of an `in6_pktinfo`.
@@ -615,7 +605,7 @@ impl Conv {
         // owner of the table taken: the argument holds it while
         // `zval_try_get_string` runs `__toString`.
         walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-            out.push(Conv::text(req, &row.value().deref())?);
+            out.push(with_string(req, row.value(), <[u8]>::to_vec)?);
             Ok(ControlFlow::Continue(()))
         })?;
         Ok(out)

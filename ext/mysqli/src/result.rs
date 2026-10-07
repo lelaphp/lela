@@ -15,6 +15,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{
     autoload, call_array, internal_iterator, known_method, lookup_class, new_object,
 };
+use php_ext::coerce::with_string;
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error, while_pending,
@@ -189,7 +190,7 @@ pub(crate) fn fetch_object(
     // `"O|Ch"`: the class by `try_convert_to_string`, whose refusal is the
     // conversion's `Error` and not a `TypeError` of the parameter, before
     // the arguments are held.
-    let class = crate::string_of(req, &class.value())?;
+    let class = with_string(req, &class.value(), <[u8]>::to_vec)?;
     let args = args.hold(req)?;
     let args = given.then_some(args);
     let Some(target) = autoload(req, &class)? else {

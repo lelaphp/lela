@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
-use php_ext::coerce::{compare, to_double, to_long, to_string};
+use php_ext::coerce::{compare, to_double, to_long, to_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self as rows, Hold, Row};
@@ -595,7 +595,7 @@ fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray
     // argument holds it while a value's `__toString` runs. A reference is
     // read as held by one owner less the walk's own (`Row::refcount`).
     let walked = rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
-        let bytes = crate::string::string_bytes(req, row.value())?;
+        let bytes = with_string(req, row.value(), <[u8]>::to_vec)?;
         if !seen.insert(bytes) {
             return Ok(ControlFlow::Continue(()));
         }

@@ -5590,14 +5590,8 @@ fn value_string(req: &mut Request, value: &Value) -> String {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
         ValueRef::Float(number) => float_format(number, precision(req), Exponent::Upper),
-        _ => match php_ext::coerce::to_string(req, value) {
-            Ok(s) => {
-                let text = String::from_utf8_lossy(s.as_bytes()).into_owned();
-                s.give_up(req);
-                text
-            }
-            Err(_) => String::new(),
-        },
+        _ => php_ext::coerce::with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -6294,11 +6288,11 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
 /// Parameter #5 [ <optional> $y = [1.0] ]
 /// ```
 fn double_string(req: &mut Request, f: f64) -> String {
-    let Ok(printed) = php_ext::coerce::to_string(req, &Value::float(f)) else {
+    let Ok(mut text) = php_ext::coerce::with_string(req, &Value::float(f), |printed| {
+        String::from_utf8_lossy(printed).into_owned()
+    }) else {
         return String::new();
     };
-    let mut text = String::from_utf8_lossy(printed.as_bytes()).into_owned();
-    printed.give_up(req);
     if f.is_finite() && !text.contains('.') {
         text.push_str(".0");
     }

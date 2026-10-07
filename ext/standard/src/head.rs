@@ -14,7 +14,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_long, to_string, truthy};
+use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -426,12 +426,7 @@ fn cookie_options(
             return Err(throw_error(req, "ValueError", &text));
         };
         let lower = key.as_bytes().to_ascii_lowercase();
-        let string = |req: &mut Request| -> Result<Vec<u8>, Thrown> {
-            let text = to_string(req, &value)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            Ok(bytes)
-        };
+        let string = |req: &mut Request| with_string(req, &value, <[u8]>::to_vec);
         match lower.as_slice() {
             b"expires" => cookie.expires = to_long(req, &value)?,
             b"path" => cookie.path = Some(string(req)?),

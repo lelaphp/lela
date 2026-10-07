@@ -146,7 +146,7 @@
 use php_ext::abi::{OrFalse, Passed, Path, Ref, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
-use php_ext::coerce::to_string;
+use php_ext::coerce::{to_string, with_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
@@ -3073,29 +3073,29 @@ pub fn php_fputcsv(
     let count = fields.len();
     let mut line = Vec::new();
     for (i, (_, field)) in fields.iter().enumerate() {
-        let field = crate::string::string_bytes(req, &field)?;
-        let bytes = field.as_slice();
-        let special = [delimiter, enclosure, b'\n', b'\r', b'\t', b' ']
-            .iter()
-            .chain(escape.iter())
-            .any(|c| bytes.contains(c));
-        if special {
-            line.push(enclosure);
-            let mut escaped = false;
-            for &ch in bytes {
-                if escape == Some(ch) {
-                    escaped = true;
-                } else if !escaped && ch == enclosure {
-                    line.push(enclosure);
-                } else {
-                    escaped = false;
+        with_string(req, &field, |bytes| {
+            let special = [delimiter, enclosure, b'\n', b'\r', b'\t', b' ']
+                .iter()
+                .chain(escape.iter())
+                .any(|c| bytes.contains(c));
+            if special {
+                line.push(enclosure);
+                let mut escaped = false;
+                for &ch in bytes {
+                    if escape == Some(ch) {
+                        escaped = true;
+                    } else if !escaped && ch == enclosure {
+                        line.push(enclosure);
+                    } else {
+                        escaped = false;
+                    }
+                    line.push(ch);
                 }
-                line.push(ch);
+                line.push(enclosure);
+            } else {
+                line.extend_from_slice(bytes);
             }
-            line.push(enclosure);
-        } else {
-            line.extend_from_slice(bytes);
-        }
+        })?;
         if i + 1 != count {
             line.push(delimiter);
         }

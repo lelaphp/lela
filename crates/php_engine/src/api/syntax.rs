@@ -17,7 +17,7 @@ pub use php_compile::syntax::{
 pub use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 
 use crate::api::call::constant;
-use crate::api::coerce::to_string;
+use crate::api::coerce::with_string;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Emalloc, PhpString, Value};
@@ -146,16 +146,6 @@ impl<F> InRequest<'_, F> {
     }
 }
 
-/// `convert_to_string` of a value read for its bytes, the string given
-/// up once they are copied, as `zend_ini_get_constant` releases its copy
-/// (`Z/Zend/zend_ini_parser.y:162`).
-fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let string = to_string(req, value)?;
-    let bytes = string.as_bytes().to_vec();
-    string.give_up(req);
-    Ok(bytes)
-}
-
 impl<F> Host for InRequest<'_, F>
 where
     F: FnMut(&mut Request, IniEvent<Value>) -> Result<(), Thrown>,
@@ -163,7 +153,9 @@ where
     type Error = Thrown;
     fn constant(&mut self, name: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         match constant(self.req, name)? {
-            Some(value) => string_bytes(self.req, &value).map(Some),
+            // `zend_ini_get_constant` releases the copy it converted
+            // (`Z/Zend/zend_ini_parser.y:162`).
+            Some(value) => with_string(self.req, &value, <[u8]>::to_vec).map(Some),
             None => Ok(None),
         }
     }
@@ -177,7 +169,7 @@ where
     }
 
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Thrown> {
-        string_bytes(self.req, &Value::float(d))
+        with_string(self.req, &Value::float(d), <[u8]>::to_vec)
     }
 
     fn event(&mut self, event: IniEvent<Val>) -> Result<(), Thrown> {

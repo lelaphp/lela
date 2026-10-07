@@ -170,6 +170,44 @@ pub fn to_string(req: &mut Request, value: &Value) -> Result<Owner<PhpString>, T
     adopted(req, made)
 }
 
+/// `zval_get_tmp_string` and `zend_tmp_string_release` around one read:
+/// `value`'s text, as [`to_string`] converts it, lent to `read`, and the
+/// string the conversion made given up whatever `read` answers. A
+/// string, or a reference to one, is lent as it stands, with no owner
+/// taken, as php's `tmp` is `NULL` for one: `read` is handed no request,
+/// so nothing it does can call into the program or free what it reads.
+/// What a native calls where it reads a value's text once, so no
+/// conversion outlives the read; the conversion's own refusal, an
+/// object with no `__toString` or what its `__toString` threw, is the
+/// `Err`, and `read` is not called.
+///
+/// The bytes are lent for the call and no longer:
+///
+/// ```compile_fail
+/// # use php_engine::api::coerce::with_string;
+/// # use php_engine::api::raising::Thrown;
+/// # use php_engine::api::request::Request;
+/// # use php_engine::api::values::Value;
+/// fn kept<'a>(req: &mut Request, value: &Value) -> Result<&'a [u8], Thrown> {
+///     with_string(req, value, |bytes| bytes)
+/// }
+/// # fn main() {}
+/// ```
+pub fn with_string<R>(
+    req: &mut Request,
+    value: &Value,
+    read: impl FnOnce(&[u8]) -> R,
+) -> Result<R, Thrown> {
+    let held = value.deref();
+    if let Some(string) = held.as_php_string() {
+        return Ok(read(string.as_bytes()));
+    }
+    let made = to_string(req, &held)?;
+    let answer = read(made.as_bytes());
+    made.give_up(req);
+    Ok(answer)
+}
+
 /// `convert_scalar_to_number`: an `int` or a `float`, a string the
 /// number it opens with (`is_numeric_string` with `allow_errors`,
 /// silently) and zero for none, what a class's `cast_object` to

@@ -10,7 +10,7 @@
 
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_long, to_string};
+use php_ext::coerce::{to_long, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
@@ -683,9 +683,7 @@ fn iconv_mime_encode(
         max = to_long(req, &given)?;
     }
     if let Some(given) = preference(options, b"line-break-chars") {
-        let text = to_string(req, &given)?;
-        lf = text.as_bytes().to_vec();
-        text.give_up(req);
+        lf = with_string(req, &given, <[u8]>::to_vec)?;
     }
     // `(size_t) line_len`.
     let max = usize::try_from(max.cast_unsigned()).unwrap_or(usize::MAX);

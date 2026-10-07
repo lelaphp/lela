@@ -18,7 +18,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Callable, FromArgument, Raw, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
-use php_ext::coerce::to_long;
+use php_ext::coerce::{to_long, with_string};
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arity, fatal};
 use php_ext::request::Request;
@@ -204,9 +204,7 @@ impl Compare {
 /// conversion given up after the comparison, as php's
 /// `zend_tmp_string_release` gives up what `zval_get_tmp_string` made.
 fn string_compare(req: &mut Request, a: &Value, b: &Value) -> Result<Ordering, Thrown> {
-    let x = crate::string::string_bytes(req, a)?;
-    let y = crate::string::string_bytes(req, b)?;
-    Ok(x.cmp(&y))
+    super::as_strings(req, a, b, Ord::cmp)
 }
 
 /// A key's text, as `zend_print_long_to_buf` prints an integer key.
@@ -637,6 +635,27 @@ fn diff_walk(
 /// array_diff(): Argument #1 ($array) must be of type array, int given
 /// ```
 ///
+/// Each comparison string is made and given up within its comparison,
+/// `zval_get_tmp_string` and `zend_tmp_string_release`, so a loop over
+/// the four set functions keeps its memory flat whatever their values
+/// convert from:
+///
+/// ```php
+/// class S { function __toString(): string { return "s" . 1; } }
+/// $a = [1, 2.5, "x", new S, 3]; $b = [2, "y", 1.5, new S]; $one = [7.5];
+/// $f = function () use ($a, $b, $one) {
+///     array_diff($a, $b); array_diff($one, $b); array_intersect($a, $b);
+///     array_diff_assoc($a, $b); array_intersect_assoc($a, $b);
+/// };
+/// for ($i = 0; $i < 100; $i++) $f();
+/// $before = memory_get_usage();
+/// for ($i = 0; $i < 20000; $i++) $f();
+/// var_dump(memory_get_usage() - $before);
+/// ```
+/// ```expect
+/// int(0)
+/// ```
+///
 /// The declarations of the diff and intersect families.
 ///
 /// ```php
@@ -695,7 +714,7 @@ fn array_diff(
         None
     };
     if let Some((_, value)) = only {
-        let search = crate::tmp_string_bytes(req, &value.deref())?;
+        let search = with_string(req, &value, <[u8]>::to_vec)?;
         let mut found = false;
         for (at, other) in values.iter().enumerate().skip(1) {
             let position = u32::try_from(at + 1).unwrap_or(u32::MAX);
@@ -704,7 +723,7 @@ fn array_diff(
                 continue;
             }
             for (_, value) in &other {
-                if crate::tmp_string_bytes(req, &value.deref())? == search {
+                if with_string(req, &value, |text| text == search.as_slice())? {
                     found = true;
                     break;
                 }
@@ -722,7 +741,7 @@ fn array_diff(
     let mut exclude: HashSet<Vec<u8>> = HashSet::new();
     for other in &rest {
         for (_, value) in other {
-            exclude.insert(crate::tmp_string_bytes(req, &value.deref())?);
+            exclude.insert(with_string(req, &value, <[u8]>::to_vec)?);
         }
     }
     let mut out = PhpArray::new(req)?;
@@ -730,7 +749,7 @@ fn array_diff(
     // (`Z/ext/standard/array.c:5965`), no owner of the table taken: the
     // argument holds it while `zval_get_tmp_string` runs `__toString`.
     let walked = walk::foreach(req, first, Hold::None, |req, row| -> walk::Step {
-        if exclude.contains(&crate::tmp_string_bytes(req, &row.value().deref())?) {
+        if with_string(req, row.value(), |text| exclude.contains(text))? {
             return Ok(ControlFlow::Continue(()));
         }
         let value = row_copied(req, row);

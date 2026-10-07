@@ -52,7 +52,7 @@ use constants::{
 };
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::coerce::{to_long, to_string, value_name};
+use php_ext::coerce::{to_long, value_name, with_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable,
@@ -623,11 +623,9 @@ fn zval_filter(
         }
         Owner::take(req, failure(flags))
     } else {
-        let string = to_string(req, &(*value).deref());
+        let bytes = with_string(req, &value, <[u8]>::to_vec);
         value.give_up(req);
-        let string = string?;
-        let bytes = string.as_bytes().to_vec();
-        string.give_up(req);
+        let bytes = bytes?;
         match function(req, run, &bytes)? {
             Outcome::Value(value) => value,
             Outcome::Failed if flags & FILTER_THROW_ON_FAILURE != 0 => {

@@ -14,7 +14,7 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
-use php_ext::coerce::{numeric_string, to_string};
+use php_ext::coerce::{numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
 use php_ext::request::{Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
@@ -358,10 +358,8 @@ fn getopt(
     // (`Z/ext/standard/basic_functions.c:1012`), no owner of the table
     // taken: the argument holds it while `__toString` runs.
     walk::foreach(req, long_options, Hold::None, |req, row| -> walk::Step {
-        let value = row.value().deref();
-        let text = to_string(req, &value)?;
-        opts.push(long_option(c_string(text.as_bytes())));
-        text.give_up(req);
+        let option = with_string(req, row.value(), |text| long_option(c_string(text)))?;
+        opts.push(option);
         Ok(ControlFlow::Continue(()))
     })?;
     let mut walk = Getopt::new(&argv, &opts);

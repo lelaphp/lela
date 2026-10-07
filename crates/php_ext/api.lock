@@ -396,6 +396,7 @@ coerce::to_string
 coerce::truthy
 coerce::type_name
 coerce::value_name
+coerce::with_string
 decl::Attribute
 decl::AttributeArgument
 decl::ClassConstDecl

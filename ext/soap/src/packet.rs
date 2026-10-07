@@ -3,7 +3,7 @@
 //! `__soapCall()` hands back.
 
 use php_ext::abi::{Ref, Untyped};
-use php_ext::coerce::to_string;
+use php_ext::coerce::with_string;
 use php_ext::request::Request;
 use php_ext::values::{Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Value, walk};
 use php_ext_libxml::ffi::{Kind, Node};
@@ -53,17 +53,9 @@ fn decode(req: &mut Request, cx: &mut Cx, enc: Option<EncRef>, node: Node) -> Re
 /// A string decoded and made a string, `convert_to_string`.
 fn decode_string(req: &mut Request, cx: &mut Cx, node: Node) -> Res<Vec<u8>> {
     let v = decode(req, cx, get_conversion(ty::IS_STRING), node)?;
-    let s = match to_string(req, &v) {
-        Ok(s) => s,
-        Err(thrown) => {
-            v.give_up(req);
-            return Err(thrown.into());
-        }
-    };
-    let bytes = s.as_bytes().to_vec();
-    s.give_up(req);
+    let bytes = with_string(req, &v, <[u8]>::to_vec);
     v.give_up(req);
-    Ok(bytes)
+    Ok(bytes?)
 }
 
 /// `parse_packet_soap`: whether the call succeeded, and what it answers.

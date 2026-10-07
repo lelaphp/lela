@@ -9,7 +9,7 @@
 use php_ext::abi::{OrFalse, Passed, Path as PathArg, Raw, This, True, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{instantiate, known_method, lookup_class};
-use php_ext::coerce::{to_string, value_name};
+use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw};
 use php_ext::request::{Request, Stream, Streams as _};
@@ -1806,10 +1806,7 @@ fn zpp_name_and_value(
     let name_bytes = match name.as_ref() {
         ValueRef::Str(s) => Some(s.as_bytes().to_vec()),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            let text = to_string(req, &name)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            Some(bytes)
+            Some(with_string(req, &name, <[u8]>::to_vec)?)
         }
         _ => None,
     };
@@ -1832,10 +1829,7 @@ fn zpp_name_and_value(
     let bytes = match value.as_ref() {
         ValueRef::Str(s) => s.as_bytes().to_vec(),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            let text = to_string(req, &value)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            bytes
+            with_string(req, &value, <[u8]>::to_vec)?
         }
         _ => {
             let given = value_name(req, &value);

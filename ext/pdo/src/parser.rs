@@ -11,7 +11,7 @@
 //!
 //! [`Placeholders::Emulated`]: crate::connector::Placeholders::Emulated
 
-use php_ext::coerce::{to_long, to_string, truthy};
+use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpObject, ValueRef};
@@ -237,12 +237,7 @@ fn quote(
             }));
         }
         (BindKind::Int, _) => return Ok(Some(to_long(req, &value)?.to_string().into_bytes())),
-        _ => {
-            let text = to_string(req, &value)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            bytes
-        }
+        _ => with_string(req, &value, <[u8]>::to_vec)?,
     };
     let mode = crate::dbh::state(req, dbh).map_or(OnError::Throw, |d| d.error_mode);
     let quoted =

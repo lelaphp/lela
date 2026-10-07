@@ -9,7 +9,7 @@ use php_ext::abi::{
     PropertyPurpose, PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{call_method, lookup_class, new_object};
-use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
+use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name, with_string};
 use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
@@ -368,10 +368,10 @@ impl Member {
             ValueRef::Int(n) => Ok(Member::Index(n)),
             ValueRef::Str(s) => Ok(Member::Name(s.as_bytes().to_vec())),
             _ => {
-                let s = to_string(req, &offset)?;
-                let bytes = s.as_bytes().to_vec();
-                s.give_up(req);
-                Ok(Member::Name(if trim { trimmed(&bytes) } else { bytes }))
+                let name = with_string(req, &offset, |bytes| {
+                    if trim { trimmed(bytes) } else { bytes.to_vec() }
+                })?;
+                Ok(Member::Name(name))
             }
         }
     }
@@ -545,10 +545,7 @@ fn plain_text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     if let Some(o) = value.as_object() {
         return Ok(cast_text(req, *o)?.unwrap_or_default());
     }
-    let s = to_string(req, &value)?;
-    let bytes = s.as_bytes().to_vec();
-    s.give_up(req);
-    Ok(bytes)
+    with_string(req, &value, <[u8]>::to_vec)
 }
 
 /// php's warning for an element written past the ones there are.

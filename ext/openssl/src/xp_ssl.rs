@@ -20,7 +20,7 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, callable_name, to_long, to_string, truthy};
+use php_ext::coerce::{callable_checked, callable_name, to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref, raise, throw_error};
 use php_ext::request::{
     Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, StreamCtx, Streams as _,
@@ -384,15 +384,6 @@ fn option(req: &Request, context: Option<StreamCtx>, name: &[u8]) -> Option<Valu
     context.and_then(|context| context.option(req, b"ssl", name))
 }
 
-/// `try_convert_to_string` of a value: its bytes, the string
-/// `zval_get_string` answered given back.
-pub(crate) fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let text = to_string(req, value)?;
-    let bytes = text.as_bytes().to_vec();
-    text.give_up(req);
-    Ok(bytes)
-}
-
 impl SslOptions {
     /// Every option the layer reads, off `context`.
     fn read(req: &mut Request, context: Option<StreamCtx>) -> Result<SslOptions, Thrown> {
@@ -412,7 +403,7 @@ impl SslOptions {
         };
         let text = |req: &mut Request, name: &[u8]| -> Result<Option<Vec<u8>>, Thrown> {
             match option(req, ctx, name) {
-                Some(v) => Ok(Some(string_of(req, &v)?)),
+                Some(v) => Ok(Some(with_string(req, &v, <[u8]>::to_vec)?)),
                 None => Ok(None),
             }
         };
@@ -498,10 +489,10 @@ fn sni_option(req: &mut Request, value: &Value) -> Result<SniOption, Thrown> {
                 walk::foreach(req, *pair, Hold::None, |req, row| -> walk::Step {
                     match row.key() {
                         Key::Str(k) if k.as_bytes() == b"local_cert" => {
-                            local_cert = Some(string_of(req, &row.value().deref())?);
+                            local_cert = Some(with_string(req, row.value(), <[u8]>::to_vec)?);
                         }
                         Key::Str(k) if k.as_bytes() == b"local_pk" => {
-                            local_pk = Some(string_of(req, &row.value().deref())?);
+                            local_pk = Some(with_string(req, row.value(), <[u8]>::to_vec)?);
                         }
                         _ => {}
                     }

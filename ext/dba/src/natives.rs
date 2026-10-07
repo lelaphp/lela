@@ -539,9 +539,11 @@ fn key_bytes(req: &mut Request, key: Union<PhpArray, PhpString>) -> Result<Vec<u
     // `__toString`. A table freed after the group ends the walk, and the
     // name is then empty.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-        let text = php_ext::coerce::to_string(req, &row.value().deref())?;
-        parts.push(text.as_bytes().to_vec());
-        text.give_up(req);
+        parts.push(php_ext::coerce::with_string(
+            req,
+            row.value(),
+            <[u8]>::to_vec,
+        )?);
         Ok(ControlFlow::Continue(()))
     })?;
     let mut parts = parts.into_iter();

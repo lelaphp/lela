@@ -481,9 +481,9 @@ pub(crate) fn float_offset(req: &mut Request, f: f64) -> Result<i64, Thrown> {
     #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
     let compatible = (n as f64) == f;
     if !compatible && f.is_finite() && f.abs() < 9.2e18 {
-        let text = php_ext::coerce::to_string(req, &Value::float(f))?;
-        let shown = String::from_utf8_lossy(text.as_bytes()).into_owned();
-        text.give_up(req);
+        let shown = php_ext::coerce::with_string(req, &Value::float(f), |text| {
+            String::from_utf8_lossy(text).into_owned()
+        })?;
         php_ext::raising::deprecated(
             req,
             &format!("Implicit conversion from float {shown} to int loses precision"),

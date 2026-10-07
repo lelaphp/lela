@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::PropertyPurpose;
 use php_ext::attr::php_function;
 use php_ext::call::{call_method, lookup_class};
-use php_ext::coerce::{Exponent, float_format, to_string};
+use php_ext::coerce::{Exponent, float_format, with_string};
 use php_ext::decl::Visibility;
 use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw, throw_error};
 use php_ext::request::Request;
@@ -762,9 +762,7 @@ fn sleep_props(
                 ),
             );
         }
-        let named = to_string(req, &name)?;
-        let text = named.as_bytes().to_vec();
-        named.give_up(req);
+        let text = with_string(req, &name, <[u8]>::to_vec)?;
         let mut private = vec![0];
         private.extend_from_slice(class);
         private.push(0);

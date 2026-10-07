@@ -5,7 +5,7 @@
 
 use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Ref, Refusals, This, True, Union};
 use php_ext::attr::php_class;
-use php_ext::coerce::{to_double, to_long, to_string};
+use php_ext::coerce::{to_double, to_long, with_string};
 use php_ext::raising::{Thrown, argument_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
@@ -243,31 +243,19 @@ fn bind_params(req: &mut Request, taken: &Taken, params: &mut [Bound]) -> Result
                     replace(req, &mut param.value, converted);
                     stmt.bind_double(at, f)
                 }
-                Kind::Blob => {
-                    let bytes = if matches!(value.as_ref(), ValueRef::Resource(_)) {
-                        let Some(stream) = Stream::from_value(req, &value) else {
-                            let message = format!("Unable to read stream for parameter {at}");
-                            fail(req, exceptions, None, 0, &message)?;
-                            return Ok(false);
-                        };
-                        let text = stream.copy_to_mem(req, None)?;
-                        let bytes = text.as_bytes().to_vec();
-                        text.give_up(req);
-                        bytes
-                    } else {
-                        let text = to_string(req, &value)?;
-                        let bytes = text.as_bytes().to_vec();
-                        text.give_up(req);
-                        bytes
+                Kind::Blob if matches!(value.as_ref(), ValueRef::Resource(_)) => {
+                    let Some(stream) = Stream::from_value(req, &value) else {
+                        let message = format!("Unable to read stream for parameter {at}");
+                        fail(req, exceptions, None, 0, &message)?;
+                        return Ok(false);
                     };
-                    stmt.bind_blob(at, &bytes)
-                }
-                Kind::Text => {
-                    let text = to_string(req, &value)?;
-                    let rc = stmt.bind_text(at, text.as_bytes());
+                    let text = stream.copy_to_mem(req, None)?;
+                    let rc = stmt.bind_blob(at, text.as_bytes());
                     text.give_up(req);
                     rc
                 }
+                Kind::Blob => with_string(req, &value, |text| stmt.bind_blob(at, text))?,
+                Kind::Text => with_string(req, &value, |text| stmt.bind_text(at, text))?,
                 Kind::Null => stmt.bind_null(at),
                 Kind::Unknown(ty) => {
                     let message = format!("Unknown parameter type: {ty} for parameter {at}");

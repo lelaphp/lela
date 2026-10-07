@@ -9,6 +9,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::Union;
 use php_ext::attr::php_function;
+use php_ext::coerce::with_string;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -52,11 +53,11 @@ pub(super) fn strip_tags(
             // (`Z/ext/standard/string.c:4842`), no owner of the table
             // taken: the argument holds it while `__toString` runs.
             walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-                let value = row.value().deref();
-                let tag = crate::string::string_bytes(req, &value)?;
-                set.push(b'<');
-                set.extend_from_slice(&tag);
-                set.push(b'>');
+                with_string(req, row.value(), |tag| {
+                    set.push(b'<');
+                    set.extend_from_slice(tag);
+                    set.push(b'>');
+                })?;
                 Ok(ControlFlow::Continue(()))
             })?;
             if set.is_empty() { None } else { Some(set) }

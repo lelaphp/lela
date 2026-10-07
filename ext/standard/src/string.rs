@@ -26,6 +26,7 @@ pub use strip_tags::strip_tags_ex;
 use constants::{STR_PAD_BOTH, STR_PAD_LEFT, STR_PAD_RIGHT};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
@@ -145,20 +146,6 @@ pub(crate) mod constants {
     pub(crate) const YESSTR: i64 = 54;
     pub(crate) const NOSTR: i64 = 55;
     pub(crate) const CODESET: i64 = 0;
-}
-
-/// `RETURN_STR_COPY(str)`: the argument's own string handed back, one
-/// more reference to it.
-pub(crate) fn str_copy(req: &mut Request, string: PhpString) -> Owner<PhpString> {
-    Owner::take(req, string)
-}
-
-/// `zval_get_string` of a value read for its bytes, the string given up.
-pub(crate) fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let string = php_ext::coerce::to_string(req, value)?;
-    let bytes = string.as_bytes().to_vec();
-    string.give_up(req);
-    Ok(bytes)
 }
 
 /// `ord(string $character): int`, php's `PHP_FUNCTION(ord)`
@@ -555,7 +542,7 @@ fn str_pad(
     let (input, pad) = (string, pad_string.as_bytes());
     let bytes = input.as_bytes();
     if length < 0 || usize::try_from(length).is_ok_and(|length| length <= bytes.len()) {
-        return Ok(str_copy(req, input));
+        return Ok(Owner::take(req, input));
     }
     if pad.is_empty() {
         return Err(arg_value_error(req, 3, "not be empty"));
@@ -603,7 +590,7 @@ fn cased(
 ) -> Result<Owner<PhpString>, Thrown> {
     let bytes = string.as_bytes();
     let Some(first) = bytes.iter().position(|b| map(b) != *b) else {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     };
     PhpString::filled(req, bytes.len(), |out| {
         out[..first].copy_from_slice(&bytes[..first]);
@@ -701,7 +688,7 @@ fn trim(
         }),
     };
     if end - start == bytes.len() {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     PhpString::new(req, &bytes[start..end])
 }
@@ -885,7 +872,7 @@ fn substr(
         None => rest,
     };
     if taken == len {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let start = usize::try_from(from).unwrap_or(0);
     let end = start + usize::try_from(taken).unwrap_or(0);
@@ -1232,7 +1219,7 @@ fn trim_side(
         (0, kept)
     };
     if end - start == bytes.len() {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     PhpString::new(req, &bytes[start..end])
 }
@@ -1528,7 +1515,7 @@ fn explode(
         1
     };
     if limit == 0 || limit == 1 {
-        let whole = str_copy(req, string).into_value();
+        let whole = Owner::take(req, string).into_value();
         array.append(req, whole)?;
         return Ok(array);
     }
@@ -1629,7 +1616,7 @@ fn implode_array(
     if elements.len() == 1
         && let Some(s) = elements[0].deref().as_php_string()
     {
-        return Ok(str_copy(req, *s));
+        return Ok(Owner::take(req, *s));
     }
     let mut out = Vec::new();
     for (i, element) in elements.iter().enumerate() {
@@ -1642,7 +1629,7 @@ fn implode_array(
         } else if let Some(n) = element.as_int() {
             out.extend_from_slice(n.to_string().as_bytes());
         } else {
-            out.extend_from_slice(&crate::tmp_string_bytes(req, &element)?);
+            with_string(req, &element, |s| out.extend_from_slice(s))?;
         }
     }
     PhpString::new(req, &out)
@@ -1960,7 +1947,7 @@ fn first_cased(
         return PhpString::new(req, b"");
     };
     if map(first) == *first {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let mut out = bytes.to_vec();
     out[0] = map(first);
@@ -2284,7 +2271,7 @@ fn nl2br(
     let xhtml = use_xhtml;
     let s = string.as_bytes();
     if !s.iter().any(|c| *c == b'\r' || *c == b'\n') {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let tag: &[u8] = if xhtml { b"<br />" } else { b"<br>" };
     let mut out = Vec::with_capacity(s.len() * 2);

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use php_ext::abi::{Passed, Raw};
 use php_ext::call::{instantiate, lookup_class};
-use php_ext::coerce::value_name;
+use php_ext::coerce::{value_name, with_string};
 use php_ext::raising::{Thrown, arity, deprecated, throw};
 use php_ext::request::{Request, Stream, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -525,10 +525,7 @@ pub(crate) fn set_stub(
     let bytes = match stub.deref().as_ref() {
         ValueRef::Str(s) => s.as_bytes().to_vec(),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            let text = php_ext::coerce::to_string(req, stub)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            bytes
+            with_string(req, stub, <[u8]>::to_vec)?
         }
         _ => {
             let given = value_name(req, stub);

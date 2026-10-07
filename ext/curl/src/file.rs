@@ -8,7 +8,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Instance, Path, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, read_prop, write_prop};
-use php_ext::coerce::to_string;
+use php_ext::coerce::{to_string, with_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
 use php_ext::values::walk::{self, Hold};
@@ -290,14 +290,6 @@ fn prop_bytes(
     Ok(value.as_str_bytes().map(<[u8]>::to_vec))
 }
 
-/// `zval_get_tmp_string`'s bytes.
-fn text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let string = to_string(req, &value.deref())?;
-    let bytes = string.as_bytes().to_vec();
-    string.give_up(req);
-    Ok(bytes)
-}
-
 /// `ch->postfields` replaced by `array`, one more owner of it.
 fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
     let value = Value::array(array);
@@ -320,8 +312,7 @@ fn add_list(
     list: PhpArray,
 ) -> Result<(), Thrown> {
     walk::foreach(req, list, Hold::None, |req, row| -> walk::Step {
-        let data = text(req, &row.value().deref())?;
-        mime.add_data(name, &data);
+        with_string(req, row.value(), |data| mime.add_data(name, data))?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(())
@@ -411,8 +402,7 @@ pub(crate) fn build_mime(
             add_list(req, &mut mime, &name, *inner)?;
             return Ok(ControlFlow::Continue(()));
         }
-        let data = text(req, &value)?;
-        mime.add_data(&name, &data);
+        with_string(req, &value, |data| mime.add_data(&name, data))?;
         Ok(ControlFlow::Continue(()))
     })?;
     // A part not added ended the walk, and the parts made are given back.

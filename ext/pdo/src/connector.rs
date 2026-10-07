@@ -22,7 +22,7 @@
 
 use std::any::Any;
 
-use php_ext::coerce::{to_long, value_name};
+use php_ext::coerce::{to_long, value_name, with_string};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
@@ -769,12 +769,7 @@ pub fn option_string(
     attr: i64,
 ) -> Result<Option<Vec<u8>>, Thrown> {
     match options.and_then(|options| options.get(&Key::Int(attr))) {
-        Some(value) => {
-            let text = php_ext::coerce::to_string(req, &value.deref())?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            Ok(Some(bytes))
-        }
+        Some(value) => Ok(Some(with_string(req, &value, <[u8]>::to_vec)?)),
         None => Ok(None),
     }
 }

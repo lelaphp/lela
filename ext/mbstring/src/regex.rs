@@ -769,11 +769,11 @@ fn replace(
                 let returned = php_ext::call::call(req, callback, &[Value::array(*subpats)]);
                 subpats.give_up(req);
                 let returned = returned?;
-                let text = php_ext::coerce::to_string(req, &returned);
+                let read = php_ext::coerce::with_string(req, &returned, |text| {
+                    out.extend_from_slice(text);
+                });
                 returned.give_up(req);
-                let text = text?;
-                out.extend_from_slice(text.as_bytes());
-                text.give_up(req);
+                read?;
             }
         }
         let n = usize::try_from(end0).unwrap_or(pos);

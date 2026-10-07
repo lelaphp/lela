@@ -20,6 +20,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, Untyped, Variadic};
 use php_ext::attr::php_function;
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -317,8 +318,7 @@ pub(super) fn setlocale(
                 // (`Z/ext/standard/string.c:4969`), no owner of the table
                 // taken: the argument holds it while `__toString` runs.
                 walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
-                    let element = row.value().deref();
-                    names.push(crate::string::string_bytes(req, &element.deref())?);
+                    names.push(with_string(req, row.value(), <[u8]>::to_vec)?);
                     Ok(ControlFlow::Continue(()))
                 })?;
                 names

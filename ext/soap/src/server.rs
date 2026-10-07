@@ -9,7 +9,7 @@ use std::sync::Arc;
 use php_ext::abi::{Instance, ObjectHandlers, Refusals, Std, This, Untyped, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
-use php_ext::coerce::{callable_checked, to_string, value_name};
+use php_ext::coerce::{callable_checked, value_name, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error,
 };
@@ -405,10 +405,7 @@ fn server_exception(
             .is_some_and(|s| s.send_errors != 0);
         let msg = if send {
             let m = php_ext::call::read_prop(req, &exception, b"message")?;
-            let s = to_string(req, &m)?;
-            let bytes = s.as_bytes().to_vec();
-            s.give_up(req);
-            bytes
+            with_string(req, &m, <[u8]>::to_vec)?
         } else {
             b"Internal Error".to_vec()
         };

@@ -6,7 +6,7 @@
 use php_ext::abi::{Callable, Instance, Passed, Path, Raw, Refusals, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, to_string};
+use php_ext::coerce::{callable_checked, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_chained, throw_error,
 };
@@ -337,14 +337,6 @@ fn operand_value(
     }
 }
 
-/// The bytes of `value`'s string form, the string given up.
-fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let text = to_string(req, value)?;
-    let bytes = text.as_bytes().to_vec();
-    text.give_up(req);
-    Ok(bytes)
-}
-
 /// Each operand converted, those converted given up where one throws.
 fn operand_values(
     req: &mut Request,
@@ -475,7 +467,7 @@ fn dispatch(
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
             ));
         }
-        _ => string_bytes(req, &answer).map(Returned::Str),
+        _ => with_string(req, &answer, <[u8]>::to_vec).map(Returned::Str),
     };
     answer.give_up(req);
     returned
@@ -658,7 +650,7 @@ fn collect(
         for (key, value) in &array {
             let name = match key {
                 Key::Str(s) => s.as_bytes().to_vec(),
-                Key::Int(_) => string_bytes(req, &value)?,
+                Key::Int(_) => with_string(req, &value, <[u8]>::to_vec)?,
             };
             if name.is_empty() || name.contains(&0) {
                 return Err(arg_value_error(

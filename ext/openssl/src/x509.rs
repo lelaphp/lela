@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use php_ext::abi::{Instance, OrFalse, Ref, Refusals, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -734,7 +735,7 @@ pub(crate) fn setup_verify(
     // `__toString`.
     let calist = calist.unwrap_or_else(PhpArray::empty);
     walk::foreach(req, calist, Hold::None, |req, row| -> walk::Step {
-        let text = crate::xp_ssl::string_of(req, &row.value().deref())?;
+        let text = with_string(req, row.value(), <[u8]>::to_vec)?;
         let Some(path) = check_path(req, &text, Origin::Item(arg, None), false) else {
             return Ok(ControlFlow::Continue(()));
         };

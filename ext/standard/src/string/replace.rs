@@ -6,14 +6,14 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{Raw, Ref, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::{coerce_param, to_long, to_string};
+use php_ext::coerce::{coerce_param, to_long, to_string, with_string};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, argument_error, arity, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
-use super::{long, lower, memnstr, str_copy, string_bytes};
+use super::{long, lower, memnstr};
 
 /// `str_replace(array|string $search, array|string $replace,
 /// string|array $subject, &$count = null): string|array`: each search
@@ -173,12 +173,12 @@ fn in_subject(
             // runs `__toString`. The replacement is read at the next bucket
             // of its table that holds one, as it stands at the step.
             let emptied = walk::foreach(req, *searches, Hold::None, |req, row| -> walk::Step {
-                let needle = string_bytes(req, &row.value().deref())?;
+                let needle = with_string(req, row.value(), <[u8]>::to_vec)?;
                 let with: Vec<u8> = match replace {
                     Union::A(all) => match all.live_from(replace_at) {
                         Some((found, _, value)) => {
                             replace_at = found.saturating_add(1);
-                            string_bytes(req, &value.deref())?
+                            with_string(req, &value, <[u8]>::to_vec)?
                         }
                         None => Vec::new(),
                     },
@@ -219,7 +219,7 @@ fn in_subject(
     }
     let value = match current {
         Some(bytes) => PhpString::new(req, &bytes)?,
-        None => str_copy(req, subject),
+        None => Owner::take(req, subject),
     };
     Ok((value, count))
 }
@@ -336,7 +336,7 @@ pub(super) fn strtr(
     }
     let n = from.len().min(to.len());
     if n == 0 {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let mut xlat: [u8; 256] = std::array::from_fn(|i| u8::try_from(i).unwrap_or(0));
     for (f, t) in from.as_bytes()[..n].iter().zip(&to.as_bytes()[..n]) {
@@ -344,7 +344,7 @@ pub(super) fn strtr(
     }
     let bytes = string.as_bytes();
     if bytes.iter().all(|c| xlat[usize::from(*c)] == *c) {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let out: Vec<u8> = bytes.iter().map(|c| xlat[usize::from(*c)]).collect();
     PhpString::new(req, &out)
@@ -366,7 +366,7 @@ fn strtr_array(
         .map(|(key, value)| (key, value.deref()))
         .collect();
     if entries.is_empty() {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let key_bytes = |key: &Key| -> Vec<u8> {
         match key {
@@ -377,14 +377,15 @@ fn strtr_array(
     if entries.len() == 1 {
         let (key, value) = &entries[0];
         let k = key_bytes(key);
-        let with = string_bytes(req, &value.deref())?;
-        if k.is_empty() {
+        let replaced = with_string(req, value, |with| {
+            (!k.is_empty()).then(|| replace_bytes(s, &k, with, true))
+        })?;
+        let Some((out, n)) = replaced else {
             docref(req, Level::Warning, "Ignoring replacement of empty string");
-            return Ok(str_copy(req, string));
-        }
-        let (out, n) = replace_bytes(s, &k, &with, true);
+            return Ok(Owner::take(req, string));
+        };
         if n == 0 {
-            return Ok(str_copy(req, string));
+            return Ok(Owner::take(req, string));
         }
         return PhpString::new(req, &out);
     }
@@ -404,7 +405,7 @@ fn strtr_array(
         patterns.push((k, *value));
     }
     if minlen > maxlen {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let mut out: Option<Vec<u8>> = None;
     let (mut pos, mut old_pos) = (0usize, 0usize);
@@ -413,10 +414,9 @@ fn strtr_array(
         while len >= minlen {
             let key = &s[pos..pos + len];
             if let Some((_, value)) = patterns.iter().find(|(k, _)| k.as_slice() == key) {
-                let with = string_bytes(req, &value.deref())?;
                 let buffer = out.get_or_insert_with(Vec::new);
                 buffer.extend_from_slice(&s[old_pos..pos]);
-                buffer.extend_from_slice(&with);
+                with_string(req, value, |with| buffer.extend_from_slice(with))?;
                 old_pos = pos + len;
                 pos = old_pos - 1;
                 break;
@@ -430,7 +430,7 @@ fn strtr_array(
             buffer.extend_from_slice(&s[old_pos..]);
             PhpString::new(req, &buffer)
         }
-        None => Ok(str_copy(req, string)),
+        None => Ok(Owner::take(req, string)),
     }
 }
 
@@ -526,21 +526,24 @@ pub(super) fn substr_replace(
             if f.saturating_add(l) > slen {
                 l = slen - f;
             }
-            let with: Vec<u8> = match replace {
-                Union::B(r) => r.as_bytes().to_vec(),
-                Union::A(array) => match array.iter().next() {
-                    Some((_, value)) => string_bytes(req, &value.deref())?,
-                    None => Vec::new(),
-                },
-            };
             let (f, l) = (
                 usize::try_from(f).unwrap_or(0),
                 usize::try_from(l).unwrap_or(0),
             );
-            let mut out = Vec::with_capacity(s.len() - l + with.len());
-            out.extend_from_slice(&s[..f]);
-            out.extend_from_slice(&with);
-            out.extend_from_slice(&s[f + l..]);
+            let splice = |with: &[u8]| {
+                let mut out = Vec::with_capacity(s.len() - l + with.len());
+                out.extend_from_slice(&s[..f]);
+                out.extend_from_slice(with);
+                out.extend_from_slice(&s[f + l..]);
+                out
+            };
+            let out = match replace {
+                Union::B(r) => splice(r.as_bytes()),
+                Union::A(array) => match array.iter().next() {
+                    Some((_, value)) => with_string(req, &value, splice)?,
+                    None => splice(b""),
+                },
+            };
             PhpString::new(req, &out).map(Union::B)
         }
         Union::A(strings) => {
@@ -560,7 +563,7 @@ pub(super) fn substr_replace(
             // strings taken: the argument holds them while `__toString`
             // runs.
             walk::foreach(req, strings, Hold::None, |req, row| -> walk::Step {
-                let s = string_bytes(req, &row.value().deref())?;
+                let s = with_string(req, row.value(), <[u8]>::to_vec)?;
                 let slen = long(s.len());
                 let clamp_from = |f: i64| {
                     if f < 0 {
@@ -590,21 +593,24 @@ pub(super) fn substr_replace(
                 if f.saturating_add(l) > slen {
                     l = slen - f;
                 }
-                let with: Vec<u8> = match replace {
-                    Union::A(all) => match next(all, &mut replace_at) {
-                        Some(value) => string_bytes(req, &value)?,
-                        None => Vec::new(),
-                    },
-                    Union::B(r) => r.as_bytes().to_vec(),
-                };
                 let (f, l) = (
                     usize::try_from(f).unwrap_or(0),
                     usize::try_from(l).unwrap_or(0),
                 );
-                let mut bytes = Vec::with_capacity(s.len() - l + with.len());
-                bytes.extend_from_slice(&s[..f]);
-                bytes.extend_from_slice(&with);
-                bytes.extend_from_slice(&s[f + l..]);
+                let splice = |with: &[u8]| {
+                    let mut bytes = Vec::with_capacity(s.len() - l + with.len());
+                    bytes.extend_from_slice(&s[..f]);
+                    bytes.extend_from_slice(with);
+                    bytes.extend_from_slice(&s[f + l..]);
+                    bytes
+                };
+                let bytes = match replace {
+                    Union::A(all) => match next(all, &mut replace_at) {
+                        Some(value) => with_string(req, &value, splice)?,
+                        None => splice(b""),
+                    },
+                    Union::B(r) => splice(r.as_bytes()),
+                };
                 let value = PhpString::new(req, &bytes)?.into_value();
                 let key = Owner::take(req, row.key().clone());
                 out.set(req, key, value)?;

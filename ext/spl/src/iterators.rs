@@ -22,7 +22,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{
     Function, Iter, call, call_method, instantiate, iterate, known_method, lookup_class, read_prop,
 };
-use php_ext::coerce::{coerce_param, to_string, truthy};
+use php_ext::coerce::{coerce_param, to_string, truthy, with_string};
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, arity, throw, throw_error, throwing_warnings,
@@ -2370,17 +2370,9 @@ impl RecursiveTreeIterator {
             req.release(key);
             return Ok(owner);
         }
-        let text = match to_string(req, &key) {
-            Ok(text) => text,
-            Err(thrown) => {
-                req.release(key);
-                return Err(thrown);
-            }
-        };
-        let bytes = text.as_bytes().to_vec();
-        text.give_up(req);
-        let text = bytes;
+        let text = with_string(req, &key, <[u8]>::to_vec);
         req.release(key);
+        let text = text?;
         let mut out = tree_prefix(req, this)?;
         out.extend(text);
         out.extend(postfix(req, this)?);
@@ -3839,11 +3831,7 @@ fn tree_entry(req: &mut Request, this: PhpObject) -> Result<Option<Vec<u8>>, Thr
     let entry = if bare.as_array().is_some() {
         Ok(b"Array".to_vec())
     } else {
-        to_string(req, &bare).map(|text| {
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            bytes
-        })
+        with_string(req, &bare, <[u8]>::to_vec)
     };
     req.release(data);
     entry.map(Some)

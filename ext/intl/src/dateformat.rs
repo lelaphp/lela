@@ -11,7 +11,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
-use php_ext::coerce::{BinaryOp, binary_op, numeric_string, to_long, to_string, value_name};
+use php_ext::coerce::{BinaryOp, binary_op, numeric_string, to_long, value_name, with_string};
 use php_ext::raising::{Thrown, argument_error, arity, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -777,14 +777,14 @@ fn format_styles(
             (date_style, time_style) = (style, style);
         }
         _ => {
-            let text = to_string(req, &format.deref())?;
-            if text.is_empty() {
-                text.give_up(req);
+            let made = with_string(req, &format, |text| {
+                (!text.is_empty()).then(|| c_string(text))
+            })?;
+            let Some(made) = made else {
                 error::set(req, Code::ILLEGAL_ARGUMENT, "the format is empty")?;
                 return Ok(None);
-            }
-            pattern = Some(c_string(text.as_bytes()));
-            text.give_up(req);
+            };
+            pattern = Some(made);
         }
     }
     if time_style != -1 {

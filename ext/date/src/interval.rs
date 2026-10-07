@@ -5,7 +5,7 @@
 use php_ext::abi::{Instance, OrFalse, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::coerce::{to_double, to_long, to_string};
+use php_ext::coerce::{to_double, to_long, with_string};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -223,9 +223,7 @@ fn scalar(value: &Value) -> bool {
 
 /// `DATE_A64I` over the value's string: `strtoll`'s leading number.
 fn a64i(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
-    let s = to_string(req, value)?;
-    let text = String::from_utf8_lossy(s.as_bytes()).into_owned();
-    s.give_up(req);
+    let text = with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())?;
     let t = text.trim_start();
     let (sign, digits) = match t.as_bytes().first() {
         Some(b'-') => (-1i64, &t[1..]),

@@ -7,7 +7,7 @@
 //! back for the call to carry out.
 
 use php_ext::call::call;
-use php_ext::coerce::{to_string, value_name};
+use php_ext::coerce::{value_name, with_string};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
@@ -128,10 +128,7 @@ fn result(
             call.return_double(f);
             Ok(())
         }
-        _ => to_string(req, &returned.deref()).map(|text| {
-            call.return_text(text.as_bytes());
-            text.give_up(req);
-        }),
+        _ => with_string(req, &returned, |text| call.return_text(text)),
     };
     returned.give_up(req);
     answered

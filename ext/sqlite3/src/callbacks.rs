@@ -6,7 +6,7 @@
 //! authorizer's errors raise, which `enableExceptions` chooses.
 
 use php_ext::call::call;
-use php_ext::coerce::to_string;
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString, Value, ValueRef};
@@ -83,10 +83,7 @@ fn answer(
             call.return_double(f);
             Ok(())
         }
-        _ => to_string(req, &returned.deref()).map(|text| {
-            call.return_text(text.as_bytes());
-            text.give_up(req);
-        }),
+        _ => with_string(req, &returned, |text| call.return_text(text)),
     };
     returned.give_up(req);
     answered
