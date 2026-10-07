@@ -50,7 +50,7 @@ fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
     {
         return cell.set(req, value);
     }
-    req.set_caller_var(name, value.hand_on_unmigrated());
+    req.set_caller_var(name, value);
     Ok(())
 }
 
@@ -295,8 +295,8 @@ fn extracted_refs(
     let walked = walk::foreach(req, table, Hold::None, |req, row| {
         if let Some(target) = target(req, kind, prefix, row.key())? {
             let cell = row.make_ref(req)?;
-            req.addref(&cell.as_value());
-            req.set_caller_var(&target, cell.as_value());
+            let cell = Owner::take(req, cell.as_value());
+            req.set_caller_var(&target, cell);
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))

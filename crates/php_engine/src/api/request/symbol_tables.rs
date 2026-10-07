@@ -514,6 +514,29 @@ impl Request {
         held
     }
 
+    /// One symbol written, `zend_hash_update_ind`: into the CV a frame
+    /// attached to the name where one is, and as
+    /// [`Request::symbol_update`] writes it otherwise; `value` is the
+    /// table's, and what stood there is released after the write.
+    pub(super) fn symbol_update_ind(&mut self, table: TableId, name: &[u8], value: Value) {
+        let attached = self.table_mut(table).and_then(|entries| {
+            entries
+                .iter()
+                .find(|(key, _)| key == name)
+                .and_then(|(_, symbol)| match symbol {
+                    Symbol::Indirect(frame, at) => Some((*frame, *at)),
+                    Symbol::Value(_) | Symbol::Held(_) => None,
+                })
+        });
+        match attached {
+            Some((frame, at)) => {
+                let previous = self.set_attached(table, frame, at, value);
+                self.release(previous);
+            }
+            None => self.symbol_update(table, name.to_vec(), value),
+        }
+    }
+
     /// `value` into an attached name's CV, what it held handed back.
     pub(crate) fn set_attached(
         &mut self,

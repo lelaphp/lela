@@ -446,7 +446,7 @@ fn bind_vars(req: &mut Request, vars: Owner<Value>) -> Result<(), Thrown> {
     let vars = PhpRef::new(req, vars)?;
     let kept = Owner::take(req, *vars).hand_on_unmigrated();
     req.state::<State>().vars = Some(kept);
-    req.set_global(b"_SESSION", Some(vars.into_value().hand_on_unmigrated()));
+    req.set_global(b"_SESSION", Some(vars.into_value()));
     Ok(())
 }
 

@@ -18,7 +18,7 @@ use php_compile::SourceKind;
 
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::Request;
-use crate::api::values::Value;
+use crate::api::values::{Owner, PhpString, Value};
 use crate::engine::{Engine, Observables, OutputSink, RequestDescription};
 
 /// What the CLI's command line serves where no program is, php's
@@ -119,12 +119,13 @@ impl Engine {
                 break;
             };
             let line = argn(line);
-            let Ok(line) = req.string(&line) else {
+            let Ok(line) = PhpString::new(req, &line) else {
                 return;
             };
             index += 1;
-            req.set_global(b"argn", Some(Value::string(line)));
-            req.set_global(b"argi", Some(Value::int(index)));
+            req.set_global(b"argn", Some(line.into_value()));
+            let index = Owner::take(req, Value::int(index));
+            req.set_global(b"argi", Some(index));
             let goes_on = match each {
                 Some(EachLine::Code(code)) => eval_string(req, code, b"Command line run code"),
                 Some(EachLine::File) => {

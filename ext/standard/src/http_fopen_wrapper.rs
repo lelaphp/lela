@@ -184,8 +184,7 @@ pub(crate) fn url_wrap_http(
     };
     let opened = wrap_http_ex(req, &mut chain, path, PHP_URL_REDIRECT_MAX, Hop::First);
     if let Some(headers) = chain.headers {
-        let value = Value::array(headers);
-        req.addref(&value);
+        let value = Owner::take(req, Value::array(headers));
         req.state::<State>().last_http_headers = Some(headers);
         req.set_local_var(b"http_response_header", value);
     }
