@@ -6,8 +6,8 @@
 //! php prints a method by. The area holds no state of its own: it reads
 //! the engine's linked classes and the classes the request declared.
 
+use php_link::{LinkedClass, Row};
 use php_unit::decl::{ClassKind, MethodDecl, Visibility};
-use php_unit::link::{LinkedClass, Row};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;

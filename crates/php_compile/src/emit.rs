@@ -6341,7 +6341,7 @@ impl Emit<'_> {
     /// `zend_verify_hooked_property` where `zend_compile_property_hooks`
     /// makes it, over a hooked property of a class that names no
     /// parent; a class that does is held to it by its link, once what
-    /// it inherits is known ([`php_unit::link::verify_hooked_property`]).
+    /// it inherits is known ([`php_link::verify_hooked_property`]).
     ///
     /// ```php
     /// class Test { public $prop = 0 { get {} set {} } }
@@ -6357,7 +6357,7 @@ impl Emit<'_> {
         if decl.parent.is_some() {
             return Ok(());
         }
-        match php_unit::link::verify_hooked_property(&decl.name.0, property) {
+        match php_link::verify_hooked_property(&decl.name.0, property) {
             Some(refusal) => Err(self.compile_error(refusal.to_string())),
             None => Ok(()),
         }
@@ -6657,7 +6657,7 @@ impl Emit<'_> {
     /// `zend_try_early_bind`: the class at `at` linked against what
     /// `CG(class_table)` holds while the file compiles, the engine's
     /// classes and the file's own bound so far, by the checks
-    /// `zend_inheritance.c` makes ([`php_unit::link`]). A refusal is
+    /// `zend_inheritance.c` makes ([`php_link`]). A refusal is
     /// php's `E_COMPILE_ERROR` while the file compiles, so nothing of it
     /// runs; a check that needs a class not bound yet leaves the class to
     /// its `DECLARE_CLASS` (false), linked where it was written; and the
@@ -6842,7 +6842,7 @@ impl Emit<'_> {
             return Ok(false);
         };
         let lookup = |name: &[u8]| {
-            self.bound_class(name).map(|decl| php_unit::link::Held {
+            self.bound_class(name).map(|decl| php_link::Held {
                 decl,
                 bodies: None,
                 linked: true,
@@ -6851,7 +6851,7 @@ impl Emit<'_> {
         };
         // A class that uses traits is never bound early, so nothing
         // here composes one, and no value is evaluated.
-        let linking = php_unit::link::link(child, &lookup, &|()| None, &|_| None);
+        let linking = php_link::link(child, &lookup, &|()| None, &|_| None);
         // `zend_can_early_bind`'s `INHERITANCE_UNRESOLVED`, silent: the
         // class is left to its opline.
         if !linking.obligations.is_empty() {
@@ -6865,8 +6865,8 @@ impl Emit<'_> {
             });
         }
         match linking.outcome {
-            php_unit::link::Linked::Linked => Ok(true),
-            php_unit::link::Linked::Refused(refused) => Err(CompileError {
+            php_link::Linked::Linked => Ok(true),
+            php_link::Linked::Refused(refused) => Err(CompileError {
                 level: refused.refusal.level(),
                 message: refused.refusal.to_string(),
                 line: refused.site.line,

@@ -24,6 +24,7 @@ test = []
 php_compile = { path = "../php_compile" }
 php_heap = { path = "../php_heap" }
 php_unit = { path = "../php_unit" }
+php_link = { path = "../php_link" }
 php_macros = { path = "../php_macros" }
 php_process = { path = "../php_process" }
 

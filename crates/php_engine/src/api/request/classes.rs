@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use php_heap::{FrameRef, Heap};
+use php_link::LinkedClass;
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
-use php_unit::link::LinkedClass;
 use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::call::Function;
@@ -431,7 +431,7 @@ impl Request {
         &mut self,
         unit: &Arc<Unit>,
         at: u32,
-        composed: Option<php_unit::link::Composed>,
+        composed: Option<php_link::Composed>,
         record: Option<LinkedClass<ClassId>>,
     ) {
         let Some(class) = ClassId::local(self.own_classes.len()) else {
@@ -816,7 +816,7 @@ impl Request {
     /// `E_COMPILE_ERROR` though the program is running, which is also
     /// what the same opline running a second time meets; then
     /// `zend_do_link_class`, the one link the early bind makes too
-    /// (`php_unit::link::link`), with the parent fetched first, then
+    /// (`php_link::link`), with the parent fetched first, then
     /// each trait, then each interface, all of them before any is
     /// checked, which is the order php's messages come in. A name
     /// nothing declares, once autoloading has been asked, is php's
@@ -885,7 +885,7 @@ impl Request {
     /// constant, property or method is found by walking `parent` from
     /// the declaration, so what this adds is the class's own row and its
     /// methods. One that uses traits is the class composed with them
-    /// ([`php_unit::link::Composed`]), which stands in the table in its
+    /// ([`php_link::Composed`]), which stands in the table in its
     /// place.
     ///
     /// The bind stands where the class was written, so what it refuses
@@ -906,7 +906,7 @@ impl Request {
     /// ```
     ///
     /// Then the class is linked (`zend_do_link_class`) by the checks
-    /// `zend_inheritance.c` makes, [`php_unit::link`], which the early
+    /// `zend_inheritance.c` makes, [`php_link`], which the early
     /// bind runs too: a class implementing an interface is never early
     /// bound, so what linking refuses about one is refused here, after
     /// what the file printed, at the site php names, and a deprecation
@@ -1189,7 +1189,7 @@ impl Request {
     /// `zend_do_link_class` over the class at `at` of `unit`, whose
     /// parent, traits and interfaces the table already holds: the link
     /// both the early bind and a `DECLARE_CLASS` make
-    /// (`php_unit::link::link`), its diagnostics raised at their sites,
+    /// (`php_link::link`), its diagnostics raised at their sites,
     /// a refusal the end of the request at its level, and the linked
     /// class bound. A link that needs a class the table does not hold
     /// yet is php's `INHERITANCE_UNRESOLVED`: under `early`, the answer
@@ -1278,18 +1278,18 @@ impl Request {
 
     /// A class as the link reads the table: its declaration, and the
     /// bodies of its methods where it was composed with traits.
-    pub(super) fn held_class(&self, name: &[u8]) -> Option<php_unit::link::Held<'_, ClassId>> {
+    pub(super) fn held_class(&self, name: &[u8]) -> Option<php_link::Held<'_, ClassId>> {
         self.held_as(self.class_named(name)?)
     }
 
     /// [`Request::held_class`] of the class `class` names.
-    fn held_as(&self, class: ClassId) -> Option<php_unit::link::Held<'_, ClassId>> {
+    fn held_as(&self, class: ClassId) -> Option<php_link::Held<'_, ClassId>> {
         let decl = self.class_decl(class)?;
         let bodies = self
             .declared_row(class)
             .and_then(|declared| declared.composed.as_ref())
             .map(|composed| composed.bodies.as_slice());
-        Some(php_unit::link::Held {
+        Some(php_link::Held {
             decl,
             bodies,
             linked: true,
@@ -1321,7 +1321,7 @@ impl Request {
             .map_or(0, |composed| composed.abstracts);
         let lookup = |name: &[u8]| self.held_as(named(name)?);
         let holder = |holder: ClassId| self.class_decl(holder);
-        php_unit::link::linked_class(
+        php_link::linked_class(
             decl,
             usize::try_from(abstracts).unwrap_or(usize::MAX),
             &lookup,
@@ -1873,7 +1873,7 @@ fn dynamic_flags(unit: &Unit, at: u32) -> crate::attributes::Flags {
 /// declaration: what it is and its own name, and its site when it was a
 /// user class.
 fn redeclaration(earlier: &ClassDecl) -> String {
-    let what = php_unit::link::object_type(earlier.kind);
+    let what = php_link::object_type(earlier.kind);
     let name = String::from_utf8_lossy(&earlier.name.0);
     if earlier.file.0.is_empty() {
         return format!("Cannot redeclare {what} {name}");

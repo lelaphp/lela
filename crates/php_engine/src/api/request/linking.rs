@@ -11,7 +11,7 @@
 //! whose parent or interface is nearly linked settling that one's
 //! first. Every other lookup finds neither.
 //!
-//! The obligations are not held: [`php_unit::link::link`] reads the
+//! The obligations are not held: [`php_link::link`] reads the
 //! table as it stands, and adding classes to it only settles what was
 //! unresolved, so linking the class again when its obligations are due
 //! leaves the same checks, now settled, in the same order, with the
@@ -22,10 +22,10 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
+use php_link::{Composed, Held, Linked, Linking, Obligation, Refused};
 use php_unit::Level;
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, ClassKind, ConstExpr, Name};
-use php_unit::link::{Composed, Held, Linked, Linking, Obligation, Refused};
 
 use super::Request;
 use crate::api::raising::Thrown;
@@ -190,7 +190,7 @@ impl Request {
         crate::api::raising::fatal(self, &format!("{prefix}: Uncaught {rendered}"))
     }
 
-    /// [`php_unit::link::link`] of `decl` over the table as a variance
+    /// [`php_link::link`] of `decl` over the table as a variance
     /// check reads it: the linked classes and those whose link is under
     /// way, a class still fetching marked as read.
     pub(super) fn link_against_table(&mut self, decl: &ClassDecl) -> Linking<ClassId> {
@@ -245,7 +245,7 @@ impl Request {
                     .find(|(written, _)| written == expr)
                     .map(|(_, value)| value.clone())
             };
-            php_unit::link::link(decl, &lookup, &holder, &evaluated)
+            php_link::link(decl, &lookup, &holder, &evaluated)
         };
         let read = read.into_inner();
         let reading = Read {
