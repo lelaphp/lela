@@ -5111,7 +5111,12 @@ fn promoted(stayed: Option<i64>, overflowed: f64) -> Value {
 /// ```
 fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut union = left.copy(req)?;
-    for (key, value) in right.snapshot_refs() {
+    // `zend_hash_merge(result, op2, zval_add_ref, 0)`, which writes only keys
+    // the union lacks and so releases nothing and runs no code of the
+    // program: the right operand's rows read under the borrowed request,
+    // then written.
+    let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(req, right).collect();
+    for (key, value) in rows {
         if !union.contains(&key) {
             req.addref(&value);
             if let Key::Str(name) = key {

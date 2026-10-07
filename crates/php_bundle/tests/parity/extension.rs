@@ -258,7 +258,11 @@ fn array_keys(
     #[php(default = false)] strict: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (key, value) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL`, no owner of the table taken: the argument
+    // holds it while `loose_eq` serves `__toString`.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = *row.value();
         let keep = match &filter_value {
             Passed::Omitted => true,
             Passed::Given(filter) => {
@@ -268,13 +272,7 @@ fn array_keys(
                 } else {
                     loose_eq(req, filter, &value)
                 };
-                match same {
-                    Ok(same) => same,
-                    Err(thrown) => {
-                        out.give_up(req);
-                        return Err(thrown);
-                    }
-                }
+                same?
             }
         };
         if keep {
@@ -288,6 +286,11 @@ fn array_keys(
             };
             out.append(req, key)?;
         }
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }

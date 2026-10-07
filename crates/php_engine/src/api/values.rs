@@ -728,18 +728,6 @@ impl PhpArray {
         self.0.value_ref(key.heap()).map(Place)
     }
 
-    /// The elements in order, references followed, views of them.
-    #[must_use]
-    pub fn snapshot(&self) -> Vec<(Key, Value)> {
-        self.iter().map(|(k, v)| (k, v.deref())).collect()
-    }
-
-    /// The elements in order, references kept as references.
-    #[must_use]
-    pub fn snapshot_refs(&self) -> Vec<(Key, Value)> {
-        self.iter().collect()
-    }
-
     /// `zend_hash_sort` after `SEPARATE_ARRAY`, what every sort native
     /// of `array.c` calls: the elements ordered in place by `compare`
     /// with php's hybrid, [`zend_sort`], the internal pointer reset, and

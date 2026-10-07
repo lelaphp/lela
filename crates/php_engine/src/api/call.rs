@@ -2990,7 +2990,11 @@ fn add_unpacked_element(
             "Only arrays can be unpacked in constant expression",
         ));
     };
-    for (key, value) in source.snapshot_refs() {
+    // `zend_ast_add_unpacked_element`'s walk, which no code of the program
+    // reaches: the constant array's rows read under the borrowed request,
+    // then written.
+    let rows: Vec<(Key, Value)> = walk::rows(req, source).collect();
+    for (key, value) in rows {
         req.addref(&value);
         match key {
             Key::Str(name) => {

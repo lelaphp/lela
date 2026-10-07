@@ -1008,12 +1008,16 @@ fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool,
     crate::api::raising::call_stack_end(req)?;
     array.protect();
     let mut acyclic = Ok(true);
-    for (_, v) in array.snapshot() {
-        if let Some(nested) = v.as_array() {
-            acyclic = constant_array_is_acyclic(req, *nested);
-            if !matches!(acyclic, Ok(true)) {
-                break;
-            }
+    // The nested arrays read under the borrowed request: the walk runs no
+    // code of the program, and the array, being a constant's value, is
+    // held by what defines it.
+    let nested: Vec<PhpArray> = walk::rows(req, array)
+        .filter_map(|(_, v)| v.deref().as_array().copied())
+        .collect();
+    for nested in nested {
+        acyclic = constant_array_is_acyclic(req, nested);
+        if !matches!(acyclic, Ok(true)) {
+            break;
         }
     }
     array.unprotect();
@@ -1027,7 +1031,12 @@ fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool,
 fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     crate::api::raising::call_stack_end(req)?;
     let mut copy = PhpArray::new(req)?;
-    for (key, value) in array.snapshot() {
+    // Read under the borrowed request, as the check before it reads them:
+    // the copy runs no code of the program.
+    let rows: Vec<(Key, Value)> = walk::rows(req, array)
+        .map(|(key, value)| (key, value.deref()))
+        .collect();
+    for (key, value) in rows {
         let value = if let Some(nested) = value.as_array()
             && value.is_refcounted()
         {
