@@ -126,20 +126,22 @@ fn replace_common(
     let result = match subject {
         Union::A(subjects) => {
             let mut out = PhpArray::new(req)?;
-            for (key, entry) in subjects.snapshot() {
-                let subject = match to_string(req, &entry.deref()) {
-                    Ok(subject) => subject,
-                    Err(thrown) => {
-                        out.give_up(req);
-                        return Err(thrown);
-                    }
-                };
+            // `ZEND_HASH_FOREACH_KEY_VAL(subject_ht, num_key, string_key,
+            // subject_entry)` (`Z/ext/standard/string.c:4501`), no owner of the
+            // table taken: the argument holds it while `__toString` runs.
+            let walked = walk::foreach(req, subjects, Hold::None, |req, row| -> walk::Step {
+                let subject = to_string(req, &row.value().deref())?;
                 let replaced = in_subject(req, &search, &replace, *subject, case_sensitive);
                 subject.give_up(req);
                 let (value, n) = replaced?;
                 count += n;
-                let key = owned_key(req, &key);
+                let key = owned_key(req, row.key());
                 out.set(req, key, Value::string(value.hand_on_unmigrated()))?;
+                Ok(ControlFlow::Continue(()))
+            });
+            if let Err(thrown) = walked {
+                out.give_up(req);
+                return Err(thrown);
             }
             Union::A(out)
         }

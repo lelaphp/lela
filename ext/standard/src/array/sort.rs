@@ -963,9 +963,13 @@ fn multisort(
     size: usize,
 ) -> Result<(), Thrown> {
     use php_ext::values::zend_sort;
+    // php copies each array's buckets into `indirect`, `indirect[k][i] = *p`
+    // (`Z/ext/standard/array.c:6205`), taking no owner, and sorts the
+    // rows under the comparison: the rows read under the borrowed request,
+    // views the arrays keep.
     let columns: Vec<Vec<(Key, Value)>> = arrays
         .iter()
-        .map(|(array, _)| array.snapshot_refs())
+        .map(|(array, _)| walk::rows(req, *array).collect())
         .collect();
     let mut rows: Vec<usize> = (0..size).collect();
     let mut pending: Option<Thrown> = None;

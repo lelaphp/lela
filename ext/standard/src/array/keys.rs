@@ -7,6 +7,7 @@
 //! sum or multiply what they are given.
 
 use std::cmp::Ordering;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, Passed, PropertyRead, PropertyTest, Raw, Union, Untyped};
 use php_ext::attr::php_function;
@@ -18,10 +19,11 @@ use php_ext::raising::{
     throw_error, warning,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 use super::sort::key_value;
-use super::{copied, key_copy, returned};
+use super::{copied, key_copy, returned, row_copied};
 
 /// The comparison a search makes: `fast_is_identical_function` under
 /// `$strict`, `fast_equal_check_function` otherwise, the element's
@@ -379,10 +381,13 @@ fn array_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, T
         return Ok(Owner::take(req, array));
     }
     let mut out = PhpArray::new(req)?;
-    for (_, element) in array.snapshot_refs() {
-        let value = copied(req, element);
+    // `zend_array_to_list`'s `ZEND_HASH_FOREACH_VAL` (`Z/Zend/zend_hash.c:2543`),
+    // no owner of the table taken: the argument holds it.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let value = row_copied(req, row);
         out.append(req, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 
@@ -411,7 +416,11 @@ fn array_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, T
 #[php_function]
 fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (_, element) in array.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_VAL(myht, entry)` (`Z/ext/standard/array.c:4609`),
+    // no owner of the table taken: the argument holds it while the warning
+    // reaches the program.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let element = *row.value();
         let element = element.deref();
         let key = match element.as_ref() {
             ValueRef::Int(n) => Key::Int(n),
@@ -425,12 +434,13 @@ fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArr
                     Level::Warning,
                     "Can only count string and integer values, entry skipped",
                 );
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
         };
         let count = out.get(&key).and_then(|v| v.as_int()).unwrap_or(0);
         out.set(req, key, Value::int(count + 1))?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 
@@ -472,7 +482,12 @@ fn symtable_key(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
 #[php_function]
 fn array_flip(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (key, element) in array.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(array), …)`
+    // (`Z/ext/standard/array.c:4890`), no owner of the table taken: the
+    // argument holds it while the warning reaches the program.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let element = *row.value();
         let element = element.deref();
         if !matches!(element.as_ref(), ValueRef::Int(_) | ValueRef::Str(_)) {
             docref(
@@ -480,13 +495,14 @@ fn array_flip(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thr
                 Level::Warning,
                 "Can only flip string and integer values, entry skipped",
             );
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         let data = key_value(&key);
         req.addref(&data);
         let new_key = symtable_key(req, &element)?;
         out.set(req, new_key, data)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 
@@ -523,7 +539,11 @@ fn array_change_key_case(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let upper = case != 0;
     let mut out = PhpArray::new(req)?;
-    for (key, element) in array.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(array), …)`
+    // (`Z/ext/standard/array.c:4930`), no owner of the table taken: the
+    // argument holds it.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
         let key = match key {
             Key::Int(n) => Key::Int(n),
             Key::Str(s) => {
@@ -541,9 +561,10 @@ fn array_change_key_case(
                 Key::Str(PhpString::new(req, &folded)?.hand_on_unmigrated())
             }
         };
-        let value = copied(req, element);
+        let value = row_copied(req, row);
         out.set(req, key, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 
@@ -657,12 +678,17 @@ fn array_fill_keys(
     value: Value,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (_, element) in keys.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(keys), entry)`
+    // (`Z/ext/standard/array.c:2831`), no owner of the table taken: the
+    // argument holds it while a key's `__toString` runs.
+    walk::foreach(req, keys, Hold::None, |req, row| -> walk::Step {
+        let element = *row.value();
         let element = element.deref();
         let key = symtable_key(req, &element)?;
         req.addref(&value);
         out.set(req, key, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 
@@ -736,7 +762,12 @@ fn array_pad(
     if size < 0 {
         fill(req, &mut out)?;
     }
-    for (key, element) in input.snapshot_refs() {
+    // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(input), key, value)`
+    // (`Z/ext/standard/array.c:4859`), no owner of the table taken: the
+    // argument holds it.
+    walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let element = *row.value();
         req.addref(&element);
         match key {
             Key::Str(_) => {
@@ -745,7 +776,8 @@ fn array_pad(
             }
             Key::Int(_) => out.append(req, element)?,
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     if size > 0 {
         fill(req, &mut out)?;
     }
@@ -789,8 +821,14 @@ fn array_reverse(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let (input, preserve) = (array, preserve_keys);
     let mut out = PhpArray::new(req)?;
-    for (key, element) in input.snapshot_refs().into_iter().rev() {
-        let value = copied(req, element);
+    // `ZEND_HASH_REVERSE_FOREACH_KEY_VAL(Z_ARRVAL_P(input), …)`
+    // (`Z/ext/standard/array.c:4771`), which no code of the program
+    // reaches: the rows read under the borrowed request, each taken as
+    // `zval_add_ref` takes it, then written last to first.
+    let rows: Vec<(Key, Value)> = walk::rows(req, input)
+        .map(|(key, element)| (key, copied(req, element)))
+        .collect();
+    for (key, value) in rows.into_iter().rev() {
         match key {
             Key::Int(_) if !preserve => out.append(req, value)?,
             _ => {
@@ -857,12 +895,18 @@ fn array_chunk(
     let mut out = PhpArray::new(req)?;
     let mut chunk: Option<Owner<PhpArray>> = None;
     let mut current = 0;
-    for (key, element) in input.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(input), …)`
+    // (`Z/ext/standard/array.c:7079`), which no code of the program
+    // reaches: the rows read under the borrowed request, each taken as
+    // `zval_add_ref` takes it, then written into their chunks.
+    let rows: Vec<(Key, Value)> = walk::rows(req, input)
+        .map(|(key, element)| (key, copied(req, element)))
+        .collect();
+    for (key, value) in rows {
         let mut open = match chunk {
             Some(open) => open,
             None => PhpArray::new(req)?,
         };
-        let value = copied(req, element);
         if preserve {
             let key = key_copy(req, &key);
             open.set(req, key, value)?;
@@ -924,11 +968,21 @@ fn array_combine(
         return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
-    for ((_, key), (_, value)) in keys.snapshot_refs().into_iter().zip(values.snapshot_refs()) {
-        let key = symtable_key(req, &key)?;
+    let mut value_at = 0;
+    // `ZEND_HASH_FOREACH_VAL(keys, entry_keys)` (`Z/ext/standard/array.c:7139`),
+    // no owner of either table taken: the arguments hold them while a key's
+    // `__toString` runs. Each value is read at the next bucket of `values`
+    // that holds one, as it stands at the step.
+    walk::foreach(req, keys, Hold::None, |req, row| -> walk::Step {
+        let Some((found, _, value)) = values.live_from(value_at) else {
+            return Ok(ControlFlow::Break(()));
+        };
+        value_at = found.saturating_add(1);
+        let key = symtable_key(req, row.value())?;
         let value = copied(req, value);
         out.set(req, key, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 
@@ -1134,30 +1188,23 @@ fn array_column(
     let column = column_key.map(column_of);
     let index = index_key.map(column_of);
     let mut out = PhpArray::new(req)?;
-    for (_, row) in input.snapshot_refs() {
-        let row = row.deref();
+    // `ZEND_HASH_FOREACH_VAL(input, data)` (`Z/ext/standard/array.c:4705`),
+    // no owner of the table taken: the argument holds it while a property
+    // read serves `__get`. A throwable gives the array built so far up.
+    let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
+        let row = row.value().deref();
         let value = match &column {
             None => {
                 req.addref(&row);
                 row
             }
-            Some(name) => match fetch(req, &row, name) {
-                Ok(Some(value)) => value,
-                Ok(None) => continue,
-                Err(thrown) => {
-                    out.give_up(req);
-                    return Err(thrown);
-                }
+            Some(name) => match fetch(req, &row, name)? {
+                Some(value) => value,
+                None => return Ok(ControlFlow::Continue(())),
             },
         };
         let key = match &index {
-            Some(name) => match fetch(req, &row, name) {
-                Ok(key) => key,
-                Err(thrown) => {
-                    out.give_up(req);
-                    return Err(thrown);
-                }
-            },
+            Some(name) => fetch(req, &row, name)?,
             None => None,
         };
         match key {
@@ -1169,13 +1216,17 @@ fn array_column(
                     Ok(key) => out.set(req, key.hand_on_unmigrated(), value)?,
                     Err(thrown) => {
                         req.release(value);
-                        out.give_up(req);
                         return Err(thrown);
                     }
                 }
             }
             None => out.append(req, value)?,
         }
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }
@@ -1306,8 +1357,16 @@ fn binop(
     name: &str,
     initial: i64,
 ) -> Result<Owner<Value>, Thrown> {
-    let mut total = Owner::take(req, Value::int(initial));
-    for (_, element) in input.snapshot_refs() {
+    let mut total = Some(Owner::take(req, Value::int(initial)));
+    // `ZEND_HASH_FOREACH_VAL(input, entry)` (`Z/ext/standard/array.c:6457`),
+    // no owner of the table taken: the argument holds it while an object's
+    // `cast_object` and a warning's handler run. The running total is the
+    // body's to take and give back.
+    let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
+        let Some(mut acc) = total.take() else {
+            return Ok(ControlFlow::Break(()));
+        };
+        let element = *row.value();
         let element = element.deref();
         let operand = match element.as_ref() {
             ValueRef::Array(_) | ValueRef::Object(_) => {
@@ -1318,15 +1377,16 @@ fn binop(
                     let number = match handlers.cast_object(req, object, TypeTag::Number) {
                         Ok(number) => number,
                         Err(thrown) => {
-                            total.give_up(req);
+                            acc.give_up(req);
                             return Err(thrown);
                         }
                     };
                     if let Some(number) =
                         number.filter(|n| n.as_int().is_some() || n.as_float().is_some())
                     {
-                        total = step(req, op, total, &number)?;
-                        continue;
+                        acc = step(req, op, acc, &number)?;
+                        total = Some(acc);
+                        return Ok(ControlFlow::Continue(()));
                     }
                 }
                 let type_name = match element.as_object() {
@@ -1341,7 +1401,8 @@ fn binop(
                     Level::Warning,
                     &format!("{name} is not supported on type {type_name}"),
                 );
-                continue;
+                total = Some(acc);
+                return Ok(ControlFlow::Continue(()));
             }
             ValueRef::Resource(resource) => {
                 let id = resource.id();
@@ -1359,13 +1420,14 @@ fn binop(
                         warning(req, "A non-numeric value encountered");
                         number
                     } else {
-                        total = step(req, op, total, &Value::int(0))?;
+                        acc = step(req, op, acc, &Value::int(0))?;
                         docref(
                             req,
                             Level::Warning,
                             &format!("{name} is not supported on type string"),
                         );
-                        continue;
+                        total = Some(acc);
+                        return Ok(ControlFlow::Continue(()));
                     }
                 }
             },
@@ -1373,9 +1435,20 @@ fn binop(
             ValueRef::Bool(b) => Value::int(i64::from(b)),
             _ => element,
         };
-        total = step(req, op, total, &operand)?;
+        acc = step(req, op, acc, &operand)?;
+        total = Some(acc);
+        Ok(ControlFlow::Continue(()))
+    });
+    match (walked, total) {
+        (Ok(_), Some(total)) => Ok(total),
+        (Ok(_), None) => Ok(Owner::take(req, Value::int(initial))),
+        (Err(thrown), total) => {
+            if let Some(total) = total {
+                total.give_up(req);
+            }
+            Err(thrown)
+        }
     }
-    Ok(total)
 }
 
 /// The number a leading-numeric string starts with, `"5abc"`'s 5: what
