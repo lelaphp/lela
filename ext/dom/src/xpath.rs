@@ -692,7 +692,13 @@ fn register_into(
         .map(|v| v.deref())
         .filter(|v| !matches!(v.as_ref(), ValueRef::Null));
     let Some(restrict) = restrict else {
-        *mode = Mode::All;
+        // The set the mode held is let go of with the mode (#2128 is
+        // php's table that outlives it).
+        if let Mode::Set(functions) = std::mem::replace(mode, Mode::All) {
+            for (_, _, value) in functions {
+                req.release(value);
+            }
+        }
         return Ok(());
     };
     let mut adding = Vec::new();

@@ -82,3 +82,19 @@ fn an_xpath_callback_given_up_where_its_conversion_or_registration_fails() {
         "Array to string conversion\nTypeError\n",
     );
 }
+
+/// `registerPhpFunctions()` with no argument after a set lets go of the
+/// callbacks the set held (`ext/dom/tests/DOMXPath_callables.phpt`).
+#[test]
+fn registering_every_function_lets_go_of_the_set() {
+    served(
+        r#"<?php
+$doc = new DOMDocument(); $doc->loadXML('<a href="x">hello</a>');
+$xpath = new DOMXPath($doc);
+$xpath->registerPhpFunctions(["f" => fn($s) => $s]);
+$xpath->registerPhpFunctions(null);
+echo "end\n";
+"#,
+        "end\n",
+    );
+}
