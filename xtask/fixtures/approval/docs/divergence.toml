@@ -1,0 +1,5 @@
+# The divergence registry of the approval fixture (#2247).
+[[divergence]]
+id = "fixture-1"
+status = "open"
+reason = ""

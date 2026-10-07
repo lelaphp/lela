@@ -2,12 +2,14 @@
 //! file relative to the workspace, the workspace whose manifest judges the
 //! call, and the checkout that workspace is in.
 
+use std::cell::OnceCell;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use super::approval::{Approvals, Asked, Evidence};
 use crate::{git, manifest};
 
 /// One intended call, as the hook receives it on stdin. `cwd` places
@@ -15,7 +17,7 @@ use crate::{git, manifest};
 /// carries so denials count per session (§10 rule 6); the other keys of
 /// the recorded shape (`permission_mode`, …) are carried by the JSON and
 /// not read.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Call {
     pub tool_name: String,
     #[serde(default)]
@@ -34,6 +36,24 @@ pub struct Call {
     /// carries it, since a call at the hook displaces what is at the path.
     #[serde(skip)]
     pub(super) displaced: Option<String>,
+    /// The session's transcript, where Claude Code writes the person's
+    /// answers ([`super::approval`]); the hook's, which in a subagent is
+    /// the main session's.
+    #[serde(default)]
+    pub transcript_path: Option<String>,
+    /// The subagent the call runs in, absent on the main loop.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// The answered `AskUserQuestion` calls the function hook read from
+    /// the engine, read only by that adapter ([`Evidence`]).
+    #[serde(default)]
+    pub(super) asked: Option<Vec<Asked>>,
+    /// Which of the two the adapter judging the call reads.
+    #[serde(skip)]
+    pub(super) evidence: Evidence,
+    /// The approvals, read once for every rule that asks.
+    #[serde(skip)]
+    approvals: OnceCell<Approvals>,
 }
 
 /// The fields of `tool_input` a rule can read: an `Edit`'s, a `Write`'s or
@@ -64,10 +84,7 @@ impl Call {
                 content: content.map(str::to_owned),
                 ..Arguments::default()
             },
-            cwd: None,
-            session_id: String::new(),
-            tool_use_id: String::new(),
-            displaced: None,
+            ..Call::default()
         }
     }
 
@@ -80,6 +97,12 @@ impl Call {
             displaced: Some(displaced.to_owned()),
             ..Call::write_of(path, Some(content))
         }
+    }
+
+    /// The person's approvals the call carries evidence of, read on the
+    /// first ask ([`Approvals::of`]).
+    pub(super) fn approvals(&self) -> &Approvals {
+        self.approvals.get_or_init(|| Approvals::of(self))
     }
 
     /// The text the call would put in the file: an `Edit`'s `new_string` or

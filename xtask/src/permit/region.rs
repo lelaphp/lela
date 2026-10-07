@@ -94,6 +94,7 @@ pub(super) fn region_body(root: &Path, path: &Path, call: &Call) -> Option<Findi
         rule: REGION_RULE.to_owned(),
         text: REGION_TEXT.to_owned(),
         adr: Vec::new(),
+        admission: None,
     })
 }
 

@@ -504,3 +504,60 @@ fn a_file_is_put_back_to_its_unstaged_edit_and_an_untracked_one_is_left() {
     assert!(out.contains(".claude/settings.json"), "{out}");
     assert!(!out.contains("scheduled_tasks"), "{out}");
 }
+
+/// #2247: a `Bash` write the person approved in the session, the change
+/// their `AskUserQuestion` answer carries as a diff (the `admit` case of
+/// `xtask/fixtures/approval/`), stands; one that writes anything else is
+/// put back as before. `--after` reads the transcript the hook names.
+#[test]
+fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
+    let approval = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/approval");
+    let transcript = approval.join("admit").join(format!("{SESSION}.jsonl"));
+    let approved = "# The divergence registry of the approval fixture (#2247).\n[[divergence]]\n\
+                    id = \"fixture-1\"\nstatus = \"accepted\"\nreason = \"Ruled by a person in the session.\"\n";
+    for (id, written, stands) in [
+        ("toolu_approved", approved.to_owned(), true),
+        (
+            "toolu_beyond",
+            format!("{approved}# and one line more\n"),
+            false,
+        ),
+    ] {
+        let root = scratch(id);
+        std::fs::copy(
+            approval.join("docs/divergence.toml"),
+            root.join("docs/divergence.toml"),
+        )
+        .unwrap();
+        git(&root, &["commit", "-qam", "the fixture's registry"]);
+        let was = read(&root, "docs/divergence.toml");
+        let command = format!("cat > docs/divergence.toml <<'EOF'\n{written}EOF");
+        let hook = |event: &str| {
+            let mut call: serde_json::Value =
+                serde_json::from_str(&stdin(event, SESSION, id, &root, &command)).unwrap();
+            call["transcript_path"] = transcript.to_str().unwrap().into();
+            call.to_string()
+        };
+        assert_eq!(permit(&root, &hook("PreToolUse"), &[]).0, 0);
+        shell(&root, &command);
+        let (code, out, err) = permit(&root, &hook("PostToolUse"), &["--after"]);
+        assert_eq!(code, 0, "{err}");
+        if stands {
+            assert_eq!(read(&root, "docs/divergence.toml"), written);
+            let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+            assert!(hook.get("decision").is_none(), "{out}");
+            let said = hook["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert!(said.contains("toolu_01AskFixtureApproval0001"), "{said}");
+            let reading = Store::of_workspace(&root)
+                .read("permit", "harness.self")
+                .unwrap()
+                .expect("the approved write is a permit reading");
+            assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+        } else {
+            assert_eq!(read(&root, "docs/divergence.toml"), was);
+            assert_denied(&root, &out, "docs/divergence.toml", "one line more");
+        }
+    }
+}

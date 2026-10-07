@@ -110,6 +110,9 @@ enum Verdict {
     /// The line cannot: kept as it stands, and named, since the sensor
     /// cannot tell a person's edit from a write the line does not show.
     Kept,
+    /// The line wrote it as the person approved in the session: kept, and
+    /// named (#2247).
+    Approved,
 }
 
 impl Verdict {
@@ -117,7 +120,7 @@ impl Verdict {
     fn status(self) -> Status {
         match self {
             Verdict::PutBack => Status::Fail,
-            Verdict::Kept => Status::Pass,
+            Verdict::Kept | Verdict::Approved => Status::Pass,
         }
     }
 }
@@ -199,7 +202,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     fs::remove_file(&file).ok();
     let record: Record = serde_json::from_str(&taken)
         .with_context(|| format!("reading the record at {}", file.display()))?;
-    let moved = sort_moved(&record, call.cwd.as_deref().map(Path::new));
+    let moved = sort_moved(&record, &call);
     if moved.is_empty() {
         return Ok(());
     }
@@ -225,7 +228,8 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
 /// put back where the call's line can write it, kept where it cannot. A
 /// word of the line is read where the call stands, its `cwd`, or the
 /// checkout where the call carries none.
-fn sort_moved(record: &Record, cwd: Option<&Path>) -> Vec<Moved> {
+fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
+    let cwd = call.cwd.as_deref().map(Path::new);
     let steering = runs_steer(&record.command);
     let line = argv::Line::read(&record.command);
     let mut moved = Vec::new();
@@ -239,7 +243,13 @@ fn sort_moved(record: &Record, cwd: Option<&Path>) -> Vec<Moved> {
                 continue;
             }
             let place = OnDisk::new(cwd.unwrap_or(&guarded.checkout), &guarded.checkout, path);
-            let (verdict, said) = if writes::can_write(&line, &place) {
+            let writes = writes::can_write(&line, &place);
+            let approved = writes
+                .then(|| approved(&guarded.checkout, path, was.as_deref(), call))
+                .flatten();
+            let (verdict, said) = if let Some(said) = approved {
+                (Verdict::Approved, format!("{path}: {said}"))
+            } else if writes {
                 let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
                 (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
             } else {
@@ -257,6 +267,23 @@ fn sort_moved(record: &Record, cwd: Option<&Path>) -> Vec<Moved> {
         }
     }
     moved
+}
+
+/// What the person's approval says of the file the call left at `path`,
+/// where it admits exactly the change from the blob `was` to what stands
+/// now ([`super::approval`]); `None` where none does.
+fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Option<String> {
+    let before = match was {
+        Some(id) => Some(String::from_utf8(cat_blob(checkout, id).ok()?).ok()?),
+        None => None,
+    };
+    let now = match fs::read(checkout.join(path)) {
+        Ok(bytes) => Some(String::from_utf8(bytes).ok()?),
+        Err(_) => None,
+    };
+    call.approvals()
+        .admits(Path::new(path), before.as_deref(), now.as_deref())
+        .map(|admission| admission.said())
 }
 
 /// What a file the line cannot write says when it moved: kept, why, and

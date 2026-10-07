@@ -7,7 +7,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde_json::{Value, json};
 
+use super::approval::Evidence;
 use super::call::Call;
 use super::hand_off::hand_off;
 use super::rules::{Judgement, Kind, deny_output, judge};
@@ -106,7 +108,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         |json| Ok(json.to_owned()),
     );
     let call = text.and_then(|text| Call::parse(&text).map(|call| (text, call)));
-    let (text, call) = match call {
+    let (text, mut call) = match call {
         Ok(read) => read,
         Err(err) => {
             println!(
@@ -115,6 +117,13 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
             );
             return Ok(());
         }
+    };
+    // Each adapter reads the person's answers where its own caller put
+    // them: the command hook from the transcript Claude Code writes, the
+    // function hook from the records it read from the engine (#2247).
+    call.evidence = match adapter {
+        Adapter::CommandHook => Evidence::Transcript,
+        Adapter::AboveTheCommandHook => Evidence::Engine,
     };
     // The blobs of harness.self's files before a Bash call, for the
     // PostToolUse hook's `--after` to hold the call to. Taken before any
@@ -159,7 +168,7 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     };
     match judge(&manifest, &workspace, &call) {
         Ok(judgement) => {
-            if let Some(output) = judgement.hook_stdout() {
+            if let Some(output) = admitted(judgement.hook_stdout(), &judgement, adapter) {
                 println!("{output}");
             }
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
@@ -174,6 +183,24 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The hook's stdout with, for the function hook alone, the approvals that
+/// admitted the call as `admitted`, which its audit log records (#2247);
+/// the command hook's stdout is Claude Code's, in its shape alone.
+fn admitted(output: Option<Value>, judgement: &Judgement, adapter: Adapter) -> Option<Value> {
+    let admitted: Vec<_> = judgement
+        .findings
+        .iter()
+        .filter_map(|f| f.admission.as_ref())
+        .collect();
+    match (output, adapter) {
+        (Some(Value::Object(mut output)), Adapter::AboveTheCommandHook) if !admitted.is_empty() => {
+            output.insert("admitted".to_owned(), json!(admitted));
+            Some(Value::Object(output))
+        }
+        (output, _) => output,
+    }
 }
 
 /// The refusal as a reading, so the store says what the judge did with
