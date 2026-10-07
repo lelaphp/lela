@@ -269,6 +269,21 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
     moved
 }
 
+/// The tracked files of `harness.self`'s scope in `checkout` that the
+/// call's line can write, read where it stands: what an approval must
+/// cover before the line runs (#2247).
+pub(super) fn written(checkout: &Path, call: &Call, line: &argv::Line) -> Vec<String> {
+    let Ok(Some(guarded)) = guard(checkout) else {
+        return Vec::new();
+    };
+    let cwd = call.cwd.as_deref().map_or(checkout, Path::new);
+    guarded
+        .blobs
+        .into_keys()
+        .filter(|path| writes::can_write(line, &OnDisk::new(cwd, checkout, path)))
+        .collect()
+}
+
 /// What the person's approval says of the file the call left at `path`,
 /// where it admits exactly the change from the blob `was` to what stands
 /// now ([`super::approval`]); `None` where none does.

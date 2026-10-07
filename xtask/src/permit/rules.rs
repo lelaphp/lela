@@ -270,22 +270,42 @@ fn evaluate(
     // one change the person approved in the session ([`super::approval`]).
     if fired
         && LIFTED.contains(&rule.id.as_str())
-        && let Some(admission) = admitted(root, call, path)
+        && let Some(admission) = admitted(root, call, path, line)
     {
         return Ok(Some(Finding::admitted(rule, admission)));
     }
     Ok(fired.then(|| Finding::of(Kind::of(rule), rule)))
 }
 
-/// The approval of what an `Edit` or a `Write` would leave at `path`:
-/// the file as it stands to what the call makes of it.
-fn admitted(root: &Path, call: &Call, path: Option<&Path>) -> Option<Admission> {
-    let path = path?;
-    if call.command().is_some() {
+/// The person's approval of what the call would leave: for an `Edit` or a
+/// `Write`, the file at `path` as it stands to what the call makes of it;
+/// for a `Bash` line, which cannot be read for what it writes, an
+/// approval pending for every harness file the line can write, whose
+/// write `permit --after` holds to the diff.
+fn admitted(
+    root: &Path,
+    call: &Call,
+    path: Option<&Path>,
+    line: Option<&Line>,
+) -> Option<Admission> {
+    let approvals = call.approvals();
+    if approvals.is_empty() {
         return None;
     }
-    let (before, after) = call.rewrite(root, Some(path))?;
-    call.approvals().admits(path, Some(&before), Some(&after))
+    let Some(line) = line else {
+        let path = path?;
+        let (before, after) = call.rewrite(root, Some(path))?;
+        return approvals.admits(path, Some(&before), Some(&after));
+    };
+    let written = super::after::written(root, call, line);
+    let pending: Option<Vec<Admission>> = written
+        .iter()
+        .map(|path| {
+            let before = fs::read_to_string(root.join(path)).ok();
+            approvals.pending(Path::new(path), before.as_deref())
+        })
+        .collect();
+    pending?.into_iter().next()
 }
 
 /// The command a hit stands in: the text from the shell separator before

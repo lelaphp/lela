@@ -130,6 +130,11 @@ impl Approvals {
         Approvals(asked.iter().flat_map(Approval::all).collect())
     }
 
+    /// Whether the call carries no approval at all.
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// The approval whose diff, applied to `before`, leaves exactly
     /// `after` at `path`; `None` stands for no file on either side.
     pub(super) fn admits(
@@ -137,6 +142,23 @@ impl Approvals {
         path: &Path,
         before: Option<&str>,
         after: Option<&str>,
+    ) -> Option<Admission> {
+        self.admission(path, before, |left| left.text() == after)
+    }
+
+    /// The approval whose diff applies to `path` as it stands: what a
+    /// `Bash` line that can write the file needs before it runs, since
+    /// its write is not known until it has run; `permit --after` then
+    /// holds what it wrote to [`Approvals::admits`].
+    pub(super) fn pending(&self, path: &Path, before: Option<&str>) -> Option<Admission> {
+        self.admission(path, before, |_| true)
+    }
+
+    fn admission(
+        &self,
+        path: &Path,
+        before: Option<&str>,
+        fits: impl Fn(&Left) -> bool,
     ) -> Option<Admission> {
         let name = path.to_str()?;
         let blob = |text: Option<&str>| text.map(|text| git::blob_id(text.as_bytes()));
@@ -147,7 +169,8 @@ impl Approvals {
                 let file = FileDiff::all(&approval.preview)
                     .into_iter()
                     .find(|file| file.path == name)?;
-                (file.apply(before)?.text() == after).then(|| Admission {
+                let left = file.apply(before).filter(|left| fits(left))?;
+                Some(Admission {
                     file: name.to_owned(),
                     ask: approval.ask.clone(),
                     question: approval.question.clone(),
@@ -157,7 +180,7 @@ impl Approvals {
                     diff_hash: git::blob_id(file.text.as_bytes()),
                     diff: file.text,
                     before: blob(before),
-                    after: blob(after),
+                    after: blob(left.text()),
                 })
             })
     }
