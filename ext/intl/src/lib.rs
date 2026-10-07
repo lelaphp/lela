@@ -33,6 +33,7 @@ mod breakiterator;
 mod calendar;
 mod collator;
 mod common_date;
+mod converter;
 mod dateformat;
 mod datepatterngenerator;
 #[allow(dead_code)]
@@ -354,6 +355,7 @@ pub fn extension() -> Extension {
         .class::<breakiterator::IntlRuleBasedBreakIterator>()
         .class::<breakiterator::IntlCodePointBreakIterator>()
         .class::<breakiterator::IntlPartsIterator>()
+        .class::<converter::UConverter>()
         .class::<uchar::IntlChar>()
         .class_constants(b"IntlChar", uchar::constants());
     builder
@@ -514,7 +516,7 @@ pub(crate) struct IntlException;
 impl IntlException {}
 
 /// A `zend_long` cast to `UErrorCode`, C's truncation to its low 32 bits.
-fn code_of(n: i64) -> Code {
+pub(crate) fn code_of(n: i64) -> Code {
     let b = n.to_le_bytes();
     Code(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
