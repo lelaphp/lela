@@ -486,8 +486,8 @@ pub fn properties<B>(
                     (Kept::Uninitialized(_), Unwritten::Skipped) => continue,
                 };
                 let mut row = Row {
-                    key: Keep::View((**key).clone()),
-                    value: Keep::View(value),
+                    key: Keep::Viewed((**key).clone()),
+                    value: Keep::Viewed(value),
                     at: At::Lent,
                     watch: Watch::Held,
                     uninitialized,
@@ -937,7 +937,7 @@ impl<T: View> Pin<T> {
 enum Keep<T: View> {
     Owned(Owner<T>),
     Pinned(Pin<T>),
-    View(T),
+    Viewed(T),
 }
 
 impl<T: View> Keep<T> {
@@ -946,7 +946,7 @@ impl<T: View> Keep<T> {
         match lent {
             Lent::Owned => Keep::Owned(Owner::take(req, view)),
             Lent::Pinned => Keep::Pinned(Pin::take(view)),
-            Lent::Viewed => Keep::View(view),
+            Lent::Viewed => Keep::Viewed(view),
         }
     }
 
@@ -955,7 +955,7 @@ impl<T: View> Keep<T> {
         match self {
             Keep::Owned(_) => Lent::Owned,
             Keep::Pinned(_) => Lent::Pinned,
-            Keep::View(_) => Lent::Viewed,
+            Keep::Viewed(_) => Lent::Viewed,
         }
     }
 
@@ -964,7 +964,7 @@ impl<T: View> Keep<T> {
         match self {
             Keep::Owned(owner) => owner,
             Keep::Pinned(pin) => &pin.view,
-            Keep::View(view) => view,
+            Keep::Viewed(view) => view,
         }
     }
 
@@ -976,7 +976,7 @@ impl<T: View> Keep<T> {
         match self {
             Keep::Owned(owner) => owner.give_up_nogc(req),
             Keep::Pinned(pin) => pin.let_go(req),
-            Keep::View(_) => {}
+            Keep::Viewed(_) => {}
         }
     }
 }

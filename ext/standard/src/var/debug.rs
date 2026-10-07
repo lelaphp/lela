@@ -227,7 +227,6 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
     call_stack_end(req)?;
-    let refcount = |value: &Value| value.refcount();
     pad(out, level);
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"bool(false)\n"),
@@ -242,7 +241,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
             out.extend_from_slice(s.as_bytes());
             if value.is_refcounted() {
-                let count = refcount(value);
+                let count = value.refcount();
                 out.extend_from_slice(format!("\" refcount({count})\n").as_bytes());
             } else {
                 out.extend_from_slice(b"\" interned\n");
@@ -262,7 +261,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             // walk and taken back where the walk found the array marked,
             // since php prints `*RECURSION*` in its place.
             let opened = out.len();
-            let count = refcount(value);
+            let count = value.refcount();
             let packed = if array.is_packed() { "packed " } else { "" };
             if value.is_refcounted() {
                 out.extend_from_slice(
@@ -328,7 +327,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                     "{prefix}object({name})#{} ({}) refcount({}){{\n",
                     object.index(),
                     held.count(),
-                    refcount(value)
+                    value.refcount()
                 )
                 .as_bytes(),
             );
@@ -391,13 +390,13 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
                 format!(
                     "resource({}) of type ({kind}) refcount({})\n",
                     resource.id(),
-                    refcount(value)
+                    value.refcount()
                 )
                 .as_bytes(),
             );
         }
         ValueRef::Reference(cell) => {
-            let count = refcount(value);
+            let count = value.refcount();
             out.extend_from_slice(format!("reference refcount({count}) {{\n").as_bytes());
             dump(req, out, &cell.get(), level + 2)?;
             pad(out, level);

@@ -515,13 +515,10 @@ fn is_magic(key: &Key) -> bool {
     matches!(key, Key::Str(s) if s.as_bytes() == MAGIC_MEMBER)
 }
 
-/// An object whose class has `__serialize`: the array the method
-/// answers written as the object's data, `php_var_serialize_nested_data`
-/// over it, and php's `TypeError` for anything else. The object is held
-/// across the call and the rows, `ZVAL_OBJ_COPY(&obj, Z_OBJ_P(struc))`
-/// (`Z/ext/standard/var.c:1148`), so a count the method reads of it is
-/// php's, and that owner is given up before the array, as php gives
-/// them up.
+/// An object whose class has `__serialize`, held across the call and
+/// the rows as `ZVAL_OBJ_COPY(&obj, Z_OBJ_P(struc))`
+/// (`Z/ext/standard/var.c:1148`) holds it, so a count the method reads
+/// of it is php's.
 fn serialize_method(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -530,16 +527,24 @@ fn serialize_method(
     hash: &mut Serializer,
 ) -> Result<(), Thrown> {
     let held = Owner::take(req, object);
-    let data = match locked(req, |req| call_method(req, &object, b"__serialize", &[])) {
-        Ok(data) => data,
-        Err(thrown) => {
-            held.give_up(req);
-            return Err(thrown);
-        }
-    };
+    let written = serialized_data(req, out, object, name, hash);
+    held.give_up(req);
+    written
+}
+
+/// [`serialize_method`]'s body: the array `__serialize` answers written
+/// as the object's data, `php_var_serialize_nested_data` over it, and
+/// php's `TypeError` for anything else.
+fn serialized_data(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: PhpObject,
+    name: &[u8],
+    hash: &mut Serializer,
+) -> Result<(), Thrown> {
+    let data = locked(req, |req| call_method(req, &object, b"__serialize", &[]))?;
     let Some(array) = data.as_array().copied() else {
         data.give_up(req);
-        held.give_up(req);
         let shown = String::from_utf8_lossy(name).into_owned();
         return Err(throw_error(
             req,
@@ -553,7 +558,6 @@ fn serialize_method(
     // `in_rcn_array` carries into the rows.
     let shared = data.refcount() > 1;
     let written = nested(req, out, &object.as_value(), array, hash, shared, false);
-    held.give_up(req);
     data.give_up(req);
     written
 }
