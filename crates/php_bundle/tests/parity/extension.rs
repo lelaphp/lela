@@ -694,7 +694,8 @@ impl ProtoBox {
     }
     fn add(req: &mut Request, this: This<Self>, n: i64) -> Result<Static, Thrown> {
         this.payload_mut(req)?.n += n;
-        req.addref(&this.object().as_value());
+        // `RETURN_OBJ_COPY`, answered as `static`: the engine takes its
+        // own owner of the object returned.
         Ok(Static(this.object()))
     }
     fn make(
