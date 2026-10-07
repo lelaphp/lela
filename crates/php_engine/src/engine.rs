@@ -1438,6 +1438,9 @@ impl Shared {
                     )
                 },
                 |_| None,
+                // No request to publish its early-bound classes for, so
+                // a request that loads it binds them as its own.
+                |_| Arc::new([]),
             )
             .0
     }
