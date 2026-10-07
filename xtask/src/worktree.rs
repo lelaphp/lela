@@ -55,17 +55,17 @@
 //!
 //! The retire is where that evidence is kept. A worktree's readings live
 //! in its own `target/harness/` and removing the worktree removes them,
-//! so the worktree's `log.jsonl` is appended into the one store first,
-//! the main checkout's, which [`Track::of`] names, and only then is the
-//! worktree removed, which keeps a merged agent's denials in the
-//! `permits` section the console reads (§4.2). The log alone, through the
-//! store's own append, one line per write, so a retire during a run tears
-//! no line of either log (#56). The per-key files beside it stay with the
-//! worktree, each being a scope's latest run over a tree the main
+//! so the worktree's log is landed in the one store first, the main
+//! checkout's, which [`Track::of`] names, and only then is the worktree
+//! removed, which keeps a merged agent's denials in the `permits` section
+//! the console reads (§4.2). The log alone, each reading into the store's
+//! log and index through the store's own append and rename, one line per
+//! write, so a retire during a run tears no line of either log (#56,
+//! #2164). The scope's files beside it stay with the worktree, each being a scope's latest run over a tree the main
 //! checkout does not have, and copying one in would hand `done` a reading
 //! that is fresh for nothing (§5, "Worktrees"; #35). What the log
-//! carries is found at the branch's merge by the tree each reading was
-//! taken over, so a pass over what the merge stages is not run again
+//! carries is found at the branch's merge in the index, by the tree each
+//! reading was taken over, so a pass over what the merge stages is not run again
 //! there (`Store::latest_over`, #1252). The worktree's kept phpt runs
 //! are carried into the main worktree's beside the log, each one main
 //! keeps none of: a run is keyed by the engine's tree and not by the
@@ -85,7 +85,7 @@ use anyhow::{Context, Result, bail};
 use crate::computed;
 use crate::git::{git, has_ref};
 use crate::phpt::against;
-use crate::reading::{self, Store};
+use crate::reading::Store;
 use crate::track::{self, MAIN, Ticket, Track, short};
 
 /// Where the worktrees of the repository whose main checkout is
@@ -273,39 +273,36 @@ pub fn retire(root: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
-/// The worktree's log appended into the store at `root` and emptied,
-/// so a removal that refuses and the call that follows it cannot count
-/// the same readings twice; the per-key files beside it stay. Whether
-/// anything was appended.
+/// The worktree's readings landed in the store at `root`, its log and
+/// its index ([`Store::land`]), and the worktree's log emptied, so a
+/// removal that refuses and the call that follows it cannot count the
+/// same readings twice; the per-key files beside it stay. Whether
+/// anything was landed.
 fn append_log(dir: &Path, root: &Path) -> Result<bool> {
-    let from = dir.join(reading::DIR).join(reading::LOG);
-    // Bytes, not text: a line the worktree wrote is appended as it is.
-    let text = match fs::read(&from) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(err) => return Err(err).with_context(|| format!("reading {}", from.display())),
-    };
-    if text.is_empty() {
+    let from = Store::of_workspace(dir);
+    let store = Store::of_workspace(root);
+    let landed = store.land(&from).with_context(|| {
+        format!(
+            "cannot land {} in {}",
+            from.root().display(),
+            store.root().display()
+        )
+    })?;
+    if landed == 0 {
         say(
             RETIRE,
             &format!(
-                "{} is missing or empty: this worktree wrote no readings",
-                from.display()
+                "{} holds no log: this worktree wrote no readings",
+                from.root().display()
             ),
         );
         return Ok(false);
     }
-    let store = Store::of_workspace(root);
-    let to = store.root().join(reading::LOG);
-    let appended = store
-        .append(&text)
-        .with_context(|| format!("cannot append to {}", to.display()))?;
-    fs::write(&from, "").with_context(|| format!("cannot empty {}", from.display()))?;
     say(
         RETIRE,
         &format!(
-            "appended {appended} lines to {} and emptied the worktree's; the per-key files beside it stay with the worktree",
-            to.display()
+            "landed {landed} lines in {}'s log and index and emptied the worktree's; the per-key files beside it stay with the worktree",
+            store.root().display()
         ),
     );
     Ok(true)

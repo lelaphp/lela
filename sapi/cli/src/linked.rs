@@ -1,0 +1,106 @@
+//! `php-linked`, the engine the witness and crosscheck lanes serve a
+//! snippet through (harness-design.md §8, revision 84; #2166). The harness
+//! once linked this engine into itself, so every edit under `crates/` or
+//! `ext/` relinked the binary every hook runs; now it starts this binary
+//! and hands it snippets.
+//!
+//! `php-linked --serve` reads one directory per line on stdin. Each holds
+//! a request as files: `source`, the program; `script_name`, what the
+//! request is named; `cwd`, the directory it is served in; `ini`, one
+//! `name=value` per line, laid over the CLI's own defaults as `-d` lays
+//! them; and `extended`, `1` where it is compiled with extended info as
+//! `-e` builds it. It serves the request with a fresh engine of the
+//! bundle's `linked` set, the isolation a process of its own gave, and
+//! writes `stdout`, `stderr`, `exit` and `entered`, the natives the
+//! request entered one per line as the trace file holds them, into the
+//! same directory; then it answers `served` on a line of its own and
+//! reads the next. A request that panics leaves `panicked` instead, and
+//! the binary goes on to the next. End of input ends it.
+//!
+//! A request that forks leaves a child that returns here after its
+//! request ends; the child ends then, with its request's status, and
+//! never reads a line meant for its parent.
+#![deny(unsafe_code)]
+
+use std::fs;
+use std::io::{self, BufRead, Write};
+use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
+use std::process::ExitCode;
+
+use php_bundle::test::{Capture, engine};
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().map(String::as_str).ne(["--serve"]) {
+        eprintln!(
+            "php-linked: serves the harness; run as `php-linked --serve`, a request directory per line on stdin"
+        );
+        return ExitCode::from(2);
+    }
+    let pid = std::process::id();
+    let stdout = io::stdout();
+    for line in io::stdin().lock().lines() {
+        let Ok(dir) = line else {
+            return ExitCode::FAILURE;
+        };
+        let exit = serve(Path::new(&dir));
+        if std::process::id() != pid {
+            // A child the request forked: its request has ended.
+            std::process::exit(exit);
+        }
+        let mut out = stdout.lock();
+        if writeln!(out, "served").and_then(|()| out.flush()).is_err() {
+            return ExitCode::FAILURE;
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// The request `dir` holds, served, and what it did written beside it;
+/// the status it ended on.
+fn serve(dir: &Path) -> i32 {
+    let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
+    let source = read("source");
+    let name = read("script_name");
+    let cwd = read("cwd");
+    let ini_text = read("ini");
+    let extended = read("extended").trim() == "1";
+    let ini: Vec<(&str, &str)> = php_sapi::ini::CLI_DEFAULTS
+        .iter()
+        .chain(&php_sapi::ini::CLI_HARDCODED)
+        .map(|&(name, value)| (name, value))
+        .chain(ini_text.lines().filter_map(|line| line.split_once('=')))
+        .collect();
+    let served = panic::catch_unwind(AssertUnwindSafe(|| {
+        engine(&ini, extended).serve_capture_traced_in(
+            Path::new(cwd.trim_end_matches('\n')),
+            name.as_bytes(),
+            &source,
+            Capture::default(),
+        )
+    }));
+    let Ok(served) = served else {
+        fs::write(dir.join("panicked"), "").ok();
+        return 255;
+    };
+    let entered: String = served
+        .entered
+        .iter()
+        .flat_map(|e| {
+            [
+                e.krate,
+                "\t",
+                e.owner.unwrap_or_default(),
+                "\t",
+                e.name,
+                "\n",
+            ]
+        })
+        .collect();
+    fs::write(dir.join("stdout"), &served.stdout).ok();
+    fs::write(dir.join("stderr"), &served.stderr).ok();
+    fs::write(dir.join("entered"), entered).ok();
+    fs::write(dir.join("exit"), served.exit_code.to_string()).ok();
+    served.exit_code
+}

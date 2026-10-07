@@ -1424,22 +1424,6 @@ impl Runner {
         )))
     }
 
-    /// The rung below the binary, for a lane the linked engine can serve:
-    /// [`Runner::Linked`] where [`resolve`](Runner::resolve) found no
-    /// binary and where what it found is behind the tree, and what it
-    /// found otherwise. The linked engine is built from the tree the
-    /// reading is stamped with, so a stale binary falls to it rather than
-    /// to a skip. A lane whose programs the in-process adapter does not
-    /// serve, a `.phpt` with its sections and its own directory, does not
-    /// take this rung and keeps the absence.
-    #[must_use]
-    pub fn or_linked(self) -> Runner {
-        match self {
-            Runner::Absent(_) | Runner::Stale(_) => Runner::Linked,
-            found => found,
-        }
-    }
-
     /// The binary, when there is one to run.
     pub fn binary(&self) -> Option<&Path> {
         match self {

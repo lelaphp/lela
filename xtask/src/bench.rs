@@ -45,6 +45,7 @@ use clap::ValueEnum;
 use serde::Deserialize;
 
 use crate::inputs;
+use crate::key::Snapshot;
 use crate::reading::{Reading, Status, Store};
 
 /// The instrument's name, the reading's `instrument` field.
@@ -475,11 +476,14 @@ pub fn run(
         }
     }
     let load = load_average();
+    let snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
     for bar in &bars {
         let measured = measure(bar, reps)?;
         print!("{}", rendered(bar, &measured, reps, label, load));
-        readings.push(recorded(bar, &measured, reps, label, note, load, root)?);
+        readings.push(recorded(
+            bar, &measured, reps, label, note, load, &snapshot,
+        )?);
     }
     store.record_measurement(&readings)
 }
@@ -544,10 +548,10 @@ fn recorded(
     label: Label,
     note: &str,
     load: Option<[f64; 3]>,
-    root: &Path,
+    snapshot: &Snapshot,
 ) -> Result<Reading> {
     let verdict = sign_of(&measured.delta);
-    let mut reading = Reading::stamped_over(INSTRUMENT, &bar.id, root, Path::new("."))?;
+    let mut reading = Reading::stamped_over(INSTRUMENT, &bar.id, snapshot, Path::new("."))?;
     reading.status = if verdict == SWAMPED {
         Status::Pass
     } else {

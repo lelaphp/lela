@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use xtask::api_check;
+use xtask::key::Snapshot;
 use xtask::manifest::{LockCeiling, Manifest, OneOrMany, Rule, Seam, Section};
 use xtask::reading::{Number, Reading, Status};
 use xtask::scratch::Tree;
@@ -193,6 +194,23 @@ fn a_lock_in_an_order_write_would_rewrite_fails_naming_the_line_and_its_place() 
         heap.message
     );
     assert_eq!(failures(&readings).len(), 1);
+}
+
+/// `--write` stamps a seam's reading over the lock it wrote, with a
+/// snapshot taken after the write (#2163): the reading is fresh for the
+/// tree `--write` left, where one stamped with the run's snapshot, taken
+/// before, would be stale for its own rewrite.
+#[test]
+fn a_rewritten_lock_is_stamped_over_what_write_left() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let root = Tree::new("api-check-write").unwrap();
+    xtask::scratch::repository(&fixture("lock-order"), &root).unwrap();
+    let home = manifest.scope_path("heap").unwrap();
+    let before = Snapshot::disk(&root).unwrap().key(&home).unwrap();
+    let readings = api_check::hold(&manifest, &root, true).unwrap();
+    let after = Snapshot::disk(&root).unwrap().key(&home).unwrap();
+    assert_ne!(before, after, "--write rewrote the lock out of order");
+    assert_eq!(of(&readings, "heap").tree(), after);
 }
 
 /// The api seam's ceilings as the tracked manifest carries them.

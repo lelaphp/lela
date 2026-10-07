@@ -187,7 +187,14 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
     let manifest = Manifest::load(root).unwrap();
     let registry = Registry::load(root).unwrap();
     let store = Store::of_workspace(root);
-    done::judge(root, &manifest, &registry, &store, base).unwrap()
+    done::judge(
+        &xtask::key::Snapshot::disk(root).unwrap(),
+        &manifest,
+        &registry,
+        &store,
+        base,
+    )
+    .unwrap()
 }
 
 /// A passing reading of `instrument` over `scope`, stamped through the
@@ -199,9 +206,21 @@ fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
         // the crate's tree as `crosscheck` stamps it (#361).
         Some(name) => {
             let krate = manifest.crate_named(name).unwrap();
-            Reading::stamped_over(instrument, scope, root, &krate.path()).unwrap()
+            Reading::stamped_over(
+                instrument,
+                scope,
+                &xtask::key::Snapshot::disk(root).unwrap(),
+                &krate.path(),
+            )
+            .unwrap()
         }
-        None => Reading::for_scope(instrument, scope, &manifest, root).unwrap(),
+        None => Reading::for_scope(
+            instrument,
+            scope,
+            &manifest,
+            &xtask::key::Snapshot::disk(root).unwrap(),
+        )
+        .unwrap(),
     };
     if UNDER_RECIPE.contains(&instrument) {
         reading = reading.under(&manifest.pin);
@@ -643,11 +662,28 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
     let store = Store::of_workspace(&root);
     for (instrument, scope) in asked_of("ext/pcre") {
         let mut reading = if instrument == "phpt" {
-            Reading::for_scope(instrument, "ext/pcre", &manifest, &root).unwrap()
+            Reading::for_scope(
+                instrument,
+                "ext/pcre",
+                &manifest,
+                &xtask::key::Snapshot::disk(&root).unwrap(),
+            )
+            .unwrap()
         } else if scope != "ext/pcre" {
-            Reading::stamped_over(instrument, &scope, &root, &krate.path()).unwrap()
+            Reading::stamped_over(
+                instrument,
+                &scope,
+                &xtask::key::Snapshot::disk(&root).unwrap(),
+                &krate.path(),
+            )
+            .unwrap()
         } else {
-            Reading::for_crate(instrument, krate, &root).unwrap()
+            Reading::for_crate(
+                instrument,
+                krate,
+                &xtask::key::Snapshot::disk(&root).unwrap(),
+            )
+            .unwrap()
         };
         if UNDER_RECIPE.contains(&instrument) {
             reading = reading.under(&manifest.pin);
@@ -924,7 +960,13 @@ fn a_lock_that_differs_must_be_in_the_diff_and_a_lock_in_the_diff_needs_its_read
     // home, `crates/php_heap`, which is what `done` hashes.
     let differs = |root: &Path| {
         let manifest = Manifest::load(root).unwrap();
-        let mut reading = Reading::for_scope("api-check", "heap", &manifest, root).unwrap();
+        let mut reading = Reading::for_scope(
+            "api-check",
+            "heap",
+            &manifest,
+            &xtask::key::Snapshot::disk(root).unwrap(),
+        )
+        .unwrap();
         reading.status = Status::Fail;
         reading.message =
             "2 public items of php_heap have no line in crates/php_heap/heap.lock: Gc, Zval".into();
@@ -1180,7 +1222,7 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();
     xtask(&root, &["done", "--hook"], Some(&stop));
     assert_eq!(
-        store.log().unwrap().readings.len(),
+        store.history("done").unwrap().readings.len(),
         2,
         "the hook writes one too"
     );
@@ -1390,7 +1432,13 @@ fn with_the_stop_rule(root: &Path) {
 /// A `ticket` reading of a close, as `xtask ticket close` writes it: it
 /// counts `opens`, passes, and names the session the call named.
 fn closed(root: &Path, ticket: &str, session: &str) {
-    let mut reading = Reading::stamped_over("ticket", ticket, root, Path::new(".")).unwrap();
+    let mut reading = Reading::stamped_over(
+        "ticket",
+        ticket,
+        &xtask::key::Snapshot::disk(root).unwrap(),
+        Path::new("."),
+    )
+    .unwrap();
     reading.status = Status::Pass;
     reading.count("criteria", 3).unwrap();
     reading.count("opens", 0).unwrap();
@@ -1784,7 +1832,13 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
     let root = scratch("refused-close");
     sh(&root, &["git", "config", "branch.main.ticket", "31"]);
     let store = Store::of_workspace(&root);
-    let mut refused = Reading::stamped_over("ticket", "31", &root, Path::new(".")).unwrap();
+    let mut refused = Reading::stamped_over(
+        "ticket",
+        "31",
+        &xtask::key::Snapshot::disk(&root).unwrap(),
+        Path::new("."),
+    )
+    .unwrap();
     refused.status = Status::Fail;
     refused.count("criteria", 3).unwrap();
     refused.count("ticked", 3).unwrap();
@@ -1796,7 +1850,13 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
     let verdict = judge(&root);
     assert!(verdict.met(), "{verdict:#?}");
 
-    let mut boxless = Reading::stamped_over("ticket", "31", &root, Path::new(".")).unwrap();
+    let mut boxless = Reading::stamped_over(
+        "ticket",
+        "31",
+        &xtask::key::Snapshot::disk(&root).unwrap(),
+        Path::new("."),
+    )
+    .unwrap();
     boxless.status = Status::Fail;
     boxless.count("criteria", 0).unwrap();
     boxless.count("ticked", 0).unwrap();
@@ -1850,7 +1910,13 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     // No box at all, withdrawn: the instrument settled it, so the
     // ticket is not held for carrying no box.
     let store = Store::of_workspace(&root);
-    let mut boxless = Reading::stamped_over("ticket", "31", &root, Path::new(".")).unwrap();
+    let mut boxless = Reading::stamped_over(
+        "ticket",
+        "31",
+        &xtask::key::Snapshot::disk(&root).unwrap(),
+        Path::new("."),
+    )
+    .unwrap();
     boxless.status = Status::Pass;
     boxless.count("criteria", 0).unwrap();
     boxless.count("ticked", 0).unwrap();

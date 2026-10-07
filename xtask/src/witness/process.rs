@@ -32,14 +32,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 
 use super::anchor::Entry;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
-use crate::oracle::profile::Profile;
+use crate::oracle::profile;
 use crate::oracle::{Invocation, Observation, Oracle, Program, Stdin};
 use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
@@ -255,39 +254,8 @@ fn built<'a>(
         .map_err(|why| anyhow!("{why}"))
 }
 
-/// `cargo build --profile <this build's> -p <package> --bin <binary>
-/// --features witness-trace` in `root`, and where cargo put the binary:
-/// the target directory cargo was told of, or `root`'s own.
+/// The host's witness binary, `--features witness-trace`, built in this
+/// harness's profile ([`profile::build`]).
 fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
-    let (package, binary) = (host.package(), host.witness);
-    let profile = Profile::this_build().map_err(anyhow::Error::msg)?;
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
-        .args([
-            "build",
-            "--quiet",
-            "--profile",
-            profile.name(),
-            "--package",
-            &package,
-            "--bin",
-            binary,
-            "--features",
-            "witness-trace",
-        ])
-        .current_dir(root)
-        .status()
-        .with_context(|| format!("running cargo to build {binary}"))?;
-    if !status.success() {
-        bail!(
-            "cargo could not build {binary} ({status}); its errors are on the harness's second stream"
-        );
-    }
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root.join("target"), |dir| root.join(dir));
-    let built = profile.binary(&target, binary);
-    if !built.is_file() {
-        bail!("cargo built {binary} and it is not at {}", built.display());
-    }
-    Ok(built)
+    profile::build(root, &host.package(), host.witness, "witness-trace")
 }

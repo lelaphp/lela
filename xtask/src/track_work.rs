@@ -102,6 +102,7 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, bail};
 
+use crate::key::Snapshot;
 use crate::reading::{Reading, Status, Store};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
 use crate::ticket::{self, Gh, STAMPED_OVER, State};
@@ -539,7 +540,10 @@ fn hold(
     else {
         return Ok(());
     };
-    let mut reading = Reading::stamped_over(INSTRUMENT, &judged.id, root, Path::new(STAMPED_OVER))?;
+    // After the session landed what it landed: the stamp is over the tree
+    // it left.
+    let now = Snapshot::disk(root)?;
+    let mut reading = Reading::stamped_over(INSTRUMENT, &judged.id, &now, Path::new(STAMPED_OVER))?;
     reading.status = match judged.judgement {
         Landed::Closed => Status::Pass,
         Landed::Standing => Status::Fail,
@@ -580,7 +584,12 @@ fn record_run(
         _ => Outcome::Failed,
     };
     let mut reading = tally.reading(
-        Reading::stamped_over(INSTRUMENT, RUN, root, Path::new(STAMPED_OVER))?,
+        Reading::stamped_over(
+            INSTRUMENT,
+            RUN,
+            &Snapshot::disk(root)?,
+            Path::new(STAMPED_OVER),
+        )?,
         &outcome,
         outcomes(tally, how),
     )?;

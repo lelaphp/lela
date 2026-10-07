@@ -63,6 +63,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::api_check::lock::Lock;
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{self, Reading, Store, plural};
 use crate::sources;
@@ -766,8 +767,13 @@ pub(crate) fn home_of_the_lock(manifest: &Manifest) -> Result<&Crate> {
 /// The reading of one run, at the crate the lock lives with: the counts
 /// are its numbers, the unresolved rows the one the lanes read, and a row
 /// naming an `api` item the lock does not carry is the failure.
-pub(crate) fn reading(join: &Join, ported: &Ported, krate: &Crate, root: &Path) -> Result<Reading> {
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
+pub(crate) fn reading(
+    join: &Join,
+    ported: &Ported,
+    krate: &Crate,
+    snapshot: &Snapshot,
+) -> Result<Reading> {
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     reading.count("rows", join.rows.len() as u64)?;
     for status in Status::ALL {
         reading.count(status.as_str(), join.rows_with(status) as u64)?;
@@ -893,6 +899,7 @@ pub(crate) fn render(join: &Join) -> String {
 /// `xtask port-map`: the census read, joined, printed row by row, and the
 /// one reading recorded, whose outcome is the exit.
 pub fn command(root: &Path, manifest: &Manifest, store: &Store, tree: Option<&Path>) -> Result<()> {
+    let snapshot = Snapshot::disk(root)?;
     let map = PortMap::load(root)?;
     let krate = home_of_the_lock(manifest)?;
     // The lock's items, its comments left out; `api_check` owns the parser.
@@ -900,7 +907,7 @@ pub fn command(root: &Path, manifest: &Manifest, store: &Store, tree: Option<&Pa
     let ported = Ported::read(root, manifest);
     let (source, counted) = read(root, tree)?;
     let join = join(&map, &lock, &ported, source, &counted);
-    let reading = reading(&join, &ported, krate, root)?;
+    let reading = reading(&join, &ported, krate, &snapshot)?;
     print!("{}", render(&join));
     println!(
         "{} {INSTRUMENT} {}: {}",

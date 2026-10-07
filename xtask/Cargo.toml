@@ -14,25 +14,11 @@ workspace = true
 sha1_smol.workspace = true          # the digest of seams.toml this build is compiled against (src/built.rs)
 
 [dependencies]
-# The in-process adapter of design §8's `ScriptExec` seam (§4.2: the harness
-# reaches the engine through the bundle): the enabled set, the tier's name and
-# a fresh engine of them over the `Capture` sink, which `witness` serves a
-# snippet through where no binary is built. The bundle's `linked` feature is
-# every extension feature it declares but `pcntl`, so the linked engine carries
-# the extensions the oracle has and a crate the manifest marks `feature =` is
-# held to its witnesses on its merits (harness §7, revision 43); the
-# `feature =` rows name php's default build for the binary and the phpt lane
-# alone. A fence that forks or takes a signal is marked `process` and served
-# by the `php` binary in a process of its own, so nothing forks the harness,
-# and an unmarked one fails on the undefined function rather than forking it
-# (harness §8, revision 61). `witness-trace` records the natives each fence
-# enters, which is what witness coverage counts (harness §4.5 condition 2,
-# revision 58).
-php_bundle = { path = "../crates/php_bundle", features = ["test", "witness-trace", "linked"] }
-# The CLI's ini layer, which the linked engine takes as the `php` binary does
-# (design §4.1, revision 57; #1398).
-php_sapi = { path = "../crates/php_sapi" }
-
+# No engine crate (harness §8, revision 84; #2166): the witness and
+# crosscheck lanes serve a snippet through `php-linked`, `sapi/cli` built
+# with the bundle's `linked` set, which this harness builds and starts as a
+# process; so an edit under `crates/` or `ext/` rebuilds that binary and
+# never this one, which every hook runs.
 anyhow.workspace = true
 clap.workspace = true
 # The oracle module's runner kills a program's process group whole, so what a

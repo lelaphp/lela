@@ -39,16 +39,15 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use php_bundle::test::Entered;
-
 use super::fence::{Subject, Witness};
 use crate::cfg;
 use crate::rust;
 
-/// One native a fence's run entered, as the linked engine hands it back
-/// ([`Entered`]) or as the binary appended it to the file the lane named
-/// (`Entered::line`, harness §8, revision 61): the crate's package, the
-/// `#[php_class]` type or none, the identifier.
+/// One native a fence's run entered, as the binary that served it wrote
+/// it, `php-linked` beside what the run printed and `php-witness` to the
+/// file the lane named (`Entered::line`, harness §8, revisions 61 and
+/// 84): the crate's package, the `#[php_class]` type or none, the
+/// identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Entry {
     pub(crate) krate: String,
@@ -75,16 +74,6 @@ pub(crate) enum Record {
 impl Default for Record {
     fn default() -> Record {
         Record::Entered(Vec::new())
-    }
-}
-
-impl From<Entered> for Entry {
-    fn from(entered: Entered) -> Entry {
-        Entry {
-            krate: entered.krate.to_owned(),
-            owner: entered.owner.map(str::to_owned),
-            name: entered.name.to_owned(),
-        }
     }
 }
 
@@ -697,17 +686,17 @@ mod tests {
     const PACKAGE: &str = "php_ext_fixture";
 
     /// A native as the fixture crate's expansion would record it.
-    fn native(owner: Option<&'static str>, name: &'static str) -> Entered {
-        Entered {
-            krate: PACKAGE,
-            owner,
-            name,
+    fn native(owner: Option<&str>, name: &str) -> Entry {
+        Entry {
+            krate: PACKAGE.to_owned(),
+            owner: owner.map(str::to_owned),
+            name: name.to_owned(),
         }
     }
 
     /// The subjects of `text`, each fence's run having entered what
     /// `trace` gives it: the fence whose snippet contains the first half.
-    fn subjects(text: &str, trace: &[(&str, Vec<Entered>)]) -> Option<Vec<Subject>> {
+    fn subjects(text: &str, trace: &[(&str, Vec<Entry>)]) -> Option<Vec<Subject>> {
         let file = Path::new("ext/fixture/src/lib.rs");
         let found = fence::extract(file, text);
         let anchored = scan(file, text, &found.witnesses, cfg::Target::built());
@@ -721,7 +710,7 @@ mod tests {
                 let natives = trace
                     .iter()
                     .filter(|(marker, _)| w.snippet.contains(marker))
-                    .flat_map(|(_, natives)| natives.iter().copied().map(Entry::from))
+                    .flat_map(|(_, natives)| natives.iter().cloned())
                     .collect();
                 (w.id(), Record::Entered(natives))
             })
@@ -740,16 +729,16 @@ mod tests {
             .collect()
     }
 
-    /// The line the binary appends reads back as the entry the linked
-    /// engine hands over, and a line of another shape reads as none.
+    /// The line a binary writes reads back as the entry it names, and a
+    /// line of another shape reads as none.
     #[test]
     fn a_line_the_binary_appended_is_the_entry_it_names() {
         let method = native(Some("C"), "count");
         let line = format!("{}\t{}\t{}", method.krate, "C", method.name);
-        assert_eq!(Entry::parse(&line), Some(Entry::from(method)));
+        assert_eq!(Entry::parse(&line), Some(method));
         assert_eq!(
             Entry::parse("php_ext_fixture\t\tnative"),
-            Some(Entry::from(native(None, "native")))
+            Some(native(None, "native"))
         );
         assert_eq!(Entry::parse("php_ext_fixture\tnative"), None);
     }
@@ -814,10 +803,10 @@ mod tests {
     #[test]
     fn a_method_entered_only_by_another_class_or_another_crate_is_not_covered() {
         let text = "/// ```php\n/// new A;\n/// ```\n/// ```expect\n/// ```\n#[php_class]\nimpl A {\n    fn go(this: This<Self>) {}\n}\n#[php_class]\nimpl B {\n    fn go(this: This<Self>) {}\n}\n";
-        let elsewhere = Entered {
-            krate: "php_ext_other",
-            owner: Some("A"),
-            name: "go",
+        let elsewhere = Entry {
+            krate: "php_ext_other".to_owned(),
+            owner: Some("A".to_owned()),
+            name: "go".to_owned(),
         };
         let trace = [("new A", vec![native(Some("B"), "go"), elsewhere])];
         let found = subjects(text, &trace).expect("the attribute declares natives");

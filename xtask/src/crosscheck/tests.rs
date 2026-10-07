@@ -445,7 +445,14 @@ fn the_head_a_host_writes_is_let_go_and_a_body_alone_is_kept() {
 fn rendered(tree: &Path, manifest: &Manifest, store: &Store, names: &[&str]) {
     for name in names {
         for column in Column::ALL {
-            let mut reading = reading_of(tree, manifest, name, Host::Cli, column).unwrap();
+            let mut reading = reading_of(
+                &crate::key::Snapshot::disk(tree).unwrap(),
+                manifest,
+                name,
+                Host::Cli,
+                column,
+            )
+            .unwrap();
             reading.status = Status::Pass;
             store.record(&[reading]).unwrap();
         }
@@ -508,7 +515,7 @@ fn a_staged_change_beyond_the_key_renders_again_though_the_reading_stands() {
     let reads = Reads::of(
         &graph,
         &manifest,
-        &Carried::linked().unwrap(),
+        &Carried::linked(&tree).unwrap(),
         "ctype",
         Host::Cli,
     );
