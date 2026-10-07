@@ -450,8 +450,9 @@ fn get_browser(
         return Ok(Union::B(OrFalse::Value(array)));
     };
     let object = new_object(req, class)?;
-    // `object_and_properties_init` over the browser's row, which runs no
-    // code of the program; each row is lent while it is written.
+    // `object_and_properties_init` over the browser's row
+    // (`Z/ext/standard/browscap.c:793`), which runs no code of the program;
+    // each row is lent while it is written.
     walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let value = row.value().deref();

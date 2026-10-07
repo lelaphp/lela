@@ -6230,7 +6230,8 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
                 .all(|(i, (key, _))| key == Key::Int(i));
             let mut out = String::from("[");
             let mut first = true;
-            // `zend_ast_export_zval`'s `ZEND_HASH_FOREACH_KEY_VAL`, which no
+            // `zend_ast_export_zval`'s `ZEND_HASH_FOREACH_KEY_VAL`
+            // (`Z/Zend/zend_ast.c:1854`), which no
             // code of the program reaches; the walk lends each row while the
             // value's text is made.
             let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {

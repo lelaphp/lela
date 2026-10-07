@@ -703,7 +703,8 @@ fn clean(req: &mut Request) -> Result<(), Thrown> {
     let Some(array) = crate::session_array_mut(req)? else {
         return Ok(());
     };
-    // `zend_hash_clean` over the separated table, each row destroyed in
+    // `zend_hash_clean` (`Z/ext/session/session.c:2702`,
+    // `Z/Zend/zend_hash.c:1875`) over the separated table, each row destroyed in
     // order and its destructor served as it goes; no owner of the table
     // taken, the session's reference holding it. A destructor that
     // assigns over `$_SESSION` frees the table under php's loop, which

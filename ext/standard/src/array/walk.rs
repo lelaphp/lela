@@ -846,8 +846,8 @@ fn mapped(
             return Ok(Some(Owner::take(req, input)));
         }
         let mut out = PhpArray::new(req)?;
-        // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(arrays[0]), num_key, str_key,
-        // zv)` (`Z/ext/standard/array.c:6854`), no owner of the table taken:
+        // `ZEND_HASH_MAP_FOREACH_KEY_VAL(input, num_key, str_key,
+        // fci.params)` (`Z/ext/standard/array.c:6854`), no owner of the table taken:
         // the argument holds it while the callback runs. An answer of
         // nothing, a callback that threw past its frame, ends the walk with
         // no array.

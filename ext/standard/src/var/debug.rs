@@ -265,7 +265,7 @@ fn dump(
             }
         }
         ValueRef::Array(array) => {
-            // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` beside
+            // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` (`Z/ext/standard/var.c:347`) beside
             // `GC_PROTECT_RECURSION(myht)` (GH-19801) and
             // `ZEND_HASH_FOREACH_KEY_VAL`: a foreach walk holding the array
             // and guarding its recursion, so an element's `__debugInfo`
