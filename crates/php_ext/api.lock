@@ -712,6 +712,7 @@ request::Request::function_extension
 request::Request::gc_collect
 request::Request::gc_enable
 request::Request::gc_enabled
+request::Request::gc_possible_root
 request::Request::gc_status
 request::Request::global
 request::Request::global_names

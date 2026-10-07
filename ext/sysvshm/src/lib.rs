@@ -539,18 +539,17 @@ fn shm_get_var(
         return Ok(Owner::take(req, Value::bool(false)));
     };
     let mut reader = Unserializer::new(req, bytes.as_deref().unwrap_or_default())?;
-    let read = reader.local(req);
-    let finished = reader.finish(req);
-    let read = match (read, finished) {
-        (Ok(read), Ok(())) => read,
-        (Ok(read), Err(thrown)) => {
-            if let Some(value) = read {
-                value.give_up(req);
-            }
-            return Err(thrown);
-        }
-        (Err(thrown), _) => return Err(thrown),
+    // The value read is the caller's, kept beside the read's outcome.
+    let (outcome, read) = match reader.local(req) {
+        Ok(read) => (Ok(()), read),
+        Err(thrown) => (Err(thrown), None),
     };
+    if let Err(thrown) = reader.finish(req, outcome) {
+        if let Some(value) = read {
+            value.give_up(req);
+        }
+        return Err(thrown);
+    }
     match read {
         Some(value) if bytes.is_some() => Ok(value),
         read => {

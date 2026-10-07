@@ -641,20 +641,30 @@ impl ArrayObject {
         let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let mut pending = None;
         let read = read_record(req, this, &mut reader, &data, &mut pending);
-        let finished = reader.finish(req);
-        let broke_at = read?;
-        finished?;
-        if let Some(at) = broke_at {
-            let len = data.len();
-            return Err(throw(
-                req,
-                "UnexpectedValueException",
-                &format!("Error at offset {at} of {len} bytes"),
-            ));
-        }
-        match pending {
-            Some(thrown) => Err(thrown),
-            None => Ok(()),
+        // What `spl_array_set_array` threw stands over the rest of the
+        // read and the var hash's destruction, as `EG(exception)` does, so
+        // no delayed call is made under it.
+        let (read, broke_at) = match (read, pending) {
+            (Ok(broke_at), None) => (Ok(()), broke_at),
+            (Ok(broke_at), Some(stands)) => (Err(stands), broke_at),
+            (Err(thrown), None) => (Err(thrown), None),
+            (Err(thrown), Some(stands)) => (Err(stands.chain(req, thrown)), None),
+        };
+        let finished = reader.finish(req, read);
+        let Some(at) = broke_at else {
+            return finished;
+        };
+        // `outexcept`, after `PHP_VAR_UNSERIALIZE_DESTROY`: chained onto
+        // whatever stands.
+        let len = data.len();
+        let broke = throw(
+            req,
+            "UnexpectedValueException",
+            &format!("Error at offset {at} of {len} bytes"),
+        );
+        match finished {
+            Ok(()) => Err(broke),
+            Err(stands) => Err(stands.chain(req, broke)),
         }
     }
 

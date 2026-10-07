@@ -29,3 +29,31 @@ $m = memory_get_usage(); session_set_cookie_params(['path' => 123456, 'PATH' => 
     );
     assert_eq!(stdout, "32\n");
 }
+
+/// A read that throws inside a session decode makes none of the
+/// `__wakeup()` calls queued before it, as php's `zend_call_function`
+/// refuses each at `EG(exception)`, so the throwing `__wakeup()` makes
+/// no second throwable to drop, under the `php` and the
+/// `php_serialize` handlers alike (#2235).
+#[test]
+fn a_read_that_throws_in_a_session_decode_makes_no_delayed_call() {
+    let engine = Engine::builder()
+        .extensions(&[php_ext_standard::extension(), php_ext_session::extension()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(
+        r#"<?php
+class A { function __wakeup() { echo "wakeup A\n"; throw new Exception("wake"); } }
+class T { public int $p; }
+$o = ["save_path" => sys_get_temp_dir(), "use_cookies" => 0, "cache_limiter" => ""];
+ob_start(); session_start($o);
+try { @session_decode('a|O:1:"A":0:{}b|O:1:"T":1:{s:1:"p";s:1:"x";}'); } catch (TypeError $e) { echo "caught\n"; }
+ini_set("session.serialize_handler", "php_serialize"); session_start($o);
+try { @session_decode('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"T":1:{s:1:"p";s:1:"x";}}'); } catch (TypeError $e) { echo "caught\n"; }
+ob_end_flush();
+"#,
+        Capture::default(),
+    );
+    assert_eq!(served.fatal, None);
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "caught\ncaught\n");
+}

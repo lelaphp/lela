@@ -351,8 +351,8 @@ impl Request {
                 return;
             }
         };
-        self.release(held);
-        self.symbol_settle(table, name, value, held);
+        let released = self.release_in_place(held);
+        self.symbol_settle(table, name, value, Some(released));
     }
 
     /// The place a [`Symbol::Held`] bucket keeps its value in, found by
@@ -365,32 +365,83 @@ impl Request {
         }
     }
 
-    /// The write after a release in place, which can have served a
-    /// destructor that wrote or deleted the name: `value` written where
-    /// the name stands now, and what the program left there, other than
-    /// `expected`, released; a name it deleted is added again.
-    fn symbol_settle(&mut self, table: TableId, name: Vec<u8>, value: Value, expected: Value) {
-        let Some(entries) = self.table_mut(table) else {
-            self.release(value);
-            return;
+    /// The write after a release, which can have served a destructor
+    /// that wrote or deleted the name: `value` written where the name
+    /// stands now, and what the program left there released; a name it
+    /// deleted is added again. After a release in place, `released`,
+    /// what that release left in the bucket is no write of the
+    /// program's and is not released again; after a release that nulled
+    /// the bucket first ([`Overwrite::Nulled`]), anything there is the
+    /// program's.
+    fn symbol_settle(
+        &mut self,
+        table: TableId,
+        name: Vec<u8>,
+        value: Value,
+        released: Option<Released>,
+    ) {
+        let entries = self.table_mut(table);
+        let at = entries
+            .as_ref()
+            .and_then(|entries| entries.iter().position(|(key, _)| *key == name));
+        let old = match (entries, at) {
+            (None, _) => {
+                if let Some(released) = released {
+                    released.let_go(self);
+                }
+                self.release(value);
+                return;
+            }
+            (Some(entries), None) => {
+                entries.push((name, Symbol::Value(value)));
+                self.table_bytes(table, true, false);
+                None
+            }
+            (Some(entries), Some(at)) => {
+                Some(std::mem::replace(&mut entries[at].1, Symbol::Value(value)))
+            }
         };
-        let Some(at) = entries.iter().position(|(key, _)| *key == name) else {
-            entries.push((name, Symbol::Value(value)));
-            self.table_bytes(table, true, false);
-            return;
+        let by_program = match (old, released) {
+            (Some(Symbol::Value(left)), Some(released)) => released
+                .wrote_over(self, left)
+                .then_some(Symbol::Value(left)),
+            (old, released) => {
+                if let Some(released) = released {
+                    released.let_go(self);
+                }
+                old
+            }
         };
-        let old = std::mem::replace(&mut entries[at].1, Symbol::Value(value));
-        match old {
-            Symbol::Value(left) if left.to_zval() == expected.to_zval() => {}
-            old => self.release_symbol(old),
+        if let Some(old) = by_program {
+            self.release_symbol(old);
         }
+    }
+
+    /// `held`, what a write finds where it writes, released where it
+    /// stands, before the write ([`Overwrite::InPlace`]), so a destructor
+    /// the release serves reads the value it is serving there. An object
+    /// is pinned across the release and the settle after it
+    /// ([`php_heap::Obj::pin`]): where the release serves code that
+    /// releases it again through the variable and so frees it, its
+    /// bytes and its id stand until [`Released::wrote_over`] lets them
+    /// go, so nothing the program makes meanwhile is laid where it
+    /// stood, and the settle compares against no block the heap has
+    /// freed. A string, a table or a cell is freed by its release only
+    /// after every destructor that release serves.
+    fn release_in_place(&mut self, held: Value) -> Released {
+        if let Some(object) = held.as_object() {
+            object.heap().pin();
+        }
+        self.release(held);
+        Released { held }
     }
 
     /// `value` written into the place `place` finds, what it held given
     /// up in `order`. The place is found again after a release that can
     /// have served program code, and what the program left there, other
-    /// than what the release left, is released after the write; where
-    /// the place is gone, `value` is given up.
+    /// than what a release in place left ([`Released::wrote_over`]), is
+    /// released after the write; where the place is gone, `value` is
+    /// given up.
     pub(super) fn overwrite_place(
         &mut self,
         place: impl Fn(&mut Request) -> Option<ZvalRef>,
@@ -402,26 +453,33 @@ impl Request {
             return;
         };
         let held = Value::of_zval(at.read());
-        let expected = match order {
+        let released = match order {
             Overwrite::After => {
                 at.write(value.to_zval());
                 self.release(held);
                 return;
             }
-            Overwrite::InPlace => held,
+            Overwrite::InPlace => Some(self.release_in_place(held)),
             Overwrite::Nulled => {
                 at.write(Value::null().to_zval());
-                Value::null()
+                self.release(held);
+                None
             }
         };
-        self.release(held);
         let Some(at) = place(self) else {
+            if let Some(released) = released {
+                released.let_go(self);
+            }
             self.release(value);
             return;
         };
         let left = Value::of_zval(at.read());
         at.write(value.to_zval());
-        if left.to_zval() != expected.to_zval() {
+        let by_program = match released {
+            Some(released) => released.wrote_over(self, left),
+            None => true,
+        };
+        if by_program {
             self.release(left);
         }
     }
@@ -645,7 +703,7 @@ impl Request {
                 }
                 entry.1 = Symbol::Value(Value::null());
                 self.release(held);
-                self.symbol_settle(table, name.to_vec(), value, Value::null());
+                self.symbol_settle(table, name.to_vec(), value, None);
             }
             _ => self.symbol_update(table, name.to_vec(), value),
         }
@@ -826,4 +884,33 @@ pub enum Overwrite {
     /// `php_extract_ref_overwrite`'s `garbage`: the write, and the old
     /// value released after it.
     After,
+}
+
+/// What a release in place ([`Request::release_in_place`]) left where
+/// it released: the value, one object of it pinned, until the settle
+/// after the write lets it go ([`Released::wrote_over`] or
+/// [`Released::let_go`]).
+#[must_use = "the pin a release in place set is let go by wrote_over or let_go"]
+struct Released {
+    held: Value,
+}
+
+impl Released {
+    /// Whether `left`, what the place holds once the release in place
+    /// is over, is a write of the program's: anything but what the
+    /// release left there. The pin [`Request::release_in_place`] set is
+    /// let go first, giving back the bytes of an object the release
+    /// freed.
+    fn wrote_over(self, req: &mut Request, left: Value) -> bool {
+        let wrote = left.to_zval() != self.held.to_zval();
+        self.let_go(req);
+        wrote
+    }
+
+    /// The pin the release in place set let go, where it set one.
+    fn let_go(self, req: &mut Request) {
+        if let Some(object) = self.held.as_object() {
+            req.heap.unpin(object.heap());
+        }
+    }
 }

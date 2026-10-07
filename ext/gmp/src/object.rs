@@ -515,8 +515,7 @@ fn clone_gmp(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, T
 fn unserialize_custom(req: &mut Request, object: PhpObject, data: &[u8]) -> Result<(), Thrown> {
     let mut reader = Unserializer::new(req, data)?;
     let read = read_custom(req, &mut reader, object);
-    let finished = reader.finish(req);
-    read.and(finished)
+    reader.finish(req, read)
 }
 
 /// The two values of a `C:` payload, as [`unserialize_custom`] reads

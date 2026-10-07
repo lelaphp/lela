@@ -168,21 +168,17 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
     if format == Format::PhpSerialize {
         let mut reader = Unserializer::new(req, &data)?;
         // The value is the var hash's until it is destroyed; the session
-        // keeps an owner of its own.
-        let held = match reader.value(req) {
-            Ok(read) => Ok(read.map(|value| Owner::take(req, value))),
-            Err(thrown) => Err(thrown),
+        // keeps an owner of its own, beside the read's outcome.
+        let (held, read) = match reader.value(req) {
+            Ok(read) => (read.map(|value| Owner::take(req, value)), Ok(())),
+            Err(thrown) => (None, Err(thrown)),
         };
-        let held = match (held, reader.finish(req)) {
-            (Ok(held), Ok(())) => held,
-            (Ok(held), Err(thrown)) => {
-                if let Some(held) = held {
-                    held.give_up(req);
-                }
-                return Err(thrown);
+        if let Err(thrown) = reader.finish(req, read) {
+            if let Some(held) = held {
+                held.give_up(req);
             }
-            (Err(thrown), _) => return Err(thrown),
-        };
+            return Err(thrown);
+        }
         let ok = held.is_some();
         // A value read is bound whatever it is, and nothing read is the
         // empty array.
@@ -227,12 +223,8 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
                 ok = false;
                 break;
             }
-            Err(thrown) => {
-                reader.finish(req).ok();
-                return Err(thrown);
-            }
+            Err(thrown) => return reader.finish(req, Err(thrown)),
         }
     }
-    reader.finish(req)?;
-    Ok(ok)
+    reader.finish(req, Ok(ok))
 }

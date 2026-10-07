@@ -98,3 +98,19 @@ echo "end\n";
         "end\n",
     );
 }
+
+/// An element read as a temporary and the `children` collection it
+/// caches name each other; the collection is offered to the collector
+/// where the element's only other owner is that temporary, as php's
+/// `dom_parent_node_children_read` does, so the cycle a discarded read
+/// leaves is collected (#2241).
+#[test]
+fn a_discarded_children_read_is_collected() {
+    served(
+        "<?php $d = Dom\\XMLDocument::createFromString('<r><a/></r>');\n\
+         $d->documentElement->children;\n\
+         try { clone $d->documentElement->children; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\n\
+         echo (clone $d->documentElement)->children->length, \"\\n\";\n",
+        "Trying to clone an uncloneable object of class Dom\\HTMLCollection\n1\n",
+    );
+}

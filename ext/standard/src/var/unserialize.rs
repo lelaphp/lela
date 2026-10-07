@@ -314,11 +314,14 @@ impl VarHash {
     /// made with `BG(serialize_lock)` held until one of them throws, and
     /// the object of that call and of every call after it marked as
     /// destructed, so its destructor never runs; every owner given up
-    /// after its entry. The `Err` is what the call threw. Where the
-    /// reader's throwable `stands`, no call is made and
-    /// every object is marked, as `zend_call_function` returns without
-    /// calling while a throwable is pending and leaves the return
-    /// undefined.
+    /// after its entry. The answer is `read`, the outcome of the read
+    /// the var hash served, or what a call threw where `read` succeeded.
+    /// Where `read` failed on a throw, that throwable stands: no call is
+    /// made and every object is marked, as `zend_call_function` returns
+    /// without calling while a throwable is pending and leaves the
+    /// return undefined, so there is never a second throwable. What a
+    /// successful `read` carries is dropped where a call throws, so it
+    /// carries no owner.
     ///
     /// ```php
     /// class W { function __wakeup() { throw new Exception("no"); } function __destruct() { echo "dtor W\n"; } }
@@ -351,11 +354,11 @@ impl VarHash {
     /// ```expect
     /// no B
     /// ```
-    fn destroy(self, req: &mut Request, stands: Option<&Thrown>) -> Result<(), Thrown> {
+    fn destroy<T>(self, req: &mut Request, read: Result<T, Thrown>) -> Result<T, Thrown> {
         for block in self.entries {
             block.free(req);
         }
-        let mut calling = stands.is_none();
+        let mut calling = read.is_ok();
         let mut failed: Option<Thrown> = None;
         for DtorBlock { block, entries } in self.dtors {
             for dtor in entries {
@@ -403,7 +406,12 @@ impl VarHash {
         if let Some(data) = self.data {
             data.free(req);
         }
-        failed.map_or(Ok(()), Err)
+        // `failed` is only ever set while `calling`, so only over a
+        // `read` that succeeded.
+        match failed {
+            Some(thrown) => Err(thrown),
+            None => read,
+        }
     }
 }
 
@@ -523,8 +531,10 @@ impl<'a> State<'a> {
     /// `PHP_VAR_UNSERIALIZE_DESTROY`: the reader's root taken off, and
     /// the var hash handed back to the reader it is shared with, or
     /// destroyed where this was its last holder, with no delayed call
-    /// made where a throwable `stands` ([`VarHash::destroy`]).
-    fn close(self, req: &mut Request, stands: Option<&Thrown>) -> Result<(), Thrown> {
+    /// made where `read`, the outcome of the read, failed on a throw
+    /// ([`VarHash::destroy`]); the answer is `read`, or what a delayed
+    /// call threw.
+    fn close<T>(self, req: &mut Request, read: Result<T, Thrown>) -> Result<T, Thrown> {
         let State {
             mut hash,
             holder,
@@ -542,8 +552,8 @@ impl<'a> State<'a> {
             .unserialize
             .close(hash, holder)
         {
-            Some(hash) => hash.destroy(req, stands),
-            None => Ok(()),
+            Some(hash) => hash.destroy(req, read),
+            None => read,
         }
     }
 }
@@ -753,8 +763,7 @@ pub fn php_unserialize_with_options(
         Err(thrown) => {
             // php's `goto cleanup`: the var hash it laid down first is
             // destroyed under the refusal.
-            state.close(req, Some(&thrown))?;
-            return Err(thrown);
+            return state.close(req, Err(thrown));
         }
     };
     let previous = (state.hash.max_depth, state.hash.depth);
@@ -815,9 +824,7 @@ pub fn php_unserialize_with_options(
     let (max_depth, depth) = previous;
     state.hash.max_depth = max_depth;
     state.hash.depth = depth;
-    let destroyed = state.close(req, parsed.as_ref().err());
-    let thrown = parsed.err().or(destroyed.err());
-    if let Some(thrown) = thrown {
+    if let Err(thrown) = state.close(req, parsed) {
         if let Some(answer) = answer {
             answer.give_up(req);
         }
@@ -986,6 +993,8 @@ impl<'a> Unserializer<'a> {
         let root = self.state.root;
         let read = self.state.read(req, Slot::Root(root));
         let value = self.state.hand_over(req);
+        // A read that failed, on a throw or not, frees what it left in
+        // the caller's zval, as php's callers `zval_ptr_dtor` it.
         if !matches!(read, Ok(true)) {
             value.give_up(req);
             return read.map(|_| None);
@@ -998,11 +1007,29 @@ impl<'a> Unserializer<'a> {
         Ok(Some(inner))
     }
 
-    /// `PHP_VAR_UNSERIALIZE_DESTROY`: where this reader was the var
-    /// hash's last, the delayed calls, in the order they were queued,
-    /// until one of them throws, which is the `Err`.
-    pub fn finish(self, req: &mut Request) -> Result<(), Thrown> {
-        self.state.close(req, None)
+    /// `PHP_VAR_UNSERIALIZE_DESTROY` after the caller's read, whose
+    /// outcome is `read`: where this reader was the var hash's last, the
+    /// delayed calls, in the order they were queued, until one of them
+    /// throws. The answer is `read`, or what a delayed call threw: where
+    /// `read` failed on a throw no call is made, as php's
+    /// `zend_call_function` refuses each at `EG(exception)`, so one
+    /// throwable leaves. What a successful `read` carries is dropped
+    /// where a call throws, so it is `Copy`: a caller keeps an owner it
+    /// read beside `read`, never in it.
+    ///
+    /// ```php
+    /// class A { function __wakeup() { echo "wakeup A\n"; throw new Exception("wake"); } }
+    /// class T { public int $p; }
+    /// $s = new SplObjectStorage;
+    /// try { $s->unserialize('x:i:2;O:1:"A":0:{},N;;O:1:"T":1:{s:1:"p";s:1:"x";},N;;m:a:0:{}'); } catch (Throwable $e) {}
+    /// try { $s->unserialize('x:i:1;O:1:"A":0:{},N;;m:a:0:{}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// wakeup A
+    /// wake
+    /// ```
+    pub fn finish<T: Copy>(self, req: &mut Request, read: Result<T, Thrown>) -> Result<T, Thrown> {
+        self.state.close(req, read)
     }
 }
 

@@ -381,18 +381,17 @@ fn msg_receive(
         return Ok(true);
     }
     let mut reader = Unserializer::new(req, &text)?;
-    let read = reader.local(req);
-    let finished = reader.finish(req);
-    let read = match (read, finished) {
-        (Ok(read), Ok(())) => read,
-        (Ok(read), Err(thrown)) => {
-            if let Some(value) = read {
-                value.give_up(req);
-            }
-            return Err(thrown);
-        }
-        (Err(thrown), _) => return Err(thrown),
+    // The value read is the caller's, kept beside the read's outcome.
+    let (outcome, read) = match reader.local(req) {
+        Ok(read) => (Ok(()), read),
+        Err(thrown) => (Err(thrown), None),
     };
+    if let Err(thrown) = reader.finish(req, outcome) {
+        if let Some(value) = read {
+            value.give_up(req);
+        }
+        return Err(thrown);
+    }
     let Some(value) = read else {
         docref(req, Level::Warning, "Message corrupted");
         message.set(req, Value::bool(false))?;
