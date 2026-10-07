@@ -78,3 +78,21 @@ echo get_class($db->query('SELECT 1')), "\n";
     );
     assert_eq!(stdout, "made\nS\n");
 }
+
+/// `setAuthorizer` on an object with no connection, one whose
+/// constructor never ran the parent's, throws before it
+/// keeps the callback, as `PDO_CONSTRUCT_CHECK` comes before
+/// `zend_fcc_dup` (#2133,
+/// `ext/pdo_sqlite/tests/subclasses/pdosqlite_setauthorizer_trampoline_no_leak.phpt`).
+#[test]
+fn set_authorizer_with_no_connection_keeps_no_callback() {
+    let stdout = armed(
+        r#"<?php
+class T { function __call($n, $a) { return Pdo\Sqlite::OK; } }
+class S extends Pdo\Sqlite { function __construct() {} }
+$obj = new S;
+try { $obj->setAuthorizer([new T, 'authorizer']); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "S object is uninitialized\n");
+}

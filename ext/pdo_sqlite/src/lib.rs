@@ -315,20 +315,23 @@ impl Sqlite {
         this: This<Self>,
         callback: Option<Callable>,
     ) -> Result<(), Thrown> {
-        let handler = callback.map(|callable| {
-            let value = req.argument(1).unwrap_or_default();
-            Handler::keep(req, callable, value)
-        });
         let this = this.object();
+        // `PDO_CONSTRUCT_CHECK` throws before `zend_fcc_dup` keeps the
+        // callback, so the callback is kept only once a connection stands.
         php_ext_pdo::connector::with_connection(req, this, |req, conn| {
-            if let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<sqlite::Handle>()
-                && let Some(old) = handle.db.set_authorizer(handler)
-            {
+            let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<sqlite::Handle>()
+            else {
+                return Ok(());
+            };
+            let handler = callback.map(|callable| {
+                let value = req.argument(1).unwrap_or_default();
+                Handler::keep(req, callable, value)
+            });
+            if let Some(old) = handle.db.set_authorizer(handler) {
                 old.release(req);
             }
             Ok(())
-        })?;
-        Ok(())
+        })
     }
 }
 
