@@ -217,10 +217,10 @@ impl Request {
         let words = words.into_value().hand_on();
         let count = Value::int(i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX));
         if !self.description.argv.is_empty() {
-            let held = Owner::take(self, words);
-            self.set_global(b"argv", Some(held));
-            let held = Owner::take(self, count);
-            self.set_global(b"argc", Some(held));
+            let list = Owner::take(self, words);
+            self.set_global(b"argv", Some(list));
+            let number = Owner::take(self, count);
+            self.set_global(b"argc", Some(number));
         }
         if server {
             self.addref(&words);

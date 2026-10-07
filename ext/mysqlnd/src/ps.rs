@@ -1173,7 +1173,14 @@ fn assign_row(
                     // the cell as the owner it is.
                     let owned = Owner::take(req, value);
                     req.release(value);
-                    r.set(req, owned)?;
+                    if let Err(thrown) = r.set(req, owned) {
+                        // A typed reference refused it: the values not
+                        // yet assigned are given back, as at the end.
+                        for v in values {
+                            req.release(v);
+                        }
+                        return Err(thrown);
+                    }
                 }
             }
             old => {

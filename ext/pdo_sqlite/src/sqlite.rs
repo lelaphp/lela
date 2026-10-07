@@ -662,16 +662,16 @@ impl Statement for Stmt {
             BindKind::Str | BindKind::Other(_) => {
                 if matches!(value.as_ref(), ValueRef::Null) {
                     self.handle.bind_null(at)
-                } else {
-                    let text = if let Some(text) = value.as_php_string() {
-                        *text
-                    } else {
-                        let text = to_string(req, &value)?;
-                        let view = *text;
-                        replace(req, param.value, text.into_value());
-                        view
-                    };
+                } else if let Some(text) = value.as_php_string() {
                     self.handle.bind_text(at, text.as_bytes())
+                } else {
+                    // Bound before the parameter takes it: the write
+                    // releases what the parameter held, which may run a
+                    // destructor, and no view is read past it.
+                    let text = to_string(req, &value)?;
+                    let rc = self.handle.bind_text(at, text.as_bytes());
+                    replace(req, param.value, text.into_value());
+                    rc
                 }
             }
         };

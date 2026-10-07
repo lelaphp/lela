@@ -156,19 +156,21 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         let mut reader = Unserializer::new(req, &data)?;
         // The value is the var hash's until it is destroyed; the session
         // keeps an owner of its own.
-        let read = reader.value(req);
-        let held = match &read {
-            Ok(Some(value)) => Some(Owner::take(req, *value)),
-            _ => None,
+        let held = match reader.value(req) {
+            Ok(read) => Ok(read.map(|value| Owner::take(req, value))),
+            Err(thrown) => Err(thrown),
         };
-        let finished = reader.finish(req);
-        if let Err(thrown) = finished {
-            if let Some(held) = held {
-                held.give_up(req);
+        let held = match (held, reader.finish(req)) {
+            (Ok(held), Ok(())) => held,
+            (Ok(held), Err(thrown)) => {
+                if let Some(held) = held {
+                    held.give_up(req);
+                }
+                return Err(thrown);
             }
-            return Err(thrown);
-        }
-        let ok = read?.is_some();
+            (Err(thrown), _) => return Err(thrown),
+        };
+        let ok = held.is_some();
         // A value read is bound whatever it is, and nothing read is the
         // empty array.
         let vars = match held {

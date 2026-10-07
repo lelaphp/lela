@@ -3110,7 +3110,7 @@ mod tests {
         let Ok(text) = PhpString::new(&mut req, b"held through the reference") else {
             return;
         };
-        let held = *text;
+        let string = *text;
         let Ok(()) = r.set(&mut req, text.into_value()) else {
             return;
         };
@@ -3118,7 +3118,7 @@ mod tests {
             v.deref().as_str_bytes().map(<[u8]>::to_vec),
             Some(b"held through the reference".to_vec())
         );
-        assert_eq!(held.heap().refcount(), 1, "the cell holds the one owner");
+        assert_eq!(string.heap().refcount(), 1, "the cell holds the one owner");
         req.release(v);
         assert_eq!(
             req.memory_usage(false),
