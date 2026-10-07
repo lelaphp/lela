@@ -57,11 +57,6 @@ struct Waiting {
 /// here: a new export on no row fails.
 const WAITING: &[Waiting] = &[
     Waiting {
-        producer: "standard",
-        ticket: 1347,
-        names: &["php_next_utf8_char"],
-    },
-    Waiting {
         producer: "random",
         ticket: 2021,
         names: &["Rng"],
@@ -556,8 +551,7 @@ mod tests {
                 "pub beyond extension(): Regex, Regex::compile, each on design §4.10's list of surfaces"
             ]
         );
-        let held =
-            Surfaces::parse(DOC).hold("standard", &lines(&["php_next_utf8_char", "php_basename"]));
+        let held = Surfaces::parse(DOC).hold("libxml", &lines(&["ffi::Sax", "php_basename"]));
         assert_eq!(
             held.problem.as_deref(),
             Some(
@@ -566,20 +560,20 @@ mod tests {
         );
         assert_eq!(
             held.notes,
-            ["pub beyond extension(), on no row and waiting on #1347: php_next_utf8_char"]
+            ["pub beyond extension(), on no row and waiting on #2020: ffi::Sax"]
         );
     }
 
     #[test]
     fn a_waiting_entry_the_design_lists_now_is_named_for_its_drop() {
-        let doc = "### 4.10 Extension crates\n\n| `standard` → `xml` | `php_next_utf8_char` | `html.h` |\n";
-        let held = Surfaces::parse(doc).hold("standard", &lines(&["php_next_utf8_char"]));
+        let doc = "### 4.10 Extension crates\n\n| `libxml` → `xml` | `ffi::Sax` | `compat.c` |\n";
+        let held = Surfaces::parse(doc).hold("libxml", &lines(&["ffi::Sax"]));
         assert_eq!(held.problem, None);
         assert_eq!(
             held.notes,
             [
-                "pub beyond extension(): php_next_utf8_char, each on design §4.10's list of surfaces",
-                "on design §4.10's list now, so its entry waiting on #1347 is dropped: php_next_utf8_char",
+                "pub beyond extension(): ffi::Sax, each on design §4.10's list of surfaces",
+                "on design §4.10's list now, so its entry waiting on #2020 is dropped: ffi::Sax",
             ]
         );
     }
