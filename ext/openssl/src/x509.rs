@@ -3,6 +3,7 @@
 //! check for a purpose against a store (`php_openssl_setup_verify`,
 //! `php_openssl_check_cert`), with `openssl_get_cert_locations`.
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use php_ext::abi::{Instance, OrFalse, Ref, Refusals, Union, Untyped};
@@ -10,6 +11,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::decode::{
@@ -406,7 +408,7 @@ pub(crate) fn name_entries(
         match found.as_ref().map(Value::as_ref) {
             Some(ValueRef::Array(list)) => {
                 let mut list = *list;
-                list.append(req, text.hand_on_unmigrated())?;
+                list.append(req, text)?;
             }
             Some(ValueRef::Str(_)) => {
                 let Some(first) = found else {
@@ -415,23 +417,24 @@ pub(crate) fn name_entries(
                 };
                 // `zend_string_copy`: the list holds the string as well,
                 // before the entry that held it alone is replaced.
-                req.addref(&first);
+                let first = Owner::take(req, first);
                 let mut list = PhpArray::new(req)?;
                 list.append(req, first)?;
-                list.append(req, text.hand_on_unmigrated())?;
-                let label_key = Key::Str(PhpString::new(req, &label)?.hand_on_unmigrated());
-                inner.set(req, label_key, list.into_value().hand_on_unmigrated())?;
+                list.append(req, text)?;
+                let label_key = PhpString::new(req, &label)?.into_key();
+                inner.set(req, label_key, list.into_value())?;
             }
             Some(_) => text.give_up(req),
             None => {
-                let label = Key::from_string(PhpString::new(req, &label)?.hand_on_unmigrated());
-                inner.set(req, label, text.hand_on_unmigrated())?;
+                let label = PhpString::new(req, &label)?;
+                let label = Key::from_string(req, label);
+                inner.set(req, label, text)?;
             }
         }
     }
     if let (Some(key), Some(fresh)) = (key, fresh) {
-        let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
-        array.set(req, key, fresh.into_value().hand_on_unmigrated())?;
+        let key = PhpString::new(req, key)?.into_key();
+        array.set(req, key, fresh.into_value())?;
     }
     Ok(())
 }
@@ -623,7 +626,12 @@ fn openssl_x509_parse(
         let hash = format!("{:08x}", cert.subject_hash());
         put_bytes(req, &mut out, b"hash", hash.as_bytes())?;
         name_entries(req, &mut out, Some(b"issuer"), &cert.issuer(), short_names)?;
-        put(req, &mut out, b"version", Value::int(cert.version()))?;
+        put(
+            req,
+            &mut out,
+            b"version",
+            Owner::take(req, Value::int(cert.version())),
+        )?;
         let (Some(hex_serial), Some(serial)) = cert.serial() else {
             store_errors(req);
             return Ok(OrFalse::False);
@@ -634,9 +642,19 @@ fn openssl_x509_parse(
         put_bytes(req, &mut out, b"validFrom", &from.data)?;
         put_bytes(req, &mut out, b"validTo", &to.data)?;
         let from = time_t(req, &from);
-        put(req, &mut out, b"validFrom_time_t", Value::int(from))?;
+        put(
+            req,
+            &mut out,
+            b"validFrom_time_t",
+            Owner::take(req, Value::int(from)),
+        )?;
         let to = time_t(req, &to);
-        put(req, &mut out, b"validTo_time_t", Value::int(to))?;
+        put(
+            req,
+            &mut out,
+            b"validTo_time_t",
+            Owner::take(req, Value::int(to)),
+        )?;
         if let Some(alias) = cert.alias() {
             put_bytes(req, &mut out, b"alias", &alias)?;
         }
@@ -649,33 +667,36 @@ fn openssl_x509_parse(
             req,
             &mut out,
             b"signatureTypeNID",
-            Value::int(i64::from(nid)),
+            Owner::take(req, Value::int(i64::from(nid))),
         )?;
 
         let mut purposes = PhpArray::new(req)?;
         for purpose in cert.purposes() {
             let mut row = PhpArray::new(req)?;
-            row.set(req, Key::Int(0), Value::bool(purpose.fit != 0))?;
-            row.set(req, Key::Int(1), Value::bool(purpose.fit_ca != 0))?;
+            row.set(
+                req,
+                Owner::take(req, Key::Int(0)),
+                Owner::take(req, Value::bool(purpose.fit != 0)),
+            )?;
+            row.set(
+                req,
+                Owner::take(req, Key::Int(1)),
+                Owner::take(req, Value::bool(purpose.fit_ca != 0)),
+            )?;
             let label = if short_names {
                 purpose.short
             } else {
                 purpose.long
             };
-            let label = Value::string(PhpString::new(req, &label)?.hand_on_unmigrated());
-            row.set(req, Key::Int(2), label)?;
+            let label = PhpString::new(req, &label)?.into_value();
+            row.set(req, Owner::take(req, Key::Int(2)), label)?;
             purposes.set(
                 req,
-                Key::Int(i64::from(purpose.id)),
-                row.into_value().hand_on_unmigrated(),
+                Owner::take(req, Key::Int(i64::from(purpose.id))),
+                row.into_value(),
             )?;
         }
-        put(
-            req,
-            &mut out,
-            b"purposes",
-            purposes.into_value().hand_on_unmigrated(),
-        )?;
+        put(req, &mut out, b"purposes", purposes.into_value())?;
 
         let Some(extensions) = cert.extensions() else {
             store_errors(req);
@@ -683,16 +704,12 @@ fn openssl_x509_parse(
         };
         let mut rows = PhpArray::new(req)?;
         for (name, value) in extensions {
-            let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
-            let name = Key::from_string(PhpString::new(req, &name)?.hand_on_unmigrated());
+            let value = PhpString::new(req, &value)?.into_value();
+            let name = PhpString::new(req, &name)?;
+            let name = Key::from_string(req, name);
             rows.set(req, name, value)?;
         }
-        put(
-            req,
-            &mut out,
-            b"extensions",
-            rows.into_value().hand_on_unmigrated(),
-        )?;
+        put(req, &mut out, b"extensions", rows.into_value())?;
         Ok(OrFalse::Value(out))
     })
 }
@@ -711,16 +728,21 @@ pub(crate) fn setup_verify(
         return Ok(None);
     };
     let (mut files, mut dirs) = (0, 0);
-    for (_, item) in calist.map(|a| a.snapshot()).unwrap_or_default() {
-        let text = crate::xp_ssl::string_of(req, &item)?;
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(calist), item)`
+    // (`Z/ext/openssl/openssl_backend_common.c:792`), no owner of the table
+    // taken: the argument holds it while `zval_try_get_string` runs
+    // `__toString`.
+    let calist = calist.unwrap_or_else(PhpArray::empty);
+    walk::foreach(req, calist, Hold::None, |req, row| -> walk::Step {
+        let text = crate::xp_ssl::string_of(req, &row.value().deref())?;
         let Some(path) = check_path(req, &text, Origin::Item(arg, None), false) else {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();
         let host = std::path::Path::new(std::ffi::OsStr::from_bytes(path.as_bytes()));
         let Ok(meta) = std::fs::metadata(host) else {
             docref(req, Level::Warning, &format!("Unable to stat {shown}"));
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let dir = !meta.is_file();
         if store.load(dir, Some(&path)) {
@@ -738,7 +760,8 @@ pub(crate) fn setup_verify(
                 &format!("Error loading {what} {shown}"),
             );
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     if files == 0 && !store.load(false, None) {
         store_errors(req);
     }

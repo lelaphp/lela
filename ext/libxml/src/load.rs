@@ -9,7 +9,7 @@ use php_ext::abi::Callable;
 use php_ext::call::{call, closure_from_callable};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{Request, Stream, StreamCtx, Streams as _, UrlStat};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::State;
 use crate::ffi::{Context, Uri};
@@ -192,9 +192,9 @@ fn arguments(
         (b"extSubSystem", &members.ext_sub_system),
     ];
     for (key, member) in rows {
-        let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+        let key = PhpString::new(req, key)?.into_key();
         let value = string_or_null(req, member.as_deref())?;
-        context.set(req, key, value.hand_on_unmigrated())?;
+        context.set(req, key, value)?;
     }
     Ok([public, system, context.into_value()])
 }

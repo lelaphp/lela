@@ -16,11 +16,13 @@
 
 use std::cmp::Ordering;
 use std::ffi::{CString, c_char};
+use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
@@ -311,9 +313,14 @@ pub(super) fn setlocale(
         let names: Vec<Vec<u8>> = match candidate.as_ref() {
             ValueRef::Array(array) => {
                 let mut names = Vec::new();
-                for (_, element) in array.snapshot() {
+                // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL(args[i]), elem)`
+                // (`Z/ext/standard/string.c:4969`), no owner of the table
+                // taken: the argument holds it while `__toString` runs.
+                walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+                    let element = row.value().deref();
                     names.push(crate::string::string_bytes(req, &element.deref())?);
-                }
+                    Ok(ControlFlow::Continue(()))
+                })?;
                 names
             }
             ValueRef::Null => vec![Vec::new()],
@@ -417,8 +424,8 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         (b"negative_sign", &lconv.negative_sign),
     ];
     for (name, value) in strings {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        let value = Value::string(PhpString::new(req, value)?.hand_on_unmigrated());
+        let key = PhpString::new(req, name)?.into_key();
+        let value = PhpString::new(req, value)?.into_value();
         array.set(req, key, value)?;
     }
     let chars: [(&[u8], c_char); 8] = [
@@ -432,8 +439,8 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         (b"n_sign_posn", lconv.n_sign_posn),
     ];
     for (name, value) in chars {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        array.set(req, key, Value::int(i64::from(value)))?;
+        let key = PhpString::new(req, name)?.into_key();
+        array.set(req, key, Owner::take(req, Value::int(i64::from(value))))?;
     }
     for (name, grouping) in [
         (&b"grouping"[..], &lconv.grouping),
@@ -442,10 +449,14 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut list = PhpArray::new(req)?;
         for (at, byte) in (0i64..).zip(grouping) {
             let value = i64::from(c_char::from_ne_bytes([*byte]));
-            list.set(req, Key::Int(at), Value::int(value))?;
+            list.set(
+                req,
+                Owner::take(req, Key::Int(at)),
+                Owner::take(req, Value::int(value)),
+            )?;
         }
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        array.set(req, key, Value::array(list.hand_on_unmigrated()))?;
+        let key = PhpString::new(req, name)?.into_key();
+        array.set(req, key, list.into_value())?;
     }
     Ok(array)
 }

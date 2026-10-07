@@ -273,7 +273,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     /// Every value held, with its key, in no order.
-    pub(crate) fn snapshot(&self) -> Vec<(K, Arc<V>)> {
+    pub(crate) fn held(&self) -> Vec<(K, Arc<V>)> {
         self.entries()
             .iter()
             .map(|(key, value)| (key.clone(), Arc::clone(value)))
@@ -658,12 +658,13 @@ pub(crate) type TreatDataHook = fn(
 ) -> Result<Option<Vec<(Vec<u8>, Vec<u8>)>>, Thrown>;
 /// The input filter, php's `sapi_module.input_filter`:
 /// [`ExtensionBuilder::input_filter`].
-pub(crate) type InputFilterHook = fn(
-    &mut Request,
-    crate::api::request::Input,
-    &[u8],
-    &[u8],
-) -> Result<Option<crate::api::values::Value>, Thrown>;
+pub(crate) type InputFilterHook =
+    fn(
+        &mut Request,
+        crate::api::request::Input,
+        &[u8],
+        &[u8],
+    ) -> Result<Option<crate::api::values::Owner<crate::api::values::Value>>, Thrown>;
 
 /// What the unit cache does with a file for the request asking, the
 /// answer to [`ExtensionBuilder::admission`] (design §6.3, revision 45):

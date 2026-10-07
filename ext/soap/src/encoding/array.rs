@@ -32,10 +32,11 @@ pub(super) enum K {
     Str(Vec<u8>),
 }
 
-/// The elements of an array in order, references kept.
-pub(super) fn rows(arr: PhpArray) -> Vec<(K, Value)> {
-    arr.snapshot_refs()
-        .into_iter()
+/// The elements of an array in order, references kept, read under the
+/// borrowed request ([`walk::rows`]): views, which [`with_rows`] holds
+/// while a program's converter runs.
+pub(super) fn rows(req: &Request, arr: PhpArray) -> Vec<(K, Value)> {
+    walk::rows(req, arr)
         .map(|(k, v)| {
             let k = match k {
                 Key::Int(n) => K::Int(n),
@@ -296,7 +297,8 @@ fn add_xml_array_elements(
         return Err(value_error(req, "Recursive array cannot be encoded"));
     }
     arr.protect();
-    let out = with_rows(req, rows(arr), |req, rows| {
+    let read = rows(req, arr);
+    let out = with_rows(req, read, |req, rows| {
         let mut j = 0;
         for (_, zdata) in rows {
             if j >= first {
@@ -354,7 +356,10 @@ fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Own
                 let k = key_of(req, &key);
                 req.release(key);
                 match k {
-                    Ok(k) => copy.set(req, k.hand_on_unmigrated(), val)?,
+                    Ok(k) => {
+                        let val = crate::classes::owner_of(req, val);
+                        copy.set(req, k, val)?;
+                    }
                     Err(t) => {
                         req.release(val);
                         return Err(t.into());
@@ -860,15 +865,15 @@ fn fill_array(
                 None => {
                     let fresh = PhpArray::new(req)?;
                     let view = *fresh;
-                    ar.set(req, k, fresh.into_value().hand_on_unmigrated())?;
+                    ar.set(req, Owner::take(req, k), fresh.into_value())?;
                     ar = view;
                 }
             }
         }
         ar.set(
             req,
-            Key::Int(i64::from(pos[dimension - 1])),
-            tmp.hand_on_unmigrated(),
+            Owner::take(req, Key::Int(i64::from(pos[dimension - 1]))),
+            tmp,
         )?;
         let mut i = dimension;
         while i > 0 {
@@ -909,7 +914,8 @@ pub(super) fn to_xml_map(
             return Err(value_error(req, "Recursive array cannot be encoded"));
         }
         arr.protect();
-        let out = with_rows(req, rows(arr), |req, rows| {
+        let read = rows(req, arr);
+        let out = with_rows(req, read, |req, rows| {
             for (k, temp) in rows {
                 let item = new_node(parent.doc(), b"item")?;
                 x_param.add_child(item);
@@ -987,14 +993,14 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
         let k = match key.as_ref() {
             ValueRef::Str(s) => {
                 let s = PhpString::new(req, s.as_bytes())?;
-                Some(Key::from_string(s.hand_on_unmigrated()))
+                Some(Key::from_string(req, s))
             }
-            ValueRef::Int(n) => Some(Key::Int(n)),
+            ValueRef::Int(n) => Some(Owner::take(req, Key::Int(n))),
             _ => None,
         };
         key.give_up(req);
         match k {
-            Some(k) => ret.set(req, k, value.hand_on_unmigrated())?,
+            Some(k) => ret.set(req, k, value)?,
             None => {
                 value.give_up(req);
                 return Err(soap_error(

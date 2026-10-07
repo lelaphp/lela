@@ -341,8 +341,8 @@ fn pair(req: &mut Request, a: Mpz, b: Mpz) -> Result<Owner<PhpArray>, Thrown> {
     let a = made(req, a)?;
     let b = made(req, b)?;
     let mut array = PhpArray::new(req)?;
-    array.set(req, Key::Int(0), a.into_value().hand_on_unmigrated())?;
-    array.set(req, Key::Int(1), b.into_value().hand_on_unmigrated())?;
+    array.set(req, Owner::take(req, Key::Int(0)), a.into_value())?;
+    array.set(req, Owner::take(req, Key::Int(1)), b.into_value())?;
     Ok(array)
 }
 
@@ -1066,9 +1066,9 @@ fn gmp_gcdext(req: &mut Request, num1: Number, num2: Number) -> Result<Owner<Php
     let (gcd, s, t) = a.gcdext(&b);
     let mut array = PhpArray::new(req)?;
     for (name, n) in [(b"g", gcd), (b"s", s), (b"t", t)] {
-        let value = made(req, n)?.into_value().hand_on_unmigrated();
+        let value = made(req, n)?.into_value();
         let key = PhpString::new(req, name)?;
-        array.set(req, Key::Str(key.hand_on_unmigrated()), value)?;
+        array.set(req, key.into_key(), value)?;
     }
     Ok(array)
 }

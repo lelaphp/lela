@@ -250,9 +250,8 @@ impl ObjectHandlers for WeakReferenceHandlers {
         let referent = object.native::<WeakRef>(req).and_then(|p| p.referent);
         let mut table = PhpArray::new(req)?;
         let value = referent.map_or(Value::null(), |referent| referent.as_value());
-        req.addref(&value);
-        let key = Key::Str(PhpString::new(req, b"object")?.hand_on_unmigrated());
-        table.set(req, key, value)?;
+        let key = PhpString::new(req, b"object")?.into_key();
+        table.set(req, key, Owner::take(req, value))?;
         Ok(Some(table.into()))
     }
 }
@@ -449,7 +448,7 @@ impl ObjectHandlers for WeakMapHandlers {
         if !entries.contains(&at) {
             register(req, key, Holder::Map(object.index()));
         }
-        entries.set(req, at, value.hand_on_unmigrated())
+        entries.set(req, Owner::take(req, at), value)
     }
 
     /// `zend_weakmap_has_dimension` (`Z/Zend/zend_weakrefs.c:409`): the
@@ -548,22 +547,23 @@ impl ObjectHandlers for WeakMapHandlers {
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
         let mut table = PhpArray::new(req)?;
-        for (key, value) in entries_of(req, object)
-            .map(|e| e.snapshot_refs())
-            .unwrap_or_default()
-        {
+        // The map's own table, read under the borrowed request: building
+        // the pairs runs no code of the program.
+        let entries: Vec<(Key, Value)> = match entries_of(req, object) {
+            Some(entries) => crate::api::values::walk::rows(req, entries).collect(),
+            None => Vec::new(),
+        };
+        for (key, value) in entries {
             let Key::Int(id) = key else { continue };
             let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id)) else {
                 continue;
             };
             let mut pair = PhpArray::new(req)?;
-            req.addref(&owner.as_value());
-            let at = Key::Str(PhpString::new(req, b"key")?.hand_on_unmigrated());
-            pair.set(req, at, owner.as_value())?;
-            req.addref(&value);
-            let at = Key::Str(PhpString::new(req, b"value")?.hand_on_unmigrated());
-            pair.set(req, at, value)?;
-            table.append(req, pair.into_value().hand_on_unmigrated())?;
+            let at = PhpString::new(req, b"key")?.into_key();
+            pair.set(req, at, Owner::take(req, owner.as_value()))?;
+            let at = PhpString::new(req, b"value")?.into_key();
+            pair.set(req, at, Owner::take(req, value))?;
+            table.append(req, pair.into_value())?;
         }
         Ok(Some(table.into()))
     }
@@ -653,7 +653,8 @@ impl ClassIterator for MapIter {
         // second.
         let cell = req.reference(value)?;
         let cell = Owner::adopt(req, cell.as_value());
-        if let Err(thrown) = entries.set(req, key, Owner::take(req, *cell).hand_on_unmigrated()) {
+        let key = Owner::take(req, key);
+        if let Err(thrown) = entries.set(req, key, Owner::take(req, *cell)) {
             cell.give_up(req);
             return Err(thrown);
         }

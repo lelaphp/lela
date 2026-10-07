@@ -363,9 +363,8 @@ fn call_if_exists(
     method: &[u8],
 ) -> Result<Option<Owner<Value>>, Thrown> {
     let mut callable = PhpArray::new(req)?;
-    req.addref(&object.as_value());
-    callable.append(req, object.as_value())?;
-    let name = Value::string(PhpString::new(req, method)?.hand_on_unmigrated());
+    callable.append(req, Owner::take(req, object.as_value()))?;
+    let name = PhpString::new(req, method)?.into_value();
     callable.append(req, name)?;
     let exists = is_callable(req, &Value::array(*callable));
     callable.give_up(req);
@@ -841,7 +840,7 @@ fn stream_bucket_new(
 fn stream_get_filters(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in req.stream_filters() {
-        let value = Value::string(PhpString::new(req, &name)?.hand_on_unmigrated());
+        let value = PhpString::new(req, &name)?.into_value();
         out.append(req, value)?;
     }
     Ok(out)

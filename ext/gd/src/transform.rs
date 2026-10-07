@@ -3,6 +3,8 @@
 //! affine transforms, the interpolation and resolution settings, and
 //! `FreeType` text.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Instance, OrFalse, Raw, True, Union, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{coerce_param, to_double, to_long};
@@ -11,6 +13,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, arity, docref, throw_error,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{Ft, Im, Rect, affine_concat, affine_matrix};
@@ -78,13 +81,20 @@ fn ttf(
         Some(options) => {
             let mut spacing = None;
             if !options.is_packed() {
-                for (key, item) in options.snapshot() {
+                // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(EXT), key, item)`
+                // (`Z/ext/gd/gd.c:3373`), no owner of the table taken: the
+                // argument holds it while `zval_get_double` reaches a
+                // diagnostic's handler.
+                walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+                    let key = row.key().clone();
+                    let item = row.value().deref();
                     if let Key::Str(key) = key
                         && key.as_bytes() == b"linespacing"
                     {
                         spacing = Some(to_double(req, &item)?);
                     }
-                }
+                    Ok(ControlFlow::Continue(()))
+                })?;
             }
             Some(spacing)
         }
@@ -323,9 +333,14 @@ fn scatter(req: &mut Request, im: Im, args: &[Untyped<Value>]) -> Result<bool, T
     let (sub, plus) = (int(sub), int(plus));
     let mut list = Vec::new();
     if let Some(colors) = colors {
-        for (_, c) in colors.snapshot() {
+        // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(hash_colors), color)`
+        // (`Z/ext/gd/gd.c:3601`), no owner of the table taken: the argument
+        // holds it while `zval_get_long` reaches a diagnostic's handler.
+        walk::foreach(req, colors, Hold::None, |req, row| -> walk::Step {
+            let c = row.value().deref();
             list.push(int(to_long(req, &c)?));
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
     }
     if list.is_empty() {
         return Ok(gd(req, || im.filter(12, [sub, plus, 0, 0], 0.0))? != 0);

@@ -50,12 +50,13 @@ pub use php_engine::{
 pub mod tier {
     pub use php_engine::tier::{
         Argument, Aside, Called, Class, Code, Evaluated, Fatal, Flow, FrameRef, Hooked, Identity,
-        Named, Opcode, Position, Request, SafepointIdx, Serves, Shape, Site, Stepped, Thrown, Tier,
-        TypeTag, Under, Value, ValueKey, backtrace, below, call, caller, catches, class_named,
-        class_of, entry, evaluate, evaluate_code, exit, exiting, frame_code, function_exists,
-        function_named, included_files, last_error, literals, method_named, oplines, pending,
-        position, restore, serves, set_argv, set_aside, set_stdin, step, superglobals, table_sizes,
-        unwind, user_classes, user_constants, user_functions, variable, variables,
+        Named, Opcode, Position, Request, Rows, SafepointIdx, Serves, Shape, Site, Stepped, Thrown,
+        Tier, TypeTag, Under, Value, ValueKey, backtrace, below, call, caller, catches,
+        class_named, class_of, entry, evaluate, evaluate_code, exit, exiting, frame_code,
+        function_exists, function_named, included_files, last_error, literals, method_named,
+        oplines, pending, position, restore, rows, serves, set_argv, set_aside, set_stdin, step,
+        superglobals, table_sizes, unwind, user_classes, user_constants, user_functions, variable,
+        variables,
     };
 }
 

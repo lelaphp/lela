@@ -1669,10 +1669,8 @@ fn image_type_to_extension(
 }
 
 /// A new string of the request's.
-fn string(req: &mut Request, bytes: &[u8]) -> Result<php::Value, Thrown> {
-    Ok(php::Value::string(
-        php::PhpString::new(req, bytes)?.hand_on_unmigrated(),
-    ))
+fn string(req: &mut Request, bytes: &[u8]) -> Result<php::Owner<php::Value>, Thrown> {
+    Ok(php::PhpString::new(req, bytes)?.into_value())
 }
 
 /// `php_getimagesize_from_any`'s end (`Z/ext/standard/image.c:1541`):
@@ -1752,7 +1750,7 @@ fn answer(
                 name.give_up(req);
             } else {
                 let value = string(req, &segment.bytes)?;
-                info.set(req, php::Key::Str(name.hand_on_unmigrated()), value)?;
+                info.set(req, name.into_key(), value)?;
             }
         }
         image_info.set(req, Untyped(info.into_value()))?;
@@ -1763,13 +1761,11 @@ fn answer(
     let mut array = php::PhpArray::new(req)?;
     for (key, value) in data.entries() {
         let key = match key {
-            Key::Index(i) => php::Key::Int(i),
-            Key::Name(name) => {
-                php::Key::Str(php::PhpString::new(req, name.as_bytes())?.hand_on_unmigrated())
-            }
+            Key::Index(i) => php::Owner::take(req, php::Key::Int(i)),
+            Key::Name(name) => php::PhpString::new(req, name.as_bytes())?.into_key(),
         };
         let value = match value {
-            Value::Int(n) => php::Value::int(n),
+            Value::Int(n) => php::Owner::take(req, php::Value::int(n)),
             Value::Str(text) => string(req, text.as_bytes())?,
         };
         array.set(req, key, value)?;

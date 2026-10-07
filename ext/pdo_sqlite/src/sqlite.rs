@@ -6,7 +6,7 @@
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
     BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, Executed, Failure,
     OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState, Statement,
@@ -744,15 +744,15 @@ impl Statement for Stmt {
             ffi::SQLITE_FLOAT => (b"double", 2),
             ffi::SQLITE_BLOB => {
                 let blob = PhpString::new(req, b"blob")?;
-                flags.append(req, Value::string(blob.hand_on_unmigrated()))?;
+                flags.append(req, blob.into_value())?;
                 (b"string", 2)
             }
             ffi::SQLITE_INTEGER => (b"integer", 1),
             _ => (b"string", 2),
         };
         set(req, &mut out, b"native_type", Some(native))?;
-        let key = Key::Str(PhpString::new(req, b"pdo_type")?.hand_on_unmigrated());
-        out.set(req, key, Value::int(pdo_type))?;
+        let key = PhpString::new(req, b"pdo_type")?.into_key();
+        out.set(req, key, Owner::take(req, Value::int(pdo_type)))?;
         set(
             req,
             &mut out,
@@ -765,8 +765,8 @@ impl Statement for Stmt {
             b"table",
             self.handle.column_table_name(column).as_deref(),
         )?;
-        let key = Key::Str(PhpString::new(req, b"flags")?.hand_on_unmigrated());
-        out.set(req, key, flags.into_value().hand_on_unmigrated())?;
+        let key = PhpString::new(req, b"flags")?.into_key();
+        out.set(req, key, flags.into_value())?;
         Ok(out.hand_on_unmigrated())
     }
 
@@ -787,8 +787,8 @@ fn set(
     let Some(value) = value else {
         return Ok(());
     };
-    let value = Value::string(PhpString::new(req, value)?.hand_on_unmigrated());
-    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+    let value = PhpString::new(req, value)?.into_value();
+    let key = PhpString::new(req, key)?.into_key();
     out.set(req, key, value)
 }
 

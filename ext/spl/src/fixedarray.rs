@@ -16,6 +16,7 @@ use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_error, warning};
 use php_ext::request::Request;
+use php_ext::values::walk::{self};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializable};
@@ -274,11 +275,11 @@ impl SplFixedArray {
         let elements = with(req, this, |a| a.elements.clone())?;
         let mut out = PhpArray::new(req)?;
         for value in elements {
-            out.append(req, crate::copied(req, value))?;
+            out.append(req, Owner::take(req, value.deref()))?;
         }
         for (key, value) in crate::std_properties(req, this)? {
-            req.addref(&value);
-            let key = crate::owned_key(req, &key);
+            let value = Owner::take(req, value);
+            let key = Owner::take(req, key.clone());
             out.set(req, key, value)?;
         }
         Ok(out)
@@ -303,12 +304,18 @@ impl SplFixedArray {
         }
         let mut elements = Vec::new();
         let mut members = PhpArray::new(req)?;
-        for (key, value) in data.snapshot() {
+        // `ZEND_HASH_FOREACH_STR_KEY_VAL(data, key, elem)`, which no code of the
+        // program reaches: the rows read under the borrowed request, views
+        // the argument keeps, then written.
+        let rows: Vec<(Key, Value)> = walk::rows(req, data)
+            .map(|(key, value)| (key, value.deref()))
+            .collect();
+        for (key, value) in rows {
             match key {
                 Key::Int(_) => elements.push(crate::copied(req, value)),
                 Key::Str(_) => {
-                    req.addref(&value);
-                    let key = crate::owned_key(req, &key);
+                    let value = Owner::take(req, value);
+                    let key = Owner::take(req, key.clone());
                     members.set(req, key, value)?;
                 }
             }
@@ -351,7 +358,7 @@ impl SplFixedArray {
         }
         let mut out = PhpArray::new(req)?;
         for value in elements {
-            out.append(req, crate::copied(req, value))?;
+            out.append(req, Owner::take(req, value.deref()))?;
         }
         Ok(out)
     }
@@ -390,25 +397,33 @@ impl SplFixedArray {
         array: PhpArray,
         #[php(default = true)] preserveKeys: bool,
     ) -> Result<Owner<Instance<Self>>, Thrown> {
-        let rows = array.snapshot();
+        // `ZEND_HASH_MAP_FOREACH_KEY`, then `ZEND_HASH_FOREACH_NUM_KEY_VAL`
+        // or `ZEND_HASH_FOREACH_VAL` with `ZVAL_COPY_DEREF`
+        // (`Z/ext/spl/spl_fixedarray.c:728`, `:748`, `:758`): read only,
+        // under the borrowed request, each element one owner more.
+        let len = array.len();
         let mut elements: Vec<Value>;
         let allocation;
-        if preserveKeys && !rows.is_empty() {
-            let mut max = 0usize;
-            for (key, _) in &rows {
+        if preserveKeys && len > 0 {
+            let mut max = Some(0usize);
+            for (key, _) in walk::rows(req, array) {
                 match key {
-                    Key::Int(n) if *n >= 0 => {
-                        max = max.max(usize::try_from(*n).unwrap_or(usize::MAX));
+                    Key::Int(n) if n >= 0 => {
+                        max = max.map(|max| max.max(usize::try_from(n).unwrap_or(usize::MAX)));
                     }
                     _ => {
-                        return Err(throw(
-                            req,
-                            "InvalidArgumentException",
-                            "array must contain only positive integer keys",
-                        ));
+                        max = None;
+                        break;
                     }
                 }
             }
+            let Some(max) = max else {
+                return Err(throw(
+                    req,
+                    "InvalidArgumentException",
+                    "array must contain only positive integer keys",
+                ));
+            };
             let Some(size) = max.checked_add(1).filter(|s| i64::try_from(*s).is_ok()) else {
                 return Err(throw(
                     req,
@@ -418,21 +433,19 @@ impl SplFixedArray {
             };
             allocation = laid(req, size)?;
             elements = vec![Value::null(); size];
-            for (key, value) in rows {
+            for (key, value) in walk::rows(req, array) {
                 if let Key::Int(n) = key
                     && let Some(slot) = usize::try_from(n).ok().and_then(|n| elements.get_mut(n))
                 {
-                    *slot = value;
+                    *slot = crate::copied(req, value);
                 }
             }
         } else {
-            allocation = laid(req, rows.len())?;
-            elements = rows.into_iter().map(|(_, v)| v).collect();
+            allocation = laid(req, len)?;
+            elements = walk::rows(req, array)
+                .map(|(_, value)| crate::copied(req, value))
+                .collect();
         }
-        let elements: Vec<Value> = elements
-            .into_iter()
-            .map(|v| crate::copied(req, v))
-            .collect();
         let Some(class) = php_ext::call::lookup_class(req, b"SplFixedArray")? else {
             return Err(php_ext::raising::fatal(
                 req,
@@ -569,7 +582,7 @@ fn with<R>(
 fn index(req: &mut Request, offset: &Value) -> Result<Option<usize>, Thrown> {
     let n = match offset.deref().as_ref() {
         ValueRef::Int(n) => n,
-        ValueRef::Str(s) => match Key::from_string(*s) {
+        ValueRef::Str(s) => match Key::lookup(*s) {
             Key::Int(n) => n,
             Key::Str(_) => return Err(illegal(req, offset)),
         },
@@ -905,8 +918,7 @@ impl ObjectHandlers for Handlers {
         };
         let mut out = PhpArray::new(req)?;
         for (key, value) in rows {
-            req.addref(&value);
-            out.set(req, key, value)?;
+            out.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
         Ok(Some(out.into()))
     }

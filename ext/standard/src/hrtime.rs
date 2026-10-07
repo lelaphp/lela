@@ -78,7 +78,7 @@ fn hrtime(req: &mut Request, #[php(default = false)] as_number: bool) -> Result<
         return Ok(Union::B(Union::A(long(t))));
     }
     let mut pair = PhpArray::new(req)?;
-    pair.append(req, Value::int(long(t / NANO_IN_SEC)))?;
-    pair.append(req, Value::int(long(t % NANO_IN_SEC)))?;
+    pair.append(req, Owner::take(req, Value::int(long(t / NANO_IN_SEC))))?;
+    pair.append(req, Owner::take(req, Value::int(long(t % NANO_IN_SEC))))?;
     Ok(Union::A(pair))
 }

@@ -15,7 +15,7 @@ use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{ClassId, Key, Owner, PhpArray, Value, adopted};
+use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, adopted};
 use crate::engine::Shared;
 use crate::exec;
 use crate::observer::LinkedAtLoad;
@@ -1804,11 +1804,12 @@ impl Request {
         for (list, names) in [(&b"internal"[..], internal), (b"user", user)] {
             let mut rows = self.array()?;
             for name in names {
-                let name = Value::string(self.string(&name)?);
-                rows.append(self, name)?;
+                let name = PhpString::new(self, &name)?;
+                rows.append(self, name.into_value())?;
             }
-            let key = Key::Str(self.string(list)?);
-            array.set(self, key, Value::array(rows))?;
+            let key = PhpString::new(self, list)?.into_key();
+            let rows = Owner::adopt(self, Value::array(rows));
+            array.set(self, key, rows)?;
         }
         Ok(array)
     }

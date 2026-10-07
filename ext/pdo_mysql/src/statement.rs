@@ -4,7 +4,7 @@
 //! `executer` call; the columns' descriptions and the `getColumnMeta` rows.
 
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_mysqlnd::client::{
     Fetched, Field, FieldType, ResultSet, Stmt as Ps, StmtFetch, column,
 };
@@ -409,12 +409,13 @@ impl Statement for Stmt {
         };
         let mut meta = PhpArray::new(req)?;
         let mut flags = PhpArray::new(req)?;
-        let set = |req: &mut Request, meta: &mut Owner<PhpArray>, key: &[u8], value: Value| {
-            let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
-            meta.set(req, key, value)
-        };
+        let set =
+            |req: &mut Request, meta: &mut Owner<PhpArray>, key: &[u8], value: Owner<Value>| {
+                let key = PhpString::new(req, key)?.into_key();
+                meta.set(req, key, value)
+            };
         if let Some(def) = &field.def {
-            let text = Value::string(PhpString::new(req, def)?.hand_on_unmigrated());
+            let text = PhpString::new(req, def)?.into_value();
             set(req, &mut meta, b"mysql:def", text)?;
         }
         for (bit, name) in [
@@ -425,13 +426,13 @@ impl Statement for Stmt {
             (column::BLOB, b"blob"),
         ] {
             if field.flags & bit != 0 {
-                let text = Value::string(PhpString::new(req, name)?.hand_on_unmigrated());
+                let text = PhpString::new(req, name)?.into_value();
                 flags.append(req, text)?;
             }
         }
         let ty = field.field_type();
         if let Some(name) = native_type(ty) {
-            let text = Value::string(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
+            let text = PhpString::new(req, name.as_bytes())?.into_value();
             set(req, &mut meta, b"native_type", text)?;
         }
         let pdo_type = match ty {
@@ -444,14 +445,14 @@ impl Statement for Stmt {
             | FieldType::LongLong => 1,
             _ => 2,
         };
-        set(req, &mut meta, b"pdo_type", Value::int(pdo_type))?;
         set(
             req,
             &mut meta,
-            b"flags",
-            flags.into_value().hand_on_unmigrated(),
+            b"pdo_type",
+            Owner::take(req, Value::int(pdo_type)),
         )?;
-        let table = Value::string(PhpString::new(req, &field.table)?.hand_on_unmigrated());
+        set(req, &mut meta, b"flags", flags.into_value())?;
+        let table = PhpString::new(req, &field.table)?.into_value();
         set(req, &mut meta, b"table", table)?;
         Ok(meta.hand_on_unmigrated())
     }

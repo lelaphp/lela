@@ -55,8 +55,8 @@ use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{
-    ArrayIter, Held, HeldProperties, HeldRow, Kept, Key, Owner, PhpArray, PhpObject, PhpRef,
-    PhpString, Value,
+    ArrayIter, Held, HeldProperties, Kept, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString,
+    Value,
 };
 
 /// What a walk's body answers for one row: `Continue` to go on to the
@@ -226,6 +226,24 @@ pub enum Guarded<B> {
     Recursive,
 }
 
+/// What a walk over an object's properties ([`properties`]) does at a
+/// typed property nothing has written, php's `IS_INDIRECT` to an
+/// `IS_UNDEF` slot: the reader's choice of php's macro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unwritten {
+    /// Stepped over, as `ZEND_HASH_FOREACH_KEY_VAL_IND` steps over it:
+    /// `print_r`'s `print_hash`.
+    Skipped,
+    /// Lent as a row whose [`Row::uninitialized`] names the property's
+    /// type and whose value is undef, as the dumpers'
+    /// `ZEND_HASH_FOREACH_KEY_VAL` finds it and
+    /// `zend_get_typed_property_info_for_slot` types it: `var_dump` and
+    /// `debug_zval_dump`, which print `uninitialized(T)`. An untyped
+    /// slot nothing holds is stepped over still, as php's dumpers step
+    /// over one.
+    Shown,
+}
+
 /// php's `ZEND_HASH_FOREACH` over `table` from a native whose body runs
 /// code of the program: the rows in order, each lent to `body` as a
 /// [`Row`] kept alive for its step, a reference row as the reference. The rows are read as they stand when the walk reaches
@@ -325,7 +343,7 @@ pub fn foreach<B>(
     let table = table.into();
     table.pin();
     let standing = Standing::taken(req, &table, hold);
-    let walked = foreach_steps(req, &table, standing.watch(), &mut body);
+    let walked = foreach_steps(req, &table, standing.watch(), Unwritten::Skipped, &mut body);
     standing.given_up(req);
     table.unpin(req);
     walked
@@ -378,7 +396,7 @@ pub fn foreach_guarded<B>(
     if let Some(guarded) = guarded {
         guarded.protect();
     }
-    let walked = foreach_steps(req, &table, standing.watch(), &mut body);
+    let walked = foreach_steps(req, &table, standing.watch(), Unwritten::Skipped, &mut body);
     if let Some(guarded) = guarded
         && standing.watch().stands(req, guarded.heap())
     {
@@ -401,7 +419,9 @@ pub fn foreach_guarded<B>(
 /// [`foreach`] pins it; the class's debug table by its owner; and rows
 /// the class answers by an owner of each, so a row the body's code
 /// gives up is still read. A typed property nothing has written is no
-/// row. The walk takes nothing beyond each step's row and gives the
+/// row, or under [`Unwritten::Shown`] a row whose
+/// [`Row::uninitialized`] names its type, as `unwritten` says. The walk
+/// takes nothing beyond each step's row and gives the
 /// properties back never: the reader clears its recursion guard and
 /// then releases them ([`HeldProperties::release`]), as php's
 /// `zend_release_properties` comes after its
@@ -438,30 +458,37 @@ pub fn foreach_guarded<B>(
 pub fn properties<B>(
     req: &mut Request,
     held: &HeldProperties,
+    unwritten: Unwritten,
     mut body: impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
     match &held.held {
         Held::Table(table, owner) => {
             let table = Table::Object(table.clone());
             table.pin();
-            let walked = foreach_steps(req, &table, Watch::over(**owner), &mut body);
+            let watch = Watch::over(**owner);
+            let walked = foreach_steps(req, &table, watch, unwritten, &mut body);
             table.unpin(req);
             walked
         }
         Held::Debug(table, _) => {
             let watch = Watch::over(**table);
-            foreach_steps(req, &Table::Array(**table), watch, &mut body)
+            foreach_steps(req, &Table::Array(**table), watch, unwritten, &mut body)
         }
         Held::Rows(rows) => {
             for (key, kept) in rows {
-                let Kept::Value(value) = kept else {
-                    continue;
+                let (value, uninitialized) = match (kept, unwritten) {
+                    (Kept::Value(value), _) => (**value, None),
+                    (Kept::Uninitialized(ty), Unwritten::Shown) => {
+                        (Value::of_zval(Zval::UNDEF), Some(ty.clone()))
+                    }
+                    (Kept::Uninitialized(_), Unwritten::Skipped) => continue,
                 };
                 let mut row = Row {
                     key: Owner::take(req, (**key).clone()),
-                    value: Owner::take(req, **value),
+                    value: Owner::take(req, value),
                     at: At::Lent,
                     watch: Watch::Held,
+                    uninitialized,
                 };
                 let step = body(req, &mut row);
                 row.give_up(req);
@@ -655,37 +682,49 @@ impl ObjectTable {
         })
     }
 
+    /// [`ObjectTable::held_from`] as php's dumpers read the positions
+    /// ([`Unwritten::Shown`]): a declared slot nothing holds is the row
+    /// too where its property is typed, with its type's text, and is
+    /// stepped over where it is not.
+    fn shown_from(
+        &self,
+        req: &Request,
+        mut pos: u32,
+        end: u32,
+    ) -> Option<(u32, Key, Zval, At, Option<String>)> {
+        while pos < end {
+            match self.table.row_at(pos) {
+                Some((TableRow::Slot(slot), value)) if value.is_undef() => {
+                    let placed = req.placed_properties(self.owner.class());
+                    if let Some((_, property)) = placed.get(usize::try_from(slot).ok()?)
+                        && let Some(ty) = property.ty.as_ref()
+                    {
+                        let at = At::Slot {
+                            holder: None,
+                            owner: self.owner,
+                            table: self.table.table(),
+                            slot,
+                        };
+                        let shown = Some(crate::natives::type_text(ty));
+                        return Some((pos, self.slot_key(slot)?, value, at, shown));
+                    }
+                }
+                Some(_) => {
+                    if let Some((found, key, value, at)) = self.held_from(pos, pos + 1) {
+                        return Some((found, key, value, at, None));
+                    }
+                }
+                None => {}
+            }
+            pos = pos.saturating_add(1);
+        }
+        None
+    }
+
     /// The key declared slot `slot` stands under.
     fn slot_key(&self, slot: u32) -> Option<Key> {
         let name = self.names.get(usize::try_from(slot).ok()?)?;
         Some(Key::Str(PhpString::of(*name)))
-    }
-
-    /// The rows as php's debug dumpers walk them, `ZEND_HASH_FOREACH`
-    /// without `_IND`: a slot nothing holds shown as `uninitialized(T)`
-    /// where its property is typed (`zend_get_typed_property_info_for_slot`)
-    /// and stepped over where it is not. Views, no owner taken.
-    pub(crate) fn shown(&self, req: &Request) -> Vec<(Key, HeldRow)> {
-        let placed = req.placed_properties(self.owner.class());
-        (0..self.table.used())
-            .filter_map(|pos| {
-                let (row, value) = self.table.row_at(pos)?;
-                match row {
-                    TableRow::Slot(slot) if value.is_undef() => {
-                        let (_, property) = placed.get(usize::try_from(slot).ok()?)?;
-                        let ty = property.ty.as_ref()?;
-                        let shown = HeldRow::Uninitialized(crate::natives::type_text(ty));
-                        Some((self.slot_key(slot)?, shown))
-                    }
-                    TableRow::Slot(slot) => {
-                        Some((self.slot_key(slot)?, HeldRow::Value(Value::of_zval(value))))
-                    }
-                    TableRow::Entry(key) => {
-                        Some((Key::of(key), HeldRow::Value(Value::of_zval(value))))
-                    }
-                }
-            })
-            .collect()
     }
 }
 
@@ -756,8 +795,8 @@ impl Standing {
             Standing::Immutable => {}
             Standing::Built(rows) => {
                 for (key, value) in rows {
-                    value.give_up(req);
-                    key.give_up(req);
+                    value.give_up_nogc(req);
+                    key.give_up_nogc(req);
                 }
             }
         }
@@ -770,22 +809,21 @@ fn foreach_steps<B>(
     req: &mut Request,
     table: &Table,
     watch: Watch,
+    unwritten: Unwritten,
     body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
     let end = table.end();
     let watched = table.heap().map(PhpArray::heap);
     let mut pos = 0;
     while watched.is_none_or(|watched| watch.stands(req, watched)) {
-        let Some((found, key, value, at)) = table.held_from(pos, end) else {
+        // The row is laid out by a call of its own, so what finding it
+        // takes is off the stack while the body runs: a walk the body
+        // re-enters, a nested array compared or dumped, costs a level
+        // only what this loop keeps.
+        let Some((found, mut row)) = next_lent(req, table, (pos, end), watch, unwritten) else {
             break;
         };
         pos = found.saturating_add(1);
-        let mut row = Row {
-            key: Owner::take(req, key),
-            value: Owner::take(req, Value::of_zval(value)),
-            at,
-            watch,
-        };
         let step = body(req, &mut row);
         row.give_up(req);
         if let ControlFlow::Break(broke) = step? {
@@ -793,6 +831,34 @@ fn foreach_steps<B>(
         }
     }
     Ok(None)
+}
+
+/// The row a [`foreach`] walk lends next, at or after `pos` below `end`,
+/// with its position, each of its key and value one owner more for the
+/// step; `None` past the last.
+#[inline(never)]
+fn next_lent(
+    req: &Request,
+    table: &Table,
+    (pos, end): (u32, u32),
+    watch: Watch,
+    unwritten: Unwritten,
+) -> Option<(u32, Row)> {
+    let found = match (table, unwritten) {
+        (Table::Object(object), Unwritten::Shown) => object.shown_from(req, pos, end),
+        _ => table
+            .held_from(pos, end)
+            .map(|(found, key, value, at)| (found, key, value, at, None)),
+    };
+    let (found, key, value, at, uninitialized) = found?;
+    let row = Row {
+        key: Owner::take(req, key),
+        value: Owner::take(req, Value::of_zval(value)),
+        at,
+        watch,
+        uninitialized,
+    };
+    Some((found, row))
 }
 
 /// One row a callback walk lends its body ([`foreach`], [`live`]): the
@@ -807,6 +873,9 @@ pub struct Row {
     at: At,
     /// How the row knows the table it is in still stands.
     watch: Watch,
+    /// The type's text of the typed property nothing has written that
+    /// the row stands for ([`Unwritten::Shown`]).
+    uninitialized: Option<String>,
 }
 
 /// How a walk knows the table its rows are in still stands.
@@ -889,6 +958,16 @@ impl Row {
         &self.value
     }
 
+    /// Where the row stands for a typed property nothing has written,
+    /// lent by a walk over [`Unwritten::Shown`]: the text of its type,
+    /// `zend_type_to_string` of what
+    /// `zend_get_typed_property_info_for_slot` finds, which a dumper
+    /// prints as `uninitialized(T)`. The row's value is then undef.
+    #[must_use]
+    pub fn uninitialized(&self) -> Option<&str> {
+        self.uninitialized.as_deref()
+    }
+
     /// The value's refcount as php's walk reads it, `Z_REFCOUNT_P` over
     /// the bucket: the owners besides the walk's own for the step, which
     /// php's walk does not take. One for what carries no count, as
@@ -969,14 +1048,17 @@ impl Row {
     fn lend(&mut self, req: &mut Request, cell: PhpRef) -> PhpRef {
         let owned = Owner::take(req, cell.as_value());
         let value = std::mem::replace(&mut self.value, owned);
-        value.give_up(req);
+        value.give_up_nogc(req);
         cell
     }
 
-    /// The walk's owners of the row given up as the step ends.
+    /// The walk's owners of the row given up as the step ends, as
+    /// `zval_ptr_dtor_nogc` gives one up: php's walk holds no owner of a
+    /// row, so giving the walk's up leaves no possible root of the cycle
+    /// collector where php leaves none.
     fn give_up(self, req: &mut Request) {
-        self.value.give_up(req);
-        self.key.give_up(req);
+        self.value.give_up_nogc(req);
+        self.key.give_up_nogc(req);
     }
 }
 
@@ -1116,6 +1198,7 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
             value: Owner::take(req, Value::of_zval(value)),
             at: At::Bucket(table, found),
             watch: Watch::Iterator(at),
+            uninitialized: None,
         }));
     }
     if let Some(held) = now.as_object().copied() {
@@ -1184,6 +1267,7 @@ fn object_row(
         value: Owner::take(req, Value::of_zval(value)),
         at,
         watch: Watch::Iterator(iterator),
+        uninitialized: None,
     }))
 }
 

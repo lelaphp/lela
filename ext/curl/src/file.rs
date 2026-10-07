@@ -3,14 +3,18 @@
 //! a `CURLOPT_POSTFIELDS` array into a MIME form, and the file a
 //! `CURLFile` part reads while the transfer runs.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Instance, Path, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, read_prop, write_prop};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
+use crate::ffi::MimeBuilder;
 use crate::handle::{Curl, easy_of, made};
 
 /// `struct mime_data_cb_arg`: the path a `CURLFile` part reads and the
@@ -306,6 +310,23 @@ fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
     }
 }
 
+/// One part per element of a list under `name`:
+/// `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(current), …)`
+/// (`Z/ext/curl/interface.c:1519`), held by the row, as php's is.
+fn add_list(
+    req: &mut Request,
+    mime: &mut MimeBuilder,
+    name: &[u8],
+    list: PhpArray,
+) -> Result<(), Thrown> {
+    walk::foreach(req, list, Hold::None, |req, row| -> walk::Step {
+        let data = text(req, &row.value().deref())?;
+        mime.add_data(name, &data);
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(())
+}
+
 /// `build_mime_structure_from_hash`: one part per element, a
 /// `CURLFile` read from its path, a `CURLStringFile` from its data, an
 /// array one part per element under its key, anything else its string;
@@ -320,7 +341,11 @@ pub(crate) fn build_mime(
         return Ok(false);
     };
     let mut error = 0;
-    for (key, value) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(postfields, …)` (`Z/ext/curl/interface.c:1387`)
+    // holds nothing: the option's argument holds the table.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<()> {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let name = match key {
             Key::Int(n) => n.to_string().into_bytes(),
             Key::Str(s) => s.as_bytes().to_vec(),
@@ -333,11 +358,10 @@ pub(crate) fn build_mime(
                     String::from_utf8_lossy(&name)
                 );
                 docref(req, Level::Warning, &text);
-                continue;
+                return Ok(ControlFlow::Continue(()));
             };
             if req.check_open_basedir(&path, true).is_err() {
-                let thrown = mime.discard(req);
-                return thrown.map_or(Ok(false), Err);
+                return Ok(ControlFlow::Break(()));
             }
             let kind = prop_bytes(req, file, b"mime")?.filter(|m| !m.is_empty());
             let postname = prop_bytes(req, file, b"postname")?.filter(|p| !p.is_empty());
@@ -364,11 +388,10 @@ pub(crate) fn build_mime(
                 Some(0) => {}
                 Some(code) => error = code,
                 None => {
-                    let thrown = mime.discard(req);
-                    return thrown.map_or(Ok(false), Err);
+                    return Ok(ControlFlow::Break(()));
                 }
             }
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         if let Some(file) = is_a(req, &value, b"CURLStringFile")? {
             let postname = prop_bytes(req, file, b"postname")?.unwrap_or_default();
@@ -379,21 +402,23 @@ pub(crate) fn build_mime(
                 Some(0) => {}
                 Some(code) => error = code,
                 None => {
-                    let thrown = mime.discard(req);
-                    return thrown.map_or(Ok(false), Err);
+                    return Ok(ControlFlow::Break(()));
                 }
             }
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         if let ValueRef::Array(inner) = value.as_ref() {
-            for (_, element) in inner.snapshot() {
-                let data = text(req, &element)?;
-                mime.add_data(&name, &data);
-            }
-            continue;
+            add_list(req, &mut mime, &name, *inner)?;
+            return Ok(ControlFlow::Continue(()));
         }
         let data = text(req, &value)?;
         mime.add_data(&name, &data);
+        Ok(ControlFlow::Continue(()))
+    })?;
+    // A part not added ended the walk, and the parts made are given back.
+    if walked.is_some() {
+        let thrown = mime.discard(req);
+        return thrown.map_or(Ok(false), Err);
     }
     if let Some(curl) = object.native_mut::<Curl>(req) {
         curl.err = i64::from(error);

@@ -787,8 +787,7 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
                 warning(req, "unexpected NAN value was coerced to array");
             }
             let mut array = req.array()?;
-            req.addref(&value);
-            array.append(req, value)?;
+            array.append(req, Owner::take(req, value))?;
             Ok(array)
         }
     }
@@ -864,19 +863,25 @@ pub(crate) fn mangled_array(
             req.addref(&entry);
             entry
         };
+        let entry = Owner::adopt(req, entry);
         let name = match key {
             Key::Int(n) => {
-                array.set(req, Key::Int(n), entry)?;
+                array.set(req, Owner::take(req, Key::Int(n)), entry)?;
                 continue;
             }
             Key::Str(name) => name,
         };
         let key = if let Some(prefix) = mangled_prefix(&mangled, &mut at, name) {
             let bytes = [prefix.as_slice(), name.as_bytes()].concat();
-            Key::Str(req.string(&bytes)?)
+            match PhpString::new(req, &bytes) {
+                Ok(mangled) => mangled.into_key(),
+                Err(thrown) => {
+                    entry.give_up(req);
+                    return Err(thrown);
+                }
+            }
         } else {
-            req.addref(&Value::string(name));
-            Key::from_string(name)
+            Owner::take(req, Key::lookup(name))
         };
         array.set(req, key, entry)?;
     }
@@ -3506,16 +3511,27 @@ fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result
     if left.len() != right.len() {
         return Ok(left.len().cmp(&right.len()));
     }
-    for (key, value) in left.snapshot() {
-        let Some(other) = right.get(&key) else {
-            return Ok(Ordering::Greater);
-        };
-        let ordering = compare(req, &value, &other)?;
-        if ordering != Ordering::Equal {
-            return Ok(ordering);
-        }
-    }
-    Ok(Ordering::Equal)
+    // `zend_hash_compare_impl`'s loop over `ht1`'s buckets
+    // (`Z/Zend/zend_hash.c:3115`), which takes no owner of either table:
+    // the operands hold them while `compare` serves `__toString` or a
+    // class's `compare`. The walk fixes the end as it begins where php's
+    // loop reads `nNumUsed` at each step, which only a row appended
+    // mid-compare could tell apart.
+    let decided = crate::api::values::walk::foreach(
+        req,
+        left,
+        crate::api::values::walk::Hold::None,
+        |req, row| -> crate::api::values::walk::Step<Ordering> {
+            let Some(other) = right.get(row.key()) else {
+                return Ok(std::ops::ControlFlow::Break(Ordering::Greater));
+            };
+            match compare(req, &row.value().deref(), &other)? {
+                Ordering::Equal => Ok(std::ops::ControlFlow::Continue(())),
+                ordering => Ok(std::ops::ControlFlow::Break(ordering)),
+            }
+        },
+    )?;
+    Ok(decided.unwrap_or(Ordering::Equal))
 }
 
 /// `increment_function` (`Z/Zend/zend_operators.c:2712`): the value
@@ -4587,7 +4603,7 @@ pub(crate) fn array_offset(
     let empty = |req: &mut Request| Ok(php_heap::Key::Str(req.string(b"")?.heap()));
     match offset.as_ref() {
         ValueRef::Str(s) if constant => Ok(php_heap::Key::Str(s.heap())),
-        ValueRef::Str(s) => Ok(Key::from_string(*s).heap()),
+        ValueRef::Str(s) => Ok(Key::lookup(*s).heap()),
         ValueRef::Int(n) => Ok(php_heap::Key::Long(n)),
         ValueRef::Reference(r) => array_offset(req, &r.get(), false),
         ValueRef::Null => {
@@ -4688,7 +4704,7 @@ pub(crate) fn array_key_exists(
 ) -> Result<bool, Thrown> {
     let key = key.deref();
     match key.as_ref() {
-        ValueRef::Str(s) => return Ok(array.heap().contains(Key::from_string(*s).heap())),
+        ValueRef::Str(s) => return Ok(array.heap().contains(Key::lookup(*s).heap())),
         ValueRef::Int(n) => return Ok(array.heap().contains(php_heap::Key::Long(n))),
         _ => {}
     }
@@ -4937,7 +4953,7 @@ pub(crate) fn unset_dim(
     let a = array.heap();
     let key = match offset.deref().as_ref() {
         ValueRef::Str(s) if constant => php_heap::Key::Str(s.heap()),
-        ValueRef::Str(s) => Key::from_string(*s).heap(),
+        ValueRef::Str(s) => Key::lookup(*s).heap(),
         ValueRef::Int(n) => php_heap::Key::Long(n),
         ValueRef::Bool(b) => php_heap::Key::Long(i64::from(b)),
         ValueRef::Float(f) => {
@@ -5105,13 +5121,15 @@ fn promoted(stayed: Option<i64>, overflowed: f64) -> Value {
 /// ```
 fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut union = left.copy(req)?;
-    for (key, value) in right.snapshot_refs() {
+    // `zend_hash_merge(result, op2, zval_add_ref, 0)`, which writes only keys
+    // the union lacks and so releases nothing and runs no code of the
+    // program: the right operand's rows read under the borrowed request,
+    // then written.
+    let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(req, right).collect();
+    for (key, value) in rows {
         if !union.contains(&key) {
-            req.addref(&value);
-            if let Key::Str(name) = key {
-                req.addref(&Value::string(name));
-            }
-            union.set(req, key, value)?;
+            let key = Owner::take(req, key);
+            union.set(req, key, Owner::take(req, value))?;
         }
     }
     Ok(union)
@@ -5741,8 +5759,12 @@ mod tests {
         let Ok(mut a) = req.array() else {
             return Value::null();
         };
+        // The entries are the test's to hand on, made for the array.
         for (k, v) in entries {
-            a.set(req, k, v).ok();
+            let (k, v) = (Owner::adopt(req, k), Owner::adopt(req, v));
+            if a.set(req, k, v).is_err() {
+                break;
+            }
         }
         Value::array(a)
     }

@@ -13,7 +13,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use php_ext_standard::{base64, quot_print};
 
 use super::ffi::{self, Cd, Errno};
@@ -814,19 +814,19 @@ fn iconv_mime_decode_headers(
     }
     let mut out = PhpArray::new(req)?;
     for (name, field) in fields {
-        let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
+        let key = PhpString::new(req, &name)?.into_key();
         let value = match field {
             Field::One(value) => PhpString::new(req, &value)?.into_value(),
             Field::Many(values) => {
                 let mut list = PhpArray::new(req)?;
                 for value in values {
                     let value = PhpString::new(req, &value)?.into_value();
-                    list.append(req, value.hand_on_unmigrated())?;
+                    list.append(req, value)?;
                 }
                 list.into_value()
             }
         };
-        out.set(req, key, value.hand_on_unmigrated())?;
+        out.set(req, key, value)?;
     }
     Ok(OrFalse::Value(out))
 }

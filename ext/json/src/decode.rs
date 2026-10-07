@@ -693,7 +693,7 @@ impl Parser<'_> {
         let at = match frame {
             Open::Array { at, array } => {
                 match array.as_mut() {
-                    Some(array) => array.append(req, value.hand_on_unmigrated())?,
+                    Some(array) => array.append(req, value)?,
                     None => value.give_up(req),
                 }
                 *at
@@ -711,13 +711,13 @@ impl Parser<'_> {
                 match holder {
                     Holder::Array(array) => {
                         let name = match PhpString::new(req, key) {
-                            Ok(name) => Key::from_string(name.hand_on_unmigrated()),
+                            Ok(name) => Key::from_string(req, name),
                             Err(thrown) => {
                                 value.give_up(req);
                                 return Err(thrown);
                             }
                         };
-                        array.set(req, name, value.hand_on_unmigrated())?;
+                        array.set(req, name, value)?;
                     }
                     Holder::Object(object) => {
                         if key.first() == Some(&0) {

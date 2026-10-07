@@ -7,12 +7,15 @@
 //! holds no state of its own: a trace reads the chain the frames and
 //! calls hold.
 
+use std::ops::ControlFlow;
+
 use php_heap::Slot;
 use php_unit::Opcode;
 use php_unit::decl::ClassKind;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
+use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted,
 };
@@ -350,14 +353,14 @@ impl Request {
                 // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
                 // name, one more owner of the interned string.
                 let file = Value::string(self.interned(&file)?);
-                self.set_string_key(&mut row, b"file", file)?;
-                self.set_string_key(&mut row, b"line", Value::int(line))?;
+                self.set_string_key(&mut row, b"file", Owner::adopt(self, file))?;
+                self.set_string_key(&mut row, b"line", Owner::adopt(self, Value::int(line)))?;
             }
             match traced {
                 Traced::Function(function) => {
                     let name = self.declared_name(function);
                     let name = Value::string(self.interned(name.as_bytes())?);
-                    self.set_string_key(&mut row, b"function", name)?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
                     // `ce->name` whole: an anonymous class's with its NUL
                     // and site; a receiver's class name for a function of
                     // no scope it is passed to, `zend_ffi_get_func`'s.
@@ -368,18 +371,22 @@ impl Request {
                     };
                     if let Some(class) = class {
                         let class = Value::string(self.interned(&class)?);
-                        self.set_string_key(&mut row, b"class", class)?;
+                        self.set_string_key(&mut row, b"class", Owner::adopt(self, class))?;
                         if provide_object && let Some(this) = this {
-                            self.addref(&this.as_value());
-                            self.set_string_key(&mut row, b"object", this.as_value())?;
+                            let this = Owner::take(self, this.as_value());
+                            self.set_string_key(&mut row, b"object", this)?;
                         }
                         let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
                         let join = Value::string(self.interned(join)?);
-                        self.set_string_key(&mut row, b"type", join)?;
+                        self.set_string_key(&mut row, b"type", Owner::adopt(self, join))?;
                     }
                     if !ignore_arguments {
                         let args = self.trace_row_arguments(function, arguments, named)?;
-                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                        self.set_string_key(
+                            &mut row,
+                            b"args",
+                            Owner::adopt(self, Value::array(args)),
+                        )?;
                     }
                 }
                 Traced::Include { kind, file } => {
@@ -388,17 +395,21 @@ impl Request {
                     // `DEBUG_BACKTRACE_IGNORE_ARGS` as without it, made
                     // here with the row as its one owner.
                     if let Some(file) = file {
-                        let file = Value::string(self.string(&file)?);
+                        let file = PhpString::new(self, &file)?;
                         let mut args = self.array()?;
-                        args.append(self, file)?;
-                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                        args.append(self, file.into_value())?;
+                        self.set_string_key(
+                            &mut row,
+                            b"args",
+                            Owner::adopt(self, Value::array(args)),
+                        )?;
                     }
                     let name = Value::string(self.interned(kind.name().as_bytes())?);
-                    self.set_string_key(&mut row, b"function", name)?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
                 }
                 Traced::Unknown => {
                     let name = Value::string(self.string(b"unknown")?);
-                    self.set_string_key(&mut row, b"function", name)?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
                 }
                 Traced::Dropped => {
                     // `zend_array_destroy(stack_frame)`.
@@ -406,7 +417,7 @@ impl Request {
                     continue;
                 }
             }
-            trace.append(self, Value::array(row))?;
+            trace.append(self, Owner::adopt(self, Value::array(row)))?;
         }
         Ok(trace)
     }
@@ -434,23 +445,23 @@ impl Request {
         for (at, argument) in arguments.into_iter().enumerate() {
             let argument = argument.deref();
             let argument = if sensitive.at(at) {
-                self.sensitive_value(argument)?
+                let redacted = self.sensitive_value(argument)?;
+                Owner::adopt(self, redacted)
             } else {
-                self.addref(&argument);
-                argument
+                Owner::take(self, argument)
             };
             args.append(self, argument)?;
         }
         for (name, argument) in named {
             let argument = argument.deref();
             let argument = if sensitive.variadic {
-                self.sensitive_value(argument)?
+                let redacted = self.sensitive_value(argument)?;
+                Owner::adopt(self, redacted)
             } else {
-                self.addref(&argument);
-                argument
+                Owner::take(self, argument)
             };
-            self.addref(&Value::string(name));
-            args.set(self, Key::Str(name), argument)?;
+            let name = Owner::take(self, Key::Str(name));
+            args.set(self, name, argument)?;
         }
         Ok(args)
     }
@@ -479,11 +490,15 @@ impl Request {
         }
         let mut row = self.array()?;
         let file = Value::string(self.string(&executing)?);
-        self.set_string_key(&mut row, b"file", file)?;
-        self.set_string_key(&mut row, b"line", Value::int(i64::from(at)))?;
+        self.set_string_key(&mut row, b"file", Owner::adopt(self, file))?;
+        self.set_string_key(
+            &mut row,
+            b"line",
+            Owner::adopt(self, Value::int(i64::from(at))),
+        )?;
         let name = Value::string(self.string(b"[constant expression]")?);
-        self.set_string_key(&mut row, b"function", name)?;
-        trace.append(self, Value::array(row))
+        self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
+        trace.append(self, Owner::adopt(self, Value::array(row)))
     }
 
     /// Which arguments of a call to `function` a trace shows redacted,
@@ -831,34 +846,34 @@ impl Request {
         use std::fmt::Write as _;
         let mut out = String::new();
         let mut num = 0usize;
-        for (index, row) in trace.snapshot_refs() {
-            let Some(row) = row.as_array().copied() else {
-                let index = match index {
+        // `ZEND_HASH_FOREACH_NUM_KEY_VAL(trace, index, frame)`
+        // (`Z/Zend/zend_exceptions.c:641`), no owner of the trace taken: the
+        // property holds it while a warning reaches the program's handler.
+        // Each field is looked up in the frame as `_build_trace_string`
+        // looks it up, when it is read; the walk's owner of the frame keeps
+        // it for the step.
+        let walked = walk::foreach(self, trace, Hold::None, |req, frame| -> walk::Step {
+            let Some(row) = frame.value().as_array().copied() else {
+                let index = match frame.key() {
                     Key::Int(n) => n.to_string(),
                     Key::Str(_) => String::from("0"),
                 };
-                crate::api::raising::warning(self, &format!("Expected array for frame {index}"));
-                continue;
+                crate::api::raising::warning(req, &format!("Expected array for frame {index}"));
+                return Ok(ControlFlow::Continue(()));
             };
-            let fields = row.snapshot_refs();
-            let field = |name: &[u8]| {
-                fields
-                    .iter()
-                    .find(|(key, _)| matches!(key, Key::Str(s) if s.as_bytes() == name))
-                    .map(|(_, value)| *value)
-            };
+            let field = |name: &[u8]| row.find(name);
             write!(out, "#{num} ").ok();
             num += 1;
             match field(b"file").map(|file| file.as_str_bytes().map(<[u8]>::to_vec)) {
                 None => out.push_str("[internal function]: "),
                 Some(None) => {
-                    crate::api::raising::warning(self, "File name is not a string");
+                    crate::api::raising::warning(req, "File name is not a string");
                     out.push_str("[unknown file]: ");
                 }
                 Some(Some(file)) => {
                     let line = match field(b"line") {
                         Some(line) => line.as_int().unwrap_or_else(|| {
-                            crate::api::raising::warning(self, "Line is not an int");
+                            crate::api::raising::warning(req, "Line is not an int");
                             0
                         }),
                         None => 0,
@@ -876,18 +891,24 @@ impl Request {
                     let text = text.split(|byte| *byte == 0).next().unwrap_or_default();
                     out.push_str(&String::from_utf8_lossy(text));
                 } else {
-                    crate::api::raising::warning(self, &format!("Value for {key} is not a string"));
+                    crate::api::raising::warning(req, &format!("Value for {key} is not a string"));
                     out.push_str("[unknown]");
                 }
             }
             out.push('(');
             if let Some(args) = field(b"args") {
                 match args.as_array() {
-                    Some(args) => out.push_str(&self.trace_arguments(&args.snapshot_refs())),
-                    None => crate::api::raising::warning(self, "args element is not an array"),
+                    Some(args) => out.push_str(&req.trace_arguments(*args)?),
+                    None => crate::api::raising::warning(req, "args element is not an array"),
                 }
             }
             out.push_str(")\n");
+            Ok(ControlFlow::Continue(()))
+        });
+        // The body answers no throwable but what a frame's arguments'
+        // walk answered, which none does.
+        match walked {
+            Ok(_) | Err(_) => {}
         }
         if include_main {
             write!(out, "#{num} {{main}}").ok();
@@ -959,19 +980,25 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 3
     /// ```
-    fn trace_arguments(&mut self, arguments: &[(Key, Value)]) -> String {
+    fn trace_arguments(&mut self, arguments: PhpArray) -> Result<String, Thrown> {
         let mut out = String::new();
-        for (i, (key, argument)) in arguments.iter().enumerate() {
-            if i > 0 {
+        let mut first = true;
+        // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(tmp), name, arg)`
+        // (`Z/Zend/zend_exceptions.c:616`), no owner of the table taken:
+        // the frame holds it.
+        walk::foreach(self, arguments, Hold::None, |req, row| -> walk::Step {
+            if !first {
                 out.push_str(", ");
             }
-            if let Key::Str(name) = key {
+            first = false;
+            if let Key::Str(name) = row.key() {
                 out.push_str(&String::from_utf8_lossy(name.as_bytes()));
                 out.push_str(": ");
             }
-            self.trace_argument(&mut out, &argument.deref());
-        }
-        out
+            req.trace_argument(&mut out, &row.value().deref());
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(out)
     }
 
     /// One argument as [`Request::trace_arguments`] renders it,
@@ -1152,10 +1179,16 @@ impl Request {
         &mut self,
         row: &mut PhpArray,
         name: &[u8],
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         // `ZSTR_KNOWN(ZEND_STR_FILE)` and its kin.
-        let key = Key::Str(self.interned(name)?);
+        let key = match self.interned(name) {
+            Ok(name) => Owner::take(self, Key::Str(name)),
+            Err(thrown) => {
+                value.give_up(self);
+                return Err(thrown);
+            }
+        };
         row.set(self, key, value)
     }
 }

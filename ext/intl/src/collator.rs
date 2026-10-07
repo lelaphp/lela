@@ -6,6 +6,7 @@
 //! sort keys.
 
 use std::cmp::Ordering;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{Instance, OrFalse, Ref, Refusals, This, True};
 use php_ext::attr::{php_class, php_function};
@@ -14,6 +15,7 @@ use php_ext::coerce;
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, fatal, throw_error, warning};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, zend_sort};
 
 use crate::error::{self, Carrier, IntlError};
@@ -581,11 +583,16 @@ fn sort_with_sort_keys(
         return Ok(true);
     }
     let mut keyed = Vec::with_capacity(given.len());
-    for (_, value) in given.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_VAL(hash, hashData)` (`Z/ext/intl/collator/collator_sort.c:397`),
+    // no owner of the table taken: the by-reference argument holds it while
+    // a failure's warning reaches the program, after which the native
+    // returns and reads no row it kept.
+    let walked = walk::foreach(req, given, Hold::None, |req, row| -> walk::Step<bool> {
+        let value = *row.value();
         let text = match value.as_str_bytes().map(to_utf16) {
             Some(Err(status)) => {
                 check(req, object, status, "Sort with sort keys failed")?;
-                return Ok(false);
+                return Ok(ControlFlow::Break(false));
             }
             Some(Ok(text)) => text,
             None => Vec::new(),
@@ -593,12 +600,15 @@ fn sort_with_sort_keys(
         let mut key = with(req, object, |c| c.sort_key(&text)).unwrap_or_default();
         key.truncate(key.iter().position(|&b| b == 0).unwrap_or(key.len()));
         keyed.push((key, value));
+        Ok(ControlFlow::Continue(()))
+    })?;
+    if let Some(answer) = walked {
+        return Ok(answer);
     }
     zend_sort(&mut keyed, &mut |a, b| a.0.cmp(&b.0));
     let mut sorted = PhpArray::new(req)?;
     for (_, value) in keyed {
-        req.addref(&value);
-        sorted.append(req, value)?;
+        sorted.append(req, Owner::take(req, value))?;
     }
     array.set(req, sorted)?;
     Ok(true)

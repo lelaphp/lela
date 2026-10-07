@@ -73,6 +73,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::ffi::OsStr;
+use std::ops::ControlFlow;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, Stdio};
@@ -82,6 +83,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
 use crate::State;
@@ -694,10 +696,15 @@ type Env = Vec<(Vec<u8>, Vec<u8>)>;
 /// element with no string key is taken as the `name=value` it spells.
 fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
     let mut pairs = Vec::new();
-    for (key, value) in env.snapshot() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(environment, key, element)`
+    // (`Z/ext/standard/proc_open.c:171`), no owner of the table taken: the
+    // argument holds it while `zval_get_string` runs `__toString`.
+    walk::foreach(req, env, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let text = crate::tmp_string_bytes(req, &value)?;
         if text.is_empty() {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         match key {
             Key::Str(name) if !name.is_empty() => pairs.push((name.as_bytes().to_vec(), text)),
@@ -707,7 +714,8 @@ fn environment(req: &mut Request, env: PhpArray) -> Result<Env, Thrown> {
                 }
             }
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(pairs)
 }
 
@@ -854,22 +862,36 @@ fn proc_open(
     };
     let mut descriptors: Vec<Descriptor> = Vec::new();
     let mut pty = Pty::default();
-    for (key, item) in descriptor_spec.snapshot() {
-        let Key::Int(index) = key else {
-            return Err(arg_value_error(req, 2, "be an integer indexed array"));
-        };
-        let nindex = descriptors.len();
-        let made = match item.as_ref() {
-            ValueRef::Resource(_) => resource_descriptor(req, &item, index, nindex)?,
-            ValueRef::Array(ht) => array_descriptor(req, *ht, index, &descriptors, &mut pty)?,
-            _ => {
-                return Err(arg_value_error(req, 2, "only contain arrays and streams"));
+    // `ZEND_HASH_FOREACH_KEY_VAL(descriptorspec, nindex, str_index, descitem)`
+    // (`Z/ext/standard/proc_open.c:1288`), no owner of the table taken: the
+    // argument holds it while a stream's cast runs its wrapper.
+    let walked = walk::foreach(
+        req,
+        descriptor_spec,
+        Hold::None,
+        |req, row| -> walk::Step<bool> {
+            let key = row.key().clone();
+            let item = row.value().deref();
+            let Key::Int(index) = key else {
+                return Err(arg_value_error(req, 2, "be an integer indexed array"));
+            };
+            let nindex = descriptors.len();
+            let made = match item.as_ref() {
+                ValueRef::Resource(_) => resource_descriptor(req, &item, index, nindex)?,
+                ValueRef::Array(ht) => array_descriptor(req, *ht, index, &descriptors, &mut pty)?,
+                _ => {
+                    return Err(arg_value_error(req, 2, "only contain arrays and streams"));
+                }
+            };
+            match made {
+                Some(descriptor) => descriptors.push(descriptor),
+                None => return Ok(ControlFlow::Break(false)),
             }
-        };
-        match made {
-            Some(descriptor) => descriptors.push(descriptor),
-            None => return Ok(Untyped(OrFalse::False)),
-        }
+            Ok(ControlFlow::Continue(()))
+        },
+    )?;
+    if walked.is_some() {
+        return Ok(Untyped(OrFalse::False));
     }
     let child = child_command(
         req,
@@ -898,8 +920,11 @@ fn proc_open(
         };
         if let Some(stream) = stream {
             let value = stream.as_value();
-            req.addref(&value);
-            opened.set(req, Key::Int(index), value)?;
+            opened.set(
+                req,
+                Owner::take(req, Key::Int(index)),
+                Owner::take(req, value),
+            )?;
             held.push(stream.hand_on_unmigrated().resource());
         }
     }
@@ -929,9 +954,13 @@ fn command_of(req: &mut Request, command: Union<PhpArray, PhpString>) -> Result<
                 return Err(arg_value_error(req, 1, "not be empty"));
             }
             let mut argv = Vec::new();
-            for (i, (_, value)) in array.snapshot().into_iter().enumerate() {
-                argv.push(arg_string(req, &value, i + 1)?);
-            }
+            // `ZEND_HASH_FOREACH_VAL(array, arg_zv)`
+            // (`Z/ext/standard/proc_open.c:785`), no owner of the table
+            // taken: the argument holds it while `__toString` runs.
+            walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+                argv.push(arg_string(req, &row.value().deref(), argv.len() + 1)?);
+                Ok(ControlFlow::Continue(()))
+            })?;
             Ok((argv[0].clone(), Some(argv)))
         }
         Union::B(command) => Ok((command.as_bytes().to_vec(), None)),
@@ -1130,11 +1159,9 @@ fn proc_get_status(req: &mut Request, process: Resource) -> Result<Owner<PhpArra
     let command = process.command.clone();
     let pid = process.child;
     let mut out = PhpArray::new(req)?;
+    let command = PhpString::new(req, &command)?;
     let rows: [(&[u8], Value); 9] = [
-        (
-            b"command",
-            Value::string(PhpString::new(req, &command)?.hand_on_unmigrated()),
-        ),
+        (b"command", Value::string(*command)),
         (b"pid", Value::int(i64::from(pid))),
         (b"cached", Value::bool(cached)),
         (b"running", Value::bool(running)),
@@ -1145,8 +1172,9 @@ fn proc_get_status(req: &mut Request, process: Resource) -> Result<Owner<PhpArra
         (b"stopsig", Value::int(i64::from(stopsig))),
     ];
     for (name, value) in rows {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        out.set(req, key, value)?;
+        let key = PhpString::new(req, name)?.into_key();
+        out.set(req, key, Owner::take(req, value))?;
     }
+    command.give_up(req);
     Ok(out)
 }

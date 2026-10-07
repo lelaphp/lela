@@ -6,6 +6,7 @@
 //! of digest and cipher names.
 
 use std::ffi::{c_int, c_ulong};
+use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
@@ -13,6 +14,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::constants::{OPENSSL_DONT_ZERO_PAD_KEY, OPENSSL_RAW_DATA, OPENSSL_ZERO_PADDING};
@@ -581,7 +583,7 @@ fn list(req: &mut Request, names: Vec<Vec<u8>>) -> Result<Owner<PhpArray>, Throw
     let mut out = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, &name)?;
-        out.append(req, Value::string(name.hand_on_unmigrated()))?;
+        out.append(req, name.into_value())?;
     }
     Ok(out)
 }
@@ -823,16 +825,24 @@ fn openssl_seal(
             ));
         }
         let mut keys = Vec::new();
-        for (i, (_, value)) in public_key.snapshot().into_iter().enumerate() {
+        // `ZEND_HASH_FOREACH_VAL(pubkeysht, pubkey)` (`Z/ext/openssl/openssl.c:4290`),
+        // no owner of the table taken: the argument holds it while a key's
+        // `__toString` and a warning's handler run.
+        let refused = walk::foreach(req, public_key, Hold::None, |req, row| -> walk::Step {
             let arg = Arg::new(4, "public_key");
+            let value = row.value().deref();
             let Some(key) = key_from(req, &value, Half::Public, None, arg)? else {
                 if !raised(req) {
-                    let text = format!("Not a public key ({}th member of pubkeys)", i + 1);
+                    let text = format!("Not a public key ({}th member of pubkeys)", keys.len() + 1);
                     docref(req, Level::Warning, &text);
                 }
-                return Ok(OrFalse::False);
+                return Ok(ControlFlow::Break(()));
             };
             keys.push(key);
+            Ok(ControlFlow::Continue(()))
+        })?;
+        if refused.is_some() {
+            return Ok(OrFalse::False);
         }
         let Some(sealed) = seal(&cipher, &keys, data.as_bytes()) else {
             store_errors(req);
@@ -845,7 +855,7 @@ fn openssl_seal(
             let mut list = PhpArray::new(req)?;
             for key in &sealed.keys {
                 let key = PhpString::new(req, key)?;
-                list.append(req, Value::string(key.hand_on_unmigrated()))?;
+                list.append(req, key.into_value())?;
             }
             encrypted_keys.set(req, Untyped(list.into_value()))?;
             if iv.is_given() {

@@ -232,7 +232,7 @@ fn usage_into(
     ];
     for (name, value) in fields {
         let key = PhpString::new(req, name)?;
-        array.set(req, Key::Str(key.hand_on_unmigrated()), Value::int(value))?;
+        array.set(req, key.into_key(), Owner::take(req, Value::int(value)))?;
     }
     Ok(())
 }

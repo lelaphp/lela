@@ -7,6 +7,8 @@
 //! order their objects were finished once the whole string is read; and
 //! php's warnings, with the byte offset where the scanner stood.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
@@ -15,6 +17,7 @@ use php_ext::raising::{
     Level, Thrown, call_stack_end, deprecated, docref, throw, throw_error, warning,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     ClassId, Emalloc, Key, Layout, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
 };
@@ -1063,7 +1066,11 @@ fn allowed_names(
     list: PhpArray,
     function: &str,
 ) -> Result<(), Thrown> {
-    for (_, entry) in list.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(classes), entry)`
+    // (`Z/ext/standard/var.c:1416`), no owner of the table taken: the
+    // option holds it while `__toString` runs.
+    walk::foreach(req, list, Hold::None, |req, row| -> walk::Step {
+        let entry = row.value().deref();
         let entry = entry.deref();
         if !matches!(entry.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             let name = value_name(req, &entry);
@@ -1104,9 +1111,10 @@ fn allowed_names(
         if names.find(lowered.as_bytes()).is_some() {
             lowered.give_up(req);
         } else {
-            names.set(req, Key::Str(lowered.hand_on_unmigrated()), Value::null())?;
+            names.set(req, lowered.into_key(), Owner::take(req, Value::null()))?;
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -1262,10 +1270,8 @@ impl State<'_> {
             }
             Slot::Element(array, key) => {
                 let mut array = *array;
-                if let Key::Str(s) = key {
-                    req.addref(&Value::string(*s));
-                }
-                array.set(req, key.clone(), value.hand_on_unmigrated())?;
+                let key = Owner::take(req, key.clone());
+                array.set(req, key, value)?;
             }
             Slot::Property(object, name) => {
                 let name = Owner::take(req, *name);
@@ -1746,9 +1752,11 @@ impl State<'_> {
             let key = match self.key(req) {
                 Some(Scalar::Long(n)) => Key::Int(n),
                 // A key is `zend_string_init_existing_interned`'s.
-                Some(Scalar::Str(bytes)) => Key::from_string(
-                    PhpString::existing_interned(req, &bytes)?.hand_on_unmigrated(),
-                ),
+                // The var hash keeps a string key's owner, below.
+                Some(Scalar::Str(bytes)) => {
+                    let made = PhpString::existing_interned(req, &bytes)?;
+                    Key::from_string(req, made).hand_on_unmigrated()
+                }
                 _ => return Ok(false),
             };
             // The key's own owner is the var hash's, whose slots name it
@@ -1763,10 +1771,8 @@ impl State<'_> {
                 self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Element(array, key.clone()));
             }
-            if let Key::Str(s) = &key {
-                req.addref(&Value::string(*s));
-            }
-            array.set(req, key.clone(), Value::null())?;
+            let at = Owner::take(req, key.clone());
+            array.set(req, at, Owner::take(req, Value::null()))?;
             if !self.value(req, Some(Slot::Element(array, key)))? {
                 return Ok(false);
             }

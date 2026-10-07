@@ -13,6 +13,7 @@
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{Callable, FromArgument, Raw, Untyped, Variadic};
 use php_ext::attr::php_function;
@@ -21,10 +22,11 @@ use php_ext::coerce::to_long;
 use php_ext::decl::Type;
 use php_ext::raising::{Thrown, arity, fatal};
 use php_ext::request::Request;
+use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk, zend_sort};
 
 use super::sort::key_value;
-use super::{copied, key_copy, user_compare};
+use super::{row_copied, user_compare};
 
 /// What a diff or an intersection compares values with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -262,28 +264,28 @@ fn by_key(
     let arrays = arrays_of(req, &parsed.arrays)?;
     let callback = parsed.callbacks.into_iter().next();
     let mut out = PhpArray::new(req)?;
-    for (key, value) in arrays[0].snapshot_refs() {
-        let value = match value.as_ref() {
-            ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
-            _ => value,
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(args[0]), h, key, val)`
+    // (`Z/ext/standard/array.c:5155`, `:5551`), no owner of the table taken: the
+    // argument holds it while a comparison serves the callback or
+    // `__toString`. A reference read as held by one owner is php's count,
+    // less the walk's own owner of the row (`Row::refcount`).
+    let walked = walk::foreach(req, arrays[0], Hold::None, |req, row| -> walk::Step {
+        let key = row.key();
+        let value = match row.value().as_ref() {
+            ValueRef::Reference(reference) if row.refcount() == 1 => reference.get(),
+            _ => *row.value(),
         };
         let mut keep = true;
         for other in &arrays[1..] {
-            let matched = match other.get(&key) {
+            let matched = match other.get(key) {
                 None => false,
                 Some(_) if data == Data::None => true,
                 Some(found) => {
                     let ordering = match &callback {
-                        Some(callback) => plain_user(req, callback, &value, &found),
-                        None => string_compare(req, &value.deref(), &found.deref()),
+                        Some(callback) => plain_user(req, callback, &value, &found)?,
+                        None => string_compare(req, &value.deref(), &found.deref())?,
                     };
-                    match ordering {
-                        Ok(ordering) => ordering == Ordering::Equal,
-                        Err(thrown) => {
-                            out.give_up(req);
-                            return Err(thrown);
-                        }
-                    }
+                    ordering == Ordering::Equal
                 }
             };
             if matched == diff {
@@ -292,10 +294,15 @@ fn by_key(
             }
         }
         if keep {
-            req.addref(&value);
-            let key = key_copy(req, &key);
+            let value = Owner::take(req, value);
+            let key = Owner::take(req, key.clone());
             out.set(req, key, value)?;
         }
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }
@@ -320,9 +327,10 @@ fn lists(
 ) -> Vec<Vec<Bucket>> {
     let mut lists = Vec::with_capacity(arrays.len());
     for array in arrays {
-        let mut list: Vec<Bucket> = array
-            .snapshot_refs()
-            .into_iter()
+        // php copies each table's buckets into its list, `*list++ = *p`,
+        // taking no owner, and sorts the list under the comparison: the
+        // rows read under the borrowed request, views the argument keeps.
+        let mut list: Vec<Bucket> = walk::rows(req, *array)
             .map(|(key, val)| Bucket { key, val })
             .collect();
         if list.len() > 1 {
@@ -718,13 +726,21 @@ fn array_diff(
         }
     }
     let mut out = PhpArray::new(req)?;
-    for (key, value) in first.snapshot_refs() {
-        if exclude.contains(&crate::tmp_string_bytes(req, &value.deref())?) {
-            continue;
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(args[0]), idx, key, value)`
+    // (`Z/ext/standard/array.c:5965`), no owner of the table taken: the
+    // argument holds it while `zval_get_tmp_string` runs `__toString`.
+    let walked = walk::foreach(req, first, Hold::None, |req, row| -> walk::Step {
+        if exclude.contains(&crate::tmp_string_bytes(req, &row.value().deref())?) {
+            return Ok(ControlFlow::Continue(()));
         }
-        let value = copied(req, value);
-        let key = key_copy(req, &key);
+        let value = row_copied(req, row);
+        let key = Owner::take(req, row.key().clone());
         out.set(req, key, value)?;
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }

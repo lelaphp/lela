@@ -516,10 +516,11 @@ fn scrub(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     for (key, frame) in framed {
         let mut frame = frame.copy(req)?;
         let args = PhpString::new(req, b"args")?;
-        let replaced = frame.replace(req, &Key::Str(*args), Value::array(PhpArray::empty()));
+        let empty = Owner::take(req, Value::array(PhpArray::empty()));
+        let replaced = frame.replace(req, &Key::Str(*args), empty);
         args.give_up(req);
         let replaced = match replaced {
-            Ok(_) => copy.replace(req, &key, frame.into_value().hand_on_unmigrated()),
+            Ok(_) => copy.replace(req, &key, frame.into_value()),
             Err(thrown) => {
                 frame.give_up(req);
                 Err(thrown)

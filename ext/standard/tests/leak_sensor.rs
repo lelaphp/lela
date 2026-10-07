@@ -249,3 +249,35 @@ fn pack_gives_up_the_strings_it_reads() {
         "7373000073737373004444\n12.5\nType C: too few arguments\n"
     );
 }
+
+/// `array_flip`, `array_count_values`, `array_fill_keys` and
+/// `array_combine` key an array by numeric strings and keep none of
+/// them: the integer key gives up the string it was read from (#1996).
+#[test]
+fn a_numeric_string_made_an_integer_key_is_given_up() {
+    let stdout = armed(
+        r#"<?php
+$n = [strval(99 + strlen('a')), str_repeat('7', 2), str_repeat('k', 2)];
+foreach ([array_flip($n), array_count_values($n), array_fill_keys($n, 0), array_combine($n, $n)] as $a) {
+    echo implode(',', array_keys($a)), '=', implode(',', $a), "\n";
+}
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "100,77,kk=0,1,2\n100,77,kk=1,1,1\n100,77,kk=0,0,0\n100,77,kk=100,77,kk\n"
+    );
+}
+
+/// `parse_str` registers each variable as `php_register_variable_ex`
+/// does, and keeps none of the keys its bracket walk makes (#2076).
+#[test]
+fn the_keys_a_variable_registration_makes_are_given_up() {
+    let stdout = armed(
+        r#"<?php
+parse_str('arr[]=foo&123[]=x&a[b][c]=1&a[b][]=2&7=x', $o);
+echo implode(',', array_keys($o)), ' ', $o['arr'][0], $o[123][0], $o['a']['b']['c'], $o['a']['b'][0], $o[7], "\n";
+"#,
+    );
+    assert_eq!(stdout, "arr,123,a,7 foox12x\n");
+}

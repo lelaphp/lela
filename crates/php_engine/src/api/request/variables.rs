@@ -109,7 +109,7 @@ impl Request {
             let mut words = PhpArray::new(self)?;
             for word in self.description.argv.clone() {
                 let word = PhpString::new(self, &word)?;
-                words.append(self, Value::string(word.hand_on_unmigrated()))?;
+                words.append(self, word.into_value())?;
             }
             let count = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
             self.symbol_update(
@@ -212,7 +212,7 @@ impl Request {
         let mut words = PhpArray::new(self)?;
         for word in self.description.argv.clone() {
             let word = PhpString::new(self, &word)?;
-            words.append(self, Value::string(word.hand_on_unmigrated()))?;
+            words.append(self, word.into_value())?;
         }
         let words = words.into_value().hand_on();
         let count = Value::int(i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX));
@@ -223,9 +223,10 @@ impl Request {
             self.set_global(b"argc", Some(number));
         }
         if server {
-            self.addref(&words);
-            self.update_server(b"argv", words)?;
-            self.update_server(b"argc", count)?;
+            let held = Owner::take(self, words);
+            self.update_server(b"argv", held)?;
+            let held = Owner::take(self, count);
+            self.update_server(b"argc", held)?;
         }
         self.release(words);
         Ok(())
@@ -306,15 +307,21 @@ impl Request {
     /// array while it has not written to its own, sees the row, as
     /// `phar_mung_server_vars` has it. `value` is the array's from here;
     /// nothing is written where `$_SERVER` was never made.
-    pub fn update_server(&mut self, name: &[u8], value: Value) -> Result<(), Thrown> {
+    pub fn update_server(&mut self, name: &[u8], value: Owner<Value>) -> Result<(), Thrown> {
         let Some(server) = self.http_globals.server else {
-            self.release(value);
+            value.give_up(self);
             return Ok(());
         };
-        let name = PhpString::new(self, name)?;
-        self.array_update(server.heap(), Key::Str(*name).heap(), value)?;
+        let name = match PhpString::new(self, name) {
+            Ok(name) => name,
+            Err(thrown) => {
+                value.give_up(self);
+                return Err(thrown);
+            }
+        };
+        let written = self.array_update(server.heap(), Key::Str(*name).heap(), value.hand_on());
         name.give_up(self);
-        Ok(())
+        written
     }
 
     /// `SG(request_info).request_method`, where the host was given one.
@@ -496,31 +503,26 @@ impl Request {
         mut dest: Owner<PhpArray>,
         source: PhpArray,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        for (key, value) in source.snapshot() {
+        // `ZEND_HASH_FOREACH_KEY_VAL(src, num_key, string_key, src_entry)`
+        // (`Z/main/php_variables.c:761`), which no code of the program
+        // reaches, the request's variables holding strings and arrays: the
+        // rows read under the borrowed request, then written.
+        let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(self, source)
+            .map(|(key, value)| (key, value.deref()))
+            .collect();
+        for (key, value) in rows {
             let into = dest.get(&key).and_then(|had| had.as_array().copied());
             if let (Some(nested), Some(into)) = (value.as_array().copied(), into) {
                 let into = into.copy(self)?;
                 let merged = self.merge(into, nested)?;
-                let key = self.owned_key(&key);
-                dest.set(self, key, merged.into_value().hand_on_unmigrated())?;
+                let key = Owner::take(self, key);
+                dest.set(self, key, merged.into_value())?;
             } else {
-                self.addref(&value);
-                let key = self.owned_key(&key);
-                dest.set(self, key, value)?;
+                let key = Owner::take(self, key);
+                dest.set(self, key, Owner::take(self, value))?;
             }
         }
         Ok(dest)
-    }
-
-    /// A key's second owner, for a write that gives one up.
-    fn owned_key(&mut self, key: &Key) -> Key {
-        match key {
-            Key::Int(n) => Key::Int(*n),
-            Key::Str(s) => {
-                self.addref(&Value::string(*s));
-                Key::Str(*s)
-            }
-        }
     }
 
     /// `php_auto_globals_create_server` (`Z/main/php_variables.c:876`)
@@ -590,10 +592,10 @@ impl Request {
         // `sapi_get_request_time`, when the request started.
         let now = self.started().as_secs_f64();
         let name = PhpString::new(self, b"REQUEST_TIME_FLOAT")?;
-        server.set(self, Key::Str(name.hand_on_unmigrated()), Value::float(now))?;
+        server.set(self, name.into_key(), Owner::take(self, Value::float(now)))?;
         let name = PhpString::new(self, b"REQUEST_TIME")?;
         let whole = self.request_time();
-        server.set(self, Key::Str(name.hand_on_unmigrated()), Value::int(whole))?;
+        server.set(self, name.into_key(), Owner::take(self, Value::int(whole)))?;
         // `zend_hash_find_ex_ind` of both, and neither where one is
         // missing: the zval as the table holds it, a reference kept one.
         let found = |req: &mut Request, name: &[u8]| {
@@ -603,9 +605,8 @@ impl Request {
         if !self.description.argv.is_empty() {
             if let (Some(count), Some(words)) = (found(self, b"argc"), found(self, b"argv")) {
                 for (name, value) in [(b"argv".as_slice(), words), (b"argc", count)] {
-                    self.addref(&value);
                     let name = PhpString::new(self, name)?;
-                    server.set(self, Key::Str(name.hand_on_unmigrated()), value)?;
+                    server.set(self, name.into_key(), Owner::take(self, value))?;
                 }
             }
         } else if self.ini_flag(b"register_argc_argv") {
@@ -625,18 +626,14 @@ impl Request {
             if !query.is_empty() {
                 for word in query.split(|b| *b == b'+') {
                     let word = PhpString::new(self, word)?;
-                    words.append(self, Value::string(word.hand_on_unmigrated()))?;
+                    words.append(self, word.into_value())?;
                     count += 1;
                 }
             }
             let name = PhpString::new(self, b"argv")?;
-            server.set(
-                self,
-                Key::Str(name.hand_on_unmigrated()),
-                words.into_value().hand_on_unmigrated(),
-            )?;
+            server.set(self, name.into_key(), words.into_value())?;
             let name = PhpString::new(self, b"argc")?;
-            server.set(self, Key::Str(name.hand_on_unmigrated()), Value::int(count))?;
+            server.set(self, name.into_key(), Owner::take(self, Value::int(count)))?;
         }
         self.check_http_proxy(&mut server)?;
         Ok(server)
@@ -664,8 +661,8 @@ impl Request {
             .map(|(_, v)| v.clone());
         if let Some(value) = local {
             let value = PhpString::new(self, &value)?;
-            let key = Key::Str(name.hand_on_unmigrated());
-            server.set(self, key, Value::string(value.hand_on_unmigrated()))?;
+            let key = name.into_key();
+            server.set(self, key, value.into_value())?;
         } else {
             server.unset(self, &Key::Str(*name))?;
             name.give_up(self);
@@ -697,13 +694,16 @@ impl Request {
             if name.is_empty() || name.iter().any(|b| matches!(b, b' ' | b'.' | b'[')) {
                 continue;
             }
-            let value = PhpString::new(self, &value)?;
             let name = PhpString::new(self, &name)?;
-            array.set(
-                self,
-                Key::from_string(name.hand_on_unmigrated()),
-                Value::string(value.hand_on_unmigrated()),
-            )?;
+            let name = Key::from_string(self, name);
+            let value = match PhpString::new(self, &value) {
+                Ok(value) => value,
+                Err(thrown) => {
+                    name.give_up(self);
+                    return Err(thrown);
+                }
+            };
+            array.set(self, name, value.into_value())?;
         }
         Ok(array)
     }
@@ -752,7 +752,7 @@ impl Request {
         &mut self,
         into: PhpArray,
         name: &[u8],
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         self.register_in(into, name, value, false)
     }
@@ -845,7 +845,7 @@ impl Request {
             // the filter sees it (`php_sapi_filter`).
             if input == Input::Cookie {
                 let key = PhpString::new(self, &name)?;
-                let held = into.get(&Key::from_string(*key)).is_some();
+                let held = into.get(&Key::lookup(*key)).is_some();
                 key.give_up(self);
                 if held {
                     continue;
@@ -940,15 +940,11 @@ impl Request {
         input: Input,
         name: &[u8],
         value: &[u8],
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let shared = std::sync::Arc::clone(&self.shared);
         match shared.supplied.input_filter.get() {
             Some(hook) => hook(self, input, name, value),
-            None => Ok(Some(
-                PhpString::new(self, value)?
-                    .into_value()
-                    .hand_on_unmigrated(),
-            )),
+            None => Ok(Some(PhpString::new(self, value)?.into_value())),
         }
     }
 
@@ -959,12 +955,13 @@ impl Request {
 
     /// `php_register_variable_ex` into `track`, with `cookie` saying the
     /// track is `$_COOKIE`'s, whose plain name already there keeps the
-    /// first value (RFC 2965's more specific path first).
+    /// first value (RFC 2965's more specific path first). `value` is the
+    /// array's from here, and so is each key the walk makes.
     pub(crate) fn register_in(
         &mut self,
         track: PhpArray,
         var_name: &[u8],
-        value: Value,
+        value: Owner<Value>,
         cookie: bool,
     ) -> Result<(), Thrown> {
         // The name is a C string: it ends at its first NUL.
@@ -983,10 +980,9 @@ impl Request {
         }
         let var_len = bracket.unwrap_or(var.len());
         if var_len == 0 {
-            self.release(value);
+            value.give_up(self);
             return Ok(());
         }
-        let max_nesting = self.ini_long(b"max_input_nesting_level");
         let place = Place {
             track,
             original,
@@ -994,20 +990,54 @@ impl Request {
         };
         // The walk: `index` is the key the next write lands at, `None`
         // for `[]`; `path` the containers entered so far.
-        let mut index: Option<Vec<u8>> = Some(var[..var_len].to_vec());
-        let Some(mut ip) = bracket else {
+        let index: Option<Vec<u8>> = Some(var[..var_len].to_vec());
+        let Some(ip) = bracket else {
             return self.write_at(&place, &[], index.as_deref(), value);
         };
-        let mut path: Vec<Key> = Vec::new();
+        // The keys of the containers entered, each one owner of its own
+        // until the walk ends, so the key names a string that stands.
+        let mut path: Vec<Owner<Key>> = Vec::new();
+        let walked = self.walk_brackets(&place, &var, var_len, ip, index, &mut path, value);
+        for key in path {
+            key.give_up(self);
+        }
+        walked
+    }
+
+    /// `php_register_variable_ex`'s walk over the brackets after the
+    /// name, from the `[` at `ip`: each index one level of nested array
+    /// entered or made, its key kept in `path`, and `value` written at
+    /// the last.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_brackets(
+        &mut self,
+        place: &Place<'_>,
+        var: &[u8],
+        var_len: usize,
+        mut ip: usize,
+        mut index: Option<Vec<u8>>,
+        path: &mut Vec<Owner<Key>>,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        let track = place.track;
+        let original = place.original;
+        let max_nesting = self.ini_long(b"max_input_nesting_level");
         let mut nest = 0i64;
         loop {
             nest += 1;
             if nest > max_nesting {
-                let top = PhpString::new(self, &var[..var_len])?;
+                let top = match PhpString::new(self, &var[..var_len]) {
+                    Ok(top) => top,
+                    Err(thrown) => {
+                        value.give_up(self);
+                        return Err(thrown);
+                    }
+                };
                 let mut top_level = track;
-                top_level.unset(self, &Key::from_string(*top))?;
+                let unset = top_level.unset(self, &Key::lookup(*top));
                 top.give_up(self);
-                self.release(value);
+                value.give_up(self);
+                unset?;
                 if !self.ini_flag(b"display_errors") {
                     docref(
                         self,
@@ -1047,30 +1077,41 @@ impl Request {
                         });
                     }
                 }
-                return self.write_at(&place, &path, name.as_deref(), value);
+                return self.write_at(place, path, name.as_deref(), value);
             };
             // Enter, or make, the container at `index`.
             let key = match &index {
                 None => None,
                 Some(index) => {
                     if forbidden(index, original) {
-                        self.release(value);
+                        value.give_up(self);
                         return Ok(());
                     }
-                    Some(Key::from_string(
-                        PhpString::new(self, index)?.hand_on_unmigrated(),
-                    ))
+                    match PhpString::new(self, index) {
+                        Ok(index) => Some(Key::from_string(self, index)),
+                        Err(thrown) => {
+                            value.give_up(self);
+                            return Err(thrown);
+                        }
+                    }
                 }
             };
-            let Some(key) = self.enter(track, &path, key)? else {
-                self.release(value);
+            let entered = match self.enter(track, path, key) {
+                Ok(entered) => entered,
+                Err(thrown) => {
+                    value.give_up(self);
+                    return Err(thrown);
+                }
+            };
+            let Some(key) = entered else {
+                value.give_up(self);
                 return Ok(());
             };
             path.push(key);
             index = new_index;
             ip += 1;
             if var.get(ip) != Some(&b'[') {
-                return self.write_at(&place, &path, index.as_deref(), value);
+                return self.write_at(place, path, index.as_deref(), value);
             }
         }
     }
@@ -1081,22 +1122,31 @@ impl Request {
     fn enter(
         &mut self,
         track: PhpArray,
-        path: &[Key],
-        key: Option<Key>,
-    ) -> Result<Option<Key>, Thrown> {
+        path: &[Owner<Key>],
+        key: Option<Owner<Key>>,
+    ) -> Result<Option<Owner<Key>>, Thrown> {
         let mut parent = descend(track, path);
         let Some(key) = key else {
             let fresh = PhpArray::new(self)?;
-            if !parent.try_append(self, fresh.into_value().hand_on_unmigrated())? {
+            if !parent.try_append(self, fresh.into_value())? {
                 return Ok(None);
             }
             let last = walk::rows(self, parent).last().map(|(key, _)| key);
-            return Ok(last.map(|key| self.owned_key(&key)));
+            return Ok(last.map(|key| Owner::take(self, key)));
         };
         if parent.get(&key).is_none_or(|v| v.as_array().is_none()) {
-            let fresh = PhpArray::new(self)?;
-            let slot = self.owned_key(&key);
-            parent.set(self, slot, fresh.into_value().hand_on_unmigrated())?;
+            let fresh = match PhpArray::new(self) {
+                Ok(fresh) => fresh,
+                Err(thrown) => {
+                    key.give_up(self);
+                    return Err(thrown);
+                }
+            };
+            let slot = Owner::take(self, (*key).clone());
+            if let Err(thrown) = parent.set(self, slot, fresh.into_value()) {
+                key.give_up(self);
+                return Err(thrown);
+            }
         }
         Ok(Some(key))
     }
@@ -1107,9 +1157,9 @@ impl Request {
     fn write_at(
         &mut self,
         place: &Place<'_>,
-        path: &[Key],
+        path: &[Owner<Key>],
         index: Option<&[u8]>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let mut container = descend(place.track, path);
         let Some(index) = index else {
@@ -1117,16 +1167,23 @@ impl Request {
             return Ok(());
         };
         if forbidden(index, place.original) {
-            self.release(value);
+            value.give_up(self);
             return Ok(());
         }
-        let name = PhpString::new(self, index)?;
-        if place.cookie && path.is_empty() && container.get(&Key::from_string(*name)).is_some() {
+        let name = match PhpString::new(self, index) {
+            Ok(name) => name,
+            Err(thrown) => {
+                value.give_up(self);
+                return Err(thrown);
+            }
+        };
+        if place.cookie && path.is_empty() && container.get(&Key::lookup(*name)).is_some() {
             name.give_up(self);
-            self.release(value);
+            value.give_up(self);
             return Ok(());
         }
-        container.set(self, Key::from_string(name.hand_on_unmigrated()), value)
+        let key = Key::from_string(self, name);
+        container.set(self, key, value)
     }
 
     /// The request headers the host received, `getallheaders()`, as
@@ -1140,10 +1197,14 @@ impl Request {
             .map(|web| web.headers.clone())
             .unwrap_or_default();
         for (name, value) in &headers {
-            let key = Key::Str(PhpString::new(self, name)?.hand_on_unmigrated());
-            let value = PhpString::new(self, value)?
-                .into_value()
-                .hand_on_unmigrated();
+            let key = PhpString::new(self, name)?.into_key();
+            let value = match PhpString::new(self, value) {
+                Ok(value) => value.into_value(),
+                Err(thrown) => {
+                    key.give_up(self);
+                    return Err(thrown);
+                }
+            };
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -1162,7 +1223,7 @@ struct Place<'a> {
 /// makes has the one owner that holds it, so a write through this
 /// name of it lands in place, where php's `SEPARATE_ARRAY` would find
 /// nothing to separate.
-fn descend(track: PhpArray, path: &[Key]) -> PhpArray {
+fn descend(track: PhpArray, path: &[Owner<Key>]) -> PhpArray {
     let mut current = track;
     for key in path {
         match current.get(key).and_then(|v| v.as_array().copied()) {

@@ -239,6 +239,16 @@ impl<T: View> Owner<T> {
         req.release(self.counted);
     }
 
+    /// The owner given up as `zval_ptr_dtor_nogc` gives one up: the value
+    /// destroyed at its last owner, and where owners are left no possible
+    /// root of the cycle collector (design §5.12). What a walk gives up of
+    /// what it held where php's held nothing, and `zend_array_release`.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn give_up_nogc(mut self, req: &mut Request) {
+        self.consume();
+        req.release_nogc(self.counted);
+    }
+
     /// The owner given up as `GC_DELREF` gives one up, and what is left
     /// of the value: at the last owner the value is destroyed,
     /// `zend_array_destroy`, `zend_string_efree` or
@@ -329,6 +339,17 @@ impl<T: ResourceView> Owner<T> {
     }
 }
 
+impl Owner<PhpString> {
+    /// The owner of the string as the string key it is, the same count,
+    /// not read as a number: what `zend_hash_update` is handed, where
+    /// [`Key::from_string`] is `zend_symtable_update`'s key.
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_key(self) -> Owner<Key> {
+        let key = Key::Str(self.view);
+        self.recast(key)
+    }
+}
+
 impl Owner<Resource> {
     /// The owner of the resource as the typed view `typed` makes of it,
     /// the same count: what a facet hands back of a resource it has just
@@ -388,32 +409,47 @@ impl Owner<PhpArray> {
     }
 
     /// [`PhpArray::set`].
-    pub fn set(&mut self, req: &mut Request, key: Key, value: Value) -> Result<(), Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set(
+        &mut self,
+        req: &mut Request,
+        key: Owner<Key>,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
         self.written(|view| view.set(req, key, value))
     }
 
     /// [`PhpArray::add_new`].
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn add_new(
         &mut self,
         req: &mut Request,
-        key: Key,
-        value: Value,
+        key: Owner<Key>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         self.written(|view| view.add_new(req, key, value))
     }
 
     /// [`PhpArray::replace`].
-    pub fn replace(&mut self, req: &mut Request, key: &Key, value: Value) -> Result<bool, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace(
+        &mut self,
+        req: &mut Request,
+        key: &Key,
+        value: Owner<Value>,
+    ) -> Result<bool, Thrown> {
         self.written(|view| view.replace(req, key, value))
     }
 
     /// [`PhpArray::append`].
-    pub fn append(&mut self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
         self.written(|view| view.append(req, value))
     }
 
     /// [`PhpArray::try_append`].
-    pub fn try_append(&mut self, req: &mut Request, value: Value) -> Result<bool, Thrown> {
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn try_append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<bool, Thrown> {
         self.written(|view| view.try_append(req, value))
     }
 

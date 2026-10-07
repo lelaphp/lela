@@ -206,7 +206,7 @@ fn socket_addrinfo_lookup(
         if let Some(entry) = object.native_mut::<Entry>(req) {
             entry.0 = Some(held);
         }
-        out.append(req, object.into_value().hand_on_unmigrated())?;
+        out.append(req, object.into_value())?;
     }
     Ok(OrFalse::Value(out))
 }
@@ -404,53 +404,58 @@ fn socket_addrinfo_explain(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let info = entry(req, address)?;
     let mut out = PhpArray::new(req)?;
-    put(req, &mut out, "ai_flags", Value::int(i64::from(info.flags)))?;
+    put(
+        req,
+        &mut out,
+        "ai_flags",
+        Owner::take(req, Value::int(i64::from(info.flags))),
+    )?;
     put(
         req,
         &mut out,
         "ai_family",
-        Value::int(i64::from(info.family)),
+        Owner::take(req, Value::int(i64::from(info.family))),
     )?;
     put(
         req,
         &mut out,
         "ai_socktype",
-        Value::int(i64::from(info.socktype)),
+        Owner::take(req, Value::int(i64::from(info.socktype))),
     )?;
     put(
         req,
         &mut out,
         "ai_protocol",
-        Value::int(i64::from(info.protocol)),
+        Owner::take(req, Value::int(i64::from(info.protocol))),
     )?;
     if let Some(name) = &info.canonname {
         let name = string(req, name)?;
-        put(req, &mut out, "ai_canonname", name.hand_on_unmigrated())?;
+        put(req, &mut out, "ai_canonname", name)?;
     }
     let mut addr = PhpArray::new(req)?;
     match &info.addr {
         Addr::V4(v4) if info.family == libc::AF_INET => {
-            put(req, &mut addr, "sin_port", Value::int(i64::from(v4.port())))?;
+            put(
+                req,
+                &mut addr,
+                "sin_port",
+                Owner::take(req, Value::int(i64::from(v4.port()))),
+            )?;
             let text = string(req, v4.ip().to_string().as_bytes())?;
-            put(req, &mut addr, "sin_addr", text.hand_on_unmigrated())?;
+            put(req, &mut addr, "sin_addr", text)?;
         }
         Addr::V6(v6) if info.family == libc::AF_INET6 => {
             put(
                 req,
                 &mut addr,
                 "sin6_port",
-                Value::int(i64::from(v6.port())),
+                Owner::take(req, Value::int(i64::from(v6.port()))),
             )?;
             let text = string(req, v6.ip().to_string().as_bytes())?;
-            put(req, &mut addr, "sin6_addr", text.hand_on_unmigrated())?;
+            put(req, &mut addr, "sin6_addr", text)?;
         }
         _ => {}
     }
-    put(
-        req,
-        &mut out,
-        "ai_addr",
-        addr.into_value().hand_on_unmigrated(),
-    )?;
+    put(req, &mut out, "ai_addr", addr.into_value())?;
     Ok(out)
 }

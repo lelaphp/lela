@@ -32,7 +32,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, fatal, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
 /// A by-reference parameter with no declared type.
@@ -473,8 +473,8 @@ fn msg_stat_queue(
         ("msg_lspid", stat.lspid),
         ("msg_lrpid", stat.lrpid),
     ] {
-        let key = Key::Str(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
-        array.set(req, key, Value::int(value))?;
+        let key = PhpString::new(req, key.as_bytes())?.into_key();
+        array.set(req, key, Owner::take(req, Value::int(value)))?;
     }
     Ok(OrFalse::Value(array))
 }

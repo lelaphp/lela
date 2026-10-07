@@ -8,12 +8,15 @@
 //! each element off as the walk passes it, and `SplQueue` and
 //! `SplStack` freeze the direction (`SPL_DLLIST_IT_FIX`).
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::{ArrayAccess, Countable, Iterator, Serializable};
@@ -741,14 +744,14 @@ impl SplDoublyLinkedList {
         let this = this.object();
         let (flags, values) = with(req, this, |l| (l.flags, l.values()))?;
         let mut out = PhpArray::new(req)?;
-        out.append(req, Value::int(flags))?;
+        out.append(req, Owner::take(req, Value::int(flags)))?;
         let mut list = PhpArray::new(req)?;
         for value in values {
-            list.append(req, crate::copied(req, value))?;
+            list.append(req, Owner::take(req, value.deref()))?;
         }
-        out.append(req, list.into_value().hand_on_unmigrated())?;
+        out.append(req, list.into_value())?;
         let members = crate::members(req, this)?;
-        out.append(req, members.into_value().hand_on_unmigrated())?;
+        out.append(req, members.into_value())?;
         Ok(out)
     }
 
@@ -771,10 +774,15 @@ impl SplDoublyLinkedList {
             ));
         };
         with(req, this, |l| l.flags = flags)?;
-        for (_, value) in storage.snapshot() {
+        // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(storage_zv), elem)`
+        // (`Z/ext/spl/spl_dllist.c:1153`), no owner of the table taken: the
+        // argument holds it.
+        walk::foreach(req, storage, Hold::None, |req, row| -> walk::Step {
+            let value = row.value().deref();
             let value = crate::copied(req, value);
             with(req, this, |l| l.push(value))?;
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         crate::load_members(req, this, &Value::array(members))
     }
 }
@@ -1006,21 +1014,16 @@ fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     let (flags, values) = with(req, object, |l| (l.flags, l.values()))?;
     let mut out = PhpArray::new(req)?;
     for (key, value) in crate::std_properties(req, object)? {
-        req.addref(&value);
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0flags")?;
-    out.set(req, Key::Str(name.hand_on_unmigrated()), Value::int(flags))?;
+    out.set(req, name.into_key(), Owner::take(req, Value::int(flags)))?;
     let mut list = PhpArray::new(req)?;
     for value in values {
-        list.append(req, crate::copied(req, value))?;
+        list.append(req, Owner::take(req, value.deref()))?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0dllist")?;
-    out.set(
-        req,
-        Key::Str(name.hand_on_unmigrated()),
-        list.into_value().hand_on_unmigrated(),
-    )?;
+    out.set(req, name.into_key(), list.into_value())?;
     Ok(out)
 }
 

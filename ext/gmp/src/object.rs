@@ -5,6 +5,7 @@
 //! class's three methods.
 
 use std::cmp::Ordering;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{ClassUnserialize, CloneObj, DebugInfo, Instance, ObjectHandlers, This, Union};
 use php_ext::attr::php_class;
@@ -12,6 +13,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{BinaryOp, numeric_string, to_long, type_name, value_name};
 use php_ext::raising::{Thrown, deprecated, fatal, throw, throw_chained, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_standard::Unserializer;
 
@@ -99,22 +101,18 @@ impl GMP {
         let text = held(req, object, |n| n.to_text(16));
         let mut array = PhpArray::new(req)?;
         let text = PhpString::new(req, &text)?;
-        array.append(req, text.into_value().hand_on_unmigrated())?;
+        array.append(req, text.into_value())?;
         let rows = object.entries(req)?;
         if !rows.is_empty() {
             let mut props = PhpArray::new(req)?;
             for (key, value) in rows {
                 let key = match key {
-                    Key::Str(name) => {
-                        req.addref(&Value::string(name));
-                        Key::from_string(name)
-                    }
-                    Key::Int(n) => Key::Int(n),
+                    Key::Str(name) => Owner::take(req, Key::lookup(name)),
+                    Key::Int(n) => Owner::take(req, Key::Int(n)),
                 };
-                req.addref(&value);
-                props.set(req, key, value)?;
+                props.set(req, key, Owner::take(req, value))?;
             }
-            array.append(req, props.into_value().hand_on_unmigrated())?;
+            array.append(req, props.into_value())?;
         }
         Ok(array)
     }
@@ -150,7 +148,12 @@ impl GMP {
         let Some(props) = props.as_array() else {
             return Err(throw(req, "Exception", "Could not unserialize properties"));
         };
-        for (key, value) in props.snapshot() {
+        // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
+        // (`Z/Zend/zend_API.c:1752`), no owner of the table taken: what
+        // unserializes it holds it while a deprecation reaches the program.
+        walk::foreach(req, *props, Hold::None, |req, row| -> walk::Step {
+            let key = row.key().clone();
+            let value = row.value().deref();
             let value = Owner::take(req, value);
             match key {
                 Key::Str(name) => {
@@ -167,7 +170,8 @@ impl GMP {
                     object.set_row(req, &Key::Int(n), value)?;
                 }
             }
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(())
     }
 }
@@ -378,20 +382,13 @@ impl ObjectHandlers for Handlers {
         let rows = object.entries(req)?;
         let mut table = PhpArray::new(req)?;
         for (key, value) in rows {
-            if let Key::Str(name) = &key {
-                req.addref(&Value::string(*name));
-            }
-            req.addref(&value);
-            table.set(req, key, value)?;
+            let key = Owner::take(req, key.clone());
+            table.set(req, key, Owner::take(req, value))?;
         }
         let text = held(req, object, |n| n.to_text(10));
         let num = PhpString::new(req, &text)?;
         let key = PhpString::new(req, b"num")?;
-        table.set(
-            req,
-            Key::Str(key.hand_on_unmigrated()),
-            num.into_value().hand_on_unmigrated(),
-        )?;
+        table.set(req, key.into_key(), num.into_value())?;
         Ok(Some(table.into()))
     }
 
@@ -539,9 +536,15 @@ fn read_custom(
     else {
         return Err(throw(req, "Exception", "Could not unserialize properties"));
     };
-    for (key, value) in props.snapshot() {
+    // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
+    // (`Z/Zend/zend_API.c:1752`), no owner of the table taken: what
+    // unserializes it holds it while a deprecation reaches the program.
+    walk::foreach(req, props, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let value = Owner::take(req, value);
         object.set_row(req, &key, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }

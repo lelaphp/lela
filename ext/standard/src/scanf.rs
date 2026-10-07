@@ -471,7 +471,7 @@ fn scan(
     } else {
         let mut array = PhpArray::new(req)?;
         for _ in 0..total {
-            array.append(req, Value::null())?;
+            array.append(req, Owner::take(req, Value::null()))?;
         }
         Target::Array(array)
     };
@@ -539,7 +539,7 @@ fn scan(
         let (op, base) = match ch {
             b'n' => {
                 if !suppress {
-                    let consumed = Value::int(i64::try_from(s).unwrap_or(0));
+                    let consumed = Owner::take(req, Value::int(i64::try_from(s).unwrap_or(0)));
                     put(req, &mut target, &mut obj_index, consumed)?;
                 }
                 nconversions += 1;
@@ -595,8 +595,7 @@ fn scan(
                     }
                 }
                 if !suppress {
-                    let value =
-                        Value::string(PhpString::new(req, &input[s..end])?.hand_on_unmigrated());
+                    let value = PhpString::new(req, &input[s..end])?.into_value();
                     put(req, &mut target, &mut obj_index, value)?;
                 }
                 s = end;
@@ -620,8 +619,7 @@ fn scan(
                     break 'scan;
                 }
                 if !suppress {
-                    let value =
-                        Value::string(PhpString::new(req, &input[s..end])?.hand_on_unmigrated());
+                    let value = PhpString::new(req, &input[s..end])?.into_value();
                     put(req, &mut target, &mut obj_index, value)?;
                 }
                 s = end;
@@ -719,9 +717,9 @@ fn scan(
                     let value = strtol(&buf, base, unsigned);
                     let value = if unsigned && value < 0 {
                         let text = u64::from_ne_bytes(value.to_ne_bytes()).to_string();
-                        Value::string(PhpString::new(req, text.as_bytes())?.hand_on_unmigrated())
+                        PhpString::new(req, text.as_bytes())?.into_value()
                     } else {
-                        Value::int(value)
+                        Owner::take(req, Value::int(value))
                     };
                     put(req, &mut target, &mut obj_index, value)?;
                 }
@@ -783,7 +781,12 @@ fn scan(
                 if !suppress {
                     let text = String::from_utf8_lossy(&buf).into_owned();
                     let value = strtod(&text);
-                    put(req, &mut target, &mut obj_index, Value::float(value))?;
+                    put(
+                        req,
+                        &mut target,
+                        &mut obj_index,
+                        Owner::take(req, Value::float(value)),
+                    )?;
                 }
             }
         }
@@ -814,24 +817,22 @@ fn put(
     req: &mut Request,
     target: &mut Target,
     index: &mut usize,
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
     match target {
         Target::Vars { first, count } => {
             if *index >= *count {
-                req.release(value);
+                value.give_up(req);
                 return Ok(());
             }
             let position = *first + u32::try_from(*index).unwrap_or(0);
             *index += 1;
-            let owned = Owner::take(req, value);
-            req.release(value);
-            assign_at(req, position, owned)
+            assign_at(req, position, value)
         }
         Target::Array(array) => {
             let key = Key::Int(i64::try_from(*index).unwrap_or(0));
             *index += 1;
-            array.set(req, key, value)
+            array.set(req, Owner::take(req, key), value)
         }
     }
 }

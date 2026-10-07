@@ -10,11 +10,14 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// `header(string $header, bool $replace = true, int $response_code = 0): void`
@@ -244,7 +247,7 @@ fn headers_sent(
 fn headers_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for line in req.headers_list() {
-        let value = Value::string(PhpString::new(req, &line)?.hand_on_unmigrated());
+        let value = PhpString::new(req, &line)?.into_value();
         array.append(req, value)?;
     }
     Ok(array)
@@ -411,7 +414,13 @@ fn cookie_options(
     cookie: &mut Cookie,
     function: &str,
 ) -> Result<(), Thrown> {
-    for (key, value) in options.snapshot() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(options, key, value)`
+    // (`Z/ext/standard/head.c:204`), no owner of the table taken: the
+    // argument holds it while `__toString` and a `ValueError` reach the
+    // program.
+    walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let Key::Str(key) = key else {
             let text = format!("{function}(): option array cannot have numeric keys");
             return Err(throw_error(req, "ValueError", &text));
@@ -439,7 +448,8 @@ fn cookie_options(
                 return Err(throw_error(req, "ValueError", &text));
             }
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 

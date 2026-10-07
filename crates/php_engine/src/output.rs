@@ -36,7 +36,7 @@ use crate::api::request::{
     BufferHandler, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request,
     StartHandler,
 };
-use crate::api::values::{Key, Owner, PhpString, Value, ValueRef};
+use crate::api::values::{Owner, PhpString, Value, ValueRef};
 
 /// The handler operations, `Z/main/php_output.h:23-29`.
 const HANDLER_WRITE: u32 = 0x00;
@@ -509,8 +509,8 @@ impl StatusFields {
             (b"buffer_used", Value::int(long(self.buffer_used))),
         ];
         for (key, value) in rows {
-            let key = Key::Str(req.string(key)?);
-            entry.set(req, key, value)?;
+            let key = PhpString::new(req, key)?.into_key();
+            entry.set(req, key, Owner::adopt(req, value))?;
         }
         Ok(Value::array(entry))
     }
@@ -1890,8 +1890,8 @@ fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
                 .map(|handler| handler.name.bytes().to_vec())
                 .collect();
             for name in names {
-                let name = Value::string(req.string(&name)?);
-                list.append(req, name)?;
+                let name = PhpString::new(req, &name)?;
+                list.append(req, name.into_value())?;
             }
             Value::array(list)
         }
@@ -1903,7 +1903,7 @@ fn read_op(req: &mut Request, op: &OutputOp) -> Result<Value, Thrown> {
                 for at in 0..level {
                     if let Some(fields) = req.output().status_fields(at) {
                         let row = fields.into_array(req)?;
-                        rows.append(req, row)?;
+                        rows.append(req, Owner::adopt(req, row))?;
                     }
                 }
                 Value::array(rows)

@@ -4,6 +4,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path, Raw, This, True};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
@@ -12,6 +14,7 @@ use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, throw, throw_error, while_pending,
 };
 use php_ext::request::{Request, Stream, StreamCtx, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     Emalloc, FreshString, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
 };
@@ -1156,7 +1159,7 @@ fn names(req: &mut Request, crypto: bool) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for algo in ALGOS.iter().filter(|a| !crypto || a.crypto) {
         let name = PhpString::new(req, algo.name.as_bytes())?;
-        out.append(req, name.into_value().hand_on_unmigrated())?;
+        out.append(req, name.into_value())?;
     }
     Ok(out)
 }
@@ -1691,23 +1694,20 @@ impl HashContext {
         let fields = fields?;
         let mut out = PhpArray::new(req)?;
         let algo_name = PhpString::new(req, name.as_bytes())?;
-        out.append(req, algo_name.into_value().hand_on_unmigrated())?;
-        out.append(req, Value::int(flags.0))?;
-        out.append(req, fields.into_value().hand_on_unmigrated())?;
-        out.append(req, Value::int(magic))?;
+        out.append(req, algo_name.into_value())?;
+        out.append(req, Owner::take(req, Value::int(flags.0)))?;
+        out.append(req, fields.into_value())?;
+        out.append(req, Owner::take(req, Value::int(magic)))?;
         let mut members = PhpArray::new(req)?;
         for (key, value) in this.props(req)? {
-            req.addref(&value);
+            let value = Owner::take(req, value);
             let key = match key {
-                Key::Str(name) => {
-                    req.addref(&Value::string(name));
-                    Key::from_string(name)
-                }
-                Key::Int(_) => key,
+                Key::Str(name) => Owner::take(req, Key::lookup(name)),
+                Key::Int(_) => Owner::take(req, key),
             };
             members.set(req, key, value)?;
         }
-        out.append(req, members.into_value().hand_on_unmigrated())?;
+        out.append(req, members.into_value())?;
         Ok(out)
     }
 
@@ -1798,11 +1798,16 @@ impl HashContext {
             context.running = Some(running);
             context.flags = flags;
         }
-        for (key, value) in members.snapshot() {
+        // `object_properties_load`'s walk (`Z/Zend/zend_API.c:1752`), no
+        // owner of the table taken: the argument holds it.
+        walk::foreach(req, members, Hold::None, |req, row| -> walk::Step {
+            let key = row.key().clone();
+            let value = row.value().deref();
             let name = key.to_prop_name(req)?;
             let value = Owner::take(req, value);
             this.set_prop(req, name, value)?;
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(())
     }
 
@@ -1823,11 +1828,7 @@ impl HashContext {
         let mut out = PhpArray::new(req)?;
         let key = PhpString::new(req, b"algo")?;
         let name = PhpString::new(req, algo.map_or("", |a| a.label).as_bytes())?;
-        out.set(
-            req,
-            Key::Str(key.hand_on_unmigrated()),
-            name.into_value().hand_on_unmigrated(),
-        )?;
+        out.set(req, key.into_key(), name.into_value())?;
         Ok(out)
     }
 }

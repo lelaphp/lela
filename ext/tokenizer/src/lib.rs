@@ -33,6 +33,7 @@ mod names;
 mod tokens;
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{Extension, ExtensionBuilder, This, Untyped};
 use php_ext::attr::{php_class, php_function};
@@ -40,6 +41,7 @@ use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, arg_type_error, raise, raise_at, throw_at, throw_error};
 use php_ext::request::Request;
 use php_ext::syntax::{self, FileId, LexOptions};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use names::constants::{self, TOKEN_PARSE};
@@ -268,7 +270,7 @@ impl PhpToken {
                 rows.give_up(req);
                 return Err(thrown);
             }
-            rows.append(req, object.into_value().hand_on_unmigrated())?;
+            rows.append(req, object.into_value())?;
         }
         Ok(rows)
     }
@@ -370,9 +372,12 @@ impl PhpToken {
             ValueRef::Array(kinds) => {
                 let mut id = None;
                 let mut text = None;
-                let mut found = false;
-                for (_, entry) in kinds.snapshot() {
-                    let entry = entry.deref();
+                // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(kind), entry)`
+                // (`Z/ext/tokenizer/tokenizer.c:166`), no owner of the
+                // table taken: the argument holds it while a property read
+                // or the `TypeError` reaches the program.
+                walk::foreach(req, *kinds, Hold::None, |req, row| -> walk::Step {
+                    let entry = row.value().deref();
                     match entry.as_ref() {
                         ValueRef::Int(n) => {
                             let id = match id {
@@ -380,8 +385,7 @@ impl PhpToken {
                                 None => *id.insert(token_id(req, this)?),
                             };
                             if id == n {
-                                found = true;
-                                break;
+                                return Ok(ControlFlow::Break(()));
                             }
                         }
                         ValueRef::Str(s) => {
@@ -390,8 +394,7 @@ impl PhpToken {
                                 None => *text.insert(token_text(req, this)?),
                             };
                             if text.as_bytes() == s.as_bytes() {
-                                found = true;
-                                break;
+                                return Ok(ControlFlow::Break(()));
                             }
                         }
                         _ => {
@@ -405,8 +408,9 @@ impl PhpToken {
                             ));
                         }
                     }
-                }
-                found
+                    Ok(ControlFlow::Continue(()))
+                })?
+                .is_some()
             }
             _ => {
                 return Err(arg_type_error(
@@ -1024,12 +1028,12 @@ fn token_get_all(
         match token.name.and_then(names::id_of) {
             Some(id) => {
                 let mut row = PhpArray::new(req)?;
-                row.append(req, Value::int(id))?;
-                row.append(req, text.hand_on_unmigrated())?;
-                row.append(req, Value::int(i64::from(token.line)))?;
-                rows.append(req, row.into_value().hand_on_unmigrated())?;
+                row.append(req, Owner::take(req, Value::int(id)))?;
+                row.append(req, text)?;
+                row.append(req, Owner::take(req, Value::int(i64::from(token.line))))?;
+                rows.append(req, row.into_value())?;
             }
-            None => rows.append(req, text.hand_on_unmigrated())?,
+            None => rows.append(req, text)?,
         }
     }
     Ok(rows)

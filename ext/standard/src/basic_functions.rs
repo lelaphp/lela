@@ -8,6 +8,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Untyped, Variadic};
@@ -17,6 +18,7 @@ use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
 use php_ext::request::{Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use constants::{CONNECTION_ABORTED, INI_PERDIR, INI_SYSTEM, INI_USER};
@@ -183,8 +185,9 @@ fn getenv(
             if name.is_empty() || name.iter().any(|c| matches!(c, b' ' | b'.' | b'[')) {
                 continue;
             }
-            let key = Key::from_string(PhpString::new(req, &name)?.hand_on_unmigrated());
-            let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
+            let key = PhpString::new(req, &name)?;
+            let key = Key::from_string(req, key);
+            let value = PhpString::new(req, &value)?.into_value();
             array.set(req, key, value)?;
         }
         return Ok(Union::A(array));
@@ -351,11 +354,16 @@ fn getopt(
         return Ok(OrFalse::False);
     }
     let mut opts = crate::getopt::short_options(c_string(spec.as_bytes()));
-    for (_, value) in long_options.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(p_longopts), entry)`
+    // (`Z/ext/standard/basic_functions.c:1012`), no owner of the table
+    // taken: the argument holds it while `__toString` runs.
+    walk::foreach(req, long_options, Hold::None, |req, row| -> walk::Step {
+        let value = row.value().deref();
         let text = to_string(req, &value)?;
         opts.push(long_option(c_string(text.as_bytes())));
         text.give_up(req);
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     let mut walk = Getopt::new(&argv, &opts);
     // Each option found, by name in the order first found, with each
     // value it was given.
@@ -382,15 +390,15 @@ fn getopt(
         let key = if !(name.len() > 1 && name[0] == b'0')
             && let Some(n) = numeric_string(&name).and_then(|v| v.as_int())
         {
-            Key::Int(n)
+            Owner::take(req, Key::Int(n))
         } else {
-            Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated())
+            PhpString::new(req, &name)?.into_key()
         };
         let mut items = Vec::new();
         for value in values {
             items.push(match value {
-                Some(bytes) => Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated()),
-                None => Value::bool(false),
+                Some(bytes) => PhpString::new(req, &bytes)?.into_value(),
+                None => Owner::take(req, Value::bool(false)),
             });
         }
         let value = if items.len() == 1 {
@@ -400,7 +408,7 @@ fn getopt(
             for item in items {
                 list.append(req, item)?;
             }
-            Value::array(list.hand_on_unmigrated())
+            list.into_value()
         };
         result.set(req, key, value)?;
     }
@@ -1349,7 +1357,8 @@ fn ini_get_all(
     }
     let mut all = PhpArray::new(req)?;
     for entry in entries {
-        let key = Key::from_string(PhpString::new(req, &entry.decl.name.0)?.hand_on_unmigrated());
+        let key = PhpString::new(req, &entry.decl.name.0)?;
+        let key = Key::from_string(req, key);
         let value = if details {
             let access = (i64::from(entry.decl.user) * INI_USER)
                 | (i64::from(entry.decl.per_dir) * INI_PERDIR)
@@ -1361,12 +1370,12 @@ fn ini_get_all(
             for (name, value) in [
                 (&b"global_value"[..], ini_value(req, global)?),
                 (b"local_value", ini_value(req, entry.value.as_deref())?),
-                (b"access", Value::int(access)),
+                (b"access", Owner::take(req, Value::int(access))),
             ] {
-                let name = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+                let name = PhpString::new(req, name)?.into_key();
                 option.set(req, name, value)?;
             }
-            Value::array(option.hand_on_unmigrated())
+            option.into_value()
         } else {
             ini_value(req, entry.value.as_deref())?
         };
@@ -1377,10 +1386,10 @@ fn ini_get_all(
 
 /// An entry's value as `ini_get_all()` answers it: the string, or `null`
 /// where the entry has none (php's `NULL`).
-fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Value, Thrown> {
+fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Owner<Value>, Thrown> {
     Ok(match value {
-        Some(value) => Value::string(PhpString::new(req, value)?.hand_on_unmigrated()),
-        None => Value::null(),
+        Some(value) => PhpString::new(req, value)?.into_value(),
+        None => Owner::take(req, Value::null()),
     })
 }
 
@@ -1647,7 +1656,7 @@ fn sys_getloadavg(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown>
     };
     let mut array = PhpArray::new(req)?;
     for average in load {
-        array.append(req, Value::float(average))?;
+        array.append(req, Owner::take(req, Value::float(average)))?;
     }
     Ok(OrFalse::Value(array))
 }

@@ -12,9 +12,10 @@ use php_ext::attr::php_function;
 use php_ext::coerce::to_array;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value};
 
-use super::{copied, key_copy};
+use super::copied;
 
 /// The array a by-reference argument holds, as `Z_PARAM_ARRAY_EX(array,
 /// 0, 1)` separates it, with the cell to write a rebuilt table into; an
@@ -167,8 +168,7 @@ fn array_push(
 ) -> Result<i64, Thrown> {
     let mut stack = Stack::of(req, array)?;
     for value in values.0 {
-        req.addref(&value);
-        if let Err(thrown) = stack.array.append(req, value) {
+        if let Err(thrown) = stack.array.append(req, Owner::take(req, value)) {
             stack.finish(req);
             return Err(thrown);
         }
@@ -323,7 +323,10 @@ fn unwrapped(req: &mut Request, taken: Value) -> Owner<Value> {
 #[php_function]
 fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Thrown> {
     let mut stack = Stack::of(req, array)?;
-    let rows = stack.array.snapshot_refs();
+    // The rebuild runs no code of the program, as php's in-place one runs
+    // none: the rows are read under the borrowed request, views the table
+    // the stack holds keeps until it is replaced.
+    let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
     let Some((_, first)) = rows.first().cloned() else {
         stack.finish(req);
         return Ok(Owner::take(req, Value::null()));
@@ -331,10 +334,10 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, 
     req.addref(&first);
     let mut rebuilt = PhpArray::new(req)?;
     for (key, element) in rows.into_iter().skip(1) {
-        req.addref(&element);
+        let element = Owner::take(req, element);
         match key {
             Key::Str(_) => {
-                let key = key_copy(req, &key);
+                let key = Owner::take(req, key.clone());
                 rebuilt.set(req, key, element)?;
             }
             Key::Int(_) => rebuilt.append(req, element)?,
@@ -437,14 +440,17 @@ fn array_unshift(
     let mut rebuilt = PhpArray::new(req)?;
     let argc = values.0.len();
     for value in values.0 {
-        req.addref(&value);
-        rebuilt.append(req, value)?;
+        rebuilt.append(req, Owner::take(req, value))?;
     }
-    for (key, element) in stack.array.snapshot_refs() {
-        req.addref(&element);
+    // The rebuild runs no code of the program, as php's in-place one runs
+    // none: the rows are read under the borrowed request, views the table
+    // the stack holds keeps until it is replaced.
+    let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
+    for (key, element) in rows {
+        let element = Owner::take(req, element);
         match key {
             Key::Str(_) => {
-                let key = key_copy(req, &key);
+                let key = Owner::take(req, key.clone());
                 rebuilt.set(req, key, element)?;
             }
             Key::Int(_) => rebuilt.append(req, element)?,
@@ -665,9 +671,11 @@ fn array_splice(
         walk.iter_pos = stack.array.iterators_lower_pos(req, walk.iter_pos);
     }
     if let Some(replacement) = &replacement {
-        for (_, value) in replacement.snapshot_refs() {
-            req.addref(&value);
-            rebuilt.append(req, value)?;
+        // The replacement's rows, which this native owns, appended; no code
+        // of the program runs between.
+        let values: Vec<Value> = walk::rows(req, **replacement).map(|(_, v)| v).collect();
+        for value in values {
+            rebuilt.append(req, Owner::take(req, value))?;
             walk.pos += 1;
         }
     }
@@ -733,10 +741,10 @@ fn remove_range(
         // `zend_hash_add_new(removed, p->key, entry)`: a string key is
         // kept, copied before the delete gives the bucket's up.
         let kept = match (&removed, &key) {
-            (Some(_), Key::Str(_)) => Some(key_copy(req, &key)),
+            (Some(_), Key::Str(_)) => Some(Owner::take(req, key.clone())),
             _ => None,
         };
-        req.addref(&element);
+        let element = Owner::take(req, element);
         stack.array.unset(req, &key)?;
         let table = stack.array.to_value();
         if holder == Holder::Shared {
@@ -745,7 +753,7 @@ fn remove_range(
         match (removed.as_deref_mut(), kept) {
             (Some(removed), Some(key)) => removed.set(req, key, element)?,
             (Some(removed), None) => removed.append(req, element)?,
-            (None, _) => req.release(element),
+            (None, _) => element.give_up(req),
         }
         if holder == Holder::Shared {
             if table.refcount() == 1 {
@@ -800,10 +808,10 @@ fn keep(
     key: &Key,
     element: Value,
 ) -> Result<(), Thrown> {
-    req.addref(&element);
+    let element = Owner::take(req, element);
     match key {
         Key::Str(_) => {
-            let key = key_copy(req, key);
+            let key = Owner::take(req, key.clone());
             rebuilt.set(req, key, element)
         }
         Key::Int(_) => rebuilt.append(req, element),
@@ -911,7 +919,10 @@ fn array_slice(
         return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
-    let rows = input.snapshot_refs();
+    // `ZEND_HASH_FOREACH_KEY_VAL` over the slice's range, which no code of
+    // the program reaches: the rows read under the borrowed request, views
+    // the argument keeps.
+    let rows: Vec<(Key, Value)> = walk::rows(req, input).collect();
     let from = usize::try_from(start).unwrap_or(usize::MAX);
     let count = usize::try_from(taken).unwrap_or(usize::MAX);
     for (key, element) in rows.into_iter().skip(from).take(count) {
@@ -919,7 +930,7 @@ fn array_slice(
         match key {
             Key::Int(_) if !preserve => out.append(req, value)?,
             _ => {
-                let key = key_copy(req, &key);
+                let key = Owner::take(req, key.clone());
                 out.set(req, key, value)?;
             }
         }

@@ -11,7 +11,7 @@ use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::stmt;
 
@@ -368,11 +368,7 @@ impl ObjectHandlers for Handlers {
 /// `zend_hash_update` under its name.
 fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut Owner<PhpArray>) -> Result<(), Thrown> {
     for (key, value) in Std.get_properties(req, stmt)? {
-        if let Key::Str(name) = key {
-            req.addref(&Value::string(name));
-        }
-        req.addref(&value);
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let names: Vec<Vec<u8>> = stmt::read(req, stmt, |s| {
         s.columns
@@ -387,12 +383,13 @@ fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut Owner<PhpArray>) -> 
         }
         let value = crate::fetch::value(req, stmt, i64::try_from(at).unwrap_or(-1), None)?;
         let key = match PhpString::new(req, name) {
-            Ok(key) => Key::Str(key.hand_on_unmigrated()),
+            Ok(key) => key.into_key(),
             Err(thrown) => {
                 req.release(value);
                 return Err(thrown);
             }
         };
+        let value = crate::owned(req, value);
         out.set(req, key, value)?;
     }
     Ok(())

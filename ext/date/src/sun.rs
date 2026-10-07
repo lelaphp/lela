@@ -207,8 +207,8 @@ fn add_pair(
         1 => (Value::bool(true), Value::bool(true)),
         _ => (Value::int(times.0), Value::int(times.1)),
     };
-    set_str(req, array, names.0, a)?;
-    set_str(req, array, names.1, b)
+    set_str(req, array, names.0, Owner::take(req, a))?;
+    set_str(req, array, names.1, Owner::take(req, b))
 }
 
 /// `date_sun_info(int $timestamp, float $latitude, float $longitude):
@@ -284,7 +284,12 @@ fn date_sun_info(
     let mut array = PhpArray::new(req)?;
     let (rs, _, _, rise, set, transit) = t.rise_set(longitude, latitude, -35.0 / 60.0, true);
     add_pair(req, &mut array, rs, (b"sunrise", b"sunset"), (rise, set))?;
-    set_str(req, &mut array, b"transit", Value::int(transit))?;
+    set_str(
+        req,
+        &mut array,
+        b"transit",
+        Owner::take(req, Value::int(transit)),
+    )?;
     for (altitude, begin, end) in [
         (
             -6.0,

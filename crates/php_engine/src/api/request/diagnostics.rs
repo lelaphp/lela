@@ -1091,8 +1091,6 @@ impl Request {
         };
         let mut array = self.array()?;
         // `ZVAL_STR_COPY` of the message and the file.
-        self.addref(&Value::string(last.message));
-        self.addref(&Value::string(last.file));
         for (name, value) in [
             (&b"type"[..], Value::int(last.level.bit())),
             (b"message", Value::string(last.message)),
@@ -1101,13 +1099,13 @@ impl Request {
         ] {
             // `ZSTR_KNOWN`, the four names permanent.
             let key = Key::Str(self.interned(name)?);
-            array.set(self, key, value)?;
+            let key = Owner::take(self, key);
+            array.set(self, key, Owner::take(self, value))?;
         }
         if let Some((Some(trace), _)) = self.diagnostics.last_fatal_error_backtrace {
-            let trace = Value::array(trace);
-            self.addref(&trace);
             let key = Key::Str(self.interned(b"trace")?);
-            array.set(self, key, trace)?;
+            let key = Owner::take(self, key);
+            array.set(self, key, Owner::take(self, Value::array(trace)))?;
         }
         Ok(Some(array))
     }

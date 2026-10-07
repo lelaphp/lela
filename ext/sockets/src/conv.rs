@@ -9,12 +9,14 @@
 //! and its two conversions.
 
 use std::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::ops::ControlFlow;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use php_ext::coerce::{float_to_long, numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::walk::{self, Hold};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
 use crate::ffi::{self, Addr, SUN_PATH, cmsg};
@@ -458,13 +460,24 @@ impl Conv {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for (at, (_, element)) in array.snapshot().into_iter().enumerate() {
-            let key = format!("element #{}", at + 1);
+        let mut at = 0;
+        // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), elem)`
+        // (`Z/ext/sockets/conversions.c:956`), no owner of the table taken:
+        // the argument holds it while a stream's cast runs its wrapper.
+        let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+            at += 1;
+            let key = format!("element #{at}");
+            let element = row.value().deref();
             let fd = self.under(&key, |c| c.fd_of(req, &element));
             if self.failed() {
-                break;
+                return Ok(ControlFlow::Break(()));
             }
             out.extend_from_slice(&fd.to_ne_bytes());
+            Ok(ControlFlow::Continue(()))
+        });
+        match walked {
+            // The body answers no throwable.
+            Ok(_) | Err(_) => {}
         }
         out
     }
@@ -504,13 +517,21 @@ impl Conv {
         let Some(array) = self.table(value) else {
             return Ok(out);
         };
-        for (at, (_, element)) in array.snapshot().into_iter().enumerate() {
+        let mut at = 0;
+        // `from_array_iterate`'s `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), elem)`
+        // (`Z/ext/sockets/conversions.c:228`), no owner of the table taken:
+        // the argument holds it while a field's conversion runs
+        // `__toString`.
+        walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
             if self.failed() {
-                break;
+                return Ok(ControlFlow::Break(()));
             }
             let key = format!("element #{at}");
+            at += 1;
+            let element = row.value().deref();
             self.under(&key, |c| c.cmsghdr(req, &element, &mut out))?;
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(out)
     }
 
@@ -590,9 +611,13 @@ impl Conv {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
-        for (_, element) in array.snapshot() {
-            out.push(Conv::text(req, &element)?);
-        }
+        // `from_array_iterate` (`Z/ext/sockets/conversions.c:228`), no
+        // owner of the table taken: the argument holds it while
+        // `zval_try_get_string` runs `__toString`.
+        walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+            out.push(Conv::text(req, &row.value().deref())?);
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(out)
     }
 
@@ -691,33 +716,43 @@ impl Conv {
                     req,
                     &mut out,
                     "family",
-                    Value::int(i64::from(libc::AF_INET)),
+                    Owner::take(req, Value::int(i64::from(libc::AF_INET))),
                 )?;
                 let text = string(req, &ntop(addr))?;
-                put(req, &mut out, "addr", text.hand_on_unmigrated())?;
-                put(req, &mut out, "port", Value::int(i64::from(v4.port())))?;
+                put(req, &mut out, "addr", text)?;
+                put(
+                    req,
+                    &mut out,
+                    "port",
+                    Owner::take(req, Value::int(i64::from(v4.port()))),
+                )?;
             }
             Addr::V6(v6) => {
                 put(
                     req,
                     &mut out,
                     "family",
-                    Value::int(i64::from(libc::AF_INET6)),
+                    Owner::take(req, Value::int(i64::from(libc::AF_INET6))),
                 )?;
                 let text = string(req, &ntop(addr))?;
-                put(req, &mut out, "addr", text.hand_on_unmigrated())?;
-                put(req, &mut out, "port", Value::int(i64::from(v6.port())))?;
+                put(req, &mut out, "addr", text)?;
+                put(
+                    req,
+                    &mut out,
+                    "port",
+                    Owner::take(req, Value::int(i64::from(v6.port()))),
+                )?;
                 put(
                     req,
                     &mut out,
                     "flowinfo",
-                    Value::int(i64::from(v6.flowinfo())),
+                    Owner::take(req, Value::int(i64::from(v6.flowinfo()))),
                 )?;
                 put(
                     req,
                     &mut out,
                     "scope_id",
-                    Value::int(i64::from(v6.scope_id())),
+                    Owner::take(req, Value::int(i64::from(v6.scope_id()))),
                 )?;
             }
             Addr::Unix(path) => {
@@ -725,10 +760,10 @@ impl Conv {
                     req,
                     &mut out,
                     "family",
-                    Value::int(i64::from(libc::AF_UNIX)),
+                    Owner::take(req, Value::int(i64::from(libc::AF_UNIX))),
                 )?;
                 let text = string(req, path)?;
-                put(req, &mut out, "path", text.hand_on_unmigrated())?;
+                put(req, &mut out, "path", text)?;
             }
             Addr::Other(family) => {
                 self.fail(&format!(
@@ -748,14 +783,14 @@ impl Conv {
         let mut octets = [0u8; 16];
         octets.copy_from_slice(&data[..16]);
         let text = string(req, Ipv6Addr::from(octets).to_string().as_bytes())?;
-        put(req, &mut out, "addr", text.hand_on_unmigrated())?;
+        put(req, &mut out, "addr", text)?;
         let mut index = [0u8; 4];
         index.copy_from_slice(&data[16..20]);
         put(
             req,
             &mut out,
             "ifindex",
-            Value::int(i64::from(u32::from_ne_bytes(index))),
+            Owner::take(req, Value::int(i64::from(u32::from_ne_bytes(index)))),
         )?;
         Ok(out)
     }
@@ -785,7 +820,7 @@ impl Conv {
             };
             let element = if meta.st_mode & libc::S_IFMT == libc::S_IFSOCK {
                 match import_descriptor(req, fd)? {
-                    Ok(socket) => socket.into_value().hand_on_unmigrated(),
+                    Ok(socket) => socket.into_value(),
                     Err(errno) => {
                         self.fail(&format!(
                             "error getting protocol descriptor {raw}: getsockopt() call failed with errno {errno}"
@@ -795,7 +830,7 @@ impl Conv {
                 }
             } else {
                 let stream = req.stream_from_fd(fd, FdStream::File { mode: b"rw" })?;
-                stream.into_resource().into_value().hand_on_unmigrated()
+                stream.into_resource().into_value()
             };
             out.append(req, element)?;
         }
@@ -806,8 +841,18 @@ impl Conv {
     fn cmsghdr_value(&mut self, req: &mut Request, at: &[u8]) -> Result<Owner<Value>, Thrown> {
         let (length, level, ty) = cmsg::header(at);
         let mut out = PhpArray::new(req)?;
-        put(req, &mut out, "level", Value::int(i64::from(level)))?;
-        put(req, &mut out, "type", Value::int(i64::from(ty)))?;
+        put(
+            req,
+            &mut out,
+            "level",
+            Owner::take(req, Value::int(i64::from(level))),
+        )?;
+        put(
+            req,
+            &mut out,
+            "type",
+            Owner::take(req, Value::int(i64::from(ty))),
+        )?;
         let data = self.under("data", |c| -> Result<Owner<Value>, Thrown> {
             let Some(entry) = Ancillary::of(level, ty) else {
                 c.fail(&format!("cmsghdr with level {level} and type {ty} not supported"));
@@ -831,7 +876,7 @@ impl Conv {
                 Ancillary::Rights => c.fd_array_value(req, body),
             }
         })?;
-        put(req, &mut out, "data", data.hand_on_unmigrated())?;
+        put(req, &mut out, "data", data)?;
         Ok(out.into_value())
     }
 
@@ -848,17 +893,22 @@ impl Conv {
             Some(addr) => self.under("name", |c| c.sockaddr_value(req, addr))?,
             None => Owner::take(req, Value::null()),
         };
-        put(req, &mut out, "name", name.hand_on_unmigrated())?;
+        put(req, &mut out, "name", name)?;
         let control = self.under("control", |c| c.control_value(req, &got.control))?;
-        put(req, &mut out, "control", control.hand_on_unmigrated())?;
+        put(req, &mut out, "control", control)?;
         let mut iov = PhpArray::new(req)?;
         if got.count > 0 {
             let n = got.count.min(size);
             let bytes = string(req, &got.data[..n])?;
-            iov.append(req, bytes.hand_on_unmigrated())?;
+            iov.append(req, bytes)?;
         }
-        put(req, &mut out, "iov", iov.into_value().hand_on_unmigrated())?;
-        put(req, &mut out, "flags", Value::int(i64::from(got.flags)))?;
+        put(req, &mut out, "iov", iov.into_value())?;
+        put(
+            req,
+            &mut out,
+            "flags",
+            Owner::take(req, Value::int(i64::from(got.flags))),
+        )?;
         Ok(out.into_value())
     }
 
@@ -873,7 +923,7 @@ impl Conv {
             let key = format!("element #{index}");
             index += 1;
             let element = self.under(&key, |c| c.cmsghdr_value(req, &control[at..]))?;
-            out.append(req, element.hand_on_unmigrated())?;
+            out.append(req, element)?;
             if length == 0 {
                 break;
             }
@@ -911,10 +961,16 @@ pub(crate) fn put(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     name: &str,
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, name.as_bytes())?;
-    array.set(req, Key::Str(key.hand_on_unmigrated()), value)
+    let key = match PhpString::new(req, name.as_bytes()) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
+    array.set(req, key, value)
 }
 
 /// `socket_import_file_descriptor` (`Z/ext/sockets/sockets.c:2542`) over

@@ -117,7 +117,7 @@ fn driver_names(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, name.as_bytes())?;
-        out.append(req, Value::string(name.hand_on_unmigrated()))?;
+        out.append(req, name.into_value())?;
     }
     Ok(out)
 }

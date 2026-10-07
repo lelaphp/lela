@@ -37,6 +37,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Raw, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
@@ -44,6 +46,7 @@ use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
 use php_ext::request::{BodyLimits, Request};
 use php_ext::values::walk;
+use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
@@ -119,8 +122,8 @@ fn request_parse_body(
     }
     let (post, files) = req.parse_body(&limits)?;
     let mut pair = PhpArray::new(req)?;
-    pair.append(req, Value::array(post.hand_on_unmigrated()))?;
-    pair.append(req, Value::array(files.hand_on_unmigrated()))?;
+    pair.append(req, post.into_value())?;
+    pair.append(req, files.into_value())?;
     Ok(pair)
 }
 
@@ -129,7 +132,12 @@ fn request_parse_body(
 /// integer or a quantity string, each refusal php's `ValueError`.
 fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>, Thrown> {
     let mut limits = Vec::new();
-    for (key, value) in options.snapshot() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(options, key, value)`
+    // (`Z/ext/standard/http.c:283`), no owner of the table taken: the
+    // argument holds it while a quantity's warning reaches the program.
+    walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let key = match key {
             Key::Int(_) => {
                 return Err(throw_error(
@@ -173,7 +181,8 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
             }
         };
         limits.push((limit, quantity));
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(limits)
 }
 
@@ -268,7 +277,7 @@ impl Query<'_> {
     fn hash(
         &mut self,
         req: &mut Request,
-        rows: Vec<(KeyText, Value)>,
+        rows: Rows,
         num_prefix: &[u8],
         key_prefix: Option<&[u8]>,
     ) -> Result<(), Thrown> {
@@ -279,78 +288,110 @@ impl Query<'_> {
                 "Maximum call stack size reached.",
             ));
         }
-        for (key, value) in rows {
-            let value = value.deref();
-            let nested = match value.as_ref() {
-                ValueRef::Array(array) => Some(Nested::Array(*array)),
-                ValueRef::Object(object) if enum_backing(req, *object).is_none() => {
-                    Some(Nested::Object(*object))
-                }
-                _ => None,
-            };
-            if let Some(nested) = nested {
-                let mut prefix: Vec<u8> = Vec::new();
-                match &key {
-                    KeyText::Name(name) => {
-                        let mut encoded = Vec::new();
-                        url_encode(name, self.raw, &mut encoded);
-                        if let Some(outer) = key_prefix {
-                            prefix.extend_from_slice(outer);
-                            prefix.extend_from_slice(&encoded);
-                            prefix.extend_from_slice(b"%5D%5B");
-                        } else {
-                            prefix.extend_from_slice(&encoded);
-                            prefix.extend_from_slice(b"%5B");
-                        }
-                    }
-                    KeyText::Index(index) => {
-                        let digits = index.to_string();
-                        if let Some(outer) = key_prefix {
-                            prefix.extend_from_slice(outer);
-                            prefix.extend_from_slice(num_prefix);
-                            prefix.extend_from_slice(digits.as_bytes());
-                            prefix.extend_from_slice(b"%5D%5B");
-                        } else {
-                            prefix.extend_from_slice(num_prefix);
-                            prefix.extend_from_slice(digits.as_bytes());
-                            prefix.extend_from_slice(b"%5B");
-                        }
-                    }
-                }
-                // `GC_IS_RECURSIVE`: an array already being walked is
-                // skipped where it meets itself again.
-                match nested {
-                    Nested::Array(array) => {
-                        if array.is_recursive() {
-                            continue;
-                        }
-                        array.protect();
-                        let rows = array_rows(array);
-                        let walked = self.hash(req, rows, b"", Some(&prefix));
-                        array.unprotect();
-                        walked?;
-                    }
-                    Nested::Object(object) => {
-                        if object.is_recursive() {
-                            continue;
-                        }
-                        object.protect();
-                        let rows = object_rows(req, object);
-                        let walked = match rows {
-                            Ok(rows) => self.hash(req, rows, b"", Some(&prefix)),
-                            Err(thrown) => Err(thrown),
-                        };
-                        object.unprotect();
-                        walked?;
-                    }
-                }
-                continue;
+        match rows {
+        // The table is walked with no owner of it taken: what holds it
+        // keeps it while code of the program runs under the walk, and
+        // where that code frees it, the walk ends there. A declared slot
+        // nothing holds is stepped over.
+            Rows::Array(array) => {
+                walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+                    let key = match row.key() {
+                        Key::Int(n) => KeyText::Index(*n),
+                        Key::Str(s) => KeyText::Name(s.as_bytes().to_vec()),
+                    };
+                    self.row(req, &key, *row.value(), num_prefix, key_prefix)?;
+                    Ok(ControlFlow::Continue(()))
+                })?;
             }
-            if matches!(value.as_ref(), ValueRef::Null | ValueRef::Resource(_)) {
-                continue;
+            Rows::Built(rows) => {
+                for (key, value) in rows {
+                    self.row(req, &key, value, num_prefix, key_prefix)?;
+                }
             }
-            self.scalar(req, &value, &key, num_prefix, key_prefix)?;
         }
+        Ok(())
+    }
+
+    /// One row of [`Query::hash`]'s walk: a nested array or object
+    /// walked under the row's prefix, nothing for `null` or a resource,
+    /// and a scalar written.
+    fn row(
+        &mut self,
+        req: &mut Request,
+        key: &KeyText,
+        value: Value,
+        num_prefix: &[u8],
+        key_prefix: Option<&[u8]>,
+    ) -> Result<(), Thrown> {
+        let value = value.deref();
+        let nested = match value.as_ref() {
+            ValueRef::Array(array) => Some(Nested::Array(*array)),
+            ValueRef::Object(object) if enum_backing(req, *object).is_none() => {
+                Some(Nested::Object(*object))
+            }
+            _ => None,
+        };
+        if let Some(nested) = nested {
+            let mut prefix: Vec<u8> = Vec::new();
+            match &key {
+                KeyText::Name(name) => {
+                    let mut encoded = Vec::new();
+                    url_encode(name, self.raw, &mut encoded);
+                    if let Some(outer) = key_prefix {
+                        prefix.extend_from_slice(outer);
+                        prefix.extend_from_slice(&encoded);
+                        prefix.extend_from_slice(b"%5D%5B");
+                    } else {
+                        prefix.extend_from_slice(&encoded);
+                        prefix.extend_from_slice(b"%5B");
+                    }
+                }
+                KeyText::Index(index) => {
+                    let digits = index.to_string();
+                    if let Some(outer) = key_prefix {
+                        prefix.extend_from_slice(outer);
+                        prefix.extend_from_slice(num_prefix);
+                        prefix.extend_from_slice(digits.as_bytes());
+                        prefix.extend_from_slice(b"%5D%5B");
+                    } else {
+                        prefix.extend_from_slice(num_prefix);
+                        prefix.extend_from_slice(digits.as_bytes());
+                        prefix.extend_from_slice(b"%5B");
+                    }
+                }
+            }
+            // `GC_IS_RECURSIVE`: an array already being walked is
+            // skipped where it meets itself again.
+            match nested {
+                Nested::Array(array) => {
+                    if array.is_recursive() {
+                        return Ok(());
+                    }
+                    array.protect();
+                    let walked = self.hash(req, Rows::Array(array), b"", Some(&prefix));
+                    array.unprotect();
+                    walked?;
+                }
+                Nested::Object(object) => {
+                    if object.is_recursive() {
+                        return Ok(());
+                    }
+                    object.protect();
+                    let rows = object_rows(req, object);
+                    let walked = match rows {
+                        Ok(rows) => self.hash(req, Rows::Built(rows), b"", Some(&prefix)),
+                        Err(thrown) => Err(thrown),
+                    };
+                    object.unprotect();
+                    walked?;
+                }
+            }
+            return Ok(());
+        }
+        if matches!(value.as_ref(), ValueRef::Null | ValueRef::Resource(_)) {
+            return Ok(());
+        }
+        self.scalar(req, &value, key, num_prefix, key_prefix)?;
         Ok(())
     }
 }
@@ -368,16 +409,11 @@ enum Nested {
     Object(PhpObject),
 }
 
-/// An array's rows.
-fn array_rows(array: PhpArray) -> Vec<(KeyText, Value)> {
-    array
-        .snapshot()
-        .into_iter()
-        .map(|(key, value)| match key {
-            Key::Int(n) => (KeyText::Index(n), value),
-            Key::Str(s) => (KeyText::Name(s.as_bytes().to_vec()), value),
-        })
-        .collect()
+/// What [`Query::hash`] walks: an array's rows, walked as they stand,
+/// or an object's visible properties, read for it.
+enum Rows {
+    Array(PhpArray),
+    Built(Vec<(KeyText, Value)>),
 }
 
 /// An object's properties the calling scope may read,
@@ -453,7 +489,7 @@ fn http_build_query(
 ) -> Result<Owner<PhpString>, Thrown> {
     let data = data.value();
     let rows = match data.as_ref() {
-        ValueRef::Array(array) => array_rows(*array),
+        ValueRef::Array(array) => Rows::Array(*array),
         ValueRef::Object(object) => {
             if enum_backing(req, *object).is_some() {
                 let name = value_name(req, &data);
@@ -463,7 +499,7 @@ fn http_build_query(
                     &format!("not be an enum, {name} given"),
                 ));
             }
-            object_rows(req, *object)?
+            Rows::Built(object_rows(req, *object)?)
         }
         _ => {
             let name = value_name(req, &data);

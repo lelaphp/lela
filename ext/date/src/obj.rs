@@ -362,9 +362,15 @@ pub(super) fn set_str(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     key: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
+    let key = match PhpString::new(req, key) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     array.set(req, key, value)
 }
 
@@ -375,7 +381,7 @@ pub(super) fn set_string(
     key: &[u8],
     value: &[u8],
 ) -> Result<(), Thrown> {
-    let value = Value::string(PhpString::new(req, value)?.hand_on_unmigrated());
+    let value = PhpString::new(req, value)?.into_value();
     set_str(req, array, key, value)
 }
 
@@ -484,11 +490,8 @@ pub(super) fn rows_array(
     };
     if !first {
         for (key, value) in own {
-            if let Key::Str(name) = key {
-                req.addref(&Value::string(*name));
-            }
-            req.addref(value);
-            if let Err(thrown) = array.set(req, key.clone(), *value) {
+            let (key, value) = (Owner::take(req, key.clone()), Owner::take(req, *value));
+            if let Err(thrown) = array.set(req, key, value) {
                 give_up_fields(req, fields);
                 array.give_up(req);
                 return Err(thrown);
@@ -498,11 +501,7 @@ pub(super) fn rows_array(
     let mut fields = fields.into_iter();
     while let Some((name, value)) = fields.next() {
         let set = match PhpString::new(req, name) {
-            Ok(key) => array.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                value.hand_on_unmigrated(),
-            ),
+            Ok(key) => array.set(req, key.into_key(), value),
             Err(thrown) => {
                 value.give_up(req);
                 Err(thrown)
@@ -517,11 +516,8 @@ pub(super) fn rows_array(
     if first {
         for (key, value) in own {
             if !array.contains(key) {
-                if let Key::Str(name) = key {
-                    req.addref(&Value::string(*name));
-                }
-                req.addref(value);
-                array.set(req, key.clone(), *value)?;
+                let (key, value) = (Owner::take(req, key.clone()), Owner::take(req, *value));
+                array.set(req, key, value)?;
             }
         }
     }

@@ -16,7 +16,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal,
 };
 use php_ext::request::{Receiving, Request, Siginfo, take_signals};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Disposition};
 use crate::{State, failed};
@@ -316,26 +316,71 @@ pub(crate) fn siginfo(
     posted: &Siginfo,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut info = PhpArray::new(req)?;
-    put(req, &mut info, b"signo", Value::int(posted.number.into()))?;
-    put(req, &mut info, b"errno", Value::int(posted.errno.into()))?;
-    put(req, &mut info, b"code", Value::int(posted.code.into()))?;
+    put(
+        req,
+        &mut info,
+        b"signo",
+        Owner::take(req, Value::int(posted.number.into())),
+    )?;
+    put(
+        req,
+        &mut info,
+        b"errno",
+        Owner::take(req, Value::int(posted.errno.into())),
+    )?;
+    put(
+        req,
+        &mut info,
+        b"code",
+        Owner::take(req, Value::int(posted.code.into())),
+    )?;
     let Ok(signal) = Signal::try_from(number) else {
         return Ok(info);
     };
     match signal {
         Signal::SIGCHLD => {
-            put(req, &mut info, b"status", Value::int(posted.status.into()))?;
-            put(req, &mut info, b"pid", Value::int(posted.pid.into()))?;
-            put(req, &mut info, b"uid", Value::int(posted.uid.into()))?;
+            put(
+                req,
+                &mut info,
+                b"status",
+                Owner::take(req, Value::int(posted.status.into())),
+            )?;
+            put(
+                req,
+                &mut info,
+                b"pid",
+                Owner::take(req, Value::int(posted.pid.into())),
+            )?;
+            put(
+                req,
+                &mut info,
+                b"uid",
+                Owner::take(req, Value::int(posted.uid.into())),
+            )?;
         }
         Signal::SIGUSR1 | Signal::SIGUSR2 => {
-            put(req, &mut info, b"pid", Value::int(posted.pid.into()))?;
-            put(req, &mut info, b"uid", Value::int(posted.uid.into()))?;
+            put(
+                req,
+                &mut info,
+                b"pid",
+                Owner::take(req, Value::int(posted.pid.into())),
+            )?;
+            put(
+                req,
+                &mut info,
+                b"uid",
+                Owner::take(req, Value::int(posted.uid.into())),
+            )?;
         }
         Signal::SIGILL | Signal::SIGFPE | Signal::SIGSEGV | Signal::SIGBUS => {
             #[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
             let addr = posted.addr as i64 as f64;
-            put(req, &mut info, b"addr", Value::float(addr))?;
+            put(
+                req,
+                &mut info,
+                b"addr",
+                Owner::take(req, Value::float(addr)),
+            )?;
         }
         _ => {}
     }
@@ -347,10 +392,16 @@ fn put(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     key: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, key)?;
-    array.set(req, Key::Str(key.hand_on_unmigrated()), value)
+    let key = match PhpString::new(req, key) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
+    array.set(req, key, value)
 }
 
 /// `pcntl_sigprocmask(int $mode, array $signals, &$old_signals = null):
@@ -409,7 +460,7 @@ pub(crate) fn pcntl_sigprocmask(
                 .and_then(|n| Signal::try_from(n).ok())
                 .is_some_and(|signal| old.contains(signal));
             if member {
-                numbers.append(req, Value::int(number))?;
+                numbers.append(req, Owner::take(req, Value::int(number)))?;
             }
         }
         old_signals.set(req, Untyped(numbers.into_value()))?;

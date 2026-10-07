@@ -2,12 +2,15 @@
 //! (`Z/ext/pcre/php_pcre.c:2567`, `:2928`): a subject cut at each match,
 //! and the entries of an array that match or, inverted, do not.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::walk::{self, Hold};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::constants::{
     PREG_GREP_INVERT, PREG_INTERNAL_ERROR, PREG_NO_ERROR, PREG_SPLIT_DELIM_CAPTURE,
@@ -159,7 +162,7 @@ pub(super) fn split_impl(
         } else {
             piece(req, bytes, start, end)?
         };
-        out.append(req, value.hand_on_unmigrated())
+        out.append(req, value)
     };
     if limit == 0 {
         limit = -1;
@@ -291,19 +294,15 @@ fn preg_grep(
     let invert = flags & PREG_GREP_INVERT != 0;
     let mut out = PhpArray::new(req)?;
     set_error(req, PREG_NO_ERROR);
-    let entries = array.snapshot_refs();
     let Some(mut scratch) = Scratch::take(req, &pattern) else {
         return Ok(OrFalse::Value(out));
     };
-    let mut kept = Ok(());
-    for (key, entry) in entries {
-        let text = match to_string(req, &entry) {
-            Ok(text) => text,
-            Err(thrown) => {
-                kept = Err(thrown);
-                break;
-            }
-        };
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(input), num_key, string_key,
+    // entry)` (`Z/ext/pcre/php_pcre.c:2966`), no owner of the table taken: the
+    // argument holds it while `__toString` and a notice's handler run.
+    let kept = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let entry = *row.value();
+        let text = to_string(req, &entry)?;
         let mut subject = Subject::new(text.as_bytes());
         let rc = scratch.run(&pattern, &mut subject, 0, 0, true);
         text.give_up(req);
@@ -316,19 +315,16 @@ fn preg_grep(
             invert
         } else {
             exec_error(req, rc);
-            break;
+            return Ok(ControlFlow::Break(()));
         };
         if keep {
-            req.addref(&entry);
-            if let Key::Str(s) = &key {
-                req.addref(&Value::string(*s));
-            }
-            if let Err(thrown) = out.set(req, key, entry) {
-                kept = Err(thrown);
-                break;
-            }
+            let entry = Owner::take(req, entry);
+            let key = row.key().clone();
+            out.set(req, Owner::take(req, key), entry)?;
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })
+    .map(|_| ());
     scratch.give_back(req);
     if let Err(thrown) = kept {
         out.give_up(req);

@@ -749,19 +749,27 @@ fn to_array(req: &mut Request, rows: &Rows) -> Result<Owner<PhpArray>, Thrown> {
         let mut inner = PhpArray::new(req)?;
         for sub in subs {
             match sub {
-                Sub::Count(index, n) => inner.set(req, Key::Int(*index), Value::int(*n))?,
+                Sub::Count(index, n) => inner.set(
+                    req,
+                    Owner::take(req, Key::Int(*index)),
+                    Owner::take(req, Value::int(*n)),
+                )?,
                 Sub::Named(name, counts) => {
                     let mut named = PhpArray::new(req)?;
                     for (index, n) in counts {
-                        named.set(req, Key::Int(*index), Value::int(*n))?;
+                        named.set(
+                            req,
+                            Owner::take(req, Key::Int(*index)),
+                            Owner::take(req, Value::int(*n)),
+                        )?;
                     }
-                    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                    inner.set(req, key, named.into_value().hand_on_unmigrated())?;
+                    let key = PhpString::new(req, name)?.into_key();
+                    inner.set(req, key, named.into_value())?;
                 }
             }
         }
-        let key = Key::Str(PhpString::new(req, key)?.hand_on_unmigrated());
-        out.set(req, key, inner.into_value().hand_on_unmigrated())?;
+        let key = PhpString::new(req, key)?.into_key();
+        out.set(req, key, inner.into_value())?;
     }
     Ok(out)
 }

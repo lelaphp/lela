@@ -16,6 +16,7 @@ use crate::api::raising::{Thrown, argument_error, throw_error};
 use crate::api::request::{Request, Strategy};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted, adopted_some,
+    walk,
 };
 use crate::exec::{self, Body, CallStage};
 
@@ -497,31 +498,42 @@ pub(crate) fn call_array_made(
     array: PhpArray,
 ) -> Result<Value, Thrown> {
     let target = callable.target();
+    // `zend_call_function`'s `ZEND_HASH_FOREACH_STR_KEY_VAL(fci->named_params,
+    // …)` (`Z/Zend/zend_execute_API.c:924`) places the rows read only, under
+    // the borrowed request; the call takes its own owner of each as it
+    // binds it, and the array's holder keeps the rest standing.
     let Some(function) = callee(req, target) else {
-        let positional: Vec<Value> = array.snapshot_refs().into_iter().map(|(_, v)| v).collect();
+        let positional: Vec<Value> = walk::rows(req, array).map(|(_, v)| v).collect();
         return serve(req, target, &positional, &[]);
     };
     let mut placement = Placement::new(function, &[]);
     let mut have_named = false;
-    for (key, value) in array.snapshot_refs() {
+    let mut refused = None;
+    for (key, value) in walk::rows(req, array) {
         match key {
-            Key::Int(_) => {
-                if have_named {
-                    return Err(throw_error(
-                        req,
-                        "Error",
-                        "Cannot use positional argument after named argument",
-                    ));
-                }
-                placement.arguments.push(value);
+            Key::Int(_) if have_named => {
+                refused = Some(None);
+                break;
             }
+            Key::Int(_) => placement.arguments.push(value),
             Key::Str(name) => {
                 have_named = true;
-                placement.named(req, name, value)?;
+                if let Err(named) = placement.place_named(req, name, value) {
+                    refused = Some(Some((named, name)));
+                    break;
+                }
             }
         }
     }
-    serve(req, target, &placement.arguments, &placement.extra_named)
+    match refused {
+        None => serve(req, target, &placement.arguments, &placement.extra_named),
+        Some(None) => Err(throw_error(
+            req,
+            "Error",
+            "Cannot use positional argument after named argument",
+        )),
+        Some(Some((named, name))) => Err(named.throw(req, name)),
+    }
 }
 
 /// One call's argument list while `zend_call_function` builds it: the
@@ -546,16 +558,25 @@ impl Placement {
     /// One named argument placed by [`handle_named_arg`], the function
     /// the `SEND_*` handlers place theirs by, and written where it went.
     fn named(&mut self, req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
+        self.place_named(req, name, value)
+            .map_err(|refused| refused.throw(req, name))
+    }
+
+    /// [`Placement::named`] with php's refusal answered rather than
+    /// thrown, so a reader under a borrowed request can place one.
+    fn place_named(
+        &mut self,
+        req: &Request,
+        name: PhpString,
+        value: Value,
+    ) -> Result<(), NamedRefused> {
         let offset = arg_offset_by_name(req, self.function, name.as_bytes());
-        match handle_named_arg(offset, &mut self.arguments, &mut self.extra_named, name) {
-            Ok(Named { at, .. }) => {
-                if let Some(slot) = at.slot(&mut self.arguments, &mut self.extra_named) {
-                    *slot = value;
-                }
-                Ok(())
-            }
-            Err(refused) => Err(refused.throw(req, name)),
+        let Named { at, .. } =
+            handle_named_arg(offset, &mut self.arguments, &mut self.extra_named, name)?;
+        if let Some(slot) = at.slot(&mut self.arguments, &mut self.extra_named) {
+            *slot = value;
         }
+        Ok(())
     }
 }
 
@@ -2972,12 +2993,16 @@ fn add_unpacked_element(
             "Only arrays can be unpacked in constant expression",
         ));
     };
-    for (key, value) in source.snapshot_refs() {
-        req.addref(&value);
+    // `zend_ast_add_unpacked_element`'s walk, which no code of the program
+    // reaches: the constant array's rows read under the borrowed request,
+    // then written.
+    let rows: Vec<(Key, Value)> = walk::rows(req, source).collect();
+    for (key, value) in rows {
+        let value = Owner::take(req, value);
         match key {
-            Key::Str(name) => {
-                req.addref(&Value::string(name));
-                array.set(req, Key::Str(name), value)?;
+            Key::Str(_) => {
+                let key = Owner::take(req, key);
+                array.set(req, key, value)?;
             }
             Key::Int(_) => array.append(req, value)?,
         }

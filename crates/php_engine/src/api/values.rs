@@ -330,12 +330,50 @@ impl Key {
         }
     }
 
-    /// The key a string makes: `Int` when its bytes are a canonical
-    /// decimal integer in range (`ZEND_HANDLE_NUMERIC_STR`), else the
-    /// string itself. The string is the caller's to have allocated, as
-    /// php's `zend_symtable_update` is handed a `zend_string *`.
+    /// The key an owned string makes, as `zend_symtable_update` makes it
+    /// of the `zend_string *` it is handed: `Int` when the bytes are a
+    /// canonical decimal integer in range (`ZEND_HANDLE_NUMERIC_STR`), the
+    /// string's owner given up, since no bucket keeps it, and else the
+    /// string itself, its owner the key's. What a native builds a key
+    /// with out of a string it made; a key read from a string it was
+    /// handed is [`Key::lookup`]'s, with [`Owner::take`] where a sink
+    /// keeps it.
+    ///
+    /// The four natives that key an array by its values stay flat over
+    /// numeric strings, as php's do:
+    ///
+    /// ```php
+    /// function run($i) {
+    ///     $n = [(string) (100 + $i), (string) (200 + $i), "k$i"];
+    ///     array_flip($n); array_count_values($n); array_fill_keys($n, 0); array_combine($n, $n);
+    /// }
+    /// run(0);
+    /// $m = memory_get_usage();
+    /// for ($i = 1; $i <= 1000; $i++) { run($i); }
+    /// var_dump(memory_get_usage() - $m);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn from_string(req: &mut Request, s: Owner<PhpString>) -> Owner<Key> {
+        match php_heap::canonical_int(s.as_bytes()) {
+            Some(n) => {
+                s.give_up(req);
+                Owner::take(req, Key::Int(n))
+            }
+            None => s.into_key(),
+        }
+    }
+
+    /// The key a string names, a view and no owner taken: `Int` when its
+    /// bytes are a canonical decimal integer in range
+    /// (`ZEND_HANDLE_NUMERIC_STR`), else the string itself. What
+    /// `zend_symtable_find` looks a string up as; a sink that keeps the
+    /// key is handed an owner of it, [`Owner::take`], which takes one of
+    /// the string on its string arm alone.
     #[must_use]
-    pub fn from_string(s: PhpString) -> Key {
+    pub fn lookup(s: PhpString) -> Key {
         match php_heap::canonical_int(s.as_bytes()) {
             Some(n) => Key::Int(n),
             None => Key::Str(s),
@@ -372,12 +410,28 @@ impl Key {
 /// `PhpArray` it took out of it holds two names; writing through the
 /// second leaves the first as php leaves the argument.
 ///
-/// **What is handed in is given up.** The value written by a `set` or an
-/// `append` is the array's from that moment, as `ZVAL_COPY_VALUE` into
-/// the bucket makes it php's, and so is a string key: a native builds a
-/// string with [`PhpString::new`], hands it to `set`, and never names it
-/// again, which is `add_assoc_*`'s shape. What a read hands back is a
-/// view, no owner taken.
+/// **The writes are sinks.** `set`, `replace`, `append` and
+/// `try_append` take an [`Owner`] of the value they write, and `set` one
+/// of the key: the value is the array's from that moment, as
+/// `ZVAL_COPY_VALUE` into the bucket makes it php's, and so is a string
+/// key. A native builds a string with [`PhpString::new`], hands its
+/// owner to `set`, and never names it again, which is `add_assoc_*`'s
+/// shape; a value it was handed, a view, it hands on with
+/// [`Owner::take`], `Z_TRY_ADDREF` first as php's natives do. A view
+/// handed as it stands does not compile:
+///
+/// ```compile_fail,E0308
+/// # use php_engine::api::raising::Thrown;
+/// # use php_engine::api::request::Request;
+/// # use php_engine::api::values::{Key, Owner, PhpArray, Value};
+/// fn kept(req: &mut Request, into: &mut PhpArray, value: Value) -> Result<(), Thrown> {
+///     let key = Owner::take(req, Key::Int(0));
+///     into.set(req, key, value)
+/// }
+/// # fn main() {}
+/// ```
+///
+/// What a read hands back is a view, no owner taken.
 #[derive(Clone, Copy)]
 pub struct PhpArray(Arr);
 
@@ -581,54 +635,81 @@ impl PhpArray {
     /// `zend_hash_index_update` after `SEPARATE_ARRAY`: in place for a
     /// present key, its old value released, and at the end otherwise; an
     /// integer key at or past `nNextFreeElement` moves it. The value and
-    /// a string key are the array's from here.
-    // Taking the key is the point: a string key's owner is given up here.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn set(&mut self, req: &mut Request, key: Key, value: Value) -> Result<(), Thrown> {
-        self.separate(req)?;
-        req.array_update(self.0, key.heap(), value)?;
+    /// the key are the array's from here: the bucket takes its own owner
+    /// of a string key, and the one handed in is given up.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set(
+        &mut self,
+        req: &mut Request,
+        key: Owner<Key>,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        if let Err(thrown) = self.separate(req) {
+            key.give_up(req);
+            value.give_up(req);
+            return Err(thrown);
+        }
+        let key = key.hand_on();
+        let written = req.array_update(self.0, key.heap(), value.hand_on());
         if let Key::Str(s) = key {
             req.release(Value::string(s));
         }
-        Ok(())
+        written
     }
 
     /// Lay `value` down at `key` as `zend_hash_add_new` and
     /// `zend_symtable_add_new` do after `SEPARATE_ARRAY`: a string key
     /// appended without the lookup, so a key the array holds already is
-    /// held twice and a lookup finds this row. The value and a string key
-    /// are the array's from here.
-    #[allow(clippy::needless_pass_by_value)]
+    /// held twice and a lookup finds this row. The value and the key are
+    /// the array's from here, as [`PhpArray::set`] takes them.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn add_new(
         &mut self,
         req: &mut Request,
-        key: Key,
-        value: Value,
+        key: Owner<Key>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        self.separate(req)?;
-        req.array_add_new(self.0, key.heap(), value)?;
+        if let Err(thrown) = self.separate(req) {
+            key.give_up(req);
+            value.give_up(req);
+            return Err(thrown);
+        }
+        let key = key.hand_on();
+        let written = req.array_add_new(self.0, key.heap(), value.hand_on());
         if let Key::Str(s) = key {
             req.release(Value::string(s));
         }
-        Ok(())
+        written
     }
 
     /// Replace the value at `key` in place; `false`, and `value` given
-    /// up, when it is absent.
-    pub fn replace(&mut self, req: &mut Request, key: &Key, value: Value) -> Result<bool, Thrown> {
+    /// up, when it is absent. The key is the array's already, so only
+    /// the value is taken.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn replace(
+        &mut self,
+        req: &mut Request,
+        key: &Key,
+        value: Owner<Value>,
+    ) -> Result<bool, Thrown> {
         if !self.contains(key) {
-            req.release(value);
+            value.give_up(req);
             return Ok(false);
         }
-        self.separate(req)?;
-        req.array_update(self.0, key.heap(), value)?;
+        if let Err(thrown) = self.separate(req) {
+            value.give_up(req);
+            return Err(thrown);
+        }
+        req.array_update(self.0, key.heap(), value.hand_on())?;
         Ok(true)
     }
 
     /// `$a[] = value`, at `nNextFreeElement`, or php's `Error` "Cannot
     /// add element to the array as the next element is already occupied"
-    /// when that is `ZEND_LONG_MAX` and taken (`zend_cannot_add_element`).
-    pub fn append(&mut self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+    /// when that is `ZEND_LONG_MAX` and taken (`zend_cannot_add_element`),
+    /// `value` given up.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
         if self.try_append(req, value)? {
             return Ok(());
         }
@@ -642,9 +723,13 @@ impl PhpArray {
     /// `$a[] = value`, or `false`, and `value` given up, when
     /// `nNextFreeElement` is `ZEND_LONG_MAX` and taken, which is what
     /// `add_next_index_*` answers.
-    pub fn try_append(&mut self, req: &mut Request, value: Value) -> Result<bool, Thrown> {
-        self.separate(req)?;
-        req.array_append(self.0, value)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn try_append(&mut self, req: &mut Request, value: Owner<Value>) -> Result<bool, Thrown> {
+        if let Err(thrown) = self.separate(req) {
+            value.give_up(req);
+            return Err(thrown);
+        }
+        req.array_append(self.0, value.hand_on())
     }
 
     /// Remove `key`, `zend_hash_del` after `SEPARATE_ARRAY`: `true` when
@@ -726,18 +811,6 @@ impl PhpArray {
     #[must_use]
     pub fn place(&self, key: &Key) -> Option<Place> {
         self.0.value_ref(key.heap()).map(Place)
-    }
-
-    /// The elements in order, references followed, views of them.
-    #[must_use]
-    pub fn snapshot(&self) -> Vec<(Key, Value)> {
-        self.iter().map(|(k, v)| (k, v.deref())).collect()
-    }
-
-    /// The elements in order, references kept as references.
-    #[must_use]
-    pub fn snapshot_refs(&self) -> Vec<(Key, Value)> {
-        self.iter().collect()
     }
 
     /// `zend_hash_sort` after `SEPARATE_ARRAY`, what every sort native
@@ -983,35 +1056,12 @@ enum Kept {
 /// `zend_get_typed_property_info_for_slot` finds a type for, which a
 /// dumper shows as `uninitialized(T)` with the type's text.
 #[derive(Debug, Clone)]
-pub enum HeldRow {
+pub(crate) enum HeldRow {
     Value(Value),
     Uninitialized(String),
 }
 
 impl HeldProperties {
-    /// The rows in the table's order, read under the request as a rows
-    /// walk reads them: views, which stand while the request is
-    /// borrowed and the properties held.
-    #[must_use]
-    pub fn rows(&self, req: &Request) -> Vec<(Key, HeldRow)> {
-        match &self.held {
-            Held::Table(table, _) => table.shown(req),
-            Held::Rows(rows) => rows
-                .iter()
-                .map(|(key, kept)| {
-                    let row = match kept {
-                        Kept::Value(value) => HeldRow::Value(**value),
-                        Kept::Uninitialized(ty) => HeldRow::Uninitialized(ty.clone()),
-                    };
-                    ((**key).clone(), row)
-                })
-                .collect(),
-            Held::Debug(table, _) => walk::rows(req, **table)
-                .map(|(key, value)| (key, HeldRow::Value(value.deref())))
-                .collect(),
-        }
-    }
-
     /// `zend_array_count` over the table (`Z/Zend/zend_hash.c:519`), the
     /// number a dumper prints before the rows: an uninitialised row not
     /// counted, and under [`PropertyPurpose::Debug`] a slot `unset`
@@ -1028,8 +1078,10 @@ impl HeldProperties {
     /// standing after the dump (`Z/ext/standard/var.c:184`).
     pub fn release(self, req: &mut Request) -> Result<(), Thrown> {
         match self.held {
+            // `zend_array_release`: one owner fewer, the table destroyed at
+            // the last, and no possible root of the cycle collector.
             Held::Table(_, table) => {
-                table.give_up(req);
+                table.give_up_nogc(req);
                 Ok(())
             }
             Held::Rows(rows) => {
@@ -1042,7 +1094,7 @@ impl HeldProperties {
                 Ok(())
             }
             Held::Debug(table, thrown) => {
-                table.give_up(req);
+                table.give_up_nogc(req);
                 thrown.map_or(Ok(()), Err)
             }
         }
@@ -2963,9 +3015,14 @@ mod tests {
         let Ok(mut a) = PhpArray::new(&mut req) else {
             return;
         };
-        assert!(a.set(&mut req, Key::Int(5), Value::int(1)).is_ok());
-        assert!(a.append(&mut req, Value::int(2)).is_ok());
-        assert!(a.set(&mut req, Key::Int(-4), Value::null()).is_ok());
+        let key = Owner::take(&req, Key::Int(5));
+        let value = Owner::take(&req, Value::int(1));
+        assert!(a.set(&mut req, key, value).is_ok());
+        let value = Owner::take(&req, Value::int(2));
+        assert!(a.append(&mut req, value).is_ok());
+        let key = Owner::take(&req, Key::Int(-4));
+        let value = Owner::take(&req, Value::null());
+        assert!(a.set(&mut req, key, value).is_ok());
         assert_eq!(a.len(), 3);
         assert_eq!(a.get(&Key::Int(6)), Some(Value::int(2)));
         assert!(!a.is_list());
@@ -2992,7 +3049,8 @@ mod tests {
         let Ok(mut a) = PhpArray::new(&mut req).map(Owner::hand_on) else {
             return;
         };
-        assert!(a.append(&mut req, Value::int(1)).is_ok());
+        let value = Owner::take(&req, Value::int(1));
+        assert!(a.append(&mut req, value).is_ok());
         let first = Value::array(a);
         let second = first;
         assert_eq!(first.refcount(), 1, "a copy touches no refcount");
@@ -3001,7 +3059,8 @@ mod tests {
         let Some(mut b) = second.as_array().copied() else {
             return;
         };
-        assert!(b.append(&mut req, Value::int(2)).is_ok());
+        let value = Owner::take(&req, Value::int(2));
+        assert!(b.append(&mut req, value).is_ok());
         assert_eq!(first.refcount(), 1, "the write took the second owner away");
         assert_eq!(b.len(), 2);
         assert_eq!(first.as_array().map(PhpArray::len), Some(1));
@@ -3030,10 +3089,11 @@ mod tests {
         let first = object.as_value();
         let second = first;
         assert_eq!(first.refcount(), 1, "a copy touches no refcount");
-        req.addref(&second);
+        let second = Owner::take(&req, second);
         assert_eq!(first.refcount(), 2);
         assert_eq!(second.as_object(), Some(&object));
         let Ok(mut a) = PhpArray::new(&mut req) else {
+            second.give_up(&mut req);
             return;
         };
         assert!(a.append(&mut req, second).is_ok());

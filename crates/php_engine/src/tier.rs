@@ -27,6 +27,7 @@ use crate::api::abi::Extension;
 use crate::{exec, interrupt};
 
 pub use crate::api::request::Request;
+pub use crate::api::values::walk::{Rows, rows};
 pub use crate::api::values::{Key as ValueKey, TypeTag, Value};
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};

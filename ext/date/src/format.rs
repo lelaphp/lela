@@ -677,9 +677,9 @@ fn localtime(
     let mut array = PhpArray::new(req)?;
     for (name, value) in rows {
         if associative {
-            set_str(req, &mut array, name, Value::int(value))?;
+            set_str(req, &mut array, name, Owner::take(req, Value::int(value)))?;
         } else {
-            array.append(req, Value::int(value))?;
+            array.append(req, Owner::take(req, Value::int(value)))?;
         }
     }
     Ok(array)
@@ -726,7 +726,7 @@ fn getdate(
         (b"yday", ffi::day_of_year(t.y, t.m, t.d)),
     ];
     for (name, value) in rows {
-        set_str(req, &mut array, name, Value::int(value))?;
+        set_str(req, &mut array, name, Owner::take(req, Value::int(value)))?;
     }
     set_string(
         req,
@@ -735,7 +735,11 @@ fn getdate(
         full_day(t.y, t.m, t.d).as_bytes(),
     )?;
     set_string(req, &mut array, b"month", full_month(t.m).as_bytes())?;
-    array.set(req, Key::Int(0), Value::int(ts))?;
+    array.set(
+        req,
+        Owner::take(req, Key::Int(0)),
+        Owner::take(req, Value::int(ts)),
+    )?;
     Ok(array)
 }
 

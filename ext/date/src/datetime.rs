@@ -7,6 +7,7 @@
 //! immutable class's clone it first (`date_clone_immutable`) and answer
 //! the clone.
 
+use std::ops::ControlFlow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use php_ext::abi::{Class, ClassRef, Instance, OrFalse, Path, Static, This, Union};
@@ -14,6 +15,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, ValueRef,
 };
@@ -790,25 +792,30 @@ pub(super) fn restore_properties(
     hash: PhpArray,
     internal: &[&[u8]],
 ) -> Result<(), Thrown> {
-    for (key, value) in hash.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(myht, prop_name, prop_val)`
+    // (`Z/ext/date/php_date.c:3009`), no owner of the table taken: what
+    // unserializes it holds it while a property write runs a hook.
+    walk::foreach(req, hash, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = *row.value();
         let Key::Str(name) = key else {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         if matches!(value.as_ref(), ValueRef::Reference(_)) || internal.contains(&name.as_bytes()) {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         let bytes = name.as_bytes();
         let (scope, plain): (ClassId, &[u8]) = match bytes.strip_prefix(b"\0") {
             Some(rest) => {
                 let Some(at) = rest.iter().position(|b| *b == 0) else {
-                    continue;
+                    return Ok(ControlFlow::Continue(()));
                 };
                 let owner = &rest[..at];
                 let scope = if owner == b"*" {
                     object.class()
                 } else {
                     let Some(class) = php_ext::call::lookup_class(req, owner)? else {
-                        continue;
+                        return Ok(ControlFlow::Continue(()));
                     };
                     class
                 };
@@ -819,7 +826,8 @@ pub(super) fn restore_properties(
         let plain = PhpString::new(req, plain)?;
         let value = Owner::take(req, value);
         object.write_prop_in(req, PropertyScope::Of(ClassRef(scope)), plain, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -845,8 +853,7 @@ fn unserialize(
 fn wakeup(req: &mut Request, class: &str, object: PhpObject) -> Result<(), Thrown> {
     let mut hash = PhpArray::new(req)?;
     for (key, value) in object.props(req)? {
-        req.addref(&value);
-        hash.set(req, key, value)?;
+        hash.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let done = initialize_from_hash(req, object, *hash);
     hash.give_up(req);

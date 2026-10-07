@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=1828ef058fea47291c9bbc845af2724a3fdaf77d37dc9def8f9a2c4264765730 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=2906b51f1adc12d32202f17b0cb406f2d3e8824afa704514708813aebb26fe67 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -112,10 +112,10 @@ third-engine-design.md
 | ops | ops.lock | 209 |  | pass |
 | api | api.lock | 1315 | 1500 | pass |
 | sapi | sapi.lock | 35 |  | pass |
-| tier | tier.lock | 65 |  | pass |
+| tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=c4d533664867c7612b16fc14e22bd07c4e75b320794f3a0a6b0642c978dcccc6 out=ea9adcb184bfff90eb2734a8bc6d866cfd05aaa145bdc2a61344b45763ac8a9a -->
+<!-- /computed in=b60b65d2939a92388f5d8b31bfcf21508d66155e0496e9231405e7e2871fd3dd out=5cdd9f38e06d2cb17dc127c5de1eb6fa7217d21b7d11df527773465a98c5e3f9 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -136,19 +136,19 @@ third-engine-design.md
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | no reading |
-| ticket.close |  | deny_argv | no reading |
-| ticket.close-api |  | deny_pattern | no reading |
+| git.no-verify |  | deny_argv | fail |
+| ticket.close |  | deny_argv | fail |
+| ticket.close-api |  | deny_pattern | fail |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | no reading |
+| lanes.nightly |  | deny_pattern | fail |
 | lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | no reading |
+| lanes.builder-subset |  | require_argv | fail |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
+| harness.self |  | deny | pass |
 | divergence.reason |  | check | no reading |
-| owner.no-assign-discard |  | deny_pattern | fail |
+| owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=41b262995fd0534786112bfcf420ba6e61149ceba2c66a087720baabdcecca5d out=37d2841e1c624e9d804f3b375c92dc0d330fe3b72df8eba45023ab6930446199 -->
+<!-- /computed in=0916b61481da36955fa020014e903a526ac8ed66e898f448fe50bc079f318728 out=0525dffefe4ef93cd822f740f6b7b60297e1443e58837e618e2f02c32c1fdb9a -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

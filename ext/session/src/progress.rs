@@ -312,8 +312,8 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
         let cancel = cancelled(req, vars, &key);
         with(req, |progress| progress.cancel_upload |= cancel);
         let data = rendered(req)?;
-        let key = Key::Str(PhpString::new(req, &key)?.hand_on_unmigrated());
-        vars.set(req, key, data.hand_on_unmigrated())?;
+        let key = PhpString::new(req, &key)?.into_key();
+        vars.set(req, key, data)?;
     }
     session::flush(req, true)?;
     Ok(())
@@ -345,49 +345,69 @@ fn rendered(req: &mut Request) -> Result<Owner<Value>, Thrown> {
         return Ok(Owner::take(req, Value::null()));
     };
     let mut array = PhpArray::new(req)?;
-    set(req, &mut array, b"start_time", Value::int(data.start_time))?;
+    set(
+        req,
+        &mut array,
+        b"start_time",
+        Owner::take(req, Value::int(data.start_time)),
+    )?;
     set(
         req,
         &mut array,
         b"content_length",
-        Value::int(data.content_length),
+        Owner::take(req, Value::int(data.content_length)),
     )?;
     set(
         req,
         &mut array,
         b"bytes_processed",
-        Value::int(data.bytes_processed),
+        Owner::take(req, Value::int(data.bytes_processed)),
     )?;
-    set(req, &mut array, b"done", Value::bool(data.done))?;
+    set(
+        req,
+        &mut array,
+        b"done",
+        Owner::take(req, Value::bool(data.done)),
+    )?;
     let mut files = PhpArray::new(req)?;
     for file in &data.files {
         let mut entry = PhpArray::new(req)?;
-        let field_name = string_value(req, &file.field_name)?.hand_on_unmigrated();
+        let field_name = string_value(req, &file.field_name)?;
         set(req, &mut entry, b"field_name", field_name)?;
-        let name = string_value(req, &file.name)?.hand_on_unmigrated();
+        let name = string_value(req, &file.name)?;
         set(req, &mut entry, b"name", name)?;
         let tmp_name = match &file.tmp_name {
-            Some(tmp) => string_value(req, tmp)?.hand_on_unmigrated(),
-            None => Value::null(),
+            Some(tmp) => string_value(req, tmp)?,
+            None => Owner::take(req, Value::null()),
         };
         set(req, &mut entry, b"tmp_name", tmp_name)?;
-        set(req, &mut entry, b"error", Value::int(file.error))?;
-        set(req, &mut entry, b"done", Value::bool(file.done))?;
-        set(req, &mut entry, b"start_time", Value::int(file.start_time))?;
+        set(
+            req,
+            &mut entry,
+            b"error",
+            Owner::take(req, Value::int(file.error)),
+        )?;
+        set(
+            req,
+            &mut entry,
+            b"done",
+            Owner::take(req, Value::bool(file.done)),
+        )?;
+        set(
+            req,
+            &mut entry,
+            b"start_time",
+            Owner::take(req, Value::int(file.start_time)),
+        )?;
         set(
             req,
             &mut entry,
             b"bytes_processed",
-            Value::int(file.bytes_processed),
+            Owner::take(req, Value::int(file.bytes_processed)),
         )?;
-        files.append(req, entry.into_value().hand_on_unmigrated())?;
+        files.append(req, entry.into_value())?;
     }
-    set(
-        req,
-        &mut array,
-        b"files",
-        files.into_value().hand_on_unmigrated(),
-    )?;
+    set(req, &mut array, b"files", files.into_value())?;
     with(req, |progress| progress.data = Some(data));
     Ok(array.into_value())
 }
@@ -397,9 +417,15 @@ fn set(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+    let key = match PhpString::new(req, name) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     array.set(req, key, value)
 }
 

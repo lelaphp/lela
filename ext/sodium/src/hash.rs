@@ -1207,7 +1207,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_init_push(
     let mut pair = PhpArray::new(req)?;
     for bytes in [&state[..], &header[..]] {
         let string = made(req, bytes)?;
-        pair.append(req, Value::string(string.hand_on_unmigrated()))?;
+        pair.append(req, string.into_value())?;
     }
     state.fill(0);
     Ok(pair)
@@ -1377,8 +1377,8 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_pull(
     let mut pair = PhpArray::new(req)?;
     let string = made(req, &msg[..real])?;
     msg.fill(0);
-    pair.append(req, Value::string(string.hand_on_unmigrated()))?;
-    pair.append(req, Value::int(i64::from(tag)))?;
+    pair.append(req, string.into_value())?;
+    pair.append(req, Owner::take(req, Value::int(i64::from(tag))))?;
     Ok(OrFalse::Value(pair))
 }
 

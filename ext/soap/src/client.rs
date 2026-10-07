@@ -10,7 +10,7 @@ use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, argument_error, docref, fatal, throw_value};
 use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{
-    Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+    Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef, walk,
 };
 use php_ext_libxml::ffi::{Library, Node, Save};
 
@@ -363,7 +363,10 @@ impl SoapClient {
         let soap_headers: Option<Vec<Value>> = match headers.as_ref() {
             ValueRef::Null | ValueRef::Undef => None,
             ValueRef::Array(a) => {
-                let list: Vec<Value> = a.snapshot().into_iter().map(|(_, v)| v).collect();
+                // `soap_headers = Z_ARRVAL_P(headers)` (`Z/ext/soap/soap.c:2694`):
+                // php keeps the table and reads its rows as views, as these
+                // are read under the borrowed request.
+                let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
                     let e = docref_error(req, "Invalid SOAP header");
                     return unwrapped(req, object, Err(e));
@@ -414,7 +417,7 @@ impl SoapClient {
         for f in sdl.functions.values() {
             let s = function_to_string(&sdl, f);
             let v = PhpString::new(req, &s)?;
-            out.append(req, Value::string(v.hand_on_unmigrated()))?;
+            out.append(req, v.into_value())?;
         }
         Ok(Some(out))
     }
@@ -441,7 +444,7 @@ impl SoapClient {
                     type_to_string(&sdl, t, &mut s, 0);
                 }
                 let v = PhpString::new(req, &s)?;
-                out.append(req, Value::string(v.hand_on_unmigrated()))?;
+                out.append(req, v.into_value())?;
             }
         }
         Ok(Some(out))
@@ -602,18 +605,14 @@ impl SoapClient {
         };
         match value {
             None => {
-                cookies.unset(req, &PhpKey::from_string(name))?;
+                cookies.unset(req, &PhpKey::lookup(name))?;
             }
             Some(v) => {
                 let mut cookie = PhpArray::new(req)?;
-                req.addref(&Value::string(v));
-                cookie.set(req, PhpKey::Int(0), Value::string(v))?;
-                req.addref(&Value::string(name));
-                cookies.set(
-                    req,
-                    PhpKey::from_string(name),
-                    cookie.into_value().hand_on_unmigrated(),
-                )?;
+                let at = Owner::take(req, PhpKey::Int(0));
+                cookie.set(req, at, Owner::take(req, Value::string(v)))?;
+                let name = Owner::take(req, PhpKey::lookup(name));
+                cookies.set(req, name, cookie.into_value())?;
             }
         }
         set_client_slot(req, object, ClientSlot::Cookies, cookies.into_value())
@@ -668,7 +667,9 @@ impl SoapClient {
                 set_client_slot(req, object, ClientSlot::DefaultHeaders, value)?;
             }
             ValueRef::Array(a) => {
-                let list: Vec<Value> = a.snapshot().into_iter().map(|(_, v)| v).collect();
+                // `verify_soap_headers_array(Z_ARRVAL_P(headers))`
+                // (`Z/ext/soap/soap.c:2906`) reads the rows only.
+                let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
                     let e = docref_error(req, "Invalid SOAP header");
                     return unwrapped(req, object, Err(e));
@@ -678,7 +679,7 @@ impl SoapClient {
             }
             ValueRef::Object(o) if instance_of(req, *o, "SoapHeader") => {
                 let mut list = PhpArray::new(req)?;
-                req.addref(&headers);
+                let headers = Owner::take(req, headers);
                 list.append(req, headers)?;
                 set_client_slot(req, object, ClientSlot::DefaultHeaders, list.into_value())?;
             }
@@ -1030,8 +1031,8 @@ fn construct(
                 let mut shown = PhpArray::new(req)?;
                 for (k, _) in t.iter() {
                     if let crate::table::Key::Str(name) = k {
-                        let key = PhpKey::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                        shown.set(req, key, Value::null())?;
+                        let key = PhpString::new(req, name)?.into_key();
+                        shown.set(req, key, Owner::take(req, Value::null()))?;
                     }
                 }
                 set_client_slot(req, this, ClientSlot::Typemap, shown.into_value())?;
@@ -1064,7 +1065,9 @@ fn call_common(
 ) -> R<Value> {
     let mut headers = soap_headers;
     if let ValueRef::Array(defaults) = client_slot(this, ClientSlot::DefaultHeaders).as_ref() {
-        let defaults: Vec<Value> = defaults.snapshot().into_iter().map(|(_, v)| v).collect();
+        // `ZEND_HASH_FOREACH_VAL(default_headers, tmp)`
+        // (`Z/ext/soap/soap.c:2590`), read only, views of the rows.
+        let defaults: Vec<Value> = walk::rows(req, *defaults).map(|(_, v)| v.deref()).collect();
         match &mut headers {
             Some(list) => list.extend(
                 defaults
@@ -1074,11 +1077,10 @@ fn call_common(
             None => headers = Some(defaults),
         }
     }
-    let real_args: Vec<Value> = args
-        .snapshot()
-        .into_iter()
-        .map(|(_, v)| v.deref())
-        .collect();
+    // `ZEND_HASH_FOREACH_VAL(args, param)` with `ZVAL_COPY_VALUE`
+    // (`Z/ext/soap/soap.c:2609`), read only, views of the rows the argument
+    // holds.
+    let real_args: Vec<Value> = walk::rows(req, args).map(|(_, v)| v.deref()).collect();
     do_soap_call(
         req,
         this,

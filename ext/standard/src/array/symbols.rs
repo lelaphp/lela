@@ -553,16 +553,18 @@ fn compact_var(
             let bytes = name.as_bytes().to_vec();
             if let Some(value) = req.caller_var(&bytes) {
                 let value = value.deref();
-                req.addref(&value);
-                let key = Key::from_string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
+                let value = Owner::take(req, value);
+                let key = PhpString::new(req, &bytes)?;
+                let key = Key::from_string(req, key);
                 out.set(req, key, value)?;
             } else if bytes == b"this" {
                 // `zend_get_this_object`: the object the caller runs on,
                 // which no symbol table holds.
                 if let Some(object) = req.this_object() {
                     let value = object.as_value();
-                    req.addref(&value);
-                    let key = Key::from_string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
+                    let value = Owner::take(req, value);
+                    let key = PhpString::new(req, &bytes)?;
+                    let key = Key::from_string(req, key);
                     out.set(req, key, value)?;
                 }
             } else {
@@ -576,13 +578,14 @@ fn compact_var(
             }
             call_stack_end(req)?;
             array.protect();
-            let mut done = Ok(());
-            for (_, element) in array.snapshot_refs() {
-                done = compact_var(req, out, &element, position);
-                if done.is_err() {
-                    break;
-                }
-            }
+            // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(entry), value_ptr)`
+            // (`Z/ext/standard/array.c:2707`), no owner of the table taken:
+            // the argument holds it while an undefined variable's warning
+            // reaches the program.
+            let done = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+                compact_var(req, out, row.value(), position)?;
+                Ok(ControlFlow::Continue(()))
+            });
             array.unprotect();
             done?;
         }

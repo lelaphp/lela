@@ -154,6 +154,7 @@ use php_ext::raising::{
 use php_ext::request::{
     OptionAnswer, Request, Resolve, Stream, StreamOption, Streams as _, Whence, WrapperOp,
 };
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 /// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which
@@ -198,6 +199,7 @@ pub(crate) fn on_auto_detect_line_endings(
     Ok(true)
 }
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::State;
@@ -1176,11 +1178,11 @@ pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Owner<Value>, Thro
     };
     let mut out = PhpArray::new(req)?;
     for field in sb {
-        out.append(req, Value::int(field))?;
+        out.append(req, Owner::take(req, Value::int(field)))?;
     }
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        out.set(req, key, Value::int(field))?;
+        let key = PhpString::new(req, name)?.into_key();
+        out.set(req, key, Owner::take(req, Value::int(field)))?;
     }
     Ok(out.into_value())
 }
@@ -1732,7 +1734,12 @@ fn write_data(
         }
         ValueRef::Array(array) => {
             let mut numbytes = 0;
-            for (_, element) in array.snapshot() {
+            // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(data), tmp)`
+            // (`Z/ext/standard/file.c:531`), no owner of the table taken:
+            // the argument holds it while `__toString` and the stream's
+            // wrapper run.
+            let walked = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+                let element = row.value().deref();
                 let text = to_string(req, &element)?;
                 let len = text.len();
                 if len > 0 {
@@ -1746,10 +1753,14 @@ fn write_data(
                             &format!("Failed to write {len} bytes to {name}"),
                         );
                         text.give_up(req);
-                        return Ok(None);
+                        return Ok(ControlFlow::Break(()));
                     }
                 }
                 text.give_up(req);
+                Ok(ControlFlow::Continue(()))
+            })?;
+            if walked.is_some() {
+                return Ok(None);
             }
             Ok(Some(numbytes))
         }
@@ -2372,7 +2383,7 @@ fn file(
     }
     let mut array = PhpArray::new(req)?;
     for line in lines {
-        let v = Value::string(PhpString::new(req, line)?.hand_on_unmigrated());
+        let v = PhpString::new(req, line)?.into_value();
         array.append(req, v)?;
     }
     Ok(OrFalse::Value(array))
@@ -2705,9 +2716,9 @@ fn get_meta_tags(
                     } else {
                         Vec::new()
                     };
-                    let key = Key::from_string(PhpString::new(req, &key)?.hand_on_unmigrated());
-                    let content =
-                        Value::string(PhpString::new(req, &content)?.hand_on_unmigrated());
+                    let key = PhpString::new(req, &key)?;
+                    let key = Key::from_string(req, key);
+                    let content = PhpString::new(req, &content)?.into_value();
                     array.set(req, key, content)?;
                 }
                 name = None;
@@ -3202,10 +3213,10 @@ fn fgetcsv(
     }
     let mut array = PhpArray::new(req)?;
     match fields {
-        None => array.append(req, Value::null())?,
+        None => array.append(req, Owner::take(req, Value::null()))?,
         Some(fields) => {
             for field in fields {
-                let value = Value::string(PhpString::new(req, &field)?.hand_on_unmigrated());
+                let value = PhpString::new(req, &field)?.into_value();
                 array.append(req, value)?;
             }
         }

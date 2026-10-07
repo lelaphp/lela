@@ -669,15 +669,15 @@ impl ArrayObject {
         let flags = ar_flags(req, this)?;
         let iterator_class = payload(req, this)?.iterator_class;
         let mut out = PhpArray::new(req)?;
-        out.append(req, Value::int(flags & CLONE_MASK))?;
+        out.append(req, Owner::take(req, Value::int(flags & CLONE_MASK)))?;
         let stored = if flags & IS_SELF != 0 {
             Owner::take(req, Value::null())
         } else {
             storage(req, this)?
         };
-        out.append(req, stored.hand_on_unmigrated())?;
+        out.append(req, stored)?;
         let members = crate::members(req, this)?;
-        out.append(req, members.into_value().hand_on_unmigrated())?;
+        out.append(req, members.into_value())?;
         let class = match iterator_class {
             Some(class) if !is_array_iterator(req, class) => {
                 let name = crate::class_name(req, class);
@@ -685,7 +685,7 @@ impl ArrayObject {
             }
             _ => Owner::take(req, Value::null()),
         };
-        out.append(req, class.hand_on_unmigrated())?;
+        out.append(req, class)?;
         Ok(out)
     }
 
@@ -1318,7 +1318,7 @@ impl Table {
     /// what `spl_array_get_properties_for` hands a cast; views.
     fn every_row(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         match self {
-            Table::Array(_, array) => Ok(array.snapshot_refs()),
+            Table::Array(_, array) => Ok(walk::rows(req, array).collect()),
             Table::Props(object) => {
                 let table = object.property_table(req)?;
                 Ok(walk::rows(req, table).collect())
@@ -1346,8 +1346,8 @@ impl Table {
     fn set(self, req: &mut Request, key: &Key, value: Owner<Value>) -> Result<(), Thrown> {
         match self {
             Table::Array(owner, mut array) => {
-                let key = crate::owned_key(req, key);
-                array.set(req, key, value.hand_on_unmigrated())?;
+                let key = Owner::take(req, key.clone());
+                array.set(req, key, value)?;
                 store(req, owner, array)
             }
             Table::Props(object) => {
@@ -1428,7 +1428,7 @@ impl Table {
         // taken next element is no `Error` here, as it is for `$a[]`.
         match self {
             Table::Array(owner, mut array) => {
-                array.try_append(req, value.hand_on_unmigrated())?;
+                array.try_append(req, value)?;
                 store(req, owner, array)
             }
             Table::Props(object) => object.append_row(req, value).map(drop),
@@ -1476,8 +1476,8 @@ impl Table {
             Table::Props(_) => {
                 let mut out = PhpArray::new(req)?;
                 for (key, value) in self.every_row(req)? {
-                    req.addref(&value);
-                    let key = crate::owned_key(req, &key);
+                    let value = Owner::take(req, value);
+                    let key = Owner::take(req, key.clone());
                     out.set(req, key, value)?;
                 }
                 Ok(out)
@@ -1505,9 +1505,9 @@ impl Table {
                 // to the table.
                 let cell = PhpRef::new(req, held)?;
                 let kept = Owner::take(req, cell.as_value());
-                let key = crate::owned_key(req, key);
+                let key = Owner::take(req, key.clone());
                 let stored = array
-                    .set(req, key, kept.hand_on_unmigrated())
+                    .set(req, key, kept)
                     .and_then(|()| store(req, owner, array));
                 if let Err(thrown) = stored {
                     cell.give_up(req);
@@ -1548,7 +1548,7 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
             );
             Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated())
         }
-        ValueRef::Str(s) => Key::from_string(*s),
+        ValueRef::Str(s) => Key::lookup(*s),
         ValueRef::Resource(r) => {
             let id = r.id();
             warning(
@@ -2367,8 +2367,8 @@ impl ObjectHandlers for Handlers {
 fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in crate::std_properties(req, object)? {
-        req.addref(&value);
-        let key = crate::owned_key(req, &key);
+        let value = Owner::take(req, value);
+        let key = Owner::take(req, key.clone());
         out.set(req, key, value)?;
     }
     let storage = match payload(req, object)?.storage {
@@ -2382,7 +2382,7 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<Ph
         Storage::Array(array) => Value::array(array),
         Storage::Other(backing) | Storage::Object(backing) => backing.as_value(),
     };
-    req.addref(&storage);
+    let storage = Owner::take(req, storage);
     let base: &[u8] = if crate::is_a(req, object.class(), b"ArrayIterator") {
         b"ArrayIterator"
     } else {
@@ -2390,7 +2390,7 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<Ph
     };
     let name = [b"\0".as_slice(), base, b"\0storage"].concat();
     let name = PhpString::new(req, &name)?;
-    out.set(req, Key::Str(name.hand_on_unmigrated()), storage)?;
+    out.set(req, name.into_key(), storage)?;
     Ok(out)
 }
 

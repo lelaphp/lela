@@ -9,7 +9,7 @@ use php_ext::abi::This;
 use php_ext::attr::php_class;
 use php_ext::raising::{Thrown, arg_value_error, deprecated, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString};
 
 use crate::{Algo, Failure, Field, Generated, Serial, constants, csprng};
 
@@ -370,9 +370,9 @@ impl Mt19937 {
         };
         let mut out = PhpArray::new(req)?;
         let members = crate::members(req, this)?;
-        out.append(req, Value::array(members.hand_on_unmigrated()))?;
+        out.append(req, members.into_value())?;
         let state = crate::fields(req, &fields)?;
-        out.append(req, Value::array(state.hand_on_unmigrated()))?;
+        out.append(req, state.into_value())?;
         Ok(out)
     }
 
@@ -446,11 +446,7 @@ impl Mt19937 {
         if let Some(fields) = crate::with_serial(req, this, |s| s.serialize()) {
             let state = crate::fields(req, &fields)?;
             let key = PhpString::new(req, b"__states")?;
-            out.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                Value::array(state.hand_on_unmigrated()),
-            )?;
+            out.set(req, key.into_key(), state.into_value())?;
         }
         Ok(out)
     }

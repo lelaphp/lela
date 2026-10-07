@@ -24,7 +24,7 @@ use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 use crate::api::call::Function;
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::Request;
-use crate::api::values::{ClassId, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 
 /// Which op array of a unit a frame serves: the main one, the body of
 /// one of the unit's functions, the body of a function no name bound
@@ -1693,10 +1693,10 @@ pub(crate) fn starting_statics(
         } else {
             value_of(var.value)
         };
-        req.addref(&value);
-        let set = req
-            .interned(&var.name.0)
-            .and_then(|name| table.set(req, crate::api::values::Key::Str(name), value));
+        let set = req.interned(&var.name.0).and_then(|name| {
+            let name = Owner::take(req, crate::api::values::Key::Str(name));
+            table.set(req, name, Owner::take(req, value))
+        });
         if let Err(thrown) = set {
             req.release(Value::array(table));
             return Err(thrown);

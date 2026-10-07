@@ -12,6 +12,7 @@ use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_libxml::ffi::{Borrowed, Kind, Node, NodeObject, XPath};
 
@@ -924,19 +925,19 @@ fn table(req: &mut Request, rows: Vec<Row>) -> Result<Owner<PhpArray>, Thrown> {
     for row in rows {
         match row {
             Row::Named(name, mut values) => {
-                let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
+                let key = PhpString::new(req, &name)?.into_key();
                 let value = if values.len() == 1 {
                     values.remove(0)
                 } else {
                     let mut list = PhpArray::new(req)?;
                     for v in values {
-                        list.append(req, v.hand_on_unmigrated())?;
+                        list.append(req, v)?;
                     }
                     list.into_value()
                 };
-                out.set(req, key, value.hand_on_unmigrated())?;
+                out.set(req, key, value)?;
             }
-            Row::Next(value) => out.append(req, value.hand_on_unmigrated())?,
+            Row::Next(value) => out.append(req, value)?,
         }
     }
     Ok(out)
@@ -994,9 +995,9 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
             if !attrs.is_empty() {
                 let mut list = PhpArray::new(req)?;
                 for (name, value) in attrs {
-                    let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
+                    let key = PhpString::new(req, &name)?.into_key();
                     let value = string(req, &value)?;
-                    list.set(req, key, value.hand_on_unmigrated())?;
+                    list.set(req, key, value)?;
                 }
                 add_row(&mut rows, b"@attributes", list.into_value());
             }
@@ -1565,7 +1566,10 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Vec<(Key, Value)>, Thrown> {
-        Ok(properties(req, object)?.snapshot())
+        let table = properties(req, object)?;
+        Ok(walk::rows(req, table)
+            .map(|(key, value)| (key, value.deref()))
+            .collect())
     }
 
     fn get_properties_for(
@@ -1577,7 +1581,9 @@ impl ObjectHandlers for Handlers {
         if purpose == PropertyPurpose::Debug {
             return Ok(PropertiesFor::Standard);
         }
-        Ok(PropertiesFor::Rows(properties(req, object)?.snapshot()))
+        let table = properties(req, object)?;
+        let rows = walk::rows(req, table).map(|(key, value)| (key, value.deref()));
+        Ok(PropertiesFor::Rows(rows.collect()))
     }
 
     fn properties_overloaded(&self) -> bool {

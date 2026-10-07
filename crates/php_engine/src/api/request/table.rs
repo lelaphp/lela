@@ -448,16 +448,16 @@ impl Request {
         let mut table = table.hand_on();
         if table.iter().any(|(key, _)| matches!(key, Key::Int(_))) {
             let mut spelt = self.array()?;
-            for (key, value) in table.snapshot_refs() {
+            // `zend_symtable_to_proptable`'s copy, which no code of the
+            // program reaches: the rows read under the borrowed request,
+            // then written under their spelt keys.
+            let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(self, table).collect();
+            for (key, value) in rows {
                 let key = match key {
-                    Key::Int(n) => Key::Str(self.string(n.to_string().as_bytes())?),
-                    Key::Str(name) => {
-                        self.addref(&Value::string(name));
-                        Key::Str(name)
-                    }
+                    Key::Int(n) => PhpString::new(self, n.to_string().as_bytes())?.into_key(),
+                    Key::Str(_) => Owner::take(self, key),
                 };
-                self.addref(&value);
-                spelt.set(self, key, value)?;
+                spelt.set(self, key, Owner::take(self, value))?;
             }
             self.release(Value::array(table));
             table = spelt;

@@ -14,7 +14,7 @@ use php_ext::abi::Passed;
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::string::{next_utf8_char, str_copy};
 use tables::Row;
@@ -1036,8 +1036,9 @@ fn write_row(
         entity.push(b'&');
         entity.extend_from_slice(name.as_bytes());
         entity.push(b';');
-        let key = php_ext::values::Key::from_string(PhpString::new(req, key)?.hand_on_unmigrated());
-        let value = Value::string(PhpString::new(req, &entity)?.hand_on_unmigrated());
+        let key = PhpString::new(req, key)?;
+        let key = php_ext::values::Key::from_string(req, key);
+        let value = PhpString::new(req, &entity)?.into_value();
         array.set(req, key, value)
     };
     match row {

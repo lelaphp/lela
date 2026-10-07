@@ -372,11 +372,16 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>
     for statics in [false, true] {
         for (declaring, property) in rows.iter().filter(|(_, p)| p.is_instance != statics) {
             let value = match &property.default {
-                Some(expr) => crate::api::call::eval_declared(req, expr, Some(*declaring))?
-                    .hand_on_unmigrated(),
-                None => Value::null(),
+                Some(expr) => crate::api::call::eval_declared(req, expr, Some(*declaring))?,
+                None => Owner::take(req, Value::null()),
             };
-            let key = Key::Str(PhpString::new(req, &property.name.0)?.hand_on_unmigrated());
+            let key = match PhpString::new(req, &property.name.0) {
+                Ok(key) => key.into_key(),
+                Err(thrown) => {
+                    value.give_up(req);
+                    return Err(thrown);
+                }
+            };
             array.set(req, key, value)?;
         }
     }
@@ -489,28 +494,29 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     if let Some(rows) = req.hooked_object_rows(object)? {
         let mut array = PhpArray::new(req)?;
         for (key, value, declared) in rows {
+            let value = Owner::adopt(req, value);
             let name = match key {
                 Key::Int(_) if array.contains(&key) => {
-                    req.release(value);
+                    value.give_up(req);
                     continue;
                 }
                 Key::Int(_) => {
-                    array.add_new(req, key, value)?;
+                    array.add_new(req, Owner::take(req, key), value)?;
                     continue;
                 }
-                Key::Str(name) => name,
+                Key::Str(name) => Owner::adopt(req, name),
             };
             let seen = declared
                 .is_none_or(|(declaring, visibility)| visible(req, declaring, visibility, scope));
             if !seen {
-                req.release(value);
-                req.release(Value::string(name));
+                value.give_up(req);
+                name.give_up(req);
                 continue;
             }
             let key = if declared.is_some() {
-                Key::Str(name)
+                name.into_key()
             } else {
-                Key::from_string(name)
+                Key::from_string(req, name)
             };
             array.add_new(req, key, value)?;
         }
@@ -531,7 +537,8 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
             Key::Int(n) => {
                 if !array.contains(&key) {
                     let value = req.dup_value(value, None);
-                    array.add_new(req, Key::Int(n), value)?;
+                    let value = Owner::adopt(req, value);
+                    array.add_new(req, Owner::take(req, Key::Int(n)), value)?;
                 }
                 continue;
             }
@@ -545,14 +552,14 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         if !seen {
             continue;
         }
-        let value = req.dup_value(value, None);
-        req.addref(&Value::string(name));
         let key = if declared.is_some() {
             Key::Str(name)
         } else {
-            Key::from_string(name)
+            Key::lookup(name)
         };
-        array.add_new(req, key, value)?;
+        let key = Owner::take(req, key);
+        let value = req.dup_value(value, None);
+        array.add_new(req, key, Owner::adopt(req, value))?;
     }
     Ok(array)
 }
@@ -590,7 +597,8 @@ fn answered_vars(
         let name = match key {
             Key::Int(n) => {
                 let value = req.dup_value(value, None);
-                array.set(req, Key::Int(n), value)?;
+                let value = Owner::adopt(req, value);
+                array.set(req, Owner::take(req, Key::Int(n)), value)?;
                 continue;
             }
             Key::Str(name) => name,
@@ -601,11 +609,11 @@ fn answered_vars(
             if !req.property_row_visible(class, name.as_bytes(), None) {
                 continue;
             }
-            Key::from_string(name)
+            Key::lookup(name)
         };
-        req.addref(&Value::string(name));
+        let key = Owner::take(req, key);
         let value = req.dup_value(value, None);
-        array.add_new(req, key, value)?;
+        array.add_new(req, key, Owner::adopt(req, value))?;
     }
     Ok(array)
 }
@@ -711,7 +719,7 @@ fn get_class_methods(
     for name in names {
         // `ZVAL_STR_COPY(&method_name, mptr->common.function_name)`.
         let name = Value::string(req.interned(&name)?);
-        array.append(req, name)?;
+        array.append(req, Owner::take(req, name))?;
     }
     Ok(array)
 }
@@ -1144,7 +1152,7 @@ fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Owner<PhpArray>, T
     for name in names {
         // `copy_class_or_interface_name`: `ce->name`, or the alias's key.
         let name = Value::string(req.interned(&name)?);
-        array.append(req, name)?;
+        array.append(req, Owner::take(req, name))?;
     }
     Ok(array)
 }

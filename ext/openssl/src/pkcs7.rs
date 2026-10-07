@@ -2,10 +2,13 @@
 //! verification, encryption and decryption of files, and the
 //! certificates and CRLs a PEM `PKCS7` carries.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::config::{as_int, cipher_of};
@@ -31,10 +34,16 @@ pub(crate) fn write_headers(
     out: &Bio<'_>,
     headers: Option<PhpArray>,
 ) -> Result<bool, Thrown> {
-    for (key, value) in headers.map(|h| h.snapshot()).unwrap_or_default() {
-        let text = crate::xp_ssl::string_of(req, &value)?;
+    let Some(headers) = headers else {
+        return Ok(true);
+    };
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(zheaders), strindex, zcertval)`
+    // (`Z/ext/openssl/openssl.c:2729`), no owner of the table taken: the
+    // argument holds it while `zval_try_get_string` runs `__toString`.
+    let refused = walk::foreach(req, headers, Hold::None, |req, row| -> walk::Step {
+        let text = crate::xp_ssl::string_of(req, &row.value().deref())?;
         let mut line = Vec::new();
-        if let Key::Str(name) = &key {
+        if let Key::Str(name) = row.key() {
             line.extend_from_slice(c_string(name.as_bytes()).as_bytes());
             line.extend_from_slice(b": ");
         }
@@ -42,10 +51,11 @@ pub(crate) fn write_headers(
         line.push(b'\n');
         if !out.write(&line) {
             store_errors(req);
-            return Ok(false);
+            return Ok(ControlFlow::Break(()));
         }
-    }
-    Ok(true)
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(refused.is_none())
 }
 
 /// The recipients of an encryption: `php_openssl_x509_from_zval` of each
@@ -140,8 +150,12 @@ pub(crate) fn pem_list(
     for list in [certs, crls] {
         for (i, pem) in list.into_iter().enumerate() {
             if let Some(pem) = pem {
-                let pem = Value::string(PhpString::new(req, &pem)?.hand_on_unmigrated());
-                out.set(req, Key::Int(i64::try_from(i).unwrap_or(0)), pem)?;
+                let pem = PhpString::new(req, &pem)?.into_value();
+                out.set(
+                    req,
+                    Owner::take(req, Key::Int(i64::try_from(i).unwrap_or(0))),
+                    pem,
+                )?;
             }
         }
     }

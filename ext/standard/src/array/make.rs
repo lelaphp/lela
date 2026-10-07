@@ -3,17 +3,20 @@
 //! `array_replace_recursive` beside `array_merge`, `range`, and the two
 //! that draw from the random engine, `shuffle` and `array_rand`.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
 use php_ext::raising::{Level, Thrown, argument_error, call_stack_end, docref, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_random::Rng;
 
 use super::sort::key_value;
 use super::stack::Stack;
-use super::{HT_MAX_SIZE, copied, key_copy, returned};
+use super::{HT_MAX_SIZE, copied, give_up_rows, returned, row_copied};
 use crate::math::math_round;
 
 /// `string|int|float`, a bound of `range`.
@@ -132,18 +135,27 @@ fn array_merge_recursive(
     };
     super::merge_total(req, &arrays)?;
     let mut dest = PhpArray::new(req)?;
-    for (key, value) in first.snapshot_refs() {
-        let value = match value.as_ref() {
-            ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
-            _ => value,
-        };
-        req.addref(&value);
-        match key {
+    // `php_array_merge_wrapper`'s copy of the first array
+    // (`ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(src, string_key, src_entry)`,
+    // `Z/ext/standard/array.c:4364`), which no code of the program reaches:
+    // the rows read under the borrowed request, each taken as php takes
+    // it, a reference with one owner followed, then written.
+    let rows: Vec<(Key, Owner<Value>)> = walk::rows(req, *first)
+        .map(|(key, value)| (key, copied(req, value)))
+        .collect();
+    let mut rows = rows.into_iter();
+    while let Some((key, value)) = rows.next() {
+        let written = match key {
             Key::Str(_) => {
-                let key = key_copy(req, &key);
-                dest.set(req, key, value)?;
+                let key = Owner::take(req, key);
+                dest.set(req, key, value)
             }
-            Key::Int(_) => dest.append(req, value)?,
+            Key::Int(_) => dest.append(req, value),
+        };
+        if let Err(thrown) = written {
+            give_up_rows(req, rows);
+            dest.give_up(req);
+            return Err(thrown);
         }
     }
     for src in rest {
@@ -162,24 +174,32 @@ fn merge_recursive(
     src: PhpArray,
 ) -> Result<(), Thrown> {
     call_stack_end(req)?;
-    for (key, src_entry) in src.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(src, string_key, src_entry)`
+    // (`Z/ext/standard/array.c:4041`), no owner of the table taken: the
+    // argument holds it while an object's cast or a destructor an
+    // overwrite serves runs. A count read of the row is php's, less the
+    // walk's own owner of it (`Row::refcount`); where the two rows are
+    // one reference, that is the reference's.
+    walk::foreach(req, src, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let src_entry = *row.value();
         let Key::Str(_) = key else {
-            let value = copied(req, src_entry);
+            let value = row_copied(req, row);
             dest.append(req, value)?;
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let Some(dest_entry) = dest.get(&key) else {
-            let value = copied(req, src_entry);
-            let key = key_copy(req, &key);
+            let value = row_copied(req, row);
+            let key = Owner::take(req, key.clone());
             dest.set(req, key, value)?;
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let src_value = src_entry.deref();
         let dest_value = dest_entry.deref();
         let thash = dest_value.as_array().copied();
         let same_cell = matches!(
             (src_entry.as_php_ref(), dest_entry.as_php_ref()),
-            (Some(a), Some(b)) if a == b && dest_entry.refcount() % 2 == 1
+            (Some(a), Some(b)) if a == b && row.refcount() % 2 == 1
         );
         if thash.is_some_and(|thash| thash.is_recursive()) || same_cell {
             return Err(throw_error(req, "Error", "Recursion detected"));
@@ -190,7 +210,7 @@ fn merge_recursive(
             ValueRef::Array(array) => array.copy(req)?,
             ValueRef::Null => {
                 let mut array = PhpArray::new(req)?;
-                array.append(req, Value::null())?;
+                array.append(req, Owner::take(req, Value::null()))?;
                 array
             }
             _ => to_array(req, &dest_value)?,
@@ -219,13 +239,13 @@ fn merge_recursive(
             }
             merged
         } else {
-            req.addref(&src_value);
-            nested.append(req, src_value)
+            nested.append(req, Owner::take(req, src_value))
         };
-        let written = key_copy(req, &key);
-        dest.set(req, written, Value::array(nested.hand_on_unmigrated()))?;
+        let written = Owner::take(req, key.clone());
+        dest.set(req, written, nested.into_value())?;
         merged?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -329,11 +349,16 @@ fn replace_flat(
     dest: &mut Owner<PhpArray>,
     src: PhpArray,
 ) -> Result<(), Thrown> {
-    for (key, value) in src.snapshot_refs() {
-        let value = copied(req, value);
-        let key = key_copy(req, &key);
+    // `zend_hash_merge(dest, src, zval_add_ref, 1)`'s walk over `src`
+    // (`Z/Zend/zend_hash.c:2556`), no owner of it taken: the argument holds
+    // it while an overwrite's release serves a destructor.
+    walk::foreach(req, src, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row_copied(req, row);
+        let key = Owner::take(req, key.clone());
         dest.set(req, key, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -344,17 +369,22 @@ fn replace_recursive(
     src: PhpArray,
 ) -> Result<(), Thrown> {
     call_stack_end(req)?;
-    for (key, src_entry) in src.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(src, num_key, string_key, src_entry)`
+    // (`Z/ext/standard/array.c:4148`), no owner of the table taken: the
+    // argument holds it while an overwrite's release serves a destructor.
+    walk::foreach(req, src, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let src_entry = *row.value();
         let src_value = src_entry.deref();
         let dest_array = dest
             .get(&key)
             .and_then(|entry| entry.deref().as_array().copied());
         let (Some(src_array), Some(dest_array)) = (src_value.as_array().copied(), dest_array)
         else {
-            let value = copied(req, src_entry);
-            let key = key_copy(req, &key);
+            let value = row_copied(req, row);
+            let key = Owner::take(req, key.clone());
             dest.set(req, key, value)?;
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         if dest_array.is_recursive() || src_array.is_recursive() {
             return Err(throw_error(req, "Error", "Recursion detected"));
@@ -365,10 +395,11 @@ fn replace_recursive(
         let replaced = replace_recursive(req, &mut nested, src_array);
         dest_array.unprotect();
         src_array.unprotect();
-        let written = key_copy(req, &key);
-        dest.set(req, written, Value::array(nested.hand_on_unmigrated()))?;
+        let written = Owner::take(req, key.clone());
+        dest.set(req, written, nested.into_value())?;
         replaced?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -710,7 +741,7 @@ fn character_range(
         while at >= i64::from(high) {
             let byte = u8::try_from(at).unwrap_or(0);
             let text = PhpString::new(req, &[byte])?;
-            out.append(req, Value::string(text.hand_on_unmigrated()))?;
+            out.append(req, text.into_value())?;
             if at - step < 0 {
                 break;
             }
@@ -721,7 +752,7 @@ fn character_range(
         while at <= i64::from(high) {
             let byte = u8::try_from(at).unwrap_or(0);
             let text = PhpString::new(req, &[byte])?;
-            out.append(req, Value::string(text.hand_on_unmigrated()))?;
+            out.append(req, text.into_value())?;
             if at + step_wide > 255 {
                 break;
             }
@@ -729,7 +760,7 @@ fn character_range(
         }
     } else {
         let text = PhpString::new(req, &[low])?;
-        out.append(req, Value::string(text.hand_on_unmigrated()))?;
+        out.append(req, text.into_value())?;
     }
     Ok(out)
 }
@@ -782,7 +813,7 @@ fn double_range(
         let mut i = 0u32;
         let mut element = start;
         while i < size && if down { element >= end } else { element <= end } {
-            out.append(req, Value::float(element))?;
+            out.append(req, Owner::take(req, Value::float(element)))?;
             i += 1;
             let distance = f64::from(i) * step;
             element = if down {
@@ -844,7 +875,7 @@ fn long_range(
             } else {
                 start.wrapping_add(distance)
             };
-            out.append(req, Value::int(element))?;
+            out.append(req, Owner::take(req, Value::int(element)))?;
         }
         Ok(())
     })
@@ -903,12 +934,15 @@ fn filled(
 fn shuffle(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
     let mut stack = Stack::of(req, array)?;
     let array = stack.array;
-    let mut values: Vec<Value> = array.snapshot_refs().into_iter().map(|(_, v)| v).collect();
+    // `php_array_data_shuffle` permutes the table's own rows with the
+    // default engine, which runs no code of the program: the rows read
+    // under the borrowed request, views the table keeps until the
+    // shuffled copy replaces it.
+    let mut values: Vec<Value> = walk::rows(req, array).map(|(_, v)| v).collect();
     Rng::default_engine().shuffle(req, &mut values)?;
     let mut shuffled = PhpArray::new(req)?;
     for value in values {
-        req.addref(&value);
-        shuffled.append(req, value)?;
+        shuffled.append(req, Owner::take(req, value))?;
     }
     stack.replace(req, shuffled)?;
     stack.finish(req);
@@ -957,8 +991,7 @@ fn array_rand(
     let mut out = PhpArray::new(req)?;
     for key in &keys {
         let value = key_value(key);
-        req.addref(&value);
-        out.append(req, value)?;
+        out.append(req, Owner::take(req, value))?;
     }
     Ok(returned(out.into_value()))
 }

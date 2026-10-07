@@ -126,8 +126,8 @@ impl Request {
             self.release(Value::string(name));
             return Ok(None);
         }
-        self.addref(&Value::string(name));
-        if let Err(thrown) = table.add_new(self, Key::Str(name), Value::null()) {
+        let key = Owner::take(self, Key::Str(name));
+        if let Err(thrown) = table.add_new(self, key, Owner::take(self, Value::null())) {
             self.release(Value::string(name));
             return Err(thrown);
         }
@@ -230,17 +230,17 @@ impl Request {
                 this,
             } => {
                 let first = if let Some(object) = this {
-                    self.addref(&object.as_value());
-                    object.as_value()
+                    Owner::take(self, object.as_value())
                 } else {
                     let class = self.class_name(scope);
-                    Value::string(self.string(class.as_bytes())?)
+                    let class = Value::string(self.string(class.as_bytes())?);
+                    Owner::adopt(self, class)
                 };
                 let name = self.function_name(function);
                 let mut pair = self.array()?;
                 pair.append(self, first)?;
                 let name = Value::string(self.string(name.as_bytes())?);
-                pair.append(self, name)?;
+                pair.append(self, Owner::adopt(self, name))?;
                 Ok(Value::array(pair))
             }
         }

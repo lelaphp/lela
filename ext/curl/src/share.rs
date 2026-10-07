@@ -1,12 +1,15 @@
 //! `share.c`: the `CurlShareHandle` and `CurlSharePersistentHandle`
 //! classes, each over a `CURLSH`, and their natives.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Instance, Refusals};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::write_prop;
 use php_ext::coerce::{numeric_string, to_long, value_name};
 use php_ext::raising::{Thrown, argument_error, throw};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::State;
@@ -268,7 +271,11 @@ fn curl_share_init_persistent(
         return Err(argument_error(req, "ValueError", 1, "must not be empty"));
     }
     let mut id = 0u8;
-    for (_, entry) in share_options.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(share_opts, zval *entry)`
+    // (`Z/ext/curl/share.c:162`), no owner of the table taken: the
+    // argument holds it while a `TypeError` reaches the program.
+    walk::foreach(req, share_options, Hold::None, |req, row| -> walk::Step {
+        let entry = row.value().deref();
         let Some(option) = try_long(req, &entry)? else {
             let tail = format!(
                 "must contain only int values, {} given",
@@ -293,12 +300,13 @@ fn curl_share_init_persistent(
             ));
         };
         id |= bit;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     let object = made(req, b"CurlSharePersistentHandle")?;
     let mut options = PhpArray::new(req)?;
     for (lock, bit) in LOCKS {
         if id & bit != 0 {
-            options.append(req, Value::int(lock))?;
+            options.append(req, Owner::take(req, Value::int(lock)))?;
         }
     }
     if let Err(thrown) = write_prop(req, &object, b"options", options.into_value()) {

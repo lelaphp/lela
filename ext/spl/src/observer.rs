@@ -10,6 +10,7 @@
 mod table;
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{
     CloneObj, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers, Std, This, Union, Untyped,
@@ -19,6 +20,7 @@ use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::Serializer;
 
@@ -931,13 +933,13 @@ impl SplObjectStorage {
         let rows = with(req, this, |s| s.live())?;
         let mut list = PhpArray::new(req)?;
         for (object, inf) in rows {
-            list.append(req, crate::copied(req, object.as_value()))?;
-            list.append(req, crate::copied(req, inf))?;
+            list.append(req, Owner::take(req, object.as_value().deref()))?;
+            list.append(req, Owner::take(req, inf.deref()))?;
         }
         let mut out = PhpArray::new(req)?;
-        out.append(req, list.into_value().hand_on_unmigrated())?;
+        out.append(req, list.into_value())?;
         let members = crate::members(req, this)?;
-        out.append(req, members.into_value().hand_on_unmigrated())?;
+        out.append(req, members.into_value())?;
         Ok(out)
     }
 
@@ -989,16 +991,29 @@ impl SplObjectStorage {
                 "Odd number of elements",
             ));
         }
-        let values: Vec<Value> = storage.snapshot().into_iter().map(|(_, v)| v).collect();
-        for pair in values.chunks(2) {
-            let (Some(object), Some(inf)) = (pair.first(), pair.get(1)) else {
-                break;
+        // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(storage_zv), val)`
+        // (`Z/ext/spl/spl_observer.c:1068`), no owner of the table taken:
+        // the argument holds it while an attach serves the class's
+        // `getHash`. Each key row is kept for the next step by an owner of
+        // its own, where php keeps a pointer into the table.
+        let mut key: Option<Owner<Value>> = None;
+        let walked = walk::foreach(req, storage, Hold::None, |req, row| -> walk::Step {
+            let Some(object) = key.take() else {
+                key = Some(Owner::take(req, *row.value()));
+                return Ok(ControlFlow::Continue(()));
             };
-            let Some(target) = object.as_object().copied() else {
+            let target = object.as_object().copied();
+            object.give_up(req);
+            let Some(target) = target else {
                 return Err(throw(req, "UnexpectedValueException", "Non-object key"));
             };
-            storage_attach(req, this, target, *inf)?;
+            storage_attach(req, this, target, row.value().deref())?;
+            Ok(ControlFlow::Continue(()))
+        });
+        if let Some(object) = key {
+            object.give_up(req);
         }
+        walked?;
         crate::load_members(req, this, &members)
     }
 
@@ -1031,8 +1046,7 @@ impl SplObjectStorage {
         let rows = with(req, this, |s| s.live())?;
         let mut out = PhpArray::new(req)?;
         for (key, value) in crate::std_properties(req, this)? {
-            req.addref(&value);
-            out.set(req, key, value)?;
+            out.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
         let mut storage = PhpArray::new(req)?;
         for (object, inf) in rows {
@@ -1040,23 +1054,15 @@ impl SplObjectStorage {
             let key = PhpString::new(req, b"obj")?;
             row.set(
                 req,
-                Key::Str(key.hand_on_unmigrated()),
-                crate::copied(req, object.as_value()),
+                key.into_key(),
+                Owner::take(req, object.as_value().deref()),
             )?;
             let key = PhpString::new(req, b"inf")?;
-            row.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                crate::copied(req, inf),
-            )?;
-            storage.append(req, row.into_value().hand_on_unmigrated())?;
+            row.set(req, key.into_key(), Owner::take(req, inf.deref()))?;
+            storage.append(req, row.into_value())?;
         }
         let name = PhpString::new(req, b"\0SplObjectStorage\0storage")?;
-        out.set(
-            req,
-            Key::Str(name.hand_on_unmigrated()),
-            storage.into_value().hand_on_unmigrated(),
-        )?;
+        out.set(req, name.into_key(), storage.into_value())?;
         Ok(out)
     }
 }
@@ -2096,16 +2102,11 @@ fn get_one(
         Owner::take(req, Value::null())
     };
     if with(req, this, |s| s.flags)? & MultipleIterator::MIT_KEYS_ASSOC == 0 {
-        return out.append(req, value.hand_on_unmigrated());
+        return out.append(req, value);
     }
     let key = match inf.as_ref() {
-        ValueRef::Int(n) => Key::Int(n),
-        ValueRef::Str(s) => Key::from_string(
-            crate::copied(req, Value::string(*s))
-                .as_php_string()
-                .copied()
-                .unwrap_or(*s),
-        ),
+        ValueRef::Int(n) => Owner::take(req, Key::Int(n)),
+        ValueRef::Str(s) => Owner::take(req, Key::lookup(*s)),
         _ => {
             value.give_up(req);
             return Err(throw(
@@ -2115,5 +2116,5 @@ fn get_one(
             ));
         }
     };
-    out.set(req, key, value.hand_on_unmigrated())
+    out.set(req, key, value)
 }

@@ -387,16 +387,10 @@ fn common(
 
 /// A symbol-table key for a column's name, `zend_symtable_update`'s: a
 /// canonical decimal is the integer, and the string made for it given
-/// up, which #1996 moves into `Key::from_string` itself.
-fn symtable_key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
+/// up ([`Key::from_string`]).
+fn symtable_key(req: &mut Request, name: &[u8]) -> Result<Owner<Key>, Thrown> {
     let made = PhpString::new(req, name)?;
-    match Key::from_string(*made) {
-        Key::Int(n) => {
-            made.give_up(req);
-            Ok(Key::Int(n))
-        }
-        Key::Str(_) => Ok(Key::Str(made.hand_on_unmigrated())),
-    }
+    Ok(Key::from_string(req, made))
 }
 
 /// `do_fetch`: the next row shaped as `how` asks, with the group key
@@ -731,26 +725,18 @@ fn columns(
         match kind {
             Kind::Assoc => {
                 let key = symtable_key(req, &name)?;
+                let fetched = crate::owned(req, fetched);
                 set(req, &mut out, key, fetched)?;
             }
-            Kind::Default | Kind::Both => {
-                let key = symtable_key(req, &name)?;
-                req.addref(&fetched);
-                set(req, &mut out, key, fetched)?;
-                if let Some(mut array) = out.as_array().copied() {
-                    if array.contains(&Key::Int(at)) {
-                        req.release(fetched);
-                    } else {
-                        array.set(req, Key::Int(at), fetched)?;
-                        out = Value::array(array);
-                    }
-                }
-            }
+            Kind::Default | Kind::Both => both(req, &mut out, &name, at, fetched)?,
             Kind::Named => named(req, &mut out, &name, fetched)?,
             Kind::Num => {
+                let fetched = crate::owned(req, fetched);
                 if let Some(mut array) = out.as_array().copied() {
                     array.append(req, fetched)?;
                     out = Value::array(array);
+                } else {
+                    fetched.give_up(req);
                 }
             }
             Kind::Class | Kind::Obj | Kind::Into => {
@@ -852,12 +838,48 @@ fn scope(kind: Kind, class: Option<ClassId>) -> PropertyScope {
     }
 }
 
-/// `zend_symtable_update` on the row's array.
-fn set(req: &mut Request, out: &mut Value, key: Key, value: Value) -> Result<(), Thrown> {
-    if let Some(mut array) = out.as_array().copied() {
-        array.set(req, key, value)?;
+/// `FETCH_BOTH`'s column: the value under its name and, where the
+/// number names no column already, under its number
+/// (`zend_hash_index_add`), the fetch engine's owner handed to the row.
+fn both(
+    req: &mut Request,
+    out: &mut Value,
+    name: &[u8],
+    at: i64,
+    fetched: Value,
+) -> Result<(), Thrown> {
+    let key = symtable_key(req, name)?;
+    let held = Owner::take(req, fetched);
+    set(req, out, key, held)?;
+    let fetched = crate::owned(req, fetched);
+    let Some(mut array) = out.as_array().copied() else {
+        fetched.give_up(req);
+        return Ok(());
+    };
+    if array.contains(&Key::Int(at)) {
+        fetched.give_up(req);
+    } else {
+        array.set(req, Owner::take(req, Key::Int(at)), fetched)?;
         *out = Value::array(array);
     }
+    Ok(())
+}
+
+/// `zend_symtable_update` on the row's array; the key and the value
+/// given up where the row is no array.
+fn set(
+    req: &mut Request,
+    out: &mut Value,
+    key: Owner<Key>,
+    value: Owner<Value>,
+) -> Result<(), Thrown> {
+    let Some(mut array) = out.as_array().copied() else {
+        key.give_up(req);
+        value.give_up(req);
+        return Ok(());
+    };
+    array.set(req, key, value)?;
+    *out = Value::array(array);
     Ok(())
 }
 
@@ -872,16 +894,17 @@ fn named(req: &mut Request, out: &mut Value, name: &[u8], fetched: Value) -> Res
             list
         } else {
             let mut list = PhpArray::new(req)?.hand_on_unmigrated();
-            req.addref(&current);
-            list.append(req, current)?;
+            list.append(req, Owner::take(req, current))?;
             list
         };
+        let fetched = crate::owned(req, fetched);
         list.append(req, fetched)?;
         Value::array(list)
     } else {
         fetched
     };
-    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+    let key = PhpString::new(req, name)?.into_key();
+    let stored = crate::owned(req, stored);
     array.set(req, key, stored)?;
     *out = Value::array(array);
     Ok(())
@@ -1019,12 +1042,13 @@ fn key_pair(
     let key = value(req, object, 0, None)?;
     let fetched = value(req, object, 1, None)?;
     let key = if let Some(n) = key.as_int() {
-        Key::Int(n)
+        Owner::take(req, Key::Int(n))
     } else {
         let text = to_string(req, &key)?;
         req.release(key);
-        Key::from_string(text.hand_on_unmigrated())
+        Key::from_string(req, text)
     };
+    let fetched = crate::owned(req, fetched);
     container.set(req, key, fetched)?;
     Ok(true)
 }
@@ -1562,6 +1586,7 @@ fn gather_all(
         grouped_rows(req, object, how | flags.0, flags, with, out)?;
     } else {
         while let Some((row, _)) = shaped(req, object, how, Orientation::Forward, 0, false, with)? {
+            let row = crate::owned(req, row);
             out.append(req, row)?;
         }
     }
@@ -1623,15 +1648,41 @@ fn grouped_rows(
     for (key, rows) in groups {
         let key = symtable_key(req, &key)?;
         if flags.has(Flag::Unique) {
+            let mut written = Ok(());
             for row in rows {
-                out.set(req, key.clone(), row)?;
+                let row = crate::owned(req, row);
+                if written.is_err() {
+                    row.give_up(req);
+                    continue;
+                }
+                let at = Owner::take(req, (*key).clone());
+                written = out.set(req, at, row);
             }
+            key.give_up(req);
+            written?;
         } else {
-            let mut group = PhpArray::new(req)?;
+            let mut group = match PhpArray::new(req) {
+                Ok(group) => group,
+                Err(thrown) => {
+                    key.give_up(req);
+                    return Err(thrown);
+                }
+            };
+            let mut appended = Ok(());
             for row in rows {
-                group.append(req, row)?;
+                let row = crate::owned(req, row);
+                if appended.is_err() {
+                    row.give_up(req);
+                    continue;
+                }
+                appended = group.append(req, row);
             }
-            out.set(req, key, group.into_value().hand_on_unmigrated())?;
+            if let Err(thrown) = appended {
+                group.give_up(req);
+                key.give_up(req);
+                return Err(thrown);
+            }
+            out.set(req, key, group.into_value())?;
         }
     }
     Ok(())

@@ -2042,11 +2042,10 @@ impl Generator {
             }
         });
         if let Some(name) = name {
-            let key = Key::from_string(PhpString::new(req, b"function")?.hand_on_unmigrated());
-            let value = PhpString::new(req, &name)?
-                .into_value()
-                .hand_on_unmigrated();
-            out.set(req, key, value)?;
+            let key = PhpString::new(req, b"function")?;
+            let key = Key::from_string(req, key);
+            let value = PhpString::new(req, &name)?;
+            out.set(req, key, value.into_value())?;
         }
         Ok(out)
     }

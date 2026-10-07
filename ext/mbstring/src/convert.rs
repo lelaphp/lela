@@ -3,6 +3,8 @@
 //! (`mb_guess_encoding_for_strings`), validity, the encoding lists, kana
 //! conversion and numeric entities.
 
+use std::ops::ControlFlow;
+
 use crate::ffi::mbfl::{Encoder, Encoding, fast_convert, kana};
 use crate::settings::{State, Substitute, encoding, encodings, settings, text_encodings};
 use crate::tables::{
@@ -16,6 +18,7 @@ use php_ext::abi::{OrFalse, Passed, Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, fatal, pending};
 use php_ext::request::Request;
+use php_ext::values::walk::{Guarded, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
 
 /// `mb_fast_convert` under a substitute, with the errors met.
@@ -82,39 +85,65 @@ fn convert_array(
     }
     input.protect();
     let mut out = PhpArray::new(req)?;
-    for (key, value) in input.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(input, idx, key, entry)`
+    // (`Z/ext/mbstring/mbstring.c:2762`), no owner of the table taken: the
+    // argument holds it while a warning reaches the program. A throwable
+    // gives the array made so far up, and the table its mark, as every
+    // other way out does.
+    let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let key = match key {
             Key::Str(name) => match convert_from(req, name.as_bytes(), to, from) {
-                Some(name) => Key::Str(new_string(req, &name)?.hand_on_unmigrated()),
-                None => continue,
+                Some(name) => new_string(req, &name)?.into_key(),
+                None => return Ok(ControlFlow::Continue(())),
             },
-            Key::Int(n) => Key::Int(n),
+            Key::Int(n) => Owner::take(req, Key::Int(n)),
         };
         let value = value.deref();
         let converted = match value.as_ref() {
             ValueRef::Str(s) => match convert_from(req, s.as_bytes(), to, from) {
-                Some(s) => new_string(req, &s)?.into_value(),
-                None => continue,
+                Some(s) => new_string(req, &s).map(|s| Some(s.into_value())),
+                None => Ok(None),
             },
             ValueRef::Null | ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
-                Owner::take(req, value)
+                Ok(Some(Owner::take(req, value)))
             }
             ValueRef::Array(inner) => {
                 let inner = *inner;
-                match convert_array(req, inner, to, from)? {
-                    Some(array) => array.into_value(),
-                    // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
-                    None => Owner::take(req, Value::array(PhpArray::empty())),
-                }
+                convert_array(req, inner, to, from).map(|array| {
+                    Some(match array {
+                        Some(array) => array.into_value(),
+                        // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
+                        None => Owner::take(req, Value::array(PhpArray::empty())),
+                    })
+                })
             }
             _ => {
                 docref(req, Level::Warning, "Object is not supported");
-                continue;
+                Ok(None)
             }
         };
-        out.set(req, key, converted.hand_on_unmigrated())?;
-    }
+        // The key made for an element left out is given up with it.
+        let converted = match converted {
+            Ok(Some(converted)) => converted,
+            Ok(None) => {
+                key.give_up(req);
+                return Ok(ControlFlow::Continue(()));
+            }
+            Err(thrown) => {
+                key.give_up(req);
+                return Err(thrown);
+            }
+        };
+        out.set(req, key, converted)?;
+        Ok(ControlFlow::Continue(()))
+    });
     input.unprotect();
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
+    }
     Ok(Some(out))
 }
 
@@ -459,7 +488,7 @@ fn mb_list_encodings(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut all = PhpArray::new(req)?;
     for enc in Encoding::all() {
         let name = new_string(req, enc.name())?;
-        all.append(req, name.into_value().hand_on_unmigrated())?;
+        all.append(req, name.into_value())?;
     }
     let kept = Owner::take(req, *all);
     req.state::<State>().all_encodings = Some(kept.hand_on_unmigrated());
@@ -507,7 +536,7 @@ fn mb_encoding_aliases(req: &mut Request, encoding: PhpString) -> Result<Owner<P
     let mut out = PhpArray::new(req)?;
     for alias in enc.aliases() {
         let alias = new_string(req, alias)?;
-        out.append(req, alias.into_value().hand_on_unmigrated())?;
+        out.append(req, alias.into_value())?;
     }
     Ok(out)
 }
@@ -545,36 +574,38 @@ fn check_string(s: PhpString, enc: Encoding) -> bool {
 
 /// `php_mb_check_encoding_recursive`.
 fn check_array(req: &mut Request, array: PhpArray, enc: Encoding) -> bool {
-    if array.is_recursive() {
-        docref(req, Level::Warning, "Cannot not handle circular references");
-        return false;
-    }
-    array.protect();
-    let mut valid = true;
-    for (key, value) in array.snapshot() {
-        if let Key::Str(key) = &key
+    // `GC_TRY_PROTECT_RECURSION(vars)` and `ZEND_HASH_FOREACH_KEY_VAL(vars,
+    // …)` (`Z/ext/mbstring/mbstring.c:5643`): a guarded walk holding
+    // nothing, the argument holding the table while a nested table's
+    // circular warning reaches the program's handler.
+    let walked = walk::foreach_guarded(req, array, Hold::None, |req, row| -> walk::Step {
+        if let Key::Str(key) = row.key()
             && !check_string(*key, enc)
         {
-            valid = false;
-            break;
+            return Ok(ControlFlow::Break(()));
         }
-        let value = value.deref();
+        let value = row.value().deref();
         let ok = match value.as_ref() {
             ValueRef::Str(s) => check_string(*s, enc),
-            ValueRef::Array(inner) => {
-                let inner = *inner;
-                check_array(req, inner, enc)
-            }
+            ValueRef::Array(inner) => check_array(req, *inner, enc),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Null | ValueRef::Bool(_) => true,
             _ => false,
         };
-        if !ok {
-            valid = false;
-            break;
+        Ok(if ok {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        })
+    });
+    match walked {
+        Ok(Guarded::Walked(invalid)) => invalid.is_none(),
+        Ok(Guarded::Recursive) => {
+            docref(req, Level::Warning, "Cannot not handle circular references");
+            false
         }
+        // The body answers no throwable.
+        Err(_) => false,
     }
-    array.unprotect();
-    valid
 }
 
 /// `mb_check_encoding(array|string|null $value = null, ?string $encoding = null): bool`.
@@ -762,18 +793,21 @@ fn find_strings(req: &mut Request, value: &Value, out: &mut Vec<Vec<u8>>) -> Res
     match value.as_ref() {
         ValueRef::Str(s) => out.push(s.as_bytes().to_vec()),
         ValueRef::Array(array) => {
-            let array = *array;
-            if array.is_recursive() {
-                return Ok(true);
+            // `Z_PROTECT_RECURSION_P(var)` and `ZEND_HASH_FOREACH_VAL_IND(ht,
+            // entry)` (`Z/ext/mbstring/mbstring.c:3774`): a guarded walk
+            // holding nothing, the argument holding the table.
+            let walked =
+                walk::foreach_guarded(req, *array, Hold::None, |req, row| -> walk::Step {
+                    Ok(if find_strings(req, row.value(), out)? {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    })
+                })?;
+            match walked {
+                Guarded::Recursive | Guarded::Walked(Some(())) => return Ok(true),
+                Guarded::Walked(None) => {}
             }
-            array.protect();
-            for (_, v) in array.snapshot() {
-                if find_strings(req, &v, out)? {
-                    array.unprotect();
-                    return Ok(true);
-                }
-            }
-            array.unprotect();
         }
         ValueRef::Object(object) => {
             let object = *object;
@@ -903,16 +937,16 @@ fn convert_array_in(
     to: Encoding,
 ) -> Result<bool, Thrown> {
     array.protect();
-    for (key, v) in array.snapshot_refs() {
-        match convert_value(req, &v, from, to)? {
-            Walk::Stopped => {
-                array.unprotect();
-                return Ok(true);
-            }
+    // `ZEND_HASH_FOREACH_VAL(ht, entry)` (`Z/ext/mbstring/mbstring.c:3828`)
+    // over the separated table, no owner of it taken: the variable holds it
+    // while what a nested object's conversion reaches runs, and each row is
+    // written in place as php writes it.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<bool> {
+        match convert_value(req, row.value(), from, to)? {
+            Walk::Stopped => return Ok(ControlFlow::Break(true)),
             Walk::Kept => {}
             Walk::Replace(new) => {
-                if !array.replace(req, &key, new.hand_on_unmigrated())? {
-                    array.unprotect();
+                if !array.replace(req, row.key(), new)? {
                     return Err(fatal(
                         req,
                         "InternalError: mb_convert_variables lost a key of the array it converts",
@@ -920,9 +954,10 @@ fn convert_array_in(
                 }
             }
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    });
     array.unprotect();
-    Ok(false)
+    Ok(walked?.unwrap_or(false))
 }
 
 /// `mb_convert_variables(string $to_encoding, array|string $from_encoding, mixed &$var, mixed &...$vars): string|false`.

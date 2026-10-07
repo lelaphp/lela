@@ -82,6 +82,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
@@ -95,6 +96,7 @@ use php_ext::request::{
     Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx, StreamOption,
     Streams as _, Whence,
 };
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::virtual_cwd::MAXPATHLEN;
@@ -209,25 +211,30 @@ fn context_resource(req: &mut Request, res: Resource, position: u32) -> Result<S
 /// the first entry that is neither is php's `ValueError`, what came
 /// before it already set.
 fn parse_options(req: &mut Request, res: StreamCtx, options: PhpArray) -> Result<(), Thrown> {
-    for (wkey, wval) in options.snapshot() {
-        let wval = wval.deref();
-        match (&wkey, wval.as_array()) {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(options, wkey, wval)` and
+    // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(wval), okey, oval)`
+    // (`Z/ext/standard/streamsfuncs.c:877`, `:881`), no owner of either
+    // table taken: the argument holds them while an option is set.
+    walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+        let wval = row.value().deref();
+        match (row.key(), wval.as_array()) {
             (Key::Str(wrapper), Some(inner)) => {
-                for (okey, oval) in inner.snapshot() {
-                    if let Key::Str(option) = okey {
-                        res.set_option(req, wrapper.as_bytes(), option.as_bytes(), &oval)?;
+                walk::foreach(req, *inner, Hold::None, |req, row| -> walk::Step {
+                    if let Key::Str(option) = row.key() {
+                        let value = row.value().deref();
+                        res.set_option(req, wrapper.as_bytes(), option.as_bytes(), &value)?;
                     }
-                }
+                    Ok(ControlFlow::Continue(()))
+                })?;
+                Ok(ControlFlow::Continue(()))
             }
-            _ => {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    "Options should have the form [\"wrappername\"][\"optionname\"] = $value",
-                ));
-            }
+            _ => Err(throw_error(
+                req,
+                "ValueError",
+                "Options should have the form [\"wrappername\"][\"optionname\"] = $value",
+            )),
         }
-    }
+    })?;
     Ok(())
 }
 
@@ -408,19 +415,14 @@ fn stream_context_get_params(
     let (options, notification) = (res.options(req), res.notifier(req));
     let mut array = PhpArray::new(req)?;
     if let Some(notification) = notification {
-        req.addref(&notification);
-        let key = Key::Str(PhpString::new(req, b"notification")?.hand_on_unmigrated());
-        array.set(req, key, notification)?;
+        let key = PhpString::new(req, b"notification")?.into_key();
+        array.set(req, key, Owner::take(req, notification))?;
     }
     let options = match options {
-        Some(options) => {
-            let value = Value::array(options);
-            req.addref(&value);
-            value
-        }
-        None => Value::array(PhpArray::new(req)?.hand_on_unmigrated()),
+        Some(options) => Owner::take(req, Value::array(options)),
+        None => PhpArray::new(req)?.into_value(),
     };
-    let key = Key::Str(PhpString::new(req, b"options")?.hand_on_unmigrated());
+    let key = PhpString::new(req, b"options")?.into_key();
     array.set(req, key, options)?;
     Ok(array)
 }
@@ -1193,7 +1195,7 @@ fn stream_resolve_include_path(
 fn stream_get_wrappers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for scheme in req.stream_wrappers() {
-        let scheme = Value::string(PhpString::new(req, scheme.as_bytes())?.hand_on_unmigrated());
+        let scheme = PhpString::new(req, scheme.as_bytes())?.into_value();
         array.append(req, scheme)?;
     }
     Ok(array)
