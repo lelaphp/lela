@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use regex_lite::Regex;
 use serde_json::{Value, json};
 
+use super::approval::{Admission, LIFTED};
 use super::argv::Line;
 use super::call::Call;
 use super::label;
@@ -49,6 +50,8 @@ pub struct Finding {
     pub rule: String,
     pub text: String,
     pub adr: Vec<String>,
+    /// The person's approval that turned the rule's denial into this note.
+    pub(crate) admission: Option<Admission>,
 }
 
 impl Finding {
@@ -58,6 +61,16 @@ impl Finding {
             rule: rule.id.clone(),
             text: rule.text.clone(),
             adr: rule.adr.iter().map(str::to_owned).collect(),
+            admission: None,
+        }
+    }
+
+    /// The note a denial becomes where the person approved the change.
+    fn admitted(rule: &Rule, admission: Admission) -> Finding {
+        Finding {
+            text: admission.said(),
+            admission: Some(admission),
+            ..Finding::of(Kind::Note, rule)
         }
     }
 
@@ -253,7 +266,26 @@ fn evaluate(
     if fired && !rule.within.holds_in(&runs_in(root, line)) {
         return Ok(None);
     }
+    // A denial of the agent's hand on a harness file is lifted from the
+    // one change the person approved in the session ([`super::approval`]).
+    if fired
+        && LIFTED.contains(&rule.id.as_str())
+        && let Some(admission) = admitted(root, call, path)
+    {
+        return Ok(Some(Finding::admitted(rule, admission)));
+    }
     Ok(fired.then(|| Finding::of(Kind::of(rule), rule)))
+}
+
+/// The approval of what an `Edit` or a `Write` would leave at `path`:
+/// the file as it stands to what the call makes of it.
+fn admitted(root: &Path, call: &Call, path: Option<&Path>) -> Option<Admission> {
+    let path = path?;
+    if call.command().is_some() {
+        return None;
+    }
+    let (before, after) = call.rewrite(root, Some(path))?;
+    call.approvals().admits(path, Some(&before), Some(&after))
 }
 
 /// The command a hit stands in: the text from the shell separator before

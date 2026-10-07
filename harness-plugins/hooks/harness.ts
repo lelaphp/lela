@@ -43,7 +43,7 @@
 // a tracked file pre-commit rewrites when the plugin is staged (#62), which
 // the tsconfig includes; the import is empty at run time.
 
-import type { EngineInterface, Register, ToolCallInput } from 'claude-code';
+import type { EngineInterface, Register, SessionMessage, ToolCallInput } from 'claude-code';
 
 /// `cargo run` when no binary is built, and when no built one judged: it
 /// rebuilds a stale xtask rather than trusting it (hooks.json says why),
@@ -102,9 +102,10 @@ const RAN_AN_INSTRUMENT = /(^|[\s;&|])(cargo\s+xtask|xtask|\S*\/xtask)\b/;
 
 /// The hook's stdin for one call (§13 D.16): the head permit reads and
 /// the tool's own arguments as `tool_input`, the event's reserved keys
-/// left out.
-function stdinOf(e: ToolCallInput, session_id: string, cwd: string): string {
-  const { tool, tool_use_id, consent: _consent, ...tool_input } = e as ToolCallInput & {
+/// left out; the subagent it runs in, and the answered `AskUserQuestion`
+/// calls the engine holds where a person's approval is asked for (#2247).
+function stdinOf(e: ToolCallInput, session_id: string, cwd: string, asked?: unknown[]): string {
+  const { tool, tool_use_id, consent: _consent, agentId, ...tool_input } = e as ToolCallInput & {
     consent?: string;
   };
   return JSON.stringify({
@@ -114,8 +115,20 @@ function stdinOf(e: ToolCallInput, session_id: string, cwd: string): string {
     tool_name: tool,
     tool_input,
     tool_use_id,
+    agent_id: agentId,
+    asked,
   });
 }
+
+/// A denial the person's approval could lift, and the evidence of one:
+/// each answered `AskUserQuestion` the engine recorded, never the model's text.
+const APPROVABLE = /\(harness\.self(-shell)?[,)]/;
+const askedOf = (messages: readonly SessionMessage[]) =>
+  messages.flatMap((m) =>
+    m.toolUses
+      .filter((t) => t.tool === 'AskUserQuestion' && t.result !== undefined && !t.isError)
+      .map((t) => ({ tool_use_id: t.tool_use_id, input: t.input, result: t.result })),
+  );
 
 /// What permit printed: the deny's reason, the allow's notes, or nothing.
 type Decision = { deny?: string; notes?: string };
@@ -143,21 +156,27 @@ export const register: Register = (on, options) => {
     let decision: Decision = {};
     try {
       const [cwd, id, bins] = await Promise.all([$.session.cwd(), $.session.id(), xtask($)]);
-      const stdin = stdinOf(e, id, cwd);
       // permit's exit is 0 whatever it decides, so a non-zero one is a
       // permit that never judged: the build is older than the manifest it
       // reads, or than the harness's own sources. The next candidate
-      // judges, rather than the call passing on a build's silence.
-      for (const bin of bins) {
-        const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
-          cwd,
-          stdin,
-          timeoutMs: 30_000,
-        });
-        if (run.exitCode === 0) {
-          decision = decisionOf(run.stdout);
-          break;
+      // judges, rather than the call passing on a build's silence. A
+      // denial an approval could lift is asked again with the evidence.
+      let stdin = stdinOf(e, id, cwd);
+      for (let asked = false; ; asked = true) {
+        for (const bin of bins) {
+          const run = await $.process.run([...bin, 'permit', '--above-the-command-hook'], {
+            cwd,
+            stdin,
+            timeoutMs: 30_000,
+          });
+          if (run.exitCode === 0) {
+            decision = decisionOf(run.stdout);
+            break;
+          }
         }
+        if (asked || !APPROVABLE.test(decision.deny ?? '')) break;
+        const found = await $.session.messages();
+        stdin = stdinOf(e, id, cwd, Array.isArray(found) ? askedOf(found) : []);
       }
     } catch {
       // fails open: the command hook beneath judges the call
