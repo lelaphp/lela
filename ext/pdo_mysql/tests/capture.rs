@@ -263,3 +263,72 @@ fn a_persistent_connection_keeps_its_socket_however_full_the_stream_pool_is() {
     let served = engine.serve_capture(&format!("<?php {open}"), Capture::default());
     assert_eq!(String::from_utf8_lossy(&served.stdout), thread);
 }
+
+/// A persistent connection waiting in PDO's pool as the engine ends is
+/// closed on the shutdown request through `mysql_handle_closer`, which
+/// sends the server its `COM_QUIT`, as php's `zend_shutdown` destroys
+/// `EG(persistent_list)` and `php_pdo_pdbh_dtor` reaches `dbh_free`
+/// (#1961), where a dropped socket sends the server nothing. The
+/// connection reaches the server through a relay of the test's own, which
+/// reads each packet the server is sent: none after the connect while the
+/// engine lives, the `COM_QUIT` last once its last clone is dropped.
+/// Skipped where no server answers on `ci/mysql/compose.yaml`'s address.
+#[test]
+fn a_pooled_persistent_connection_is_quit_as_the_engine_ends() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::time::Duration;
+
+    if TcpStream::connect("127.0.0.1:3306").is_err() {
+        eprintln!("no MySQL server on 127.0.0.1:3306; ci/mysql/compose.yaml starts one");
+        return;
+    }
+    let relay = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = relay.local_addr().unwrap().port();
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut client, _) = relay.accept().unwrap();
+        let mut upstream = TcpStream::connect("127.0.0.1:3306").unwrap();
+        let (mut from, mut to) = (upstream.try_clone().unwrap(), client.try_clone().unwrap());
+        std::thread::spawn(move || std::io::copy(&mut from, &mut to));
+        let mut seen = Vec::new();
+        let mut chunk = [0; 4096];
+        while let Ok(n @ 1..) = client.read(&mut chunk) {
+            seen.extend_from_slice(&chunk[..n]);
+            upstream.write_all(&chunk[..n]).ok();
+        }
+        upstream.shutdown(Shutdown::Write).ok();
+        sent.send(seen).ok();
+    });
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_pdo_mysql::extension(),
+        ])
+        .build();
+    let script = format!(
+        "<?php new PDO('mysql:host=127.0.0.1;port={port};dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]); echo 'connected';"
+    );
+    let served = engine.serve_capture(&script, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "connected");
+    assert!(
+        received.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the pooled connection was closed before the engine ended"
+    );
+    drop(engine);
+    let seen = received.recv_timeout(Duration::from_secs(10)).unwrap();
+    let mut last = &[][..];
+    let mut rest = &seen[..];
+    while let [a, b, c, _, ..] = *rest {
+        let len = usize::from(a) | usize::from(b) << 8 | usize::from(c) << 16;
+        last = &rest[..(4 + len).min(rest.len())];
+        rest = &rest[last.len()..];
+    }
+    assert_eq!(
+        last,
+        [1, 0, 0, 0, 1],
+        "the last packet the server was sent is no COM_QUIT"
+    );
+}
