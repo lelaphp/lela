@@ -214,6 +214,9 @@ impl Request {
         self.accel_loaded = held.unit.as_ref().ok().cloned();
         self.early_bound =
             (held.unit.as_ref().ok()).map(|unit| (Arc::clone(unit), Arc::clone(&held.early)));
+        if let Ok(unit) = &held.unit {
+            self.note_held(unit);
+        }
         Some(held)
     }
 
@@ -399,6 +402,11 @@ impl Request {
             .and_then(Result::ok)
             .zip(early)
             .filter(|(_, early)| early.iter().any(Option::is_some));
+        // php keeps a link in its inheritance cache only under opcache,
+        // whose loaded classes are immutable (`ZEND_ACC_IMMUTABLE`).
+        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, true) = (&cached, filed, loaded) {
+            self.note_held(unit);
+        }
         // The file opened as a stream where php compiles it or resolves
         // it to look it up by its full path, and not for a hit whose key
         // the cache files: one by the full path, or read back from the

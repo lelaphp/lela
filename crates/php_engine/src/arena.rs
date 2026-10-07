@@ -137,6 +137,9 @@ pub(crate) struct Arena {
     /// The engine's natives and native methods, which the arena's user
     /// functions are numbered past.
     first_function: u32,
+    /// php's inheritance cache over the classes published here, dropped
+    /// with them ([`crate::inheritance_cache`]).
+    pub(crate) inheritance: crate::inheritance_cache::InheritanceCache,
 }
 
 impl Arena {
@@ -151,6 +154,7 @@ impl Arena {
             enum_methods: Column::below(Function::ENUM),
             first_class,
             first_function,
+            inheritance: crate::inheritance_cache::InheritanceCache::default(),
         }
     }
 

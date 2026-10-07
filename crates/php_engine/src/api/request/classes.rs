@@ -484,7 +484,13 @@ impl Request {
     /// ak a a ak P a!? P,C
     /// bk b b bk P b!? P,C
     /// ```
-    fn declare_published(&mut self, unit: &Arc<Unit>, at: u32, class: ClassId, decl: &ClassDecl) {
+    pub(super) fn declare_published(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: u32,
+        class: ClassId,
+        decl: &ClassDecl,
+    ) {
         let place = self.buckets.claim(unit, at);
         let key = decl.name.0.to_ascii_lowercase().into_boxed_slice();
         self.declared.push(key, Named { place, class });
@@ -1197,16 +1203,31 @@ impl Request {
         decl: &ClassDecl,
         early: bool,
     ) -> Result<bool, Thrown> {
-        let linking = self.link_against_table(decl);
-        if early && !linking.obligations.is_empty() {
-            return Ok(false);
-        }
         let Ok(at) = u32::try_from(at) else {
             return Err(crate::api::raising::fatal(
                 self,
                 "InternalError: a unit declares more classes than can be numbered",
             ));
         };
+        // `zend_inheritance_cache_get` before anything is checked, over
+        // what was fetched (design §6.2).
+        let fetched = self.fetched(unit, decl);
+        if let Some(fetched) = &fetched
+            && let Some(entry) = self.cached_link(unit, at, fetched)?
+        {
+            self.declare_cached(unit, at, decl, &entry);
+            return Ok(true);
+        }
+        let (linking, read) = self.link_reading(decl);
+        if early && !linking.obligations.is_empty() {
+            return Ok(false);
+        }
+        if let Some(fetched) = fetched
+            && let Some(entry) = self.publish_link(unit, at, fetched, &linking, &read, early)
+        {
+            self.declare_cached(unit, at, decl, &entry);
+            return Ok(true);
+        }
         self.link_settled(unit, at, linking)?;
         Ok(true)
     }
