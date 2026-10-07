@@ -5,9 +5,9 @@
 //! ended in a fatal reports nothing, as php's debug heap reports nothing
 //! after an unclean shutdown. The leak names the extension whose native
 //! or lifecycle hook allocated it (#1993), and with allocations traced
-//! the line that did. Each engine here arms the sensor
-//! (`EngineBuilder::sense_leaks`), which is off by default until the
-//! leaks the corpus has are fixed (#2057).
+//! the line that did. A debug engine is armed unless it is built with
+//! the sensor off (`EngineBuilder::sense_leaks`); each engine here names
+//! the sensor it is built with.
 
 use php_macros::php_function;
 
@@ -111,6 +111,30 @@ fn a_dropped_owner_fails_the_request_as_an_internal_error() {
     );
     assert!(stdout.contains(BY_LEAK_SENSOR), "{stdout}");
     assert_eq!(served.exit_code, 255);
+}
+
+/// A debug engine built without a word about the sensor is armed, so
+/// the faulty native's dropped owner fails its request, and one built
+/// with the sensor off ends the request as a release engine does
+/// (#1992's default).
+#[test]
+fn a_debug_engine_is_armed_unless_built_with_the_sensor_off() {
+    let program = "<?php dropped_owner();\necho 'went on';\n";
+    let armed = Engine::cli_builder().extensions(&[faulty()]).build();
+    let served = armed.serve_capture(program, Capture::default());
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.starts_with(&format!("went on\n{LEAKED}")),
+        "{stdout}"
+    );
+    assert_eq!(served.exit_code, 255);
+    let off = Engine::cli_builder()
+        .extensions(&[faulty()])
+        .sense_leaks(LeakSensor::Off)
+        .build();
+    let served = off.serve_capture(program, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "went on");
+    assert_eq!(served.exit_code, 0);
 }
 
 /// A block a lifecycle hook allocated and dropped is named with the

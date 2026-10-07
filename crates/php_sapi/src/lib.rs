@@ -125,11 +125,11 @@ impl OutputSink for Starting {
 }
 
 /// [`start`]'s builder before it is built: the witness lane's trace, a
-/// debug build's request leak sensor where `PHP_SENSE_LEAKS` arms it or
-/// `PHP_SENSE_LEAKS_BACKTRACE` arms it with a backtrace per allocation, and
-/// the line's `-d` entries; for a host that builds more than one engine
-/// and writes the startup errors once, as php-fpm's children build theirs
-/// after the master has started.
+/// debug build's request leak sensor, armed unless `PHP_SENSE_LEAKS` turns
+/// it off and traced where `PHP_SENSE_LEAKS_BACKTRACE` asks for a
+/// backtrace per allocation, and the line's `-d` entries; for a host that
+/// builds more than one engine and writes the startup errors once, as
+/// php-fpm's children build theirs after the master has started.
 #[must_use]
 pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuilder {
     let mut builder = builder;
@@ -138,15 +138,8 @@ pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuil
         builder = builder.trace_natives_to(path.into());
     }
     #[cfg(debug_assertions)]
-    {
-        let set = |name| std::env::var_os(name).is_some_and(|v| v == "1");
-        builder = builder.sense_leaks(if set(SENSE_LEAKS_BACKTRACE) {
-            LeakSensor::Traced
-        } else if set(SENSE_LEAKS) {
-            LeakSensor::Armed
-        } else {
-            LeakSensor::Off
-        });
+    if let Some(sensor) = leak_sensor(|name| std::env::var_os(name)) {
+        builder = builder.sense_leaks(sensor);
     }
     for (name, value) in ini {
         builder = builder.ini(name, value);
@@ -160,18 +153,35 @@ pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuil
 #[cfg(feature = "witness-trace")]
 const TRACE: &str = "PHP_WITNESS_TRACE";
 
-/// The variable that arms a debug build's request leak sensor (#1992,
-/// `EngineBuilder::sense_leaks`) when it is `1`: read once, as the host
-/// builds its engine, and never per request. A lane or a builder runs a
-/// debug binary under it, `PHP_SENSE_LEAKS=1 cargo xtask phpt --engine
-/// target/debug/php`, to hold a subset to the sensor; a release build
-/// reads nothing.
+/// The leak sensor the host's environment asks for in place of the
+/// builder's armed default: traced where [`SENSE_LEAKS_BACKTRACE`] is `1`,
+/// off where [`SENSE_LEAKS`] is `0`, and the default kept otherwise.
+#[cfg(debug_assertions)]
+fn leak_sensor(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<LeakSensor> {
+    let is = |name, value: &str| var(name).is_some_and(|set| set == value);
+    if is(SENSE_LEAKS_BACKTRACE, "1") {
+        Some(LeakSensor::Traced)
+    } else if is(SENSE_LEAKS, "0") {
+        Some(LeakSensor::Off)
+    } else {
+        None
+    }
+}
+
+/// The variable that turns a debug build's request leak sensor (#1992,
+/// `EngineBuilder::sense_leaks`) off when it is `0`, so a debug request
+/// ends as a release one does; the sensor is armed without it. Read once,
+/// as the host builds its engine, and never per request. It is the
+/// unarmed side of a census, the same debug binary measured unarmed to
+/// tell a leak from a regression, `PHP_SENSE_LEAKS=0 target/debug/php`,
+/// behind a wrapper given as `cargo xtask phpt --engine`, since the
+/// recipe clears the environment; a release build reads nothing.
 #[cfg(debug_assertions)]
 const SENSE_LEAKS: &str = "PHP_SENSE_LEAKS";
 
 /// The variable that arms a debug build's request leak sensor with a
 /// backtrace kept per allocation (#1993, `LeakSensor::Traced`) when it is
-/// `1`, with or without [`SENSE_LEAKS`]: the leak then names the frames
+/// `1`, whatever [`SENSE_LEAKS`] says: the leak then names the frames
 /// that allocated its first block, each with its line in a build that
 /// carries line tables, as the dev profile does, and by its function
 /// alone in a `release-da` one. Read once, as [`SENSE_LEAKS`] is, and
@@ -229,4 +239,39 @@ pub fn version(name: &str, engine: &Engine) -> String {
 #[must_use]
 pub fn exit_code(status: i32) -> ExitCode {
     ExitCode::from(u8::try_from(status & 0xff).unwrap_or(255))
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use std::ffi::OsString;
+
+    use php_engine::LeakSensor;
+
+    use super::{SENSE_LEAKS, SENSE_LEAKS_BACKTRACE, leak_sensor};
+
+    /// The sensor `leak_sensor` picks where the environment holds `set`.
+    fn picked(set: &[(&str, &str)]) -> Option<LeakSensor> {
+        leak_sensor(|name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        })
+    }
+
+    /// A debug host keeps the builder's armed sensor unless
+    /// `PHP_SENSE_LEAKS=0` turns it off; `1`, the opt-in it once was,
+    /// changes nothing, and `PHP_SENSE_LEAKS_BACKTRACE=1` traces whatever
+    /// the other says (#1992).
+    #[test]
+    fn the_host_keeps_the_armed_default_unless_turned_off() {
+        assert_eq!(picked(&[]), None);
+        assert_eq!(picked(&[(SENSE_LEAKS, "1")]), None);
+        assert_eq!(picked(&[(SENSE_LEAKS, "")]), None);
+        assert_eq!(picked(&[(SENSE_LEAKS, "0")]), Some(LeakSensor::Off));
+        assert_eq!(
+            picked(&[(SENSE_LEAKS, "0"), (SENSE_LEAKS_BACKTRACE, "1")]),
+            Some(LeakSensor::Traced)
+        );
+        assert_eq!(picked(&[(SENSE_LEAKS_BACKTRACE, "0")]), None);
+    }
 }

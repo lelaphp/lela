@@ -2625,17 +2625,20 @@ pub struct EngineBuilder {
 }
 
 /// A debug build's request leak sensor (#1992, #1993), as a host sets it
-/// for every request of its engine ([`EngineBuilder::sense_leaks`]).
+/// for every request of its engine ([`EngineBuilder::sense_leaks`]):
+/// armed unless the engine is built with it off, as a debug php reports
+/// its leaks unless told not to.
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LeakSensor {
     /// Unarmed: a debug request ends as a release one does.
-    #[default]
     Off,
-    /// Armed: each request ends in php's debug shutdown, every block of
-    /// the request's lifetime freed by name, and in the `InternalError`
-    /// naming what the heap still held and the extension whose native or
-    /// lifecycle hook allocated the first of it; silent after a fatal.
+    /// Armed, the default: each request ends in php's debug shutdown,
+    /// every block of the request's lifetime freed by name, and in the
+    /// `InternalError` naming what the heap still held and the extension
+    /// whose native or lifecycle hook allocated the first of it; silent
+    /// after a fatal.
+    #[default]
     Armed,
     /// Armed, and every allocation keeps the backtrace that made it, so
     /// the `InternalError` names the frames that allocated the first
@@ -2654,11 +2657,12 @@ impl LeakSensor {
 
 impl EngineBuilder {
     /// A debug build's request leak sensor, for every request of the
-    /// engine ([`LeakSensor`]). The hosts arm it from `PHP_SENSE_LEAKS=1`
-    /// and trace allocations under it from `PHP_SENSE_LEAKS_BACKTRACE=1`,
-    /// read once as they build their engine (`php_sapi::prepare`). It is
-    /// off by default until the leaks the corpus has are fixed (#2057);
-    /// turning it on by default is #1992's last step.
+    /// engine ([`LeakSensor`]); armed unless this sets it otherwise, so
+    /// every test that builds an engine and every request a debug host
+    /// serves is a leak test. The hosts turn it off from
+    /// `PHP_SENSE_LEAKS=0` and trace allocations under it from
+    /// `PHP_SENSE_LEAKS_BACKTRACE=1`, read once as they build their
+    /// engine (`php_sapi::prepare`).
     #[cfg(debug_assertions)]
     #[must_use]
     pub fn sense_leaks(mut self, sensor: LeakSensor) -> EngineBuilder {
@@ -3492,7 +3496,7 @@ impl Engine {
             #[cfg(feature = "witness-trace")]
             trace_to: None,
             #[cfg(debug_assertions)]
-            sense_leaks: LeakSensor::Off,
+            sense_leaks: LeakSensor::default(),
         }
     }
 
@@ -4457,8 +4461,9 @@ impl Engine {
     ) -> (Observables, Trace) {
         // `PG(report_memleaks)` as `php_request_shutdown` reads it first.
         // The debug teardown below runs where the request leak sensor is
-        // armed ([`EngineBuilder::sense_leaks`]); unarmed, a debug request
-        // ends as a release one does.
+        // armed, as it is unless the engine was built with it off
+        // ([`EngineBuilder::sense_leaks`]); unarmed, a debug request ends
+        // as a release one does.
         #[cfg(debug_assertions)]
         let report_memleaks = req.ini_flag(b"report_memleaks");
         end_phase(&self.shared.extensions, req, |e| e.rshutdown);

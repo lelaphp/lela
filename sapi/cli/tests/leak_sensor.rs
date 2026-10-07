@@ -1,17 +1,18 @@
 //! The request leak sensor (#1992) over what only the CLI host
 //! registers: `STDIN`, `STDOUT` and `STDERR`, which `do_cli` registers
 //! under `Core` as resources whose one owner is the constant table. A
-//! debug binary arms the sensor from `PHP_SENSE_LEAKS`, so a request that
-//! keeps a block, or gives one up twice, ends in the `InternalError`
-//! naming it.
+//! debug binary is armed unless `PHP_SENSE_LEAKS=0` turns the sensor off,
+//! so a request that keeps a block, or gives one up twice, ends in the
+//! `InternalError` naming it.
 #![cfg(debug_assertions)]
 
 use std::process::{Command, Stdio};
 
-/// stdout and stderr of an armed `php -n -r <code>`, stdin empty.
+/// stdout and stderr of `php -n -r <code>`, armed as a debug binary is
+/// by default, stdin empty.
 fn armed(code: &str) -> (String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_php"))
-        .env("PHP_SENSE_LEAKS", "1")
+        .env_remove("PHP_SENSE_LEAKS")
         .args(["-n", "-r", code])
         .stdin(Stdio::null())
         .output()
