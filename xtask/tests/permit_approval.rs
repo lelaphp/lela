@@ -88,6 +88,7 @@ fn the_persons_answer_admits_the_change_and_no_forged_answer_does() {
         "deny-subagent",
         "deny-filled-by-the-model",
         "deny-away",
+        "deny-mislabelled",
     ] {
         assert!(names.iter().any(|n| n == forged), "{forged}: {names:?}");
     }

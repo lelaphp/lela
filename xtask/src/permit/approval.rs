@@ -3,8 +3,9 @@
 //! theirs; once they have approved a change in the session, typing it is
 //! the agent's. The approval is their answer to an `AskUserQuestion` call:
 //! a question that names the file, whose chosen option's `preview` carries
-//! the change as a unified diff. It admits a call that realizes exactly
-//! that diff from the file as it stands, and nothing else.
+//! the change as a unified diff and whose label says it applies it. It
+//! admits a call that realizes exactly that diff from the file as it
+//! stands, and nothing else.
 //!
 //! The answer is read where the model cannot write it. Claude Code writes
 //! a tool's record, `toolUseResult` beside the `tool_result` block, in the
@@ -188,7 +189,8 @@ impl Approvals {
 
 impl Approval {
     /// Each question of one answered call that the person answered by
-    /// choosing an option with a preview. None where the model filled the
+    /// choosing an option with a preview whose label says it applies the
+    /// change ([`says_apply`]). None where the model filled the
     /// answers in its own input, where the dialog answered for an absent
     /// person, or where the person asked for another round.
     fn all(asked: &Asked) -> Vec<Approval> {
@@ -218,6 +220,9 @@ impl Approval {
                 let chosen = options
                     .iter()
                     .find(|o| text(o.get("label")) == Some(answer.clone()))?;
+                if !says_apply(&answer) {
+                    return None;
+                }
                 let preview = text(chosen.get("preview")).filter(|p| !p.is_empty())?;
                 let notes = text(
                     result
@@ -242,6 +247,18 @@ impl Approval {
             })
             .collect()
     }
+}
+
+/// Whether a chosen option's label says it applies the change: it begins
+/// "Apply" or "Approve". The person reads the label as much as the
+/// preview, so an option that carries the diff under "Leave it" approves
+/// nothing.
+fn says_apply(label: &str) -> bool {
+    let word = label.split_whitespace().next().unwrap_or_default();
+    let word = word
+        .trim_matches(|c: char| !c.is_alphabetic())
+        .to_lowercase();
+    ["apply", "approve"].contains(&word.as_str())
 }
 
 /// The answered `AskUserQuestion` calls of the transcript at `path`, which
