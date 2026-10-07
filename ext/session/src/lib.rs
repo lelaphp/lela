@@ -439,14 +439,14 @@ fn session_array_mut(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
 /// `zend_hash_update_ind`, and the reference held before given up. An
 /// array but for what `php_serialize` decodes, which binds whatever the
 /// data held.
-fn bind_vars(req: &mut Request, vars: Value) -> Result<(), Thrown> {
+fn bind_vars(req: &mut Request, vars: Owner<Value>) -> Result<(), Thrown> {
     if let Some(old) = req.state::<State>().vars.take() {
         req.release(old.as_value());
     }
-    let vars = PhpRef::new(req, vars)?.hand_on_unmigrated();
-    req.addref(&vars.as_value());
-    req.state::<State>().vars = Some(vars);
-    req.set_global(b"_SESSION", Some(vars.as_value()));
+    let vars = PhpRef::new(req, vars)?;
+    let kept = Owner::take(req, *vars).hand_on_unmigrated();
+    req.state::<State>().vars = Some(kept);
+    req.set_global(b"_SESSION", Some(vars.into_value().hand_on_unmigrated()));
     Ok(())
 }
 

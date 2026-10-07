@@ -162,9 +162,8 @@ fn state_of(
     state: &mut Option<Box<Aggregate>>,
 ) -> Result<(PhpRef, i64), Thrown> {
     if state.is_none() {
-        let context = PhpRef::new(req, Value::null())?
-            .into_value()
-            .hand_on_unmigrated();
+        let null = Owner::take(req, Value::null());
+        let context = PhpRef::new(req, null)?.into_value().hand_on_unmigrated();
         *state = Some(Box::new(Aggregate {
             value: context,
             row: 0,
@@ -198,7 +197,7 @@ fn step(
     let returned = call(req, &handler.callable, &values);
     release_all(req, extra);
     let returned = returned?;
-    context.set(req, returned.hand_on_unmigrated())
+    context.set(req, returned)
 }
 
 /// `do_callback` for an aggregate's final: the aggregate's reference and

@@ -12,7 +12,7 @@
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::{Owner, Value, ValueRef};
 
 use crate::client::{Mysqlnd, ResultSet};
 use crate::conn::ConnData;
@@ -1169,7 +1169,11 @@ fn assign_row(
         match bind.zv {
             Some(old) if matches!(old.as_ref(), ValueRef::Reference(_)) => {
                 if let ValueRef::Reference(r) = old.as_ref() {
-                    r.set(req, value)?;
+                    // The row's value, its one owner the row's, handed to
+                    // the cell as the owner it is.
+                    let owned = Owner::take(req, value);
+                    req.release(value);
+                    r.set(req, owned)?;
                 }
             }
             old => {

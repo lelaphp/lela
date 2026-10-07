@@ -782,11 +782,9 @@ fn convert(req: &mut Request, bound: &mut Bound) -> Result<(), Thrown> {
     let inner = bound.value.deref();
     let converted = match (bound.ty.kind(), inner.as_ref()) {
         (BindKind::Str, ValueRef::Null | ValueRef::Str(_)) => None,
-        (BindKind::Str, _) if bound.max_len <= 0 => {
-            Some(Value::string(to_string(req, &inner)?.hand_on_unmigrated()))
-        }
-        (BindKind::Int, ValueRef::Bool(b)) => Some(Value::int(i64::from(b))),
-        (BindKind::Bool, ValueRef::Int(n)) => Some(Value::bool(n != 0)),
+        (BindKind::Str, _) if bound.max_len <= 0 => Some(to_string(req, &inner)?.into_value()),
+        (BindKind::Int, ValueRef::Bool(b)) => Some(Owner::take(req, Value::int(i64::from(b)))),
+        (BindKind::Bool, ValueRef::Int(n)) => Some(Owner::take(req, Value::bool(n != 0))),
         _ => None,
     };
     if let Some(converted) = converted {
@@ -841,11 +839,11 @@ fn hook(
 /// The value a bound entry holds replaced by `new`, through the
 /// reference where the entry holds one, as php's `convert_to_*` writes
 /// in place.
-pub(super) fn replace_inner(req: &mut Request, value: &mut Value, new: Value) {
+pub(super) fn replace_inner(req: &mut Request, value: &mut Value, new: Owner<Value>) {
     if let Some(cell) = value.as_php_ref().copied() {
         cell.convert(req, new);
     } else {
-        let old = std::mem::replace(value, new);
+        let old = std::mem::replace(value, new.hand_on_unmigrated());
         req.release(old);
     }
 }

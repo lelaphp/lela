@@ -218,7 +218,7 @@ pub(super) fn create_id(req: &mut Request) -> Option<Vec<u8>> {
 pub(super) fn track_init(req: &mut Request) -> Result<(), Thrown> {
     req.set_global(b"_SESSION", None);
     let array = PhpArray::new(req)?;
-    bind_vars(req, array.into_value().hand_on_unmigrated())
+    bind_vars(req, array.into_value())
 }
 
 /// `php_session_encode`: the session's variables through the serializer,

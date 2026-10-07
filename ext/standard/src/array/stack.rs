@@ -40,11 +40,12 @@ impl Stack {
                 given,
             });
         }
-        let array = match given.get() {
-            Some(array) => array.copy(req)?.hand_on_unmigrated(),
-            None => PhpArray::new(req)?.hand_on_unmigrated(),
+        let made = match given.get() {
+            Some(array) => array.copy(req)?,
+            None => PhpArray::new(req)?,
         };
-        let cell = PhpRef::new(req, array.to_value())?.hand_on_unmigrated();
+        let array = *made;
+        let cell = PhpRef::new(req, made.into_value())?.hand_on_unmigrated();
         Ok(Stack {
             array,
             owned: Some(cell),
@@ -60,7 +61,7 @@ impl Stack {
     ) -> Result<(), Thrown> {
         let view = *rebuilt;
         match self.owned {
-            Some(cell) => cell.set(req, rebuilt.into_value().hand_on_unmigrated())?,
+            Some(cell) => cell.set(req, rebuilt.into_value())?,
             None => self.given.set(req, rebuilt)?,
         }
         self.array = view;

@@ -6,7 +6,7 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
 use crate::{Format, bind_vars, session_array, session_array_mut, shown};
@@ -157,23 +157,28 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         // The value is the var hash's until it is destroyed; the session
         // keeps an owner of its own.
         let read = reader.value(req);
-        if let Ok(Some(value)) = &read {
-            req.addref(value);
-        }
+        let held = match &read {
+            Ok(Some(value)) => Some(Owner::take(req, *value)),
+            _ => None,
+        };
         let finished = reader.finish(req);
         if let Err(thrown) = finished {
-            if let Ok(Some(value)) = read {
-                req.release(value);
+            if let Some(held) = held {
+                held.give_up(req);
             }
             return Err(thrown);
         }
-        let read = read?;
-        let ok = read.is_some();
+        let ok = read?.is_some();
         // A value read is bound whatever it is, and nothing read is the
         // empty array.
-        let vars = match read {
+        let vars = match held {
             Some(value) if !matches!(value.as_ref(), ValueRef::Null) => value,
-            _ => PhpArray::new(req)?.into_value().hand_on_unmigrated(),
+            held => {
+                if let Some(null) = held {
+                    null.give_up(req);
+                }
+                PhpArray::new(req)?.into_value()
+            }
         };
         bind_vars(req, vars)?;
         return Ok(ok || data.is_empty());

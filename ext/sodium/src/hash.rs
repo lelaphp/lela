@@ -14,7 +14,7 @@ use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use crate::constants::SODIUM_CRYPTO_PWHASH_ALG_DEFAULT;
 use crate::ffi::{self, GenericHash, Stream};
 use crate::{
-    ZSTR_MAX_LEN, assign, assign_bytes, bad_arg, fail, internal, made, parsed, random_key, referent,
+    ZSTR_MAX_LEN, assign_bytes, bad_arg, fail, internal, made, parsed, random_key, referent,
 };
 
 /// `crypto_auth_BYTES` and `crypto_auth_KEYBYTES`.
@@ -686,7 +686,7 @@ pub(crate) fn sodium_crypto_generichash_final(
     if hash.finish(&mut out).is_err() {
         return Err(internal(req));
     }
-    assign(req, &state, Value::null())?;
+    state.set(req, Value::null())?;
     made(req, &out)
 }
 

@@ -379,6 +379,7 @@ fn common(
             continue;
         };
         let fetched = value(req, object, position, Some(ty))?;
+        let fetched = crate::owned(req, fetched);
         cell.set(req, fetched)?;
     }
     Ok(true)

@@ -163,11 +163,11 @@ impl Stmt {
 
 /// `zval_ptr_dtor(parameter); ZVAL_STR(parameter, ...)`: the bound value
 /// replaced, through its reference for `bindParam()`.
-fn replace(req: &mut Request, value: &mut Value, new: Value) {
+fn replace(req: &mut Request, value: &mut Value, new: Owner<Value>) {
     if let Some(cell) = value.as_php_ref().copied() {
         cell.convert(req, new);
     } else {
-        let old = std::mem::replace(value, new);
+        let old = std::mem::replace(value, new.hand_on_unmigrated());
         req.release(old);
     }
 }
@@ -373,7 +373,7 @@ impl Statement for Stmt {
                             ));
                         };
                         let text = stream.copy_to_mem(req, None)?;
-                        replace(req, param.value, Value::string(text.hand_on_unmigrated()));
+                        replace(req, param.value, text.into_value());
                     }
                     _ => {}
                 }

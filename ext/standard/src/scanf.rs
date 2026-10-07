@@ -824,7 +824,9 @@ fn put(
             }
             let position = *first + u32::try_from(*index).unwrap_or(0);
             *index += 1;
-            assign_at(req, position, value)
+            let owned = Owner::take(req, value);
+            req.release(value);
+            assign_at(req, position, owned)
         }
         Target::Array(array) => {
             let key = Key::Int(i64::try_from(*index).unwrap_or(0));
@@ -839,12 +841,12 @@ fn put(
 /// argument is, held to the types of the properties that reference is
 /// typed by, and given up where it is not one. The positions are the
 /// caller's, `sscanf`'s, `fscanf`'s or `SplFileObject::fscanf`'s.
-fn assign_at(req: &mut Request, position: u32, value: Value) -> Result<(), Thrown> {
+fn assign_at(req: &mut Request, position: u32, value: Owner<Value>) -> Result<(), Thrown> {
     let given = req.argument(position).unwrap_or_default();
     if let ValueRef::Reference(reference) = given.as_ref() {
         return reference.set(req, value);
     }
-    req.release(value);
+    value.give_up(req);
     Ok(())
 }
 

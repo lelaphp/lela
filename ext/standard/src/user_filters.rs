@@ -430,6 +430,7 @@ impl StreamFilter for UserFilter {
             Some(n) => Value::int(i64::try_from(**n).unwrap_or(i64::MAX)),
             None => Value::null(),
         };
+        let count = Owner::take(req, count);
         let count = PhpRef::new(req, count)?;
         let closing = Value::bool(flags == FilterFlags::FlushClose);
         let args = [

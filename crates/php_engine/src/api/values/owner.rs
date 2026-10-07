@@ -381,7 +381,7 @@ impl Owner<PhpObject> {
 impl Owner<PhpArray> {
     /// A write through the owner's array, its count moved with the name
     /// where the write separated the array.
-    fn written<R>(&mut self, write: impl FnOnce(&mut PhpArray) -> R) -> R {
+    pub(super) fn written<R>(&mut self, write: impl FnOnce(&mut PhpArray) -> R) -> R {
         let answer = write(&mut self.view);
         self.counted = Value::array(self.view);
         answer
