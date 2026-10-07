@@ -1500,7 +1500,7 @@ impl Table {
                 if let Some(cell) = found.and_then(|v| v.as_php_ref().copied()) {
                     return Ok(Owner::take(req, cell));
                 }
-                let held = found.map_or_else(Value::null, |v| crate::copied(req, v));
+                let held = Owner::take(req, found.map_or_else(Value::null, |v| v.deref()));
                 // The cell's first owner goes to the slot's caller, a second
                 // to the table.
                 let cell = PhpRef::new(req, held)?;
@@ -2605,13 +2605,10 @@ fn sort_through(
     };
     let table = table(req, this)?;
     let handed = match table {
-        Table::Array(_, array) => {
-            req.addref(&Value::array(array));
-            array
-        }
-        Table::Props(_) => table.copy(req)?.hand_on_unmigrated(),
+        Table::Array(_, array) => Owner::take(req, array),
+        Table::Props(_) => table.copy(req)?,
     };
-    let cell = PhpRef::new(req, Value::array(handed))?;
+    let cell = PhpRef::new(req, handed.into_value())?;
     let mut arguments = vec![cell.as_value()];
     arguments.extend(extra);
     with(req, this, |p| p.sorting += 1)?;

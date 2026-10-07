@@ -122,7 +122,7 @@ fn openssl_call(
     let data = string(req, data)?;
     let signature = string(req, sig)?;
     let signature = if is_sign {
-        PhpRef::new(req, signature.hand_on_unmigrated())?.into_value()
+        PhpRef::new(req, signature)?.into_value()
     } else {
         signature
     };

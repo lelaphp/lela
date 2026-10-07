@@ -457,11 +457,11 @@ impl Stmt {
 
 /// A value the callback converts in place, through the reference where the
 /// parameter holds one, as php's `convert_to_*` writes.
-fn replace(req: &mut Request, value: &mut Value, new: Value) {
+fn replace(req: &mut Request, value: &mut Value, new: Owner<Value>) {
     if let Some(cell) = value.as_php_ref().copied() {
         cell.convert(req, new);
     } else {
-        let old = std::mem::replace(value, new);
+        let old = std::mem::replace(value, new.hand_on_unmigrated());
         req.release(old);
     }
 }
@@ -619,7 +619,8 @@ impl Statement for Stmt {
                     self.handle.bind_null(at)
                 } else {
                     let n = to_long(req, &value)?;
-                    replace(req, param.value, Value::int(n));
+                    let converted = Owner::take(req, Value::int(n));
+                    replace(req, param.value, converted);
                     self.handle.bind_int(at, n)
                 }
             }
@@ -632,9 +633,10 @@ impl Statement for Stmt {
                                 "Expected a stream resource",
                             ));
                         };
-                        let text = stream.copy_to_mem(req, None)?.hand_on_unmigrated();
-                        replace(req, param.value, Value::string(text));
-                        text.as_bytes().to_vec()
+                        let text = stream.copy_to_mem(req, None)?;
+                        let bytes = text.as_bytes().to_vec();
+                        replace(req, param.value, text.into_value());
+                        bytes
                     }
                     ValueRef::Null => {
                         let rc = self.handle.bind_null(at);
@@ -645,9 +647,10 @@ impl Statement for Stmt {
                         };
                     }
                     _ => {
-                        let text = to_string(req, &value)?.hand_on_unmigrated();
-                        replace(req, param.value, Value::string(text));
-                        text.as_bytes().to_vec()
+                        let text = to_string(req, &value)?;
+                        let bytes = text.as_bytes().to_vec();
+                        replace(req, param.value, text.into_value());
+                        bytes
                     }
                 };
                 return if self.handle.bind_blob(at, &bytes) == ffi::SQLITE_OK {
@@ -659,15 +662,16 @@ impl Statement for Stmt {
             BindKind::Str | BindKind::Other(_) => {
                 if matches!(value.as_ref(), ValueRef::Null) {
                     self.handle.bind_null(at)
-                } else {
-                    let text = if let Some(text) = value.as_php_string() {
-                        *text
-                    } else {
-                        let text = to_string(req, &value)?.hand_on_unmigrated();
-                        replace(req, param.value, Value::string(text));
-                        text
-                    };
+                } else if let Some(text) = value.as_php_string() {
                     self.handle.bind_text(at, text.as_bytes())
+                } else {
+                    // Bound before the parameter takes it: the write
+                    // releases what the parameter held, which may run a
+                    // destructor, and no view is read past it.
+                    let text = to_string(req, &value)?;
+                    let rc = self.handle.bind_text(at, text.as_bytes());
+                    replace(req, param.value, text.into_value());
+                    rc
                 }
             }
         };

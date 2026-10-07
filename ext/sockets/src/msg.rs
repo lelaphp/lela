@@ -158,7 +158,7 @@ fn socket_recvmsg(
         value
     };
     match message.reference() {
-        Some(cell) => cell.set(req, value.hand_on_unmigrated())?,
+        Some(cell) => cell.set(req, value)?,
         None => value.give_up(req),
     }
     Ok(OrFalse::Value(long(got.count)))

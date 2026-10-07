@@ -9,7 +9,7 @@ use std::ops::ControlFlow;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, PhpArray, PhpString, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
 use crate::{Format, bind_vars, session_array, session_array_mut, shown};
@@ -169,24 +169,31 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         let mut reader = Unserializer::new(req, &data)?;
         // The value is the var hash's until it is destroyed; the session
         // keeps an owner of its own.
-        let read = reader.value(req);
-        if let Ok(Some(value)) = &read {
-            req.addref(value);
-        }
-        let finished = reader.finish(req);
-        if let Err(thrown) = finished {
-            if let Ok(Some(value)) = read {
-                req.release(value);
+        let held = match reader.value(req) {
+            Ok(read) => Ok(read.map(|value| Owner::take(req, value))),
+            Err(thrown) => Err(thrown),
+        };
+        let held = match (held, reader.finish(req)) {
+            (Ok(held), Ok(())) => held,
+            (Ok(held), Err(thrown)) => {
+                if let Some(held) = held {
+                    held.give_up(req);
+                }
+                return Err(thrown);
             }
-            return Err(thrown);
-        }
-        let read = read?;
-        let ok = read.is_some();
+            (Err(thrown), _) => return Err(thrown),
+        };
+        let ok = held.is_some();
         // A value read is bound whatever it is, and nothing read is the
         // empty array.
-        let vars = match read {
+        let vars = match held {
             Some(value) if !matches!(value.as_ref(), ValueRef::Null) => value,
-            _ => PhpArray::new(req)?.into_value().hand_on_unmigrated(),
+            held => {
+                if let Some(null) = held {
+                    null.give_up(req);
+                }
+                PhpArray::new(req)?.into_value()
+            }
         };
         bind_vars(req, vars)?;
         return Ok(ok || data.is_empty());

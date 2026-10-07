@@ -753,7 +753,7 @@ impl<T> Ref<T> {
     pub fn set(&self, req: &mut Request, value: impl IntoReturn) -> Result<(), Thrown> {
         let value = value.into_return(req)?;
         if let Some(cell) = self.cell {
-            return cell.set(req, value.hand_on_unmigrated());
+            return cell.set(req, value);
         }
         value.give_up(req);
         Ok(())

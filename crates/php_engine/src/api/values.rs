@@ -2283,12 +2283,12 @@ impl PhpRef {
     }
 
     /// A reference holding `value`, php's `ZVAL_NEW_REF`: one owner of
-    /// the cell, and `value` the cell's from here, so a caller that
-    /// keeps a second name of what `value` names takes its own owner.
-    /// The `Err` is the memory limit as the fatal that ends the request.
+    /// the cell, and a sink of `value`, whose owner the cell takes as
+    /// `ZVAL_NEW_REF` copies the zval in without a count of its own. The
+    /// `Err` is the memory limit as the fatal that ends the request.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn new(req: &mut Request, value: Value) -> Result<Owner<PhpRef>, Thrown> {
-        let made = req.reference(value);
+    pub fn new(req: &mut Request, value: Owner<Value>) -> Result<Owner<PhpRef>, Thrown> {
+        let made = req.reference(value.hand_on());
         adopted(req, made)
     }
 
@@ -2307,7 +2307,24 @@ impl PhpRef {
     /// any other cell takes the value as it is, after `zval_ptr_safe_dtor`
     /// has left it `null` and released what it held, so a destructor that
     /// release serves reads `null` there and not the value. On the
-    /// `TypeError` the value is given up and the cell keeps what it held.
+    /// `TypeError` the value is given up and the cell keeps what it held,
+    /// as `zend_try_assign_typed_ref_ex` gives it up.
+    ///
+    /// A sink: the value is an owner, the cell's from here, and a view is
+    /// refused, so a value the caller holds no owner of never reaches the
+    /// cell. The pinned code is documentation on the pinned stable rustdoc,
+    /// which checks only that the block fails (#2049); it fails with
+    /// `E0308`, an `Owner<Value>` expected and a `Value` found.
+    ///
+    /// ```compile_fail,E0308
+    /// # use php_engine::api::raising::Thrown;
+    /// # use php_engine::api::request::Request;
+    /// # use php_engine::api::values::{PhpRef, Value};
+    /// fn viewed(req: &mut Request, cell: PhpRef, value: Value) -> Result<(), Thrown> {
+    ///     cell.set(req, value)
+    /// }
+    /// # fn main() {}
+    /// ```
     ///
     /// ```php
     /// class T { public int $i = 0; public ?string $s = null; }
@@ -2342,7 +2359,8 @@ impl PhpRef {
     /// array(0) {
     /// }
     /// ```
-    pub fn set(&self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+    pub fn set(&self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
+        let value = value.hand_on();
         if self.0.sources() == 0 {
             req.reference_set(self.0, Value::null());
             req.reference_set(self.0, value);
@@ -2357,9 +2375,10 @@ impl PhpRef {
     /// `Z/Zend/zend_operators.c`): no type source is consulted, since php's
     /// conversion writes the zval where it stands. What binding a PDO
     /// parameter by reference does; an assignment through the cell is
-    /// [`PhpRef::set`]. What the cell held is released after the write.
-    pub fn convert(&self, req: &mut Request, value: Value) {
-        req.reference_set(self.0, value);
+    /// [`PhpRef::set`]. A sink, as [`PhpRef::set`] is: the cell takes the
+    /// value's owner, and what it held is released after the write.
+    pub fn convert(&self, req: &mut Request, value: Owner<Value>) {
+        req.reference_set(self.0, value.hand_on());
     }
 
     /// The reference as a value, `ZVAL_REF`: named, no owner taken.
@@ -3137,7 +3156,8 @@ mod tests {
     fn a_reference_is_a_cell_of_the_heap_and_is_followed_by_deref() {
         let mut req = crate::test::request();
         let start = req.memory_usage(false);
-        let Ok(r) = PhpRef::new(&mut req, Value::int(3)) else {
+        let three = Owner::take(&req, Value::int(3));
+        let Ok(r) = PhpRef::new(&mut req, three) else {
             return;
         };
         assert_eq!(req.memory_usage(false) - start, 32);
@@ -3147,18 +3167,18 @@ mod tests {
         assert_eq!(v.deref().as_int(), Some(3));
         assert_eq!(v.type_name(), "int");
         assert_eq!(v.refcount(), 1);
-        let Ok(text) = PhpString::new(&mut req, b"held through the reference").map(Owner::hand_on)
-        else {
+        let Ok(text) = PhpString::new(&mut req, b"held through the reference") else {
             return;
         };
-        let Ok(()) = r.set(&mut req, Value::string(text)) else {
+        let string = *text;
+        let Ok(()) = r.set(&mut req, text.into_value()) else {
             return;
         };
         assert_eq!(
             v.deref().as_str_bytes().map(<[u8]>::to_vec),
             Some(b"held through the reference".to_vec())
         );
-        assert_eq!(text.heap().refcount(), 1, "the cell holds the one owner");
+        assert_eq!(string.heap().refcount(), 1, "the cell holds the one owner");
         req.release(v);
         assert_eq!(
             req.memory_usage(false),
@@ -3175,8 +3195,8 @@ mod tests {
     fn a_resource_is_a_list_entry_closed_once_and_freed_at_the_last_release() {
         fn dtor(req: &mut Request, r: Resource) {
             let seen = r.native::<u32>(req).copied().unwrap_or(0);
-            req.define_constant(b"dtor", Value::int(i64::from(seen)))
-                .ok();
+            let seen = Owner::take(req, Value::int(i64::from(seen)));
+            req.define_constant(b"dtor", seen);
         }
         let mut req = crate::test::request();
         let start = req.memory_usage(false);

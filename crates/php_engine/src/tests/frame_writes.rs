@@ -89,7 +89,8 @@ fn stop(observed: &mut Observed<'_>) {
         return;
     };
     if let Some((name, value)) = plan.write {
-        let set = observed.set_frame_var(frame, name.as_bytes(), Value::int(value));
+        let value = Owner::take(observed, Value::int(value));
+        let set = observed.set_frame_var(frame, name.as_bytes(), value);
         let line = format!("[set {}]", if set { "ok" } else { "refused" });
         observed.write(line.as_bytes());
     }

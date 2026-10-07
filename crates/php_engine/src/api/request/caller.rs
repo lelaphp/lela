@@ -10,7 +10,7 @@ use php_heap::{FrameRef, Slot};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::exec;
 
 use super::{Deprecations, Link, Request, Slots, Symbol};
@@ -113,40 +113,26 @@ impl Request {
     }
 
     /// The variable `name` of the innermost user frame written with
-    /// `value`, which is the frame's from here: a CV's slot where the
-    /// table points the name at one, the bucket otherwise, a name the
-    /// table has not added to it; what stood there before is released
-    /// after the write, as `zend_hash_update` and `ZVAL_COPY_VALUE` into
-    /// an `IS_INDIRECT` slot leave it. What `extract` writes; a write
-    /// through a reference the variable holds is the native's to make.
-    pub fn set_caller_var(&mut self, name: &[u8], value: Value) {
+    /// `value`: a CV's slot where the table points the name at one, the
+    /// bucket otherwise, a name the table has not added to it; what stood
+    /// there before is released after the write, as `zend_hash_update`
+    /// and `ZVAL_COPY_VALUE` into an `IS_INDIRECT` slot leave it. What
+    /// `extract` writes; a write through a reference the variable holds
+    /// is the native's to make. A sink: the variable takes the value's
+    /// owner, given up where no user frame is running.
+    pub fn set_caller_var(&mut self, name: &[u8], value: Owner<Value>) {
         let Some(frame) = self.caller_frame() else {
-            self.release(value);
+            value.give_up(self);
             return;
         };
-        self.set_table_var(frame, name, value);
+        self.set_table_var(frame, name, value.hand_on());
     }
 
     /// [`Request::set_caller_var`]'s write into `frame`'s table, rebuilt
     /// first where the frame has none.
     fn set_table_var(&mut self, frame: FrameRef, name: &[u8], value: Value) {
         let table = self.rebuild_symbol_table(frame);
-        let indirect = self.table_mut(table).and_then(|entries| {
-            entries
-                .iter()
-                .find(|(key, _)| key == name)
-                .and_then(|(_, symbol)| match symbol {
-                    Symbol::Indirect(frame, at) => Some((*frame, *at)),
-                    Symbol::Value(_) | Symbol::Held(_) => None,
-                })
-        });
-        match indirect {
-            Some((frame, at)) => {
-                let previous = self.set_attached(table, frame, at, value);
-                self.release(previous);
-            }
-            None => self.symbol_update(table, name.to_vec(), value),
-        }
+        self.symbol_update_ind(table, name, value);
     }
 
     /// `zend_set_local_var_str(name, value, 0)`
@@ -154,12 +140,13 @@ impl Request {
     /// `$http_response_header` with: the variable `name` of the innermost
     /// user frame written with `value` where the frame has a symbol table,
     /// as the main op array's frame always has, or where `name` is one of
-    /// its CVs, what it held released; `false`, and the value released,
+    /// its CVs, what it held released; `false`, and the value given up,
     /// where neither is so or no user frame is running, since without
-    /// `force` php adds no table to a frame that has none.
-    pub fn set_local_var(&mut self, name: &[u8], value: Value) -> bool {
+    /// `force` php adds no table to a frame that has none. A sink: the
+    /// variable takes the value's owner.
+    pub fn set_local_var(&mut self, name: &[u8], value: Owner<Value>) -> bool {
         let Some(frame) = self.caller_frame() else {
-            self.release(value);
+            value.give_up(self);
             return false;
         };
         self.set_local_var_in(frame, name, value, false)
@@ -171,13 +158,13 @@ impl Request {
     /// table where it has one, else the CV of that name, else, with
     /// `force`, the table `zend_rebuild_symbol_table` builds for it; what
     /// stood there released, which php's CV arm leaves to its callers,
-    /// whose variable is undefined. `false`, and the value released,
+    /// whose variable is undefined. `false`, and the value given up,
     /// where none of them takes it.
     pub(super) fn set_local_var_in(
         &mut self,
         frame: FrameRef,
         name: &[u8],
-        value: Value,
+        value: Owner<Value>,
         force: bool,
     ) -> bool {
         if self
@@ -185,7 +172,7 @@ impl Request {
             .at(frame)
             .is_some_and(|state| state.symbol_table.is_some())
         {
-            self.set_table_var(frame, name, value);
+            self.set_table_var(frame, name, value.hand_on());
             return true;
         }
         let at = self
@@ -196,14 +183,14 @@ impl Request {
         let place = at.and_then(|at| self.stack.frame_mut(frame)?.slot_ptr(Slot(at)));
         let Some(place) = place else {
             if force {
-                self.set_table_var(frame, name, value);
+                self.set_table_var(frame, name, value.hand_on());
                 return true;
             }
-            self.release(value);
+            value.give_up(self);
             return false;
         };
         let held = Value::of_zval(place.read());
-        place.write(value.to_zval());
+        place.write(value.hand_on().to_zval());
         self.release(held);
         true
     }

@@ -965,35 +965,15 @@ fn define(
                 "cannot be a recursive array",
             ));
         }
-        copy_constant_array(req, *array)?.into_value().hand_on()
+        copy_constant_array(req, *array)?.into_value()
     } else {
-        req.addref(&value);
-        value
+        Owner::take(req, value)
     };
     let mut key = bytes.to_vec();
     if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
         key[..slash].make_ascii_lowercase();
     }
-    let special = key == b"__COMPILER_HALT_OFFSET__"
-        || key.eq_ignore_ascii_case(b"true")
-        || key.eq_ignore_ascii_case(b"false")
-        || key.eq_ignore_ascii_case(b"null");
-    if !special && req.define_constant(&key, value)? {
-        return Ok(true);
-    }
-    let shown = key
-        .iter()
-        .position(|b| *b == 0)
-        .map_or(&key[..], |nul| &key[..nul]);
-    warning(
-        req,
-        &format!(
-            "Constant {} already defined, this will be an error in PHP 9",
-            String::from_utf8_lossy(shown)
-        ),
-    );
-    req.release(value);
-    Ok(false)
+    Ok(req.define_constant(&key, value))
 }
 
 /// `validate_constant_array_argument`: no array in the value, through

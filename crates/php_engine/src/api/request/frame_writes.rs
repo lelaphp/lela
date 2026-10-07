@@ -34,16 +34,16 @@ impl Request {
     /// `zend_set_local_var(name, value, 1)`
     /// (`Z/Zend/zend_execute_API.c:1917`) with `EG(current_execute_data)`
     /// at the frame `frame` names: the variable `name` of that frame
-    /// written with `value`, one owner of which it takes, in its symbol
+    /// written with `value`, a sink whose owner it takes, in its symbol
     /// table where it has one, else in the compiled variable of that
     /// name, else in the table `zend_rebuild_symbol_table` builds for it;
     /// what stood there released. A variable that holds a reference is
     /// bound to `value` in its place, as php's `zend_hash_update_ind`
-    /// binds it. `false`, and the value released, where the frame is not
+    /// binds it. `false`, and the value given up, where the frame is not
     /// one this reaches: popped, suspended, or below a fiber.
-    pub fn set_frame_var(&mut self, frame: FrameId, name: &[u8], value: Value) -> bool {
+    pub fn set_frame_var(&mut self, frame: FrameId, name: &[u8], value: Owner<Value>) -> bool {
         let Some(at) = self.running_frame_of(frame) else {
-            self.release(value);
+            value.give_up(self);
             return false;
         };
         self.set_local_var_in(at, name, value, true)

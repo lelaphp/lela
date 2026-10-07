@@ -247,15 +247,16 @@ fn walk(
     };
     // A value where a reference was asked for, past the notice: the
     // walk is over a cell of its own, which nobody reads after.
-    let holder = if let Some(reference) = given.reference() {
-        reference
+    let (holder, owned) = if let Some(reference) = given.reference() {
+        (reference, None)
     } else {
-        req.addref(&target);
-        PhpRef::new(req, target)?.hand_on_unmigrated()
+        let target = Owner::take(req, target);
+        let cell = PhpRef::new(req, target)?;
+        (*cell, Some(cell))
     };
     let walked = walk_level(req, holder, &walking);
-    if given.reference().is_none() {
-        req.release(holder.as_value());
+    if let Some(cell) = owned {
+        cell.give_up(req);
     }
     walked?;
     Ok(True)

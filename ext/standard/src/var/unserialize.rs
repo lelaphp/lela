@@ -1342,8 +1342,8 @@ impl State<'_> {
                     let cell = if let Some(cell) = held.as_php_ref() {
                         *cell
                     } else {
-                        req.addref(&held);
-                        let made = PhpRef::new(req, held)?;
+                        let owned = Owner::take(req, held);
+                        let made = PhpRef::new(req, owned)?;
                         let cell = *made;
                         self.write(req, &held_slot, Some(at), made.into_value())?;
                         // `ref_props`: a typed property whose value was read

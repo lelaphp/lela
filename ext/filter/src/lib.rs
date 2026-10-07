@@ -809,7 +809,7 @@ fn filter_elements(
             } else {
                 let held = Owner::take(req, cell.get());
                 let filtered = zval_filter(req, held, filter, run)?;
-                cell.convert(req, filtered.hand_on_unmigrated());
+                cell.convert(req, filtered);
             }
             return Ok(ControlFlow::Continue(()));
         }
