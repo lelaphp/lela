@@ -1146,6 +1146,7 @@ values::Owner::unset
 values::Owner::unset_in_place
 values::PhpArray
 values::PhpArray::append
+values::PhpArray::clean
 values::PhpArray::contains
 values::PhpArray::copy
 values::PhpArray::cursor_current
