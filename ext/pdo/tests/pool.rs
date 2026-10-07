@@ -158,3 +158,33 @@ fn a_persistent_connection_found_dead_is_closed() {
     assert_eq!(closed(), "closed\nclosed\nclosed\n");
     std::fs::remove_file(&log).ok();
 }
+
+/// A persistent connection waiting in the engine's pool as the engine
+/// ends is closed through the connector's `closer` on the shutdown
+/// request, once, as php's `zend_shutdown` destroys `EG(persistent_list)`
+/// and `php_pdo_pdbh_dtor` reaches `dbh_free` (#1961): nothing is closed
+/// while the engine lives, and the one connection is closed by the drop
+/// of its last clone.
+#[test]
+fn a_pooled_persistent_connection_is_closed_as_the_engine_ends() {
+    let log = std::env::temp_dir().join(format!("t1961-pdo-end-{}.log", std::process::id()));
+    std::fs::remove_file(&log).ok();
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+            counted(),
+        ])
+        .build();
+    let script = format!(
+        "<?php new PDO('counted:{}', null, null, [PDO::ATTR_PERSISTENT => 'p']); echo 'done';",
+        log.display()
+    );
+    let served = engine.serve_capture(&script, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    let closed = || std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(closed(), "");
+    drop(engine);
+    assert_eq!(closed(), "closed\n");
+    std::fs::remove_file(&log).ok();
+}

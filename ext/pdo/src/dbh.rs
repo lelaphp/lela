@@ -255,11 +255,32 @@ pub(crate) fn deactivate(req: &mut Request) {
             Some(Pooled(pool)) => pool.give_back(key, dbh),
             None => Some(dbh),
         };
-        if let Some(mut dbh) = past
-            && let Conn::Open(conn) = &mut dbh.conn
-        {
-            conn.close(req);
+        if let Some(mut dbh) = past {
+            close_pooled(req, &mut dbh);
         }
+    }
+}
+
+/// What php's `zend_shutdown` does to PDO's persistent connections when it
+/// destroys `EG(persistent_list)` (`Z/Zend/zend.c:1166`): each the pool
+/// keeps closed on the shutdown request through its connector's `closer`,
+/// as `php_pdo_pdbh_dtor` reaches `dbh_free` (`pdo_dbh.c:1617`, `:1547`), so
+/// `pdo_mysql` sends its `COM_QUIT` (#1961).
+pub(crate) fn engine_end(req: &mut Request) {
+    let idle = req
+        .engine::<Pooled>()
+        .map(|Pooled(pool)| pool.drain())
+        .unwrap_or_default();
+    for (_, mut dbh) in idle {
+        close_pooled(req, &mut dbh);
+    }
+}
+
+/// `dbh_free`'s `closer` over a persistent connection the pool will not
+/// keep, given back past its bound or drained at engine end.
+fn close_pooled(req: &mut Request, dbh: &mut DbhState) {
+    if let Conn::Open(conn) = &mut dbh.conn {
+        conn.close(req);
     }
 }
 
