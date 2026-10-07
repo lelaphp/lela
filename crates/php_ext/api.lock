@@ -925,6 +925,7 @@ request::StreamCtx::notifier
 request::StreamCtx::notify
 request::StreamCtx::option
 request::StreamCtx::options
+request::StreamCtx::release_default
 request::StreamCtx::resource
 request::StreamCtx::set_notifier
 request::StreamCtx::set_option
@@ -1131,7 +1132,6 @@ values::Owner::into_resource
 values::Owner::into_static
 values::Owner::into_typed
 values::Owner::into_value
-values::Owner::leave_to_list
 values::Owner::replace
 values::Owner::separate
 values::Owner::set

@@ -208,16 +208,23 @@ impl StreamCtx {
     /// resource(6) of type (stream)
     /// ```
     pub fn default_ctx(req: &mut Request) -> Result<StreamCtx, Thrown> {
-        if let Some(context) = req.streams().default_context {
-            return Ok(context);
+        if let Some(context) = req.streams().default_context.as_deref() {
+            return Ok(*context);
         }
-        // php keeps no value of it: the request's resource list holds it
-        // until its close at the request's end.
         let context = StreamCtx::alloc(req)?;
         let view = *context;
-        context.leave_to_list();
-        req.streams().default_context = Some(view);
+        req.streams().default_context = Some(context);
         Ok(view)
+    }
+
+    /// `FG(default_context)` given up as the request ends: php keeps no
+    /// value of it and frees it with the regular list after
+    /// `shutdown_executor`; ext/standard, whose `FG` it is in php, gives
+    /// it up at its `post_deactivate`, past the list's close.
+    pub fn release_default(req: &mut Request) {
+        if let Some(context) = req.streams().default_context.take() {
+            context.give_up(req);
+        }
     }
 
     /// `zend_fetch_resource_ex(zcontext, "Stream-Context", le)` over

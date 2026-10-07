@@ -317,19 +317,6 @@ impl<T: View> Owner<T> {
 }
 
 impl<T: ResourceView> Owner<T> {
-    /// The owner handed to the request's resource list,
-    /// `EG(regular_list)`, as php leaves a resource it registered and
-    /// kept no value of: the list's close at the request's end,
-    /// `zend_close_rsrc_list`, closes it after every `RSHUTDOWN`, its
-    /// destructor served then, and the list's destruction frees it.
-    /// What `FG(default_context)` is left to. A resource only: a value
-    /// of any other kind has no list to end in.
-    // Taking the owner is the point: the list holds it from here.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn leave_to_list(mut self) {
-        self.consume();
-    }
-
     /// The owner of the typed view as the [`Resource`] it is, the same
     /// count: what a native returns a stream it made as.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
