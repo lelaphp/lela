@@ -303,3 +303,21 @@ foreach (['A', 'I', 'T', 'E'] as $c) {
         "bool(false)\nbool(false)\nbool(false)\nCannot instantiate enum E\n"
     );
 }
+
+/// A read that fails on a throw, here `unserialize_callback_func`'s,
+/// makes none of the `__wakeup()` calls it queued, as
+/// `zend_call_function` returns at `EG(exception)` without calling, so
+/// the throwable a queued call would make is never made and none is
+/// dropped (#2231, `ext/standard/tests/serialize/bug64354_2.phpt`).
+#[test]
+fn a_read_failed_on_a_throw_makes_no_delayed_call() {
+    let stdout = armed(
+        r#"<?php
+class A { function __wakeup() { throw new Exception("wakeup A"); } }
+function cb($class) { throw new Exception("no $class"); }
+ini_set('unserialize_callback_func', 'cb');
+try { unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "no B\n");
+}
