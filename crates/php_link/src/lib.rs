@@ -3360,67 +3360,17 @@ impl<'a, H: Copy> Linker<'a, H> {
         if let Some(refusal) = self.inherited_interfaces_refused(child, &all) {
             return Some(Linked::Refused(at_class(child, refusal)));
         }
+        let inherited = self
+            .class_parent(child)
+            .map(|parent| self.all_interfaces(parent))
+            .unwrap_or_default();
         let mut interfaces = Vec::new();
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
-            for constant in &interface.constants {
-                match constants.find(&constant.name.0, member_name).copied() {
-                    Some((held_by, _)) if held_by.is_some_and(|by| same(by, interface)) => {}
-                    Some((held_by, held)) => {
-                        if let Some(linked) =
-                            self.constant_refused(child, held, held_by, constant, interface)
-                        {
-                            return Some(linked);
-                        }
-                    }
-                    None => put(constants, Some(interface), constant),
-                }
-            }
-            for method in &interface.methods {
-                match methods.find(&method.function.name.0, member_name).copied() {
-                    Some((None, own)) => {
-                        let (fe_side, proto_side) = Self::own_over(child, interface);
-                        if let Some(linked) = self.method_refused(
-                            child,
-                            own,
-                            fe_side,
-                            method,
-                            proto_side,
-                            Check::Interface,
-                        ) {
-                            return Some(linked);
-                        }
-                    }
-                    // `do_inherit_method` over a method another class of
-                    // the chain or another interface put there: held to
-                    // the interface's as php holds it, unless it is that
-                    // very method.
-                    Some((Some(held_by), held)) if !same(held_by, interface) => {
-                        let fe_side = Side {
-                            scope: Self::scope_of(child, Cls::Linked(held_by)),
-                            shown: &held_by.name.0,
-                        };
-                        let (_, proto_side) = Self::own_over(child, interface);
-                        let check = Check::Interface;
-                        let refused =
-                            self.method_refused(child, held, fe_side, method, proto_side, check);
-                        if refused.is_some() {
-                            return refused;
-                        }
-                    }
-                    Some(_) => {}
-                    None => put(methods, Some(interface), method),
-                }
-            }
-            for property in &interface.properties {
-                if let Some(own) = child.properties.iter().find(|p| p.name == property.name)
-                    && let Some(linked) = self.inherited_property_refused(
-                        child,
-                        own,
-                        property,
-                        interface,
-                        Check::Interface,
-                    )
+            if named.iter().any(|own| same(own, interface)) {
+                let again = inherited.iter().any(|seen| same(seen, interface));
+                if let Some(linked) =
+                    self.implementation_refused(child, interface, again, constants, methods)
                 {
                     return Some(linked);
                 }
@@ -3429,6 +3379,113 @@ impl<'a, H: Copy> Linker<'a, H> {
                 && let Some(refusal) = self.interface_refused(child, interface, &all)
             {
                 return Some(Linked::Refused(at_class(child, refusal)));
+            }
+        }
+        None
+    }
+
+    /// `do_interface_implementation` of one interface the class names,
+    /// over the interface's linked tables, in which a constant or a
+    /// method it redeclares hides its parent's; the parents it extends
+    /// add nothing (`zend_do_inherit_interfaces`). One its parent
+    /// implements `again` is only `do_inherit_constant_check`ed.
+    ///
+    /// ```php
+    /// interface I { const X = "i"; function m(int $a); }
+    /// interface I2 extends I { const X = "i2"; function m(int|string $a); }
+    /// class D implements I2 { function m(int|string $a) {} }
+    /// echo D::X, "\n";
+    /// interface K { const Y = "k"; }
+    /// class P implements K {}
+    /// class Q extends P implements K { const Y = "q"; }
+    /// echo Q::Y, "\n";
+    /// abstract class E implements I2, I {}
+    /// ```
+    /// ```expect exit=255
+    /// i2
+    /// q
+    ///
+    /// Fatal error: Class E inherits both I2::X and I::X, which is ambiguous in %s on line 10
+    /// ```
+    ///
+    /// ```php
+    /// interface I { const X = "i"; }
+    /// interface J { const X = "j"; }
+    /// class D implements I, J {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Class D inherits both I::X and J::X, which is ambiguous in %s on line 4
+    /// ```
+    fn implementation_refused(
+        &mut self,
+        child: &'a ClassDecl,
+        interface: &'a ClassDecl,
+        again: bool,
+        constants: &mut Constants<'a>,
+        methods: &mut Methods<'a>,
+    ) -> Option<Linked> {
+        for &(declaring, constant) in self.members_above::<ClassConstDecl>(interface).rows() {
+            let declaring = declaring.unwrap_or(interface);
+            match constants.find(&constant.name.0, member_name).copied() {
+                Some((held_by, _)) if held_by.is_some_and(|by| same(by, declaring)) => {}
+                Some((held_by, held)) => {
+                    let refused = self.constant_refused(child, held, held_by, constant, declaring);
+                    if refused.is_some() {
+                        return refused;
+                    }
+                }
+                None if !again => put(constants, Some(declaring), constant),
+                None => {}
+            }
+        }
+        if again {
+            return None;
+        }
+        for &(declaring, method) in self.members_above::<MethodDecl>(interface).rows() {
+            let declaring = declaring.unwrap_or(interface);
+            match methods.find(&method.function.name.0, member_name).copied() {
+                Some((None, own)) => {
+                    let (fe_side, proto_side) = Self::own_over(child, declaring);
+                    let check = Check::Interface;
+                    let refused =
+                        self.method_refused(child, own, fe_side, method, proto_side, check);
+                    if refused.is_some() {
+                        return refused;
+                    }
+                }
+                // `do_inherit_method` over a method another class of the
+                // chain or another interface put there: held to the
+                // interface's as php holds it, unless it is that very
+                // method.
+                Some((Some(held_by), held)) if !same(held_by, declaring) => {
+                    let fe_side = Side {
+                        scope: Self::scope_of(child, Cls::Linked(held_by)),
+                        shown: &held_by.name.0,
+                    };
+                    let (_, proto_side) = Self::own_over(child, declaring);
+                    let check = Check::Interface;
+                    let refused =
+                        self.method_refused(child, held, fe_side, method, proto_side, check);
+                    if refused.is_some() {
+                        return refused;
+                    }
+                }
+                Some(_) => {}
+                None => put(methods, Some(declaring), method),
+            }
+        }
+        for &(declaring, property) in self.members_above::<PropertyDecl>(interface).rows() {
+            let declaring = declaring.unwrap_or(interface);
+            if let Some(own) = child.properties.iter().find(|p| p.name == property.name)
+                && let Some(linked) = self.inherited_property_refused(
+                    child,
+                    own,
+                    property,
+                    declaring,
+                    Check::Interface,
+                )
+            {
+                return Some(linked);
             }
         }
         None
