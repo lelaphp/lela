@@ -298,9 +298,7 @@ pub(crate) fn deprecated_constant(req: &mut Request, key: &[u8]) -> Result<(), T
         level,
         &format!("Constant {name} is deprecated{suffix}"),
     );
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
+    none_pending(req)?;
     Ok(())
 }
 
@@ -1322,6 +1320,16 @@ pub fn pending(req: &mut Request) -> Result<(), Thrown> {
         None if req.is_pending() => Err(Thrown::of(None)),
         None => Ok(()),
     }
+}
+
+/// `if (UNEXPECTED(EG(exception)))` after a step that can raise: the
+/// throwable a handler left pending as the `Err`, left pending for the
+/// unwind to find.
+pub(crate) fn none_pending(req: &Request) -> Result<(), Thrown> {
+    if req.is_pending() {
+        return Err(Thrown::of(None));
+    }
+    Ok(())
 }
 
 /// `zend_replace_error_handling(EH_THROW, class)` around `f`: a warning

@@ -14,7 +14,7 @@ use php_unit::decl::{PropertyDecl, Visibility};
 
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
-use crate::api::raising::{Level, Thrown};
+use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, adopted,
 };
@@ -1045,17 +1045,9 @@ impl Request {
             self.reference_set(cell, value);
             return Ok(());
         }
-        match crate::ops::verify_ref_assignable(self, cell, &value, strict) {
-            Ok(None) => self.reference_set(cell, value),
-            Ok(Some(coerced)) => {
-                self.release(value);
-                self.reference_set(cell, coerced);
-            }
-            Err(thrown) => {
-                self.release(value);
-                return Err(thrown);
-            }
-        }
+        let verdict = crate::ops::verify_ref_assignable(self, cell, &value, strict);
+        let value = crate::ops::landed(self, value, verdict)?;
+        self.reference_set(cell, value);
         Ok(())
     }
 
@@ -2240,17 +2232,7 @@ impl Request {
             name,
             strict,
         );
-        match verified {
-            Ok(None) => Ok(value),
-            Ok(Some(coerced)) => {
-                self.release(value);
-                Ok(coerced)
-            }
-            Err(thrown) => {
-                self.release(value);
-                Err(thrown)
-            }
-        }
+        crate::ops::landed(self, value, verified)
     }
 
     /// `zend_std_write_property`'s `typed_property` arm around
@@ -3091,9 +3073,7 @@ impl Request {
             return Ok(());
         }
         held.let_go(self);
-        if self.is_pending() {
-            return Err(Thrown::of(None));
-        }
+        none_pending(self)?;
         Err(crate::api::raising::throw_error(
             self,
             "Error",

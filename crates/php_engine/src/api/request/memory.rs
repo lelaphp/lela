@@ -183,6 +183,20 @@ impl Request {
         self.fatal_of(allocated).map(PhpRef::of)
     }
 
+    /// `ZVAL_MAKE_REF`: the cell `place` holds, or a new one over what it
+    /// held, `null` for what nothing wrote, written back into the place,
+    /// which gives the cell the owner the place had of the value. No
+    /// owner more is taken; a caller that keeps the cell adds its own.
+    pub(crate) fn make_ref(&mut self, place: php_heap::ZvalRef) -> Result<PhpRef, Thrown> {
+        let held = Value::of_zval(place.read());
+        if let Some(cell) = held.as_php_ref() {
+            return Ok(*cell);
+        }
+        let cell = self.reference(held.undef_as_null())?;
+        place.write(cell.as_value().to_zval());
+        Ok(cell)
+    }
+
     /// The reference's half of `zend_assign_to_variable`, what
     /// [`PhpRef::set`] and `ASSIGN` over a CV holding a reference are:
     /// `value` is the cell's from here, and what the cell held is

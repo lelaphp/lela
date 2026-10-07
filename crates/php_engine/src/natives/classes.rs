@@ -12,7 +12,7 @@ use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
 use crate::api::abi::{
     OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
 };
-use crate::api::raising::{Thrown, arg_type_error, deprecated, throw_error, warning};
+use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, throw_error, warning};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -132,9 +132,7 @@ fn get_parent_class(
             req,
             "Calling get_parent_class() without arguments is deprecated",
         );
-        if req.is_pending() {
-            return Err(Thrown::of(None));
-        }
+        none_pending(req)?;
         req.scope()
     };
     match class.and_then(|class| req.class_parent(class)) {

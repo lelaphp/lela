@@ -14,7 +14,7 @@ use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
 use php_unit::{FramelessEntry, Opcode, Unit};
 
 use crate::api::call::Function;
-use crate::api::raising::{Level, Thrown};
+use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, adopted};
 use crate::engine::Shared;
 use crate::exec;
@@ -1270,9 +1270,7 @@ impl Request {
             String::from_utf8_lossy(used_by)
         );
         crate::api::raising::raise(self, level, &message);
-        if self.is_pending() {
-            return Err(Thrown::of(None));
-        }
+        none_pending(self)?;
         Ok(())
     }
 

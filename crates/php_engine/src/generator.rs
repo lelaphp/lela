@@ -799,8 +799,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     }
     let caller = req.stack_mut().current();
     if let Some((at, slot)) = returns_to {
-        let previous = req.set_slot(at, slot, object.as_value());
-        req.release(previous);
+        req.replace_slot(at, slot, object.as_value());
     }
     req.vm_mut().advance(caller);
     Ok(crate::tier::Stepped::Moved(caller))
@@ -1274,17 +1273,7 @@ fn resumed(req: &mut Request, generator: PhpObject) -> Result<(), Thrown> {
         req.end_in(&fatal);
         return Err(Thrown::of(None));
     }
-    pending_as_err(req)
-}
-
-fn pending_as_err(req: &mut Request) -> Result<(), Thrown> {
-    if let Some(pending) = req.take_pending_view() {
-        return Err(Thrown::of(Some(pending)));
-    }
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
-    Ok(())
+    crate::api::raising::pending(req)
 }
 
 /// `zend_generator_ensure_initialized`: a generator never resumed runs

@@ -62,7 +62,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Thrown, none_pending};
 use crate::api::request::{Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
@@ -313,10 +313,7 @@ pub(crate) fn declare_class<T: Tier>(
     let key = runtime_key(code, op)?;
     match req.bind_class_in_slot(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
+        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 
@@ -365,10 +362,7 @@ pub(crate) fn declare_class_delayed<T: Tier>(
     let key = runtime_key(code, op)?;
     match req.bind_delayed(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
+        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 
@@ -450,8 +444,7 @@ pub(crate) fn declare_anon_class<T: Tier>(
                 class
             }
             Err(thrown) => {
-                req.leave_pending(&thrown);
-                return Ok(Stepped::Threw(frame));
+                return threw(req, frame, &thrown);
             }
         }
     };
@@ -527,10 +520,7 @@ pub(crate) fn declare_function<T: Tier>(
     };
     match req.bind_function(&serving.unit, at, &lowered) {
         Ok(()) => Ok(advance(req, frame)),
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
+        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 
@@ -845,9 +835,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
         Ok(made) => made,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, made.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, made.as_value());
     Ok(advance(req, frame))
 }
 
@@ -1163,8 +1151,7 @@ pub(crate) fn bind_static<T: Tier>(
         req.addref(&held);
         held
     };
-    let previous = req.set_slot(frame, op.op1, bound);
-    req.release(previous);
+    req.replace_slot(frame, op.op1, bound);
     Ok(advance(req, frame))
 }
 
@@ -1216,8 +1203,7 @@ pub(crate) fn bind_init_static_or_jmp<T: Tier>(
     };
     let bound = cell.as_value();
     req.addref(&bound);
-    let previous = req.set_slot(frame, op.op1, bound);
-    req.release(previous);
+    req.replace_slot(frame, op.op1, bound);
     jump_to(req, frame, op.op2)
 }
 
@@ -1276,8 +1262,7 @@ pub(crate) fn bind_global<T: Tier>(
         Ok(cell) => cell,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let previous = req.set_slot(frame, op.op1, cell.as_value());
-    req.release(previous);
+    req.replace_slot(frame, op.op1, cell.as_value());
     Ok(advance(req, frame))
 }
 
@@ -1661,10 +1646,7 @@ pub(crate) fn echo<T: Tier>(
             req.release(Value::string(text));
             Ok(advance(req, frame))
         }
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
+        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 
@@ -1755,8 +1737,7 @@ fn init_call(
     let name = match crate::ops::to_string(req, &named) {
         Ok(name) => name,
         Err(thrown) => {
-            req.leave_pending(&thrown);
-            return Ok(Stepped::Threw(frame));
+            return threw(req, frame, &thrown);
         }
     };
     let slot = CacheSlot(op.out);
@@ -1782,8 +1763,7 @@ fn init_call(
             ),
         );
         req.release(Value::string(name));
-        req.leave_pending(&thrown);
-        return Ok(Stepped::Threw(frame));
+        return threw(req, frame, &thrown);
     };
     let count = usize::try_from(op.extended_value).unwrap_or(0);
     req.vm_mut()
@@ -1946,15 +1926,7 @@ fn send_by_ref(
 /// the place, which gives the cell the owner the place had of the
 /// value; the cell comes back with one more owner, the caller's.
 fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
-    let held = exec::value_of(at.read());
-    let cell = if let Some(cell) = held.as_php_ref() {
-        *cell
-    } else {
-        let cell = req.reference(held.undef_as_null())?;
-        at.write(cell.as_value().to_zval());
-        cell
-    };
-    let bound = cell.as_value();
+    let bound = req.make_ref(at)?.as_value();
     req.addref(&bound);
     Ok(bound)
 }
@@ -2943,11 +2915,7 @@ pub(crate) fn assert_check<T: Tier>(
     if req.assertions() > 0 {
         return Ok(advance(req, frame));
     }
-    if op.out_type != OperandKind::Unused {
-        let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, Value::bool(true));
-        req.release(previous);
-    }
+    write_out(req, frame, code, op, &Value::bool(true));
     jump_to(req, frame, op.op2)
 }
 
@@ -3421,8 +3389,7 @@ fn answered(
 ) -> Edge {
     match returns_to {
         Some((at, slot)) => {
-            let previous = req.set_slot(at, slot, value);
-            req.release(previous);
+            req.replace_slot(at, slot, value);
         }
         None => req.release(value),
     }
@@ -3727,8 +3694,7 @@ fn verify_arg_type(
     let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
     let argument = req.slot(frame, slot);
     if let Some(coerced) = verified_arg(req, frame, number, at, &argument)? {
-        let previous = req.set_slot(frame, slot, coerced);
-        req.release(previous);
+        req.replace_slot(frame, slot, coerced);
     }
     Ok(())
 }
@@ -3900,8 +3866,7 @@ pub(crate) fn recv_variadic<T: Tier>(
         Ok(collected) => collected,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let previous = req.set_slot(frame, op.out, collected.to_value());
-    req.release(previous);
+    req.replace_slot(frame, op.out, collected.to_value());
     for step in 0..count {
         let Some(argument) = req
             .vm()
@@ -4130,8 +4095,7 @@ pub(crate) fn verify_return_type<T: Tier>(
         req.release(previous);
         return Ok(advance(req, frame));
     }
-    let previous = req.set_slot(frame, slot, coerced);
-    req.release(previous);
+    req.replace_slot(frame, slot, coerced);
     Ok(advance(req, frame))
 }
 
@@ -4314,9 +4278,7 @@ pub(crate) fn callable_convert<T: Tier>(
         Ok(made) => made,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, made.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, made.as_value());
     Ok(advance(req, frame))
 }
 
@@ -4615,8 +4577,7 @@ pub(crate) fn recv_init<T: Tier>(
             Err(thrown) => return threw(req, frame, &thrown),
         };
         let evaluated = default.1;
-        let previous = req.set_slot(frame, op.out, default.0);
-        req.release(previous);
+        req.replace_slot(frame, op.out, default.0);
         // php goes on to `recv_init_check_type` for a default it
         // evaluated and returns for one it copied, so a constant
         // expression's value is held to the parameter's type and a
@@ -4733,9 +4694,7 @@ pub(crate) fn new<T: Tier>(
         Ok(object) => object,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, object.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, object.as_value());
     let count = usize::try_from(op.extended_value).unwrap_or(0);
     // `Z_OBJ_HT_P(result)->get_constructor`: the table's answer, which
     // is `zend_std_get_constructor`'s visibility check for a user class
@@ -4749,8 +4708,7 @@ pub(crate) fn new<T: Tier>(
         let next_is_do_fcall = exec::opline_at(code, at.saturating_add(1))
             .is_some_and(|next| next.opcode == php_unit::Opcode::DoFcall);
         if count == 0 && next_is_do_fcall {
-            req.vm_mut().jump(frame, at.saturating_add(2));
-            return Ok(Stepped::Same(frame));
+            return jump_to(req, frame, at.saturating_add(2));
         }
     }
     let function = constructor.unwrap_or(Function::PASS);
@@ -5715,9 +5673,7 @@ pub(crate) fn fetch_this<T: Tier>(
     };
     let value = this.as_value();
     req.addref(&value);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -5984,12 +5940,7 @@ pub(crate) fn fetch_globals<T: Tier>(
         Ok(array) => array,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let previous = req.set_slot(
-        frame,
-        exec::temporary_slot(code, op.out),
-        Value::array(array),
-    );
-    req.release(previous);
+    set_out(req, frame, code, op, Value::array(array));
     Ok(advance(req, frame))
 }
 
@@ -6178,8 +6129,7 @@ fn fetch_by_name(
             if !lock {
                 exec::free_operand(req, frame, code, op.op1_type, op.op1);
             }
-            let previous = req.set_slot(frame, out, Value::undef());
-            req.release(previous);
+            req.replace_slot(frame, out, Value::undef());
             return threw(req, frame, &thrown);
         }
     };
@@ -6254,8 +6204,7 @@ fn fetch_by_name(
     if !lock {
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
     }
-    let previous = req.set_slot(frame, out, value.unwrap_or_else(Value::null));
-    req.release(previous);
+    req.replace_slot(frame, out, value.unwrap_or_else(Value::null));
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
@@ -6345,8 +6294,7 @@ fn static_member(
 fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName) -> Edge {
     let value = match (req.vm().this(frame), mode) {
         (_, ByName::W | ByName::Rw | ByName::Unset) => {
-            let previous = req.set_slot(frame, out, Value::undef());
-            req.release(previous);
+            req.replace_slot(frame, out, Value::undef());
             let message = if mode == ByName::Unset {
                 "Cannot unset $this"
             } else {
@@ -6366,8 +6314,7 @@ fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName
         }
         (None, ByName::Is) => Value::null(),
     };
-    let previous = req.set_slot(frame, out, value);
-    req.release(previous);
+    req.replace_slot(frame, out, value);
     Ok(advance(req, frame))
 }
 
@@ -6420,9 +6367,7 @@ pub(crate) fn begin_silence<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let standing = req.error_reporting();
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::int(standing));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::int(standing));
     if !has_only_fatal_errors(standing) {
         req.set_error_reporting(standing & E_FATAL_ERRORS);
         req.silence_modifies_error_reporting();
@@ -6603,14 +6548,7 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     } else {
         req.class_constant(class, &name)
     };
-    let value = match value {
-        Ok(value) => value,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
-    Ok(advance(req, frame))
+    computed_into(req, frame, code, op, value)
 }
 
 /// `ZEND_FETCH_CONSTANT` (`Z/Zend/zend_vm_def.h:6075`), the opline
@@ -6716,9 +6654,7 @@ pub(crate) fn fetch_constant<T: Tier>(
         return threw(req, frame, &thrown);
     };
     req.addref(&value);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     // `if (ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED)`
     // (`Z/Zend/zend_execute.c:5439`): the value is copied first and the
     // deprecation raised after, and the opline then advances under
@@ -7020,8 +6956,7 @@ fn static_prop_place(
         if held.as_object().is_some() || (mode == StaticFetch::Unset && unwritten) {
             let copied = held.undef_as_null();
             req.addref(&copied);
-            let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), copied);
-            req.release(previous);
+            set_out(req, frame, code, op, copied);
             return Ok(advance(req, frame));
         }
         if let Some(thrown) = req.set_refused(declaring, &property, "indirectly modify") {
@@ -7049,8 +6984,7 @@ fn static_prop_place(
         .flatten();
     if let Some(cell) = bound {
         req.addref(&cell.as_value());
-        let previous = req.set_slot(frame, out, cell.as_value());
-        req.release(previous);
+        req.replace_slot(frame, out, cell.as_value());
         return Ok(advance(req, frame));
     }
     let Some(var) = req.slot_ptr(frame, out) else {
@@ -7074,14 +7008,8 @@ fn fetch_static_prop(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let scope = req.executed_scope();
-    let value = match req.static_property(class, &name, scope, fetch) {
-        Ok(value) => value,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
-    Ok(advance(req, frame))
+    let read = req.static_property(class, &name, scope, fetch);
+    computed_into(req, frame, code, op, read)
 }
 
 /// `ZEND_FETCH_OBJ_R` (`Z/Zend/zend_vm_def.h:2069`) over a property
@@ -7311,9 +7239,7 @@ fn fetch_obj(
         Ok(value) => req.unwrap_reference(value),
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -8139,8 +8065,7 @@ fn fetch_obj_read(
             return threw(req, frame, &thrown);
         }
     };
-    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
 }
@@ -8296,14 +8221,7 @@ pub(crate) fn fetch_dim_r<T: Tier>(
     let read = read_dimension(req, frame, code, op, &container, DimRead::Warning)?;
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let value = match read {
-        Ok(value) => value,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
-    Ok(advance(req, frame))
+    computed_into(req, frame, code, op, read)
 }
 
 /// `ZEND_FETCH_DIM_IS` (`Z/Zend/zend_vm_def.h`), a link of a chain an
@@ -8355,14 +8273,7 @@ pub(crate) fn fetch_dim_is<T: Tier>(
     let read = read_dimension(req, frame, code, op, &container, DimRead::Silent)?;
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let value = match read {
-        Ok(value) => value,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
-    Ok(advance(req, frame))
+    computed_into(req, frame, code, op, read)
 }
 
 /// `ZEND_FETCH_LIST_R` (`Z/Zend/zend_vm_def.h:2431`), one element of a
@@ -8432,14 +8343,7 @@ fn list_read(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) ->
         Ok(Value::null())
     };
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    let value = match read {
-        Ok(value) => value,
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
-    Ok(advance(req, frame))
+    computed_into(req, frame, code, op, read)
 }
 
 /// `ZEND_FETCH_LIST_W` (`Z/Zend/zend_vm_def.h:2443`), an element of a
@@ -9275,9 +9179,7 @@ fn string_held<T>(
     let stepped = step(req);
     let left = held.let_go(req);
     let stepped = stepped?;
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
+    none_pending(req)?;
     Ok((!left.freed() && keeper.stands(at, string)).then_some(stepped))
 }
 
@@ -9476,9 +9378,7 @@ fn held_alone<T>(
     let stepped = step(req);
     let left = held.let_go(req);
     let stepped = stepped?;
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
+    none_pending(req)?;
     Ok((!left.not_alone()).then_some(stepped))
 }
 
@@ -10040,9 +9940,7 @@ pub(crate) fn clone<T: Tier>(
         Ok(object) => object,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, object.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, object.as_value());
     Ok(advance(req, frame))
 }
 
@@ -10216,8 +10114,7 @@ fn hold_class(
     class: crate::api::values::ClassId,
 ) {
     let slot = exec::temporary_slot(code, out);
-    let previous = req.set_slot(frame, slot, Value::int(i64::from(class.0)));
-    req.release(previous);
+    req.replace_slot(frame, slot, Value::int(i64::from(class.0)));
 }
 
 /// `ZEND_FETCH_CLASS_NAME` (`Z/Zend/zend_vm_def.h:8895`), `C::class`
@@ -10311,9 +10208,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::string(name));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::string(name));
     Ok(advance(req, frame))
 }
 
@@ -10395,8 +10290,7 @@ pub(crate) fn fetch_class<T: Tier>(
         }
         // `Z_CE_P(EX_VAR(opline->result.var)) = NULL`.
         Ok(None) => {
-            let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), Value::null());
-            req.release(previous);
+            set_out(req, frame, code, op, Value::null());
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -10499,10 +10393,7 @@ fn do_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, opco
             }
             Ok(advance(req, frame))
         }
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
+        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 
@@ -10619,8 +10510,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
         }
     };
     if answer == Cached::Hit {
-        req.vm_mut().jump(frame, op.op2);
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, op.op2);
     }
     Ok(advance(req, frame))
 }
@@ -10855,16 +10745,10 @@ fn frameless_call(
     let width = if arguments.len() == 3 { 2 } else { 1 };
     match served {
         Ok(value) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, value);
-            req.release(previous);
-            req.vm_mut().jump(frame, at.saturating_add(width));
-            Ok(Stepped::Same(frame))
+            set_out(req, frame, code, op, value);
+            jump_to(req, frame, at.saturating_add(width))
         }
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
+        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 
@@ -10968,12 +10852,7 @@ pub(crate) fn assign<T: Tier>(
         Ok(pair) => pair,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    if op.out_type != OperandKind::Unused {
-        req.addref(&landed);
-        let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, landed);
-        req.release(previous);
-    }
+    write_out(req, frame, code, op, &landed);
     req.release(garbage);
     Ok(advance(req, frame))
 }
@@ -11070,8 +10949,7 @@ pub(crate) fn assign_op<T: Tier>(
     let held = if op.op1_type == OperandKind::Cv {
         let held = exec::operand(req, frame, code, op.op1_type, op.op1);
         if req.slot(frame, op.op1).tag() == TypeTag::Undef {
-            let previous = req.set_slot(frame, op.op1, Value::null());
-            req.release(previous);
+            req.replace_slot(frame, op.op1, Value::null());
         }
         held
     } else {
@@ -11279,17 +11157,11 @@ pub(crate) fn assign_ref<T: Tier>(
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
             return Ok(advance(req, frame));
         }
-        Some(cell) => *cell,
-        None => {
-            let held = held.undef_as_null();
-            let cell = match req.reference(held) {
-                Ok(cell) => cell,
-                Err(thrown) => return threw(req, frame, &thrown),
-            };
-            // The owner the slot had of `held` is the cell's now.
-            source.write(cell.as_value().to_zval());
-            cell
-        }
+        // The owner the slot had of `held` is the cell's now.
+        _ => match req.make_ref(source) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        },
     };
     let bound = cell.as_value();
     req.addref(&bound);
@@ -11468,19 +11340,12 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         write_out(req, frame, code, op, &landed);
         req.release(garbage);
         exec::free_operand(req, frame, code, data_type, data_at);
-        req.vm_mut().jump(frame, at.saturating_add(2));
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, at.saturating_add(2));
     }
-    let cell = if let Some(cell) = held.as_php_ref() {
-        *cell
-    } else {
-        let cell = match req.reference(held.undef_as_null()) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
-        // The owner the source had of `held` is the cell's now.
-        source.write(cell.as_value().to_zval());
-        cell
+    // The owner the source had of `held` is the cell's now.
+    let cell = match req.make_ref(source) {
+        Ok(cell) => cell,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     let typed = req.declared_typed_property(object.class(), &name);
     if let Some(typed) = typed.as_ref() {
@@ -11522,8 +11387,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     write_out(req, frame, code, op, &bound);
     req.release(garbage);
     exec::free_operand(req, frame, code, data_type, data_at);
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, at.saturating_add(2))
 }
 
 /// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two
@@ -11829,8 +11693,7 @@ pub(crate) fn assign_obj<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, at.saturating_add(2))
 }
 
 /// `ASSIGN_OBJ`'s body over an object: the name placed
@@ -12165,8 +12028,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     };
     let Some((declaring, property)) = placed else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        req.vm_mut().jump(frame, at.saturating_add(2));
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, at.saturating_add(2));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     // `zend_assign_to_typed_prop`'s set-visibility arm, after the value
@@ -12186,8 +12048,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
         Ok(pair) => landed_out(req, frame, code, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, at.saturating_add(2))
 }
 
 /// The slot one of the five read-modify-write opcodes over a
@@ -12439,8 +12300,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        req.vm_mut().jump(frame, at.saturating_add(2));
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, at.saturating_add(2));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
@@ -12488,24 +12348,19 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
         write_out(req, frame, code, op, &cell.get());
-        req.vm_mut().jump(frame, at.saturating_add(2));
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, at.saturating_add(2));
     }
     let stepped = match ty {
         None => stepped,
-        Some(ty) => match verified_op(req, &stepped, &ty, declaring, &name, strict) {
-            Ok(None) => stepped,
-            Ok(Some(coerced)) => {
-                req.release(stepped);
-                coerced
+        Some(ty) => {
+            let verdict = verified_op(req, &stepped, &ty, declaring, &name, strict);
+            // php gives the operation's value up and the slot keeps what
+            // it held (`zval_ptr_dtor(&z_copy)`).
+            match crate::ops::landed(req, stepped, verdict) {
+                Ok(landed) => landed,
+                Err(thrown) => return threw(req, frame, &thrown),
             }
-            Err(thrown) => {
-                // php gives the operation's value up and the slot keeps
-                // what it held (`zval_ptr_dtor(&z_copy)`).
-                req.release(stepped);
-                return threw(req, frame, &thrown);
-            }
-        },
+        }
     };
     write_out(req, frame, code, op, &stepped);
     // The value is already the declared type's, so the store is php's
@@ -12513,8 +12368,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // time: a weak conversion raises a deprecation and php raises it
     // once.
     req.store_static_property(declaring, &name, stepped);
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, at.saturating_add(2))
 }
 
 /// `zend_binary_assign_op_typed_prop` (`Z/Zend/zend_execute.c:1693`):
@@ -12604,16 +12458,13 @@ fn static_prop_step(
             return threw(req, frame, &thrown);
         }
         Some(ty) => {
-            match crate::ops::verify_property_type(req, &stepped, &ty, declaring, &name, strict) {
-                Ok(None) => stepped,
-                Ok(Some(coerced)) => {
-                    req.release(stepped);
-                    coerced
-                }
+            let verdict =
+                crate::ops::verify_property_type(req, &stepped, &ty, declaring, &name, strict);
+            match crate::ops::landed(req, stepped, verdict) {
+                Ok(landed) => landed,
                 Err(thrown) => {
                     // `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps
                     // what it held and the stepped value is given up.
-                    req.release(stepped);
                     req.release(held);
                     return threw(req, frame, &thrown);
                 }
@@ -12882,8 +12733,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        req.vm_mut().jump(frame, at.saturating_add(2));
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, at.saturating_add(2));
     };
     let Some(source) = write_place(req, frame, code, data_type, data_at) else {
         return Err(Fatal::Error(String::from(
@@ -12955,8 +12805,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             },
         );
     }
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, at.saturating_add(2))
 }
 
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
@@ -13002,17 +12851,8 @@ fn assign_to_place(
     if let Some(cell) = held.as_php_ref() {
         let cell = *cell;
         if !req.ref_type_sources(cell.heap()).is_empty() {
-            value = match crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict) {
-                Ok(None) => value,
-                Ok(Some(coerced)) => {
-                    req.release(value);
-                    coerced
-                }
-                Err(thrown) => {
-                    req.release(value);
-                    return Err(thrown);
-                }
-            };
+            let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict);
+            value = crate::ops::landed(req, value, verdict)?;
         }
         at = cell.heap().val_ref();
         held = exec::value_of(at.read());
@@ -13443,8 +13283,7 @@ pub(crate) fn separate<T: Tier>(
     // taken for the slot before the cell lets its own go.
     let inner = cell.get();
     req.addref(&inner);
-    let previous = req.set_slot(frame, slot, inner);
-    req.release(previous);
+    req.replace_slot(frame, slot, inner);
     Ok(advance(req, frame))
 }
 
@@ -14191,8 +14030,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    req.vm_mut().jump(frame, at.saturating_add(2));
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, at.saturating_add(2))
 }
 
 /// The operation of a compound assignment over a declared property
@@ -15341,6 +15179,12 @@ fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<Propert
     table.get_property_ptr_ptr(req, object, name)
 }
 
+/// `ZVAL_COPY_VALUE(EX_VAR(opline->result.var), value)`: the temporary
+/// `out` names takes `value`'s owner, and what it held is released.
+fn set_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, value: Value) {
+    req.replace_slot(frame, exec::temporary_slot(code, op.out), value);
+}
+
 /// `if (RETURN_VALUE_USED(opline)) ZVAL_COPY(EX_VAR(opline->result.var), value)`:
 /// the temporary `out` names one more owner of `value`, and nothing
 /// where the compiler marked the temporary `UNUSED`.
@@ -15349,8 +15193,7 @@ fn write_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, va
         return;
     }
     req.addref(value);
-    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), *value);
-    req.release(previous);
+    set_out(req, frame, code, op, *value);
 }
 
 /// `ZEND_RETURNS_FUNCTION` (`Z/Zend/zend_compile.h:1198`), on an
@@ -15529,9 +15372,7 @@ fn unset_under_nothing(
             req,
             "Automatic conversion of false to array is deprecated",
         );
-        if req.is_pending() {
-            return Err(Thrown::of(None));
-        }
+        none_pending(req)?;
     }
     if op.op2_type == OperandKind::Cv {
         let _ = exec::operand(req, frame, code, op.op2_type, op.op2);
@@ -15582,9 +15423,7 @@ pub(crate) fn fetch_obj_unset<T: Tier>(
     }
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let out = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, out, Value::null());
-    req.release(previous);
+    set_out(req, frame, code, op, Value::null());
     Ok(advance(req, frame))
 }
 
@@ -15787,9 +15626,7 @@ fn unset_container(req: &mut Request, container: &Value, offset: &Value) -> Resu
                 req,
                 "Automatic conversion of false to array is deprecated",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             Ok(())
         }
         ValueRef::Undef | ValueRef::Null => Ok(()),
@@ -15939,9 +15776,7 @@ pub(crate) fn init_array<T: Tier>(
         Ok(array) => array,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::array(array));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::array(array));
     if op.op1_type == OperandKind::Unused {
         return Ok(advance(req, frame));
     }
@@ -16764,8 +16599,7 @@ pub(crate) fn fe_reset_r<T: Tier>(
         } else {
             req.addref(&subject);
         }
-        let previous = req.set_slot(frame, slot, subject);
-        req.release(previous);
+        req.replace_slot(frame, slot, subject);
         if let Some(cell) = req.slot_ptr(frame, slot) {
             // `Z_FE_POS_P(EX_VAR(opline->result.var)) = pos`, which php
             // writes after the copy and not through it: the word is the
@@ -16790,15 +16624,13 @@ pub(crate) fn fe_reset_r<T: Tier>(
         } else {
             req.addref(&subject);
         }
-        let previous = req.set_slot(frame, slot, subject);
-        req.release(previous);
+        req.replace_slot(frame, slot, subject);
         set_fe_iter(req, frame, slot, started);
         if op.op1_type == OperandKind::Var {
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
         }
         if started.is_none() {
-            req.vm_mut().jump(frame, op.op2);
-            return Ok(Stepped::Same(frame));
+            return jump_to(req, frame, op.op2);
         }
         return Ok(advance(req, frame));
     }
@@ -16852,15 +16684,13 @@ fn fe_reset_iterator(
         Ok((wrapper, _)) => wrapper.as_value(),
         Err(_) => Value::undef(),
     };
-    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), held);
-    req.release(previous);
+    set_out(req, frame, code, op, held);
     let free = |req: &mut Request| exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match reset {
         Ok((_, empty)) => {
             free(req);
             if empty {
-                req.vm_mut().jump(frame, op.op2);
-                Ok(Stepped::Same(frame))
+                jump_to(req, frame, op.op2)
             } else {
                 Ok(advance(req, frame))
             }
@@ -16906,12 +16736,10 @@ fn fe_reset_refused(
         ),
     );
     let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::undef());
-    req.release(previous);
+    req.replace_slot(frame, slot, Value::undef());
     set_fe_iter(req, frame, slot, None);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    req.vm_mut().jump(frame, op.op2);
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, op.op2)
 }
 
 /// `Z_FE_ITER` (`Z/Zend/zend_types.h:424`): the index a walk over a
@@ -17152,8 +16980,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
     let (key, value) = match foreach_var(req, at.read()) {
         ForeachVar::Array { array, pos } => {
             let Some((found, key, value)) = array.live_from(pos) else {
-                req.vm_mut().jump(frame, op.extended_value);
-                return Ok(Stepped::Same(frame));
+                return jump_to(req, frame, op.extended_value);
             };
             // `Z_FE_POS_P(array) = pos + 1`: the word alone, since a
             // value write is `ZVAL_COPY_VALUE` and leaves `u2` standing
@@ -17174,8 +17001,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
                 (key, value)
             }
             Ok(None) => {
-                req.vm_mut().jump(frame, op.extended_value);
-                return Ok(Stepped::Same(frame));
+                return jump_to(req, frame, op.extended_value);
             }
             Err(thrown) => return threw(req, frame, &thrown),
         },
@@ -17191,9 +17017,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
             Ok(key) => key,
             Err(thrown) => return threw(req, frame, &thrown),
         };
-        let out = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, out, key);
-        req.release(previous);
+        set_out(req, frame, code, op, key);
     }
     let assigned = fe_assign(req, frame, code, op, value);
     if let Some(owned) = owned {
@@ -17229,15 +17053,12 @@ fn fe_fetch_iterator(
     let (current, key) = match crate::interfaces::fetch(req, iterator, keyed, false) {
         Ok(Some(found)) => found,
         Ok(None) => {
-            req.vm_mut().jump(frame, op.extended_value);
-            return Ok(Stepped::Same(frame));
+            return jump_to(req, frame, op.extended_value);
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
     if let Some(key) = key {
-        let out = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, out, key);
-        req.release(previous);
+        set_out(req, frame, code, op, key);
     }
     let assigned = fe_assign(req, frame, code, op, current);
     req.release(current);
@@ -17296,8 +17117,7 @@ fn fe_assign(
     if op.op2_type == OperandKind::Var {
         req.addref(&value);
         let out = exec::temporary_slot(code, op.op2);
-        let previous = req.set_slot(frame, out, value);
-        req.release(previous);
+        req.replace_slot(frame, out, value);
         return Ok(advance(req, frame));
     }
     let value = value.deref();
@@ -17305,8 +17125,7 @@ fn fe_assign(
     if let Some(r) = req.slot(frame, op.op2).as_php_ref() {
         req.reference_set(r.heap(), value);
     } else {
-        let garbage = req.set_slot(frame, op.op2, value);
-        req.release(garbage);
+        req.replace_slot(frame, op.op2, value);
     }
     Ok(advance(req, frame))
 }
@@ -17465,20 +17284,12 @@ pub(crate) fn fe_reset_rw<T: Tier>(
     }
     // `if (array_ptr == array_ref) ZVAL_NEW_REF(array_ref, array_ref)`:
     // the place's owner is the cell's from here.
-    let held = exec::value_of(place.read());
-    let cell = if let Some(cell) = held.as_php_ref() {
-        *cell
-    } else {
-        let cell = match req.reference(held) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
-        place.write(cell.as_value().to_zval());
-        cell
+    let cell = match req.make_ref(place) {
+        Ok(cell) => cell,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     req.addref(&cell.as_value());
-    let previous = req.set_slot(frame, slot, cell.as_value());
-    req.release(previous);
+    req.replace_slot(frame, slot, cell.as_value());
     let started = if is_array {
         match req.reference_separate(cell.heap()) {
             Ok(Some(array)) => Some(req.heap_mut().iterator_add(array, 0)),
@@ -17500,8 +17311,7 @@ pub(crate) fn fe_reset_rw<T: Tier>(
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
     }
     if started.is_none() {
-        req.vm_mut().jump(frame, op.op2);
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, op.op2);
     }
     Ok(advance(req, frame))
 }
@@ -17534,8 +17344,7 @@ fn fe_reset_rw_value(
             Ok(cell) => cell,
             Err(thrown) => return threw(req, frame, &thrown),
         };
-        let previous = req.set_slot(frame, slot, cell.as_value());
-        req.release(previous);
+        req.replace_slot(frame, slot, cell.as_value());
         let started = match req.reference_separate(cell.heap()) {
             Ok(Some(array)) => Some(HashIter(req.heap_mut().iterator_add(array, 0))),
             Ok(None) => None,
@@ -17551,16 +17360,14 @@ fn fe_reset_rw_value(
             return fe_reset_iterator(req, frame, code, op, object, true);
         }
         let _ = req.take_slot(frame, exec::temporary_slot(code, op.op1));
-        let previous = req.set_slot(frame, slot, subject);
-        req.release(previous);
+        req.replace_slot(frame, slot, subject);
         let started = match req.object_walk_start(object) {
             Ok(started) => started.map(HashIter),
             Err(thrown) => return threw(req, frame, &thrown),
         };
         set_fe_iter(req, frame, slot, started);
         if started.is_none() {
-            req.vm_mut().jump(frame, op.op2);
-            return Ok(Stepped::Same(frame));
+            return jump_to(req, frame, op.op2);
         }
         return Ok(advance(req, frame));
     }
@@ -17678,15 +17485,13 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
     let BoundRw { key, cell, owned } = match found? {
         Ok(Some(found)) => found,
         Ok(None) => {
-            req.vm_mut().jump(frame, op.extended_value);
-            return Ok(Stepped::Same(frame));
+            return jump_to(req, frame, op.extended_value);
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
     if let Some(key) = key {
         let out = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, out, key);
-        req.release(previous);
+        req.replace_slot(frame, out, key);
     }
     let bound = cell.as_value();
     if op.op2_type == OperandKind::Cv {
@@ -17696,14 +17501,12 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
             .is_some_and(|held| *held == cell);
         if !same {
             req.addref(&bound);
-            let garbage = req.set_slot(frame, op.op2, bound);
-            req.release(garbage);
+            req.replace_slot(frame, op.op2, bound);
         }
     } else {
         req.addref(&bound);
         let out = exec::temporary_slot(code, op.op2);
-        let garbage = req.set_slot(frame, out, bound);
-        req.release(garbage);
+        req.replace_slot(frame, out, bound);
     }
     if owned {
         req.release(bound);
@@ -18198,9 +18001,7 @@ pub(crate) fn rope_init<T: Tier>(
         Ok(rope) => rope,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::array(rope));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::array(rope));
     rope_piece(req, frame, code, op, rope)
 }
 
@@ -18319,9 +18120,7 @@ pub(crate) fn rope_end<T: Tier>(
     req.release(held);
     match joined {
         Ok(joined) => {
-            let out = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, out, Value::string(joined));
-            req.release(previous);
+            set_out(req, frame, code, op, Value::string(joined));
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -19271,9 +19070,7 @@ pub(crate) fn func_get_args<T: Tier>(
     })();
     match copied {
         Ok(array) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, Value::array(array));
-            req.release(previous);
+            set_out(req, frame, code, op, Value::array(array));
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -19303,9 +19100,7 @@ pub(crate) fn func_num_args<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::int(i64::from(passed)));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::int(i64::from(passed)));
     Ok(advance(req, frame))
 }
 
@@ -19443,9 +19238,7 @@ fn class_name_into(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::string(name));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::string(name));
     Ok(advance(req, frame))
 }
 
@@ -19695,8 +19488,7 @@ pub(crate) fn jmpz_ex<T: Tier>(
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
-    req.vm_mut().jump(frame, op.op2);
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, op.op2)
 }
 
 /// `ZEND_JMPNZ_EX` (`Z/Zend/zend_vm_def.h:3216`): [`jmpz_ex`] with the
@@ -19730,8 +19522,7 @@ pub(crate) fn jmpnz_ex<T: Tier>(
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
-    req.vm_mut().jump(frame, op.op2);
-    Ok(Stepped::Same(frame))
+    jump_to(req, frame, op.op2)
 }
 
 /// `ZEND_JMP_SET`: the left operand of `a ?: c`
@@ -19764,11 +19555,8 @@ pub(crate) fn jmp_set<T: Tier>(
         return Ok(advance(req, frame));
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, taken);
-    req.release(previous);
-    req.vm_mut().jump(frame, op.op2);
-    Ok(Stepped::Same(frame))
+    set_out(req, frame, code, op, taken);
+    jump_to(req, frame, op.op2)
 }
 
 /// `ZEND_JMP_NULL` (`Z/Zend/zend_vm_def.h:7841`), the short circuit of a
@@ -19845,11 +19633,8 @@ pub(crate) fn jmp_null<T: Tier>(
         SHORT_CIRCUITING_CHAIN_ISSET => Value::bool(false),
         _ => Value::bool(true),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, result);
-    req.release(previous);
-    req.vm_mut().jump(frame, op.op2);
-    Ok(Stepped::Same(frame))
+    set_out(req, frame, code, op, result);
+    jump_to(req, frame, op.op2)
 }
 
 /// `ZEND_SHORT_CIRCUITING_CHAIN_MASK` and the three values under it
@@ -19901,11 +19686,8 @@ pub(crate) fn coalesce<T: Tier>(
         return Ok(advance(req, frame));
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, taken);
-    req.release(previous);
-    req.vm_mut().jump(frame, op.op2);
-    Ok(Stepped::Same(frame))
+    set_out(req, frame, code, op, taken);
+    jump_to(req, frame, op.op2)
 }
 
 /// `ZEND_SWITCH_LONG`: [`crate::ops::switch_long`] over the subject,
@@ -20012,8 +19794,7 @@ pub(crate) fn match_error<T: Tier>(
 ) -> Edge {
     let subject = exec::operand_undef(req, frame, code, op.op1_type, op.op1);
     let thrown = crate::ops::match_unhandled_error(req, &subject);
-    req.leave_pending(&thrown);
-    Ok(Stepped::Threw(frame))
+    threw(req, frame, &thrown)
 }
 
 /// `ZEND_CASE`: [`crate::ops::is_equal`] over a temporary subject and
@@ -20066,9 +19847,7 @@ pub(crate) fn qm_assign<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -20095,9 +19874,7 @@ pub(crate) fn copy_tmp<T: Tier>(
 ) -> Edge {
     let value = req.slot(frame, exec::temporary_slot(code, op.op1));
     req.addref(&value);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -20198,8 +19975,7 @@ fn returned_to_caller<T: Tier>(
 fn handed_back(req: &mut Request, into: Option<(FrameRef, u32)>, value: Value) -> bool {
     match into {
         Some((at, slot)) => {
-            let previous = req.set_slot(at, slot, value);
-            req.release(previous);
+            req.replace_slot(at, slot, value);
         }
         None => req.release(value),
     }
@@ -20252,15 +20028,10 @@ fn computed_into(
 ) -> Edge {
     match computed {
         Ok(value) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, value);
-            req.release(previous);
+            set_out(req, frame, code, op, value);
             Ok(advance(req, frame))
         }
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
+        Err(thrown) => threw(req, frame, &thrown),
     }
 }
 
@@ -20310,8 +20081,7 @@ fn smart_branch<T: Tier>(
         return Ok(Stepped::Threw(frame));
     }
     if (answer.as_bool() == Some(true)) != (jump.opcode == Opcode::Jmpnz) {
-        req.vm_mut().jump(frame, at.saturating_add(1));
-        return Ok(Stepped::Same(frame));
+        return jump_to(req, frame, at.saturating_add(1));
     }
     jumped::<T>(req, frame, at, jump.op2, jump.out)
 }
@@ -20382,8 +20152,7 @@ fn incdec_typed_ref(
     let stepped = match kernel(req, &held) {
         Ok(stepped) => stepped,
         Err(thrown) => {
-            req.leave_pending(&thrown);
-            return Ok(Stepped::Threw(frame));
+            return threw(req, frame, &thrown);
         }
     };
     let increment = matches!(op.opcode, Opcode::PreInc | Opcode::PostInc);
@@ -20393,28 +20162,16 @@ fn incdec_typed_ref(
             RefStep::Landed(stored) => (stored, None),
             RefStep::Clamped(stored, thrown) => (stored, Some(thrown)),
             RefStep::Refused(thrown) => {
-                if op.out_type != OperandKind::Unused {
-                    let out = exec::temporary_slot(code, op.out);
-                    let previous = req.set_slot(frame, out, Value::null());
-                    req.release(previous);
-                }
+                write_out(req, frame, code, op, &Value::null());
                 exec::free_operand(req, frame, code, op.op1_type, op.op1);
-                req.leave_pending(&thrown);
-                return Ok(Stepped::Threw(frame));
+                return threw(req, frame, &thrown);
             }
         };
-    if op.out_type != OperandKind::Unused {
-        let out = exec::temporary_slot(code, op.out);
-        let value = if post { held } else { stored };
-        req.addref(&value);
-        let previous = req.set_slot(frame, out, value);
-        req.release(previous);
-    }
+    write_out(req, frame, code, op, if post { &held } else { &stored });
     req.reference_set(cell.heap(), stored);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if let Some(thrown) = raised {
-        req.leave_pending(&thrown);
-        return Ok(Stepped::Threw(frame));
+        return threw(req, frame, &thrown);
     }
     Ok(advance(req, frame))
 }
@@ -20477,16 +20234,10 @@ fn step_through_typed_ref(
         );
         return RefStep::Clamped(Value::int(bound), thrown);
     }
-    match crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict) {
-        Ok(None) => RefStep::Landed(stepped),
-        Ok(Some(coerced)) => {
-            req.release(stepped);
-            RefStep::Landed(coerced)
-        }
-        Err(thrown) => {
-            req.release(stepped);
-            RefStep::Refused(thrown)
-        }
+    let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict);
+    match crate::ops::landed(req, stepped, verdict) {
+        Ok(landed) => RefStep::Landed(landed),
+        Err(thrown) => RefStep::Refused(thrown),
     }
 }
 
@@ -20536,16 +20287,10 @@ fn incdec(
     }
     match kernel(req, &held) {
         Ok(stepped) => {
-            if op.out_type != OperandKind::Unused {
-                // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`,
-                // before the step for a `POST_*` and after it for a
-                // `PRE_*`; one more owner either way.
-                let out = exec::temporary_slot(code, op.out);
-                let value = if post { held } else { stepped };
-                req.addref(&value);
-                let previous = req.set_slot(frame, out, value);
-                req.release(previous);
-            }
+            // `ZVAL_COPY(EX_VAR(opline->result.var), var_ptr)`, before
+            // the step for a `POST_*` and after it for a `PRE_*`; one
+            // more owner either way.
+            write_out(req, frame, code, op, if post { &held } else { &stepped });
             // The kernel's one owner of the stepped value is the
             // variable's from here, and what stood there is released,
             // which is what the in-place step does.
@@ -20556,8 +20301,7 @@ fn incdec(
                 place.write(stepped.into_zval());
                 req.release(previous);
             } else {
-                let previous = req.set_slot(frame, op.op1, stepped);
-                req.release(previous);
+                req.replace_slot(frame, op.op1, stepped);
             }
             // `FREE_OP1()`: a `VAR` holding an `IS_INDIRECT` owns
             // nothing, and one holding what `offsetGet` answered gives
@@ -20567,8 +20311,7 @@ fn incdec(
         }
         Err(thrown) => {
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
+            threw(req, frame, &thrown)
         }
     }
 }
@@ -20853,8 +20596,7 @@ pub(crate) fn catch<T: Tier>(
                 return threw(req, frame, &thrown);
             }
         } else {
-            let garbage = req.set_slot(frame, op.out, value);
-            req.release(garbage);
+            req.replace_slot(frame, op.out, value);
         }
     } else {
         req.release(caught.as_value());
@@ -21340,19 +21082,10 @@ pub(crate) fn return_by_ref<T: Tier>(
                 Err(thrown) => return threw(req, frame, &thrown),
             }
         } else {
-            let cell = if let Some(cell) = held.as_php_ref() {
-                req.addref(&held);
-                *cell
-            } else {
-                let cell = match req.reference(held.undef_as_null()) {
-                    Ok(cell) => cell,
-                    Err(thrown) => return threw(req, frame, &thrown),
-                };
-                at.write(cell.as_value().to_zval());
-                req.addref(&cell.as_value());
-                cell
-            };
-            cell.as_value()
+            match bound_at(req, at) {
+                Ok(bound) => bound,
+                Err(thrown) => return threw(req, frame, &thrown),
+            }
         }
     } else {
         return Err(Fatal::Error(String::from(
@@ -21444,8 +21177,7 @@ pub(crate) fn r#yield<T: Tier>(
         .then(|| exec::take_operand(req, frame, code, op.op2_type, op.op2));
     let send_target = (op.out_type != OperandKind::Unused).then(|| {
         let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, Value::null());
-        req.release(previous);
+        req.replace_slot(frame, slot, Value::null());
         slot
     });
     crate::generator::yielded(req, generator, value, key, send_target);
@@ -21486,14 +21218,8 @@ fn yielded_by_ref(
         let value = held.deref();
         req.addref(&value);
         value
-    } else if let Some(cell) = held.as_php_ref() {
-        req.addref(&held);
-        cell.as_value()
     } else {
-        let cell = req.reference(held.undef_as_null())?;
-        place.write(cell.as_value().to_zval());
-        req.addref(&cell.as_value());
-        cell.as_value()
+        bound_at(req, place)?
     };
     if op.op1_type == OperandKind::Var {
         let slot = exec::temporary_slot(code, op.op1);
@@ -21583,8 +21309,7 @@ pub(crate) fn yield_from<T: Tier>(
         Ok(crate::generator::From::Finished(retval)) => {
             match out {
                 Some(slot) => {
-                    let previous = req.set_slot(frame, slot, retval);
-                    req.release(previous);
+                    req.replace_slot(frame, slot, retval);
                 }
                 None => req.release(retval),
             }
@@ -21592,8 +21317,7 @@ pub(crate) fn yield_from<T: Tier>(
         }
         Ok(crate::generator::From::Delegating) => {
             if let Some(slot) = out {
-                let previous = req.set_slot(frame, slot, Value::null());
-                req.release(previous);
+                req.replace_slot(frame, slot, Value::null());
             }
             crate::observer::generator_yielded(req, frame, generator);
             crate::generator::suspend(req, generator)?;
@@ -21698,26 +21422,14 @@ pub(crate) fn make_ref<T: Tier>(
             .slot_ptr(frame, at)
             .and_then(|slot| slot.read().as_indirect());
         match place {
-            Some(place) => {
-                let value = exec::value_of(place.read());
-                let cell = if let Some(cell) = value.as_php_ref() {
-                    *cell
-                } else {
-                    let cell = match req.reference(value.undef_as_null()) {
-                        Ok(cell) => cell,
-                        Err(thrown) => return threw(req, frame, &thrown),
-                    };
-                    place.write(cell.as_value().to_zval());
-                    cell
-                };
-                req.addref(&cell.as_value());
-                cell.as_value()
-            }
+            Some(place) => match bound_at(req, place) {
+                Ok(bound) => bound,
+                Err(thrown) => return threw(req, frame, &thrown),
+            },
             None => req.take_slot(frame, at),
         }
     };
-    let previous = req.set_slot(frame, out, held);
-    req.release(previous);
+    req.replace_slot(frame, out, held);
     Ok(advance(req, frame))
 }
 
@@ -22596,8 +22308,7 @@ mod tests {
                 "an object is made on pass {pass}"
             );
             let Some(Ok(object)) = made else { continue };
-            let previous = req.set_slot(frame, 0, object.as_value());
-            req.release(previous);
+            req.replace_slot(frame, 0, object.as_value());
             req.vm_mut().jump(frame, 0);
             assert_eq!(
                 init_method_call::<Nop>(&mut req, frame, code, &op),
@@ -23055,8 +22766,7 @@ mod tests {
         // Two CVs would share the cell; this frame has one, and the test
         // is the second holder.
         req.addref(&cell.as_value());
-        let previous = req.set_slot(frame, 0, cell.as_value());
-        req.release(previous);
+        req.replace_slot(frame, 0, cell.as_value());
 
         assert_eq!(
             assign::<Nop>(&mut req, frame, code, &op),

@@ -669,6 +669,13 @@ impl Request {
         Value::of_zval(old)
     }
 
+    /// [`Request::set_slot`] and what the slot held released after the
+    /// write, the `zval_ptr_dtor` php's assignment over a slot ends with.
+    pub(crate) fn replace_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
+        let previous = self.set_slot(frame, at, value);
+        self.release(previous);
+    }
+
     /// A debug build's question at a write over a slot that held an
     /// owner of a `held`: whether the slot is the `TMP` of the opline
     /// `frame` stands at, which the handler that read it last should

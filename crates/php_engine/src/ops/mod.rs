@@ -16,7 +16,9 @@ use php_unit::decl::Visibility;
 
 use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
-use crate::api::raising::{Level, Thrown, deprecated, raise, throw, throw_error, warning};
+use crate::api::raising::{
+    Level, Thrown, deprecated, none_pending, raise, throw, throw_error, warning,
+};
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
@@ -1001,6 +1003,41 @@ fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> O
         .map(|i| i + *at)?;
     *at = found + 1;
     mangled.get(found).and_then(|slot| slot.prefix.clone())
+}
+
+/// The value a type check over `value` lands: `value` where the check
+/// took it as it is, the coercion where it made one, `value` given up
+/// either way it does not land, as php's `zval_ptr_dtor` gives up the
+/// operand of a refused or a coerced assignment.
+///
+/// ```php
+/// class C { public int $n = 0; public static float $f = 0.0; }
+/// $c = new C;
+/// $c->n = "5";
+/// C::$f = 1;
+/// $r = &$c->n;
+/// $r = "7";
+/// var_dump($c->n, C::$f);
+/// try { $c->n = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $r = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->n);
+/// ```
+/// ```expect
+/// int(7)
+/// float(1)
+/// Cannot assign string to property C::$n of type int
+/// Cannot assign array to reference held by property C::$n of type int
+/// int(7)
+/// ```
+pub(crate) fn landed(
+    req: &mut Request,
+    value: Value,
+    verdict: Result<Option<Value>, Thrown>,
+) -> Result<Value, Thrown> {
+    if !matches!(verdict, Ok(None)) {
+        req.release(value);
+    }
+    verdict.map(|coerced| coerced.unwrap_or(value))
 }
 
 /// `zend_verify_property_type` (`Z/Zend/zend_object_handlers.c:1065`)
@@ -3640,9 +3677,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Increment on type bool has no effect, this will change in the next major version of PHP",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             // php steps nothing here, so the variable keeps what it
             // holds; the value handed back is a second owner of it,
             // which the caller's write-back gives the variable again.
@@ -3753,9 +3788,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on empty string is deprecated as non-numeric",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             Ok(Value::int(-1))
         }
         ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
@@ -3767,9 +3800,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                     req,
                     "Decrement on non-numeric string has no effect and is deprecated",
                 );
-                if req.is_pending() {
-                    return Err(Thrown::of(None));
-                }
+                none_pending(req)?;
                 // As [`increment`]'s bool arm: nothing is stepped, and
                 // the value handed back is a second owner of the string
                 // the variable holds.
@@ -3783,9 +3814,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on type null has no effect, this will change in the next major version of PHP",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             Ok(Value::null())
         }
         ValueRef::Bool(_) => {
@@ -3793,9 +3822,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
                 req,
                 "Decrement on type bool has no effect, this will change in the next major version of PHP",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             req.addref(value);
             Ok(*value)
         }
@@ -3872,9 +3899,7 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
         req,
         "Increment on non-numeric string is deprecated, use str_increment() instead",
     );
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
+    none_pending(req)?;
     if bytes.is_empty() {
         return req.string(b"1");
     }
@@ -4611,9 +4636,7 @@ pub(crate) fn array_offset(
                 req,
                 "Using null as an array offset is deprecated, use an empty string instead",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             empty(req)
         }
         ValueRef::Float(f) => Ok(php_heap::Key::Long(double_to_long(req, f))),
@@ -4727,9 +4750,7 @@ pub(crate) fn array_key_exists(
         return Ok(false);
     }
     let key = converted?;
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
+    none_pending(req)?;
     Ok(array.heap().contains(key))
 }
 

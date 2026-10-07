@@ -18,7 +18,7 @@ use php_unit::Level;
 
 use crate::api::abi::{ObjectHandlers, PropertiesFor, PropertyPurpose, This};
 use crate::api::call::{Function, eval_declared_made, instantiate_named_made};
-use crate::api::raising::{Thrown, raise, throw_error};
+use crate::api::raising::{Thrown, none_pending, raise, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
@@ -199,7 +199,7 @@ pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Resu
     };
     let named = callee_named(req, function, "Method", "Function");
     raise(req, level, &format!("{named} is deprecated{suffix}"));
-    pending(req)
+    none_pending(req)
 }
 
 /// `zend_nodiscard_function` (`Z/Zend/zend_execute.c:1947`), raised by
@@ -255,7 +255,7 @@ pub(crate) fn no_discard_function(req: &mut Request, function: Function) -> Resu
             "The return value of {named} should either be used or intentionally ignored by casting it as (void){suffix}"
         ),
     );
-    pending(req)
+    none_pending(req)
 }
 
 /// `zend_deprecated_class_constant` (`Z/Zend/zend_execute.c:1966`):
@@ -320,7 +320,7 @@ pub(crate) fn deprecated_class_constant(
         String::from_utf8_lossy(name)
     );
     raise(req, level, &message);
-    pending(req)
+    none_pending(req)
 }
 
 /// `get_deprecation_suffix_from_attribute` (`Z/Zend/zend_execute.c:1801`):
@@ -360,15 +360,6 @@ fn joined_suffix(message: &[u8], since: &[u8]) -> String {
         out.push_str(&String::from_utf8_lossy(message));
     }
     out
-}
-
-/// `if (UNEXPECTED(EG(exception)))` after a raise: a handler that
-/// threw is the `Err`, the throwable left pending.
-fn pending(req: &Request) -> Result<(), Thrown> {
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
-    Ok(())
 }
 
 /// `attributes_object_handlers_sensitive_parameter_value`:

@@ -709,17 +709,8 @@ impl Request {
         let Some(ty) = &property.ty else {
             return Ok(value);
         };
-        match crate::ops::verify_property_type(self, &value, ty, declaring, &property.name.0, true)
-        {
-            Ok(None) => Ok(value),
-            Ok(Some(coerced)) => {
-                self.release(value);
-                Ok(coerced)
-            }
-            Err(thrown) => {
-                self.release(value);
-                Err(thrown)
-            }
-        }
+        let verdict =
+            crate::ops::verify_property_type(self, &value, ty, declaring, &property.name.0, true);
+        crate::ops::landed(self, value, verdict)
     }
 }
