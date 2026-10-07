@@ -69,7 +69,7 @@ use crate::api::values::{
     ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, ValueRef,
 };
 use crate::exec::{
-    self, Cached, CallStage, CallState, E_FATAL_ERRORS, LAST_CATCH, ReturnValue, cached_class,
+    self, Cached, CallState, E_FATAL_ERRORS, LAST_CATCH, ReturnValue, cached_class,
     cleanup_live_vars, cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors,
     restore_silenced,
 };
@@ -1384,7 +1384,6 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let callee = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
-    let count = usize::try_from(op.extended_value).unwrap_or(0);
     let resolved = if let Some(object) = callee.as_object().copied() {
         dynamic_call_object(req, object)
     } else if let Some(name) = callee.as_str_bytes().map(<[u8]>::to_vec) {
@@ -1398,32 +1397,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
             &format!("Value of type {} is not callable", callee.type_name()),
         ))
     };
-    let target = match resolved {
-        Ok(target) => target,
-        Err(thrown) => {
-            exec::free_operand(req, frame, code, op.op2_type, op.op2);
-            return threw(req, frame, &thrown);
-        }
-    };
-    req.vm_mut().push_call(CallState {
-        function: target.function,
-        name: target.name,
-        arguments: Vec::new(),
-        count,
-        receiver: target.this.map(exec::Receiver::Owned),
-        called_scope: target.called_scope,
-        closure: target.closure,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Building,
-        send_arg_by_ref: false,
-        frameless: false,
-        return_value: ReturnValue::Used,
-        dynamic: true,
-        coerced: Vec::new(),
-        beneath: 0,
-    });
-    exec::free_operand(req, frame, code, op.op2_type, op.op2);
-    Ok(advance(req, frame))
+    push_dynamic(req, frame, code, op, resolved)
 }
 
 /// What a dynamic call resolved to: the callee, the name the call frame
@@ -1812,23 +1786,8 @@ fn init_call(
         return Ok(Stepped::Threw(frame));
     };
     let count = usize::try_from(op.extended_value).unwrap_or(0);
-    req.vm_mut().push_call(CallState {
-        function,
-        name: Some(name),
-        arguments: Vec::new(),
-        count,
-        receiver: None,
-        called_scope: None,
-        closure: None,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Building,
-        send_arg_by_ref: false,
-        frameless: false,
-        return_value: ReturnValue::Used,
-        dynamic: false,
-        coerced: Vec::new(),
-        beneath: 0,
-    });
+    req.vm_mut()
+        .push_call(CallState::building(function, Some(name), count));
     Ok(advance(req, frame))
 }
 
@@ -2543,29 +2502,34 @@ pub(crate) fn init_user_call<T: Tier>(
             }))
         }
     };
-    let target = match target {
+    push_dynamic(req, frame, code, op, target)
+}
+
+/// The call an `INIT_DYNAMIC_CALL` or `INIT_USER_CALL` resolved its
+/// callee to, `ZEND_CALL_DYNAMIC`, laid down with the callee operand
+/// freed; the callee operand freed and the throw raised where it
+/// resolved to none.
+fn push_dynamic(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    resolved: Result<DynamicTarget, Thrown>,
+) -> Edge {
+    let target = match resolved {
         Ok(target) => target,
         Err(thrown) => {
             exec::free_operand(req, frame, code, op.op2_type, op.op2);
             return threw(req, frame, &thrown);
         }
     };
+    let count = usize::try_from(op.extended_value).unwrap_or(0);
     req.vm_mut().push_call(CallState {
-        function: target.function,
-        name: target.name,
-        arguments: Vec::new(),
-        count: usize::try_from(op.extended_value).unwrap_or(0),
         receiver: target.this.map(exec::Receiver::Owned),
         called_scope: target.called_scope,
         closure: target.closure,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Building,
-        send_arg_by_ref: false,
-        frameless: false,
-        return_value: ReturnValue::Used,
         dynamic: true,
-        coerced: Vec::new(),
-        beneath: 0,
+        ..CallState::building(target.function, target.name, count)
     });
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     Ok(advance(req, frame))
@@ -4799,21 +4763,9 @@ pub(crate) fn new<T: Tier>(
         object
     });
     req.vm_mut().push_call(CallState {
-        function,
-        name: Some(name),
-        arguments: Vec::new(),
-        count,
         receiver: this.map(exec::Receiver::Owned),
         called_scope: constructor.map(|_| class),
-        closure: None,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Building,
-        send_arg_by_ref: false,
-        frameless: false,
-        return_value: ReturnValue::Used,
-        dynamic: false,
-        coerced: Vec::new(),
-        beneath: 0,
+        ..CallState::building(function, Some(name), count)
     });
     Ok(advance(req, frame))
 }
@@ -5183,22 +5135,11 @@ fn static_call_frame(
             Err(thrown) => return threw(req, frame, &thrown),
         },
     };
+    let count = usize::try_from(op.extended_value).unwrap_or(0);
     req.vm_mut().push_call(CallState {
-        function,
-        name: Some(name),
-        arguments: Vec::new(),
-        count: usize::try_from(op.extended_value).unwrap_or(0),
         receiver: this,
         called_scope: Some(called),
-        closure: None,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Building,
-        send_arg_by_ref: false,
-        frameless: false,
-        return_value: ReturnValue::Used,
-        dynamic: false,
-        coerced: Vec::new(),
-        beneath: 0,
+        ..CallState::building(function, Some(name), count)
     });
     Ok(advance(req, frame))
 }
@@ -5294,25 +5235,14 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         Ok(written) => written,
         Err(thrown) => return threw(req, frame, &thrown),
     };
+    let count = usize::try_from(op.extended_value).unwrap_or(0);
     req.vm_mut().push_call(CallState {
-        function,
-        name: Some(written),
-        arguments: Vec::new(),
-        count: usize::try_from(op.extended_value).unwrap_or(0),
         receiver,
         called_scope: Some(match this {
             Some(this) if !trampoline => this.class(),
             _ => declaring,
         }),
-        closure: None,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Building,
-        send_arg_by_ref: false,
-        frameless: false,
-        return_value: ReturnValue::Used,
-        coerced: Vec::new(),
-        beneath: 0,
-        dynamic: false,
+        ..CallState::building(function, Some(written), count)
     });
     Ok(advance(req, frame))
 }
@@ -5581,22 +5511,11 @@ pub(crate) fn init_method_call<T: Tier>(
         }
         None
     };
+    let count = usize::try_from(op.extended_value).unwrap_or(0);
     req.vm_mut().push_call(CallState {
-        function,
-        name: Some(name),
-        arguments: Vec::new(),
-        count: usize::try_from(op.extended_value).unwrap_or(0),
         receiver: this,
         called_scope: Some(called),
-        closure: None,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Building,
-        send_arg_by_ref: false,
-        frameless: false,
-        return_value: ReturnValue::Used,
-        dynamic: false,
-        coerced: Vec::new(),
-        beneath: 0,
+        ..CallState::building(function, Some(name), count)
     });
     Ok(advance(req, frame))
 }
@@ -10923,21 +10842,8 @@ fn frameless_call(
         .map(|&(kind, field)| exec::take_operand(req, frame, code, kind, field))
         .collect();
     req.vm_mut().push_call(CallState {
-        function: Function(entry.function),
-        name: None,
-        count: values.len(),
-        arguments: values,
-        receiver: None,
-        called_scope: None,
-        closure: None,
-        extra_named: exec::ExtraNamed::default(),
-        stage: CallStage::Serving,
-        send_arg_by_ref: false,
         frameless: true,
-        return_value: ReturnValue::Used,
-        dynamic: false,
-        coerced: Vec::new(),
-        beneath: 0,
+        ..CallState::serving(Function(entry.function), values)
     });
     // php falls back to a full call where the callee is observed,
     // `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`), which
@@ -22287,23 +22193,7 @@ mod tests {
         let strlen = req.function_named(b"strlen");
 
         for call in 1..=2 {
-            let state = CallState {
-                function: f,
-                name: None,
-                arguments: Vec::new(),
-                count: 0,
-                receiver: None,
-                called_scope: None,
-                closure: None,
-                extra_named: exec::ExtraNamed::default(),
-                stage: CallStage::Serving,
-                send_arg_by_ref: false,
-                frameless: false,
-                return_value: ReturnValue::Used,
-                dynamic: false,
-                coerced: Vec::new(),
-                beneath: 0,
-            };
+            let state = CallState::serving(f, Vec::new());
             let frame = req
                 .push_user_frame(f, state, None, crate::exec::Caller::Opline(main))
                 .unwrap_or(main);
