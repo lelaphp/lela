@@ -623,6 +623,7 @@ impl Heap {
     /// set it keeps until after this one is let go, as a walk's steps
     /// nest.
     #[must_use = "a pin that was set is let go with Heap::unpin_block"]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn pin_block(z: Zval) -> bool {
         counted_header(z, Refcounted::pin).unwrap_or(false)
     }
@@ -632,6 +633,7 @@ impl Heap {
     /// release would have freed it, an object's destructor served first,
     /// and a table's rows and a reference's value released with it,
     /// never a possible root of the cycle collector.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn unpin_block(hooks: &mut dyn HeapHooks, z: Zval) {
         if counted_header(z, Refcounted::unpin) == Some(0) {
             hooks.heap().addref(z);

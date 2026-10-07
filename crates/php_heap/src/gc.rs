@@ -174,8 +174,9 @@ impl Refcounted {
         if self.refuses(crate::sensed::RefOp::Addref) {
             return;
         }
-        // The count never reaches the pin's bit ([`PINNED`]).
-        self.refcount.set(self.refcount.get().saturating_add(1));
+        // The count saturates beneath the pin's bit ([`PINNED`]).
+        let word = self.refcount.get();
+        self.refcount.set(word + u32::from(word & COUNT != COUNT));
     }
 
     /// `GC_SET_REFCOUNT`: the count as `zend_objects_store_del` holds it
@@ -210,16 +211,30 @@ impl Refcounted {
 
     /// The pin set; whether it was not set already. A block pinned
     /// already is kept by the pin that set it, which is let go after
-    /// this one, as a walk's steps nest.
+    /// this one, as a walk's steps nest. A debug build's freed-use guard
+    /// refuses a pin of a block the heap has freed, as it refuses an
+    /// addref, and sets nothing.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn pin(&self) -> bool {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::RefOp::Addref) {
+            return false;
+        }
         let word = self.refcount.get();
         self.refcount.set(word | PINNED);
         word & PINNED == 0
     }
 
     /// The pin let go; the count beneath it, which is zero where the
-    /// block's last owner went while it stood.
+    /// block's last owner went while it stood. A debug build's freed-use
+    /// guard refuses it over a block the heap has freed, as it refuses a
+    /// release, and answers one owner left, so nothing is freed twice.
+    #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn unpin(&self) -> u32 {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::RefOp::Release) {
+            return 1;
+        }
         let count = self.refcount.get() & COUNT;
         self.refcount.set(count);
         count
