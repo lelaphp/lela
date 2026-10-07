@@ -742,8 +742,9 @@ pub(crate) struct Shared {
     /// rows of the classes and functions published past the engine's
     /// own, which every request reads with nothing taken and which no row is
     /// written in after it is published. The preload is its first
-    /// publisher. Each request holds the arena it started with.
-    pub(crate) arena: Arc<crate::arena::Arena>,
+    /// publisher. Each request holds the arena it started with, and an
+    /// opcache restart empties it once none does ([`crate::arena::Epochs`]).
+    pub(crate) arena: crate::arena::Epochs,
     /// The persistent pool (design §4.10, #1172), php's
     /// `EG(persistent_list)`: what the stream layer keeps between
     /// requests, the sockets `pfsockopen` and `STREAM_CLIENT_PERSISTENT`
@@ -2996,7 +2997,7 @@ impl EngineBuilder {
             &functions,
             &classes,
         );
-        let arena = Arc::new(crate::arena::Arena::past(
+        let arena = crate::arena::Epochs::of(crate::arena::Arena::past(
             classes.len(),
             functions.len().saturating_add(methods.len()),
         ));
@@ -4169,9 +4170,6 @@ impl Engine {
                 ..Observables::default()
             });
         }
-        // `accel_activate`: a reset a request asked for empties the unit
-        // cache at the next request's start.
-        self.shared.units.restart_if_pending();
         if let Err(thrown) = serve_rinits(&mut req, &self.shared.extensions) {
             // `zend_throw_exception_internal` with no frame standing
             // (`Z/Zend/zend_exceptions.c:206-224`): the throwable rendered

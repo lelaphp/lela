@@ -7,10 +7,10 @@
 
 use php_ext::abi::PostStartup;
 use php_ext::process;
-use php_ext::request::Request;
+use php_ext::request::{CacheBudget, Request};
 
 use crate::ini::{Log, accel_log, atoi, flag, long, value};
-use crate::{Startup, cli, verdict};
+use crate::{Startup, cli, consumption, max_cached_keys, verdict};
 
 /// `sizeof(zend_accel_shared_globals)` on the oracle's build, what
 /// `zend_accel_init_shm` asks the segment for beside the interned
@@ -26,6 +26,14 @@ pub(crate) fn post_startup(req: &mut Request) -> PostStartup {
         accel_log(req, Log::Fatal, &refusal);
         return PostStartup::Refuse { status: -2 };
     }
+    // `zend_accel_init_shm`: the segment's size and the hash's, and what
+    // must be wasted of it for a cache that runs out to restart.
+    let budget = CacheBudget {
+        memory: u64::try_from(consumption(req)).unwrap_or(0),
+        max_wasted: u32::try_from(atoi(value(req, "opcache.max_wasted_percentage"))).unwrap_or(5),
+        keys: u64::try_from(max_cached_keys(req)).unwrap_or(u64::MAX),
+    };
+    req.unit_cache().bound(budget);
     let file_cache_only = flag(req, "opcache.file_cache_only");
     if file_cache_only && flag(req, "opcache.enable_file_override") {
         accel_log(

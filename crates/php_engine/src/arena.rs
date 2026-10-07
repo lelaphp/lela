@@ -20,15 +20,22 @@
 //! restart counts as waste. No row is written after its number is
 //! handed on, nor freed or reused while the arena stands: what a class
 //! builds once and keeps (its placed properties) its publisher builds
-//! before handing the number on. An opcache restart replaces the arena
-//! once no request holds it (#2184).
+//! before handing the number on.
+//!
+//! An opcache restart is the one thing that takes rows back ([`Epochs`]):
+//! once no request holds the arena, each column is cut back to the rows
+//! it kept, the preload's, which php keeps across a restart
+//! (`zend_shared_alloc_save_state` after preloading, restored to by
+//! `accel_activate`'s restart), and every number past them is free to
+//! be reserved again. Each request holds the arena it started in, so no
+//! number a live request holds is ever reused.
 //!
 //! Nothing here is `unsafe`: the slots are `OnceLock`s, so a row is
 //! `Sync` where its type is, and the segments never reallocate, so a
 //! row borrowed from the arena lives as long as the arena.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::api::call::Function;
 use crate::api::request::{Declared, UserFunction};
@@ -51,6 +58,8 @@ pub(crate) struct Column<T> {
     segments: [OnceLock<Box<[OnceLock<T>]>>; SEGMENTS],
     /// How many numbers were reserved, which is the next one's.
     reserved: AtomicU32,
+    /// How many rows a restart keeps ([`Column::keep`]).
+    kept: AtomicU32,
     /// The number no row reaches.
     limit: u32,
 }
@@ -74,6 +83,7 @@ impl<T> Column<T> {
         Column {
             segments: std::array::from_fn(|_| OnceLock::new()),
             reserved: AtomicU32::new(0),
+            kept: AtomicU32::new(0),
             limit: limit.min(held),
         }
     }
@@ -122,6 +132,28 @@ impl<T> Column<T> {
     /// handed stands below it.
     pub(crate) fn reserved(&self) -> u32 {
         self.reserved.load(Ordering::Acquire)
+    }
+
+    /// Every number reserved so far kept by a restart.
+    fn keep(&self) {
+        self.kept.store(self.reserved(), Ordering::Release);
+    }
+
+    /// The rows past the kept ones emptied, and their numbers free to
+    /// be reserved again: what only the arena's one holder may do, so
+    /// nothing reads a row as it goes. The segments stay laid down.
+    fn truncate(&mut self) {
+        let kept = *self.kept.get_mut();
+        let reserved = *self.reserved.get_mut();
+        for at in kept..reserved {
+            let slot = locate(at).and_then(|(segment, offset)| {
+                self.segments.get_mut(segment)?.get_mut()?.get_mut(offset)
+            });
+            if let Some(slot) = slot {
+                slot.take();
+            }
+        }
+        *self.reserved.get_mut() = kept;
     }
 }
 
@@ -234,11 +266,100 @@ impl Arena {
         };
         self.enum_methods.fill(at, row).is_ok()
     }
+
+    /// Every row published so far kept by a restart: the preload's, once
+    /// it has published.
+    pub(crate) fn keep(&self) {
+        self.classes.keep();
+        self.functions.keep();
+        self.enum_methods.keep();
+    }
+
+    /// The arena as a restart leaves it: the kept rows alone.
+    fn truncate(&mut self) {
+        self.classes.truncate();
+        self.functions.truncate();
+        self.enum_methods.truncate();
+        // Every link it keeps names a class past the kept rows: the
+        // preload links its classes as its request's own and publishes
+        // them, keeping none here.
+        self.inheritance.clear();
+    }
+
+    /// How many classes, functions and enum methods are reserved.
+    #[cfg(test)]
+    pub(crate) fn counts(&self) -> [u32; 3] {
+        [
+            self.classes.reserved(),
+            self.functions.reserved(),
+            self.enum_methods.reserved(),
+        ]
+    }
+}
+
+/// The arena's epochs (design §5.14, *Identities*): the arena a request
+/// starting now is handed, which it holds until it ends. A restart
+/// (`accel_activate`'s, under `ZCSG(restart_pending)`) is made only once
+/// no request holds the arena, `accel_is_inactive`, and empties it back
+/// to the rows it kept; while one does, the restart stays pending and
+/// is tried again at the next request's start.
+pub(crate) struct Epochs {
+    current: Mutex<Arc<Arena>>,
+}
+
+impl Epochs {
+    pub(crate) fn of(arena: Arena) -> Epochs {
+        Epochs {
+            current: Mutex::new(Arc::new(arena)),
+        }
+    }
+
+    /// The arena for a request starting now: where `pending` asks for a
+    /// restart and no request holds the arena, the arena emptied back to
+    /// the rows it kept and `restart` called, both while no other
+    /// request can start.
+    pub(crate) fn enter(
+        &self,
+        pending: impl FnOnce() -> bool,
+        restart: impl FnOnce(),
+    ) -> Arc<Arena> {
+        let mut current = match self.current.lock() {
+            Ok(current) => current,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if pending()
+            && let Some(arena) = Arc::get_mut(&mut current)
+        {
+            arena.truncate();
+            restart();
+        }
+        Arc::clone(&current)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Column, FIRST, locate};
+
+    #[test]
+    fn a_truncated_column_keeps_its_kept_rows_and_numbers_the_rest_again() {
+        let mut column: Column<u32> = Column::below(1 << 20);
+        let first = column.reserve(70).unwrap_or(u32::MAX);
+        for at in first..70 {
+            assert_eq!(column.fill(at, at), Ok(()));
+        }
+        column.keep();
+        let past = column.reserve(100).unwrap_or(u32::MAX);
+        assert_eq!(column.fill(past, 7), Ok(()));
+        assert_eq!(column.fill(past + 99, 9), Ok(()));
+        column.truncate();
+        assert_eq!(column.reserved(), 70);
+        assert_eq!(column.get(69), Some(&69), "a kept row stays");
+        assert_eq!(column.get(past), None, "a row past them goes");
+        assert_eq!(column.reserve(1), Some(70), "its number is reserved again");
+        assert_eq!(column.fill(70, 1), Ok(()));
+        assert_eq!(column.get(70), Some(&1));
+    }
 
     #[test]
     fn each_number_has_its_own_slot_and_segments_double() {

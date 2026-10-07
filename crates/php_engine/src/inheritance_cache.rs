@@ -141,9 +141,9 @@ impl InheritanceCache {
     }
 
     /// Every entry given up, as an opcache restart gives up the shared
-    /// memory they stand in (#2184), for a restart that keeps the arena
-    /// and truncates it; one that replaces the arena drops the map with it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "#2184's restart is its caller"))]
+    /// memory they stand in: what a restart that empties the arena back
+    /// to the preload's rows does ([`crate::arena::Epochs::enter`]); one
+    /// that replaces the arena drops the map with it.
     pub(crate) fn clear(&mut self) {
         for shard in &mut self.shards {
             shard
@@ -198,6 +198,25 @@ mod tests {
         assert_eq!(cache.declarations(), 1);
         cache.clear();
         assert!(cache.find(&unit, 0).is_none());
+    }
+
+    /// A restart, made once no request holds the arena, empties the map
+    /// with the rows its entries name.
+    #[test]
+    fn a_restart_empties_the_map() {
+        let epochs = crate::arena::Epochs::of(crate::arena::Arena::past(0, 0));
+        let unit = Unit::default().published();
+        let arena = epochs.enter(|| false, || {});
+        arena.inheritance.add(&unit, 0, entry(1, 10));
+        assert!(arena.inheritance.find(&unit, 0).is_some());
+        let held = epochs.enter(|| true, || {});
+        assert!(
+            held.inheritance.find(&unit, 0).is_some(),
+            "held by a request: no restart"
+        );
+        drop((arena, held));
+        let restarted = epochs.enter(|| true, || {});
+        assert!(restarted.inheritance.find(&unit, 0).is_none());
     }
 
     /// Readers on many threads while one writes: each sees a chain whole,
