@@ -66,8 +66,8 @@ api = "values::PhpArray::append"
 mahout = "mahout_value::PhpArray::snapshot"
 sites = 145
 crates = 12
-status = "same"
-api = "values::PhpArray::snapshot"
+status = "gone"
+rule = "the walk php's native uses: values::walk::rows for a read-only loop, values::walk::foreach with php's Hold where code of the program runs (#2004)"
 
 [[item]]
 mahout = "mahout_value::Value::as_array"
@@ -325,8 +325,8 @@ api = "values::PhpObject::set_prop"
 mahout = "mahout_value::PhpArray::snapshot_ref_flags"
 sites = 5
 crates = 1
-status = "renamed"
-api = "values::PhpArray::snapshot_refs"
+status = "gone"
+rule = "the walk php's native uses: values::walk::rows for a read-only loop, values::walk::foreach with php's Hold where code of the program runs (#2004)"
 
 [[item]]
 mahout = "mahout_value::PhpObject::closure_deferred_method_name"
