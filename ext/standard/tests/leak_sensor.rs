@@ -374,3 +374,55 @@ try { echo serialize(new T), "\n"; } catch (Exception $e) { echo $e->getMessage(
     );
     assert!(stdout.ends_with("n\n"), "{stdout}");
 }
+
+/// A write that releases a variable's object in place, as `extract`'s
+/// `EXTR_REFS` prefix helpers do, tells the value a destructor the
+/// release serves wrote there from the object it released, even where
+/// that destructor freed the object through the variable and the
+/// program's new object took its address: the new object is released
+/// once, after the write, and nothing is held (#2242). Each round
+/// drains the debug quarantine by one more object of the same size, so
+/// rounds lay the new object where the old one stood. The variable is a
+/// CV the main file's table points at (`$p_x`), and then a bucket
+/// `$GLOBALS` moved into a place of its own (`p_y`, which no frame
+/// compiles).
+#[test]
+fn a_write_in_place_tells_a_new_value_at_a_reused_address_from_the_old() {
+    let stdout = armed(
+        r#"<?php
+class X { function __construct(public $n) {} function __destruct() { echo "X{$this->n} "; } }
+class O { public $d; }
+class D { function __destruct() {
+    $v = $GLOBALS['v'];
+    $GLOBALS[$v] = 1;
+    $k = []; for ($i = 0; $i < $GLOBALS['n']; $i++) $k[] = new O;
+    $k = null;
+    $GLOBALS[$v] = new O;
+    $GLOBALS[$v]->d = new X($GLOBALS['n']);
+} }
+$v = 'p_x';
+for ($n = 0; $n < 40; $n++) {
+    unset($p_x, $src);
+    $p_x = new O; $p_x->d = new D;
+    $src = ['x' => 5];
+    extract($src, EXTR_REFS | EXTR_PREFIX_ALL, 'p');
+}
+echo "| ";
+$v = 'p_y';
+for ($n = 0; $n < 40; $n++) {
+    unset($GLOBALS['p_y'], $src);
+    $GLOBALS['p_y'] = new O; $GLOBALS['p_y']->d = new D;
+    $src = ['y' => 5];
+    extract($src, EXTR_REFS | EXTR_PREFIX_ALL, 'p');
+}
+echo "end\n";
+"#,
+    );
+    let rounds = (0..40).fold(String::new(), |mut rounds, n| {
+        rounds.push('X');
+        rounds.push_str(&n.to_string());
+        rounds.push(' ');
+        rounds
+    });
+    assert_eq!(stdout, format!("{rounds}| {rounds}end\n"));
+}
