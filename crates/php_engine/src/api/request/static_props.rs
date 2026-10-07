@@ -356,17 +356,9 @@ impl Request {
         // not strict, and php's `TypeError` where it neither satisfies
         // nor coerces, the value given up as php gives it up.
         if let Some(ty) = property.ty.clone() {
-            match crate::ops::verify_property_type(self, &value, &ty, declaring, name, strict) {
-                Ok(None) => {}
-                Ok(Some(coerced)) => {
-                    self.release(value);
-                    value = coerced;
-                }
-                Err(thrown) => {
-                    self.release(value);
-                    return Err(thrown);
-                }
-            }
+            let verdict =
+                crate::ops::verify_property_type(self, &value, &ty, declaring, name, strict);
+            value = crate::ops::landed(self, value, verdict)?;
         }
         // `zend_assign_to_variable` over a slot bound by reference: the
         // cell is held to every property it is typed by, which may be

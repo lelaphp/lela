@@ -1005,6 +1005,41 @@ fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> O
     mangled.get(found).and_then(|slot| slot.prefix.clone())
 }
 
+/// The value a type check over `value` lands: `value` where the check
+/// took it as it is, the coercion where it made one, `value` given up
+/// either way it does not land, as php's `zval_ptr_dtor` gives up the
+/// operand of a refused or a coerced assignment.
+///
+/// ```php
+/// class C { public int $n = 0; public static float $f = 0.0; }
+/// $c = new C;
+/// $c->n = "5";
+/// C::$f = 1;
+/// $r = &$c->n;
+/// $r = "7";
+/// var_dump($c->n, C::$f);
+/// try { $c->n = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $r = []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->n);
+/// ```
+/// ```expect
+/// int(7)
+/// float(1)
+/// Cannot assign string to property C::$n of type int
+/// Cannot assign array to reference held by property C::$n of type int
+/// int(7)
+/// ```
+pub(crate) fn landed(
+    req: &mut Request,
+    value: Value,
+    verdict: Result<Option<Value>, Thrown>,
+) -> Result<Value, Thrown> {
+    if !matches!(verdict, Ok(None)) {
+        req.release(value);
+    }
+    verdict.map(|coerced| coerced.unwrap_or(value))
+}
+
 /// `zend_verify_property_type` (`Z/Zend/zend_object_handlers.c:1065`)
 /// under `zend_assign_to_typed_prop` (`Z/Zend/zend_execute.c:3583`):
 /// what a write to a property with a declared type is held to. Nothing

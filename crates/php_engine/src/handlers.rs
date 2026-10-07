@@ -12489,19 +12489,15 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     }
     let stepped = match ty {
         None => stepped,
-        Some(ty) => match verified_op(req, &stepped, &ty, declaring, &name, strict) {
-            Ok(None) => stepped,
-            Ok(Some(coerced)) => {
-                req.release(stepped);
-                coerced
+        Some(ty) => {
+            let verdict = verified_op(req, &stepped, &ty, declaring, &name, strict);
+            // php gives the operation's value up and the slot keeps what
+            // it held (`zval_ptr_dtor(&z_copy)`).
+            match crate::ops::landed(req, stepped, verdict) {
+                Ok(landed) => landed,
+                Err(thrown) => return threw(req, frame, &thrown),
             }
-            Err(thrown) => {
-                // php gives the operation's value up and the slot keeps
-                // what it held (`zval_ptr_dtor(&z_copy)`).
-                req.release(stepped);
-                return threw(req, frame, &thrown);
-            }
-        },
+        }
     };
     write_out(req, frame, code, op, &stepped);
     // The value is already the declared type's, so the store is php's
@@ -12600,16 +12596,13 @@ fn static_prop_step(
             return threw(req, frame, &thrown);
         }
         Some(ty) => {
-            match crate::ops::verify_property_type(req, &stepped, &ty, declaring, &name, strict) {
-                Ok(None) => stepped,
-                Ok(Some(coerced)) => {
-                    req.release(stepped);
-                    coerced
-                }
+            let verdict =
+                crate::ops::verify_property_type(req, &stepped, &ty, declaring, &name, strict);
+            match crate::ops::landed(req, stepped, verdict) {
+                Ok(landed) => landed,
                 Err(thrown) => {
                     // `ZVAL_COPY_VALUE(var_ptr, copy)`: the slot keeps
                     // what it held and the stepped value is given up.
-                    req.release(stepped);
                     req.release(held);
                     return threw(req, frame, &thrown);
                 }
@@ -12998,17 +12991,8 @@ fn assign_to_place(
     if let Some(cell) = held.as_php_ref() {
         let cell = *cell;
         if !req.ref_type_sources(cell.heap()).is_empty() {
-            value = match crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict) {
-                Ok(None) => value,
-                Ok(Some(coerced)) => {
-                    req.release(value);
-                    coerced
-                }
-                Err(thrown) => {
-                    req.release(value);
-                    return Err(thrown);
-                }
-            };
+            let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict);
+            value = crate::ops::landed(req, value, verdict)?;
         }
         at = cell.heap().val_ref();
         held = exec::value_of(at.read());
@@ -20469,16 +20453,10 @@ fn step_through_typed_ref(
         );
         return RefStep::Clamped(Value::int(bound), thrown);
     }
-    match crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict) {
-        Ok(None) => RefStep::Landed(stepped),
-        Ok(Some(coerced)) => {
-            req.release(stepped);
-            RefStep::Landed(coerced)
-        }
-        Err(thrown) => {
-            req.release(stepped);
-            RefStep::Refused(thrown)
-        }
+    let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &stepped, strict);
+    match crate::ops::landed(req, stepped, verdict) {
+        Ok(landed) => RefStep::Landed(landed),
+        Err(thrown) => RefStep::Refused(thrown),
     }
 }
 
