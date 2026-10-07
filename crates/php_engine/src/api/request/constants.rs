@@ -369,9 +369,9 @@ impl Request {
         let Some([stdin, stdout, stderr]) = (hooks.standard_handles)(self, stdin_replaced)? else {
             return Ok(());
         };
-        self.register_host_constant(b"STDIN", stdin);
-        self.register_host_constant(b"STDOUT", stdout);
-        self.register_host_constant(b"STDERR", stderr);
+        self.register_host_constant(b"STDIN", stdin.hand_on());
+        self.register_host_constant(b"STDOUT", stdout.hand_on());
+        self.register_host_constant(b"STDERR", stderr.hand_on());
         Ok(())
     }
 

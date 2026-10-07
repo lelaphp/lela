@@ -2212,7 +2212,7 @@ impl ObjectHandlers for FileHandlers {
 /// `spl_filesystem_object_clone`: an info copied; a directory opened
 /// again and read to where it stood; a file refused, as php's
 /// `ZEND_UNREACHABLE` guards.
-fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_fs(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let (kind, path, name, flags, index, file_class, info_class) = fs(req, object, |it| {
         (
             it.kind,
@@ -2261,7 +2261,7 @@ fn clone_fs(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
         }
     }
     // The `clone_obj` slot's return, the one owner the copy was made with.
-    Ok(cloned.hand_on_unmigrated())
+    Ok(cloned)
 }
 
 /// A file's name beside its stat, `php_fstat`'s thirteen fields.

@@ -90,7 +90,7 @@ impl ObjectHandlers for Handlers {
 /// `IntlDateFormatter_object_clone`: a fresh object's members, the
 /// styles and the calendar type left at their defaults as php leaves
 /// them, and `udat_clone`; php's `Error` once the copy is made.
-fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let mut status = Code::ZERO;
     let copy = object
         .native::<DateFormatObject>(req)
@@ -105,7 +105,7 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
     let message = match held {
         false => "Cannot clone uninitialized IntlDateFormatter",
         true if status.is_failure() => "Failed to clone IntlDateFormatter",
-        true => return Ok(new.hand_on_unmigrated()),
+        true => return Ok(new),
     };
     new.give_up(req);
     Err(throw_error(req, "Error", message))

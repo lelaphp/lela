@@ -606,7 +606,7 @@ fn with<T>(req: &mut Request, object: PhpObject, f: impl FnOnce(&Trans) -> T) ->
 }
 
 /// `Transliterator_clone_obj`: a clone of ICU's transliterator.
-fn clone_trans(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
+fn clone_trans(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
     let copy = match object.native::<TransObject>(req) {
         Some(TransObject {
             utrans: Some(utrans),
@@ -627,5 +627,5 @@ fn clone_trans(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
         error: IntlError::default(),
         utrans: Some(copy),
     };
-    clone_with(req, &object, payload).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, payload)
 }

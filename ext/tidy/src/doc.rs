@@ -89,11 +89,11 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         Ok(Some(match to {
-            TypeTag::Int | TypeTag::Number => Value::int(0),
-            TypeTag::Float => Value::float(0.0),
-            TypeTag::Bool => Value::bool(true),
+            TypeTag::Int | TypeTag::Number => Owner::take(req, Value::int(0)),
+            TypeTag::Float => Owner::take(req, Value::float(0.0)),
+            TypeTag::Bool => Owner::take(req, Value::bool(true)),
             TypeTag::String => {
                 let bytes = if self.node {
                     node::text(req, object)?.unwrap_or_default()
@@ -101,7 +101,7 @@ impl ObjectHandlers for Handlers {
                     let id = doc_id(req, object)?;
                     with_doc(req, id, |req, doc| doc.save(req))?.unwrap_or_default()
                 };
-                Value::string(PhpString::new(req, fixed(&bytes))?.hand_on_unmigrated())
+                PhpString::new(req, fixed(&bytes))?.into_value()
             }
             _ => return Ok(None),
         }))
@@ -1071,7 +1071,10 @@ fn tidy_get_body(
 
 /// The functions in `tidy.stub.php`'s order.
 /// A function's declaration and its entry.
-type Entry = (FunctionDecl, fn(&mut Request) -> Result<Value, Thrown>);
+type Entry = (
+    FunctionDecl,
+    fn(&mut Request) -> Result<Owner<Value>, Thrown>,
+);
 
 pub(crate) fn functions() -> Vec<Entry> {
     vec![

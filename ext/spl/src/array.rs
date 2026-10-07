@@ -372,7 +372,8 @@ impl ArrayObject {
                 &format!("Cannot append properties to objects, use {class}::offsetSet() instead"),
             ));
         }
-        Handlers.write_dimension(req, this, None, crate::copied(req, value))
+        let value = Owner::take(req, value.deref());
+        Handlers.write_dimension(req, this, None, value)
     }
 
     /// `getArrayCopy(): array`: the table as an array of its own.
@@ -1493,23 +1494,28 @@ impl Table {
         req: &mut Request,
         key: &Key,
         found: Option<Value>,
-    ) -> Result<PhpRef, Thrown> {
+    ) -> Result<Owner<PhpRef>, Thrown> {
         match self {
             Table::Array(owner, mut array) => {
                 if let Some(cell) = found.and_then(|v| v.as_php_ref().copied()) {
-                    req.addref(&cell.as_value());
-                    return Ok(cell);
+                    return Ok(Owner::take(req, cell));
                 }
                 let held = found.map_or_else(Value::null, |v| crate::copied(req, v));
-                // The cell's first owner goes to the table, the second to
-                // the slot's caller.
-                let cell = PhpRef::new(req, held)?.hand_on_unmigrated();
+                // The cell's first owner goes to the slot's caller, a second
+                // to the table.
+                let cell = PhpRef::new(req, held)?;
+                let kept = Owner::take(req, cell.as_value());
                 let key = Owner::take(req, key.clone());
-                array.set(req, key, Owner::take(req, cell.as_value()))?;
-                store(req, owner, array)?;
+                let stored = array
+                    .set(req, key, kept)
+                    .and_then(|()| store(req, owner, array));
+                if let Err(thrown) = stored {
+                    cell.give_up(req);
+                    return Err(thrown);
+                }
                 Ok(cell)
             }
-            Table::Props(backing) => backing.row_ref(req, key).map(Owner::hand_on_unmigrated),
+            Table::Props(backing) => backing.row_ref(req, key),
         }
     }
 
@@ -1613,7 +1619,7 @@ fn place(
     object: PhpObject,
     offset: &Value,
     read: DimensionRead,
-) -> Result<Option<PhpRef>, Thrown> {
+) -> Result<Option<Owner<PhpRef>>, Thrown> {
     if read != DimensionRead::Unset {
         sorting_refused(req, object)?;
     }
@@ -1686,7 +1692,7 @@ fn place(
 ///   string(1) "r"
 /// }
 /// ```
-fn current_place(req: &mut Request, object: PhpObject) -> Result<Option<PhpRef>, Thrown> {
+fn current_place(req: &mut Request, object: PhpObject) -> Result<Option<Owner<PhpRef>>, Thrown> {
     let Some((_, key, value)) = here(req, object)? else {
         return Ok(None);
     };
@@ -1697,9 +1703,7 @@ fn current_place(req: &mut Request, object: PhpObject) -> Result<Option<PhpRef>,
         if unbound {
             refuse_readonly(req, backing, &key)?;
         }
-        return backing
-            .typed_row_ref(req, &key)
-            .map(|cell| Some(cell.hand_on_unmigrated()));
+        return backing.typed_row_ref(req, &key).map(Some);
     }
     let table = table(req, object)?;
     table.element_ref(req, &key, Some(value)).map(Some)
@@ -1996,14 +2000,14 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let get = crate::overridden(req, object, b"offsetget");
         let silent = read == DimensionRead::Silent;
         if get || (silent && crate::overridden(req, object, b"offsetexists")) {
             if silent {
                 let at = offset.copied().unwrap_or_default();
                 if !has(req, object, &at, 0, true)? {
-                    return Ok(Value::null());
+                    return Ok(Owner::take(req, Value::null()));
                 }
             }
             // `if (!offset) { ZVAL_UNDEF(&tmp); offset = &tmp; }`: `$o[]`
@@ -2031,23 +2035,25 @@ impl ObjectHandlers for Handlers {
                         ),
                     );
                 }
-                return got.map(Owner::hand_on_unmigrated);
+                return got;
             }
         }
         let Some(offset) = offset else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         match read {
             // The slot hands the engine an owner of what it read.
             DimensionRead::Warning => {
-                self::read(req, object, offset, true).map(|v| crate::copied(req, v))
+                self::read(req, object, offset, true).map(|v| Owner::take(req, v.deref()))
             }
             DimensionRead::Silent => {
-                self::read(req, object, offset, false).map(|v| crate::copied(req, v))
+                self::read(req, object, offset, false).map(|v| Owner::take(req, v.deref()))
             }
             DimensionRead::Write | DimensionRead::ReadWrite | DimensionRead::Unset => {
-                Ok(place(req, object, offset, read)?
-                    .map_or_else(Value::null, |cell| cell.as_value()))
+                Ok(match place(req, object, offset, read)? {
+                    Some(cell) => cell.into_value(),
+                    None => Owner::take(req, Value::null()),
+                })
             }
         }
     }
@@ -2145,17 +2151,17 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if crate::overridden(req, object, b"offsetset") {
             let offset = offset.copied().unwrap_or_default();
-            let answered = call_method(req, &object, b"offsetSet", &[offset, value]);
-            req.release(value);
+            let answered = call_method(req, &object, b"offsetSet", &[offset, *value]);
+            value.give_up(req);
             answered?.give_up(req);
             return Ok(());
         }
-        let written = write(req, object, offset, value);
-        req.release(value);
+        let written = write(req, object, offset, *value);
+        value.give_up(req);
         written
     }
 
@@ -2201,7 +2207,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         how: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         if as_props(req, object, name)? {
             let member = crate::string_value(req, name)?;
             let fetch = match how {
@@ -2236,8 +2242,7 @@ impl ObjectHandlers for Handlers {
             // The name an `ArrayObject` writes a property under is the
             // offset's, a view; the slot gives the value up.
             let member = Value::string(*name);
-            let written =
-                self.write_dimension(req, object, Some(&member), value.hand_on_unmigrated());
+            let written = self.write_dimension(req, object, Some(&member), value);
             name.give_up(req);
             return written;
         }
@@ -2392,7 +2397,7 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<Ph
 /// `spl_array_object_clone`: the flags and the iterator class copied;
 /// an `ArrayObject` a copy of the table, an `ArrayIterator` reading
 /// through the object it was cloned from.
-fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_array(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let (flags, iterator_class, storage) = {
         let p = payload(req, object)?;
         (p.flags, p.iterator_class, p.storage)
@@ -2413,7 +2418,7 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
         iterator_class,
         ..SplArrayObject::default()
     };
-    clone_with(req, &object, copy).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, copy)
 }
 
 /// `spl_array_set_array`: the storage replaced by `given`, an array held

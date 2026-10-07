@@ -638,7 +638,9 @@ pub struct IncludeSource {
 }
 
 /// [`StreamHooks::standard_handles`].
-pub type StandardHandlesHook = fn(&mut Request, bool) -> Result<Option<[Value; 3]>, Thrown>;
+/// Each stream's one owner the caller's, which the constant it registers
+/// holds.
+pub type StandardHandlesHook = fn(&mut Request, bool) -> Result<Option<[Owner<Value>; 3]>, Thrown>;
 
 /// What [`ExtensionBuilder::encodings`] takes: the encoding functions
 /// bound to one request.
@@ -1655,11 +1657,7 @@ impl ExtensionBuilder {
     /// order. A name no extension declares, or one `disable_functions`
     /// took out, is intercepted by nothing.
     #[must_use]
-    pub fn intercept(
-        mut self,
-        name: &[u8],
-        entry: fn(&mut Request) -> Result<Value, Thrown>,
-    ) -> ExtensionBuilder {
+    pub fn intercept(mut self, name: &[u8], entry: Entry) -> ExtensionBuilder {
         self.supplies.intercepts.push((Name(name.into()), entry));
         self
     }
@@ -2042,7 +2040,8 @@ pub enum PropertiesFor {
 }
 
 /// What the `get_debug_info` slot answers: php's `HashTable *` with its
-/// `*is_temp` owner, the caller's, and the throwable a handler raised
+/// `*is_temp` owner, the caller's, which the caller gives up once the
+/// dump is printed, and the throwable a handler raised
 /// while it built the table and left in `EG(exception)`, which
 /// `dom_get_debug_info_helper` does for a property whose reader fails
 /// (`Z/ext/dom/php_dom.c:526`). A dumper renders the table and then
@@ -2052,12 +2051,12 @@ pub enum PropertiesFor {
 /// is chained onto the first with [`Thrown::chain`].
 #[derive(Debug)]
 pub struct DebugInfo {
-    pub table: PhpArray,
+    pub table: Owner<PhpArray>,
     pub thrown: Option<Thrown>,
 }
 
-impl From<PhpArray> for DebugInfo {
-    fn from(table: PhpArray) -> DebugInfo {
+impl From<Owner<PhpArray>> for DebugInfo {
+    fn from(table: Owner<PhpArray>) -> DebugInfo {
         DebugInfo {
             table,
             thrown: None,
@@ -2066,16 +2065,23 @@ impl From<PhpArray> for DebugInfo {
 }
 
 /// The `clone_obj` slot: a fresh object holding what this one holds,
-/// one owner, the caller's.
-pub type CloneObj = fn(&mut Request, PhpObject) -> Result<PhpObject, Thrown>;
+/// its one owner the caller's.
+pub type CloneObj = fn(&mut Request, PhpObject) -> Result<Owner<PhpObject>, Thrown>;
 /// The `clone_obj_with` slot: `clone($o, [...])`, the clone with each
-/// named property written through `write_property` from `scope`.
+/// named property of the table, php's `const HashTable *`, a view,
+/// written through `write_property` from `scope`; the clone's one owner
+/// the caller's.
 pub type CloneObjWith =
-    fn(&mut Request, PhpObject, Option<ClassId>, PhpArray) -> Result<PhpObject, Thrown>;
+    fn(&mut Request, PhpObject, Option<ClassId>, PhpArray) -> Result<Owner<PhpObject>, Thrown>;
+/// What [`ObjectHandlers::iterator_element`] answers for one element: its
+/// key and its value, one owner each, the caller's, as php's
+/// `get_current_key` and `get_current_data` hand them to `zend_iterator`'s
+/// reader.
+pub type IteratorElement = (Owner<Value>, Owner<Value>);
 /// The `current_place` slot: the element the object's own iterator
 /// stands at made a reference in place, the cell with one more owner,
 /// the caller's; `None` past the last element.
-pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<PhpRef>, Thrown>;
+pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<Owner<PhpRef>>, Thrown>;
 
 /// The `zend_object_iterator` a class hands out from its own
 /// `get_iterator` and walks in C, as [`ObjectHandlers::get_iterator`]
@@ -2092,9 +2098,10 @@ pub trait ClassIterator: Send {
     /// `funcs->valid`, `SUCCESS` as `true`.
     fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown>;
     /// `funcs->get_current_data`, one owner, the caller's.
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown>;
-    /// `funcs->get_current_key`, one owner, the caller's.
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown>;
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown>;
+    /// `funcs->get_current_key`, one owner, the caller's, as php's
+    /// caller frees the `zval` the function filled.
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown>;
     /// `funcs->move_forward`.
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown>;
     /// `funcs->dtor`, when the loop gives the iterator up, before the
@@ -2187,7 +2194,8 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `read_property`, `zend_std_read_property` at `Std`: one more
-    /// owner of the value read, a reference followed. `read` is php's
+    /// owner of the value read, a reference followed, the caller's, as
+    /// php's caller frees the `rv` the slot read into. `read` is php's
     /// `type` argument, `BP_VAR_R` or the `BP_VAR_IS` an `isset`, an
     /// `empty` or a `??` reads through.
     fn read_property(
@@ -2196,7 +2204,7 @@ pub trait ObjectHandlers: Send + Sync {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         req.read_property(object, name, read)
     }
 
@@ -2211,7 +2219,7 @@ pub trait ObjectHandlers: Send + Sync {
         name: Owner<PhpString>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        req.write_property(object, name.hand_on(), value.hand_on())
+        req.write_property(object, name, value)
     }
 
     /// `read_dimension`, `zend_std_read_dimension` at `Std`:
@@ -2272,7 +2280,7 @@ pub trait ObjectHandlers: Send + Sync {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         req.read_dimension(object, offset, read)
     }
 
@@ -2297,14 +2305,15 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `write_dimension`, `zend_std_write_dimension` at `Std`:
-    /// `offsetSet` on an `ArrayAccess`, and php's `Error` otherwise.
-    /// `value` is given up either way.
+    /// `offsetSet` on an `ArrayAccess`, and php's `Error` otherwise. A
+    /// sink of the value's owner, which a table that keeps the value
+    /// hands on and one that does not, or refuses the write, gives up.
     fn write_dimension(
         &self,
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         req.write_dimension(object, offset, value)
     }
@@ -2506,13 +2515,14 @@ pub trait ObjectHandlers: Send + Sync {
     /// `cast_object`, `zend_std_cast_object_tostring` at `Std`: the
     /// `__toString` of the class for a string, `true` for a bool, and
     /// `None`, php's `FAILURE`, for every other type and for a class
-    /// with no `__toString`.
+    /// with no `__toString`. The value cast to is the caller's, as php's
+    /// `retval` is.
     fn cast_object(
         &self,
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         req.cast_object(object, to)
     }
 
@@ -2558,15 +2568,16 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `do_operation`: the value an operator over the object answers,
-    /// `right` none for a unary one; `None` at `Std`, php's null slot,
-    /// so the operator is `zend_binop_error`'s.
+    /// the caller's, as php's `result` is, `right` none for a unary one;
+    /// `None` at `Std`, php's null slot, so the operator is
+    /// `zend_binop_error`'s.
     fn do_operation(
         &self,
         req: &mut Request,
         op: BinaryOp,
         left: &Value,
         right: Option<&Value>,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let _ = (req, op, left, right);
         Ok(None)
     }
@@ -2600,7 +2611,7 @@ pub trait ObjectHandlers: Send + Sync {
         req: &mut Request,
         object: PhpObject,
         index: usize,
-    ) -> Result<Option<(Value, Value)>, Thrown> {
+    ) -> Result<Option<IteratorElement>, Thrown> {
         let _ = (req, object, index);
         Ok(None)
     }

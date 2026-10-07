@@ -398,15 +398,10 @@ impl InvalidUrlException {
     }
 }
 
-/// The case object of `kind` as an owner. `IntoReturn` answers a case
-/// with one owner taken for the caller (`enum_case`), which the face has
-/// no way to name as the owner it is: a second is taken for the caller
-/// and that one given back.
+/// The case object of `kind` as an owner: `IntoReturn` answers a case
+/// with the one owner taken for the caller (`enum_case`).
 fn case_owner(req: &mut Request, kind: UrlValidationErrorType) -> Result<Owner<Value>, Thrown> {
-    let returned = kind.into_return(req)?;
-    let owner = Owner::take(req, returned);
-    req.release(returned);
-    Ok(owner)
+    kind.into_return(req)
 }
 
 /// `zend_readonly_property_modification_error`.

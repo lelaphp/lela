@@ -964,13 +964,14 @@ impl ClassIterator for ListIterator {
         Ok(self.cursor.pointer.is_some())
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let found = with(req, object, |l| l.at(self.cursor))?;
-        Ok(found.map_or_else(Value::null, |v| crate::copied(req, v)))
+        let current = found.map_or_else(Value::null, |v| v.deref());
+        Ok(Owner::take(req, current))
     }
 
-    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
-        Ok(Value::int(self.cursor.position))
+    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, Value::int(self.cursor.position)))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -984,7 +985,7 @@ impl ClassIterator for ListIterator {
 
 /// `spl_dllist_object_clone`: the list copied, one more owner of each
 /// element, the pointer at the head.
-fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_list(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let (values, flags) = with(req, object, |l| (l.values(), l.flags))?;
     let mut copy = Box::new(LlistState {
         flags,
@@ -996,7 +997,7 @@ fn clone_list(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
         copy.push(value);
     }
     copy.cursor.pointer = copy.head;
-    clone_with(req, &object, copy).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, copy)
 }
 
 /// `spl_dllist_object_get_debug_info`: the properties, then `flags` and

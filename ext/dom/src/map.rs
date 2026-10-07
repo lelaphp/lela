@@ -576,7 +576,7 @@ impl ObjectHandlers for MapHandlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         crate::read_property(req, object, name, read)
     }
 
@@ -632,7 +632,7 @@ impl ObjectHandlers for MapHandlers {
         object: PhpObject,
         offset_value: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let isset = read == DimensionRead::Silent;
         let dims = dims(req, object);
         let Some(offset_value) = offset_value else {
@@ -645,7 +645,7 @@ impl ObjectHandlers for MapHandlers {
             return Err(throw_error(req, "Error", &message));
         };
         if dims != Dims::Legacy {
-            let read = match (dims, modern_index(req, offset_value)?) {
+            return match (dims, modern_index(req, offset_value)?) {
                 (_, Index::Long(n)) => item(req, object, n),
                 (Dims::ModernMap, Index::Str(name)) => named(req, object, name.as_bytes(), None),
                 (Dims::Collection, Index::Str(name)) => {
@@ -653,13 +653,12 @@ impl ObjectHandlers for MapHandlers {
                 }
                 _ => Err(illegal_offset(req, object, offset_value, isset)),
             };
-            return read.map(Owner::hand_on_unmigrated);
         }
         let is_list = !named_keys(req, object);
-        let read = match offset(req, offset_value)? {
+        match offset(req, offset_value)? {
             Err(name) if is_list => {
                 let _ = name;
-                return Ok(Value::null());
+                Ok(Owner::take(req, Value::null()))
             }
             Err(name) => named(req, object, name.as_bytes(), None),
             Ok(index) if is_list => item(req, object, index),
@@ -673,8 +672,7 @@ impl ObjectHandlers for MapHandlers {
                 }
                 item(req, object, index)
             }
-        };
-        read.map(Owner::hand_on_unmigrated)
+        }
     }
 
     fn has_dimension(
@@ -813,22 +811,21 @@ impl ClassIterator for NodeIter {
         Ok(self.current.is_some())
     }
 
-    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
-        let Some(current) = self.current else {
-            return Ok(Value::null());
-        };
-        req.addref(&current.as_value());
-        Ok(current.as_value())
+    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        let current = self
+            .current
+            .map_or_else(Value::null, |current| current.as_value());
+        Ok(Owner::take(req, current))
     }
 
     /// `php_dom_iterator_current_key`: the index, or a named map's item
     /// by its name, a modern attribute by its qualified name.
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         if !named_keys(req, object) {
-            return Ok(Value::int(self.index));
+            return Ok(Owner::take(req, Value::int(self.index)));
         }
         let Some(node) = self.current.and_then(|o| node_of(req, o)) else {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         };
         let modern = self
             .current
@@ -838,7 +835,7 @@ impl ClassIterator for NodeIter {
         } else {
             node.name()
         };
-        string(req, &name).map(Owner::hand_on_unmigrated)
+        string(req, &name)
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

@@ -24,7 +24,7 @@ use php_unit::decl::{
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{Key, Owner, PhpArray, Value};
+use crate::api::values::{Key, Owner, PhpArray, Value, adopted};
 
 /// Where the trampolines' function numbers begin: among the request's
 /// own, past its enum methods' ([`Function::TRAMPOLINE`]), so the spaces
@@ -393,14 +393,14 @@ pub(crate) fn hand_to_magic(req: &mut Request, function: Function) -> Result<Fun
 /// #2 {main}
 ///   thrown in %s on line 2
 /// ```
-pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Value, Thrown> {
+pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some((function, this, called)) = req.serving_callee() else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let Some((magic, name)) = req.trampoline_of(function).and_then(|(trampoline, _)| {
         Some((trampoline.magic()?, trampoline.decl.function.name.clone()))
     }) else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);
     let passed: Vec<Value> = (1..=count)
@@ -430,5 +430,5 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Value, Thrown> {
     for argument in arguments {
         req.release(argument);
     }
-    served
+    adopted(req, served)
 }

@@ -1069,7 +1069,7 @@ fn hash_final(
 /// ```expect
 /// 1976 32
 /// ```
-fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_context(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let forked = object.native::<Context>(req).map(|c| {
         (
             c.algo,
@@ -1087,32 +1087,40 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         copy.give_up(req);
         return Err(thrown);
     };
-    for (key, value) in object.props(req)? {
-        match key {
-            Key::Str(name) => {
-                let value = Owner::take(req, value);
-                let name = Owner::take(req, name);
-                copy.set_prop(req, name, value)?;
-            }
-            Key::Int(_) => {
-                let value = Owner::take(req, value);
-                copy.set_row(req, &key, value)?;
+    let filled = (|| {
+        for (key, value) in object.props(req)? {
+            match key {
+                Key::Str(name) => {
+                    let value = Owner::take(req, value);
+                    let name = Owner::take(req, name);
+                    copy.set_prop(req, name, value)?;
+                }
+                Key::Int(_) => {
+                    let value = Owner::take(req, value);
+                    copy.set_row(req, &key, value)?;
+                }
             }
         }
+        let running = Running::new(req, algo, state)?;
+        let mut kept = Emalloc::new(req, algo.block)?;
+        if let Some(key) = key {
+            kept.bytes_mut().copy_from_slice(&key);
+        }
+        if let Some(context) = copy.native_mut::<Context>(req) {
+            context.algo = Some(algo);
+            context.running = Some(running);
+            context.flags = flags;
+            context.key = Some(kept);
+        }
+        Ok(())
+    })();
+    // The `clone_obj` slot's return, the one owner the copy was made
+    // with, given up where the copy could not be filled.
+    if let Err(thrown) = filled {
+        copy.give_up(req);
+        return Err(thrown);
     }
-    let running = Running::new(req, algo, state)?;
-    let mut kept = Emalloc::new(req, algo.block)?;
-    if let Some(key) = key {
-        kept.bytes_mut().copy_from_slice(&key);
-    }
-    if let Some(context) = copy.native_mut::<Context>(req) {
-        context.algo = Some(algo);
-        context.running = Some(running);
-        context.flags = flags;
-        context.key = Some(kept);
-    }
-    // The `clone_obj` slot's return, the one owner the copy was made with.
-    Ok(copy.hand_on_unmigrated())
+    Ok(copy)
 }
 
 /// `hash_copy(HashContext $context): HashContext`.
@@ -1140,10 +1148,7 @@ fn hash_copy(
 ) -> Result<Owner<Instance<HashContext>>, Thrown> {
     let object = verify(req, context.object(), 1)?;
     // The slot's copy is the one owner it was made with.
-    let copy = clone_context(req, object)?;
-    let owner = Owner::take(req, copy);
-    req.release(copy.as_value());
-    Ok(owner.into_instance())
+    Ok(clone_context(req, object)?.into_instance())
 }
 
 /// The table's names, all or the cryptographic ones.

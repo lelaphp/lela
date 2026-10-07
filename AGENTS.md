@@ -110,12 +110,12 @@ third-engine-design.md
 | process | process.lock | 17 |  | pass |
 | unit | unit.lock | 122 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1316 | 1500 | pass |
+| api | api.lock | 1317 | 1500 | pass |
 | sapi | sapi.lock | 35 |  | pass |
 | tier | tier.lock | 65 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=79bf6ba18ed6b76b5426613f1d8585355a01c3a12a7bbca8b3038ef4eaf45830 out=c2bd02b9a6e2a34f58e151ca9d4717a24f6f4469a2c1f854f3cc6752429e0eec -->
+<!-- /computed in=b23864647d406033eeb6c59eb7ab1ee08f7582916f2ad67155b05185631ffa5a out=d5d6ec5034b616830224701940574fb2c6e916a643be2f4712d536626b767f85 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -136,19 +136,19 @@ third-engine-design.md
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | no reading |
-| ticket.close |  | deny_argv | no reading |
-| ticket.close-api |  | deny_pattern | no reading |
+| git.no-verify |  | deny_argv | fail |
+| ticket.close |  | deny_argv | fail |
+| ticket.close-api |  | deny_pattern | fail |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | no reading |
+| lanes.nightly |  | deny_pattern | fail |
 | lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | no reading |
+| lanes.builder-subset |  | require_argv | fail |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
+| harness.self |  | deny | pass |
 | divergence.reason |  | check | no reading |
-| owner.no-assign-discard |  | deny_pattern | fail |
+| owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=41b262995fd0534786112bfcf420ba6e61149ceba2c66a087720baabdcecca5d out=37d2841e1c624e9d804f3b375c92dc0d330fe3b72df8eba45023ab6930446199 -->
+<!-- /computed in=0916b61481da36955fa020014e903a526ac8ed66e898f448fe50bc079f318728 out=0525dffefe4ef93cd822f740f6b7b60297e1443e58837e618e2f02c32c1fdb9a -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

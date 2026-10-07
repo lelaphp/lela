@@ -24,7 +24,8 @@ use php_macros::php_class;
 use php_unit::decl::ClassKind;
 
 use crate::api::abi::{
-    ClassIterator, CurrentPlace, ExtensionBuilder, Instance, ObjectHandlers, This, Untyped,
+    ClassIterator, CurrentPlace, ExtensionBuilder, Instance, IteratorElement, ObjectHandlers, This,
+    Untyped,
 };
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
@@ -238,8 +239,8 @@ impl Funcs {
             Funcs::Generator => crate::generator::iterator_valid(req, data),
             Funcs::Element => Ok(match element(req, wrapper, data)? {
                 Some((key, value)) => {
-                    req.release(key);
-                    req.release(value);
+                    key.give_up(req);
+                    value.give_up(req);
                     true
                 }
                 None => false,
@@ -282,7 +283,7 @@ impl Funcs {
         let Walk { wrapper, data } = it;
         match self {
             Funcs::Places(place) if by_ref => {
-                Ok(place(req, data)?.map_or_else(Value::null, |cell| cell.as_value()))
+                Ok(place(req, data)?.map_or_else(Value::null, |cell| cell.into_value().hand_on()))
             }
             Funcs::Places(_) => crate::api::call::call_method_made(req, &data, b"current", &[]),
             Funcs::User => {
@@ -309,13 +310,15 @@ impl Funcs {
             }
             Funcs::Element => Ok(match element(req, wrapper, data)? {
                 Some((key, value)) => {
-                    req.release(key);
-                    value
+                    key.give_up(req);
+                    value.hand_on()
                 }
                 None => Value::null(),
             }),
-            Funcs::Class => class_step(req, it, |iter, req, data| iter.current(req, data))
-                .unwrap_or_else(|| Ok(Value::null())),
+            Funcs::Class => class_step(req, it, |iter, req, data| {
+                iter.current(req, data).map(Owner::hand_on)
+            })
+            .unwrap_or_else(|| Ok(Value::null())),
         }
     }
 
@@ -335,13 +338,15 @@ impl Funcs {
             Funcs::Generator => crate::generator::iterator_key(req, data),
             Funcs::Element => Ok(match element(req, wrapper, data)? {
                 Some((key, value)) => {
-                    req.release(value);
-                    key
+                    value.give_up(req);
+                    key.hand_on()
                 }
                 None => Value::null(),
             }),
-            Funcs::Class => class_step(req, it, |iter, req, data| iter.key(req, data))
-                .unwrap_or_else(|| Ok(Value::null())),
+            Funcs::Class => class_step(req, it, |iter, req, data| {
+                iter.key(req, data).map(Owner::hand_on)
+            })
+            .unwrap_or_else(|| Ok(Value::null())),
         }
     }
 }
@@ -407,7 +412,7 @@ fn element(
     req: &mut Request,
     wrapper: PhpObject,
     data: PhpObject,
-) -> Result<Option<(Value, Value)>, Thrown> {
+) -> Result<Option<IteratorElement>, Thrown> {
     let at = position(req, wrapper);
     let table = req.object_handlers(data.heap());
     table.iterator_element(req, data, at)
@@ -1039,14 +1044,13 @@ impl InternalIterator {
             let made = funcs.current(req, walk, false);
             return crate::api::values::adopted(req, made);
         }
-        let made = match internal_element(req, this.object())? {
+        Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
-                req.release(key);
+                key.give_up(req);
                 value
             }
-            None => Value::null(),
-        };
-        Ok(Owner::adopt(req, made))
+            None => Owner::take(req, Value::null()),
+        })
     }
 
     /// `InternalIterator::key(): mixed`.
@@ -1056,14 +1060,13 @@ impl InternalIterator {
             let made = funcs.key(req, walk);
             return crate::api::values::adopted(req, made);
         }
-        let made = match internal_element(req, this.object())? {
+        Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
-                req.release(value);
+                value.give_up(req);
                 key
             }
-            None => Value::null(),
-        };
-        Ok(Owner::adopt(req, made))
+            None => Owner::take(req, Value::null()),
+        })
     }
 
     /// `InternalIterator::next(): void`.
@@ -1086,8 +1089,8 @@ impl InternalIterator {
         }
         Ok(match internal_element(req, this.object())? {
             Some((key, value)) => {
-                req.release(key);
-                req.release(value);
+                key.give_up(req);
+                value.give_up(req);
                 true
             }
             None => false,
@@ -1180,7 +1183,7 @@ pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<
 
 /// The element a walk by index stands at, through the walked object's
 /// class's `iterator_element`.
-fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<(Value, Value)>, Thrown> {
+fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<IteratorElement>, Thrown> {
     let Some(Internal::Elements { object, index }) = this.native::<Internal>(req) else {
         return Err(throw_error(
             req,

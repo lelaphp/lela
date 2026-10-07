@@ -192,7 +192,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
         let rows = zone(req, object).map(debug_rows);
-        debug_table(req, rows).map(|table| Some(table.hand_on_unmigrated().into()))
+        debug_table(req, rows).map(|table| Some(table.into()))
     }
 }
 
@@ -271,7 +271,7 @@ pub(crate) fn set(
 /// bool(true)
 /// bool(false)
 /// ```
-fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let zone = zone(req, object).map(|z| tz::php_intl_tz_clone(z));
     let constructed = zone.is_some();
     let payload = TimeZoneObject {
@@ -281,7 +281,7 @@ fn clone_timezone(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thr
     let held = payload.zone.is_some();
     let copy = clone_with(req, &object, payload)?;
     if held {
-        return Ok(copy.hand_on_unmigrated());
+        return Ok(copy);
     }
     copy.give_up(req);
     let message = if constructed {

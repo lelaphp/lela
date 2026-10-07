@@ -280,8 +280,8 @@ impl<T: View> Owner<T> {
     /// The view, the owner handed with it to a sink that still takes a
     /// view: the debt of the migration of #1980, for a sink not yet
     /// taking owners (`PhpArray::set` and its siblings, the property
-    /// sinks, a `Key`, the handler slots, a native's own state). #1996,
-    /// #1997, #1999, #2102 and #2104 delete its uses as their sinks take
+    /// sinks, a `Key`, a native's own state). #1996, #1997, #1999 and
+    /// #2104 delete its uses as their sinks take
     /// owners, and #1999 makes it `pub(crate)` again. The worst it does misused is a leak, which the
     /// request's leak sensor reports, never a second release: it hands on
     /// the one owner there is.
@@ -296,15 +296,6 @@ impl<T: View> Owner<T> {
     pub fn into_value(self) -> Owner<Value> {
         let value = self.counted;
         self.recast(value)
-    }
-
-    /// The value the owner's count stands on, the owner handed on with
-    /// it: what the engine is handed as a native's return.
-    // Taking the owner is the point: the engine holds it from here.
-    #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn hand_on_counted(mut self) -> Value {
-        self.consume();
-        self.counted
     }
 
     /// The same owner over another view of its value.
@@ -579,7 +570,7 @@ impl<T: View + IntoReturn> IntoReturn for Owner<T> {
     fn declared() -> Option<Type> {
         T::declared()
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
-        Ok(self.hand_on_counted())
+    fn into_return(self, _: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(self.into_value())
     }
 }

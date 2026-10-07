@@ -30,7 +30,7 @@ pub(crate) trait Props: 'static {
         object: PhpObject,
         name: &str,
         quiet: bool,
-    ) -> Result<Option<Value>, Thrown>;
+    ) -> Result<Option<Owner<Value>>, Thrown>;
 
     /// The names with a write function, which only `report_mode` has.
     const WRITABLE: &'static [&'static str] = &[];
@@ -81,11 +81,14 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         match handled::<P>(name) {
-            Some(name) => {
-                Ok(P::read(req, object, name, read == PropertyRead::Silent)?.unwrap_or_default())
-            }
+            Some(name) => Ok(
+                match P::read(req, object, name, read == PropertyRead::Silent)? {
+                    Some(value) => value,
+                    None => Owner::take(req, Value::null()),
+                },
+            ),
             None => Std.read_property(req, object, name, read),
         }
     }
@@ -150,7 +153,7 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
             PropertyTest::NotEmpty => truthy(req, &value),
             _ => !matches!(value.as_ref(), ValueRef::Null),
         };
-        req.release(value);
+        value.give_up(req);
         Ok(answer)
     }
 
@@ -164,21 +167,24 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         let mut table = PhpArray::new(req)?;
         for name in P::NAMES {
             if let Some(value) = P::read(req, object, name, true)? {
-                // The reader's owner of `value` handed on as one the
-                // table takes, the reader's own given up.
-                let set = PhpString::new(req, name.as_bytes())
-                    .and_then(|key| table.set(req, key.into_key(), Owner::take(req, value)));
-                req.release(value);
-                set?;
+                // The table's row takes the value's owner.
+                let key = match PhpString::new(req, name.as_bytes()) {
+                    Ok(key) => key.into_key(),
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                };
+                table.set(req, key, value)?;
             }
         }
-        Ok(Some(DebugInfo::from(table.hand_on_unmigrated())))
+        Ok(Some(DebugInfo::from(table)))
     }
 }
 
 /// `CHECK_STATUS`'s refusal where not quiet: "Property access is not
 /// allowed yet".
-pub(crate) fn not_yet(req: &mut Request, quiet: bool) -> Result<Option<Value>, Thrown> {
+pub(crate) fn not_yet(req: &mut Request, quiet: bool) -> Result<Option<Owner<Value>>, Thrown> {
     if quiet {
         return Ok(None);
     }
@@ -194,7 +200,7 @@ pub(crate) fn gone(
     req: &mut Request,
     object: PhpObject,
     quiet: bool,
-) -> Result<Option<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     if quiet {
         return Ok(None);
     }

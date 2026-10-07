@@ -2975,7 +2975,7 @@ impl Ops for HostFd {
 pub(crate) fn standard_handles(
     req: &mut Request,
     stdin_replaced: bool,
-) -> Result<Option<[Value; 3]>, Thrown> {
+) -> Result<Option<[Owner<Value>; 3]>, Thrown> {
     if stdin_replaced {
         req.streams().standard_closed[0] = false;
     }
@@ -3003,9 +3003,7 @@ pub(crate) fn standard_handles(
         }
     }
     let [stdin, stdout, stderr] = match opened {
-        [Some(stdin), Some(stdout), Some(stderr)] => {
-            [stdin, stdout, stderr].map(Owner::hand_on_unmigrated)
-        }
+        [Some(stdin), Some(stdout), Some(stderr)] => [stdin, stdout, stderr],
         opened => {
             free(req, opened);
             return Ok(None);
@@ -3016,11 +3014,9 @@ pub(crate) fn standard_handles(
         Some(stdout.resource()),
         Some(stderr.resource()),
     ];
-    Ok(Some([
-        stdin.as_value(),
-        stdout.as_value(),
-        stderr.as_value(),
-    ]))
+    Ok(Some(
+        [stdin, stdout, stderr].map(|stream| stream.into_resource().into_value()),
+    ))
 }
 
 /// `php_stream_output_ops` (`Z/ext/standard/php_fopen_wrapper.c:52`),
@@ -4221,18 +4217,11 @@ impl StreamLayer for Request {
         let outer = std::mem::take(&mut self.streams().wrapper_errors);
         let opened = open(self, path, mode, opening);
         let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
-        // The opener hands its owner on with the view, the hook's debt
-        // until #2102 has it return the owner: the owner taken here stands
-        // for that one, whose count is released.
-        let opened = match opened? {
-            Some(stream) => {
-                let owner = Owner::take(self, stream);
-                self.release(stream.as_value());
-                self.stream_op(stream, |_, s| s.set_wrapper_stat(stream_stat));
-                Some(owner)
-            }
-            None => None,
-        };
+        // The opener's owner, which the open hands its caller.
+        let opened = opened?;
+        if let Some(stream) = &opened {
+            self.stream_op(**stream, |_, s| s.set_wrapper_stat(stream_stat));
+        }
         Ok((
             label,
             opened.ok_or_else(|| self.wrapper_errors_text(&logged)),
@@ -4546,7 +4535,8 @@ impl StreamLayer for Request {
             })
             .flatten();
         match meta {
-            Some(Ok(Some(array))) => Ok(Some(Value::array(array))),
+            // The meta-data row the array is written into takes its owner.
+            Some(Ok(Some(array))) => Ok(Some(array.into_value().hand_on_unmigrated())),
             Some(Err(thrown)) => Err(thrown),
             Some(Ok(None)) | None => Ok(None),
         }

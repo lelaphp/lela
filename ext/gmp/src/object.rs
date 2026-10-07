@@ -327,11 +327,11 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
-        Ok(Some(match to {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
+        let cast = match to {
             TypeTag::String => {
                 let text = held(req, object, |n| n.to_text(10));
-                Value::string(PhpString::new(req, &text)?.hand_on_unmigrated())
+                return Ok(Some(PhpString::new(req, &text)?.into_value()));
             }
             TypeTag::Int => Value::int(held(req, object, Mpz::to_long)),
             TypeTag::Float => Value::float(held(req, object, Mpz::to_double)),
@@ -344,7 +344,8 @@ impl ObjectHandlers for Handlers {
             }),
             TypeTag::Bool => Value::bool(held(req, object, |n| n.sign() != 0)),
             _ => return Ok(None),
-        }))
+        };
+        Ok(Some(Owner::take(req, cast)))
     }
 
     /// `gmp_get_debug_info`: the properties, then `num` in base 10.
@@ -380,7 +381,7 @@ impl ObjectHandlers for Handlers {
         let num = PhpString::new(req, &text)?;
         let key = PhpString::new(req, b"num")?;
         table.set(req, key.into_key(), num.into_value())?;
-        Ok(Some(table.hand_on_unmigrated().into()))
+        Ok(Some(table.into()))
     }
 
     /// `gmp_do_operation`: the arithmetic, bitwise and shift operators
@@ -412,7 +413,7 @@ impl ObjectHandlers for Handlers {
         op: BinaryOp,
         left: &Value,
         right: Option<&Value>,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let n = match (op, right) {
             (BinaryOp::BitwiseNot, _) => match left.deref().as_object() {
                 Some(object) => held(req, *object, Mpz::com),
@@ -442,7 +443,7 @@ impl ObjectHandlers for Handlers {
                 }
             }
         };
-        Ok(Some(made(req, n)?.into_value().hand_on_unmigrated()))
+        Ok(Some(made(req, n)?.into_value()))
     }
 
     /// `gmp_compare`: the two as numbers, an operand that is none
@@ -479,9 +480,9 @@ impl ObjectHandlers for Handlers {
 }
 
 /// `gmp_clone_obj`.
-fn clone_gmp(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_gmp(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let copy = held(req, object, Mpz::clone);
-    clone_with(req, &object, copy).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, copy)
 }
 
 /// `gmp_unserialize`, a `C:` record's payload: the number as a

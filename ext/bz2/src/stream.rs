@@ -503,9 +503,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
         scheme: "compress.bzip2".into(),
         label: "BZip2",
         is_url: false,
-        open: Some(|req, path, mode, opening| {
-            Ok(open(req, path, mode, opening)?.map(Owner::hand_on_unmigrated))
-        }),
+        open: Some(open),
         open_dir: None,
         stat: None,
         unlink: None,

@@ -128,10 +128,11 @@ pub(crate) fn object_to_string(
     let class = object.class();
     let table = req.object_handlers(object.heap());
     if let Some(returned) = table.cast_object(req, object, TypeTag::String)? {
-        if let Some(text) = returned.as_php_string() {
-            return Ok(*text);
+        if let Some(text) = returned.as_php_string().copied() {
+            returned.hand_on();
+            return Ok(text);
         }
-        req.release(returned);
+        returned.give_up(req);
     }
     let name = req.class_name(class);
     Err(throw_error(
@@ -552,7 +553,11 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
 fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
     let table = req.object_handlers(object.heap());
     match table.cast_object(req, object, TypeTag::Bool) {
-        Ok(Some(value)) => value.as_bool() == Some(true),
+        Ok(Some(value)) => {
+            let truth = value.as_bool() == Some(true);
+            value.give_up(req);
+            truth
+        }
         Ok(None) => {
             let class = req.class_name(object.class());
             raise(
@@ -581,7 +586,7 @@ fn object_converted(
 ) -> Option<Value> {
     let table = req.object_handlers(object.heap());
     match table.cast_object(req, object, to) {
-        Ok(Some(converted)) => Some(converted),
+        Ok(Some(converted)) => Some(converted.hand_on()),
         Ok(None) => {
             not_converted(req, &object.as_value(), shown);
             None
@@ -1621,7 +1626,7 @@ pub(crate) fn properties_for(
         // of it outlives this call; the reader that holds it is
         // `PhpObject::props_held`.
         Answered::Debug(info) => {
-            req.release(Value::array(info.table));
+            info.table.give_up(req);
             Err(crate::api::raising::fatal(
                 req,
                 "InternalError: a class's debug table is read held, through props_held",
@@ -2633,7 +2638,7 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
     if let ValueRef::Object(o) = value.as_ref() {
         let table = req.object_handlers(o.heap());
         if let Some(result) = table.do_operation(req, BinaryOp::BitwiseNot, &value, None)? {
-            return Ok(result);
+            return Ok(result.hand_on());
         }
     }
     if let Some(n) = value.as_int() {
@@ -3641,7 +3646,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             if let Some(stepped) =
                 table.do_operation(req, BinaryOp::Add, value, Some(&Value::int(1)))?
             {
-                return Ok(stepped);
+                return Ok(stepped.hand_on());
             }
             if let Some(number) = object_number(req, o)? {
                 return increment(req, &number);
@@ -3791,7 +3796,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             if let Some(stepped) =
                 table.do_operation(req, BinaryOp::Sub, value, Some(&Value::int(1)))?
             {
-                return Ok(stepped);
+                return Ok(stepped.hand_on());
             }
             if let Some(number) = object_number(req, o)? {
                 return decrement(req, &number);
@@ -5145,7 +5150,7 @@ fn object_operation(
         if let ValueRef::Object(o) = side.as_ref() {
             let table = req.object_handlers(o.heap());
             if let Some(value) = table.do_operation(req, op, &left, Some(&right))? {
-                return Ok(Some(value));
+                return Ok(Some(value.hand_on()));
             }
         }
     }
@@ -5595,8 +5600,16 @@ fn modular(d: f64) -> i64 {
 /// ```
 fn object_number(req: &mut Request, object: PhpObject) -> Result<Option<Value>, Thrown> {
     let table = req.object_handlers(object.heap());
-    let converted = table.cast_object(req, object, TypeTag::Number)?;
-    Ok(converted.filter(|c| matches!(c.as_ref(), ValueRef::Int(_) | ValueRef::Float(_))))
+    Ok(match table.cast_object(req, object, TypeTag::Number)? {
+        Some(number) if matches!(number.as_ref(), ValueRef::Int(_) | ValueRef::Float(_)) => {
+            Some(number.hand_on())
+        }
+        Some(other) => {
+            other.give_up(req);
+            None
+        }
+        None => None,
+    })
 }
 
 /// `zendi_try_convert_scalar_to_number`: the number php works in, or

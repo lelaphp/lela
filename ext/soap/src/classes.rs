@@ -639,9 +639,15 @@ impl ObjectHandlers for UrlHandlers {
         OPAQUE
     }
 
-    fn cast_object(&self, req: &mut Request, object: PhpObject, to: TypeTag) -> R<Option<Value>> {
+    fn cast_object(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        to: TypeTag,
+    ) -> R<Option<Owner<Value>>> {
         if to == TypeTag::Int {
-            return Ok(Some(Value::int(i64::from(object.index()))));
+            let id = Value::int(i64::from(object.index()));
+            return Ok(Some(Owner::take(req, id)));
         }
         Std.cast_object(req, object, to)
     }

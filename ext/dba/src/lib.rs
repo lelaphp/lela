@@ -45,7 +45,7 @@ use php_ext::attr::php_class;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpObject, TypeTag, Value};
+use php_ext::values::{Owner, PhpObject, TypeTag, Value};
 
 use crate::link::{Handler, Link};
 
@@ -340,15 +340,15 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
-        let _ = req;
-        Ok(match to {
-            TypeTag::Int => Some(Value::int(i64::from(object.index()))),
+    ) -> Result<Option<Owner<Value>>, Thrown> {
+        let cast = match to {
+            TypeTag::Int => Value::int(i64::from(object.index())),
             // `zend_std_cast_object_tostring`, for a class with no
             // `__toString`.
-            TypeTag::Bool => Some(Value::bool(true)),
-            _ => None,
-        })
+            TypeTag::Bool => Value::bool(true),
+            _ => return Ok(None),
+        };
+        Ok(Some(Owner::take(req, cast)))
     }
 
     /// `dba_connection_free_obj`: the connection closed.

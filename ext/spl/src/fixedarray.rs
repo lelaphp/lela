@@ -8,8 +8,8 @@
 //! [`Handlers::iterator_element`].
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, Instance, ObjectHandlers, PropertiesFor, PropertyPurpose, Std, This,
-    True, Untyped,
+    CloneObj, DimensionRead, Instance, IteratorElement, ObjectHandlers, PropertiesFor,
+    PropertyPurpose, Std, This, True, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
@@ -712,20 +712,19 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         offset: Option<&Value>,
         fetch: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         if fetch == DimensionRead::Silent
             && let Some(at) = offset
             && !self.has_dimension(req, object, at, false)?
         {
-            return Ok(Value::null());
+            return Ok(Owner::take(req, Value::null()));
         }
         if crate::overridden(req, object, b"offsetget") {
             let offset = offset.copied().unwrap_or_default();
-            return call_method(req, &object, b"offsetGet", &[offset])
-                .map(Owner::hand_on_unmigrated);
+            return call_method(req, &object, b"offsetGet", &[offset]);
         }
         // The slot hands the engine an owner of what it read.
-        read(req, object, offset).map(|v| crate::copied(req, v))
+        read(req, object, offset).map(|v| Owner::take(req, v.deref()))
     }
 
     fn write_dimension(
@@ -733,17 +732,17 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         if crate::overridden(req, object, b"offsetset") {
             let offset = offset.copied().unwrap_or_default();
-            let answered = call_method(req, &object, b"offsetSet", &[offset, value]);
-            req.release(value);
+            let answered = call_method(req, &object, b"offsetSet", &[offset, *value]);
+            value.give_up(req);
             answered?.give_up(req);
             return Ok(());
         }
-        let written = write(req, object, offset, value);
-        req.release(value);
+        let written = write(req, object, offset, *value);
+        value.give_up(req);
         written
     }
 
@@ -908,7 +907,7 @@ impl ObjectHandlers for Handlers {
         for (key, value) in rows {
             out.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
-        Ok(Some(out.hand_on_unmigrated().into()))
+        Ok(Some(out.into()))
     }
 
     fn iterator_element(
@@ -916,13 +915,11 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         index: usize,
-    ) -> Result<Option<(Value, Value)>, Thrown> {
+    ) -> Result<Option<IteratorElement>, Thrown> {
         let value = with(req, object, |a| a.elements.get(index).copied())?;
         Ok(value.map(|value| {
-            (
-                Value::int(i64::try_from(index).unwrap_or(i64::MAX)),
-                crate::copied(req, value),
-            )
+            let key = Value::int(i64::try_from(index).unwrap_or(i64::MAX));
+            (Owner::take(req, key), Owner::take(req, value.deref()))
         }))
     }
 }
@@ -992,7 +989,7 @@ fn fit(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> 
 }
 
 /// `spl_fixedarray_object_clone`: the elements with one more owner each.
-fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_array(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let elements = with(req, object, |a| a.elements.clone())?;
     for value in &elements {
         req.addref(value);
@@ -1007,5 +1004,4 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown
             resizing: None,
         }),
     )
-    .map(Owner::hand_on_unmigrated)
 }

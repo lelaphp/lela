@@ -154,7 +154,7 @@ impl<T: IntoReturn> IntoReturn for AsIs<T> {
     fn declared() -> Option<Type> {
         T::declared()
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         self.0.into_return(req)
     }
 }
@@ -864,7 +864,7 @@ impl ObjectHandlers for ResultHandlers {
         object: PhpObject,
         name: &[u8],
         read: php_ext::abi::PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         self.0.read_property(req, object, name, read)
     }
     fn write_property(
@@ -977,14 +977,13 @@ impl ClassIterator for RowIter {
         Ok(self.current.is_some_and(|row| row.as_array().is_some()))
     }
 
-    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
         let row = self.current.unwrap_or_default();
-        req.addref(&row);
-        Ok(row)
+        Ok(Owner::take(req, row))
     }
 
-    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Value, Thrown> {
-        Ok(Value::int(self.row_num))
+    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, Value::int(self.row_num)))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -1015,7 +1014,7 @@ impl Props for ResultProps {
         object: PhpObject,
         name: &str,
         quiet: bool,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let mut rows = crate::payload::<Rows>(req, object)
             .map(std::mem::take)
             .unwrap_or_default();
@@ -1027,21 +1026,25 @@ impl Props for ResultProps {
             return props::gone(req, object, quiet);
         };
         let value = match name {
-            "current_field" => Value::int(i64::try_from(set.field_tell()).unwrap_or(0)),
-            "field_count" => Value::int(i64::from(set.num_fields())),
+            "current_field" => Owner::take(
+                req,
+                Value::int(i64::try_from(set.field_tell()).unwrap_or(0)),
+            ),
+            "field_count" => Owner::take(req, Value::int(i64::from(set.num_fields()))),
             "lengths" => match lengths_of(set).filter(|_| set.num_fields() > 0) {
-                Some(lengths) => lengths_array(req, &lengths)?
-                    .into_value()
-                    .hand_on_unmigrated(),
-                None => Value::null(),
+                Some(lengths) => lengths_array(req, &lengths)?.into_value(),
+                None => Owner::take(req, Value::null()),
             },
-            "num_rows" => long_or_string(req, set.num_rows())?.hand_on_unmigrated(),
-            "type" => Value::int(if set.is_buffered() {
-                link::STORE
-            } else {
-                link::USE
-            }),
-            _ => Value::null(),
+            "num_rows" => long_or_string(req, set.num_rows())?,
+            "type" => {
+                let kind = if set.is_buffered() {
+                    link::STORE
+                } else {
+                    link::USE
+                };
+                Owner::take(req, Value::int(kind))
+            }
+            _ => Owner::take(req, Value::null()),
         };
         if let Some(slot) = crate::payload::<Rows>(req, object) {
             *slot = rows;

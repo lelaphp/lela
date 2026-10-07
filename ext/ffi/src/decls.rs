@@ -1261,7 +1261,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let sym = object
             .native::<Decls>(req)
             .and_then(|decls| decls.scope.symbols.as_ref()?.get(name).cloned())
@@ -1290,14 +1290,13 @@ impl ObjectHandlers for Handlers {
                     false,
                     false,
                 )
-                .map(Owner::hand_on_unmigrated)
             }
             SymbolKind::Func => {
                 let ty = types(req).pointer_to(sym.ty, 0);
                 let made = make(req, Data::holding(ty, sym.addr, true))?;
-                Ok(made.into_value().hand_on_unmigrated())
+                Ok(made.into_value())
             }
-            _ => Ok(Value::int(sym.value)),
+            _ => Ok(Owner::take(req, Value::int(sym.value))),
         }
     }
 
@@ -1336,7 +1335,7 @@ impl ObjectHandlers for Handlers {
         _: PhpObject,
         _: Option<&Value>,
         _: php_ext::abi::DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         Err(bad_array_access(req))
     }
 
@@ -1345,9 +1344,9 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         _: PhpObject,
         _: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        req.release(value);
+        value.give_up(req);
         Err(bad_array_access(req))
     }
 
@@ -1441,11 +1440,11 @@ impl ObjectHandlers for Handlers {
     /// `zend_fake_cast_object`.
     fn cast_object(
         &self,
-        _: &mut Request,
+        req: &mut Request,
         _: PhpObject,
         to: TypeTag,
-    ) -> Result<Option<Value>, Thrown> {
-        Ok((to == TypeTag::Bool).then_some(Value::bool(true)))
+    ) -> Result<Option<Owner<Value>>, Thrown> {
+        Ok((to == TypeTag::Bool).then(|| Owner::take(req, Value::bool(true))))
     }
 
     /// `get_debug_info = NULL` over `zend_fake_get_properties`: nothing.

@@ -41,15 +41,18 @@ pub(super) fn get_zval_property(req: &mut Request, object: &Value, name: &[u8]) 
             // `__get` answers; the value it made is held until the
             // serialisation ends (`encode_finish`), as php's `rv` is.
             let o = *o;
-            let read = o
+            let answered = o
                 .handlers(req)
                 .read_property(req, o, name, php_ext::abi::PropertyRead::Silent)
                 .ok()?;
-            let read = read.deref();
+            // The value a reference answered names, held in its place.
+            let read = Owner::take(req, answered.deref());
+            answered.give_up(req);
             if matches!(read.as_ref(), ValueRef::Null | ValueRef::Undef) {
-                req.release(read);
+                read.give_up(req);
                 return None;
             }
+            let read = read.hand_on_unmigrated();
             req.state::<crate::State>().held.push(read);
             Some(read)
         }

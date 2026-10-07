@@ -114,9 +114,12 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         match Property::of(name) {
-            Some(p) => Ok(p.read(req, object)?.unwrap_or_default()),
+            Some(p) => Ok(match p.read(req, object)? {
+                Some(value) => value,
+                None => Owner::take(req, Value::null()),
+            }),
             None => Std.read_property(req, object, name, read),
         }
     }
@@ -171,7 +174,7 @@ impl ObjectHandlers for Handlers {
             PropertyTest::NotEmpty => truthy(req, &value),
             _ => !matches!(value.as_ref(), ValueRef::Null),
         };
-        req.release(value);
+        value.give_up(req);
         Ok(answer)
     }
 
@@ -206,12 +209,15 @@ impl ObjectHandlers for Handlers {
         for (name, p) in Property::ALL {
             match p.read(req, object) {
                 Ok(Some(value)) => {
-                    // The reader's owner of `value` handed on as one the
-                    // table takes, the reader's own given up.
-                    let held = Owner::take(req, value);
-                    req.release(value);
-                    let key = PhpString::new(req, name)?.into_key();
-                    table.set(req, key, held)?;
+                    // The table's row takes the value's owner.
+                    let key = match PhpString::new(req, name) {
+                        Ok(key) => key.into_key(),
+                        Err(thrown) => {
+                            value.give_up(req);
+                            return Err(thrown);
+                        }
+                    };
+                    table.set(req, key, value)?;
                 }
                 Ok(None) => {}
                 Err(t) => {
@@ -222,10 +228,7 @@ impl ObjectHandlers for Handlers {
                 }
             }
         }
-        Ok(Some(DebugInfo {
-            table: table.hand_on_unmigrated(),
-            thrown,
-        }))
+        Ok(Some(DebugInfo { table, thrown }))
     }
 
     /// `xmlreader_get_method`: `open` and `XML`, the two static natives
@@ -535,7 +538,7 @@ impl Property {
     /// `xmlreader_property_reader`: the value off the reader as it
     /// stands, the empty one of the type where the object has none; a
     /// number libxml answers `-1` for is php's `Error`.
-    fn read(self, req: &mut Request, object: PhpObject) -> Result<Option<Value>, Thrown> {
+    fn read(self, req: &mut Request, object: PhpObject) -> Result<Option<Owner<Value>>, Thrown> {
         let text =
             |f: fn(&TextReader) -> Option<Vec<u8>>| move |r: &mut TextReader| Read::Text(f(r));
         let number = |f: fn(&mut TextReader) -> i32, boolean: bool| {
@@ -574,20 +577,18 @@ impl Property {
                 "Error",
                 "Failed to read property because no XML data has been read yet",
             )),
-            Some(Read::Number(n, true)) => Ok(Some(Value::bool(n != 0))),
-            Some(Read::Number(n, false)) => Ok(Some(Value::int(i64::from(n)))),
+            Some(Read::Number(n, true)) => Ok(Some(Owner::take(req, Value::bool(n != 0)))),
+            Some(Read::Number(n, false)) => Ok(Some(Owner::take(req, Value::int(i64::from(n))))),
             Some(Read::Text(t)) => {
                 let s = PhpString::new(req, t.as_deref().unwrap_or_default())?;
-                Ok(Some(Value::string(s.hand_on_unmigrated())))
+                Ok(Some(s.into_value()))
             }
-            None if boolean => Ok(Some(Value::bool(false))),
+            None if boolean => Ok(Some(Owner::take(req, Value::bool(false)))),
             None => match self {
                 Property::AttributeCount | Property::Depth | Property::NodeType => {
-                    Ok(Some(Value::int(0)))
+                    Ok(Some(Owner::take(req, Value::int(0))))
                 }
-                _ => Ok(Some(Value::string(
-                    PhpString::new(req, b"")?.hand_on_unmigrated(),
-                ))),
+                _ => Ok(Some(PhpString::new(req, b"")?.into_value())),
             },
         }
     }

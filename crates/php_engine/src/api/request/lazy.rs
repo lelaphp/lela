@@ -22,7 +22,7 @@ use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
 use crate::api::raising::{Thrown, throw_error};
-use crate::api::values::{ClassId, Key, PhpArray, PhpObject, TypeTag, Value};
+use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
 pub(crate) const SKIP_INITIALIZATION_ON_SERIALIZE: i64 = 1 << 3;
@@ -978,6 +978,8 @@ impl Request {
                         req.release(Value::string(key));
                         return Err(thrown);
                     }
+                    // The handler layer's two owners, named for the write.
+                    let (key, value) = (Owner::adopt(req, key), Owner::adopt(req, value));
                     req.write_std_property(object, key, value)
                 });
                 if written.is_err()
@@ -1059,7 +1061,7 @@ impl Request {
     /// bool(true)
     /// bool(true)
     /// ```
-    pub(crate) fn lazy_clone(&mut self, object: PhpObject) -> Result<PhpObject, Thrown> {
+    pub(crate) fn lazy_clone(&mut self, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
         if matches!(object.heap().laziness(), Laziness::Ghost | Laziness::Proxy) {
             self.lazy_init(object)?;
         }
@@ -1092,11 +1094,11 @@ impl Request {
         self.lazy.rows.insert(
             p.id().0,
             Info {
-                state: State::Instance(copy),
+                state: State::Instance(copy.hand_on()),
                 skip_on_serialize,
             },
         );
-        Ok(proxy)
+        Ok(Owner::adopt(self, proxy))
     }
 
     /// `zend_lazy_object_debug_info`: what `var_dump` shows of a lazy

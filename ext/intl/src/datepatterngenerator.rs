@@ -42,7 +42,7 @@ impl ObjectHandlers for Handlers {
 
 /// `IntlDatePatternGenerator_object_clone`: the members and the
 /// generator's clone, or php's `Error` once the copy is made.
-fn clone_generator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_generator(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let copy = object
         .native::<GeneratorObject>(req)
         .and_then(|o| o.dtpg.as_deref())
@@ -58,7 +58,7 @@ fn clone_generator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
     };
     let new = clone_with(req, &object, payload)?;
     if message.is_empty() {
-        return Ok(new.hand_on_unmigrated());
+        return Ok(new);
     }
     new.give_up(req);
     Err(throw_error(req, "Error", message))

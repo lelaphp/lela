@@ -186,7 +186,8 @@ mod libc_seek {
 /// same options, cast to its fd and handed to `gzdopen` on a
 /// duplicate, with the `zlib` `level` of its `php_stream_context` set on it; a stream of
 /// the `ZLIB` kind, unbuffered. Its own warnings are made under
-/// `REPORT_ERRORS` alone, which the wrapper is never handed.
+/// `REPORT_ERRORS` alone, which the wrapper is never handed. The
+/// wrapper's opener, `gzip_stream_wops.stream_opener`.
 fn open(
     req: &mut Request,
     path: &[u8],
@@ -269,16 +270,6 @@ fn gzdopen(
     Ok(Some(file))
 }
 
-/// The wrapper's opener, `gzip_stream_wops.stream_opener`.
-fn wrapper_open(
-    req: &mut Request,
-    path: &[u8],
-    mode: &[u8],
-    opening: Opening,
-) -> Result<Option<Stream>, Thrown> {
-    Ok(open(req, path, mode, opening)?.map(Owner::hand_on_unmigrated))
-}
-
 /// `php_stream_gzip_wrapper`, `compress.zlib`, labelled `ZLIB`: an
 /// opener and nothing else, so a stat, a directory, an unlink or a
 /// rename through it is refused as php refuses them.
@@ -320,7 +311,7 @@ pub(crate) fn wrapper() -> StreamWrapper {
         scheme: "compress.zlib".into(),
         label: "ZLIB",
         is_url: false,
-        open: Some(wrapper_open),
+        open: Some(open),
         open_dir: None,
         stat: None,
         unlink: None,

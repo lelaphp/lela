@@ -1843,7 +1843,7 @@ impl Crypto for Layer {
     /// ```expect
     /// bool(false)
     /// ```
-    fn meta(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
+    fn meta(&self, req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
         let Some(tls) = self.tls.as_ref().filter(|_| self.phase == Phase::Active) else {
             return Ok(None);
         };
@@ -1870,7 +1870,7 @@ impl Crypto for Layer {
         if let Some(alpn) = tls.alpn_selected() {
             crate::put_bytes(req, &mut array, b"alpn_protocol", &alpn)?;
         }
-        Ok(Some(array.hand_on_unmigrated()))
+        Ok(Some(array))
     }
 
     /// `STREAM_XPORT_OP_CONNECT`'s tail and the accept's: where the
