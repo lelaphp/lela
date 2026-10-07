@@ -5,12 +5,15 @@
 //! over a string subject or each string of an array one, a pattern array
 //! applied in turn.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Callable, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_string};
 use php_ext::raising::{Level, Thrown, arg_type_error, docref, raise_while_pending};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::Either;
@@ -341,50 +344,71 @@ fn in_subject(
         Union::A(patterns) => patterns,
     };
     let replacements = match replacement {
-        Union::A(replacements) => Some(replacements.snapshot()),
+        Union::A(replacements) => Some(replacements),
         Union::B(_) => None,
     };
-    let mut current = Owner::take(req, subject);
-    for (at, (_, entry)) in patterns.snapshot().into_iter().enumerate() {
-        let regex = match to_string(req, &entry) {
+    let mut current = Some(Owner::take(req, subject));
+    let mut replace_at = 0;
+    // `php_pcre_replace_array`'s `ZEND_HASH_FOREACH_VAL(regex, regex_entry)`
+    // (`Z/ext/pcre/php_pcre.c:2093`), no owner of the patterns taken: the
+    // argument holds them while `zval_get_tmp_string` runs `__toString`.
+    // The replacement is read at the next bucket that holds one
+    // (`ZEND_HASH_ELEMENT(replace_ht, replace_idx)`), as it stands then.
+    let walked = walk::foreach(req, patterns, Hold::None, |req, row| -> walk::Step {
+        let Some(subject) = current.take() else {
+            return Ok(ControlFlow::Break(()));
+        };
+        let regex = match to_string(req, &row.value().deref()) {
             Ok(regex) => regex,
             Err(thrown) => {
-                current.give_up(req);
+                subject.give_up(req);
                 return Err(thrown);
             }
         };
-        let replacement = match (&replacements, replacement) {
-            (Some(all), _) => match all.get(at) {
-                Some((_, value)) => match to_string(req, value) {
-                    Ok(text) => text,
-                    Err(thrown) => {
-                        regex.give_up(req);
-                        current.give_up(req);
-                        return Err(thrown);
-                    }
-                },
-                None => PhpString::new(req, b"")?,
+        let replacement = match (replacements, replacement) {
+            (Some(all), _) => match all.live_from(replace_at) {
+                Some((found, _, value)) => {
+                    replace_at = found.saturating_add(1);
+                    to_string(req, &value.deref())
+                }
+                None => PhpString::new(req, b""),
             },
-            (None, Union::B(text)) => Owner::take(req, text),
-            (None, Union::A(_)) => PhpString::new(req, b"")?,
+            (None, Union::B(text)) => Ok(Owner::take(req, text)),
+            (None, Union::A(_)) => PhpString::new(req, b""),
+        };
+        let replacement = match replacement {
+            Ok(replacement) => replacement,
+            Err(thrown) => {
+                regex.give_up(req);
+                subject.give_up(req);
+                return Err(thrown);
+            }
         };
         let result = replace_one(
             req,
             regex.as_bytes(),
-            *current,
+            *subject,
             replacement.as_bytes(),
             limit,
             count,
         );
         replacement.give_up(req);
         regex.give_up(req);
-        current.give_up(req);
-        match result? {
-            Some(next) => current = next,
-            None => return Ok(None),
+        subject.give_up(req);
+        current = result?;
+        Ok(if current.is_some() {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        })
+    });
+    if let Err(thrown) = walked {
+        if let Some(current) = current {
+            current.give_up(req);
         }
+        return Err(thrown);
     }
-    Ok(Some(current))
+    Ok(current)
 }
 
 /// `php_replace_in_subject_func`: [`in_subject`] with a callback. While
@@ -404,29 +428,42 @@ fn in_subject_func(
         }
         Union::A(patterns) => patterns,
     };
-    let mut current = Owner::take(req, subject);
-    for (_, entry) in patterns.snapshot() {
+    let mut current = Some(Owner::take(req, subject));
+    // `ZEND_HASH_FOREACH_VAL(regex_ht, regex_entry)`
+    // (`Z/ext/pcre/php_pcre.c:2194`), no owner of the patterns taken: the
+    // argument holds them while the callback and `__toString` run.
+    let walked = walk::foreach(req, patterns, Hold::None, |req, row| -> walk::Step {
+        let entry = row.value().deref();
         let converted = match calling.pending {
             None => to_string(req, &entry).map(Some),
             Some(pending) => string_while_pending(req, pending, &entry),
         };
         let regex = match converted {
             Ok(Some(regex)) => regex,
-            Ok(None) => break,
-            Err(thrown) => {
-                current.give_up(req);
-                return Err(thrown);
-            }
+            Ok(None) => return Ok(ControlFlow::Break(())),
+            Err(thrown) => return Err(thrown),
         };
-        let result = replace_one_func(req, regex.as_bytes(), *current, calling, count);
+        let Some(subject) = current.take() else {
+            regex.give_up(req);
+            return Ok(ControlFlow::Break(()));
+        };
+        let result = replace_one_func(req, regex.as_bytes(), *subject, calling, count);
         regex.give_up(req);
-        current.give_up(req);
-        match result? {
-            Some(next) => current = next,
-            None => return Ok(None),
+        subject.give_up(req);
+        current = result?;
+        Ok(if current.is_some() {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        })
+    });
+    if let Err(thrown) = walked {
+        if let Some(current) = current {
+            current.give_up(req);
         }
+        return Err(thrown);
     }
-    Ok(Some(current))
+    Ok(current)
 }
 
 /// `zval_try_get_string` while a throwable is pending: an array raises
@@ -855,7 +892,7 @@ fn preg_replace_callback_array(
     #[php(default = 0)] flags: i64,
 ) -> Result<Replacement, Thrown> {
     let limit = limit_of(limit);
-    let mut current = match subject {
+    let current = match subject {
         Union::A(a) => Union::A(Owner::take(req, a)),
         Union::B(s) => Union::B(Owner::take(req, s)),
     };
@@ -870,36 +907,57 @@ fn preg_replace_callback_array(
         Union::A(a) => a.give_up(req),
     };
     let mut total = 0;
-    for (key, callback) in pattern.snapshot() {
-        let Key::Str(regex) = key else {
-            release(req, current);
+    let mut current = Some(current);
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(pattern, str_idx_regex, replace)`
+    // (`Z/ext/pcre/php_pcre.c:2462`), no owner of the table taken: the
+    // argument holds it while each callback runs.
+    let walked = walk::foreach(req, pattern, Hold::None, |req, row| -> walk::Step {
+        let Some(subject) = current.take() else {
+            return Ok(ControlFlow::Break(()));
+        };
+        let Key::Str(regex) = row.key().clone() else {
+            release(req, subject);
             return Err(arg_type_error(
                 req,
                 1,
                 "contain only string patterns as keys",
             ));
         };
-        let Ok(callable) = callable_checked(req, &callback) else {
-            release(req, current);
+        let Ok(callable) = callable_checked(req, &row.value().deref()) else {
+            release(req, subject);
             return Err(arg_type_error(req, 1, "contain only valid callbacks"));
         };
         let replaced = func_impl(
             req,
             Union::B(regex),
             &callable,
-            view(&current),
+            view(&subject),
             limit,
             flags,
         );
-        release(req, current);
+        release(req, subject);
         let (value, replaced) = replaced?;
         total += replaced;
         current = match value {
-            Some(Union::A(string)) => Union::B(string),
-            Some(Union::B(array)) => Union::A(array),
-            None => return Ok(None),
+            Some(Union::A(string)) => Some(Union::B(string)),
+            Some(Union::B(array)) => Some(Union::A(array)),
+            None => None,
         };
+        Ok(if current.is_some() {
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        })
+    });
+    if let Err(thrown) = walked {
+        if let Some(current) = current {
+            release(req, current);
+        }
+        return Err(thrown);
     }
+    let Some(current) = current else {
+        return Ok(None);
+    };
     let written = count.set(
         req,
         Untyped(Value::int(i64::try_from(total).unwrap_or(i64::MAX))),
