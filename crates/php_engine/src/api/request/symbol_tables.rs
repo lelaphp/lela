@@ -278,17 +278,7 @@ impl Request {
             self.globals().len() - 1
         });
         let cell = match self.globals()[at].1 {
-            Symbol::Held(held) => {
-                let place = held.heap().val_ref();
-                let value = Value::of_zval(place.read());
-                if let Some(cell) = value.as_php_ref() {
-                    *cell
-                } else {
-                    let cell = self.reference(value.undef_as_null())?;
-                    place.write(cell.as_value().to_zval());
-                    cell
-                }
-            }
+            Symbol::Held(held) => self.make_ref(held.heap().val_ref())?,
             Symbol::Indirect(frame, slot) => {
                 let Some(place) = self.attached_ptr(TableId::GLOBAL, frame, slot) else {
                     return Err(crate::api::raising::fatal(
@@ -296,15 +286,8 @@ impl Request {
                         "InternalError: a global bound to a CV the frame does not have",
                     ));
                 };
-                let held = Value::of_zval(place.read());
-                if let Some(cell) = held.as_php_ref() {
-                    *cell
-                } else {
-                    let cell = self.reference(held.undef_as_null())?;
-                    // The CV's owner of what it held is the cell's now.
-                    place.write(cell.as_value().to_zval());
-                    cell
-                }
+                // The CV's owner of what it held is the cell's now.
+                self.make_ref(place)?
             }
             Symbol::Value(held) => {
                 if let Some(cell) = held.as_php_ref() {

@@ -1946,15 +1946,7 @@ fn send_by_ref(
 /// the place, which gives the cell the owner the place had of the
 /// value; the cell comes back with one more owner, the caller's.
 fn bound_at(req: &mut Request, at: php_heap::ZvalRef) -> Result<Value, Thrown> {
-    let held = exec::value_of(at.read());
-    let cell = if let Some(cell) = held.as_php_ref() {
-        *cell
-    } else {
-        let cell = req.reference(held.undef_as_null())?;
-        at.write(cell.as_value().to_zval());
-        cell
-    };
-    let bound = cell.as_value();
+    let bound = req.make_ref(at)?.as_value();
     req.addref(&bound);
     Ok(bound)
 }
@@ -11275,17 +11267,11 @@ pub(crate) fn assign_ref<T: Tier>(
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
             return Ok(advance(req, frame));
         }
-        Some(cell) => *cell,
-        None => {
-            let held = held.undef_as_null();
-            let cell = match req.reference(held) {
-                Ok(cell) => cell,
-                Err(thrown) => return threw(req, frame, &thrown),
-            };
-            // The owner the slot had of `held` is the cell's now.
-            source.write(cell.as_value().to_zval());
-            cell
-        }
+        // The owner the slot had of `held` is the cell's now.
+        _ => match req.make_ref(source) {
+            Ok(cell) => cell,
+            Err(thrown) => return threw(req, frame, &thrown),
+        },
     };
     let bound = cell.as_value();
     req.addref(&bound);
@@ -11467,16 +11453,10 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         req.vm_mut().jump(frame, at.saturating_add(2));
         return Ok(Stepped::Same(frame));
     }
-    let cell = if let Some(cell) = held.as_php_ref() {
-        *cell
-    } else {
-        let cell = match req.reference(held.undef_as_null()) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
-        // The owner the source had of `held` is the cell's now.
-        source.write(cell.as_value().to_zval());
-        cell
+    // The owner the source had of `held` is the cell's now.
+    let cell = match req.make_ref(source) {
+        Ok(cell) => cell,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     let typed = req.declared_typed_property(object.class(), &name);
     if let Some(typed) = typed.as_ref() {
@@ -17441,16 +17421,9 @@ pub(crate) fn fe_reset_rw<T: Tier>(
     }
     // `if (array_ptr == array_ref) ZVAL_NEW_REF(array_ref, array_ref)`:
     // the place's owner is the cell's from here.
-    let held = exec::value_of(place.read());
-    let cell = if let Some(cell) = held.as_php_ref() {
-        *cell
-    } else {
-        let cell = match req.reference(held) {
-            Ok(cell) => cell,
-            Err(thrown) => return threw(req, frame, &thrown),
-        };
-        place.write(cell.as_value().to_zval());
-        cell
+    let cell = match req.make_ref(place) {
+        Ok(cell) => cell,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
     req.addref(&cell.as_value());
     let previous = req.set_slot(frame, slot, cell.as_value());
@@ -21310,19 +21283,10 @@ pub(crate) fn return_by_ref<T: Tier>(
                 Err(thrown) => return threw(req, frame, &thrown),
             }
         } else {
-            let cell = if let Some(cell) = held.as_php_ref() {
-                req.addref(&held);
-                *cell
-            } else {
-                let cell = match req.reference(held.undef_as_null()) {
-                    Ok(cell) => cell,
-                    Err(thrown) => return threw(req, frame, &thrown),
-                };
-                at.write(cell.as_value().to_zval());
-                req.addref(&cell.as_value());
-                cell
-            };
-            cell.as_value()
+            match bound_at(req, at) {
+                Ok(bound) => bound,
+                Err(thrown) => return threw(req, frame, &thrown),
+            }
         }
     } else {
         return Err(Fatal::Error(String::from(
@@ -21456,14 +21420,8 @@ fn yielded_by_ref(
         let value = held.deref();
         req.addref(&value);
         value
-    } else if let Some(cell) = held.as_php_ref() {
-        req.addref(&held);
-        cell.as_value()
     } else {
-        let cell = req.reference(held.undef_as_null())?;
-        place.write(cell.as_value().to_zval());
-        req.addref(&cell.as_value());
-        cell.as_value()
+        bound_at(req, place)?
     };
     if op.op1_type == OperandKind::Var {
         let slot = exec::temporary_slot(code, op.op1);
@@ -21668,21 +21626,10 @@ pub(crate) fn make_ref<T: Tier>(
             .slot_ptr(frame, at)
             .and_then(|slot| slot.read().as_indirect());
         match place {
-            Some(place) => {
-                let value = exec::value_of(place.read());
-                let cell = if let Some(cell) = value.as_php_ref() {
-                    *cell
-                } else {
-                    let cell = match req.reference(value.undef_as_null()) {
-                        Ok(cell) => cell,
-                        Err(thrown) => return threw(req, frame, &thrown),
-                    };
-                    place.write(cell.as_value().to_zval());
-                    cell
-                };
-                req.addref(&cell.as_value());
-                cell.as_value()
-            }
+            Some(place) => match bound_at(req, place) {
+                Ok(bound) => bound,
+                Err(thrown) => return threw(req, frame, &thrown),
+            },
             None => req.take_slot(frame, at),
         }
     };

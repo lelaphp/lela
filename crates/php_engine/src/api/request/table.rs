@@ -221,14 +221,7 @@ impl Request {
     /// and the cell handed back with one more owner, the caller's.
     pub(crate) fn table_row_ref(&mut self, object: PhpObject, key: &Key) -> Result<PhpRef, Thrown> {
         let place = self.table_row_place(object, key)?;
-        let held = Value::of_zval(place.read());
-        let cell = if let Some(cell) = held.as_php_ref() {
-            *cell
-        } else {
-            let cell = self.reference(held.undef_as_null())?;
-            place.write(cell.as_value().to_zval());
-            cell
-        };
+        let cell = self.make_ref(place)?;
         self.addref(&cell.as_value());
         Ok(cell)
     }
