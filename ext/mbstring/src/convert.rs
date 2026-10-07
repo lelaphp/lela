@@ -85,11 +85,18 @@ fn convert_array(
     }
     input.protect();
     let mut out = PhpArray::new(req)?;
-    for (key, value) in input.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(input, idx, key, entry)`
+    // (`Z/ext/mbstring/mbstring.c:2762`), no owner of the table taken: the
+    // argument holds it while a warning reaches the program. A throwable
+    // gives the array made so far up, and the table its mark, as every
+    // other way out does.
+    let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let key = match key {
             Key::Str(name) => match convert_from(req, name.as_bytes(), to, from) {
                 Some(name) => Key::Str(new_string(req, &name)?.hand_on_unmigrated()),
-                None => continue,
+                None => return Ok(ControlFlow::Continue(())),
             },
             Key::Int(n) => Key::Int(n),
         };
@@ -97,7 +104,7 @@ fn convert_array(
         let converted = match value.as_ref() {
             ValueRef::Str(s) => match convert_from(req, s.as_bytes(), to, from) {
                 Some(s) => new_string(req, &s)?.into_value(),
-                None => continue,
+                None => return Ok(ControlFlow::Continue(())),
             },
             ValueRef::Null | ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
                 Owner::take(req, value)
@@ -112,12 +119,17 @@ fn convert_array(
             }
             _ => {
                 docref(req, Level::Warning, "Object is not supported");
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
         };
         out.set(req, key, converted.hand_on_unmigrated())?;
-    }
+        Ok(ControlFlow::Continue(()))
+    });
     input.unprotect();
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
+    }
     Ok(Some(out))
 }
 
@@ -911,16 +923,16 @@ fn convert_array_in(
     to: Encoding,
 ) -> Result<bool, Thrown> {
     array.protect();
-    for (key, v) in array.snapshot_refs() {
-        match convert_value(req, &v, from, to)? {
-            Walk::Stopped => {
-                array.unprotect();
-                return Ok(true);
-            }
+    // `ZEND_HASH_FOREACH_VAL(ht, entry)` (`Z/ext/mbstring/mbstring.c:3828`)
+    // over the separated table, no owner of it taken: the variable holds it
+    // while what a nested object's conversion reaches runs, and each row is
+    // written in place as php writes it.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<bool> {
+        match convert_value(req, row.value(), from, to)? {
+            Walk::Stopped => return Ok(ControlFlow::Break(true)),
             Walk::Kept => {}
             Walk::Replace(new) => {
-                if !array.replace(req, &key, new.hand_on_unmigrated())? {
-                    array.unprotect();
+                if !array.replace(req, row.key(), new.hand_on_unmigrated())? {
                     return Err(fatal(
                         req,
                         "InternalError: mb_convert_variables lost a key of the array it converts",
@@ -928,9 +940,10 @@ fn convert_array_in(
                 }
             }
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    });
     array.unprotect();
-    Ok(false)
+    Ok(walked?.unwrap_or(false))
 }
 
 /// `mb_convert_variables(string $to_encoding, array|string $from_encoding, mixed &$var, mixed &...$vars): string|false`.

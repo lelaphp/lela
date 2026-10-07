@@ -4,6 +4,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Path, Raw, This, True};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
@@ -12,6 +14,7 @@ use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, throw, throw_error, while_pending,
 };
 use php_ext::request::{Request, Stream, StreamCtx, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     Emalloc, FreshString, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
 };
@@ -1793,11 +1796,16 @@ impl HashContext {
             context.running = Some(running);
             context.flags = flags;
         }
-        for (key, value) in members.snapshot() {
+        // `object_properties_load`'s walk (`Z/Zend/zend_API.c:1752`), no
+        // owner of the table taken: the argument holds it.
+        walk::foreach(req, members, Hold::None, |req, row| -> walk::Step {
+            let key = row.key().clone();
+            let value = row.value().deref();
             let name = key.to_prop_name(req)?;
             let value = Owner::take(req, value);
             this.set_prop(req, name, value)?;
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(())
     }
 

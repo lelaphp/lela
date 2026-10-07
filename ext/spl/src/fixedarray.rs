@@ -304,7 +304,13 @@ impl SplFixedArray {
         }
         let mut elements = Vec::new();
         let mut members = PhpArray::new(req)?;
-        for (key, value) in data.snapshot() {
+        // `ZEND_HASH_FOREACH_STR_KEY_VAL(data, key, elem)`, which no code of the
+        // program reaches: the rows read under the borrowed request, views
+        // the argument keeps, then written.
+        let rows: Vec<(Key, Value)> = walk::rows(req, data)
+            .map(|(key, value)| (key, value.deref()))
+            .collect();
+        for (key, value) in rows {
             match key {
                 Key::Int(_) => elements.push(crate::copied(req, value)),
                 Key::Str(_) => {

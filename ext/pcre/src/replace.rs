@@ -519,17 +519,21 @@ fn over_array_func(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     let mut pending: Option<Thrown> = None;
-    for (key, entry) in subjects.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(subject_ht, num_key, string_key,
+    // subject_entry)` (`Z/ext/pcre/php_pcre.c:2247`), no owner of the table
+    // taken: the argument holds it while the callback runs.
+    let walked = walk::foreach(req, subjects, Hold::None, |req, row| -> walk::Step {
+        let entry = row.value().deref();
         let converted = match &pending {
             None => to_string(req, &entry).map(Some),
             Some(thrown) => string_while_pending(req, thrown, &entry),
         };
         let subject = match converted {
             Ok(Some(subject)) => subject,
-            Ok(None) => break,
+            Ok(None) => return Ok(ControlFlow::Break(())),
             Err(thrown) => {
                 pending = Some(thrown);
-                break;
+                return Ok(ControlFlow::Break(()));
             }
         };
         let calling = Calling {
@@ -540,6 +544,7 @@ fn over_array_func(
         subject.give_up(req);
         match result {
             Ok(Some(result)) => {
+                let key = row.key().clone();
                 if let Key::Str(s) = &key {
                     req.addref(&Value::string(*s));
                 }
@@ -548,6 +553,14 @@ fn over_array_func(
             Ok(None) => {}
             Err(thrown) => pending = Some(thrown),
         }
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(match pending {
+            Some(earlier) => earlier.chain(req, thrown),
+            None => thrown,
+        });
     }
     match pending {
         Some(thrown) => {
@@ -572,33 +585,31 @@ fn over_array(
     keep: impl Fn(usize, usize) -> bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (key, entry) in subjects.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(subject_ht, num_key, string_key,
+    // subject_entry)` (`Z/ext/pcre/php_pcre.c:2318`), no owner of the table
+    // taken: the argument holds it while a subject's `__toString` runs.
+    let walked = walk::foreach(req, subjects, Hold::None, |req, row| -> walk::Step {
         let before = *count;
-        let subject = match to_string(req, &entry) {
-            Ok(subject) => subject,
-            Err(thrown) => {
-                out.give_up(req);
-                return Err(thrown);
-            }
-        };
+        let subject = to_string(req, &row.value().deref())?;
         let result = each(req, *subject, count);
         subject.give_up(req);
-        let result = match result {
-            Ok(Some(result)) => result,
-            Ok(None) => continue,
-            Err(thrown) => {
-                out.give_up(req);
-                return Err(thrown);
-            }
+        let Some(result) = result? else {
+            return Ok(ControlFlow::Continue(()));
         };
         if !keep(before, *count) {
             result.give_up(req);
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
+        let key = row.key().clone();
         if let Key::Str(s) = &key {
             req.addref(&Value::string(*s));
         }
         out.set(req, key, result.into_value().hand_on_unmigrated())?;
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }
