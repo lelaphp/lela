@@ -2808,7 +2808,9 @@ impl EngineBuilder {
     /// `php_value` and `php_admin_value` (`fpm_php_apply_defines_ex`):
     /// the value as given, not read again by the INI grammar, through the
     /// entry's `on_modify`, with [`IniOrigin`]'s reach; one php does not
-    /// know is left, so [`Engine::ini_get`] answers `None` for it.
+    /// know is left, so [`Engine::ini_get`] answers `None` for it. It is
+    /// the master value every request starts with, and never in the
+    /// startup ini an extension's engine start is handed.
     #[must_use]
     pub fn host_ini(mut self, name: &[u8], value: &[u8], mode: IniOrigin) -> EngineBuilder {
         self.host_ini.push((name.to_vec(), value.to_vec(), mode));
@@ -2962,6 +2964,10 @@ impl EngineBuilder {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, Some(value)));
         }
+        // The startup ini an extension's engine start is handed: the
+        // entries as php's `MINIT` meets them in the master, before a
+        // host's values are laid over at `ZEND_INI_STAGE_ACTIVATE`.
+        let startup = ini.clone();
         let locked = host_ini(self.host_ini, &extensions, &mut ini, &mut held);
         let on = |name: &str| {
             ini.iter()
@@ -3084,7 +3090,7 @@ impl EngineBuilder {
             }),
             end: Arc::default(),
         };
-        engine.register_ini(held, &configuration.loads, self.sapi_name);
+        engine.register_ini(held, startup, &configuration.loads, self.sapi_name);
         engine.end.arm(&engine.shared, self.sapi_name);
         engine
     }
@@ -3563,6 +3569,7 @@ impl Engine {
     fn register_ini(
         &mut self,
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+        mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
         loads: &Loads,
         sapi_name: &'static str,
     ) {
@@ -3597,6 +3604,7 @@ impl Engine {
         // the bundle: a refused start shows what php raised before it,
         // which is nothing of a later extension's (`Engine::refused`).
         let mut marks = Vec::new();
+        let mut activated = Vec::new();
         for (name, value, activate) in held {
             let owner = (self.shared.extensions.iter())
                 .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name));
@@ -3610,7 +3618,11 @@ impl Engine {
                 .is_some_and(|handler| matches!(handler(&mut req, Some(&value)), Ok(true)));
             if accepted {
                 req.take_startup_value(&name, &value);
-                taken.push((name, Some(value)));
+                if activate {
+                    activated.push((name, Some(value)));
+                } else {
+                    taken.push((name, Some(value)));
+                }
             }
         }
         req.set_ini_stage(IniStage::Startup);
@@ -3633,9 +3645,19 @@ impl Engine {
         // it; one without a handler always takes.
         let extensions = &shared.extensions;
         shared.locked.retain(|name| {
-            on_modify(extensions, name).is_none() || taken.iter().any(|(n, _)| n == name)
+            on_modify(extensions, name).is_none() || activated.iter().any(|(n, _)| n == name)
         });
+        // What the startup stage took is the master value and the startup
+        // ini alike; what the host's activate stage took is the master
+        // value alone, as php-fpm's child alters the master value of an
+        // engine whose `MINIT` has run (`fpm_php_zend_ini_alter_master`).
         for (name, value) in taken {
+            startup.retain(|(n, _)| *n != name);
+            startup.push((name.clone(), value.clone()));
+            shared.ini.retain(|(n, _)| *n != name);
+            shared.ini.push((name, value));
+        }
+        for (name, value) in activated {
             shared.ini.retain(|(n, _)| *n != name);
             shared.ini.push((name, value));
         }
@@ -3643,9 +3665,7 @@ impl Engine {
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
         let mut start = Start {
-            ini: StartupIni {
-                entries: shared.ini.clone(),
-            },
+            ini: StartupIni { entries: startup },
             host: sapi_name,
             process: Vec::new(),
         };

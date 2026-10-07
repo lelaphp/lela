@@ -4,10 +4,12 @@
 //! request a request state is built for and at engine drop.
 
 use super::test_ext::{Event, Events, Phase, Recording, TestExt, record};
-use crate::api::abi::{Extension, PostStartup as Answer};
+use crate::api::abi::{Extension, ExtensionBuilder, PostStartup as Answer, Refusal, Start};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::engine::{Engine, HostPage, HostServes, Method, RequestDescription, WebRequest};
+use crate::engine::{
+    Engine, HostPage, HostServes, IniOrigin, Method, RequestDescription, WebRequest,
+};
 use crate::test::Capture;
 
 use Event::{Ext, Mark};
@@ -579,6 +581,79 @@ fn a_request_whose_start_failed_is_not_looked_at() {
     });
     assert!(observed.start_failed);
     assert!(!looked);
+}
+
+/// What the engine start of [`starts_from_ini`] was handed for its two
+/// entries.
+static STARTED_WITH: std::sync::Mutex<Vec<Option<Vec<u8>>>> = std::sync::Mutex::new(Vec::new());
+
+/// An `on_modify` that takes every value.
+#[allow(clippy::unnecessary_wraps)] // an `on_modify`'s signature
+fn takes_every_value(_: &mut Request, _: Option<&[u8]>) -> Result<bool, Thrown> {
+    Ok(true)
+}
+
+/// An engine start that records what its startup ini holds for
+/// `t.plain` and `t.handled` in [`STARTED_WITH`].
+#[allow(clippy::unnecessary_wraps)] // an engine start's signature
+fn records_startup_ini(start: &Start) -> Result<(), Refusal> {
+    let value = |name: &[u8]| {
+        start
+            .ini()
+            .entries
+            .iter()
+            .find(|(entry, _)| entry.as_slice() == name)
+            .and_then(|(_, value)| value.clone())
+    };
+    let mut seen = STARTED_WITH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    seen.clear();
+    seen.extend([value(b"t.plain"), value(b"t.handled")]);
+    Ok(())
+}
+
+/// An extension of two system entries, `t.plain` and `t.handled`, the
+/// second with an `on_modify` that takes every value, whose engine start
+/// records what its startup ini holds for each.
+fn starts_from_ini() -> Extension {
+    let entry = |name: &str| php_unit::decl::IniDecl {
+        name: php_unit::decl::Name(name.as_bytes().into()),
+        default: Some(b"default"[..].into()),
+        user: false,
+        per_dir: false,
+        system: true,
+    };
+    ExtensionBuilder::default()
+        .ini(vec![entry("t.plain"), entry("t.handled")])
+        .on_modify(b"t.handled", takes_every_value)
+        .engine_state(records_startup_ini)
+        .build("starts_from_ini")
+}
+
+/// A host's own entries are laid over at `ZEND_INI_STAGE_ACTIVATE`, as
+/// php-fpm's child applies its pool's `php_value` and `php_admin_value`
+/// to an engine whose `MINIT` ran once in the master: an extension's
+/// engine start sees the startup ini without them, the `-d` value where
+/// one was given and the default where none was, whether or not the
+/// entry has an `on_modify`, while the master value every request
+/// starts with is the host's (#1944).
+#[test]
+fn an_engine_start_sees_the_startup_ini_without_the_host_s_entries() {
+    let _rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[starts_from_ini()])
+        .ini(b"t.plain", b"line")
+        .host_ini(b"t.plain", b"pool", IniOrigin::Admin)
+        .host_ini(b"t.handled", b"pool", IniOrigin::Value)
+        .build();
+    let seen = STARTED_WITH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    assert_eq!(seen, [Some(b"line".to_vec()), Some(b"default".to_vec())]);
+    assert_eq!(engine.ini_get(b"t.plain"), Some(b"pool".to_vec()));
+    assert_eq!(engine.ini_get(b"t.handled"), Some(b"pool".to_vec()));
 }
 
 /// The built-in server is the one host that shuts a request whose start

@@ -479,6 +479,51 @@ fn a_request_whose_start_fails_logs_no_line_of_its_script() {
     assert_eq!(String::from_utf8_lossy(&unopened_failed.1), "");
 }
 
+/// A pool's `php_admin_value[ffi.preload]` naming a header that is not
+/// there: php reads `ffi.preload` in `MINIT` alone, which ran once in the
+/// master under the master's ini, and its child lays the pool's value
+/// over the running engine as the master value, so the child serves its
+/// requests and `ini_get()` answers the pool's value: the oracle's
+/// php-fpm's bytes under the same configuration (#1944).
+#[test]
+fn a_pool_s_failing_ffi_preload_is_not_an_engine_start_of_the_child() {
+    let dir = tree("pool-preload");
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    let mut written = std::fs::read_to_string(&path).unwrap();
+    written.push_str("php_admin_value[ffi.preload] = /nonexistent/pool-preload.h\n");
+    std::fs::write(&path, written).unwrap();
+    let script = dir.join("index.php");
+    std::fs::write(
+        &script,
+        "<?php var_dump(ini_get('ffi.preload'), extension_loaded('ffi'));",
+    )
+    .unwrap();
+    let mut master = php_fpm()
+        .args(["-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let body = connect(&socket, Instant::now())
+        .map(|s| response(s, &script))
+        .unwrap_or_default();
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\n\
+         string(27) \"/nonexistent/pool-preload.h\"\nbool(true)\n"
+    );
+}
+
 /// A log line with its time, the pids and a child's lifetime masked: the
 /// number after `pid`, `child` and `after` is `N`.
 #[cfg(target_os = "macos")]
