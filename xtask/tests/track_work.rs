@@ -70,15 +70,28 @@ struct Scratch {
 impl Scratch {
     /// Main's checkout of this working tree's files, laid by
     /// [`scratch::repository`]: one commit on `main`, pushed to `origin`,
-    /// and the checkout on `main`.
+    /// and the checkout on `main`. `origin` is a bare clone borrowing the
+    /// checkout's objects, as the checkout borrows the workspace's, so the
+    /// push writes no pack and each scratch holds no copy of the tree's
+    /// objects (#644).
     fn lay(name: &str) -> Scratch {
         let dir = Tree::new(&format!("track-work-{name}")).unwrap();
         let root = dir.join("repo");
         let origin = dir.join("origin.git");
         scratch::repository(workspace(), &root).unwrap();
-        fs::create_dir_all(&origin).unwrap();
         fs::create_dir_all(dir.join("bin")).unwrap();
-        sh(&origin, &["git", "init", "-q", "--bare", "-b", "main"]);
+        sh(
+            &dir,
+            &[
+                "git",
+                "clone",
+                "-q",
+                "--bare",
+                "--shared",
+                root.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
         sh(
             &root,
             &["git", "remote", "add", "origin", origin.to_str().unwrap()],

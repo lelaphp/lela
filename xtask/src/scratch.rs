@@ -206,6 +206,16 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
 /// test holds. The harness a build there compiles is this working tree's,
 /// uncommitted changes and all, so a test that builds `xtask` in a
 /// worktree of it builds the harness under test.
+///
+/// The files are copied, which on APFS is a clone sharing the workspace's
+/// blocks (`std::fs::copy` is `fclonefileat` there), and the objects are
+/// borrowed: the scratch's object store names the workspace's as its
+/// alternate, so `git add` writes only the blobs of what the workspace has
+/// not committed, and the trees and the commit above them. Written out,
+/// they were a scratch's real cost on disk, 36 MB of loose objects each,
+/// and a suite lays a dozen at once (#644). A scratch lives for one test,
+/// well inside the two weeks git keeps an unreachable object, so nothing
+/// it borrows is pruned from under it.
 pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
     for file in crate::git::files(workspace, Path::new("."))? {
@@ -217,6 +227,14 @@ pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
             .with_context(|| format!("copying {file} into {}", to.display()))?;
     }
     git(to, &["init", "-q", "-b", "main"], None)?;
+    if let Some(common) = crate::git::common_dir(workspace) {
+        let alternates = to.join(".git/objects/info/alternates");
+        std::fs::write(
+            &alternates,
+            format!("{}\n", common.join("objects").display()),
+        )
+        .with_context(|| format!("writing {}", alternates.display()))?;
+    }
     git(to, &["config", "core.hooksPath", "scripts/hooks"], None)?;
     git(to, &["add", "-A"], None)?;
     git(
