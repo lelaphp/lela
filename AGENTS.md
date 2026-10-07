@@ -115,7 +115,7 @@ third-engine-design.md
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=ec22db5bfe7171c08362fec1ad20d30ba57801247871e991eb91af7c41ab6ecf out=d0426c9c293a8172bb16cda724ed1793eaeac2908bfa7bb0dfd124793c5afdbc -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -144,11 +144,11 @@ third-engine-design.md
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | fail |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | pass |
+| harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=0916b61481da36955fa020014e903a526ac8ed66e898f448fe50bc079f318728 out=0525dffefe4ef93cd822f740f6b7b60297e1443e58837e618e2f02c32c1fdb9a -->
+<!-- /computed in=a7e379cf76613fcb2910bb3ad77e5f37f64b770022932b5799a1ef2f8d7866f5 out=81c5fd38e09d43769bfaa6193fe7a3818a0a3c60900153d819318d78cf805a3e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

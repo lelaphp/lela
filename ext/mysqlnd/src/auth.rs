@@ -10,7 +10,7 @@ use php_ext::abi::Callable;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
 
 use crate::charset;
 use crate::conn::ConnData;
@@ -709,7 +709,8 @@ fn rsa_encrypt(req: &mut Request, pem: &[u8], data: &[u8]) -> Result<Option<Vec<
     let Some(encrypt) = native(req, b"openssl_public_encrypt")? else {
         return Ok(None);
     };
-    let out = PhpRef::new(req, Value::null())?;
+    let null = Owner::take(req, Value::null());
+    let out = PhpRef::new(req, null)?;
     let data = PhpString::new(req, data)?;
     let pem = PhpString::new(req, pem)?;
     let args = [

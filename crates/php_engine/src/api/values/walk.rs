@@ -1428,11 +1428,11 @@ pub fn detached<T>(
     if held.is_empty() {
         return Ok(None);
     }
-    let mut copy = held.copy(req)?.hand_on();
-    let answered = body(req, &mut copy);
+    let mut copy = held.copy(req)?;
+    let answered = copy.written(|copy| body(req, copy));
     match holder.reference() {
-        Some(cell) => cell.convert(req, copy.to_value()),
-        None => req.release(copy.to_value()),
+        Some(cell) => cell.convert(req, copy.into_value()),
+        None => copy.give_up(req),
     }
     answered.map(Some)
 }

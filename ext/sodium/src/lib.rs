@@ -572,28 +572,15 @@ pub(crate) fn referent(cell: &Ref<Raw<PhpString>>) -> Option<Vec<u8>> {
     value.as_str_bytes().map(<[u8]>::to_vec)
 }
 
-/// Write through a by-reference argument, the caller's variable where
-/// it passed one.
-pub(crate) fn assign(
-    req: &mut Request,
-    cell: &Ref<Raw<PhpString>>,
-    value: Value,
-) -> Result<(), Thrown> {
-    if let Some(reference) = cell.reference() {
-        return reference.set(req, value);
-    }
-    req.release(value);
-    Ok(())
-}
-
-/// [`assign`] of a new string of these bytes.
+/// A new string of these bytes written through a by-reference argument,
+/// the caller's variable where it passed one ([`Ref::set`]).
 pub(crate) fn assign_bytes(
     req: &mut Request,
     cell: &Ref<Raw<PhpString>>,
     bytes: &[u8],
 ) -> Result<(), Thrown> {
     let string = made(req, bytes)?;
-    assign(req, cell, Value::string(string.hand_on_unmigrated()))
+    cell.set(req, string)
 }
 
 /// `sodium_add(string &$string1, string $string2): void`: the two as
@@ -745,7 +732,7 @@ fn sodium_memzero(
     if referent(&string).is_none() {
         return Err(fail(req, "a PHP string is required"));
     }
-    assign(req, &string, Value::null())
+    string.set(req, Value::null())
 }
 
 /// A `block_size` argument: `zend_long` greater than zero, as `size_t`.

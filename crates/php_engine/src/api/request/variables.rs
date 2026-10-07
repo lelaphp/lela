@@ -17,7 +17,7 @@
 
 use php_unit::AutoGlobal;
 
-use super::{Request, Symbol};
+use super::Request;
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 use crate::exec::TableId;
@@ -182,33 +182,17 @@ impl Request {
 
     /// A variable of `EG(symbol_table)` written or deleted, what an
     /// extension that binds a global does: `Some` is
-    /// `zend_hash_update_ind`, `value` the table's from here, into the CV
-    /// a frame attached to the name where one is, and into the bucket
-    /// otherwise, a name the table has not added to it; `None` is
+    /// `zend_hash_update_ind`, a sink whose owner the table takes, into
+    /// the CV a frame attached to the name where one is, and into the
+    /// bucket otherwise, a name the table has not added to it; `None` is
     /// `zend_delete_global_variable`, `zend_hash_del_ind`. What stood
     /// there is released after the write, where a destructor is served.
     /// The session binds `$_SESSION` so (`php_session_track_init`).
-    pub fn set_global(&mut self, name: &[u8], value: Option<Value>) {
+    pub fn set_global(&mut self, name: &[u8], value: Option<Owner<Value>>) {
         let table = self.global_table();
-        let Some(value) = value else {
-            self.symbol_unset(table, name);
-            return;
-        };
-        let attached = self.table_mut(table).and_then(|entries| {
-            entries
-                .iter()
-                .find(|(key, _)| key == name)
-                .and_then(|(_, symbol)| match symbol {
-                    Symbol::Indirect(frame, at) => Some((*frame, *at)),
-                    Symbol::Value(_) | Symbol::Held(_) => None,
-                })
-        });
-        match attached {
-            Some((frame, at)) => {
-                let previous = self.set_attached(table, frame, at, value);
-                self.release(previous);
-            }
-            None => self.symbol_update(table, name.to_vec(), value),
+        match value {
+            Some(value) => self.symbol_update_ind(table, name, value.hand_on()),
+            None => self.symbol_unset(table, name),
         }
     }
 
@@ -233,9 +217,10 @@ impl Request {
         let words = words.into_value().hand_on();
         let count = Value::int(i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX));
         if !self.description.argv.is_empty() {
-            self.addref(&words);
-            self.set_global(b"argv", Some(words));
-            self.set_global(b"argc", Some(count));
+            let list = Owner::take(self, words);
+            self.set_global(b"argv", Some(list));
+            let number = Owner::take(self, count);
+            self.set_global(b"argc", Some(number));
         }
         if server {
             let held = Owner::take(self, words);

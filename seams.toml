@@ -497,7 +497,7 @@ lock = "process.lock"
 [[seam]]
 name = "unit"
 producer = "php_unit"
-consumers = ["php_compile", "php_engine", "php_jit"]
+consumers = ["php_compile", "php_engine", "php_jit", "php_link"]
 lock = "unit.lock"
 adr = "0001"
 [[seam]]
@@ -549,10 +549,10 @@ from = "php_unit"
 to = ["php_heap"]
 [[edge]]
 from = "php_compile"
-to = ["php_syntax", "php_unit", "php_heap"]
+to = ["php_syntax", "php_unit", "php_link", "php_heap"]
 [[edge]]
 from = "php_engine"
-to = ["php_compile", "php_unit", "php_heap", "php_macros", "php_process"]
+to = ["php_compile", "php_unit", "php_link", "php_heap", "php_macros", "php_process"]
 adr = "0007"
 [[edge]]
 from = "php_streams"
@@ -573,7 +573,7 @@ order = "registration"
 adr = ["0004", "0006"]
 [[edge]]
 from = "php_jit"
-to = ["php_engine", "php_unit", "php_heap"]
+to = ["php_engine", "php_unit", "php_link", "php_heap"]
 allowlist = "tier.lock"
 adr = "0006"
 [[edge]]

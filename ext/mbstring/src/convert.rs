@@ -1072,7 +1072,7 @@ fn mb_convert_variables(
                 return Ok(OrFalse::False);
             }
             Walk::Kept => {}
-            Walk::Replace(new) => cell.set(req, new.hand_on_unmigrated())?,
+            Walk::Replace(new) => cell.set(req, new)?,
         }
     }
     Ok(OrFalse::Value(new_string(req, from.name())?))

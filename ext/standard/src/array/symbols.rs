@@ -43,8 +43,7 @@ fn prefixed(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 /// reference the variable holds, held to the types it is typed by, else
 /// in its place.
 fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
-    let value = value.deref();
-    req.addref(&value);
+    let value = Owner::take(req, value.deref());
     if let Some(cell) = req
         .caller_var(name)
         .and_then(|held| held.as_php_ref().copied())
@@ -315,8 +314,8 @@ fn extracted_refs(
     let walked = walk::foreach(req, table, Hold::None, |req, row| {
         if let Some(target) = target(req, kind, prefix, row.key())? {
             let cell = row.make_ref(req)?;
-            req.addref(&cell.as_value());
-            req.set_caller_var(&target, cell.as_value());
+            let cell = Owner::take(req, cell.as_value());
+            req.set_caller_var(&target, cell);
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))

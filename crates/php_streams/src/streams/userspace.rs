@@ -263,7 +263,8 @@ fn open_with(
     let Some(object) = create_object(req, user)? else {
         return Ok(Err(String::from("operation failed")));
     };
-    let opened_path = PhpRef::new(req, Value::null())?.hand_on_unmigrated();
+    let null = Owner::take(req, Value::null());
+    let opened_path = PhpRef::new(req, null)?.hand_on_unmigrated();
     let args = [
         string_arg(req, path)?,
         string_arg(req, mode)?,
