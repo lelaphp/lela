@@ -54,12 +54,12 @@ struct State {
     /// newline came.
     buffer: Vec<u8>,
     /// `LIBXML(entity_loader_callback)`, and the value it was read off,
-    /// held with one owner.
-    entity_loader: Option<(Callable, Value)>,
+    /// and its owner.
+    entity_loader: Option<(Callable, Owner<Value>)>,
     /// `LIBXML(entity_loader_disabled)`.
     entity_loader_disabled: bool,
-    /// `LIBXML(stream_context)`, held with one owner.
-    stream_context: Option<Value>,
+    /// `LIBXML(stream_context)`, its owner.
+    stream_context: Option<Owner<Value>>,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -158,10 +158,10 @@ fn rshutdown(req: &mut Request) {
     let loader = state.entity_loader.take();
     let context = state.stream_context.take();
     if let Some((_, value)) = loader {
-        req.release(value);
+        value.give_up(req);
     }
     if let Some(value) = context {
-        req.release(value);
+        value.give_up(req);
     }
 }
 
@@ -709,9 +709,9 @@ fn libxml_set_streams_context(req: &mut Request, context: Untyped<Value>) -> Res
     };
     // `zend_fetch_resource_ex(arg, "Stream-Context", le_stream_context)`.
     StreamCtx::fetch(req, *resource)?;
-    req.addref(&given);
+    let given = Owner::take(req, given);
     if let Some(old) = req.state::<State>().stream_context.replace(given) {
-        req.release(old);
+        old.give_up(req);
     }
     Ok(())
 }
@@ -721,7 +721,7 @@ fn libxml_set_streams_context(req: &mut Request, context: Untyped<Value>) -> Res
 /// the one given, and the one it held answered; each owner moves with the
 /// value, as soap's `get_sdl` sets the client's around a WSDL fetch and
 /// puts the old one back.
-pub fn switch_stream_ctx(req: &mut Request, given: Option<Value>) -> Option<Value> {
+pub fn switch_stream_ctx(req: &mut Request, given: Option<Owner<Value>>) -> Option<Owner<Value>> {
     std::mem::replace(&mut req.state::<State>().stream_context, given)
 }
 
@@ -907,10 +907,10 @@ fn libxml_set_external_entity_loader(
     let given = resolver_function.value();
     let callable = resolver_function.hold(req)?;
     if let Some((_, old)) = req.state::<State>().entity_loader.take() {
-        req.release(old);
+        old.give_up(req);
     }
     if let Some(callable) = callable {
-        req.addref(&given);
+        let given = Owner::take(req, given);
         req.state::<State>().entity_loader = Some((callable, given));
     }
     Ok(True)

@@ -25,7 +25,7 @@ use std::any::Any;
 use php_ext::coerce::{to_long, value_name, with_string};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
 /// `pdo_driver_t`: a connector's name, the class `PDO::connect()` makes
 /// for it, and its factory.
@@ -330,7 +330,17 @@ pub struct Binding<'a> {
     pub name: Option<&'a [u8]>,
     pub ty: BindType,
     pub is_parameter: bool,
-    pub value: &'a mut Value,
+    pub value: &'a mut Owner<Value>,
+}
+
+/// `zval_ptr_dtor(parameter)` and `new` in its place: a bound value
+/// replaced, through its reference for `bindParam()`, as php's
+/// `convert_to_*` writes in place.
+pub(crate) fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
+    match value.as_php_ref().copied() {
+        Some(cell) => cell.convert(req, new),
+        None => std::mem::replace(value, new).give_up(req),
+    }
 }
 
 /// `enum pdo_placeholder_support`: what a statement's connector takes
@@ -469,7 +479,7 @@ pub trait Connection: Any + Send {
 
     /// `get_attribute`: the value, `None` for an attribute the connector
     /// does not know, php's `0`.
-    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Value>, Failure> {
+    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Owner<Value>>, Failure> {
         let _ = (req, attr);
         Err(Failure::unsupported())
     }
@@ -563,7 +573,7 @@ pub trait Statement: Any + Send {
         req: &mut Request,
         column: usize,
         ty: Option<BindKind>,
-    ) -> Result<Value, Failure>;
+    ) -> Result<Owner<Value>, Failure>;
 
     /// `param_hook`.
     fn bind(
@@ -589,7 +599,7 @@ pub trait Statement: Any + Send {
 
     /// `get_attribute`: `None` for an attribute the connector does not
     /// know.
-    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Value>, Failure> {
+    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Owner<Value>>, Failure> {
         let _ = (req, attr);
         Err(Failure::unsupported())
     }
@@ -601,7 +611,7 @@ pub trait Statement: Any + Send {
         req: &mut Request,
         column: usize,
         executed: bool,
-    ) -> Result<PhpArray, Failure> {
+    ) -> Result<Owner<PhpArray>, Failure> {
         let _ = (req, column, executed);
         Err(Failure::unsupported())
     }

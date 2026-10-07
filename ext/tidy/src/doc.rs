@@ -13,7 +13,7 @@ use php_ext::raising::{
     Level, Thrown, arg_null_deprecated, arg_type_error, argument_error, docref, fatal, throw,
     throw_error, throwing_warnings,
 };
-use php_ext::request::{Opening, Request, Streams as _};
+use php_ext::request::{Opening, OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::ffi::{self, Base, OptType, Status};
@@ -161,7 +161,7 @@ fn file_to_mem(
             return Err(thrown);
         }
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(Some(data))
 }
 

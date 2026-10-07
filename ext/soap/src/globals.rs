@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::values::{PhpObject, Value};
+use php_ext::values::{Owner, PhpObject, Value};
 
 use crate::SOAP_1_1;
 use crate::model::{Encoder, Sdl};
@@ -43,9 +43,9 @@ pub(crate) struct State {
     /// each with the time it was read, for `WSDL_CACHE_MEMORY`; in
     /// insertion order, which decides the one `soap.wsdl_cache_limit`
     /// evicts among those read in the same second.
-    /// What a `__get` answered the encoder, held until the serialisation
-    /// that read it ends.
-    pub(crate) held: Vec<Value>,
+    /// What a `__get` answered the encoder, one owner each, held until
+    /// the serialisation that read it ends (`encode_finish`).
+    pub(crate) held: Vec<Owner<Value>>,
     /// A throwable the encoder left pending and went on past
     /// (`zend_value_error` in a converter), handed on once the message
     /// is made.

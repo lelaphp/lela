@@ -15,7 +15,7 @@
 use std::ffi::c_int;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::PhpObject;
 use php_ext_libxml::ffi::{self as f, Dump, Kind, Name, Node, Ns};
 
@@ -876,7 +876,7 @@ fn dump_to_file(
     let saved = match dump_to_string(req, node, 0, format, no_empty, encoding) {
         Ok(saved) => saved,
         Err(thrown) => {
-            stream.hand_on_unmigrated().free(req);
+            stream.free(req);
             return Err(thrown);
         }
     };
@@ -887,7 +887,7 @@ fn dump_to_file(
         }
         None => -1,
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(written)
 }
 

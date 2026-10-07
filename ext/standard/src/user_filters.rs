@@ -340,9 +340,9 @@ fn bucket_type(req: &mut Request) -> ResourceType {
 }
 
 /// A filter written in PHP (`userfilter_ops`): the object its factory
-/// made, one owner.
+/// made, one owner, until `close` gives it up.
 struct UserFilter {
-    object: PhpObject,
+    object: Option<Owner<PhpObject>>,
 }
 
 /// php's warning for a call that left buckets on its input brigade.
@@ -410,7 +410,9 @@ impl StreamFilter for UserFilter {
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> Result<FilterStatus, Thrown> {
-        let object = self.object;
+        let Some(object) = self.object.as_deref().copied() else {
+            return Ok(FilterStatus::ErrFatal);
+        };
         let has_stream = object.prop(req, b"stream").is_some();
         if has_stream {
             let value = Owner::take(req, stream.as_value());
@@ -486,13 +488,15 @@ impl StreamFilter for UserFilter {
     /// as `zend_call_method_if_exists` calls nothing under
     /// `EG(exception)`, then the object given up either way.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        let object = self.object;
+        let Some(object) = self.object.take() else {
+            return Ok(());
+        };
         let closed = if req.stream_thrown().is_some() {
             Ok(None)
         } else {
-            call_if_exists(req, object, b"onclose")
+            call_if_exists(req, *object, b"onclose")
         };
-        req.release(object.as_value());
+        object.give_up(req);
         if let Some(value) = closed? {
             value.give_up(req);
         }
@@ -543,12 +547,7 @@ fn user_filter_factory(
         return Ok(None);
     };
     let object = new_object(req, class)?;
-    let filtername = PhpString::new(req, name)?.into_value();
-    write_prop(req, &object, b"filtername", filtername)?;
-    let params = params.map_or_else(Value::null, Value::deref);
-    let params = Owner::take(req, params);
-    write_prop(req, &object, b"params", params)?;
-    match call_if_exists(req, *object, b"oncreate") {
+    match created(req, *object, name, params) {
         Ok(Some(value)) if matches!(value.as_ref(), ValueRef::Bool(false)) => {
             value.give_up(req);
             object.give_up(req);
@@ -559,7 +558,7 @@ fn user_filter_factory(
                 value.give_up(req);
             }
             Ok(Some(Box::new(UserFilter {
-                object: object.hand_on_unmigrated(),
+                object: Some(object),
             })))
         }
         Err(thrown) => {
@@ -567,6 +566,22 @@ fn user_filter_factory(
             Err(thrown)
         }
     }
+}
+
+/// The new filter object's `filtername` and `params` set, and what
+/// `onCreate()` answered, where the object has it.
+fn created(
+    req: &mut Request,
+    object: PhpObject,
+    name: &[u8],
+    params: Option<&Value>,
+) -> Result<Option<Owner<Value>>, Thrown> {
+    let filtername = PhpString::new(req, name)?.into_value();
+    write_prop(req, &object, b"filtername", filtername)?;
+    let params = params.map_or_else(Value::null, Value::deref);
+    let params = Owner::take(req, params);
+    write_prop(req, &object, b"params", params)?;
+    call_if_exists(req, object, b"oncreate")
 }
 
 /// `Z_PARAM_RESOURCE` then `zend_fetch_resource` of a brigade: the

@@ -15,7 +15,7 @@ use php_ext::abi::{
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::Visibility;
-use php_ext::raising::{Level, Thrown, raise, throw_error};
+use php_ext::raising::{Level, Thrown, fatal, raise, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -33,7 +33,7 @@ pub(super) const WALL: i64 = 2;
 #[derive(Default)]
 pub(crate) struct DateState {
     pub time: Option<Time>,
-    rows: Vec<Value>,
+    rows: Vec<Owner<Value>>,
     /// What the time holds on the request's heap: the `timelib_time`
     /// and the `tz_abbr` `timelib_strdup` made.
     held: Option<Held>,
@@ -81,7 +81,7 @@ impl TzKind {
 #[derive(Default)]
 pub(crate) struct TzState {
     pub tz: Option<TzKind>,
-    rows: Vec<Value>,
+    rows: Vec<Owner<Value>>,
     /// The `tzi.z.abbr` copy an abbreviation zone holds on the request's
     /// heap; kept by [`set_tz`].
     held: Option<Held>,
@@ -122,7 +122,7 @@ pub(crate) struct PeriodState {
     /// How many steps past its rewind `current` stands, the index the
     /// last iterator over the period asked for; none before any walk.
     pub cursor: Option<usize>,
-    rows: Vec<Value>,
+    rows: Vec<Owner<Value>>,
     /// What `start`, `current`, `end` and `interval` hold on the
     /// request's heap, in that order; kept by [`hold_period`].
     held: [Option<Held>; 4],
@@ -532,7 +532,7 @@ fn rows_view(
     req: &mut Request,
     object: PhpObject,
     fields: Fields,
-    keep: fn(&mut Request, PhpObject) -> Option<&mut Vec<Value>>,
+    keep: fn(&mut Request, PhpObject) -> Option<&mut Vec<Owner<Value>>>,
 ) -> Result<Vec<(Key, Value)>, Thrown> {
     let mut rows = match std_rows(req, object) {
         Ok(rows) => rows,
@@ -544,30 +544,32 @@ fn rows_view(
     let mut made = Vec::with_capacity(fields.len() * 2);
     let mut fields = fields.into_iter();
     while let Some((name, value)) = fields.next() {
-        let value = value.hand_on_unmigrated();
+        let view = *value;
         made.push(value);
         let name = match PhpString::new(req, name) {
-            Ok(name) => name.hand_on_unmigrated(),
+            Ok(name) => name,
             Err(thrown) => {
                 give_up_fields(req, fields.collect());
                 release_rows(req, Some(made));
                 return Err(thrown);
             }
         };
-        made.push(Value::string(name));
-        update(&mut rows, name, value);
+        update(&mut rows, *name, view);
+        made.push(name.into_value());
     }
-    let old = keep(req, object).map(|rows| std::mem::replace(rows, made));
-    for value in old.into_iter().flatten() {
-        req.release(value);
-    }
+    let Some(kept) = keep(req, object) else {
+        release_rows(req, Some(made));
+        return Err(fatal(req, "InternalError: a date object with no payload"));
+    };
+    let old = std::mem::replace(kept, made);
+    release_rows(req, Some(old));
     Ok(rows)
 }
 
 /// What `free_obj` gives back of the kept rows.
-fn release_rows(req: &mut Request, rows: Option<Vec<Value>>) {
+fn release_rows(req: &mut Request, rows: Option<Vec<Owner<Value>>>) {
     for value in rows.into_iter().flatten() {
-        req.release(value);
+        value.give_up(req);
     }
 }
 
@@ -1328,7 +1330,7 @@ impl ObjectHandlers for PeriodHandlers {
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(p) = object.native::<PeriodObj>(req) {
             for value in &p.rows {
-                visit(*value);
+                visit(**value);
             }
         }
     }

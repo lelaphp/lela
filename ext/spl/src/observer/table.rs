@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Value};
+use php_ext::values::{Emalloc, Owner, Value};
 
 use super::RowKey;
 
@@ -36,11 +36,11 @@ fn hash_size(size: u32) -> usize {
 }
 
 /// One row's place in the table, its element, and the `getHash()`
-/// string its bucket keeps as the key.
+/// string its bucket keeps as the key, the bucket's owner of it.
 struct Entry {
     slot: u32,
     element: Emalloc,
-    key: Option<Value>,
+    key: Option<Owner<Value>>,
 }
 
 /// The table's shape: `arData` once a row was placed, `HASH_FLAG_PACKED`,
@@ -62,26 +62,23 @@ impl Table {
     /// the string the bucket keeps; and its element, allocated after
     /// the table moves, or before it where `copied` says the row goes
     /// through `zend_hash_*update_mem`, which `pemalloc`s its copy
-    /// first. The `Err` is the memory limit's fatal.
+    /// first. The `Err` is the memory limit's fatal, the string given up.
     pub(super) fn place(
         &mut self,
         req: &mut Request,
         key: RowKey,
-        key_string: Option<Value>,
+        key_string: Option<Owner<Value>>,
         copied: bool,
     ) -> Result<(), Thrown> {
-        let early = if copied {
-            Some(Emalloc::new(req, ELEMENT)?)
-        } else {
-            None
-        };
-        let slot = match key {
-            RowKey::Id(h) => self.place_index(req, h)?,
-            RowKey::Hash(_) => self.place_string(req)?,
-        };
-        let element = match early {
-            Some(element) => element,
-            None => Emalloc::new(req, ELEMENT)?,
+        let laid = self.lay(req, &key, copied);
+        let (slot, element) = match laid {
+            Ok(laid) => laid,
+            Err(thrown) => {
+                if let Some(string) = key_string {
+                    string.give_up(req);
+                }
+                return Err(thrown);
+            }
         };
         self.entries.insert(
             key,
@@ -94,11 +91,34 @@ impl Table {
         Ok(())
     }
 
+    /// [`Table::place`]'s slot and element, in php's order.
+    fn lay(
+        &mut self,
+        req: &mut Request,
+        key: &RowKey,
+        copied: bool,
+    ) -> Result<(u32, Emalloc), Thrown> {
+        let early = if copied {
+            Some(Emalloc::new(req, ELEMENT)?)
+        } else {
+            None
+        };
+        let slot = match key {
+            RowKey::Id(h) => self.place_index(req, *h)?,
+            RowKey::Hash(_) => self.place_string(req)?,
+        };
+        let element = match early {
+            Some(element) => element,
+            None => Emalloc::new(req, ELEMENT)?,
+        };
+        Ok((slot, element))
+    }
+
     /// `zend_hash_index_del` or `zend_hash_del`: the row's slot given
     /// up, `nNumUsed` drawn back past the holes at its end, and what
     /// the row held for its caller to give back, the key string and the
     /// element.
-    pub(super) fn remove(&mut self, key: &RowKey) -> Option<(Option<Value>, Emalloc)> {
+    pub(super) fn remove(&mut self, key: &RowKey) -> Option<(Option<Owner<Value>>, Emalloc)> {
         let entry = self.entries.remove(key)?;
         self.count -= 1;
         let slot = entry.slot as usize;

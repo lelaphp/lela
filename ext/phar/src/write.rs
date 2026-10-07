@@ -40,7 +40,7 @@ pub(crate) fn serialized(
     metadata: &mut Metadata,
 ) -> Result<Option<Vec<u8>>, Thrown> {
     if metadata.str.is_none()
-        && let Some(val) = metadata.val
+        && let Some(val) = metadata.val.as_deref().copied()
     {
         let mut out = Vec::new();
         let mut serializer = php_ext_standard::Serializer::new(req);
@@ -162,18 +162,20 @@ pub(crate) fn flush_ex(
         .into_iter()
         .filter_map(|slot| a.manifest.remove_at(slot))
         .collect();
-    for mut gone in gone {
-        gone.metadata.free(req);
+    for gone in gone {
+        gone.free(req);
     }
     let Some(a) = archives(req).get_mut(id) else {
         return Ok(None);
     };
     let mut main_meta = std::mem::take(&mut a.metadata);
-    let main_meta_str = serialized(req, &mut main_meta)?;
+    let main_meta_str = serialized(req, &mut main_meta);
     let Some(a) = archives(req).get_mut(id) else {
-        return Ok(None);
+        main_meta.free(req);
+        return main_meta_str.map(|_| None);
     };
     a.metadata = main_meta;
+    let main_meta_str = main_meta_str?;
     let mut global_flags = HDR_SIGNATURE;
     let mut has_dirs = false;
     let mut count = 0_u32;
@@ -198,14 +200,17 @@ pub(crate) fn flush_ex(
             continue;
         };
         let mut meta = std::mem::take(&mut e.metadata);
-        let meta_str = serialized(req, &mut meta)?;
+        let meta_str = serialized(req, &mut meta);
         let Some(e) = archives(req)
             .get_mut(id)
             .and_then(|a| a.manifest.at_mut(slot))
         else {
+            meta.free(req);
+            meta_str?;
             continue;
         };
         e.metadata = meta;
+        let meta_str = meta_str?;
         offset +=
             4 + e.filename.len() + 24 + meta_str.map_or(0, |m| m.len()) + usize::from(e.is_dir);
         if (oldfile.is_some() && !e.is_modified) || e.is_dir {
@@ -580,9 +585,9 @@ pub(crate) fn remove(req: &mut Request, data: EntryData) -> Result<Failed, Throw
         .at(slot)
         .is_some_and(|e| e.fp_refcount < 2 && e.fileinfo_lock_count == 0);
     if removable {
-        if let Some(mut gone) = a.manifest.remove_at(slot) {
+        if let Some(gone) = a.manifest.remove_at(slot) {
             a.refcount -= 1;
-            gone.metadata.free(req);
+            gone.free(req);
         }
     } else {
         if let Some(e) = a.manifest.at_mut(slot) {
@@ -758,26 +763,21 @@ pub(crate) fn open_for_write(
                 e.flags |= u32::try_from(level).unwrap_or(0);
             }
             if let Some(value) = metadata {
-                let value = value.deref();
-                req.addref(&value);
+                let value = php_ext::values::Owner::take(req, value.deref());
                 if let Some(a) = archives(req).get_mut(data.archive) {
                     a.is_modified = true;
                 }
-                let old = archives(req)
+                let mut kept = Metadata {
+                    val: Some(value),
+                    str: None,
+                };
+                if let Some(e) = archives(req)
                     .get_mut(data.archive)
                     .and_then(|a| a.manifest.at_mut(slot))
-                    .map(|e| {
-                        std::mem::replace(
-                            &mut e.metadata,
-                            Metadata {
-                                val: Some(value),
-                                str: None,
-                            },
-                        )
-                    });
-                if let Some(mut old) = old {
-                    old.free(req);
+                {
+                    std::mem::swap(&mut e.metadata, &mut kept);
                 }
+                kept.free(req);
             }
         }
     }
@@ -961,8 +961,8 @@ pub(crate) fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, 
         e.is_deleted = true;
         let dir = moved.is_dir;
         let (_, replaced) = a.manifest.update(&new, moved);
-        if let Some(mut replaced) = replaced {
-            replaced.metadata.free(req);
+        if let Some(replaced) = replaced {
+            replaced.free(req);
         }
         let Some(new_slot) = archives(req).get(id).and_then(|a| a.manifest.slot(&new)) else {
             return Ok(false);
@@ -980,11 +980,11 @@ pub(crate) fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, 
                 }
             }
             Err(error) => {
-                if let Some(mut gone) = archives(req)
+                if let Some(gone) = archives(req)
                     .get_mut(id)
                     .and_then(|a| a.manifest.remove(&new))
                 {
-                    gone.metadata.free(req);
+                    gone.free(req);
                 }
                 return fail(
                     req,
@@ -1177,11 +1177,11 @@ pub(crate) fn mkdir(
                 lossy(&real)
             ),
         );
-        if let Some(mut gone) = archives(req)
+        if let Some(gone) = archives(req)
             .get_mut(id)
             .and_then(|a| a.manifest.remove(&dir))
         {
-            gone.metadata.free(req);
+            gone.free(req);
         }
         return Ok(false);
     }

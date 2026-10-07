@@ -44,7 +44,9 @@ pub struct StreamCtx(Resource);
 /// its notifier, which php `ecalloc`s apart from it when `notification`
 /// is set.
 pub(crate) struct Context {
-    options: Option<PhpArray>,
+    /// Boxed, so the payload fits php's `php_stream_context` in a debug
+    /// build too, where an owner carries the line that made it.
+    options: Option<Box<Owner<PhpArray>>>,
     notifier: Option<Box<Notifier>>,
 }
 
@@ -151,7 +153,7 @@ pub(crate) fn context_dtor(req: &mut Request, res: Resource) {
             notifier.free(req);
         }
         if let Some(options) = options {
-            req.release(Value::array(options));
+            options.give_up(req);
         }
     }
 }
@@ -184,9 +186,9 @@ impl StreamCtx {
     /// ```
     pub fn alloc(req: &mut Request) -> Result<Owner<StreamCtx>, Thrown> {
         let kind = req.types().context;
-        let options = PhpArray::new(req)?.hand_on_unmigrated();
+        let options = PhpArray::new(req)?;
         let context = Context {
-            options: Some(options),
+            options: Some(Box::new(options)),
             notifier: None,
         };
         Ok(Resource::sized(req, kind, context, CONTEXT_SIZE)?.into_typed(StreamCtx))
@@ -209,9 +211,13 @@ impl StreamCtx {
         if let Some(context) = req.streams().default_context {
             return Ok(context);
         }
-        let context = StreamCtx::alloc(req)?.hand_on_unmigrated();
-        req.streams().default_context = Some(context);
-        Ok(context)
+        // php keeps no value of it: the request's resource list holds it
+        // until its close at the request's end.
+        let context = StreamCtx::alloc(req)?;
+        let view = *context;
+        context.leave_to_list();
+        req.streams().default_context = Some(view);
+        Ok(view)
     }
 
     /// `zend_fetch_resource_ex(zcontext, "Stream-Context", le)` over
@@ -270,7 +276,11 @@ impl StreamCtx {
     /// which `stream_context_get_options` hands back with one more.
     #[must_use]
     pub fn options(self, req: &Request) -> Option<PhpArray> {
-        self.0.native::<Context>(req)?.options
+        self.0
+            .native::<Context>(req)?
+            .options
+            .as_deref()
+            .map(|options| **options)
     }
 
     /// `php_stream_context_set_option` (`Z/main/streams/streams.c:2457`):
@@ -512,14 +522,19 @@ impl StreamCtx {
 
     /// The options array taken out of the `context` for a call that
     /// changes it.
-    fn take_options(self, req: &mut Request) -> Option<PhpArray> {
-        self.0.native_mut::<Context>(req)?.options.take()
+    fn take_options(self, req: &mut Request) -> Option<Owner<PhpArray>> {
+        self.0
+            .native_mut::<Context>(req)?
+            .options
+            .take()
+            .map(|options| *options)
     }
 
     /// The options array put back after [`StreamCtx::take_options`].
-    fn put_options(self, req: &mut Request, options: PhpArray) {
-        if let Some(context) = self.0.native_mut::<Context>(req) {
-            context.options = Some(options);
+    fn put_options(self, req: &mut Request, options: Owner<PhpArray>) {
+        match self.0.native_mut::<Context>(req) {
+            Some(context) => context.options = Some(Box::new(options)),
+            None => options.give_up(req),
         }
     }
 
@@ -570,21 +585,21 @@ fn call_user_notifier(
     let message = match notice.message {
         Some(text) => {
             let text = text.split(|b| *b == 0).next().unwrap_or_default();
-            PhpString::new(req, text)?.into_value().hand_on_unmigrated()
+            PhpString::new(req, text)?.into_value()
         }
-        None => Value::null(),
+        None => Owner::take(req, Value::null()),
     };
     let long = |n: usize| Value::int(i64::try_from(n).unwrap_or(i64::MAX));
     let arguments = [
         Value::int(notice.code as i64),
         Value::int(notice.severity as i64),
-        message,
+        *message,
         Value::int(notice.message_code),
         long(notice.sofar),
         long(notice.max),
     ];
     let answered = call(req, &callable, &arguments);
-    req.release(message);
+    message.give_up(req);
     answered.map(|value| value.give_up(req))
 }
 
@@ -592,7 +607,7 @@ fn call_user_notifier(
 /// taken out of the `context` for the call.
 fn put_option(
     req: &mut Request,
-    options: &mut PhpArray,
+    options: &mut Owner<PhpArray>,
     wrapper: &[u8],
     option: &[u8],
     value: &Value,
@@ -633,7 +648,7 @@ fn put_option(
 /// taken out of the `context` for the call.
 fn unset_in(
     req: &mut Request,
-    options: &mut PhpArray,
+    options: &mut Owner<PhpArray>,
     wrapper: &[u8],
     option: &[u8],
 ) -> Result<(), Thrown> {

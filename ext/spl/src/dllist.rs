@@ -26,11 +26,11 @@ const IT_MASK: i64 = 3;
 /// `SPL_DLLIST_IT_FIX`: the LIFO bit frozen, `SplQueue`'s and `SplStack`'s.
 const IT_FIX: i64 = 4;
 
-/// One `spl_ptr_llist_element`: its data, `None` once taken out, and
-/// its neighbours.
-#[derive(Clone, Copy, Default)]
+/// One `spl_ptr_llist_element`: its data, the list's owner of it,
+/// `None` once taken out, and its neighbours.
+#[derive(Default)]
 struct Node {
-    data: Option<Value>,
+    data: Option<Owner<Value>>,
     prev: Option<usize>,
     next: Option<usize>,
 }
@@ -62,7 +62,7 @@ pub(crate) struct LlistState {
 pub(crate) type Llist = Box<LlistState>;
 
 impl LlistState {
-    fn push(&mut self, value: Value) {
+    fn push(&mut self, value: Owner<Value>) {
         let at = self.nodes.len();
         self.nodes.push(Node {
             data: Some(value),
@@ -77,7 +77,7 @@ impl LlistState {
         self.count += 1;
     }
 
-    fn unshift(&mut self, value: Value) {
+    fn unshift(&mut self, value: Owner<Value>) {
         let at = self.nodes.len();
         self.nodes.push(Node {
             data: Some(value),
@@ -93,7 +93,7 @@ impl LlistState {
     }
 
     /// `spl_ptr_llist_pop`: the tail's data, its `prev` cut.
-    fn pop(&mut self) -> Option<Value> {
+    fn pop(&mut self) -> Option<Owner<Value>> {
         let tail = self.tail?;
         let prev = self.nodes[tail].prev;
         match prev {
@@ -107,7 +107,7 @@ impl LlistState {
     }
 
     /// `spl_ptr_llist_shift`: the head's data, its `next` cut.
-    fn shift(&mut self) -> Option<Value> {
+    fn shift(&mut self) -> Option<Owner<Value>> {
         let head = self.head?;
         let next = self.nodes[head].next;
         match next {
@@ -158,7 +158,7 @@ impl LlistState {
     /// `spl_dllist_it_helper_move_forward`: the cursor one step on under
     /// `flags`, and the element passed, taken off under
     /// `IT_MODE_DELETE`, for the caller to give up.
-    fn move_forward(&mut self, cursor: &mut Cursor, flags: i64) -> Option<Value> {
+    fn move_forward(&mut self, cursor: &mut Cursor, flags: i64) -> Option<Owner<Value>> {
         let old = cursor.pointer?;
         if flags & SplDoublyLinkedList::IT_MODE_LIFO != 0 {
             cursor.pointer = self.nodes[old].prev;
@@ -179,7 +179,24 @@ impl LlistState {
     /// The data a cursor stands on, `None` off the list or on a node
     /// taken out under it.
     fn at(&self, cursor: Cursor) -> Option<Value> {
-        cursor.pointer.and_then(|at| self.nodes[at].data)
+        cursor
+            .pointer
+            .and_then(|at| self.nodes[at].data.as_deref().copied())
+    }
+
+    /// `spl_ptr_llist_destroy`: the nodes let go, with whatever data a
+    /// node still held, for the caller to give up.
+    fn destroy(&mut self) -> Vec<Owner<Value>> {
+        let left = self
+            .nodes
+            .iter_mut()
+            .filter_map(|node| node.data.take())
+            .collect();
+        self.nodes.clear();
+        self.head = None;
+        self.tail = None;
+        self.count = 0;
+        left
     }
 
     /// The data from head to tail.
@@ -187,8 +204,8 @@ impl LlistState {
         let mut out = Vec::with_capacity(self.count);
         let mut current = self.head;
         while let Some(at) = current {
-            if let Some(v) = self.nodes[at].data {
-                out.push(v);
+            if let Some(v) = &self.nodes[at].data {
+                out.push(**v);
             }
             current = self.nodes[at].next;
         }
@@ -294,7 +311,7 @@ impl SplDoublyLinkedList {
         if index < 0 || index > i64::try_from(count).unwrap_or(i64::MAX) {
             return Err(out_of_range(req, "is out of range"));
         }
-        let value = crate::copied(req, value);
+        let value = Owner::take(req, value.deref());
         with(req, this, |l| {
             if index == i64::try_from(l.count).unwrap_or(i64::MAX) {
                 l.push(value);
@@ -340,7 +357,7 @@ impl SplDoublyLinkedList {
     fn pop(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match with(req, this.object(), |l| l.pop())? {
             // The list's owner of the element, the caller's now.
-            Some(value) => Ok(crate::owner_of(req, value)),
+            Some(value) => Ok(value),
             None => Err(throw(
                 req,
                 "RuntimeException",
@@ -354,7 +371,7 @@ impl SplDoublyLinkedList {
     fn shift(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match with(req, this.object(), |l| l.shift())? {
             // The list's owner of the element, the caller's now.
-            Some(value) => Ok(crate::owner_of(req, value)),
+            Some(value) => Ok(value),
             None => Err(throw(
                 req,
                 "RuntimeException",
@@ -366,14 +383,14 @@ impl SplDoublyLinkedList {
     /// `push(mixed $value): void`.
     #[php(tentative)]
     fn push(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
-        let value = crate::copied(req, value);
+        let value = Owner::take(req, value.deref());
         with(req, this.object(), |l| l.push(value))
     }
 
     /// `unshift(mixed $value): void`.
     #[php(tentative)]
     fn unshift(req: &mut Request, this: This<Self>, value: Value) -> Result<(), Thrown> {
-        let value = crate::copied(req, value);
+        let value = Owner::take(req, value.deref());
         with(req, this.object(), |l| l.unshift(value))
     }
 
@@ -509,7 +526,7 @@ impl SplDoublyLinkedList {
     ) -> Result<Value, Thrown> {
         let this = this.object();
         let at = node(req, this, index.0)?;
-        let value = with(req, this, |l| l.nodes[at].data)?.unwrap_or_default();
+        let value = with(req, this, |l| l.nodes[at].data.as_deref().copied())?.unwrap_or_default();
         Ok(value.deref())
     }
 
@@ -523,15 +540,13 @@ impl SplDoublyLinkedList {
     ) -> Result<(), Thrown> {
         let this = this.object();
         let Some(index) = index.0 else {
-            let value = crate::copied(req, value);
+            let value = Owner::take(req, value.deref());
             return with(req, this, |l| l.push(value));
         };
         let at = node(req, this, index)?;
-        let value = crate::copied(req, value);
+        let value = Owner::take(req, value.deref());
         let old = with(req, this, |l| l.nodes[at].data.replace(value))?;
-        if let Some(old) = old {
-            req.release(old);
-        }
+        crate::give_up(req, old);
         Ok(())
     }
 
@@ -542,7 +557,7 @@ impl SplDoublyLinkedList {
         let this = this.object();
         let at = node(req, this, index.0)?;
         let old = with(req, this, |l| {
-            let Node { prev, next, .. } = l.nodes[at];
+            let (prev, next) = (l.nodes[at].prev, l.nodes[at].next);
             if let Some(prev) = prev {
                 l.nodes[prev].next = next;
             }
@@ -563,9 +578,7 @@ impl SplDoublyLinkedList {
             }
             l.nodes[at].data.take()
         })?;
-        if let Some(old) = old {
-            req.release(old);
-        }
+        crate::give_up(req, old);
         Ok(())
     }
 
@@ -656,7 +669,7 @@ impl SplDoublyLinkedList {
             return Ok(());
         }
         while let Some(old) = with(req, this, |l| l.pop())? {
-            req.release(old);
+            old.give_up(req);
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let read = read_list(req, this, &mut reader, &data);
@@ -698,11 +711,12 @@ impl SplDoublyLinkedList {
             let mut current = head;
             while let Some(at) = current {
                 out.push(b':');
-                let (data, next) = with(req, this, |l| (l.nodes[at].data, l.nodes[at].next))?;
-                let data = data.unwrap_or_default();
-                req.addref(&data);
+                let (data, next) = with(req, this, |l| {
+                    (l.nodes[at].data.as_deref().copied(), l.nodes[at].next)
+                })?;
+                let data = Owner::take(req, data.unwrap_or_default());
                 let written = serializer.write(req, out, &data);
-                req.release(data);
+                data.give_up(req);
                 written?;
                 let taken = match next {
                     Some(next) => with(req, this, |l| l.nodes[next].data.is_none())?,
@@ -778,8 +792,7 @@ impl SplDoublyLinkedList {
         // (`Z/ext/spl/spl_dllist.c:1153`), no owner of the table taken: the
         // argument holds it.
         walk::foreach(req, storage, Hold::None, |req, row| -> walk::Step {
-            let value = row.value().deref();
-            let value = crate::copied(req, value);
+            let value = Owner::take(req, row.value().deref());
             with(req, this, |l| l.push(value))?;
             Ok(ControlFlow::Continue(()))
         })?;
@@ -879,19 +892,16 @@ impl ObjectHandlers for Handlers {
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let values = object
-            .native_mut::<Llist>(req)
-            .map(|l| {
-                let values = l.values();
-                l.nodes.clear();
-                l.head = None;
-                l.tail = None;
-                values
-            })
-            .unwrap_or_default();
-        for value in values {
-            req.release(value);
+        // `spl_dllist_object_free_storage`: popped from the tail, each
+        // element given up as it comes off, then the list destroyed.
+        while let Some(value) = object.native_mut::<Llist>(req).and_then(|l| l.pop()) {
+            value.give_up(req);
         }
+        let left = object
+            .native_mut::<Llist>(req)
+            .map(|l| l.destroy())
+            .unwrap_or_default();
+        crate::give_up_all(req, left);
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
@@ -985,7 +995,7 @@ impl ClassIterator for ListIterator {
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         let flags = self.flags;
         if let Some(value) = with(req, object, |l| l.move_forward(&mut self.cursor, flags))? {
-            req.release(value);
+            value.give_up(req);
         }
         Ok(())
     }
@@ -1001,8 +1011,7 @@ fn clone_list(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, 
         ..LlistState::default()
     });
     for value in values {
-        req.addref(&value);
-        copy.push(value);
+        copy.push(Owner::take(req, value));
     }
     copy.cursor.pointer = copy.head;
     clone_with(req, &object, copy)
@@ -1031,7 +1040,7 @@ fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
 fn peek(req: &mut Request, this: PhpObject, tail: bool) -> Result<Value, Thrown> {
     let found = with(req, this, |l| {
         let at = if tail { l.tail } else { l.head };
-        at.and_then(|at| l.nodes[at].data)
+        at.and_then(|at| l.nodes[at].data.as_deref().copied())
     })?;
     match found {
         Some(value) => Ok(value.deref()),
@@ -1066,9 +1075,7 @@ fn move_forward(req: &mut Request, this: PhpObject, flags: i64) -> Result<(), Th
         l.cursor = cursor;
         deleted
     })?;
-    if let Some(value) = deleted {
-        req.release(value);
-    }
+    crate::give_up(req, deleted);
     Ok(())
 }
 
@@ -1094,7 +1101,7 @@ fn read_list(
         let Some(value) = reader.value(req)? else {
             return Ok(Some(reader.offset()));
         };
-        req.addref(&value);
+        let value = Owner::take(req, value);
         with(req, this, |l| l.push(value))?;
     }
     if reader.offset() != data.len() {

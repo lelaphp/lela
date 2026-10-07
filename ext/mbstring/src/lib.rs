@@ -169,7 +169,7 @@ pub fn extension() -> Extension {
 /// array given back, and the regex state's.
 fn rshutdown(req: &mut Request) {
     if let Some(all) = req.state::<State>().all_encodings.take() {
-        req.release(Value::array(all));
+        all.give_up(req);
     }
     regex::rshutdown(req);
 }

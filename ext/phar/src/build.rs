@@ -9,7 +9,7 @@ use php_ext::abi::{Passed, Raw};
 use php_ext::call::{instantiate, lookup_class};
 use php_ext::coerce::{value_name, with_string};
 use php_ext::raising::{Thrown, arity, deprecated, throw};
-use php_ext::request::{Request, Stream, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Filesystem};
 
@@ -228,12 +228,16 @@ pub(crate) fn copy(req: &mut Request, id: ArchiveId, old: &[u8], new: &[u8]) -> 
     else {
         return Ok(());
     };
-    let kept = std::mem::take(&mut from.metadata);
-    let copied = kept.copied(req);
+    let mut kept = std::mem::take(&mut from.metadata);
+    let mut copied = kept.copied(req);
     let Some(a) = archives(req).get_mut(id) else {
+        kept.free(req);
+        copied.free(req);
         return Ok(());
     };
     let Some(from) = a.manifest.at_mut(source) else {
+        kept.free(req);
+        copied.free(req);
         return Ok(());
     };
     from.metadata = kept;
@@ -246,8 +250,8 @@ pub(crate) fn copy(req: &mut Request, id: ArchiveId, old: &[u8], new: &[u8]) -> 
     }
     let refused = a.manifest.add(new, copy).err();
     a.is_modified = true;
-    if let Some(mut refused) = refused {
-        refused.metadata.free(req);
+    if let Some(refused) = refused {
+        refused.free(req);
     }
     flushed(req, id)
 }
@@ -622,7 +626,6 @@ pub(crate) fn from_directory(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let rdi = class_named(req, b"RecursiveDirectoryIterator")?;
     let dir_value = Value::string(dir);
-    req.addref(&dir_value);
     let iter = php_ext::call::new_object(req, rdi)?;
     let constructed = construct_as(
         req,
@@ -654,10 +657,7 @@ pub(crate) fn from_directory(
                 return Err(thrown);
             }
         };
-        let pattern = Value::string(pattern);
-        req.addref(&pattern);
-        let made = instantiate(req, regex, &[iteriter.as_value(), pattern]);
-        req.release(pattern);
+        let made = instantiate(req, regex, &[iteriter.as_value(), Value::string(pattern)]);
         iteriter.give_up(req);
         made?
     };
@@ -732,7 +732,7 @@ fn class_name(req: &mut Request, object: PhpObject) -> String {
 fn string_key(req: &mut Request, b: &Build, it: php_ext::call::Iter) -> Result<Vec<u8>, Thrown> {
     let key = it.key(req)?;
     let bytes = key.deref().as_str_bytes().map(<[u8]>::to_vec);
-    req.release(key);
+    key.give_up(req);
     bytes.ok_or_else(|| {
         throw(
             req,
@@ -754,14 +754,14 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
     let bad = |req: &mut Request, class: &str, m: String| Err(throw(req, class, &m));
     let mut fname: Vec<u8>;
     let key: Vec<u8>;
-    let source: Stream;
-    let opened: Vec<u8>;
-    let mut close = true;
     match current.as_ref() {
-        ValueRef::Str(s) => fname = s.as_bytes().to_vec(),
+        ValueRef::Str(s) => {
+            fname = s.as_bytes().to_vec();
+            value.give_up(req);
+        }
         ValueRef::Resource(_) => {
             let Some(stream) = Stream::from_value(req, &current) else {
-                req.release(value);
+                value.give_up(req);
                 return bad(
                     req,
                     "BadMethodCallException",
@@ -769,17 +769,14 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
                 );
             };
             let k = string_key(req, b, it);
-            req.release(value);
+            value.give_up(req);
             key = k?;
-            source = stream;
-            close = false;
-            opened = b"[stream]".to_vec();
-            return add_built(req, b, &key, source, &opened, close);
+            return add_built(req, b, &key, stream, None, b"[stream]");
         }
         ValueRef::Object(object) => {
             let info = lookup_class(req, b"SplFileInfo")?;
             if !info.is_some_and(|info| object.instance_of(req, info)) {
-                req.release(value);
+                value.give_up(req);
                 return bad(
                     req,
                     "UnexpectedValueException",
@@ -790,7 +787,7 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
                 );
             }
             if b.base.is_empty() {
-                req.release(value);
+                value.give_up(req);
                 return bad(
                     req,
                     "BadMethodCallException",
@@ -801,7 +798,7 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
                 );
             }
             let seen = spl::filesystem(req, *object);
-            req.release(value);
+            value.give_up(req);
             let path = match seen {
                 Some(Filesystem::Dir { path, entry }) => {
                     let mut name = path.unwrap_or_default();
@@ -829,7 +826,7 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
             fname = expanded;
         }
         _ => {
-            req.release(value);
+            value.give_up(req);
             return bad(
                 req,
                 "UnexpectedValueException",
@@ -839,9 +836,6 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
                 ),
             );
         }
-    }
-    if matches!(current.as_ref(), ValueRef::Str(_)) {
-        req.release(value);
     }
     if b.base.is_empty() {
         key = string_key(req, b, it)?;
@@ -904,35 +898,40 @@ fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Resul
         );
     };
     // `add_built` closes the stream it opened, and its owner with it.
-    source = stream.hand_on_unmigrated();
-    opened = archive::expand_filepath(req, &fname).unwrap_or_else(|| std::mem::take(&mut fname));
-    add_built(req, b, &key, source, &opened, close)
+    let opened =
+        archive::expand_filepath(req, &fname).unwrap_or_else(|| std::mem::take(&mut fname));
+    add_built(req, b, &key, *stream, Some(stream), &opened)
 }
 
 /// `phar_build` from `after_open_fp`: the entry created, its contents
-/// appended to the walk's buffer, and the name mapped to what was opened.
+/// appended to the walk's buffer, and the name mapped to what was opened;
+/// `owned`, the owner of a stream the walk opened, closed after.
 fn add_built(
     req: &mut Request,
     b: &mut Build,
     key: &[u8],
     source: Stream,
+    owned: Option<Owner<Stream>>,
     opened: &[u8],
-    close: bool,
 ) -> Result<bool, Thrown> {
-    let done = |req: &mut Request| {
-        if close {
-            source.free(req);
+    let done = |req: &mut Request, owned: Option<Owner<Stream>>| {
+        if let Some(stream) = owned {
+            stream.free(req);
         }
     };
     if path::is_magic(key) {
-        done(req);
+        done(req, owned);
         return Ok(true);
     }
     let fname = fname_of(req, b.id);
-    let data = match write::get_or_create(req, &fname, key, b"w+b", Dir::No, true)? {
-        Ok(data) => data,
-        Err(error) => {
-            done(req);
+    let data = match write::get_or_create(req, &fname, key, b"w+b", Dir::No, true) {
+        Ok(Ok(data)) => data,
+        Err(thrown) => {
+            done(req, owned);
+            return Err(thrown);
+        }
+        Ok(Err(error)) => {
+            done(req, owned);
             let error = error.unwrap_or_default();
             return Err(throw(
                 req,
@@ -945,7 +944,7 @@ fn add_built(
     let bytes = match archive::copy_all(req, source) {
         Ok(bytes) => bytes,
         Err(thrown) => {
-            done(req);
+            done(req, owned);
             entry::delref(req, data);
             return Err(thrown);
         }
@@ -953,12 +952,13 @@ fn add_built(
     b.buffer.extend_from_slice(&bytes);
     let mode = source.stat(req).map(|sb| sb[2]);
     let umask = req.umask();
+    let mut replaced = None;
     if let Target::Slot(slot) = data.target
         && let Some(e) = archives(req)
             .get_mut(b.id)
             .and_then(|a| a.manifest.at_mut(slot))
     {
-        e.content = Content::Ufp;
+        replaced = Some(std::mem::replace(&mut e.content, Content::Ufp));
         e.offset = i64::try_from(offset).unwrap_or(i64::MAX);
         e.offset_abs = e.offset;
         let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
@@ -969,7 +969,10 @@ fn add_built(
             None => e.flags &= !umask,
         }
     }
-    done(req);
+    if let Some(Content::Tmp(Some(stream))) = replaced {
+        stream.free(req);
+    }
+    done(req, owned);
     let k = PhpString::new(req, key)?.into_key();
     let v = string(req, opened)?;
     b.ret.set(req, k, v)?;

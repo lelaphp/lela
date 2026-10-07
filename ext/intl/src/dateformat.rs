@@ -340,8 +340,9 @@ fn construct(req: &mut Request, object: PhpObject, a: Args) -> Result<bool, Thro
     };
     let mut zone = None;
     if !matches!(a.zone.as_ref(), ValueRef::Null) || owned {
-        let arg = zone_sorted(req, a.zone)?;
-        zone = process_timezone_argument(req, arg, &mut Outside::of::<DateFormatObject>(object))?;
+        zone = zone_sorted(req, a.zone, |req, arg| {
+            process_timezone_argument(req, arg, &mut Outside::of::<DateFormatObject>(object))
+        })?;
         if zone.is_none() {
             return Ok(failed(req));
         }
@@ -513,9 +514,11 @@ fn get_timezone(req: &mut Request, object: PhpObject) -> Answer<Owner<Instance<I
 /// `datefmt_set_timezone` and `IntlDateFormatter::setTimeZone`.
 fn set_timezone(req: &mut Request, object: PhpObject, zone: Value) -> Result<bool, Thrown> {
     with(req, object, |req, udatf| {
-        let arg = zone_sorted(req, zone)?;
         let mut outside = Outside::of::<DateFormatObject>(object);
-        let Some(zone) = process_timezone_argument(req, arg, &mut outside)? else {
+        let processed = zone_sorted(req, zone, |req, arg| {
+            process_timezone_argument(req, arg, &mut outside)
+        });
+        let Some(zone) = processed? else {
             return Ok(false);
         };
         df::php_intl_datefmt_adopt_zone(udatf, zone);

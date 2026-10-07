@@ -44,7 +44,7 @@ use crate::{ArrayAccess, Countable, Iterator, IteratorAggregate, JsonSerializabl
 /// ```
 #[derive(Default)]
 pub(crate) struct RowState {
-    elements: Vec<Value>,
+    elements: Vec<Owner<Value>>,
     /// `array->elements` as php allocates it on the request's heap,
     /// `sizeof(zval)` an element, and none for an empty row (design
     /// §5.13).
@@ -94,12 +94,15 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
     if size > len {
         fit(req, object, size)?;
     }
+    let fill = nulls(req, size.saturating_sub(len));
     let cut = with(req, object, |a| {
         a.resizing = Some(size);
         if size < a.elements.len() {
-            a.elements.split_off(size)
+            let cut = a.elements.split_off(size);
+            a.elements.extend(fill);
+            cut
         } else {
-            a.elements.resize(size, Value::null());
+            a.elements.extend(fill);
             Vec::new()
         }
     })?;
@@ -107,13 +110,9 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
         fit(req, object, size)?;
     }
     if size == 0 {
-        for value in cut.into_iter().rev() {
-            req.release(value);
-        }
+        crate::give_up_all(req, cut.into_iter().rev());
     } else {
-        for value in cut {
-            req.release(value);
-        }
+        crate::give_up_all(req, cut);
     }
     let asked = with(req, object, |a| a.resizing.take())?.unwrap_or(size);
     if asked != size {
@@ -217,7 +216,8 @@ impl SplFixedArray {
         }
         let size = usize::try_from(size).unwrap_or(0);
         let allocation = laid(req, size)?;
-        lay(req, this, vec![Value::null(); size], allocation)
+        let elements = nulls(req, size);
+        lay(req, this, elements, allocation)
     }
 
     /// `__wakeup(): void`, deprecated: the properties an old serialization
@@ -235,14 +235,17 @@ impl SplFixedArray {
             let props = Std.get_properties(req, this)?;
             let mut elements = Vec::with_capacity(props.len());
             for (key, value) in props {
-                elements.push(crate::copied(req, value));
-                match key {
-                    Key::Str(name) => Std.unset_property(req, this, name.as_bytes())?,
-                    Key::Int(_) => this.unset_row(req, &key)?,
+                elements.push(Owner::take(req, value.deref()));
+                let unset = match key {
+                    Key::Str(name) => Std.unset_property(req, this, name.as_bytes()),
+                    Key::Int(_) => this.unset_row(req, &key),
+                };
+                if let Err(thrown) = unset {
+                    crate::give_up_all(req, elements);
+                    return Err(thrown);
                 }
             }
-            let allocation = laid(req, elements.len())?;
-            lay(req, this, elements, allocation)?;
+            lay_laid(req, this, elements)?;
         }
         Ok(())
     }
@@ -272,7 +275,7 @@ impl SplFixedArray {
     /// ```
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
-        let elements = with(req, this, |a| a.elements.clone())?;
+        let elements = with(req, this, |a| views(&a.elements))?;
         let mut out = PhpArray::new(req)?;
         for value in elements {
             out.append(req, Owner::take(req, value.deref()))?;
@@ -311,17 +314,23 @@ impl SplFixedArray {
             .map(|(key, value)| (key, value.deref()))
             .collect();
         for (key, value) in rows {
+            let value = Owner::take(req, value);
             match key {
-                Key::Int(_) => elements.push(crate::copied(req, value)),
+                Key::Int(_) => elements.push(value),
                 Key::Str(_) => {
-                    let value = Owner::take(req, value);
                     let key = Owner::take(req, key.clone());
-                    members.set(req, key, value)?;
+                    if let Err(thrown) = members.set(req, key, value) {
+                        crate::give_up_all(req, elements);
+                        members.give_up(req);
+                        return Err(thrown);
+                    }
                 }
             }
         }
-        let allocation = laid(req, elements.len())?;
-        lay(req, this, elements, allocation)?;
+        if let Err(thrown) = lay_laid(req, this, elements) {
+            members.give_up(req);
+            return Err(thrown);
+        }
         let loaded = crate::load_members(req, this, &Value::array(*members));
         members.give_up(req);
         loaded
@@ -352,7 +361,7 @@ impl SplFixedArray {
     /// ```
     #[php(tentative)]
     fn toArray(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
-        let elements = with(req, this.object(), |a| a.elements.clone())?;
+        let elements = with(req, this.object(), |a| views(&a.elements))?;
         if elements.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -402,7 +411,7 @@ impl SplFixedArray {
         // (`Z/ext/spl/spl_fixedarray.c:728`, `:748`, `:758`): read only,
         // under the borrowed request, each element one owner more.
         let len = array.len();
-        let mut elements: Vec<Value>;
+        let mut elements: Vec<Owner<Value>>;
         let allocation;
         if preserveKeys && len > 0 {
             let mut max = Some(0usize);
@@ -432,27 +441,41 @@ impl SplFixedArray {
                 ));
             };
             allocation = laid(req, size)?;
-            elements = vec![Value::null(); size];
+            elements = nulls(req, size);
+            let mut nulled = Vec::new();
             for (key, value) in walk::rows(req, array) {
                 if let Key::Int(n) = key
                     && let Some(slot) = usize::try_from(n).ok().and_then(|n| elements.get_mut(n))
                 {
-                    *slot = crate::copied(req, value);
+                    let value = Owner::take(req, value.deref());
+                    nulled.push(std::mem::replace(slot, value));
                 }
             }
+            crate::give_up_all(req, nulled);
         } else {
             allocation = laid(req, len)?;
             elements = walk::rows(req, array)
-                .map(|(_, value)| crate::copied(req, value))
+                .map(|(_, value)| Owner::take(req, value.deref()))
                 .collect();
         }
-        let Some(class) = php_ext::call::lookup_class(req, b"SplFixedArray")? else {
-            return Err(php_ext::raising::fatal(
+        let object = match php_ext::call::lookup_class(req, b"SplFixedArray") {
+            Ok(Some(class)) => new_object(req, class),
+            Ok(None) => Err(php_ext::raising::fatal(
                 req,
                 "InternalError: SplFixedArray::fromArray served with its class unlinked",
-            ));
+            )),
+            Err(thrown) => Err(thrown),
         };
-        let object = new_object(req, class)?;
+        let object = match object {
+            Ok(object) => object,
+            Err(thrown) => {
+                crate::give_up_all(req, elements);
+                if let Some(allocation) = allocation {
+                    allocation.free(req);
+                }
+                return Err(thrown);
+            }
+        };
         lay(req, *object, elements, allocation)?;
         Ok(object.into_instance())
     }
@@ -633,7 +656,7 @@ fn has(
 ) -> Result<bool, Thrown> {
     let at = index(req, offset)?;
     let value = with(req, object, |a| {
-        at.and_then(|at| a.elements.get(at).copied())
+        at.and_then(|at| a.elements.get(at).map(|v| **v))
     })?;
     Ok(match value {
         None => false,
@@ -651,7 +674,7 @@ fn read(req: &mut Request, object: PhpObject, offset: Option<&Value>) -> Result<
         ));
     };
     let at = inside(req, object, offset)?;
-    with(req, object, |a| a.elements[at])
+    with(req, object, |a| *a.elements[at])
 }
 
 fn write(
@@ -668,20 +691,21 @@ fn write(
         ));
     };
     let at = inside(req, object, offset)?;
-    let value = crate::copied(req, value);
+    let value = Owner::take(req, value.deref());
     let old = with(req, object, |a| {
         std::mem::replace(&mut a.elements[at], value)
     })?;
-    req.release(old);
+    old.give_up(req);
     Ok(())
 }
 
 fn unset(req: &mut Request, object: PhpObject, offset: &Value) -> Result<(), Thrown> {
     let at = inside(req, object, offset)?;
+    let null = Owner::take(req, Value::null());
     let old = with(req, object, |a| {
-        std::mem::replace(&mut a.elements[at], Value::null())
+        std::mem::replace(&mut a.elements[at], null)
     })?;
-    req.release(old);
+    old.give_up(req);
     Ok(())
 }
 
@@ -696,9 +720,7 @@ impl ObjectHandlers for Handlers {
             .native_mut::<Row>(req)
             .map(|a| (std::mem::take(&mut a.elements), a.allocation.take()))
             .unwrap_or_default();
-        for value in elements {
-            req.release(value);
-        }
+        crate::give_up_all(req, elements);
         if let Some(allocation) = allocation {
             allocation.free(req);
         }
@@ -707,7 +729,7 @@ impl ObjectHandlers for Handlers {
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(a) = object.native::<Row>(req) {
             for value in &a.elements {
-                visit(*value);
+                visit(**value);
             }
         }
     }
@@ -889,7 +911,7 @@ impl ObjectHandlers for Handlers {
         let elements = if purpose == PropertyPurpose::GetObjectVars {
             Vec::new()
         } else {
-            with(req, object, |a| a.elements.clone())?
+            with(req, object, |a| views(&a.elements))?
         };
         let props = crate::std_properties(req, object)?;
         if elements.is_empty() && props.is_empty() {
@@ -929,7 +951,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         index: usize,
     ) -> Result<Option<IteratorElement>, Thrown> {
-        let value = with(req, object, |a| a.elements.get(index).copied())?;
+        let value = with(req, object, |a| a.elements.get(index).map(|v| **v))?;
         Ok(value.map(|value| {
             let key = Value::int(i64::try_from(index).unwrap_or(i64::MAX));
             (Owner::take(req, key), Owner::take(req, value.deref()))
@@ -969,17 +991,46 @@ fn laid(req: &mut Request, size: usize) -> Result<Option<Emalloc>, Thrown> {
 fn lay(
     req: &mut Request,
     object: PhpObject,
-    elements: Vec<Value>,
+    elements: Vec<Owner<Value>>,
     allocation: Option<Emalloc>,
 ) -> Result<(), Thrown> {
-    let old = with(req, object, |a| {
-        a.elements = elements;
-        std::mem::replace(&mut a.allocation, allocation)
+    let (old, held) = with(req, object, |a| {
+        (
+            std::mem::replace(&mut a.elements, elements),
+            std::mem::replace(&mut a.allocation, allocation),
+        )
     })?;
-    if let Some(old) = old {
-        old.free(req);
+    crate::give_up_all(req, old);
+    if let Some(held) = held {
+        held.free(req);
     }
     Ok(())
+}
+
+/// [`lay`] with the row allocated for `elements` first, which are given
+/// up where the allocation is refused.
+fn lay_laid(
+    req: &mut Request,
+    object: PhpObject,
+    elements: Vec<Owner<Value>>,
+) -> Result<(), Thrown> {
+    match laid(req, elements.len()) {
+        Ok(allocation) => lay(req, object, elements, allocation),
+        Err(thrown) => {
+            crate::give_up_all(req, elements);
+            Err(thrown)
+        }
+    }
+}
+
+/// `size` slots of `null`, each its owner.
+fn nulls(req: &Request, size: usize) -> Vec<Owner<Value>> {
+    (0..size).map(|_| Owner::take(req, Value::null())).collect()
+}
+
+/// The elements' views.
+fn views(elements: &[Owner<Value>]) -> Vec<Value> {
+    elements.iter().map(|value| **value).collect()
 }
 
 /// `spl_fixedarray_resize`'s allocation for a row now `size` long:
@@ -1003,11 +1054,18 @@ fn fit(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> 
 
 /// `spl_fixedarray_object_clone`: the elements with one more owner each.
 fn clone_array(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
-    let elements = with(req, object, |a| a.elements.clone())?;
-    for value in &elements {
-        req.addref(value);
-    }
-    let allocation = laid(req, elements.len())?;
+    let elements = with(req, object, |a| views(&a.elements))?;
+    let elements: Vec<Owner<Value>> = elements
+        .into_iter()
+        .map(|value| Owner::take(req, value))
+        .collect();
+    let allocation = match laid(req, elements.len()) {
+        Ok(allocation) => allocation,
+        Err(thrown) => {
+            crate::give_up_all(req, elements);
+            return Err(thrown);
+        }
+    };
     clone_with(
         req,
         &object,

@@ -1389,12 +1389,11 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
         && n.kind() == Kind::NamespaceDecl
     {
         let parent_obj = match dom(req, object).map(|d| &d.extra) {
-            Some(Extra::NamespaceParent(p)) => Some(*p),
+            Some(Extra::NamespaceParent(p)) => Some(***p),
             _ => None,
         };
         if let Some(p) = parent_obj {
-            req.addref(&p.as_value());
-            payload.extra = Extra::NamespaceParent(p);
+            payload.extra = Extra::NamespaceParent(Box::new(Owner::take(req, p)));
         }
         let ns = n.ns();
         if let Some(parent) = n.parent()
@@ -1809,13 +1808,16 @@ fn create(
 ) -> Result<Owner<Value>, Thrown> {
     let class = class(req, class_name)?;
     let object = php_ext::call::new_object(req, class)?;
-    req.addref(&base.as_value());
-    if let Some(d) = dom_mut(req, *object) {
-        d.extra = Extra::Map(Box::new(Map {
-            base: Some(base),
-            kind,
-            dims: map::Dims::of(class_name),
-        }));
+    let base = Owner::take(req, base);
+    match dom_mut(req, *object) {
+        Some(d) => {
+            d.extra = Extra::Map(Box::new(Map {
+                base: Some(base),
+                kind,
+                dims: map::Dims::of(class_name),
+            }));
+        }
+        None => base.give_up(req),
     }
     Ok(object.into_value())
 }
@@ -1834,15 +1836,22 @@ fn node_set(
             return Err(thrown);
         }
     };
-    let object = php_ext::call::new_object(req, class)?;
-    if let Some(d) = dom_mut(req, *object) {
-        d.extra = Extra::Map(Box::new(Map {
-            base: None,
-            kind: MapKind::NodeSet(array.hand_on_unmigrated()),
-            dims: map::Dims::of(class_name),
-        }));
-    } else {
-        array.give_up(req);
+    let object = match php_ext::call::new_object(req, class) {
+        Ok(object) => object,
+        Err(thrown) => {
+            array.give_up(req);
+            return Err(thrown);
+        }
+    };
+    match dom_mut(req, *object) {
+        Some(d) => {
+            d.extra = Extra::Map(Box::new(Map {
+                base: None,
+                kind: MapKind::NodeSet(array),
+                dims: map::Dims::of(class_name),
+            }));
+        }
+        None => array.give_up(req),
     }
     Ok(object.into_value())
 }

@@ -438,7 +438,7 @@ impl ObjectHandlers for WeakMapHandlers {
         let mut entries = if let Some(entries) = entries_of(req, object) {
             entries
         } else {
-            let made = PhpArray::new(req)?.hand_on_unmigrated();
+            let made = PhpArray::new(req)?.hand_on();
             if let Some(payload) = object.native_mut::<ZendWeakMap>(req) {
                 payload.entries = Some(made);
             }

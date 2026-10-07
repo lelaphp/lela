@@ -68,20 +68,31 @@ pub(crate) enum BoundKey {
 }
 
 /// `struct pdo_bound_param_data`.
-#[derive(Clone)]
 pub(crate) struct Bound {
     pub(crate) key: BoundKey,
     /// `paramno`, `-1` for a name not yet placed.
     pub(crate) position: i64,
     pub(crate) name: Option<Vec<u8>>,
     pub(crate) ty: BindType,
-    /// `parameter`, one owner: a reference for `bindParam()` and
-    /// `bindColumn()`.
-    pub(crate) value: Value,
-    /// `driver_params`, one owner, `null` for none.
-    pub(crate) driver_params: Value,
+    /// `parameter`: a reference for `bindParam()` and `bindColumn()`.
+    pub(crate) value: Owner<Value>,
+    /// `driver_params`, `null` for none.
+    pub(crate) driver_params: Owner<Value>,
     pub(crate) max_len: i64,
     pub(crate) is_parameter: bool,
+}
+
+impl Bound {
+    /// The entry as the binding callback sees it.
+    fn binding(&mut self) -> Binding<'_> {
+        Binding {
+            position: &mut self.position,
+            name: self.name.as_deref(),
+            ty: self.ty,
+            is_parameter: self.is_parameter,
+            value: &mut self.value,
+        }
+    }
 }
 
 /// `struct pdo_column_data`.
@@ -140,6 +151,17 @@ pub(crate) struct StmtState {
     pub(crate) row_count: i64,
     /// `stmt->error_code`, `None` before anything cleared it.
     pub(crate) error_code: Option<SqlState>,
+}
+
+impl StmtState {
+    /// `stmt->bound_columns` or `stmt->bound_params`.
+    fn list(&mut self, columns: bool) -> &mut Vec<Bound> {
+        if columns {
+            &mut self.columns_bound
+        } else {
+            &mut self.params
+        }
+    }
 }
 
 /// The payload: `pdo_stmt_t`'s fields, boxed, inside the `sizeof` php
@@ -323,7 +345,7 @@ impl ObjectHandlers for Handlers {
 struct Rows {
     started: bool,
     key: Option<i64>,
-    ahead: Option<Value>,
+    ahead: Option<Owner<Value>>,
 }
 
 impl Rows {
@@ -331,7 +353,7 @@ impl Rows {
     fn forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         self.started = true;
         if let Some(old) = self.ahead.take() {
-            req.release(old);
+            old.give_up(req);
         }
         self.ahead = fetch::row(req, object, 0)?;
         if self.ahead.is_none() {
@@ -363,7 +385,7 @@ impl ClassIterator for Rows {
 
     fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         self.start(req, object)?;
-        let row = self.ahead.unwrap_or_default();
+        let row = self.ahead.as_deref().copied().unwrap_or_default();
         Ok(Owner::take(req, row))
     }
 
@@ -379,7 +401,7 @@ impl ClassIterator for Rows {
 
     fn release(&mut self, req: &mut Request, _: PhpObject) {
         if let Some(row) = self.ahead.take() {
-            req.release(row);
+            row.give_up(req);
         }
     }
 }
@@ -388,17 +410,10 @@ impl ClassIterator for Rows {
 /// holds given up.
 fn free_bound(req: &mut Request, driver: Option<&mut dyn Statement>, mut bound: Bound) {
     if let Some(driver) = driver {
-        let param = Binding {
-            position: &mut bound.position,
-            name: bound.name.as_deref(),
-            ty: bound.ty,
-            is_parameter: bound.is_parameter,
-            value: &mut bound.value,
-        };
-        driver.bind(req, param, BindEvent::Free).ok();
+        driver.bind(req, bound.binding(), BindEvent::Free).ok();
     }
-    req.release(bound.value);
-    req.release(bound.driver_params);
+    bound.value.give_up(req);
+    bound.driver_params.give_up(req);
 }
 
 // ---- the statement's state, lent and read
@@ -590,49 +605,42 @@ pub(super) fn dispatch(
         })
         .unwrap_or(0);
         for at in 0..len {
-            let Some(bound) = read(req, object, |s| {
-                let list = if columns { &s.columns_bound } else { &s.params };
-                list.get(at).cloned()
-            })
-            .flatten() else {
-                continue;
-            };
-            let Bound {
-                mut position,
-                name,
-                ty,
-                is_parameter,
-                mut value,
-                ..
-            } = bound;
-            let answered = with_driver(req, object, |req, driver| {
-                let param = Binding {
-                    position: &mut position,
-                    name: name.as_deref(),
-                    ty,
-                    is_parameter,
-                    value: &mut value,
-                };
-                driver.bind(req, param, event)
-            })?;
-            write(req, object, |s| {
-                let list = if columns {
-                    &mut s.columns_bound
-                } else {
-                    &mut s.params
-                };
-                if let Some(slot) = list.get_mut(at) {
-                    slot.position = position;
-                    slot.value = value;
-                }
-            });
-            if let Err(failure) = answered {
+            if let Err(failure) = hook_at(req, object, columns, at, event)? {
                 record(req, object, failure)?;
                 return Ok(false);
             }
         }
     }
     Ok(true)
+}
+
+/// One event of the callback on the entry stored at `at`, taken out of
+/// its list for the call and put back at its place.
+fn hook_at(
+    req: &mut Request,
+    object: PhpObject,
+    columns: bool,
+    at: usize,
+    event: BindEvent,
+) -> Result<Result<(), Failure>, Thrown> {
+    let taken = write(req, object, |s| {
+        let list = s.list(columns);
+        (at < list.len()).then(|| list.remove(at))
+    });
+    let Some(mut bound) = taken.flatten() else {
+        return Ok(Ok(()));
+    };
+    let answered = with_driver(req, object, |req, driver| {
+        driver.bind(req, bound.binding(), event)
+    });
+    match object.native_mut::<Stmt>(req) {
+        Some(s) => {
+            let list = s.list(columns);
+            list.insert(at.min(list.len()), bound);
+        }
+        None => free_bound(req, None, bound),
+    }
+    answered
 }
 
 /// The statement's connector started, `stmt->methods->executer`, and on
@@ -690,8 +698,7 @@ pub(super) fn register(
     mut bound: Bound,
 ) -> Result<bool, Thrown> {
     if let Err(thrown) = convert(req, &mut bound) {
-        req.release(bound.value);
-        req.release(bound.driver_params);
+        free_bound(req, None, bound);
         return Err(thrown);
     }
     if !bound.is_parameter
@@ -730,41 +737,44 @@ pub(super) fn register(
         Some(name) => BoundKey::Name(name.clone()),
         None => BoundKey::Position(bound.position),
     };
-    let is_parameter = bound.is_parameter;
+    let columns = !bound.is_parameter;
     let position = bound.position;
-    let removed = write(req, object, |s| {
-        let list = if is_parameter {
-            &mut s.params
-        } else {
-            &mut s.columns_bound
-        };
-        let mut removed = Vec::new();
-        if position >= 0
-            && let Some(at) = list
-                .iter()
-                .position(|b| b.key == BoundKey::Position(position))
-        {
-            removed.push(list.remove(at));
-        }
-        match list.iter().position(|b| b.key == bound.key) {
-            Some(at) => removed.push(std::mem::replace(&mut list[at], bound.clone())),
-            None => list.push(bound.clone()),
-        }
-        removed
-    })
-    .unwrap_or_default();
+    let key = bound.key.clone();
+    let Some(s) = object.native_mut::<Stmt>(req) else {
+        free_bound(req, None, bound);
+        return Ok(false);
+    };
+    let list = s.list(columns);
+    let mut removed = Vec::new();
+    if position >= 0
+        && let Some(at) = list
+            .iter()
+            .position(|b| b.key == BoundKey::Position(position))
+    {
+        removed.push(list.remove(at));
+    }
+    let at = if let Some(at) = list.iter().position(|b| b.key == key) {
+        removed.push(std::mem::replace(&mut list[at], bound));
+        at
+    } else {
+        list.push(bound);
+        list.len() - 1
+    };
     for old in removed {
         free_bound_through(req, object, old)?;
     }
-    if !hook(req, object, &mut bound, BindEvent::Alloc)? {
+    // The connector told of the entry where it is stored, `pparam`.
+    let at = read(req, object, |s| {
+        let list = if columns { &s.columns_bound } else { &s.params };
+        list.iter().position(|b| b.key == key)
+    })
+    .flatten()
+    .unwrap_or(at);
+    if let Err(failure) = hook_at(req, object, columns, at, BindEvent::Alloc)? {
+        record(req, object, failure)?;
         handle_error(req, object, false)?;
-        let key = bound.key.clone();
         let taken = write(req, object, |s| {
-            let list = if is_parameter {
-                &mut s.params
-            } else {
-                &mut s.columns_bound
-            };
+            let list = s.list(columns);
             list.iter()
                 .position(|b| b.key == key)
                 .map(|at| list.remove(at))
@@ -791,7 +801,7 @@ fn convert(req: &mut Request, bound: &mut Bound) -> Result<(), Thrown> {
         _ => None,
     };
     if let Some(converted) = converted {
-        replace_inner(req, &mut bound.value, converted);
+        crate::connector::replace(req, &mut bound.value, converted);
     }
     Ok(())
 }
@@ -821,14 +831,7 @@ fn hook(
         return Ok(true);
     }
     let answered = with_driver(req, object, |req, driver| {
-        let param = Binding {
-            position: &mut bound.position,
-            name: bound.name.as_deref(),
-            ty: bound.ty,
-            is_parameter: bound.is_parameter,
-            value: &mut bound.value,
-        };
-        driver.bind(req, param, event)
+        driver.bind(req, bound.binding(), event)
     })?;
     match answered {
         Ok(()) => Ok(true),
@@ -836,18 +839,6 @@ fn hook(
             record(req, object, failure)?;
             Ok(false)
         }
-    }
-}
-
-/// The value a bound entry holds replaced by `new`, through the
-/// reference where the entry holds one, as php's `convert_to_*` writes
-/// in place.
-pub(super) fn replace_inner(req: &mut Request, value: &mut Value, new: Owner<Value>) {
-    if let Some(cell) = value.as_php_ref().copied() {
-        cell.convert(req, new);
-    } else {
-        let old = std::mem::replace(value, new.hand_on_unmigrated());
-        req.release(old);
     }
 }
 
@@ -926,15 +917,13 @@ fn bind(
         }
         (None, n - 1)
     };
-    req.addref(&value);
-    req.addref(&driver_params);
     let bound = Bound {
         key: BoundKey::Position(position),
         position,
         name,
         ty,
-        value,
-        driver_params,
+        value: Owner::take(req, value),
+        driver_params: Owner::take(req, driver_params),
         max_len,
         is_parameter,
     };
@@ -1202,45 +1191,9 @@ impl PDOStatement {
     #[php(tentative)]
     fn debugDumpParams(req: &mut Request, this: This<Self>) -> Result<Option<bool>, Thrown> {
         let (stmt, _) = this_stmt(req, this.object())?;
-        let Some((query, active, params)) = read(req, stmt, |s| {
-            (s.query.clone(), s.active.clone(), s.params.clone())
-        }) else {
+        let Some(out) = read(req, stmt, dump_params) else {
             return Ok(None);
         };
-        let mut out = format!("SQL: [{}] ", query.len()).into_bytes();
-        out.extend_from_slice(&query);
-        out.push(b'\n');
-        if let Active::Sent(sent) = active {
-            out.extend_from_slice(format!("Sent SQL: [{}] ", sent.len()).as_bytes());
-            out.extend_from_slice(&sent);
-            out.push(b'\n');
-        }
-        out.extend_from_slice(format!("Params:  {}\n", params.len()).as_bytes());
-        for bound in &params {
-            match &bound.key {
-                BoundKey::Name(name) => {
-                    out.extend_from_slice(format!("Key: Name: [{}] ", name.len()).as_bytes());
-                    out.extend_from_slice(name);
-                    out.push(b'\n');
-                }
-                BoundKey::Position(n) => {
-                    out.extend_from_slice(format!("Key: Position #{n}:\n").as_bytes());
-                }
-            }
-            let name = bound.name.clone().unwrap_or_default();
-            out.extend_from_slice(
-                format!("paramno={}\nname=[{}] \"", bound.position, name.len()).as_bytes(),
-            );
-            out.extend_from_slice(&name);
-            out.extend_from_slice(
-                format!(
-                    "\"\nis_param={}\nparam_type={}\n",
-                    i32::from(bound.is_parameter),
-                    bound.ty.raw()
-                )
-                .as_bytes(),
-            );
-        }
         req.write(&out);
         Ok(None)
     }
@@ -1348,14 +1301,13 @@ impl PDOStatement {
                     Key::Str(name) => (Some(name.as_bytes().to_vec()), -1),
                     Key::Int(n) => (None, n),
                 };
-                let value = crate::copied(req, value);
                 let bound = Bound {
                     key: BoundKey::Position(position),
                     position,
                     name,
                     ty: BindType::STR,
-                    value,
-                    driver_params: Value::null(),
+                    value: Owner::take(req, value),
+                    driver_params: Owner::take(req, Value::null()),
                     max_len: 0,
                     is_parameter: true,
                 };
@@ -1453,8 +1405,7 @@ impl PDOStatement {
         #[php(default = PDO::FETCH_ORI_NEXT)] cursorOrientation: i64,
         #[php(default = 0)] cursorOffset: i64,
     ) -> Result<Owner<Value>, Thrown> {
-        let value = fetch::fetch(req, this.object(), mode, (cursorOrientation, cursorOffset))?;
-        Ok(crate::owned(req, value))
+        fetch::fetch(req, this.object(), mode, (cursorOrientation, cursorOffset))
     }
 
     /// `PDOStatement::fetchAll(int $mode = PDO::FETCH_DEFAULT, mixed ...$args): array`:
@@ -1554,8 +1505,7 @@ impl PDOStatement {
         this: This<Self>,
         #[php(default = 0)] column: i64,
     ) -> Result<Owner<Value>, Thrown> {
-        let value = fetch::fetch_column(req, this.object(), column)?;
-        Ok(crate::owned(req, value))
+        fetch::fetch_column(req, this.object(), column)
     }
 
     /// `PDOStatement::fetchObject(?string $class = "stdClass", array $constructorArgs = []): object|false`.
@@ -1592,17 +1542,7 @@ impl PDOStatement {
             Passed::Given(args) => Some(args),
             Passed::Omitted => None,
         };
-        Ok(
-            match fetch::fetch_object(req, this.object(), class, args)? {
-                // The fetch engine's object comes with its one owner, the caller's.
-                OrFalse::Value(object) => {
-                    let owner = Owner::take(req, object);
-                    req.release(object.as_value());
-                    OrFalse::Value(owner)
-                }
-                OrFalse::False => OrFalse::False,
-            },
-        )
+        fetch::fetch_object(req, this.object(), class, args)
     }
 
     /// `PDOStatement::getAttribute(int $name): mixed`: the connector's, then
@@ -1624,8 +1564,7 @@ impl PDOStatement {
         this: This<Self>,
         name: i64,
     ) -> Result<Owner<Value>, Thrown> {
-        let value = stmt_attribute(req, this, name)?;
-        Ok(crate::owned(req, value))
+        stmt_attribute(req, this, name)
     }
 
     /// `PDOStatement::getColumnMeta(int $column): array|false`: the
@@ -1680,7 +1619,7 @@ impl PDOStatement {
         };
         clear_error(req, stmt);
         let executed = read(req, stmt, |s| s.executed).unwrap_or(false);
-        let meta = match on_driver(req, stmt, |req, driver| {
+        let mut meta = match on_driver(req, stmt, |req, driver| {
             driver.column_meta(req, at, executed)
         })? {
             Ok(Some(meta)) => meta,
@@ -1694,12 +1633,6 @@ impl PDOStatement {
             s.columns.as_ref().and_then(|c| c.get(at).cloned())
         })
         .flatten();
-        // The driver's table comes with its one owner, the caller's.
-        let mut meta = {
-            let owner = Owner::take(req, meta);
-            req.release(Value::array(meta));
-            owner
-        };
         if let Some(info) = info {
             let key = PhpString::new(req, b"name")?.into_key();
             let made = crate::string(req, &info.name)?;
@@ -1881,9 +1814,52 @@ impl PDOStatement {
     }
 }
 
-/// What `PDOStatement::getAttribute` answers, its one owner the
-/// caller's.
-fn stmt_attribute(req: &mut Request, this: This<PDOStatement>, name: i64) -> Result<Value, Thrown> {
+/// `debugDumpParams`'s text: the query, the query sent, and each bound
+/// parameter.
+fn dump_params(s: &Stmt) -> Vec<u8> {
+    let mut out = format!("SQL: [{}] ", s.query.len()).into_bytes();
+    out.extend_from_slice(&s.query);
+    out.push(b'\n');
+    if let Active::Sent(sent) = &s.active {
+        out.extend_from_slice(format!("Sent SQL: [{}] ", sent.len()).as_bytes());
+        out.extend_from_slice(sent);
+        out.push(b'\n');
+    }
+    out.extend_from_slice(format!("Params:  {}\n", s.params.len()).as_bytes());
+    for bound in &s.params {
+        match &bound.key {
+            BoundKey::Name(name) => {
+                out.extend_from_slice(format!("Key: Name: [{}] ", name.len()).as_bytes());
+                out.extend_from_slice(name);
+                out.push(b'\n');
+            }
+            BoundKey::Position(n) => {
+                out.extend_from_slice(format!("Key: Position #{n}:\n").as_bytes());
+            }
+        }
+        let name = bound.name.clone().unwrap_or_default();
+        out.extend_from_slice(
+            format!("paramno={}\nname=[{}] \"", bound.position, name.len()).as_bytes(),
+        );
+        out.extend_from_slice(&name);
+        out.extend_from_slice(
+            format!(
+                "\"\nis_param={}\nparam_type={}\n",
+                i32::from(bound.is_parameter),
+                bound.ty.raw()
+            )
+            .as_bytes(),
+        );
+    }
+    out
+}
+
+/// What `PDOStatement::getAttribute` answers.
+fn stmt_attribute(
+    req: &mut Request,
+    this: This<PDOStatement>,
+    name: i64,
+) -> Result<Owner<Value>, Thrown> {
     let attr = name;
     let (stmt, dbh) = this_stmt(req, this.object())?;
     let generic = |req: &Request| {
@@ -1897,8 +1873,8 @@ fn stmt_attribute(req: &mut Request, this: This<PDOStatement>, name: i64) -> Res
         })
     };
     clear_error(req, stmt);
-    match on_driver(req, stmt, |req, driver| driver.attribute(req, attr))? {
-        Ok(Some(Some(value))) => Ok(value),
+    let answered = match on_driver(req, stmt, |req, driver| driver.attribute(req, attr))? {
+        Ok(Some(Some(value))) => return Ok(value),
         Ok(Some(None)) => match generic(req) {
             Some(value) => Ok(value),
             None => unsupported(
@@ -1920,5 +1896,6 @@ fn stmt_attribute(req: &mut Request, this: This<PDOStatement>, name: i64) -> Res
             )
             .map(|()| Value::bool(false)),
         },
-    }
+    };
+    Ok(Owner::take(req, answered?))
 }

@@ -14,15 +14,16 @@ use php_ext::attr::php_function;
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, docref, warning};
 use php_ext::request::{
-    Cast, Opening, Request, Stream, StreamCtx, StreamOps, StreamWrapper, Streams as _, Whence,
+    Cast, Opening, OwnedStream as _, Request, Stream, StreamCtx, StreamOps, StreamWrapper,
+    Streams as _, Whence,
 };
 use php_ext::values::{Owner, PhpArray, PhpString, Resource};
 
 /// `php_gz_stream_data_t`: the `gzFile` and the stream whose fd
-/// it duplicated, kept open until the kind closes.
+/// it duplicated, whose owner the kind holds until it closes.
 struct GzStream {
     file: Option<crate::ffi::GzFile>,
-    inner: Option<Stream>,
+    inner: Option<Owner<Stream>>,
 }
 
 impl GzStream {
@@ -140,7 +141,7 @@ impl StreamOps for GzStream {
     /// `php_gziop_set_option`'s `PHP_STREAM_OPTION_LOCKING`, handed to
     /// the stream under the `gzFile`.
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
-        Some(self.inner?.flock(req, operation))
+        Some(self.inner.as_deref()?.flock(req, operation))
     }
 
     /// `php_gziop_set_option`'s `PHP_STREAM_OPTION_META_DATA_API`, handed
@@ -166,7 +167,7 @@ impl StreamOps for GzStream {
     /// bool(false)
     /// ```
     fn meta_data_from(&self) -> Option<Stream> {
-        self.inner
+        self.inner.as_deref().copied()
     }
 
     /// `PHP_STREAM_FLAG_NO_BUFFER`, which `php_stream_gzopen` sets.
@@ -243,7 +244,7 @@ fn open(
     };
     let kind = GzStream {
         file: Some(file),
-        inner: Some(inner.hand_on_unmigrated()),
+        inner: Some(inner),
     };
     req.new_stream(Box::new(kind), mode).map(Some)
 }

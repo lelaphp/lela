@@ -3,8 +3,8 @@
 //! an `include` of a wrapper's path and `parse_ini_file()` read through.
 
 use crate::api::raising::Thrown;
-use crate::api::request::{Request, Stream, StreamOption};
-use crate::api::values::{Emalloc, Owner, PhpString, Value};
+use crate::api::request::{OwnedStream, Request, Stream, StreamOption};
+use crate::api::values::{Emalloc, Owner, PhpString};
 use crate::streams::OpenOptions;
 use crate::streams::StreamLayer;
 
@@ -37,8 +37,8 @@ const ZEND_MMAP_AHEAD: usize = 32;
 /// int(1240)
 /// ```
 pub struct ScannerFile {
-    stream: Stream,
-    opened_path: Option<PhpString>,
+    stream: Owner<Stream>,
+    opened_path: Option<Owner<PhpString>>,
     buf: Option<Emalloc>,
 }
 
@@ -67,15 +67,15 @@ impl ScannerFile {
             },
         );
         Ok(Some(ScannerFile {
-            stream: stream.hand_on_unmigrated(),
-            opened_path: opened_path.map(Owner::hand_on_unmigrated),
+            stream,
+            opened_path,
             buf: None,
         }))
     }
 
     /// The `*opened_path`, which an include compiles the file under.
-    pub(crate) const fn opened_path(&self) -> Option<PhpString> {
-        self.opened_path
+    pub(crate) fn opened_path(&self) -> Option<PhpString> {
+        self.opened_path.as_deref().copied()
     }
 
     /// `zend_stream_fixup` (`Z/Zend/zend_stream.c:131-210`): the whole
@@ -86,7 +86,7 @@ impl ScannerFile {
     /// left; the bytes read, `None` for a read that failed, the buffer
     /// freed. The `Err` is the memory limit's fatal.
     pub fn load(&mut self, req: &mut Request) -> Result<Option<&[u8]>, Thrown> {
-        let stream = self.stream;
+        let stream = *self.stream;
         let file_size = req
             .stream_op(stream, |req, s| s.zend_fsize(req))
             .unwrap_or(0);
@@ -141,7 +141,7 @@ impl ScannerFile {
     pub fn destroy(self, req: &mut Request) {
         self.stream.free(req);
         if let Some(opened) = self.opened_path {
-            req.release(Value::string(opened));
+            opened.give_up(req);
         }
         if let Some(buf) = self.buf {
             buf.free(req);

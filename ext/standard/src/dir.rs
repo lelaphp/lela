@@ -64,7 +64,7 @@ use php_ext::abi::{Instance, OrFalse, Path as PathArg, Refusals, This};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Request, Resolve, Stream, Streams, Whence};
+use php_ext::request::{OwnedStream as _, Request, Resolve, Stream, Streams, Whence};
 use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::file::set_default_dir;
@@ -540,7 +540,7 @@ fn scandir(
             }
         }
     }
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     match order {
         SCANDIR_SORT_NONE => {}
         SCANDIR_SORT_ASCENDING => names.sort_by(|a, b| collate(a, b)),

@@ -112,9 +112,10 @@ fn namespace_node(
     };
     let value = object_for(req, fake, Some(this))?;
     if let Some(object) = value.as_object().copied() {
-        req.addref(&this.as_value());
-        if let Some(d) = dom_mut(req, object) {
-            d.extra = Extra::NamespaceParent(this);
+        let parent = Owner::take(req, this.as_value());
+        match dom_mut(req, object) {
+            Some(d) => d.extra = Extra::NamespaceParent(Box::new(parent)),
+            None => parent.give_up(req),
         }
     }
     Ok(value)

@@ -231,7 +231,7 @@ pub(crate) struct State {
     /// decoder state while it converts.
     pub(crate) outconv: Option<u32>,
     /// `all_encodings_list`, one owner held until `rshutdown`.
-    pub(crate) all_encodings: Option<PhpArray>,
+    pub(crate) all_encodings: Option<Owner<PhpArray>>,
     pub(crate) regex: crate::regex::State,
 }
 

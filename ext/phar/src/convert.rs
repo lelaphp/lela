@@ -149,12 +149,12 @@ pub(crate) fn to_other(
     phar.is_data = source.is_data && format != Format::Phar;
     phar.is_temporary_alias = source.is_temporary_alias;
     phar.alias.clone_from(&source.alias);
-    let meta = std::mem::take(&mut source.metadata);
-    let copied = meta.copied(req);
-    if let Some(source) = archives(req).get_mut(id) {
-        source.metadata = meta;
+    let mut meta = std::mem::take(&mut source.metadata);
+    phar.metadata = meta.copied(req);
+    match archives(req).get_mut(id) {
+        Some(source) => source.metadata = meta,
+        None => meta.free(req),
     }
-    phar.metadata = copied;
     let fname = phar.fname.clone();
     let mut fp: Vec<u8> = Vec::new();
     let slots = archives(req)
@@ -168,36 +168,46 @@ pub(crate) fn to_other(
         let mut copy = e.shallow(&e.filename.clone());
         let (is_dir, plain) = (e.is_dir, e.link.is_none() && e.tmp.is_none());
         let name = lossy(&e.filename).into_owned();
-        let meta = archives(req)
+        let mut meta = archives(req)
             .get_mut(id)
             .and_then(|a| a.manifest.at_mut(slot))
             .map(|e| std::mem::take(&mut e.metadata))
             .unwrap_or_default();
         copy.metadata = meta.copied(req);
-        if let Some(e) = archives(req)
+        match archives(req)
             .get_mut(id)
             .and_then(|a| a.manifest.at_mut(slot))
         {
-            e.metadata = meta;
+            Some(e) => e.metadata = meta,
+            None => meta.free(req),
         }
         if plain {
-            if let Err(error) = entry::open_entry_fp(req, id, slot, true)? {
-                copy.metadata.free(req);
-                phar.release_all(req);
-                return Err(throw(
-                    req,
-                    "UnexpectedValueException",
-                    &format!(
-                        "Cannot convert phar archive \"{}\", unable to open entry \"{name}\" contents: {error}",
-                        lossy(&fname)
-                    ),
-                ));
-            }
-            let (offset, size) = archives(req)
-                .get(id)
-                .and_then(|a| a.manifest.at(slot))
-                .map_or((0, 0), |e| (e.offset, e.uncompressed_filesize as usize));
-            let bytes = entry::efp_read(req, id, &Target::Slot(slot), offset, size)?;
+            let read = entry::open_entry_fp(req, id, slot, true).and_then(|opened| {
+                if let Err(error) = opened {
+                    return Ok(Err(error));
+                }
+                let (offset, size) = archives(req)
+                    .get(id)
+                    .and_then(|a| a.manifest.at(slot))
+                    .map_or((0, 0), |e| (e.offset, e.uncompressed_filesize as usize));
+                entry::efp_read(req, id, &Target::Slot(slot), offset, size).map(Ok)
+            });
+            let bytes = match read {
+                Ok(Ok(bytes)) => bytes,
+                failed => {
+                    copy.free(req);
+                    phar.release_all(req);
+                    let error = failed?.err().unwrap_or_default();
+                    return Err(throw(
+                        req,
+                        "UnexpectedValueException",
+                        &format!(
+                            "Cannot convert phar archive \"{}\", unable to open entry \"{name}\" contents: {error}",
+                            lossy(&fname)
+                        ),
+                    ));
+                }
+            };
             copy.content = Content::Fp;
             copy.offset = i64::try_from(fp.len()).unwrap_or(i64::MAX);
             fp.extend_from_slice(&bytes);
@@ -210,8 +220,8 @@ pub(crate) fn to_other(
         copy.old_flags = copy.flags & !ENT_COMPRESSION_MASK;
         copy.set_inode(&fname, 3, true);
         let filename = copy.filename.clone();
-        if let Err(mut refused) = phar.manifest.add(&filename, copy) {
-            refused.metadata.free(req);
+        if let Err(refused) = phar.manifest.add(&filename, copy) {
+            refused.free(req);
         }
         phar.add_virtual_dirs(&filename);
     }

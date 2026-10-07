@@ -21,12 +21,12 @@ pub(crate) enum Origin {
     Execute,
 }
 
-/// `php_sqlite3_result` less its `zend_object`: the `SQLite3Stmt`, one
-/// owner of it, and the column count and names php caches between
+/// `php_sqlite3_result` less its `zend_object`: the `SQLite3Stmt` and
+/// the column count and names php caches between
 /// fetches until a reset.
 #[derive(Default)]
 pub(crate) struct ResultObj {
-    stmt: Option<PhpObject>,
+    stmt: Option<Owner<PhpObject>>,
     origin: Origin,
     columns: Option<usize>,
     names: Option<Vec<Vec<u8>>>,
@@ -36,11 +36,14 @@ pub(crate) struct ResultObj {
 const ASSOC: i64 = 1;
 const NUM: i64 = 2;
 
-/// The statement object, an owner the caller took, recorded.
-pub(crate) fn attach(req: &mut Request, object: PhpObject, stmt: PhpObject, origin: Origin) {
-    if let Some(r) = object.native_mut::<Box<ResultObj>>(req) {
-        r.stmt = Some(stmt);
-        r.origin = origin;
+/// The statement object recorded, its owner kept.
+pub(crate) fn attach(req: &mut Request, object: PhpObject, stmt: Owner<PhpObject>, origin: Origin) {
+    match object.native_mut::<Box<ResultObj>>(req) {
+        Some(r) => {
+            r.stmt = Some(stmt);
+            r.origin = origin;
+        }
+        None => stmt.give_up(req),
     }
 }
 
@@ -49,7 +52,7 @@ pub(crate) fn attach(req: &mut Request, object: PhpObject, stmt: PhpObject, orig
 fn held(req: &mut Request, object: PhpObject) -> Result<Taken, Thrown> {
     let at = object
         .native::<Box<ResultObj>>(req)
-        .and_then(|r| r.stmt)
+        .and_then(|r| r.stmt.as_deref().copied())
         .and_then(|stmt| place(req, stmt));
     match at.and_then(|(db, id)| take(req, db, id)) {
         Some(taken) => Ok(taken),
@@ -153,13 +156,13 @@ impl ObjectHandlers for Handlers {
         let Some(stmt_object) = r.stmt else {
             return;
         };
-        if let Some(taken) = place(req, stmt_object).and_then(|(db, id)| take(req, db, id)) {
+        if let Some(taken) = place(req, *stmt_object).and_then(|(db, id)| take(req, db, id)) {
             if let Some(stmt) = taken.stmt.as_ref() {
                 let _ = stmt.reset(req);
             }
             give_back(req, taken);
         }
-        req.release(stmt_object.as_value());
+        stmt_object.give_up(req);
     }
 }
 

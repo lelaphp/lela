@@ -59,26 +59,27 @@ enum Kind {
     RecursiveCallbackFilter,
 }
 
-/// `spl_dual_it_object`.
+/// `spl_dual_it_object`: each value it keeps is its owner, given up as
+/// `spl_dual_it_free` and the object's free give php's up.
 #[derive(Default)]
 pub(crate) struct DualItState {
     kind: Kind,
-    inner: Option<PhpObject>,
+    inner: Option<Owner<PhpObject>>,
     /// `inner.iterator`: the iterator the inner object's `get_iterator`
     /// handed out, which every step walks, one owner.
     iter: Option<Iter>,
-    data: Option<Value>,
-    key: Option<Value>,
+    data: Option<Owner<Value>>,
+    key: Option<Owner<Value>>,
     pos: i64,
     offset: i64,
     count: i64,
     flags: i64,
-    cache: Option<PhpArray>,
-    children: Option<PhpObject>,
-    string: Option<Value>,
+    cache: Option<Owner<PhpArray>>,
+    children: Option<Owner<PhpObject>>,
+    string: Option<Owner<Value>>,
     callback: Option<Callable>,
-    callback_value: Option<Value>,
-    appended: Option<PhpObject>,
+    callback_value: Option<Owner<Value>>,
+    appended: Option<Owner<PhpObject>>,
     regex: Option<RegexIt>,
 }
 
@@ -174,8 +175,16 @@ struct RegexIt {
 /// 1 =>   \-3
 /// 5
 /// ```
-#[derive(Clone, Copy)]
 struct Level {
+    iterator: Owner<PhpObject>,
+    sub: Iter,
+    state: State,
+}
+
+/// A level's views, copied off the stack for one step: what the step
+/// reads while the level, which may be popped under it, holds the owners.
+#[derive(Clone, Copy)]
+struct Seen {
     iterator: PhpObject,
     sub: Iter,
     state: State,
@@ -184,7 +193,7 @@ struct Level {
 impl Level {
     /// `ce->get_iterator(ce, &zobject, 0)` over `iterator`, whose owner
     /// the level takes.
-    fn new(req: &mut Request, iterator: PhpObject) -> Result<Level, Thrown> {
+    fn new(req: &mut Request, iterator: Owner<PhpObject>) -> Result<Level, Thrown> {
         match iterate(req, &iterator) {
             Ok(sub) => Ok(Level {
                 iterator,
@@ -192,9 +201,18 @@ impl Level {
                 state: State::Start,
             }),
             Err(thrown) => {
-                req.release(iterator.as_value());
+                iterator.give_up(req);
                 Err(thrown)
             }
+        }
+    }
+
+    /// The level's views.
+    fn seen(&self) -> Seen {
+        Seen {
+            iterator: *self.iterator,
+            sub: self.sub,
+            state: self.state,
         }
     }
 
@@ -202,7 +220,7 @@ impl Level {
     /// order the rewind, the destructor and the free give a level up in.
     fn release(self, req: &mut Request) {
         req.release(self.sub.as_value());
-        req.release(self.iterator.as_value());
+        self.iterator.give_up(req);
     }
 }
 
@@ -288,33 +306,49 @@ fn fit_iterators(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
 /// 0
 /// -832
 /// ```
-#[derive(Clone, Copy)]
 struct Tree {
-    prefix: [PhpString; 6],
-    postfix: PhpString,
+    /// The six parts, `PREFIX_LEFT` to `PREFIX_RIGHT`.
+    prefix: Vec<Owner<PhpString>>,
+    postfix: Owner<PhpString>,
 }
 
 impl Tree {
     /// The constructor's: `""`, `"| "`, `"  "`, `"|-"`, `"\\-"`, `""`,
     /// and the empty postfix.
     fn new(req: &mut Request) -> Result<Tree, Thrown> {
-        // The strings are the tree's own, given up as it is freed.
-        let mut prefix = [PhpString::new(req, b"")?.hand_on_unmigrated(); 6];
-        for (part, text) in [(1, &b"| "[..]), (2, b"  "), (3, b"|-"), (4, b"\\-")] {
-            prefix[part] = PhpString::filled(req, text.len(), |bytes| bytes.copy_from_slice(text))?
-                .hand_on_unmigrated();
+        let mut prefix = Vec::with_capacity(6);
+        for text in [&b""[..], b"| ", b"  ", b"|-", b"\\-", b""] {
+            let made = if text.is_empty() {
+                PhpString::new(req, text)
+            } else {
+                PhpString::filled(req, text.len(), |bytes| bytes.copy_from_slice(text))
+            };
+            match made {
+                Ok(part) => prefix.push(part),
+                Err(thrown) => {
+                    for part in prefix {
+                        part.give_up(req);
+                    }
+                    return Err(thrown);
+                }
+            }
         }
-        Ok(Tree {
-            prefix,
-            postfix: PhpString::new(req, b"")?.hand_on_unmigrated(),
-        })
+        match PhpString::new(req, b"") {
+            Ok(postfix) => Ok(Tree { prefix, postfix }),
+            Err(thrown) => {
+                for part in prefix {
+                    part.give_up(req);
+                }
+                Err(thrown)
+            }
+        }
     }
 
     /// Each string's owner given up, as `spl_RecursiveIteratorIterator_free_storage`
     /// releases them.
     fn release(self, req: &mut Request) {
         for text in self.prefix.into_iter().chain([self.postfix]) {
-            req.release(Value::string(text));
+            text.give_up(req);
         }
     }
 }
@@ -545,7 +579,7 @@ impl RecursiveIteratorIterator {
         #[php(default = null)] level: Option<i64>,
     ) -> Result<Option<Instance<RecursiveIterator>>, Thrown> {
         let this = rec_checked(req, this.object())?;
-        let levels = rec(req, this, |it| it.levels.clone())?;
+        let levels = seen_levels(req, this)?;
         let wanted = level.unwrap_or_else(|| i64::try_from(levels.len()).unwrap_or(0) - 1);
         let found = usize::try_from(wanted).ok().and_then(|at| levels.get(at));
         Ok(found.map(|l| Instance::of(l.iterator)))
@@ -760,12 +794,14 @@ impl IteratorIterator {
                     ),
                 ));
             };
-            // The iterator holds the owner the call answered from here.
-            let _inner = answered.hand_on_unmigrated();
-            dual(req, this, |it| {
+            // The object the call answered, the iterator's to hold.
+            let held = Owner::take(req, iterator);
+            answered.give_up(req);
+            let old = dual(req, this, |it| {
                 it.kind = Kind::IteratorIterator;
-                it.inner = Some(iterator);
+                it.inner.replace(held)
             })?;
+            crate::give_up(req, old);
             return inner_iterate(req, this, iterator);
         }
         dual_set(req, this, Kind::IteratorIterator, given)
@@ -802,7 +838,7 @@ impl IteratorIterator {
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let this = checked(req, this.object())?;
-        let key = dual(req, this, |it| it.key)?;
+        let key = dual(req, this, |it| it.key.as_deref().copied())?;
         Ok(key.map_or_else(Value::null, |k| k.deref()))
     }
 
@@ -810,7 +846,7 @@ impl IteratorIterator {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let this = checked(req, this.object())?;
-        let data = dual(req, this, |it| it.data)?;
+        let data = dual(req, this, |it| it.data.as_deref().copied())?;
         Ok(data.map_or_else(Value::null, |d| d.deref()))
     }
 
@@ -1006,7 +1042,12 @@ impl CallbackFilterIterator {
     fn accept(req: &mut Request, this: This<Self>) -> Result<Owner<Raw<bool>>, Thrown> {
         let this = checked(req, this.object())?;
         let (data, key, inner, callback) = dual(req, this, |it| {
-            (it.data, it.key, it.inner, it.callback.clone())
+            (
+                it.data.as_deref().copied(),
+                it.key.as_deref().copied(),
+                it.inner.as_deref().copied(),
+                it.callback.clone(),
+            )
         })?;
         let (Some(data), Some(key), Some(callback)) = (data, key, callback) else {
             return Ok(crate::answered(Owner::take(req, Value::bool(false))));
@@ -1067,7 +1108,12 @@ impl RecursiveCallbackFilterIterator {
         this: This<Self>,
     ) -> Result<Owner<Instance<RecursiveCallbackFilterIterator>>, Thrown> {
         let this = checked(req, this.object())?;
-        let (Some(inner), Some(callback)) = dual(req, this, |it| (it.inner, it.callback_value))?
+        let (Some(inner), Some(callback)) = dual(req, this, |it| {
+            (
+                it.inner.as_deref().copied(),
+                it.callback_value.as_deref().copied(),
+            )
+        })?
         else {
             return Err(php_ext::raising::fatal(
                 req,
@@ -1297,12 +1343,10 @@ impl CachingIterator {
         let this = checked(req, this.object())?;
         dual_rewind(req, this)?;
         let old = dual(req, this, |it| it.cache.take())?;
-        if let Some(old) = old {
-            req.release(Value::array(old));
-        }
-        // The iterator's own cache from here.
-        let fresh = PhpArray::new(req)?.hand_on_unmigrated();
-        dual(req, this, |it| it.cache = Some(fresh))?;
+        crate::give_up(req, old);
+        let fresh = PhpArray::new(req)?;
+        let old = dual(req, this, |it| it.cache.replace(fresh))?;
+        crate::give_up(req, old);
         caching_next_step(req, this)
     }
 
@@ -1330,8 +1374,14 @@ impl CachingIterator {
     /// `__toString(): string`, what the flags name.
     fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let this = checked(req, this.object())?;
-        let (flags, key, data, string) =
-            dual(req, this, |it| (it.flags, it.key, it.data, it.string))?;
+        let (flags, key, data, string) = dual(req, this, |it| {
+            (
+                it.flags,
+                it.key.as_deref().copied(),
+                it.data.as_deref().copied(),
+                it.string.as_deref().copied(),
+            )
+        })?;
         if flags
             & (Self::CALL_TOSTRING
                 | Self::TOSTRING_USE_KEY
@@ -1400,11 +1450,9 @@ impl CachingIterator {
             ));
         }
         if flags & Self::FULL_CACHE != 0 && old & Self::FULL_CACHE == 0 {
-            // The iterator's own cache from here.
-            let fresh = PhpArray::new(req)?.hand_on_unmigrated();
-            if let Some(cache) = dual(req, this, |it| it.cache.replace(fresh))? {
-                req.release(Value::array(cache));
-            }
+            let fresh = PhpArray::new(req)?;
+            let old = dual(req, this, |it| it.cache.replace(fresh))?;
+            crate::give_up(req, old);
         }
         dual(req, this, |it| {
             it.flags = (it.flags & !CIT_PUBLIC) | (flags & CIT_PUBLIC);
@@ -1442,10 +1490,10 @@ impl CachingIterator {
         value: Value,
     ) -> Result<(), Thrown> {
         let this = checked(req, this.object())?;
-        let mut cache = full_cache(req, this)?;
+        full_cache(req, this)?;
         let key = Owner::take(req, Key::lookup(key.0));
-        cache.set(req, key, Owner::take(req, value.deref()))?;
-        dual(req, this, |it| it.cache = Some(cache))
+        let value = Owner::take(req, value.deref());
+        cache_write(req, this, |req, cache| cache.set(req, key, value))
     }
 
     /// `offsetUnset($key): void`.
@@ -1456,9 +1504,10 @@ impl CachingIterator {
         key: Untyped<PhpString>,
     ) -> Result<(), Thrown> {
         let this = checked(req, this.object())?;
-        let mut cache = full_cache(req, this)?;
-        cache.unset(req, &Key::lookup(key.0))?;
-        dual(req, this, |it| it.cache = Some(cache))
+        full_cache(req, this)?;
+        cache_write(req, this, |req, cache| {
+            cache.unset(req, &Key::lookup(key.0)).map(drop)
+        })
     }
 
     /// `offsetExists($key): bool`.
@@ -1546,7 +1595,7 @@ impl RecursiveCachingIterator {
         this: This<Self>,
     ) -> Result<Option<Instance<RecursiveCachingIterator>>, Thrown> {
         let this = checked(req, this.object())?;
-        let children = dual(req, this, |it| it.children)?;
+        let children = dual(req, this, |it| it.children.as_deref().copied())?;
         Ok(children.map(Instance::of))
     }
 }
@@ -1601,10 +1650,10 @@ impl NoRewindIterator {
     /// `NoRewindIterator::key(): mixed`, the inner iterator's
     /// `get_current_key`.
     #[php(tentative)]
-    fn key(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
+    fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match no_rewind_iter(req, this.object())? {
             Some(iter) => iter.key(req),
-            None => Ok(Value::null()),
+            None => Ok(Owner::take(req, Value::null())),
         }
     }
 
@@ -1627,8 +1676,7 @@ impl NoRewindIterator {
         match no_rewind_iter(req, this.object())? {
             Some(iter) => {
                 let data = iter.value(req)?;
-                let data = crate::owned(req, data);
-                Ok(crate::owner_of(req, data))
+                Ok(crate::dereferenced(req, data))
             }
             None => Ok(Owner::take(req, Value::null())),
         }
@@ -1680,12 +1728,13 @@ impl AppendIterator {
                 "InternalError: AppendIterator::__construct served with ArrayIterator unlinked",
             ));
         };
-        // The iterator's own list from here.
-        let list = instantiate(req, class, &[])?.hand_on_unmigrated();
-        dual(req, this, |it| {
+        let list = instantiate(req, class, &[])?;
+        let old = dual(req, this, |it| {
             it.kind = Kind::Append;
-            it.appended = Some(list);
-        })
+            it.appended.replace(list)
+        })?;
+        crate::give_up(req, old);
+        Ok(())
     }
 
     /// `append(Iterator $iterator): void`.
@@ -1740,7 +1789,7 @@ impl AppendIterator {
     fn current(req: &mut Request, this: This<Self>) -> Result<Value, Thrown> {
         let this = checked(req, this.object())?;
         dual_fetch(req, this, true)?;
-        let data = dual(req, this, |it| it.data)?;
+        let data = dual(req, this, |it| it.data.as_deref().copied())?;
         Ok(data.map_or_else(Value::null, |d| d.deref()))
     }
 
@@ -2121,7 +2170,7 @@ impl RecursiveRegexIterator {
     #[php(tentative)]
     fn accept(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let this = checked(req, this.object())?;
-        match dual(req, this, |it| it.data)? {
+        match dual(req, this, |it| it.data.as_deref().copied())? {
             None => Ok(false),
             Some(data) => match data.as_array() {
                 Some(array) => Ok(!array.is_empty()),
@@ -2302,32 +2351,31 @@ impl RecursiveTreeIterator {
         let caching_flags = cachingIteratorFlags.hold(req)?;
         let mode = mode.hold(req)?;
         let source = if crate::is_a(req, given.class(), b"IteratorAggregate") {
-            // The answer's owner is the iterator's, released with it.
-            let answered = call_method(req, &given, b"getIterator", &[])?.hand_on_unmigrated();
-            match answered.as_object().copied() {
-                Some(o) if crate::is_a(req, o.class(), b"Traversable") => o,
-                _ => {
-                    req.release(answered);
-                    return Err(throw(
-                        req,
-                        "LogicException",
-                        "getIterator() must return an object that implements Traversable",
-                    ));
-                }
+            let answered = call_method(req, &given, b"getIterator", &[])?;
+            if !answered
+                .as_object()
+                .is_some_and(|o| crate::is_a(req, o.class(), b"Traversable"))
+            {
+                answered.give_up(req);
+                return Err(throw(
+                    req,
+                    "LogicException",
+                    "getIterator() must return an object that implements Traversable",
+                ));
             }
+            answered
         } else {
-            req.addref(&given.as_value());
-            given
+            Owner::take(req, given.as_value())
         };
         let Some(class) = lookup_class(req, b"RecursiveCachingIterator")? else {
-            req.release(source.as_value());
+            source.give_up(req);
             return Err(php_ext::raising::fatal(
                 req,
                 "InternalError: RecursiveTreeIterator::__construct served with RecursiveCachingIterator unlinked",
             ));
         };
-        let caching = instantiate(req, class, &[source.as_value(), Value::int(caching_flags)]);
-        req.release(source.as_value());
+        let caching = instantiate(req, class, &[*source, Value::int(caching_flags)]);
+        source.give_up(req);
         let caching = caching?;
         let built = rec_construct(req, this, *caching, mode, flags);
         caching.give_up(req);
@@ -2362,16 +2410,14 @@ impl RecursiveTreeIterator {
         let Some(level) = top(req, this)? else {
             return Ok(Owner::take(req, Value::null()));
         };
+        let bypass = rec(req, this, |it| it.flags & Self::BYPASS_KEY != 0)?;
         let key = level.sub.key(req)?;
-        let key = crate::owned(req, key);
-        if rec(req, this, |it| it.flags & Self::BYPASS_KEY != 0)? {
-            // The key the inner iterator answered is its one owner.
-            let owner = Owner::take(req, key);
-            req.release(key);
-            return Ok(owner);
+        let key = crate::dereferenced(req, key);
+        if bypass {
+            return Ok(key);
         }
         let text = with_string(req, &key, <[u8]>::to_vec);
-        req.release(key);
+        key.give_up(req);
         let text = text?;
         let mut out = tree_prefix(req, this)?;
         out.extend(text);
@@ -2408,13 +2454,12 @@ impl RecursiveTreeIterator {
     /// `setPostfix(string $postfix): void`.
     #[php(tentative)]
     fn setPostfix(req: &mut Request, this: This<Self>, postfix: PhpString) -> Result<(), Thrown> {
-        req.addref(&Value::string(postfix));
-        let old = rec(req, this.object(), |it| {
-            it.tree
-                .as_mut()
-                .map(|tree| std::mem::replace(&mut tree.postfix, postfix))
+        let postfix = Owner::take(req, postfix);
+        let old = rec(req, this.object(), |it| match it.tree.as_mut() {
+            Some(tree) => std::mem::replace(&mut tree.postfix, postfix),
+            None => postfix,
         })?;
-        req.release(Value::string(old.unwrap_or(postfix)));
+        old.give_up(req);
         Ok(())
     }
 
@@ -2436,13 +2481,14 @@ impl RecursiveTreeIterator {
                 "be a RecursiveTreeIterator::PREFIX_* constant",
             ));
         };
-        req.addref(&Value::string(value));
+        let value = Owner::take(req, value);
         let old = rec(req, this.object(), |it| {
-            it.tree
-                .as_mut()
-                .map(|tree| std::mem::replace(&mut tree.prefix[part], value))
+            match it.tree.as_mut().and_then(|tree| tree.prefix.get_mut(part)) {
+                Some(slot) => std::mem::replace(slot, value),
+                None => value,
+            }
         })?;
-        req.release(Value::string(old.unwrap_or(value)));
+        old.give_up(req);
         Ok(())
     }
 
@@ -2483,7 +2529,7 @@ fn dual<R>(
 }
 
 fn inner(req: &mut Request, this: PhpObject) -> Result<Option<PhpObject>, Thrown> {
-    dual(req, this, |it| it.inner)
+    dual(req, this, |it| it.inner.as_deref().copied())
 }
 
 /// `spl_dual_it_free`: the inner iterator's kept `current()` given up,
@@ -2493,20 +2539,18 @@ fn dual_free(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     if let Some(iter) = inner_iter(req, this)? {
         iter.invalidate(req);
     }
-    let held = dual(req, this, |it| {
+    let (values, children) = dual(req, this, |it| {
         let children = if matches!(it.kind, Kind::Caching | Kind::RecursiveCaching) {
             it.children.take()
         } else {
             None
         };
-        (it.data.take(), it.key.take(), it.string.take(), children)
+        ([it.data.take(), it.key.take(), it.string.take()], children)
     })?;
-    for value in [held.0, held.1, held.2].into_iter().flatten() {
-        req.release(value);
+    for value in values.into_iter().flatten() {
+        value.give_up(req);
     }
-    if let Some(children) = held.3 {
-        req.release(children.as_value());
-    }
+    crate::give_up(req, children);
     Ok(())
 }
 
@@ -2555,11 +2599,13 @@ fn dual_fetch(req: &mut Request, this: PhpObject, check_more: bool) -> Result<bo
         return Ok(false);
     };
     let data = iter.value(req)?;
-    let data = crate::owned(req, data);
-    dual(req, this, |it| it.data = Some(data))?;
+    let data = crate::dereferenced(req, data);
+    let old = dual(req, this, |it| it.data.replace(data))?;
+    crate::give_up(req, old);
     let key = iter.key(req)?;
-    let key = crate::owned(req, key);
-    dual(req, this, |it| it.key = Some(key))?;
+    let key = crate::dereferenced(req, key);
+    let old = dual(req, this, |it| it.key.replace(key))?;
+    crate::give_up(req, old);
     Ok(true)
 }
 
@@ -2586,11 +2632,12 @@ fn dual_set(
     kind: Kind,
     inner: PhpObject,
 ) -> Result<(), Thrown> {
-    req.addref(&inner.as_value());
-    dual(req, this, |it| {
+    let held = Owner::take(req, inner);
+    let old = dual(req, this, |it| {
         it.kind = kind;
-        it.inner = Some(inner);
+        it.inner.replace(held)
     })?;
+    crate::give_up(req, old);
     inner_iterate(req, this, inner)
 }
 
@@ -2649,12 +2696,14 @@ fn construct_callback<C: Class>(
     let inner = iterator.hold(req)?.object();
     let given = callback.value();
     let callback = callback.hold(req)?;
-    req.addref(&given);
     dual_set(req, this, kind, inner)?;
-    dual(req, this, |it| {
+    let given = Owner::take(req, given);
+    let old = dual(req, this, |it| {
         it.callback = Some(callback);
-        it.callback_value = Some(given);
-    })
+        it.callback_value.replace(given)
+    })?;
+    crate::give_up(req, old);
+    Ok(())
 }
 
 /// `spl_dual_it_construct`'s `DIT_CachingIterator` arm, `O|l`, the flags
@@ -2681,12 +2730,12 @@ fn construct_caching(
         cache.give_up(req);
         return Err(thrown);
     }
-    // The iterator's own cache from here.
-    let cache = cache.hand_on_unmigrated();
-    dual(req, this, |it| {
+    let old = dual(req, this, |it| {
         it.flags |= flags & CIT_PUBLIC;
-        it.cache = Some(cache);
-    })
+        it.cache.replace(cache)
+    })?;
+    crate::give_up(req, old);
+    Ok(())
 }
 
 /// `spl_dual_it_construct`'s `DIT_RegexIterator` arm, `OS|lll`: the
@@ -2753,17 +2802,15 @@ impl ObjectHandlers for DualHandlers {
         });
         if let Some((values, objects, cache, callback, iter)) = held {
             for value in values.into_iter().flatten() {
-                req.release(value);
+                value.give_up(req);
             }
             if let Some(iter) = iter {
                 req.release(iter.as_value());
             }
             for object in objects.into_iter().flatten() {
-                req.release(object.as_value());
+                object.give_up(req);
             }
-            if let Some(cache) = cache {
-                req.release(Value::array(cache));
-            }
+            crate::give_up(req, cache);
             let _ = callback;
         }
     }
@@ -2785,20 +2832,23 @@ impl ObjectHandlers for DualHandlers {
     /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(it) = object.native::<DualIt>(req) {
-            for value in [it.data, it.key, it.string, it.callback_value]
+            for value in [&it.data, &it.key, &it.string, &it.callback_value]
                 .into_iter()
                 .flatten()
             {
-                visit(value);
+                visit(**value);
             }
-            for object in [it.inner, it.children, it.appended].into_iter().flatten() {
+            for object in [&it.inner, &it.children, &it.appended]
+                .into_iter()
+                .flatten()
+            {
                 visit(object.as_value());
             }
             if let Some(iter) = it.iter {
                 visit(iter.as_value());
             }
-            if let Some(cache) = it.cache {
-                visit(Value::array(cache));
+            if let Some(cache) = &it.cache {
+                visit(Value::array(**cache));
             }
         }
     }
@@ -2821,7 +2871,9 @@ impl ObjectHandlers for DualHandlers {
     /// }
     /// ```
     fn method_receiver(&self, req: &mut Request, object: PhpObject) -> Option<PhpObject> {
-        object.native::<DualIt>(req).and_then(|it| it.inner)
+        object
+            .native::<DualIt>(req)
+            .and_then(|it| it.inner.as_deref().copied())
     }
 }
 
@@ -2917,24 +2969,25 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
     }
     let (flags, kind, key, data, inner) = dual(req, this, |it| {
         it.flags |= CIT_VALID;
-        (it.flags, it.kind, it.key, it.data, it.inner)
+        (
+            it.flags,
+            it.kind,
+            it.key.as_deref().copied(),
+            it.data.as_deref().copied(),
+            it.inner.as_deref().copied(),
+        )
     })?;
     if flags & CachingIterator::FULL_CACHE != 0
         && let (Some(key), Some(data)) = (key, data)
     {
-        // The iterator's own cache, made where there is none yet.
-        let mut cache = match dual(req, this, |it| it.cache)? {
-            Some(cache) => cache,
-            None => PhpArray::new(req)?.hand_on_unmigrated(),
-        };
-        let (key, value) = crate::keyed(req, &key, crate::copied(req, data))?;
-        cache.set(req, key, value)?;
-        dual(req, this, |it| it.cache = Some(cache))?;
+        let data = Owner::take(req, data);
+        let (key, value) = crate::keyed(req, &key, data)?;
+        cache_write(req, this, |req, cache| cache.set(req, key, value))?;
     }
     if kind == Kind::RecursiveCaching
         && let Some(inner) = inner
     {
-        let children = (|| -> Result<Option<PhpObject>, Thrown> {
+        let children = (|| -> Result<Option<Owner<PhpObject>>, Thrown> {
             let answered = crate::method(req, inner, b"hasChildren")?;
             let has = truthy(req, &answered);
             answered.give_up(req);
@@ -2948,11 +3001,15 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
             };
             let made = instantiate(req, class, &[*children, Value::int(flags & CIT_PUBLIC)]);
             children.give_up(req);
-            // The iterator's own children from here.
-            made.map(|made| Some(made.hand_on_unmigrated()))
+            made.map(Some)
         })();
         match children {
-            Ok(children) => dual(req, this, |it| it.children = children)?,
+            Ok(children) => {
+                let old = dual(req, this, |it| {
+                    std::mem::replace(&mut it.children, children)
+                })?;
+                crate::give_up(req, old);
+            }
             Err(thrown) if flags & CachingIterator::CATCH_GET_CHILD != 0 => {
                 php_ext::raising::clear(req, thrown)?;
             }
@@ -2965,16 +3022,16 @@ fn caching_next_step(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         } else {
             data.unwrap_or_default()
         };
-        // The iterator's own string from here.
-        let string = to_string(req, &source)?.into_value().hand_on_unmigrated();
-        dual(req, this, |it| it.string = Some(string))?;
+        let string = to_string(req, &source)?.into_value();
+        let old = dual(req, this, |it| it.string.replace(string))?;
+        crate::give_up(req, old);
     }
     dual_next(req, this, false)
 }
 
 /// The cache, or php's `BadMethodCallException` without `FULL_CACHE`.
 fn full_cache(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
-    let (flags, cache) = dual(req, this, |it| (it.flags, it.cache))?;
+    let (flags, cache) = dual(req, this, |it| (it.flags, it.cache.as_deref().copied()))?;
     match cache {
         Some(cache) if flags & CachingIterator::FULL_CACHE != 0 => Ok(cache),
         _ => {
@@ -2988,6 +3045,25 @@ fn full_cache(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
     }
 }
 
+/// A write through the cache's owner, taken out of the iterator for the
+/// write and put back whatever the write answered, so a write that
+/// separates moves the owner with it; a cache made where there is none
+/// yet.
+fn cache_write<R>(
+    req: &mut Request,
+    this: PhpObject,
+    write: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    let mut cache = match dual(req, this, |it| it.cache.take())? {
+        Some(cache) => cache,
+        None => PhpArray::new(req)?,
+    };
+    let written = write(req, &mut cache);
+    let old = dual(req, this, |it| it.cache.replace(cache))?;
+    crate::give_up(req, old);
+    written
+}
+
 /// The iterator a `NoRewindIterator` method steps, its receiver's
 /// constructor served.
 fn no_rewind_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Thrown> {
@@ -2996,7 +3072,7 @@ fn no_rewind_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Th
 }
 
 fn appended(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
-    match dual(req, this, |it| it.appended)? {
+    match dual(req, this, |it| it.appended.as_deref().copied())? {
         Some(list) => Ok(list),
         None => Err(throw(
             req,
@@ -3014,9 +3090,7 @@ fn append_next_iterator(req: &mut Request, this: PhpObject) -> Result<bool, Thro
     if let Some(old_iter) = old_iter {
         req.release(old_iter.as_value());
     }
-    if let Some(old) = old {
-        req.release(old.as_value());
-    }
+    crate::give_up(req, old);
     let list = appended(req, this)?;
     if !crate::valid(req, list)? {
         return Ok(false);
@@ -3026,9 +3100,11 @@ fn append_next_iterator(req: &mut Request, this: PhpObject) -> Result<bool, Thro
         current.give_up(req);
         return Ok(false);
     };
-    // The append iterator holds the owner `current()` answered from here.
-    let _inner = current.hand_on_unmigrated();
-    dual(req, this, |it| it.inner = Some(next))?;
+    // The object `current()` answered, the append iterator's to hold.
+    let held = Owner::take(req, next);
+    current.give_up(req);
+    let old = dual(req, this, |it| it.inner.replace(held))?;
+    crate::give_up(req, old);
     inner_iterate(req, this, next)?;
     dual_rewind(req, this)?;
     Ok(true)
@@ -3054,7 +3130,9 @@ fn append_fetch(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
 /// under `INVERT_MATCH`.
 fn regex_accept(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
     let regex = regex_of(req, this)?;
-    let (data, key) = dual(req, this, |it| (it.data, it.key))?;
+    let (data, key) = dual(req, this, |it| {
+        (it.data.as_deref().copied(), it.key.as_deref().copied())
+    })?;
     let Some(data) = data else {
         return Ok(false);
     };
@@ -3117,14 +3195,14 @@ fn regex_run(
             let (count, matches) = pattern.match_impl(req, subject, global, regex.preg_flags, 0)?;
             let found = count.as_int().is_some_and(|n| n > 0);
             count.give_up(req);
-            regex_replace_data(req, this, Some(matches.into_value().hand_on_unmigrated()))?;
+            regex_replace_data(req, this, Some(matches.into_value()))?;
             Ok(Some(found))
         }
         Mode::Split => {
             regex_replace_data(req, this, None)?;
             let pieces = pattern.split_impl(req, subject.as_bytes(), -1, regex.preg_flags)?;
             let count = pieces.as_array().map_or(0, PhpArray::len);
-            regex_replace_data(req, this, Some(pieces.hand_on_unmigrated()))?;
+            regex_replace_data(req, this, Some(pieces))?;
             Ok(Some(count > 1))
         }
         Mode::Replace => {
@@ -3137,7 +3215,7 @@ fn regex_run(
             let Some(replaced) = replaced? else {
                 return Ok(None);
             };
-            let replaced = Some(replaced.into_value().hand_on_unmigrated());
+            let replaced = Some(replaced.into_value());
             let old = dual(req, this, |it| {
                 if regex.flags.use_key() {
                     std::mem::replace(&mut it.key, replaced)
@@ -3145,9 +3223,7 @@ fn regex_run(
                     std::mem::replace(&mut it.data, replaced)
                 }
             })?;
-            if let Some(old) = old {
-                req.release(old);
-            }
+            crate::give_up(req, old);
             Ok(Some(count > 0))
         }
     }
@@ -3158,11 +3234,10 @@ fn regex_run(
 fn regex_replace_data(
     req: &mut Request,
     this: PhpObject,
-    data: Option<Value>,
+    data: Option<Owner<Value>>,
 ) -> Result<(), Thrown> {
-    if let Some(old) = dual(req, this, |it| std::mem::replace(&mut it.data, data))? {
-        req.release(old);
-    }
+    let old = dual(req, this, |it| std::mem::replace(&mut it.data, data))?;
+    crate::give_up(req, old);
     Ok(())
 }
 
@@ -3200,15 +3275,7 @@ fn rec_key(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
         return Ok(Owner::take(req, Value::null()));
     };
     let key = level.sub.key(req)?;
-    Ok(owned_bare(req, key))
-}
-
-/// The value the sub-iterator answered, its one owner, with a reference
-/// followed: the owner moved to what the reference holds.
-fn owned_bare(req: &mut Request, value: Value) -> Owner<Value> {
-    let bare = Owner::take(req, value.deref());
-    req.release(value);
-    bare
+    Ok(crate::dereferenced(req, key))
 }
 
 /// The sub-iterator's `current()`, what `RecursiveIteratorIterator` and a
@@ -3218,11 +3285,16 @@ fn rec_current(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Throw
         return Ok(Owner::take(req, Value::null()));
     };
     let current = level.sub.value(req)?;
-    Ok(owned_bare(req, current))
+    Ok(crate::dereferenced(req, current))
 }
 
-fn top(req: &mut Request, this: PhpObject) -> Result<Option<Level>, Thrown> {
-    rec(req, this, |it| it.levels.last().copied())
+fn top(req: &mut Request, this: PhpObject) -> Result<Option<Seen>, Thrown> {
+    rec(req, this, |it| it.levels.last().map(Level::seen))
+}
+
+/// Every level's views, the root's first.
+fn seen_levels(req: &mut Request, this: PhpObject) -> Result<Vec<Seen>, Thrown> {
+    rec(req, this, |it| it.levels.iter().map(Level::seen).collect())
 }
 
 fn set_state(req: &mut Request, this: PhpObject, state: State) -> Result<(), Thrown> {
@@ -3330,11 +3402,11 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
             // `GC_ADDREF(sub_object)` around the call: a `next()` the
             // level's `valid()` re-enters may pop the level, and the
             // object its method runs on stands until the call returns.
-            req.addref(&iterator.as_value());
+            let pinned = Owner::take(req, iterator);
             let valid = sub.valid(req);
             let reentered = rec(req, this, |it| it.levels.len())
                 .and_then(|n| Ok(n != depth || top(req, this)?.map(|l| l.sub) != Some(sub)));
-            req.release(iterator.as_value());
+            pinned.give_up(req);
             let valid = valid?;
             if reentered? {
                 return Ok(());
@@ -3432,8 +3504,9 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                             "Objects returned by RecursiveIterator::getChildren() must implement RecursiveIterator",
                         ));
                     };
-                    // The level holds the child's owner from here.
-                    let _held_by_the_level = child.hand_on_unmigrated();
+                    // The child the call answered, the level's to hold.
+                    let held = Owner::take(req, object);
+                    child.give_up(req);
                     let mode = rec(req, this, |it| it.mode)?;
                     set_state(
                         req,
@@ -3444,10 +3517,11 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                             State::Next
                         },
                     )?;
-                    let level = Level::new(req, object)?;
+                    let level = Level::new(req, held)?;
+                    let sub = level.sub;
                     rec(req, this, |it| it.levels.push(level))?;
                     fit_iterators(req, this)?;
-                    level.sub.rewind(req)?;
+                    sub.rewind(req)?;
                     if let Err(thrown) = hook(req, this, b"beginchildren", b"beginChildren") {
                         caught(req, this, thrown)?;
                     }
@@ -3472,8 +3546,9 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         })?;
         if let Some(level) = popped {
             // The object before its iterator, as php's pop gives them up.
-            req.release(level.iterator.as_value());
-            req.release(level.sub.as_value());
+            let sub = level.sub;
+            level.iterator.give_up(req);
+            req.release(sub.as_value());
             // `while (!EG(exception))`: a sub-iterator's destructor that
             // throws ends the step.
             php_ext::raising::pending(req)?;
@@ -3506,7 +3581,7 @@ fn rec_rewind(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
 /// `spl_recursive_it_valid_ex`: any level valid, `endIteration` once
 /// where none is.
 fn rec_valid(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
-    let levels = rec(req, this, |it| it.levels.clone())?;
+    let levels = seen_levels(req, this)?;
     for level in levels.iter().rev() {
         if level.sub.valid(req)? {
             return Ok(true);
@@ -3672,7 +3747,7 @@ impl ObjectHandlers for RecHandlers {
     fn method_receiver(&self, req: &mut Request, object: PhpObject) -> Option<PhpObject> {
         object
             .native::<RecIt>(req)
-            .and_then(|it| it.levels.last().map(|level| level.iterator))
+            .and_then(|it| it.levels.last().map(|level| *level.iterator))
     }
 }
 
@@ -3739,12 +3814,16 @@ fn rec_construct(
     flags: i64,
 ) -> Result<(), Thrown> {
     let root = if crate::is_a(req, given.class(), b"IteratorAggregate") {
-        // The answer's owner is the level's, released with it.
-        let answered = call_method(req, &given, b"getIterator", &[])?.hand_on_unmigrated();
+        let answered = call_method(req, &given, b"getIterator", &[])?;
         match answered.as_object().copied() {
-            Some(o) if crate::is_a(req, o.class(), b"Traversable") => o,
+            Some(o) if crate::is_a(req, o.class(), b"Traversable") => {
+                // The object the call answered, the level's to hold.
+                let held = Owner::take(req, o);
+                answered.give_up(req);
+                held
+            }
             _ => {
-                req.release(answered);
+                answered.give_up(req);
                 let name =
                     String::from_utf8_lossy(&crate::class_name(req, given.class())).into_owned();
                 return Err(throw(
@@ -3757,11 +3836,10 @@ fn rec_construct(
             }
         }
     } else {
-        req.addref(&given.as_value());
-        given
+        Owner::take(req, given)
     };
     if !crate::is_a(req, root.class(), b"RecursiveIterator") {
-        req.release(root.as_value());
+        root.give_up(req);
         return Err(throw(
             req,
             "InvalidArgumentException",
@@ -3787,10 +3865,16 @@ fn rec_construct(
 
 /// `spl_recursive_tree_iterator_get_prefix`.
 fn tree_prefix(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
-    let (levels, tree) = rec(req, this, |it| (it.levels.clone(), it.tree))?;
-    let prefix: [Vec<u8>; 6] = tree.map_or_else(Default::default, |tree| {
-        tree.prefix.map(|part| part.as_bytes().to_vec())
-    });
+    let levels = seen_levels(req, this)?;
+    let prefix: [Vec<u8>; 6] = rec(req, this, |it| {
+        std::array::from_fn(|at| {
+            it.tree
+                .as_ref()
+                .and_then(|tree| tree.prefix.get(at))
+                .map(|part| part.as_bytes().to_vec())
+                .unwrap_or_default()
+        })
+    })?;
     let mut out = prefix[0].clone();
     let last = levels.len().saturating_sub(1);
     for (at, level) in levels.iter().enumerate() {
@@ -3813,6 +3897,7 @@ fn tree_prefix(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
 fn postfix(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, Thrown> {
     rec(req, this, |it| {
         it.tree
+            .as_ref()
             .map(|tree| tree.postfix.as_bytes().to_vec())
             .unwrap_or_default()
     })
@@ -3833,6 +3918,6 @@ fn tree_entry(req: &mut Request, this: PhpObject) -> Result<Option<Vec<u8>>, Thr
     } else {
         with_string(req, &bare, <[u8]>::to_vec)
     };
-    req.release(data);
+    data.give_up(req);
     entry.map(Some)
 }

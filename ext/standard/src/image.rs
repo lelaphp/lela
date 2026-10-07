@@ -15,7 +15,7 @@ use php_ext::abi::{OrFalse, Path, Ref, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name};
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values as php;
 
 use constants::{
@@ -1851,7 +1851,7 @@ fn getimagesize(
             return Err(thrown);
         }
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     let answered = answer(req, bytes.as_bytes(), filename.as_bytes(), image_info);
     bytes.give_up(req);
     answered

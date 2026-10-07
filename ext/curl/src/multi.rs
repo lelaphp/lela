@@ -22,7 +22,7 @@ use crate::info::Assoc;
 pub(crate) struct Mh {
     multi: Option<Multi>,
     /// `easyh`: each `CurlHandle` added, one owner of it.
-    easy: Vec<PhpObject>,
+    easy: Vec<Owner<PhpObject>>,
     /// `handlers.server_push`.
     push: Option<Handler>,
     /// `err.no`.
@@ -82,7 +82,7 @@ impl ObjectHandlers for Handlers {
             let _ = multi.close(req);
         }
         for easy in mh.easy {
-            req.release(easy.as_value());
+            easy.give_up(req);
         }
         if let Some(push) = mh.push {
             push.release(req);
@@ -117,6 +117,11 @@ impl ObjectHandlers for Handlers {
 
 fn mh(req: &mut Request, multi: Instance<CurlMultiHandle>) -> Result<&mut Mh, Thrown> {
     multi.payload_mut(req)
+}
+
+/// The `CurlHandle`s added, as views of the owners `easyh` holds.
+fn handles(mh: &Mh) -> Vec<PhpObject> {
+    mh.easy.iter().map(|handle| **handle).collect()
 }
 
 /// The library's `CURLM *` of an argument.
@@ -180,11 +185,16 @@ fn curl_multi_add_handle(
     let multi = multi_of(req, multi_handle)?;
     let easy = easy_of(req, object)?;
     let code = multi.add(&easy);
-    let mh = mh(req, multi_handle)?;
-    mh.err = code;
+    mh(req, multi_handle)?.err = code;
     if code == 0 {
-        mh.easy.push(object);
-        req.addref(&object.as_value());
+        let held = Owner::take(req, object);
+        match mh(req, multi_handle) {
+            Ok(mh) => mh.easy.push(held),
+            Err(thrown) => {
+                held.give_up(req);
+                return Err(thrown);
+            }
+        }
     }
     Ok(code)
 }
@@ -220,7 +230,7 @@ fn curl_multi_remove_handle(
             .position(|held| held.index() == object.index())
     {
         let held = mh.easy.remove(at);
-        req.release(held.as_value());
+        held.give_up(req);
     }
     Ok(code)
 }
@@ -241,7 +251,7 @@ fn curl_multi_get_handles(
     req: &mut Request,
     multi_handle: Instance<CurlMultiHandle>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let handles = mh(req, multi_handle)?.easy.clone();
+    let handles = handles(mh(req, multi_handle)?);
     let mut array = PhpArray::new(req)?;
     for handle in handles {
         array.append(req, Owner::take(req, handle.as_value()))?;
@@ -310,7 +320,7 @@ fn curl_multi_exec(
     multi_handle: Instance<CurlMultiHandle>,
     still_running: Ref<Untyped<Value>>,
 ) -> Result<i64, Thrown> {
-    let handles = mh(req, multi_handle)?.easy.clone();
+    let handles = handles(mh(req, multi_handle)?);
     let mut held: Vec<Easy> = Vec::with_capacity(handles.len());
     for handle in &handles {
         verify_handlers(req, *handle, true);
@@ -420,7 +430,7 @@ type Union2 = php_ext::abi::OrFalse<Owner<PhpArray>>;
 
 /// `_php_curl_multi_find_easy_handle`.
 fn find(req: &mut Request, multi: PhpObject, easy: EasyId) -> Option<PhpObject> {
-    let handles = multi.native::<Mh>(req)?.easy.clone();
+    let handles = handles(multi.native::<Mh>(req)?);
     handles.into_iter().find(|handle| {
         handle
             .native::<Curl>(req)
@@ -450,11 +460,11 @@ fn curl_multi_close(
     let multi = multi_of(req, multi_handle)?;
     let handles = std::mem::take(&mut mh(req, multi_handle)?.easy);
     for handle in handles {
-        verify_handlers(req, handle, true);
-        if let Ok(easy) = easy_of(req, handle) {
+        verify_handlers(req, *handle, true);
+        if let Ok(easy) = easy_of(req, *handle) {
             multi.remove(&easy);
         }
-        req.release(handle.as_value());
+        handle.give_up(req);
     }
     Ok(())
 }
@@ -596,9 +606,8 @@ pub(crate) fn push(
     let Ok(pushed) = made(cx.req, b"CurlHandle") else {
         return false;
     };
-    let pushed = pushed.hand_on_unmigrated();
-    let Some(easy) = made_easy(pushed) else {
-        cx.req.release(pushed.as_value());
+    let Some(easy) = made_easy(*pushed) else {
+        pushed.give_up(cx.req);
         return false;
     };
     let copied = copy_handlers(cx.req, parent);
@@ -607,7 +616,7 @@ pub(crate) fn push(
         *curl = copied;
     }
     let Ok(list) = crate::info::list(cx.req, headers) else {
-        cx.req.release(pushed.as_value());
+        pushed.give_up(cx.req);
         return false;
     };
     let returned = cx.call(&callable, &[parent.as_value(), pushed.as_value(), *list]);
@@ -621,7 +630,7 @@ pub(crate) fn push(
         None => false,
     };
     if !accepted {
-        cx.req.release(pushed.as_value());
+        pushed.give_up(cx.req);
         return false;
     }
     let adopted = pushed
@@ -631,8 +640,9 @@ pub(crate) fn push(
     if let Some(curl) = pushed.native_mut::<Curl>(cx.req) {
         curl.easy = adopted;
     }
-    if let Some(mh) = multi.native_mut::<Mh>(cx.req) {
-        mh.easy.push(pushed);
+    match multi.native_mut::<Mh>(cx.req) {
+        Some(mh) => mh.easy.push(pushed),
+        None => pushed.give_up(cx.req),
     }
     true
 }

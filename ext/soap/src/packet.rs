@@ -25,12 +25,12 @@ fn bad(
     doc: Option<Node>,
     code: &[u8],
     text: &[u8],
-) -> Res<(bool, Value)> {
+) -> Res<(bool, Owner<Value>)> {
     if let Some(d) = doc {
         d.free_document();
     }
     add_soap_fault(req, this, code, text, None, None, b"en")?;
-    Ok((false, Value::null()))
+    Ok((false, Owner::take(req, Value::null())))
 }
 
 /// The next element from `trav` on.
@@ -66,7 +66,7 @@ pub(crate) fn parse_packet_soap(
     fn_: Option<&Function>,
     sdl: Option<&Sdl>,
     soap_headers: Option<&Ref<Untyped<Value>>>,
-) -> Res<(bool, Value)> {
+) -> Res<(bool, Owner<Value>)> {
     let mut cx = Cx::default();
     encode_reset_ns(req, &mut cx);
     let r = parse(req, &mut cx, this, buffer, fn_, sdl, soap_headers);
@@ -83,9 +83,9 @@ fn parse(
     fn_: Option<&Function>,
     sdl: Option<&Sdl>,
     soap_headers: Option<&Ref<Untyped<Value>>>,
-) -> Res<(bool, Value)> {
+) -> Res<(bool, Owner<Value>)> {
     if buffer.is_empty() {
-        return Ok((true, Value::null()));
+        return Ok((true, Owner::take(req, Value::null())));
     }
     let Some(response) = crate::xml::parse_memory(req, buffer)? else {
         return bad(
@@ -279,7 +279,7 @@ fn parse(
         let r = read_fault(req, cx, this, fault, soap_version);
         response.free_document();
         r?;
-        return Ok((false, Value::null()));
+        return Ok((false, Owner::take(req, Value::null())));
     }
     let r = read_body(req, cx, body, head, fn_, sdl, soap_headers);
     response.free_document();
@@ -368,7 +368,7 @@ fn read_body(
     fn_: Option<&Function>,
     sdl: Option<&Sdl>,
     soap_headers: Option<&Ref<Untyped<Value>>>,
-) -> Res<Value> {
+) -> Res<Owner<Value>> {
     let mut return_value = PhpArray::new(req)?;
     let mut param_count = 0usize;
     let mut hdrs = None;
@@ -482,54 +482,66 @@ fn read_body(
     }
     let result = if param_count == 0 {
         return_value.give_up(req);
-        Value::null()
+        Owner::take(req, Value::null())
     } else if param_count == 1 {
+        // `ZVAL_COPY(return_value, tmp)` of the one element, then the
+        // array destroyed.
         let first = walk::rows(req, *return_value)
             .next()
-            .map(|(_, v)| v.deref());
-        let out = match first {
-            Some(v) => {
-                req.addref(&v);
-                v
-            }
-            None => Value::null(),
-        };
+            .map_or_else(Value::null, |(_, v)| v.deref());
+        let out = Owner::take(req, first);
         return_value.give_up(req);
         out
     } else {
-        return_value.into_value().hand_on_unmigrated()
+        return_value.into_value()
     };
     if let (Some(out), Some(head)) = (soap_headers, head) {
-        let mut headers = PhpArray::new(req)?;
-        let mut trav = head.children();
-        while let Some(t) = trav {
-            if t.kind() == Kind::Element {
-                let mut enc = None;
-                if let Some(hdrs) = hdrs {
-                    let mut key = Vec::new();
-                    if let Some(ns) = t.ns() {
-                        key.extend_from_slice(&crate::xml::href(ns));
-                        key.push(b':');
+        let read = (|| -> Res<()> {
+            let mut headers = PhpArray::new(req)?;
+            let mut trav = head.children();
+            while let Some(t) = trav {
+                if t.kind() == Kind::Element {
+                    let mut enc = None;
+                    if let Some(hdrs) = hdrs {
+                        let mut key = Vec::new();
+                        if let Some(ns) = t.ns() {
+                            key.extend_from_slice(&crate::xml::href(ns));
+                            key.push(b':');
+                        }
+                        key.extend_from_slice(&t.name());
+                        if let Some(h) = hdrs.get_str(&key) {
+                            enc = h.encode;
+                        }
                     }
-                    key.extend_from_slice(&t.name());
-                    if let Some(h) = hdrs.get_str(&key) {
-                        enc = h.encode;
+                    let val = match decode(req, cx, enc, t) {
+                        Ok(val) => val,
+                        Err(err) => {
+                            headers.give_up(req);
+                            return Err(err);
+                        }
+                    };
+                    let key = match PhpString::new(req, &t.name()) {
+                        Ok(key) => PhpKey::from_string(req, key),
+                        Err(thrown) => {
+                            val.give_up(req);
+                            headers.give_up(req);
+                            return Err(thrown.into());
+                        }
+                    };
+                    if let Err(thrown) = headers.set(req, key, val) {
+                        headers.give_up(req);
+                        return Err(thrown.into());
                     }
                 }
-                let val = match decode(req, cx, enc, t) {
-                    Ok(val) => val,
-                    Err(err) => {
-                        headers.give_up(req);
-                        return Err(err);
-                    }
-                };
-                let key = PhpString::new(req, &t.name())?;
-                let key = PhpKey::from_string(req, key);
-                headers.set(req, key, val)?;
+                trav = t.next();
             }
-            trav = t.next();
+            out.set(req, Untyped(headers.into_value()))?;
+            Ok(())
+        })();
+        if let Err(err) = read {
+            result.give_up(req);
+            return Err(err);
         }
-        out.set(req, Untyped(headers.into_value()))?;
     }
     Ok(result)
 }

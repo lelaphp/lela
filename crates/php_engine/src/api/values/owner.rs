@@ -287,19 +287,6 @@ impl<T: View> Owner<T> {
         self.view.clone()
     }
 
-    /// The view, the owner handed with it to a sink that still takes a
-    /// view: the debt of the migration of #1980, for a sink not yet
-    /// taking owners (`PhpArray::set` and its siblings, the property
-    /// sinks, a `Key`, a native's own state). #1996, #1997, #1999 and
-    /// #2104 delete its uses as their sinks take
-    /// owners, and #1999 makes it `pub(crate)` again. The worst it does misused is a leak, which the
-    /// request's leak sensor reports, never a second release: it hands on
-    /// the one owner there is.
-    #[must_use = "the view carries the owner to the sink it is handed to"]
-    pub fn hand_on_unmigrated(self) -> T {
-        self.hand_on()
-    }
-
     /// The owner of the value as a [`Value`], the same count: what a
     /// native returns as `mixed` or hands to a sink that takes a value.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
@@ -330,6 +317,19 @@ impl<T: View> Owner<T> {
 }
 
 impl<T: ResourceView> Owner<T> {
+    /// The owner handed to the request's resource list,
+    /// `EG(regular_list)`, as php leaves a resource it registered and
+    /// kept no value of: the list's close at the request's end,
+    /// `zend_close_rsrc_list`, closes it after every `RSHUTDOWN`, its
+    /// destructor served then, and the list's destruction frees it.
+    /// What `FG(default_context)` is left to. A resource only: a value
+    /// of any other kind has no list to end in.
+    // Taking the owner is the point: the list holds it from here.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn leave_to_list(mut self) {
+        self.consume();
+    }
+
     /// The owner of the typed view as the [`Resource`] it is, the same
     /// count: what a native returns a stream it made as.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]

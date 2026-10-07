@@ -1116,10 +1116,14 @@ impl ConnData {
             }
         }
         match self.state {
+            // `mysqlnd_send_close`: the stream closed whatever the quit
+            // came to, a link the server dropped among them.
             ConnState::Ready => {
                 if self.net.open() {
-                    ok = self.send_command(req, Com::Quit, &[], true)?;
+                    let sent = self.send_command(req, Com::Quit, &[], true);
                     self.net.close(req);
+                    self.state = ConnState::QuitSent;
+                    ok = sent?;
                 }
                 self.state = ConnState::QuitSent;
             }

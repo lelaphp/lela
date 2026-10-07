@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::api::raising::{Level, Thrown, docref, warning};
-use crate::api::request::{FreeOwned, Request, UrlStat, WrapperOp};
+use crate::api::request::{OwnedStream, Request, UrlStat, WrapperOp};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
 use crate::streams::{Located, StatBuf, stat_buf, strerror};

@@ -324,15 +324,17 @@ fn answer_sign(req: &mut Request, answer: Owner<Value>) -> Result<Ordering, Thro
 /// the argument slot is read by nobody.
 struct SortTarget {
     array: PhpArray,
-    copied: bool,
+    /// The copy's one owner, where the argument came by value: a copy
+    /// nobody else holds, which the sort writes in place.
+    copy: Option<Owner<PhpArray>>,
 }
 
 impl SortTarget {
     /// The copy given up; the caller's array left where the caller
     /// reads it.
     fn finish(self, req: &mut Request) {
-        if self.copied {
-            req.release(self.array.to_value());
+        if let Some(copy) = self.copy {
+            copy.give_up(req);
         }
     }
 }
@@ -345,18 +347,15 @@ impl SortTarget {
 /// argument but a temporary with one owner.
 fn array_by_reference(req: &mut Request, given: &Ref<PhpArray>) -> Result<SortTarget, Thrown> {
     if let Some(array) = given.separated(req)? {
-        return Ok(SortTarget {
-            array,
-            copied: false,
-        });
+        return Ok(SortTarget { array, copy: None });
     }
-    let array = match given.get() {
-        Some(array) => array.copy(req)?.hand_on_unmigrated(),
-        None => PhpArray::new(req)?.hand_on_unmigrated(),
+    let copy = match given.get() {
+        Some(array) => array.copy(req)?,
+        None => PhpArray::new(req)?,
     };
     Ok(SortTarget {
-        array,
-        copied: true,
+        array: *copy,
+        copy: Some(copy),
     })
 }
 

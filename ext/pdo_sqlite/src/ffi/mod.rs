@@ -40,7 +40,7 @@ use libsqlite3_sys as sys;
 use php_ext::abi::Callable;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::Value;
+use php_ext::values::{Owner, Value};
 
 pub use sys::{
     SQLITE_ATTACH, SQLITE_BLOB, SQLITE_BUSY, SQLITE_CONSTRAINT, SQLITE_DENY, SQLITE_DETERMINISTIC,
@@ -108,17 +108,17 @@ impl Function {
 }
 
 /// One group's aggregate state, which the library keeps between the
-/// step calls and hands the final: the value the callbacks are handed,
-/// one owner of it, and the rows counted so far.
+/// step calls and hands the final: the value the callbacks are handed
+/// and the rows counted so far.
 pub struct Aggregate {
-    pub value: Value,
+    pub value: Owner<Value>,
     pub row: i64,
 }
 
-/// An aggregate's state given up without its final served.
+/// An aggregate's state given up, after its final or without it.
 pub fn drop_aggregate(req: &mut Request, state: Option<Box<Aggregate>>) {
     if let Some(state) = state {
-        req.release(state.value);
+        state.value.give_up(req);
     }
 }
 

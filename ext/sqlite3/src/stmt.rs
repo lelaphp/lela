@@ -105,13 +105,13 @@ enum Key {
     Number(i64),
 }
 
-/// `php_sqlite3_bound_param`: one owner of the value, a reference where
-/// `bindParam` bound one.
+/// `php_sqlite3_bound_param`: the value, a reference where `bindParam`
+/// bound one.
 pub(crate) struct Bound {
     key: Key,
     number: i64,
     kind: Kind,
-    value: Value,
+    value: Owner<Value>,
 }
 
 /// `SQLITE3_CHECK_INITIALIZED` and, where `need` asks,
@@ -208,12 +208,10 @@ pub(crate) fn prepare_on(
 
 /// What `php_sqlite3_bind_params` writes into the parameter in place:
 /// through the reference where it holds one, as `convert_to_*` writes.
-fn replace(req: &mut Request, value: &mut Value, new: Owner<Value>) {
-    if let Some(cell) = value.as_php_ref().copied() {
-        cell.convert(req, new);
-    } else {
-        let old = std::mem::replace(value, new.hand_on_unmigrated());
-        req.release(old);
+fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
+    match value.as_php_ref().copied() {
+        Some(cell) => cell.convert(req, new),
+        None => std::mem::replace(value, new).give_up(req),
     }
 }
 
@@ -292,7 +290,7 @@ fn bind_all(req: &mut Request, object: PhpObject, taken: &Taken) -> Result<bool,
 
 fn release_params(req: &mut Request, params: Vec<Bound>) {
     for param in params {
-        req.release(param.value);
+        param.value.give_up(req);
     }
 }
 
@@ -322,9 +320,9 @@ fn bind(
     if number < 1 {
         return Ok(false);
     }
-    req.addref(&value);
+    let value = Owner::take(req, value);
     let Some(s) = object.native_mut::<Box<StmtObj>>(req) else {
-        req.release(value);
+        value.give_up(req);
         return Ok(false);
     };
     let mut gone = Vec::new();
@@ -342,7 +340,7 @@ fn bind(
         None => s.params.push(bound),
     }
     for value in gone {
-        req.release(value);
+        value.give_up(req);
     }
     Ok(true)
 }
@@ -616,8 +614,8 @@ impl SQLite3Stmt {
         if matches!(step, Step::Row | Step::Done) {
             give_back(req, taken);
             let result = instantiate(req, b"SQLite3Result")?;
-            req.addref(&object.as_value());
-            result::attach(req, *result, object, Origin::Execute);
+            let held = Owner::take(req, object);
+            result::attach(req, *result, held, Origin::Execute);
             if let Some(thrown) = thrown {
                 result.give_up(req);
                 return Err(thrown);

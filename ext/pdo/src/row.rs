@@ -15,10 +15,11 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::stmt;
 
-/// `pdo_row_t`: the statement read, one owner.
+/// `pdo_row_t`: the statement read, its owner boxed inside the `sizeof`
+/// php allocates.
 #[derive(Default)]
 pub(crate) struct Row {
-    stmt: Option<PhpObject>,
+    stmt: Option<Box<Owner<PhpObject>>>,
 }
 
 /// `@not-serializable final class PDORow`, as `pdo_stmt.stub.php`
@@ -81,10 +82,9 @@ pub(crate) static HANDLERS: Handlers = Handlers;
 /// Cannot write to PDORow property
 /// You may not create a PDORow manually
 /// ```
-pub(super) fn lazy(req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+pub(super) fn lazy(req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
     if let Some(row) = stmt::read(req, object, |s| s.lazy).flatten() {
-        req.addref(&row.as_value());
-        return Ok(row.as_value());
+        return Ok(Owner::take(req, row.as_value()));
     }
     let Some(class) = lookup_class(req, b"PDORow")? else {
         return Err(php_ext::raising::fatal(
@@ -92,23 +92,29 @@ pub(super) fn lazy(req: &mut Request, object: PhpObject) -> Result<Value, Thrown
             "InternalError: PDORow is not declared",
         ));
     };
-    let row = new_object(req, class)?.hand_on_unmigrated();
-    req.addref(&object.as_value());
-    if let Some(r) = row.native_mut::<Row>(req) {
-        r.stmt = Some(object);
+    let row = new_object(req, class)?;
+    let held = Owner::take(req, object);
+    match row.native_mut::<Row>(req) {
+        Some(r) => r.stmt = Some(Box::new(held)),
+        None => held.give_up(req),
     }
-    stmt::write(req, object, |s| s.lazy = Some(row));
-    Ok(row.as_value())
+    stmt::write(req, object, |s| s.lazy = Some(*row));
+    Ok(row.into_value())
 }
 
 /// The statement a row reads.
 fn statement(req: &Request, row: PhpObject) -> Option<PhpObject> {
-    row.native::<Row>(req).and_then(|r| r.stmt)
+    row.native::<Row>(req)
+        .and_then(|r| r.stmt.as_deref().map(|held| **held))
 }
 
 /// `row_read_column_number`: the value of column `column` of the
 /// current row, `None` past the columns.
-fn by_number(req: &mut Request, stmt: PhpObject, column: i64) -> Result<Option<Value>, Thrown> {
+fn by_number(
+    req: &mut Request,
+    stmt: PhpObject,
+    column: i64,
+) -> Result<Option<Owner<Value>>, Thrown> {
     let count = stmt::read(req, stmt, |s| s.column_count).unwrap_or(0);
     if usize::try_from(column).is_ok_and(|c| c < count) {
         return crate::fetch::value(req, stmt, column, None).map(Some);
@@ -117,7 +123,11 @@ fn by_number(req: &mut Request, stmt: PhpObject, column: i64) -> Result<Option<V
 }
 
 /// `row_read_column_name`: the value of the first column so named.
-fn by_name(req: &mut Request, stmt: PhpObject, name: &[u8]) -> Result<Option<Value>, Thrown> {
+fn by_name(
+    req: &mut Request,
+    stmt: PhpObject,
+    name: &[u8],
+) -> Result<Option<Owner<Value>>, Thrown> {
     let at = stmt::read(req, stmt, |s| {
         s.columns
             .as_ref()
@@ -132,7 +142,7 @@ fn by_name(req: &mut Request, stmt: PhpObject, name: &[u8]) -> Result<Option<Val
 
 /// A name read as a column number where it is an integer string, as
 /// `is_numeric_str_function` reads it, and as a column name otherwise.
-fn by_key(req: &mut Request, stmt: PhpObject, name: &[u8]) -> Result<Option<Value>, Thrown> {
+fn by_key(req: &mut Request, stmt: PhpObject, name: &[u8]) -> Result<Option<Owner<Value>>, Thrown> {
     match numeric_string(name).and_then(|v| v.as_int()) {
         Some(n) => by_number(req, stmt, n),
         None => by_name(req, stmt, name),
@@ -151,8 +161,8 @@ impl ObjectHandlers for Handlers {
         let Some(held) = object.native_mut::<Row>(req).and_then(|r| r.stmt.take()) else {
             return;
         };
-        stmt::write(req, held, |s| s.lazy = None);
-        req.release(held.as_value());
+        stmt::write(req, **held, |s| s.lazy = None);
+        (*held).give_up(req);
     }
 
     /// `row_prop_read`: `queryString` off the statement, a column by
@@ -170,8 +180,10 @@ impl ObjectHandlers for Handlers {
         if name == b"queryString" {
             return Std.read_property(req, stmt, name, read);
         }
-        let column = by_key(req, stmt, name)?.unwrap_or_default();
-        Ok(crate::owned(req, column))
+        match by_key(req, stmt, name)? {
+            Some(column) => Ok(column),
+            None => Ok(Owner::take(req, Value::null())),
+        }
     }
 
     /// `row_dim_read`: a name is the property of that name, read
@@ -190,8 +202,10 @@ impl ObjectHandlers for Handlers {
             return Ok(Owner::take(req, Value::null()));
         };
         if let ValueRef::Int(n) = offset.deref().as_ref() {
-            let column = by_number(req, stmt, n)?.unwrap_or_default();
-            return Ok(crate::owned(req, column));
+            return match by_number(req, stmt, n)? {
+                Some(column) => Ok(column),
+                None => Ok(Owner::take(req, Value::null())),
+            };
         }
         let name = to_string(req, &offset.deref())?;
         let how = if read == DimensionRead::Silent {
@@ -263,7 +277,7 @@ impl ObjectHandlers for Handlers {
             PropertyTest::Isset => !crate::is_null(&value),
             PropertyTest::NotEmpty | PropertyTest::Exists => truthy(req, &value),
         };
-        req.release(value);
+        value.give_up(req);
         Ok(answer)
     }
 
@@ -287,7 +301,7 @@ impl ObjectHandlers for Handlers {
                 return Ok(false);
             };
             let answer = truthy(req, &value);
-            req.release(value);
+            value.give_up(req);
             return Ok(answer);
         }
         let name = to_string(req, &offset.deref())?;
@@ -385,11 +399,10 @@ fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut Owner<PhpArray>) -> 
         let key = match PhpString::new(req, name) {
             Ok(key) => key.into_key(),
             Err(thrown) => {
-                req.release(value);
+                value.give_up(req);
                 return Err(thrown);
             }
         };
-        let value = crate::owned(req, value);
         out.set(req, key, value)?;
     }
     Ok(())

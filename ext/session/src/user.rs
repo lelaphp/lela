@@ -15,19 +15,18 @@ use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::{Module, State, Status, absorb, answer, files, pending, session, string_value};
 
-/// `PS(mod_user_names)`: the callables, each a value the request holds
-/// one owner of.
+/// `PS(mod_user_names)`: the callables, the request's owner of each.
 #[derive(Default)]
 pub(crate) struct Handlers {
-    pub(crate) open: Option<Value>,
-    pub(crate) close: Option<Value>,
-    pub(crate) read: Option<Value>,
-    pub(crate) write: Option<Value>,
-    pub(crate) destroy: Option<Value>,
-    pub(crate) gc: Option<Value>,
-    pub(crate) create_sid: Option<Value>,
-    pub(crate) validate_sid: Option<Value>,
-    pub(crate) update_timestamp: Option<Value>,
+    pub(crate) open: Option<Owner<Value>>,
+    pub(crate) close: Option<Owner<Value>>,
+    pub(crate) read: Option<Owner<Value>>,
+    pub(crate) write: Option<Owner<Value>>,
+    pub(crate) destroy: Option<Owner<Value>>,
+    pub(crate) gc: Option<Owner<Value>>,
+    pub(crate) create_sid: Option<Owner<Value>>,
+    pub(crate) validate_sid: Option<Owner<Value>>,
+    pub(crate) update_timestamp: Option<Owner<Value>>,
 }
 
 /// Which of the nine callables.
@@ -45,7 +44,7 @@ pub(crate) enum Slot {
 }
 
 impl Handlers {
-    pub(crate) const fn slot(&mut self, slot: Slot) -> &mut Option<Value> {
+    pub(crate) const fn slot(&mut self, slot: Slot) -> &mut Option<Owner<Value>> {
         match slot {
             Slot::Open => &mut self.open,
             Slot::Close => &mut self.close,
@@ -75,20 +74,17 @@ impl Handlers {
         .into_iter()
         .flatten()
         {
-            req.release(value);
+            value.give_up(req);
         }
     }
 }
 
-/// One callable stored, one owner of `value` taken, what stood there
-/// given up.
-pub(super) fn store(req: &mut Request, slot: Slot, value: Option<Value>) {
-    if let Some(value) = &value {
-        req.addref(value);
-    }
+/// One callable stored, its owner the request's, what stood there given
+/// up.
+pub(super) fn store(req: &mut Request, slot: Slot, value: Option<Owner<Value>>) {
     let old = std::mem::replace(req.state::<State>().handlers.slot(slot), value);
     if let Some(old) = old {
-        req.release(old);
+        old.give_up(req);
     }
 }
 
@@ -112,9 +108,9 @@ pub(super) fn store(req: &mut Request, slot: Slot, value: Option<Value>) {
 fn call_handler(
     req: &mut Request,
     slot: Slot,
-    arguments: &[Value],
+    arguments: Vec<Owner<Value>>,
 ) -> Result<Option<Owner<Value>>, Thrown> {
-    let callable = *req.state::<State>().handlers.slot(slot);
+    let callable = req.state::<State>().handlers.slot(slot).as_deref().copied();
     let done = if req.state::<State>().in_save_handler {
         req.state::<State>().in_save_handler = false;
         docref(
@@ -128,7 +124,8 @@ fn call_handler(
         && let Ok(callable) = callable_checked(req, &callable)
     {
         req.state::<State>().in_save_handler = true;
-        let answered = call(req, &callable, arguments);
+        let views: Vec<Value> = arguments.iter().map(|argument| **argument).collect();
+        let answered = call(req, &callable, &views);
         // `zend_bailout` leaves `ps_call_handler` before it clears
         // `PS(in_save_handler)`, so the next call is refused as a
         // recursive one; an `exit` unwinds as a throwable does, and the
@@ -142,7 +139,7 @@ fn call_handler(
         Ok(None)
     };
     for argument in arguments {
-        req.release(*argument);
+        argument.give_up(req);
     }
     done
 }
@@ -190,11 +187,15 @@ fn verify_bool(req: &mut Request, answer: Option<Owner<Value>>) -> bool {
 /// `PS_OPEN_FUNC(user)`: `open($path, $name)`, and the handler counted
 /// open whatever it answered.
 pub(super) fn open(req: &mut Request, path: &[u8], name: &[u8]) -> Result<bool, Thrown> {
-    let arguments = [
-        string_value(req, path)?.hand_on_unmigrated(),
-        string_value(req, name)?.hand_on_unmigrated(),
-    ];
-    let answered = call_handler(req, Slot::Open, &arguments);
+    let path = string_value(req, path)?;
+    let arguments = match string_value(req, name) {
+        Ok(name) => vec![path, name],
+        Err(thrown) => {
+            path.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let answered = call_handler(req, Slot::Open, arguments);
     req.state::<State>().user_open = true;
     let answered = answered?;
     Ok(verify_bool(req, answered))
@@ -205,7 +206,7 @@ pub(super) fn close(req: &mut Request) -> Result<(), Thrown> {
     if !req.state::<State>().user_open {
         return Ok(());
     }
-    let answered = call_handler(req, Slot::Close, &[]);
+    let answered = call_handler(req, Slot::Close, Vec::new());
     req.state::<State>().user_open = false;
     let answered = answered?;
     verify_bool(req, answered);
@@ -214,8 +215,8 @@ pub(super) fn close(req: &mut Request) -> Result<(), Thrown> {
 
 /// `PS_READ_FUNC(user)`: `read($id)`, whose string is the data.
 pub(super) fn read(req: &mut Request, id: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
-    let arguments = [string_value(req, id)?.hand_on_unmigrated()];
-    let Some(value) = call_handler(req, Slot::Read, &arguments)? else {
+    let arguments = vec![string_value(req, id)?];
+    let Some(value) = call_handler(req, Slot::Read, arguments)? else {
         return Ok(None);
     };
     let data = value.as_str_bytes().map(<[u8]>::to_vec);
@@ -224,11 +225,15 @@ pub(super) fn read(req: &mut Request, id: &[u8]) -> Result<Option<Vec<u8>>, Thro
 }
 
 fn two(req: &mut Request, slot: Slot, id: &[u8], val: &[u8]) -> Result<bool, Thrown> {
-    let arguments = [
-        string_value(req, id)?.hand_on_unmigrated(),
-        string_value(req, val)?.hand_on_unmigrated(),
-    ];
-    let answered = call_handler(req, slot, &arguments)?;
+    let id = string_value(req, id)?;
+    let arguments = match string_value(req, val) {
+        Ok(val) => vec![id, val],
+        Err(thrown) => {
+            id.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let answered = call_handler(req, slot, arguments)?;
     Ok(verify_bool(req, answered))
 }
 
@@ -250,15 +255,16 @@ pub(super) fn update_timestamp(req: &mut Request, id: &[u8], val: &[u8]) -> Resu
 
 /// `PS_DESTROY_FUNC(user)`: `destroy($id)`.
 pub(super) fn destroy(req: &mut Request, id: &[u8]) -> Result<bool, Thrown> {
-    let arguments = [string_value(req, id)?.hand_on_unmigrated()];
-    let answered = call_handler(req, Slot::Destroy, &arguments)?;
+    let arguments = vec![string_value(req, id)?];
+    let answered = call_handler(req, Slot::Destroy, arguments)?;
     Ok(verify_bool(req, answered))
 }
 
 /// `PS_GC_FUNC(user)`: `gc($max_lifetime)`, an int the count, `true`
 /// one, anything else `-1`.
 pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
-    let answered = call_handler(req, Slot::Gc, &[Value::int(maxlifetime)])?;
+    let arguments = vec![Owner::take(req, Value::int(maxlifetime))];
+    let answered = call_handler(req, Slot::Gc, arguments)?;
     let Some(value) = answered else {
         return Ok(-1);
     };
@@ -277,7 +283,7 @@ pub(super) fn create_sid(req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
     if req.state::<State>().handlers.create_sid.is_none() {
         return Ok(session::create_id(req));
     }
-    let Some(value) = call_handler(req, Slot::CreateSid, &[])? else {
+    let Some(value) = call_handler(req, Slot::CreateSid, Vec::new())? else {
         crate::throw_error(req, "No session id returned by function");
         return Ok(None);
     };
@@ -295,8 +301,8 @@ pub(super) fn validate_sid(req: &mut Request, id: &[u8]) -> Result<bool, Thrown>
     if req.state::<State>().handlers.validate_sid.is_none() {
         return Ok(true);
     }
-    let arguments = [string_value(req, id)?.hand_on_unmigrated()];
-    let answered = call_handler(req, Slot::ValidateSid, &arguments)?;
+    let arguments = vec![string_value(req, id)?];
+    let answered = call_handler(req, Slot::ValidateSid, arguments)?;
     Ok(verify_bool(req, answered))
 }
 
@@ -617,8 +623,15 @@ pub(super) fn method_of(
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
     let mut pair = PhpArray::new(req)?;
-    pair.append(req, Owner::take(req, object))?;
-    let name = string_value(req, name)?;
-    pair.append(req, name)?;
-    Ok(pair.into_value())
+    let built = pair
+        .append(req, Owner::take(req, object))
+        .and_then(|()| string_value(req, name))
+        .and_then(|name| pair.append(req, name));
+    match built {
+        Ok(()) => Ok(pair.into_value()),
+        Err(thrown) => {
+            pair.give_up(req);
+            Err(thrown)
+        }
+    }
 }

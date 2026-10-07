@@ -160,7 +160,7 @@ fn state_of(
 ) -> Result<(PhpRef, i64), Thrown> {
     if state.is_none() {
         let null = Owner::take(req, Value::null());
-        let context = PhpRef::new(req, null)?.into_value().hand_on_unmigrated();
+        let context = PhpRef::new(req, null)?.into_value();
         *state = Some(Box::new(Aggregate {
             value: context,
             row: 0,
@@ -206,13 +206,15 @@ fn finalize(
     mut state: Option<Box<Aggregate>>,
     invocation: &mut Invocation<'_>,
 ) -> Result<(), Thrown> {
-    let (context, row) = state_of(req, &mut state)?;
-    let returned = call(
-        req,
-        &handler.callable,
-        &[context.as_value(), Value::int(row)],
-    );
-    req.release(context.as_value());
+    let held = state_of(req, &mut state);
+    let returned = held.and_then(|(context, row)| {
+        call(
+            req,
+            &handler.callable,
+            &[context.as_value(), Value::int(row)],
+        )
+    });
+    crate::ffi::drop_aggregate(req, state);
     match returned {
         Ok(returned) => result(req, returned, invocation),
         Err(thrown) => {

@@ -239,7 +239,8 @@ fn current(req: &mut Request, array: ArrayOrObject) -> Result<Owner<Value>, Thro
 fn read_current(req: &mut Request, given: Value, name: &str) -> Result<Owner<Value>, Thrown> {
     let pointed = pointed(req, &given, name)?;
     let current = match &pointed {
-        Pointed::Array(array) | Pointed::Built(array) => array.cursor_current(),
+        Pointed::Array(array) => array.cursor_current(),
+        Pointed::Built(array) => array.cursor_current(),
         Pointed::Object(object) => object.pointer_row(req, None)?.map(|(_, value)| value),
     };
     let current = owned_current(req, current);
@@ -276,7 +277,8 @@ fn key(
 ) -> Result<Option<Union<Owner<PhpString>, i64>>, Thrown> {
     let pointed = pointed(req, &array.value(), "key")?;
     let key = match &pointed {
-        Pointed::Array(array) | Pointed::Built(array) => array.cursor_key(),
+        Pointed::Array(array) => array.cursor_key(),
+        Pointed::Built(array) => array.cursor_key(),
         Pointed::Object(object) => object.pointer_row(req, None)?.map(|(key, _)| key),
     };
     let key = key.map(|key| key_return(req, &key));
@@ -294,7 +296,7 @@ enum Pointed {
     /// it is read: the `(array)` cast's, where php reads the table
     /// `sxe_get_properties` keeps on the object, and a mover's copy of an
     /// array sent by value.
-    Built(PhpArray),
+    Built(Owner<PhpArray>),
     Object(PhpObject),
 }
 
@@ -302,7 +304,7 @@ impl Pointed {
     /// The read done: a table made for it given up, nothing else.
     fn read(self, req: &mut Request) {
         if let Pointed::Built(array) = self {
-            req.release(Value::array(array));
+            array.give_up(req);
         }
     }
 }
@@ -322,8 +324,7 @@ fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thro
             );
             if object.handlers(req).answers_properties() {
                 // The cast's table, the read's to give up.
-                return to_array(req, given)
-                    .map(|array| Pointed::Built(array.hand_on_unmigrated()));
+                return to_array(req, given).map(Pointed::Built);
             }
             Ok(Pointed::Object(*object))
         }
@@ -357,12 +358,13 @@ fn moved(
             // A value sent where a reference was asked for, past the
             // notice: php separates the argument slot, which nobody
             // reads after, so the move is over a copy.
-            _ => Pointed::Built(array.copy(req)?.hand_on_unmigrated()),
+            _ => Pointed::Built(array.copy(req)?),
         },
         _ => pointed(req, &target, move_name(how))?,
     };
     let mut array = match &pointed {
-        Pointed::Array(array) | Pointed::Built(array) => *array,
+        Pointed::Array(array) => *array,
+        Pointed::Built(array) => **array,
         Pointed::Object(object) => {
             if !object.pointer_move(req, how)? {
                 return Ok(Owner::take(req, Value::bool(false)));

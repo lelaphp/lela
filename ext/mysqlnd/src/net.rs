@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use php_ext::raising::Thrown;
 use php_ext::request::{
-    Persisted, Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _, Xport,
+    OwnedStream as _, Persisted, Request, SocketOptions, Stream, StreamCtx, StreamOption,
+    Streams as _, Xport,
 };
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 
 use crate::consts::{MAX_PACKET_SIZE, cr};
 use crate::error::{ErrorInfo, SERVER_GONE};
@@ -68,7 +69,7 @@ impl VioOptions {
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)] // php's flags, `vio->data->ssl` and the frame codec's two
 pub(crate) struct Net {
-    stream: Option<Stream>,
+    stream: Option<Owner<Stream>>,
     /// A persistent connection's socket while no request holds the
     /// connection: out of every request and of the engine's persistent
     /// list, the connection's alone, as php's mysqlnd owns its stream.
@@ -109,7 +110,7 @@ impl Net {
     /// The stream, for what reaches it directly: `LOCAL INFILE`'s and a
     /// connection's resource.
     pub(crate) fn stream(&self) -> Option<Stream> {
-        self.stream
+        self.stream.as_deref().copied()
     }
 
     /// `mysqlnd_pfc::reset`: both sequence numbers to zero, as every
@@ -178,10 +179,9 @@ impl Net {
                 return Ok(false);
             }
         };
-        let stream = stream.hand_on_unmigrated();
+        self.post_connect(req, *stream);
         self.stream = Some(stream);
         self.unix = unix;
-        self.post_connect(req, stream);
         Ok(true)
     }
 
@@ -195,15 +195,15 @@ impl Net {
         let (Some(kept), Some(key)) = (self.kept.take(), self.persistent_id.clone()) else {
             return Ok(());
         };
-        let stream = req.stream_lend(key, kept)?.hand_on_unmigrated();
+        let stream = req.stream_lend(key, kept)?;
+        self.post_connect(req, *stream);
         self.stream = Some(stream);
-        self.post_connect(req, stream);
         Ok(())
     }
 
     /// The stream of a persistent connection let go as the request gives
     /// the connection back, nothing of the request's left on it: its
-    /// socket kept by the connection ([`Stream::keep`]), out of the
+    /// socket kept by the connection ([`OwnedStream::keep`](php_ext::request::OwnedStream::keep)), out of the
     /// request and out of the engine's persistent list, so the one list
     /// the connection waits in is its owner's.
     pub(crate) fn give_back(&mut self, req: &mut Request) {
@@ -245,7 +245,7 @@ impl Net {
         count: usize,
         stats: &mut Stats,
     ) -> Option<Vec<u8>> {
-        let stream = self.stream?;
+        let stream = self.stream()?;
         let mut out = vec![0; count];
         let mut had = 0;
         while had < count {
@@ -263,7 +263,7 @@ impl Net {
 
     /// `mysqlnd_vio::network_write`: how many bytes the stream took.
     fn network_write(&mut self, req: &mut Request, bytes: &[u8]) -> usize {
-        match self.stream {
+        match self.stream() {
             Some(stream) => stream.write(req, bytes).unwrap_or(0),
             None => 0,
         }
@@ -454,7 +454,7 @@ impl Net {
     /// options set on the connection, TLS set up and its handshake made on
     /// the stream, the `php_stream_context` dropped again, the read timeout set anew.
     pub(crate) fn enable_ssl(&mut self, req: &mut Request) -> Result<bool, Thrown> {
-        let Some(stream) = self.stream else {
+        let Some(stream) = self.stream() else {
             return Ok(false);
         };
         let o = self.options.clone();

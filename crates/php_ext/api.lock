@@ -605,6 +605,9 @@ request::OplineView::opcode
 request::OplineView::out
 request::OptionAnswer
 request::OutputOp
+request::OwnedStream
+request::OwnedStream::free
+request::OwnedStream::keep
 request::PHP_VERSION
 request::Periodic
 request::Persisted
@@ -633,7 +636,6 @@ request::Request::addref
 request::Request::argument
 request::Request::argument_count
 request::Request::argv
-request::Request::assert_callback
 request::Request::autoload_functions
 request::Request::autoload_register
 request::Request::autoload_unregister
@@ -803,7 +805,6 @@ request::Request::scope
 request::Request::script_name
 request::Request::serialize_precision
 request::Request::serve_method
-request::Request::set_assert_callback
 request::Request::set_caller_var
 request::Request::set_ctype_locale
 request::Request::set_cwd
@@ -884,7 +885,6 @@ request::Stream::eof
 request::Stream::flock
 request::Stream::flush
 request::Stream::forbid_fclose
-request::Stream::free
 request::Stream::from_value
 request::Stream::get_line
 request::Stream::get_record
@@ -892,7 +892,6 @@ request::Stream::glob_count
 request::Stream::glob_path
 request::Stream::is_dir
 request::Stream::is_stdio
-request::Stream::keep
 request::Stream::meta_data
 request::Stream::no_fclose
 request::Stream::orig_path
@@ -1125,7 +1124,6 @@ values::Owner::cursor_next
 values::Owner::cursor_prev
 values::Owner::cursor_reset
 values::Owner::give_up
-values::Owner::hand_on_unmigrated
 values::Owner::into_instance
 values::Owner::into_key
 values::Owner::into_raw
@@ -1133,6 +1131,7 @@ values::Owner::into_resource
 values::Owner::into_static
 values::Owner::into_typed
 values::Owner::into_value
+values::Owner::leave_to_list
 values::Owner::replace
 values::Owner::separate
 values::Owner::set

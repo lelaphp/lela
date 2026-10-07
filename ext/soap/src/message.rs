@@ -320,8 +320,10 @@ pub(crate) struct HeaderCall<'a> {
     /// The function the block names, none for one `addSoapHeader()` added.
     pub(crate) function_name: Option<Vec<u8>>,
     pub(crate) must_understand: bool,
-    pub(crate) parameters: Vec<Value>,
-    pub(crate) retval: Value,
+    /// The decoded arguments, one owner each.
+    pub(crate) parameters: Vec<Owner<Value>>,
+    /// What the header's function answered, its one owner.
+    pub(crate) retval: Owner<Value>,
     pub(crate) hdr: Option<&'a Header>,
 }
 

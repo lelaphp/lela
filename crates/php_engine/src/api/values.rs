@@ -37,9 +37,12 @@
 //! call's return, a conversion, a copy). A native's return takes either:
 //! an owner is moved to the engine, and a view, an argument or an
 //! element of one as the native reads it, is the engine's to own, which
-//! takes its owner as php's `RETURN_COPY` does. The sinks move to owners
-//! one at a time (#1980): until a sink takes one, a native hands it the
-//! owner with [`Owner::hand_on_unmigrated`], the migration's debt.
+//! takes its owner as php's `RETURN_COPY` does. What a native keeps past
+//! a call, in its request state, an object's or a resource's payload or
+//! a stream's kind, it keeps as an owner, given up on that state's
+//! release path. A value's text read once is
+//! [`with_string`](crate::api::coerce::with_string), which gives up the
+//! string it converted.
 
 use std::any::Any;
 use std::cmp::Ordering;

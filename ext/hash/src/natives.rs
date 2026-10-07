@@ -13,7 +13,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Thrown, arg_type_error, arg_value_error, throw, throw_error, while_pending,
 };
-use php_ext::request::{Request, Stream, StreamCtx, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Stream, StreamCtx, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     Emalloc, FreshString, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
@@ -245,14 +245,9 @@ fn rendered(
 }
 
 /// `php_hash_alloc_context(ops)`, the state's allocation a one-shot
-/// hash holds while it runs; `stream`, opened before it, is given back
-/// where the memory limit refuses it.
-fn context(req: &mut Request, algo: &Algo, stream: Option<Stream>) -> Result<Emalloc, Thrown> {
-    Emalloc::new(req, algo.context).inspect_err(|_| {
-        if let Some(stream) = stream {
-            stream.free(req);
-        }
-    })
+/// hash holds while it runs.
+fn context(req: &mut Request, algo: &Algo) -> Result<Emalloc, Thrown> {
+    Emalloc::new(req, algo.context)
 }
 
 fn digest_value(
@@ -299,20 +294,16 @@ fn hmac(req: &mut Request, algo: &Algo, key: &[u8], data: &[u8]) -> Result<Vec<u
 /// `CHECK_NULL_PATH` naming `position`, then
 /// `php_stream_open_wrapper_ex(path, "rb", REPORT_ERRORS)`: `None` after
 /// the warning the open left.
-fn open(req: &mut Request, path: &[u8], position: u32) -> Result<Option<Stream>, Thrown> {
+fn open(req: &mut Request, path: &[u8], position: u32) -> Result<Option<Owner<Stream>>, Thrown> {
     if path.contains(&0) {
         return Err(arg_value_error(req, position, "not contain any null bytes"));
     }
-    // The stream is the native's own while it runs: its helpers lend it
-    // and the one that ends with it frees it.
-    Ok(req
-        .open_stream(path, b"rb", false)?
-        .map(Owner::hand_on_unmigrated))
+    req.open_stream(path, b"rb", false)
 }
 
 /// The loop of 1024-byte `php_stream_read`s into `state`, and the
 /// close: `false` for the read that failed, php's `n < 0`.
-fn pump(req: &mut Request, stream: Stream, state: &mut dyn State) -> bool {
+fn pump(req: &mut Request, stream: Owner<Stream>, state: &mut dyn State) -> bool {
     // php's loop reads into one `char buf[1024]` on its stack.
     let mut buf = [0u8; 1024];
     let read = loop {
@@ -369,7 +360,7 @@ fn hash(
     #[php(default = [])] options: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
     let algo = fetch(req, algo.as_bytes(), false)?;
-    let held = context(req, algo, None)?;
+    let held = context(req, algo)?;
     let mut state = match (algo.init)(req, Options(Some(options))) {
         Ok(state) => state,
         Err(thrown) => {
@@ -439,7 +430,13 @@ fn hash_file(
     let Some(stream) = open(req, filename.as_bytes(), 1)? else {
         return Ok(OrFalse::False);
     };
-    let held = context(req, algo, Some(stream))?;
+    let held = match context(req, algo) {
+        Ok(held) => held,
+        Err(thrown) => {
+            stream.free(req);
+            return Err(thrown);
+        }
+    };
     let mut state = match (algo.init)(req, Options(Some(options))) {
         Ok(state) => state,
         Err(thrown) => {
@@ -492,29 +489,23 @@ fn hash_hmac(
     #[php(default = false)] binary: bool,
 ) -> Result<Owner<PhpString>, Thrown> {
     let algo = fetch(req, algo.as_bytes(), true)?;
-    let (held, raw) = hmac_held(req, algo, None)?;
+    let (held, raw) = hmac_held(req, algo)?;
     let k = hmac_key(req, algo, key.as_bytes())?;
     let digest = hmac(req, algo, &k, data.as_bytes())?;
     rendered(req, Some(raw), held, &digest, binary)
 }
 
 /// `php_hash_do_hash_hmac`'s allocations before the key is prepared: the
-/// state's allocation, `K = emalloc(ops->block_size)` and the digest's string;
-/// `stream`, opened before them, is given back where the memory limit
-/// refuses one.
+/// state's allocation, `K = emalloc(ops->block_size)` and the digest's string.
 fn hmac_held(
     req: &mut Request,
     algo: &Algo,
-    stream: Option<Stream>,
 ) -> Result<([Option<Emalloc>; 2], FreshString), Thrown> {
-    let held = context(req, algo, stream)?;
+    let held = context(req, algo)?;
     let k = match Emalloc::new(req, algo.block) {
         Ok(k) => k,
         Err(thrown) => {
             held.free(req);
-            if let Some(stream) = stream {
-                stream.free(req);
-            }
             return Err(thrown);
         }
     };
@@ -523,9 +514,6 @@ fn hmac_held(
         Err(thrown) => {
             held.free(req);
             k.free(req);
-            if let Some(stream) = stream {
-                stream.free(req);
-            }
             Err(thrown)
         }
     }
@@ -587,9 +575,26 @@ fn hash_hmac_file(
     let Some(stream) = open(req, filename.as_bytes(), 2)? else {
         return Ok(OrFalse::False);
     };
-    let (held, raw) = hmac_held(req, algo, Some(stream))?;
-    let k = hmac_key(req, algo, key.as_bytes())?;
-    let mut state = (algo.init)(req, Options::default())?;
+    let (held, raw) = match hmac_held(req, algo) {
+        Ok(made) => made,
+        Err(thrown) => {
+            stream.free(req);
+            return Err(thrown);
+        }
+    };
+    let prepared = hmac_key(req, algo, key.as_bytes())
+        .and_then(|k| Ok((algo.init)(req, Options::default())?).map(|state| (k, state)));
+    let (k, mut state) = match prepared {
+        Ok(prepared) => prepared,
+        Err(thrown) => {
+            stream.free(req);
+            for held in held.into_iter().flatten() {
+                held.free(req);
+            }
+            raw.free(req);
+            return Err(thrown);
+        }
+    };
     state.update(&k);
     if !pump(req, stream, state.as_mut()) {
         for held in held.into_iter().flatten() {
@@ -1008,7 +1013,7 @@ fn hash_file_into(
         Some(ctx) => req.with_stream_ctx(Some(ctx), |req| req.open_stream(filename, b"rb", false)),
         None => req.open_stream(filename, b"rb", false),
     };
-    let Some(stream) = opened?.map(Owner::hand_on_unmigrated) else {
+    let Some(stream) = opened? else {
         return Ok(false);
     };
     let Some(mut running) = take(req, object) else {

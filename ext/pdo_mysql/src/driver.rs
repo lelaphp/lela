@@ -11,7 +11,7 @@
 //! does.
 
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
     BindType, Connection, Connector, Failure, OnError, Placeholders, Prepared, Scanner, Source,
@@ -597,25 +597,25 @@ impl Connection for Db {
     }
 
     /// `pdo_mysql_get_attribute`.
-    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Value>, Failure> {
+    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Owner<Value>>, Failure> {
         let h = self.h(req)?;
-        let string = |req: &mut Request, bytes: &[u8]| -> Result<Value, Failure> {
-            Ok(Value::string(
-                PhpString::new(req, bytes)?.hand_on_unmigrated(),
-            ))
+        let string = |req: &mut Request, bytes: &[u8]| -> Result<Option<Owner<Value>>, Failure> {
+            Ok(Some(PhpString::new(req, bytes)?.into_value()))
         };
-        Ok(Some(match attr {
-            attr::CLIENT_VERSION => string(req, php_ext_mysqlnd::client::CLIENT_INFO.as_bytes())?,
+        let scalar = match attr {
+            attr::CLIENT_VERSION => {
+                return string(req, php_ext_mysqlnd::client::CLIENT_INFO.as_bytes());
+            }
             attr::SERVER_VERSION => {
                 let info = h.server.status(req).server_info.unwrap_or_default();
-                string(req, &info)?
+                return string(req, &info);
             }
             attr::CONNECTION_STATUS => {
                 let info = h.server.status(req).host_info.unwrap_or_default();
-                string(req, &info)?
+                return string(req, &info);
             }
             attr::SERVER_INFO => match h.server.stat(req)? {
-                Some(text) => string(req, &text)?,
+                Some(text) => return string(req, &text),
                 None => return Err(error_of(req, h.server, None)),
             },
             attr::AUTOCOMMIT => Value::bool(h.auto_commit),
@@ -628,12 +628,13 @@ impl Connection for Db {
             attr::EMULATE_PREPARES => Value::bool(h.emulate_prepare),
             Mysql::ATTR_LOCAL_INFILE => Value::bool(h.local_infile),
             Mysql::ATTR_LOCAL_INFILE_DIRECTORY => match h.server.local_infile_directory(req) {
-                Some(dir) => string(req, &dir)?,
+                Some(dir) => return string(req, &dir),
                 None => Value::null(),
             },
             attr::FETCH_TABLE_NAMES => Value::bool(h.fetch_table_names),
             _ => return Ok(None),
-        }))
+        };
+        Ok(Some(Owner::take(req, scalar)))
     }
 
     /// `pdo_mysql_last_insert_id`.

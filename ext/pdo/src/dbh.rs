@@ -128,9 +128,9 @@ pub(crate) struct DbhState {
     /// every `PDO` asking its key shares in place of its own, as
     /// `pdo_obj->inner = pdbh` shares it.
     shares: Option<usize>,
-    /// `dbh->query_stmt`: the statement a failed `query()` left, one
-    /// owner, whose error state `errorCode()` and `errorInfo()` read.
-    query_stmt: Option<PhpObject>,
+    /// `dbh->query_stmt`: the statement a failed `query()` left, whose
+    /// error state `errorCode()` and `errorInfo()` read.
+    query_stmt: Option<Owner<PhpObject>>,
     /// `dbh->alloc_own_columns`.
     pub(crate) describes_at_execute: bool,
     /// `dbh->data_source`, `username` and `password`, the copies the
@@ -196,7 +196,7 @@ pub(crate) struct Persistent {
 /// `query()` left.
 fn persistent_shutdown(req: &mut Request, dbh: &mut DbhState) {
     if let Some(stmt) = dbh.query_stmt.take() {
-        req.release(stmt.as_value());
+        stmt.give_up(req);
     }
     if let Some(args) = dbh.stmt_args.take() {
         req.release(Value::array(args));
@@ -308,7 +308,7 @@ impl ObjectHandlers for Handlers {
                 d.query_stmt.take()
             });
             if let Some(stmt) = held.flatten() {
-                req.release(stmt.as_value());
+                stmt.give_up(req);
             }
             return;
         }
@@ -322,11 +322,11 @@ impl ObjectHandlers for Handlers {
         if let Conn::Open(mut conn) = conn {
             let _rolled_back = roll_back_open(req, &mut *conn, tracked);
             if let Some(stmt) = held.0 {
-                req.release(stmt.as_value());
+                stmt.give_up(req);
             }
             conn.close(req);
         } else if let Some(stmt) = held.0 {
-            req.release(stmt.as_value());
+            stmt.give_up(req);
         }
         if let Some(args) = held.1 {
             req.release(Value::array(args));
@@ -413,7 +413,7 @@ pub(super) fn clear_error(req: &mut Request, object: PhpObject) {
     })
     .flatten();
     if let Some(stmt) = held {
-        req.release(stmt.as_value());
+        stmt.give_up(req);
     }
 }
 
@@ -744,6 +744,11 @@ fn lend(req: &mut Request, key: &[u8]) -> Result<usize, Option<usize>> {
     let (alive, conn) = alive(req, std::mem::take(&mut dbh.conn));
     dbh.conn = conn;
     if !alive {
+        // `zend_list_close` of the dead one: its destructor closes the
+        // connection, its stream with it.
+        if let Conn::Open(conn) = &mut dbh.conn {
+            conn.close(req);
+        }
         return Err(None);
     }
     Ok(req.state::<Persistent>().lent.hold(key.to_vec(), dbh))
@@ -769,6 +774,11 @@ fn hold(req: &mut Request, object: PhpObject, key: Vec<u8>, dead: Option<usize>)
         Some((at, held)) => {
             let mut old = std::mem::replace(held, dbh);
             persistent_shutdown(req, &mut old);
+            // `zend_list_close` of the dead one: its destructor closes
+            // the connection, its stream with it.
+            if let Conn::Open(conn) = &mut old.conn {
+                conn.close(req);
+            }
             at
         }
         None => lent.hold(key, dbh),
@@ -1571,8 +1581,10 @@ impl PDO {
     fn errorCode(req: &mut Request, this: This<Self>) -> Result<Option<Owner<PhpString>>, Thrown> {
         let this = this.object();
         constructed(req, this)?;
-        let (held, code) =
-            dbh_ref(req, this, |d| (d.query_stmt, d.error_code)).unwrap_or((None, None));
+        let (held, code) = dbh_ref(req, this, |d| {
+            (d.query_stmt.as_deref().copied(), d.error_code)
+        })
+        .unwrap_or((None, None));
         if let Some(stmt) = held {
             let state = stmt.native::<Stmt>(req).and_then(|s| s.error_code);
             return PhpString::new(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())
@@ -1615,8 +1627,10 @@ impl PDO {
     fn errorInfo(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let this = this.object();
         constructed(req, this)?;
-        let (held, code) =
-            dbh_ref(req, this, |d| (d.query_stmt, d.error_code)).unwrap_or((None, None));
+        let (held, code) = dbh_ref(req, this, |d| {
+            (d.query_stmt.as_deref().copied(), d.error_code)
+        })
+        .unwrap_or((None, None));
         let state = match held {
             Some(stmt) => stmt.native::<Stmt>(req).and_then(|s| s.error_code),
             None => code,
@@ -1754,12 +1768,7 @@ impl PDO {
             _ => {}
         }
         match on_connection(req, this, |req, conn| conn.attribute(req, attr))? {
-            // The driver's value comes with its one owner, the caller's.
-            Ok(Some(Some(value))) => {
-                let owner = Owner::take(req, value);
-                req.release(value);
-                Ok(owner)
-            }
+            Ok(Some(Some(value))) => Ok(value),
             Ok(Some(None)) => unsupported(req, this, "driver does not support that attribute")
                 .map(|()| Owner::take(req, Value::bool(false))),
             Ok(None) => Ok(Owner::take(req, Value::bool(false))),
@@ -1989,14 +1998,13 @@ impl PDO {
                 Ok(OrFalse::Value(owner.into_instance()))
             }
             Err(thrown) => {
-                let stmt = owner.hand_on_unmigrated();
                 if let Some(s) = stmt.native_mut::<Stmt>(req) {
                     s.dbh = DbLink::Held(this);
                 }
                 req.release(this.as_value());
-                let old = dbh_mut(req, this, |d| d.query_stmt.replace(stmt)).flatten();
+                let old = dbh_mut(req, this, |d| d.query_stmt.replace(owner)).flatten();
                 if let Some(old) = old {
-                    req.release(old.as_value());
+                    old.give_up(req);
                 }
                 if let Some(thrown) = thrown {
                     return Err(thrown);

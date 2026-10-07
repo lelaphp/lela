@@ -10,7 +10,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, read_prop, write_prop};
 use php_ext::coerce::{to_string, with_string};
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
+use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -18,10 +18,11 @@ use crate::ffi::MimeBuilder;
 use crate::handle::{Curl, easy_of, made};
 
 /// `struct mime_data_cb_arg`: the path a `CURLFile` part reads and the
-/// stream open on it, opened again where a transfer finds it closed.
+/// stream open on it, opened again where a transfer finds it closed, an
+/// owner the part holds until its `free_cb`.
 pub(crate) struct Source {
     filename: Vec<u8>,
-    stream: Option<Stream>,
+    stream: Option<Owner<Stream>>,
 }
 
 impl Source {
@@ -32,15 +33,15 @@ impl Source {
     /// `read_cb`: up to `buffer`'s length read, the stream opened first
     /// where it is not; `None` for php's `CURL_READFUNC_ABORT`.
     pub(crate) fn read(&mut self, req: &mut Request, buffer: &mut [u8]) -> Option<usize> {
-        let stream = if let Some(stream) = self.stream {
-            stream
+        let stream: Stream = if let Some(stream) = self.stream.as_deref() {
+            *stream
         } else {
             let opened = req
                 .open_stream_with(&self.filename, b"rb", Opening::default())
-                .ok()??
-                .hand_on_unmigrated();
+                .ok()??;
+            let view = *opened;
             self.stream = Some(opened);
-            opened
+            view
         };
         if let Ok(Some(read)) = stream.read(req, buffer.len()) {
             let bytes = read.as_bytes();
@@ -55,7 +56,7 @@ impl Source {
 
     /// `seek_cb`.
     pub(crate) fn seek(&mut self, req: &mut Request, offset: i64, origin: i32) -> bool {
-        match self.stream {
+        match self.stream.as_deref() {
             Some(stream) => stream.seek(req, offset, Whence::from_int(i64::from(origin))),
             None => false,
         }
@@ -361,12 +362,9 @@ pub(crate) fn build_mime(
                 must_seek: true,
                 ..Opening::default()
             };
-            let stream = req
-                .open_stream_with(&path, b"rb", opening)
-                .ok()
-                .flatten()
-                .map(Owner::hand_on_unmigrated);
+            let stream = req.open_stream_with(&path, b"rb", opening).ok().flatten();
             let size = stream
+                .as_deref()
                 .and_then(|stream| stream.stat(req))
                 .map(|stat| stat[7]);
             let source = Source {
@@ -375,7 +373,7 @@ pub(crate) fn build_mime(
             };
             let kind = kind.unwrap_or_else(|| b"application/octet-stream".to_vec());
             let filename = postname.unwrap_or(path);
-            match mime.add_file(&name, source, size, &filename, &kind) {
+            match mime.add_file(req, &name, source, size, &filename, &kind) {
                 Some(0) => {}
                 Some(code) => error = code,
                 None => {

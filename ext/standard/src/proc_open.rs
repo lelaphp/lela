@@ -82,7 +82,7 @@ use php_ext::abi::{OrFalse, Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{value_name, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
+use php_ext::request::{Cast, FdStream, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, ResourceType, Value, ValueRef};
 
@@ -106,7 +106,7 @@ pub(super) struct ProcState {
 struct Process {
     child: i32,
     command: Vec<u8>,
-    pipes: Vec<Resource>,
+    pipes: Vec<Owner<Stream>>,
     cached: Option<i32>,
 }
 
@@ -362,9 +362,12 @@ fn process_dtor(req: &mut Request, res: Resource) {
     };
     let pipes = std::mem::take(&mut process.pipes);
     for pipe in pipes {
-        match Stream::from_value(req, &pipe.as_value()) {
-            Some(stream) => stream.free(req),
-            None => req.release(pipe.as_value()),
+        // A pipe the program closed is a closed resource: only the owner
+        // is left to give up.
+        if Stream::from_value(req, &pipe.as_value()).is_some() {
+            pipe.free(req);
+        } else {
+            pipe.give_up(req);
         }
     }
     let wait = req.state::<State>().proc_open.pclose_wait;
@@ -587,7 +590,7 @@ fn file_descriptor(
     };
     let fd = stream.cast(req, Cast::Fd, true);
     let childend = fd.and_then(|fd| dup_descriptor(req, fd, nindex));
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(childend)
 }
 
@@ -906,29 +909,19 @@ fn proc_open(
     drop(pty);
     let mut opened = PhpArray::new(req)?;
     let mut held = Vec::new();
-    for descriptor in descriptors {
-        let Descriptor {
-            index,
-            childend,
-            parent,
-        } = descriptor;
-        drop(childend);
-        let stream = match parent {
-            Parent::Pipe { fd, mode } => Some(req.stream_from_fd(fd, FdStream::File { mode })?),
-            Parent::Socket { fd } => Some(req.stream_from_fd(fd, FdStream::Socket)?),
-            Parent::None => None,
-        };
-        if let Some(stream) = stream {
-            let value = stream.as_value();
-            opened.set(
-                req,
-                Owner::take(req, Key::Int(index)),
-                Owner::take(req, value),
-            )?;
-            held.push(stream.hand_on_unmigrated().resource());
+    let filled = match parent_ends(req, descriptors, &mut opened, &mut held) {
+        Ok(()) => pipes.set(req, Untyped(opened.into_value())),
+        Err(thrown) => {
+            opened.give_up(req);
+            Err(thrown)
         }
+    };
+    if let Err(thrown) = filled {
+        for stream in held {
+            stream.free(req);
+        }
+        return Err(thrown);
     }
-    pipes.set(req, Untyped(opened.into_value()))?;
     let kind = process_type(req);
     let process = Process {
         child: pid,
@@ -938,6 +931,34 @@ fn proc_open(
     };
     let res = Resource::new(req, kind, process)?;
     Ok(Untyped(OrFalse::Value(res)))
+}
+
+/// The parent's end of each pipe made a stream, `$pipes[index]` written
+/// with it and the resource's own owner of it kept in `held`
+/// (`Z/ext/standard/proc_open.c:1478`).
+fn parent_ends(
+    req: &mut Request,
+    descriptors: Vec<Descriptor>,
+    opened: &mut Owner<PhpArray>,
+    held: &mut Vec<Owner<Stream>>,
+) -> Result<(), Thrown> {
+    for descriptor in descriptors {
+        let Descriptor {
+            index,
+            childend,
+            parent,
+        } = descriptor;
+        drop(childend);
+        let stream = match parent {
+            Parent::Pipe { fd, mode } => req.stream_from_fd(fd, FdStream::File { mode })?,
+            Parent::Socket { fd } => req.stream_from_fd(fd, FdStream::Socket)?,
+            Parent::None => continue,
+        };
+        let value = Owner::take(req, stream.as_value());
+        held.push(stream);
+        opened.set(req, Owner::take(req, Key::Int(index)), value)?;
+    }
+    Ok(())
 }
 
 /// The command as `proc_get_status` prints it, and the `argv` of an

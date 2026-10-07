@@ -14,9 +14,9 @@
 use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpObject, ValueRef};
+use php_ext::values::{Key, PhpObject, Value, ValueRef};
 
-use crate::connector::{BindKind, Failure, OnError, Rewritten, Scanner, SqlState, Token};
+use crate::connector::{BindKind, BindType, Failure, OnError, Rewritten, Scanner, SqlState, Token};
 use crate::error::{self, On};
 use crate::stmt::{self, Bound, BoundKey};
 
@@ -145,7 +145,14 @@ pub(super) fn parse_params(
     if named && positional {
         return fail(req, "mixed named and positional parameters");
     }
-    let params: Vec<Bound> = stmt::read(req, object, |s| s.params.clone()).unwrap_or_default();
+    // Each entry's key, type and value, a view: the entry holds its owner.
+    let params: Vec<Seen> = stmt::read(req, object, |s| {
+        s.params
+            .iter()
+            .map(|b| (b.key.clone(), b.ty, *b.value))
+            .collect()
+    })
+    .unwrap_or_default();
     let count = i64::try_from(params.len()).unwrap_or(i64::MAX);
     if !params.is_empty() && bindno != count {
         let every = !positional
@@ -173,7 +180,7 @@ pub(super) fn parse_params(
             let Some(bound) = find(&params, &key) else {
                 return fail(req, "parameter was not defined");
             };
-            match quote(req, object, dbh, bound)? {
+            match quote(req, object, dbh, (bound.1, bound.2))? {
                 Some(quoted) => placeholder.quoted = quoted,
                 None => return Ok(Parsed::Failed),
             }
@@ -195,9 +202,12 @@ pub(super) fn parse_params(
 }
 
 /// The entry held under `key`.
-fn find<'a>(params: &'a [Bound], key: &BoundKey) -> Option<&'a Bound> {
-    params.iter().find(|b| &b.key == key)
+fn find<'a>(params: &'a [Seen], key: &BoundKey) -> Option<&'a Seen> {
+    params.iter().find(|b| &b.0 == key)
 }
+
+/// A bound entry as the parser reads it: its key, its type and its value.
+type Seen = (BoundKey, BindType, Value);
 
 /// One bound value as the query text it stands for: `NULL`, `1` or `0`,
 /// an integer, or the connector's quoting of its string; `None` where the
@@ -206,10 +216,9 @@ fn quote(
     req: &mut Request,
     object: PhpObject,
     dbh: PhpObject,
-    bound: &Bound,
+    (ty, value): (BindType, Value),
 ) -> Result<Option<Vec<u8>>, Thrown> {
-    let value = bound.value.deref();
-    let ty = bound.ty;
+    let value = value.deref();
     let text = match (ty.kind(), value.as_ref()) {
         (BindKind::Lob, ValueRef::Resource(_)) => {
             if let Some(stream) = php_ext::request::Stream::from_value(req, &value) {

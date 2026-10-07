@@ -23,8 +23,8 @@ pub(crate) enum Resolved {
     /// A throwable raised reading the answer: a resource that is no
     /// stream, or a value with no string form.
     Thrown(Thrown),
-    /// A stream to read the entity from, one owner the input's.
-    Stream(Stream),
+    /// A stream to read the entity from, its owner the input's.
+    Stream(Owner<Stream>),
     /// A path to open as the default loader opens one.
     Path(Vec<u8>),
     /// `null`: no entity.
@@ -89,7 +89,9 @@ impl Loader {
         url: Option<&[u8]>,
         members: &Context,
     ) -> Resolved {
-        let Some((callable, value)) = req.state::<State>().entity_loader.clone() else {
+        let loader = req.state::<State>().entity_loader.as_ref();
+        let Some((callable, value)) = loader.map(|(callable, value)| (callable.clone(), **value))
+        else {
             return Resolved::Nothing;
         };
         let arguments = match arguments(req, id, url, members) {
@@ -211,8 +213,7 @@ fn read_answer(req: &mut Request, retval: &Value, callable: &Callable, loader: &
             if let Some(stream) = Stream::from_value(req, &retval) {
                 // `GC_ADDREF(stream->res)`: the input holds the stream past
                 // the return value.
-                req.addref(&retval);
-                return Resolved::Stream(stream);
+                return Resolved::Stream(Owner::take(req, stream));
             }
             let name = function_name(req, callable, loader, true);
             let text = format!(

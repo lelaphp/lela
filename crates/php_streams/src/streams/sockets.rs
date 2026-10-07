@@ -30,8 +30,8 @@ use crate::api::values::{Emalloc, Owner};
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
-    BindTo, Cast, Crypto, CryptoSocket, FreeOwned, Handshake, OptionAnswer, Request, SocketOptions,
-    Stream, StreamCtx, StreamOption, Xport, XportFactory, XportFailure,
+    BindTo, Cast, Crypto, CryptoSocket, Handshake, OptionAnswer, OwnedStream, Request,
+    SocketOptions, Stream, StreamCtx, StreamOption, Xport, XportFactory, XportFailure,
 };
 use crate::api::values::PhpString;
 use crate::streams::StreamLayer;

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use php_ext::request::{Request, StreamCtx};
-use php_ext::values::{PhpObject, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, Value, ValueRef};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::php_get_current_user;
 
@@ -34,7 +34,7 @@ use crate::sdl::get_encoder_ex;
 use crate::sdl::wsdl::load_wsdl;
 use crate::shared::{ClientSlot, client_slot, instance_of};
 use crate::table::{Key, Table};
-use crate::{Res, State};
+use crate::{Error, Res, State};
 
 /// `WSDL_CACHE_DISK`.
 pub(crate) const WSDL_CACHE_DISK: i64 = 0x1;
@@ -1308,82 +1308,118 @@ pub(crate) fn get_sdl(
     Ok(cache_in_memory(req, cache_wsdl, &key_uri, t, sdl))
 }
 
+/// A client's `stream_context`, one owner more, its proxy set on it (on
+/// one made for it where it has none), and its user agent and
+/// credentials added to `headers`: whether `Authorization` and
+/// `Proxy-Authorization` were.
+fn client_context(
+    req: &mut Request,
+    this: PhpObject,
+    uri: &[u8],
+    uri_len: usize,
+    headers: &mut Vec<u8>,
+    context: &mut Option<Owner<StreamCtx>>,
+) -> Res<(bool, bool)> {
+    let tmp = client_slot(this, ClientSlot::StreamCtx);
+    if let Some(r) = tmp.as_resource().copied() {
+        // `php_stream_context_from_zval(tmp, 0)`, one owner more.
+        let c = StreamCtx::fetch(req, r)?;
+        *context = Some(Owner::take(req, c));
+    }
+    let agent = client_slot(this, ClientSlot::UserAgent);
+    if let Some(a) = agent.as_str_bytes().filter(|a| !a.is_empty()) {
+        headers.extend_from_slice(b"User-Agent: ");
+        headers.extend_from_slice(a);
+        headers.extend_from_slice(b"\r\n");
+    }
+    let mut has_proxy_authorization = false;
+    let proxy_host = client_slot(this, ClientSlot::ProxyHost);
+    let proxy_port = client_slot(this, ClientSlot::ProxyPort);
+    if let (Some(host), ValueRef::Int(port)) = (proxy_host.as_str_bytes(), proxy_port.as_ref()) {
+        let mut proxy = b"tcp://".to_vec();
+        proxy.extend_from_slice(host);
+        proxy.push(b':');
+        proxy.extend_from_slice(port.to_string().as_bytes());
+        let ctx = if let Some(c) = context {
+            **c
+        } else {
+            let c = StreamCtx::alloc(req)?;
+            let view = *c;
+            *context = Some(c);
+            view
+        };
+        let value = string(req, &proxy)?;
+        let set = ctx.set_option(req, b"http", b"proxy", &value);
+        value.give_up(req);
+        set?;
+        let https = uri_len >= 8 && uri[..8].eq_ignore_ascii_case(b"https://");
+        if !https {
+            ctx.set_option(req, b"http", b"request_fulluri", &Value::bool(true))?;
+        }
+        has_proxy_authorization = proxy_authentication(this, headers);
+    }
+    let has_authorization = basic_authentication(this, headers);
+    Ok((has_authorization, has_proxy_authorization))
+}
+
 /// The client's `stream_context`, user agent, proxy and credentials put
 /// on the stream libxml loads with, and the WSDL read under the `WSDL`
 /// code; both put back after.
 fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<Sdl> {
     let old_error_code = req.state::<State>().error_code;
     let mut headers = Vec::new();
-    let mut context = None;
+    // The context libxml loads with, one owner, the switch's below.
+    let mut context: Option<Owner<StreamCtx>> = None;
     let mut has_proxy_authorization = false;
     let mut has_authorization = false;
-    if instance_of(req, this, "SoapClient") {
-        let tmp = client_slot(this, ClientSlot::StreamCtx);
-        if let Some(r) = tmp.as_resource().copied() {
-            // `php_stream_context_from_zval(tmp, 0)`, one owner more,
-            // shared with `new_context` below.
-            let c = StreamCtx::fetch(req, r)?;
-            req.addref(&r.as_value());
-            context = Some(c);
+    let client = if instance_of(req, this, "SoapClient") {
+        client_context(req, this, uri, uri_len, &mut headers, &mut context).map(|(a, p)| {
+            has_authorization = a;
+            has_proxy_authorization = p;
+        })
+    } else {
+        Ok(())
+    };
+    let made = match client {
+        Ok(()) => match context {
+            Some(c) => Ok(c),
+            None => StreamCtx::alloc(req).map_err(Error::from),
+        },
+        Err(e) => {
+            if let Some(c) = context {
+                c.give_up(req);
+            }
+            Err(e)
         }
-        let agent = client_slot(this, ClientSlot::UserAgent);
-        if let Some(a) = agent.as_str_bytes().filter(|a| !a.is_empty()) {
-            headers.extend_from_slice(b"User-Agent: ");
-            headers.extend_from_slice(a);
-            headers.extend_from_slice(b"\r\n");
+    };
+    let ctx = made?;
+    let options = (|| -> Res<()> {
+        if ctx.option(req, b"http", b"protocol_version").is_none() {
+            ctx.set_option(req, b"http", b"protocol_version", &Value::float(1.1))?;
+            headers.extend_from_slice(b"Connection: close\r\n");
         }
-        let proxy_host = client_slot(this, ClientSlot::ProxyHost);
-        let proxy_port = client_slot(this, ClientSlot::ProxyPort);
-        if let (Some(host), ValueRef::Int(port)) = (proxy_host.as_str_bytes(), proxy_port.as_ref())
-        {
-            let mut proxy = b"tcp://".to_vec();
-            proxy.extend_from_slice(host);
-            proxy.push(b':');
-            proxy.extend_from_slice(port.to_string().as_bytes());
-            let ctx = if let Some(c) = context {
-                c
-            } else {
-                // libxml's stream state keeps it from the switch below.
-                let c = StreamCtx::alloc(req)?.hand_on_unmigrated();
-                context = Some(c);
-                c
-            };
-            let value = string(req, &proxy)?;
-            let set = ctx.set_option(req, b"http", b"proxy", &value);
+        if !headers.is_empty() {
+            http_context_headers(
+                req,
+                Some(*ctx),
+                has_authorization,
+                has_proxy_authorization,
+                false,
+                &mut headers,
+            );
+            let value = string(req, &headers)?;
+            let set = ctx.set_option(req, b"http", b"header", &value);
             value.give_up(req);
             set?;
-            let https = uri_len >= 8 && uri[..8].eq_ignore_ascii_case(b"https://");
-            if !https {
-                ctx.set_option(req, b"http", b"request_fulluri", &Value::bool(true))?;
-            }
-            has_proxy_authorization = proxy_authentication(this, &mut headers);
         }
-        has_authorization = basic_authentication(this, &mut headers);
+        Ok(())
+    })();
+    if let Err(e) = options {
+        ctx.give_up(req);
+        return Err(e);
     }
-    let ctx = match context {
-        Some(c) => c,
-        // libxml's stream state keeps it from the switch below.
-        None => StreamCtx::alloc(req)?.hand_on_unmigrated(),
-    };
-    if ctx.option(req, b"http", b"protocol_version").is_none() {
-        ctx.set_option(req, b"http", b"protocol_version", &Value::float(1.1))?;
-        headers.extend_from_slice(b"Connection: close\r\n");
-    }
-    if !headers.is_empty() {
-        http_context_headers(
-            req,
-            Some(ctx),
-            has_authorization,
-            has_proxy_authorization,
-            false,
-            &mut headers,
-        );
-        let value = string(req, &headers)?;
-        let set = ctx.set_option(req, b"http", b"header", &value);
-        value.give_up(req);
-        set?;
-    }
-    let orig_context = php_ext_libxml::switch_stream_ctx(req, Some(ctx.resource().as_value()));
+    let given = ctx.into_resource().into_value();
+    let orig_context = php_ext_libxml::switch_stream_ctx(req, Some(given));
     req.state::<State>().error_code = Some("WSDL");
     // WSDL code: an error leaves here as php's bailout leaves
     // `load_wsdl`, with `SOAP_GLOBAL(error_code)` still `WSDL` and the
@@ -1409,10 +1445,20 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
             req.clear_last_error();
         }
     }
-    let sdl = loaded.map_err(|e| e.coded("WSDL"))?;
+    let sdl = match loaded {
+        Ok(sdl) => sdl,
+        Err(e) => {
+            // php's bailout leaves `orig_context` where it was copied,
+            // unrestored; the copy's owner is given up here.
+            if let Some(orig) = orig_context {
+                orig.give_up(req);
+            }
+            return Err(e.coded("WSDL"));
+        }
+    };
     req.state::<State>().error_code = old_error_code;
     if let Some(new_context) = php_ext_libxml::switch_stream_ctx(req, orig_context) {
-        req.release(new_context);
+        new_context.give_up(req);
     }
     Ok(sdl)
 }

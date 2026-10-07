@@ -177,7 +177,7 @@ struct State {
     var: var::Nesting,
     /// `BG(last_http_headers)`: the headers the http wrapper's last
     /// request read, one owner the state's, given back in `rshutdown`.
-    last_http_headers: Option<php_ext::values::PhpArray>,
+    last_http_headers: Option<php_ext::values::Owner<php_ext::values::PhpArray>>,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,

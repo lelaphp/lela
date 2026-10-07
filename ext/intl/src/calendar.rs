@@ -513,8 +513,9 @@ impl IntlCalendar {
         #[php(default = null)] timezone: Raw<ZoneArg>,
         #[php(default = null)] locale: Option<PhpString>,
     ) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
-        let timezone = zone_raw(req, &timezone, 1)?;
-        create_instance(req, timezone, locale)
+        zone_raw(req, &timezone, 1, |req, timezone| {
+            create_instance(req, timezone, locale)
+        })
     }
 
     #[php(tentative)]
@@ -958,8 +959,9 @@ impl IntlCalendar {
         this: This<Self>,
         timezone: Raw<ZoneArg>,
     ) -> Result<bool, Thrown> {
-        let timezone = zone_raw(req, &timezone, 1)?;
-        set_time_zone(req, Of::method(this), timezone)
+        zone_raw(req, &timezone, 1, |req, timezone| {
+            set_time_zone(req, Of::method(this), timezone)
+        })
     }
 
     #[php(tentative)]
@@ -1734,10 +1736,16 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
 }
 
 /// A `$timezone` argument held as `Z_PARAM_OBJ_OR_STR_OR_NULL` holds it
-/// and sorted as `timezone_process_timezone_argument` sorts it.
-fn zone_raw(req: &mut Request, zone: &Raw<ZoneArg>, position: u32) -> Result<ZoneArg, Thrown> {
+/// and sorted as `timezone_process_timezone_argument` sorts it, then
+/// handed to `then`.
+fn zone_raw<R>(
+    req: &mut Request,
+    zone: &Raw<ZoneArg>,
+    position: u32,
+    then: impl FnOnce(&mut Request, ZoneArg) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
     let held = zone_held(req, zone.value(), position)?;
-    zone_sorted(req, held)
+    zone_sorted(req, held, then)
 }
 
 /// The zone argument `Z_PARAM_OBJ_OR_STR_OR_NULL` took, sorted into an
@@ -1882,8 +1890,9 @@ fn intlcal_create_instance(
     #[php(default = null)] timezone: Raw<ZoneArg>,
     #[php(default = null)] locale: Option<PhpString>,
 ) -> Result<Option<Owner<Instance<IntlCalendar>>>, Thrown> {
-    let timezone = zone_raw(req, &timezone, 1)?;
-    create_instance(req, timezone, locale)
+    zone_raw(req, &timezone, 1, |req, timezone| {
+        create_instance(req, timezone, locale)
+    })
 }
 
 /// `intlcal_get_keyword_values_for_locale`.
@@ -2025,8 +2034,9 @@ fn intlcal_set_time_zone(
     calendar: Instance<IntlCalendar>,
     timezone: Raw<ZoneArg>,
 ) -> Result<bool, Thrown> {
-    let timezone = zone_raw(req, &timezone, 2)?;
-    set_time_zone(req, Of::function(calendar), timezone)
+    zone_raw(req, &timezone, 2, |req, timezone| {
+        set_time_zone(req, Of::function(calendar), timezone)
+    })
 }
 
 /// `intlcal_after`.

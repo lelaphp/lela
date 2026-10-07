@@ -433,6 +433,7 @@ fn mb_detect_encoding(
             if req
                 .state::<State>()
                 .all_encodings
+                .as_deref()
                 .is_some_and(|all| all.is_same(array))
             {
                 order_significant = false;
@@ -482,7 +483,7 @@ fn mb_detect_encoding(
 /// ```
 #[php_function]
 fn mb_list_encodings(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-    if let Some(all) = req.state::<State>().all_encodings {
+    if let Some(all) = req.state::<State>().all_encodings.as_deref().copied() {
         return Ok(Owner::take(req, all));
     }
     let mut all = PhpArray::new(req)?;
@@ -491,7 +492,9 @@ fn mb_list_encodings(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         all.append(req, name.into_value())?;
     }
     let kept = Owner::take(req, *all);
-    req.state::<State>().all_encodings = Some(kept.hand_on_unmigrated());
+    if let Some(old) = req.state::<State>().all_encodings.replace(kept) {
+        old.give_up(req);
+    }
     Ok(all)
 }
 
@@ -1033,6 +1036,7 @@ fn mb_convert_variables(
         && req
             .state::<State>()
             .all_encodings
+            .as_deref()
             .is_some_and(|all| all.is_same(*array))
     {
         order_significant = false;

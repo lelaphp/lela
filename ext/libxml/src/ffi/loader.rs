@@ -16,7 +16,8 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Stream};
+use php_ext::request::{OwnedStream as _, Request, Stream};
+use php_ext::values::Owner;
 
 use super::{Alloc, Call, Io, cstr, sys};
 use crate::load::{Loader, Resolved};
@@ -358,7 +359,10 @@ unsafe extern "C" fn entity_loader(
 ///
 /// # Safety
 /// `ctxt` is null or a live parser.
-unsafe fn stream_input(ctxt: *mut sys::xmlParserCtxt, stream: Stream) -> *mut sys::xmlParserInput {
+unsafe fn stream_input(
+    ctxt: *mut sys::xmlParserCtxt,
+    stream: Owner<Stream>,
+) -> *mut sys::xmlParserInput {
     let context = Box::into_raw(Box::new(stream)).cast::<c_void>();
     // SAFETY: the callbacks read the box this hands over; the buffer owns
     // it from here and closes it once.
@@ -405,7 +409,7 @@ unsafe extern "C" fn input_buffer(
     // SAFETY: as above.
     let req = unsafe { request(io) };
     let stream = match Loader::open_input(req, path) {
-        Ok(Some(stream)) => stream.hand_on_unmigrated(),
+        Ok(Some(stream)) => stream,
         Ok(None) => return ptr::null_mut(),
         Err(thrown) => {
             // SAFETY: as above.
@@ -417,7 +421,7 @@ unsafe extern "C" fn input_buffer(
     // the stream carries, where libxml was handed none.
     let mut enc = enc;
     if enc == sys::XML_CHAR_ENCODING_NONE {
-        match crate::mime_sniff::sniff_charset_from_stream(req, stream) {
+        match crate::mime_sniff::sniff_charset_from_stream(req, *stream) {
             Ok(Some(charset)) => {
                 let name = cstr(&charset);
                 // SAFETY: a NUL-terminated name that outlives the call.
@@ -469,7 +473,7 @@ unsafe extern "C" fn output_buffer(
     // SAFETY: as above.
     let req = unsafe { request(io) };
     let stream = match Loader::open_output(req, path) {
-        Ok(Some(stream)) => stream.hand_on_unmigrated(),
+        Ok(Some(stream)) => stream,
         Ok(None) => return failed(),
         Err(thrown) => {
             // SAFETY: as above.
@@ -503,7 +507,7 @@ pub(super) unsafe extern "C" fn stream_read(
         return -1;
     };
     // SAFETY: the box a creator handed libxml, live until closed.
-    let stream = unsafe { *context.cast::<Stream>() };
+    let stream: Stream = unsafe { **context.cast::<Owner<Stream>>() };
     // SAFETY: the running call's `Io`.
     let req = unsafe { request(io) };
     match Loader::read(req, stream, want) {
@@ -541,7 +545,7 @@ pub(super) unsafe extern "C" fn stream_write(
         return -1;
     };
     // SAFETY: the box a creator handed libxml, live until closed.
-    let stream = unsafe { *context.cast::<Stream>() };
+    let stream: Stream = unsafe { **context.cast::<Owner<Stream>>() };
     // SAFETY: libxml hands `len` bytes at `buffer`.
     let bytes = unsafe { std::slice::from_raw_parts(buffer.cast::<u8>(), n) };
     // SAFETY: the running call's `Io`.
@@ -557,35 +561,36 @@ pub(super) unsafe extern "C" fn stream_write(
 /// its resource taken, as `Z_ADDREF_P(stream_zv)` takes it, so the stream
 /// outlives the program's own name for it.
 pub(super) fn lend(req: &mut Request, stream: Stream) -> *mut c_void {
-    req.addref(&stream.as_value());
-    Box::into_raw(Box::new(stream)).cast::<c_void>()
+    Box::into_raw(Box::new(Owner::take(req, stream))).cast::<c_void>()
 }
 
-/// The close of a stream [`lend`] boxed: the owner it took given back,
+/// The close of a stream [`lend`] boxed: the owner it took given up,
 /// `zend_list_delete`, and nothing closed. Outside a call that lends a
-/// request the owner stays for the request's end.
+/// request the box is left, and its owner with it, for the request's end.
 pub(super) unsafe extern "C" fn stream_release(context: *mut c_void) -> c_int {
+    let Some((_, io)) = lent() else {
+        return 0;
+    };
     // SAFETY: the box `lend` handed libxml, released once, here.
-    let stream = *unsafe { Box::from_raw(context.cast::<Stream>()) };
-    if let Some((_, io)) = lent() {
-        // SAFETY: the running call's `Io`.
-        let req = unsafe { request(io) };
-        req.release(stream.as_value());
-    }
+    let stream = *unsafe { Box::from_raw(context.cast::<Owner<Stream>>()) };
+    // SAFETY: the running call's `Io`.
+    let req = unsafe { request(io) };
+    stream.give_up(req);
     0
 }
 
 /// `php_libxml_streams_IO_close`: `php_stream_close`, and the box given
-/// back. Outside a call that lends a request the stream is left for the
-/// request's end to close.
+/// back. Outside a call that lends a request the box is left, and the
+/// stream's owner with it, for the request's end to close.
 unsafe extern "C" fn stream_close(context: *mut c_void) -> c_int {
+    let Some((_, io)) = lent() else {
+        return 0;
+    };
     // SAFETY: the box a creator handed libxml, closed once, here.
-    let stream = *unsafe { Box::from_raw(context.cast::<Stream>()) };
-    if let Some((_, io)) = lent() {
-        // SAFETY: the running call's `Io`.
-        let req = unsafe { request(io) };
-        stream.free(req);
-    }
+    let stream = *unsafe { Box::from_raw(context.cast::<Owner<Stream>>()) };
+    // SAFETY: the running call's `Io`.
+    let req = unsafe { request(io) };
+    stream.free(req);
     0
 }
 

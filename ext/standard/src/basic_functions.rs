@@ -16,7 +16,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
-use php_ext::request::{Request, ScannerFile, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -1250,7 +1250,7 @@ fn error_log(
         LogTo::File(path) => match req.open_stream(path, b"a", false)? {
             Some(stream) => {
                 let written = stream.write(req, message);
-                stream.hand_on_unmigrated().free(req);
+                stream.free(req);
                 written == Some(message.len())
             }
             None => false,
@@ -1784,7 +1784,7 @@ fn scanned_file(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, T
             return Err(thrown);
         }
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     let bytes = source.as_bytes().to_vec();
     source.give_up(req);
     Ok(Some(bytes))

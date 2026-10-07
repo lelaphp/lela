@@ -58,7 +58,7 @@ impl UserWrapper {
 enum Called {
     Missing,
     Threw,
-    Value(Value),
+    Value(Owner<Value>),
 }
 
 /// A throwable a method raised, kept for the native that asked.
@@ -81,26 +81,23 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
     let lowered = name.to_ascii_lowercase();
     let served = if let Some(function) = req.method_named(class, &lowered) {
         req.serve_method(function, Some(object), class, args, &[])
-            .map(Owner::hand_on_unmigrated)
     } else if let Some(function) = req.method_named(class, b"__call") {
-        let Ok(called) = PhpString::new(req, name).map(Owner::hand_on_unmigrated) else {
+        let Ok(called) = PhpString::new(req, name) else {
             return Called::Threw;
         };
-        let Ok(mut list) = PhpArray::new(req).map(Owner::hand_on_unmigrated) else {
+        let Ok(mut list) = PhpArray::new(req) else {
+            called.give_up(req);
             return Called::Threw;
         };
+        let mut appended = Ok(());
         for arg in args {
-            if list.append(req, Owner::take(req, *arg)).is_err() {
-                return Called::Threw;
-            }
+            appended = appended.and_then(|()| list.append(req, Owner::take(req, *arg)));
         }
-        let magic = [Value::string(called), Value::array(list)];
-        let served = req
-            .serve_method(function, Some(object), class, &magic, &[])
-            .map(Owner::hand_on_unmigrated);
-        for value in magic {
-            req.release(value);
-        }
+        let magic = [Value::string(*called), Value::array(*list)];
+        let served =
+            appended.and_then(|()| req.serve_method(function, Some(object), class, &magic, &[]));
+        called.give_up(req);
+        list.give_up(req);
         served
     } else {
         return Called::Missing;
@@ -109,7 +106,7 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
         // A method that ended the request, `exit` or a fatal error, is
         // php's bailout: nothing after it is served.
         Ok(value) if req.is_pending() => {
-            req.release(value);
+            value.give_up(req);
             Called::Threw
         }
         Ok(value) => Called::Value(value),
@@ -117,7 +114,7 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
         // shutdown: the throwable rendered uncaught, or handed to the
         // exception handler, and not kept for a native that is not there.
         Err(thrown) if !req.executing() => match req.thrown_without_frame(&thrown) {
-            Ok(value) => Called::Value(value),
+            Ok(undef) => Called::Value(Owner::take(req, undef)),
             Err(_) => Called::Threw,
         },
         Err(thrown) => {
@@ -128,10 +125,28 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
 }
 
 /// A string argument of the request's.
-fn string_arg(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(PhpString::new(req, bytes)?
-        .into_value()
-        .hand_on_unmigrated())
+fn string_arg(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
+}
+
+/// Integer arguments, owners of no count beside the others a call takes.
+fn ints(req: &Request, numbers: &[i64]) -> Vec<Owner<Value>> {
+    numbers
+        .iter()
+        .map(|n| Owner::take(req, Value::int(*n)))
+        .collect()
+}
+
+/// The arguments' views, for a call their owners outlive.
+fn views(args: &[Owner<Value>]) -> Vec<Value> {
+    args.iter().map(|arg| **arg).collect()
+}
+
+/// The arguments given up once the call is done.
+fn give_up_all(req: &mut Request, args: Vec<Owner<Value>>) {
+    for arg in args {
+        arg.give_up(req);
+    }
 }
 
 /// `zend_is_true`.
@@ -144,25 +159,28 @@ fn truthy(req: &mut Request, value: &Value) -> bool {
 /// its `$context` set to the `php_stream_context` the operation was
 /// handed, one owner more of it, or to `null` for none, and its
 /// constructor called with nothing.
-fn create_object(req: &mut Request, user: &UserWrapper) -> Result<Option<PhpObject>, Thrown> {
+fn create_object(
+    req: &mut Request,
+    user: &UserWrapper,
+) -> Result<Option<Owner<PhpObject>>, Thrown> {
     if req.instantiable(user.class).is_err() {
         if let Some(pending) = req.take_pending() {
             req.release(pending.as_value());
         }
         return Ok(None);
     }
-    let object = crate::api::call::new_object(req, user.class)?.hand_on_unmigrated();
+    let object = crate::api::call::new_object(req, user.class)?;
     let context = match req.streams().stream_ctx {
         Some(context) => context.resource().as_value(),
         None => Value::null(),
     };
     let context = Owner::take(req, context);
     if let Err(thrown) = crate::api::call::write_prop(req, &object, b"context", context) {
-        req.release(object.as_value());
+        object.give_up(req);
         return Err(thrown);
     }
     if let Some(constructor) = req.method_named(user.class, b"__construct") {
-        match req.serve_method(constructor, Some(object), user.class, &[], &[]) {
+        match req.serve_method(constructor, Some(*object), user.class, &[], &[]) {
             Ok(value) => value.give_up(req),
             Err(thrown) => defer(req, thrown),
         }
@@ -260,22 +278,29 @@ fn open_with(
     mode: &[u8],
     options: i64,
 ) -> Result<Result<Owner<Stream>, String>, Thrown> {
-    let Some(object) = create_object(req, user)? else {
+    let Some(held) = create_object(req, user)? else {
         return Ok(Err(String::from("operation failed")));
     };
-    let null = Owner::take(req, Value::null());
-    let opened_path = PhpRef::new(req, null)?.hand_on_unmigrated();
-    let args = [
-        string_arg(req, path)?,
-        string_arg(req, mode)?,
-        Value::int(options),
-        opened_path.as_value(),
-    ];
-    let called = call(req, object, b"stream_open", &args);
-    let named = opened_path.get().deref().as_str_bytes().map(<[u8]>::to_vec);
-    for arg in args {
-        req.release(arg);
+    let object = *held;
+    let mut args = Vec::with_capacity(4);
+    let built = (|| -> Result<(), Thrown> {
+        args.push(string_arg(req, path)?);
+        args.push(string_arg(req, mode)?);
+        args.extend(ints(req, &[options]));
+        let null = Owner::take(req, Value::null());
+        args.push(PhpRef::new(req, null)?.into_value());
+        Ok(())
+    })();
+    if let Err(thrown) = built {
+        give_up_all(req, args);
+        held.give_up(req);
+        return Err(thrown);
     }
+    let called = call(req, object, b"stream_open", &views(&args));
+    let named = args[3]
+        .as_php_ref()
+        .and_then(|cell| cell.get().as_str_bytes().map(<[u8]>::to_vec));
+    give_up_all(req, args);
     let answer = match called {
         Called::Missing => Err(format!(
             "\"{}::stream_open\" is not implemented",
@@ -284,7 +309,7 @@ fn open_with(
         Called::Threw => Err(String::from("operation failed")),
         Called::Value(value) => {
             let open = truthy(req, &value);
-            req.release(value);
+            value.give_up(req);
             if open {
                 Ok(())
             } else {
@@ -296,7 +321,7 @@ fn open_with(
         }
     };
     if let Err(message) = answer {
-        req.release(object.as_value());
+        held.give_up(req);
         if let Some(thrown) = req.stream_thrown().take() {
             return Err(thrown);
         }
@@ -307,6 +332,7 @@ fn open_with(
     }
     let kind = UserStream {
         object,
+        held: Some(held),
         no_seek: false,
         own: None,
     };
@@ -335,14 +361,20 @@ fn open_dir_with(
     user: &UserWrapper,
     path: &[u8],
 ) -> Result<Result<Owner<Stream>, String>, Thrown> {
-    let Some(object) = create_object(req, user)? else {
+    let Some(held) = create_object(req, user)? else {
         return Ok(Err(String::from("operation failed")));
     };
-    let args = [string_arg(req, path)?, Value::int(0)];
-    let called = call(req, object, b"dir_opendir", &args);
-    for arg in args {
-        req.release(arg);
-    }
+    let object = *held;
+    let mut args = match string_arg(req, path) {
+        Ok(path) => vec![path],
+        Err(thrown) => {
+            held.give_up(req);
+            return Err(thrown);
+        }
+    };
+    args.extend(ints(req, &[0]));
+    let called = call(req, object, b"dir_opendir", &views(&args));
+    give_up_all(req, args);
     let answer = match called {
         Called::Missing => Err(format!(
             "\"{}::dir_opendir\" is not implemented",
@@ -351,7 +383,7 @@ fn open_dir_with(
         Called::Threw => Err(String::from("operation failed")),
         Called::Value(value) => {
             let open = truthy(req, &value);
-            req.release(value);
+            value.give_up(req);
             if open {
                 Ok(())
             } else {
@@ -363,14 +395,15 @@ fn open_dir_with(
         }
     };
     if let Err(message) = answer {
-        req.release(object.as_value());
+        held.give_up(req);
         if let Some(thrown) = req.stream_thrown().take() {
             return Err(thrown);
         }
         return Ok(Err(message));
     }
+    let held = Some(held);
     Ok(Ok(req.stream_alloc(PhpStream::new(
-        Box::new(UserDir { object }),
+        Box::new(UserDir { object, held }),
         b"r",
     ))?))
 }
@@ -380,6 +413,8 @@ fn open_dir_with(
 /// cannot seek.
 struct UserStream {
     object: PhpObject,
+    /// The instance's one owner, the kind's until its close.
+    held: Option<Owner<PhpObject>>,
     no_seek: bool,
     /// The stream the kind is under, which its methods hold against
     /// `fclose`.
@@ -407,8 +442,8 @@ impl UserStream {
     /// int, one past what was handed php's warning and cut to it.
     fn write_held(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         let data = string_arg(req, buf).ok()?;
-        let called = call(req, self.object, b"stream_write", &[data]);
-        req.release(data);
+        let called = call(req, self.object, b"stream_write", &[*data]);
+        data.give_up(req);
         let value = match called {
             Called::Missing => {
                 not_implemented(req, self.object, "stream_write");
@@ -418,10 +453,11 @@ impl UserStream {
             Called::Value(value) => value,
         };
         if matches!(value.as_ref(), ValueRef::Bool(false)) {
+            value.give_up(req);
             return None;
         }
         let didwrite = crate::api::coerce::to_long(req, &value).unwrap_or(0);
-        req.release(value);
+        value.give_up(req);
         let count = i64::try_from(buf.len()).unwrap_or(i64::MAX);
         if didwrite > count {
             let text = format!(
@@ -460,6 +496,7 @@ impl UserStream {
             Called::Value(value) => value,
         };
         if matches!(value.as_ref(), ValueRef::Bool(false)) {
+            value.give_up(req);
             return None;
         }
         // `try_convert_to_string`: what cannot be a string throws, and the
@@ -467,12 +504,12 @@ impl UserStream {
         let text = match crate::api::coerce::to_string(req, &value) {
             Ok(text) => text,
             Err(thrown) => {
-                req.release(value);
+                value.give_up(req);
                 defer(req, thrown);
                 return None;
             }
         };
-        req.release(value);
+        value.give_up(req);
         let mut didread = text.len();
         if didread > buf.len() {
             let text = format!(
@@ -503,7 +540,7 @@ impl UserStream {
                 if truthy(req, &value) {
                     *eof = true;
                 }
-                req.release(value);
+                value.give_up(req);
             }
         }
         Some(didread)
@@ -540,7 +577,7 @@ impl UserStream {
             Called::Threw => false,
             Called::Value(value) => {
                 let sought = truthy(req, &value);
-                req.release(value);
+                value.give_up(req);
                 sought
             }
         };
@@ -550,7 +587,7 @@ impl UserStream {
         match call(req, self.object, b"stream_tell", &[]) {
             Called::Value(value) => {
                 let at = value.as_int();
-                req.release(value);
+                value.give_up(req);
                 match at {
                     Some(at) => {
                         *position = at;
@@ -594,11 +631,11 @@ impl UserStream {
             Called::Value(value) => value,
         };
         if !truthy(req, &value) {
-            req.release(value);
+            value.give_up(req);
             return None;
         }
         let inner = Stream::from_value(req, &value.deref());
-        req.release(value);
+        value.give_up(req);
         let complaint = match inner {
             None => "must return a stream resource",
             Some(inner) if own.is_some_and(|own| own.resource() == inner.resource()) => {
@@ -631,20 +668,21 @@ impl UserStream {
             Called::Threw => return OptionAnswer::Err,
             Called::Value(value) => value,
         };
-        match value.as_ref() {
-            ValueRef::Bool(true) => OptionAnswer::Err,
-            ValueRef::Bool(false) => OptionAnswer::Ok,
-            _ => {
+        let answer = match value.as_bool() {
+            Some(true) => OptionAnswer::Err,
+            Some(false) => OptionAnswer::Ok,
+            None => {
                 let name = crate::api::coerce::value_name(req, &value);
                 let text = format!(
                     "{}::stream_eof value must be of type bool, {name} given",
                     class_name(req, self.object)
                 );
                 docref(req, Level::Warning, &text);
-                req.release(value);
                 OptionAnswer::Err
             }
-        }
+        };
+        value.give_up(req);
+        answer
     }
 }
 
@@ -711,9 +749,11 @@ impl Ops for UserStream {
     /// `stream_close` where it is there, then the instance given up.
     fn close(&mut self, req: &mut Request) -> i32 {
         if let Called::Value(value) = call(req, self.object, b"stream_close", &[]) {
-            req.release(value);
+            value.give_up(req);
         }
-        req.release(self.object.as_value());
+        if let Some(held) = self.held.take() {
+            held.give_up(req);
+        }
         0
     }
 
@@ -722,7 +762,7 @@ impl Ops for UserStream {
         match call(req, self.object, b"stream_flush", &[]) {
             Called::Value(value) => {
                 let flushed = truthy(req, &value);
-                req.release(value);
+                value.give_up(req);
                 flushed
             }
             Called::Missing | Called::Threw => false,
@@ -756,7 +796,7 @@ impl Ops for UserStream {
             Some(array) => statbuf_from_array(req, *array).ok(),
             None => None,
         };
-        req.release(value);
+        value.give_up(req);
         sb
     }
 
@@ -780,6 +820,7 @@ impl Ops for UserStream {
             Called::Threw => Some(false),
             Called::Value(value) => {
                 if let ValueRef::Bool(b) = value.as_ref() {
+                    value.give_up(req);
                     return Some(b);
                 }
                 let name = crate::api::coerce::value_name(req, &value);
@@ -788,7 +829,7 @@ impl Ops for UserStream {
                     class_name(req, self.object)
                 );
                 docref(req, Level::Warning, &text);
-                req.release(value);
+                value.give_up(req);
                 Some(false)
             }
         }
@@ -819,7 +860,7 @@ impl Ops for UserStream {
             Called::Threw => Some(false),
             Called::Value(value) => {
                 let taken = matches!(value.as_ref(), ValueRef::Bool(true));
-                req.release(value);
+                value.give_up(req);
                 Some(taken)
             }
         }
@@ -872,7 +913,7 @@ impl Ops for UserStream {
             Called::Threw => OptionAnswer::Err,
             Called::Value(value) => {
                 let set = truthy(req, &value);
-                req.release(value);
+                value.give_up(req);
                 if set {
                     OptionAnswer::Ok
                 } else {
@@ -891,6 +932,8 @@ impl Ops for UserStream {
 /// instance `dir_opendir` was called on.
 struct UserDir {
     object: PhpObject,
+    /// The instance's one owner, the kind's until its close.
+    held: Option<Owner<PhpObject>>,
 }
 
 impl Ops for UserDir {
@@ -915,9 +958,11 @@ impl Ops for UserDir {
     /// given up.
     fn close(&mut self, req: &mut Request) -> i32 {
         if let Called::Value(value) = call(req, self.object, b"dir_closedir", &[]) {
-            req.release(value);
+            value.give_up(req);
         }
-        req.release(self.object.as_value());
+        if let Some(held) = self.held.take() {
+            held.give_up(req);
+        }
         0
     }
 
@@ -931,7 +976,7 @@ impl Ops for UserDir {
         _position: &mut i64,
     ) -> Option<bool> {
         if let Called::Value(value) = call(req, self.object, b"dir_rewinddir", &[]) {
-            req.release(value);
+            value.give_up(req);
         }
         Some(true)
     }
@@ -956,10 +1001,11 @@ impl Ops for UserDir {
             Called::Value(value) => value,
         };
         if matches!(value.as_ref(), ValueRef::Bool(_)) {
+            value.give_up(req);
             return None;
         }
         let name = crate::api::coerce::with_string(req, &value, <[u8]>::to_vec).ok();
-        req.release(value);
+        value.give_up(req);
         name
     }
 }
@@ -973,9 +1019,10 @@ fn path_call(
     method: &[u8],
     args: &[Value],
 ) -> Result<Option<Called>, Thrown> {
-    let Some(object) = create_object(req, user)? else {
+    let Some(held) = create_object(req, user)? else {
         return Ok(None);
     };
+    let object = *held;
     let called = call(req, object, method, args);
     if let Called::Missing = called {
         let text = format!(
@@ -985,16 +1032,16 @@ fn path_call(
         );
         docref(req, Level::Warning, &text);
     }
-    req.release(object.as_value());
+    held.give_up(req);
     Ok(Some(called))
 }
 
 /// A path operation's bool: `true` only for a `true` answer.
-fn bool_answer(req: &mut Request, called: Option<&Called>) -> Result<bool, Thrown> {
+fn bool_answer(req: &mut Request, called: Option<Called>) -> Result<bool, Thrown> {
     let answer = match called {
         Some(Called::Value(value)) => {
             let yes = matches!(value.as_ref(), ValueRef::Bool(true));
-            req.release(*value);
+            value.give_up(req);
             yes
         }
         _ => false,
@@ -1015,19 +1062,17 @@ pub(crate) fn url_stat(
     url: &[u8],
     flags: i64,
 ) -> Result<Option<StatBuf>, Thrown> {
-    let args = [string_arg(req, url)?, Value::int(flags)];
-    let called = path_call(req, user, b"url_stat", &args)?;
-    for arg in args {
-        req.release(arg);
-    }
-    let sb = match called {
+    let mut args = vec![string_arg(req, url)?];
+    args.extend(ints(req, &[flags]));
+    let called = path_call(req, user, b"url_stat", &views(&args));
+    give_up_all(req, args);
+    let sb = match called? {
         Some(Called::Value(value)) => {
-            let sb = match value.as_array() {
-                Some(array) => Some(statbuf_from_array(req, *array)?),
-                None => None,
-            };
-            req.release(value);
-            sb
+            let sb = value
+                .as_array()
+                .map(|array| statbuf_from_array(req, *array));
+            value.give_up(req);
+            sb.transpose()?
         }
         _ => None,
     };
@@ -1050,54 +1095,55 @@ pub(crate) fn path_op(
     url: &[u8],
     op: WrapperOp<'_>,
 ) -> Result<bool, Thrown> {
-    let url_arg = string_arg(req, url)?;
-    let (method, args): (&[u8], Vec<Value>) = match op {
-        WrapperOp::Unlink => (b"unlink", vec![url_arg]),
-        WrapperOp::Rename { to } => (b"rename", vec![url_arg, string_arg(req, to)?]),
+    let mut args = vec![string_arg(req, url)?];
+    let (method, rest): (&[u8], Result<Vec<Owner<Value>>, Thrown>) = match op {
+        WrapperOp::Unlink => (b"unlink", Ok(Vec::new())),
+        WrapperOp::Rename { to } => (b"rename", string_arg(req, to).map(|to| vec![to])),
         WrapperOp::Mkdir { mode, recursive } => (
             b"mkdir",
-            vec![
-                url_arg,
-                Value::int(mode),
-                Value::int(i64::from(recursive) | REPORT_ERRORS),
-            ],
+            Ok(ints(req, &[mode, i64::from(recursive) | REPORT_ERRORS])),
         ),
-        WrapperOp::Rmdir => (b"rmdir", vec![url_arg, Value::int(REPORT_ERRORS)]),
-        WrapperOp::Touch(times) => {
-            let mut array = PhpArray::new(req)?.hand_on_unmigrated();
-            if let Some((mtime, atime)) = times {
-                array.append(req, Owner::take(req, Value::int(mtime)))?;
-                array.append(req, Owner::take(req, Value::int(atime)))?;
-            }
-            (
-                b"stream_metadata",
-                vec![url_arg, Value::int(1), Value::array(array)],
-            )
-        }
-        WrapperOp::Owner(uid) => (
-            b"stream_metadata",
-            vec![url_arg, Value::int(3), Value::int(uid)],
-        ),
-        WrapperOp::Group(gid) => (
-            b"stream_metadata",
-            vec![url_arg, Value::int(5), Value::int(gid)],
-        ),
-        WrapperOp::OwnerName(name) => (
-            b"stream_metadata",
-            vec![url_arg, Value::int(2), string_arg(req, name)?],
-        ),
-        WrapperOp::GroupName(name) => (
-            b"stream_metadata",
-            vec![url_arg, Value::int(4), string_arg(req, name)?],
-        ),
-        WrapperOp::Chmod(mode) => (
-            b"stream_metadata",
-            vec![url_arg, Value::int(6), Value::int(mode)],
-        ),
+        WrapperOp::Rmdir => (b"rmdir", Ok(ints(req, &[REPORT_ERRORS]))),
+        WrapperOp::Touch(times) => (b"stream_metadata", touch_args(req, times)),
+        WrapperOp::Owner(uid) => (b"stream_metadata", Ok(ints(req, &[3, uid]))),
+        WrapperOp::Group(gid) => (b"stream_metadata", Ok(ints(req, &[5, gid]))),
+        WrapperOp::OwnerName(name) => (b"stream_metadata", named_args(req, 2, name)),
+        WrapperOp::GroupName(name) => (b"stream_metadata", named_args(req, 4, name)),
+        WrapperOp::Chmod(mode) => (b"stream_metadata", Ok(ints(req, &[6, mode]))),
     };
-    let called = path_call(req, user, method, &args)?;
-    for arg in args {
-        req.release(arg);
+    match rest {
+        Ok(rest) => args.extend(rest),
+        Err(thrown) => {
+            give_up_all(req, args);
+            return Err(thrown);
+        }
     }
-    bool_answer(req, called.as_ref())
+    let called = path_call(req, user, method, &views(&args));
+    give_up_all(req, args);
+    bool_answer(req, called?)
+}
+
+/// `stream_metadata`'s option and the times as an array, empty for none.
+fn touch_args(req: &mut Request, times: Option<(i64, i64)>) -> Result<Vec<Owner<Value>>, Thrown> {
+    let mut array = PhpArray::new(req)?;
+    if let Some((mtime, atime)) = times {
+        let appended = array
+            .append(req, Owner::take(req, Value::int(mtime)))
+            .and_then(|()| array.append(req, Owner::take(req, Value::int(atime))));
+        if let Err(thrown) = appended {
+            array.give_up(req);
+            return Err(thrown);
+        }
+    }
+    let mut args = ints(req, &[1]);
+    args.push(array.into_value());
+    Ok(args)
+}
+
+/// `stream_metadata`'s option and a user or group name.
+fn named_args(req: &mut Request, option: i64, name: &[u8]) -> Result<Vec<Owner<Value>>, Thrown> {
+    let name = string_arg(req, name)?;
+    let mut args = ints(req, &[option]);
+    args.push(name);
+    Ok(args)
 }

@@ -7,13 +7,13 @@
 //! gives every enum, `cases`, `from` and `tryFrom`, are the engine's,
 //! which links them onto every enum, a native's and a program's alike.
 
-use php_ext::abi::{Instance, This, Union};
+use php_ext::abi::{Instance, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::class_constant;
 use php_ext::decl::{ClassKind, EnumBacking, Type};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use super::signature::type_factory;
 use super::{
@@ -113,13 +113,11 @@ fn this_case(req: &mut Request, this: PhpObject) -> Result<(ClassId, Vec<u8>), T
 }
 
 /// The one instance the engine keeps for a case, `zend_enum_get_case`,
-/// one more owner of it.
-fn case_object(req: &mut Request, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
+/// one more owner of it, a value that is that object.
+fn case_object(req: &mut Request, class: ClassId, name: &[u8]) -> Result<Owner<Value>, Thrown> {
     let case = class_constant(req, class, name)?;
-    if let Some(&object) = case.as_object() {
-        // The owner goes with the object the caller is handed.
-        let _case = case.hand_on_unmigrated();
-        return Ok(object);
+    if case.as_object().is_some() {
+        return Ok(case);
     }
     case.give_up(req);
     Err(fatal(req, "InternalError: an enum case that is no object"))
@@ -424,13 +422,12 @@ impl ReflectionEnumUnitCase {
     /// enum(PropertyHookType::Get)
     /// bool(true)
     /// ```
-    fn getValue(req: &mut Request, this: This<Self>) -> Result<Instance<crate::UnitEnum>, Thrown> {
+    fn getValue(
+        req: &mut Request,
+        this: This<Self>,
+    ) -> Result<Owner<Raw<Instance<crate::UnitEnum>>>, Thrown> {
         let (class, name) = this_case(req, this.object())?;
-        let case = case_object(req, class, &name)?;
-        // The class's constant keeps the case; the engine takes its own
-        // owner of the view returned.
-        req.release(case.as_value());
-        Ok(Instance::of(case))
+        Ok(case_object(req, class, &name)?.into_raw())
     }
 }
 
@@ -459,13 +456,18 @@ impl ReflectionEnumBackedCase {
     ) -> Result<Union<i64, PhpString>, Thrown> {
         let (class, name) = this_case(req, this.object())?;
         let case = case_object(req, class, &name)?;
-        let value = case.prop(req, b"value").unwrap_or_default();
+        let value = case
+            .as_object()
+            .and_then(|object| object.prop(req, b"value"))
+            .unwrap_or_default();
+        // A view of the string the case's own `value` keeps: the class's
+        // constant keeps the case.
         let backing = match (value.as_int(), value.as_php_string()) {
             (Some(int), _) => Some(Union::A(int)),
             (None, Some(&string)) => Some(Union::B(string)),
             (None, None) => None,
         };
-        req.release(case.as_value());
+        case.give_up(req);
         backing.ok_or_else(|| {
             fatal(
                 req,

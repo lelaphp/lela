@@ -12,7 +12,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString, Value, ValueRef};
 use php_ext_pdo_sqlite::ffi::{
     Aggregate, Argument, Callbacks, Handler, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
-    SQLITE_OK,
+    SQLITE_OK, drop_aggregate,
 };
 
 use crate::conn::{fail, fail_after};
@@ -119,24 +119,24 @@ impl Callbacks for Sqlite3 {
         state: &mut Option<Box<Aggregate>>,
         args: Vec<Argument>,
     ) -> Result<(), Thrown> {
-        let held = state.get_or_insert_with(|| {
-            Box::new(Aggregate {
-                value: Value::null(),
+        let held = match state {
+            Some(held) => held,
+            None => state.insert(Box::new(Aggregate {
+                value: Owner::take(req, Value::null()),
                 row: 0,
-            })
-        });
+            })),
+        };
         held.row += 1;
         let extra = arguments(req, args)?;
-        let mut values = vec![held.value, Value::int(held.row)];
+        let mut values = vec![*held.value, Value::int(held.row)];
         values.extend(views(&extra));
         let returned = call(req, &handler.callable, &values);
         release_all(req, extra);
         let (kept, thrown) = match returned {
-            Ok(value) => (value.hand_on_unmigrated(), None),
-            Err(thrown) => (Value::null(), Some(thrown)),
+            Ok(value) => (value, None),
+            Err(thrown) => (Owner::take(req, Value::null()), Some(thrown)),
         };
-        let old = std::mem::replace(&mut held.value, kept);
-        req.release(old);
+        std::mem::replace(&mut held.value, kept).give_up(req);
         thrown.map_or(Ok(()), Err)
     }
 
@@ -149,7 +149,7 @@ impl Callbacks for Sqlite3 {
         state: Option<Box<Aggregate>>,
         invocation: &mut Invocation<'_>,
     ) -> Result<(), Thrown> {
-        let value = state.as_ref().map_or(Value::null(), |held| held.value);
+        let value = state.as_ref().map_or(Value::null(), |held| *held.value);
         let returned = call(req, &handler.callable, &[value, Value::int(0)]);
         let answered = match returned {
             Ok(returned) => answer(req, returned, invocation),
@@ -158,9 +158,7 @@ impl Callbacks for Sqlite3 {
                 Err(thrown)
             }
         };
-        if let Some(held) = state {
-            req.release(held.value);
-        }
+        drop_aggregate(req, state);
         answered
     }
 

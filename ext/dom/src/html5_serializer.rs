@@ -7,7 +7,7 @@
 //! encoding through lexbor's encoder with `?` for what it lacks.
 
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::{Request, Stream, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Owner, PhpObject, PhpString};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,
@@ -586,7 +586,7 @@ pub(crate) fn save_html_file(
     let doc = match fetch(req, this) {
         Ok(found) => found,
         Err(thrown) => {
-            stream.hand_on_unmigrated().free(req);
+            stream.free(req);
             return Err(thrown);
         }
     };
@@ -600,10 +600,10 @@ pub(crate) fn save_html_file(
         common_save(&mut out, &templates, doc, &encoding)
     };
     if !saved {
-        stream.hand_on_unmigrated().free(req);
+        stream.free(req);
         return Ok(None);
     }
     let written = stream.tell(req);
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(Some(written))
 }

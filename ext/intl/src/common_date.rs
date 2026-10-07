@@ -251,22 +251,31 @@ pub(crate) fn zone_held(req: &mut Request, value: Value, position: u32) -> Resul
 }
 
 /// A held time zone argument sorted as `timezone_process_timezone_argument`
-/// sorts it: an `IntlTimeZone`, a `DateTimeZone`, or a string, another
-/// object by its string cast.
-pub(crate) fn zone_sorted(req: &mut Request, value: Value) -> Result<ZoneArg, Thrown> {
-    Ok(match value.as_ref() {
+/// sorts it, and handed to `then`: an `IntlTimeZone`, a `DateTimeZone`,
+/// or a string, another object by its string cast, which is given up
+/// once `then` is done with it.
+pub(crate) fn zone_sorted<R>(
+    req: &mut Request,
+    value: Value,
+    then: impl FnOnce(&mut Request, ZoneArg) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
+    let arg = match value.as_ref() {
         ValueRef::Object(object) if object.native::<TimeZoneObject>(req).is_some() => {
             Some(Union::A(Instance::of(*object)))
         }
         ValueRef::Object(object) if is_a(req, *object, b"DateTimeZone")? => {
             Some(Union::B(Union::A(Instance::of(*object))))
         }
-        ValueRef::Object(_) => Some(Union::B(Union::B(
-            to_string(req, &value)?.hand_on_unmigrated(),
-        ))),
+        ValueRef::Object(_) => {
+            let cast = to_string(req, &value)?;
+            let answer = then(req, Some(Union::B(Union::B(*cast))));
+            cast.give_up(req);
+            return answer;
+        }
         ValueRef::Str(text) => Some(Union::B(Union::B(*text))),
         _ => None,
-    })
+    };
+    then(req, arg)
 }
 
 /// `timezone_throw_exception_with_call_location`: an `IntlException`
