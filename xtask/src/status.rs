@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value, json};
 
 pub(crate) mod every;
+mod graph;
 mod parity;
 pub(crate) use every::PerReading;
 
@@ -148,6 +149,8 @@ pub fn render(
         }
         Section::Week => return week_section(manifest, &readings, week, format),
         Section::Bundle => (bundle(manifest, &readings), BUNDLE),
+        Section::Crates => return graph::crates(manifest, root, format, uncut),
+        Section::Edges => return graph::edges(manifest, format),
         Section::Modules => return modules(manifest, &readings, format),
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),

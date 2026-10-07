@@ -150,6 +150,124 @@ fn modules_renders_each_lock_by_its_defining_modules_the_widest_first() {
     assert_eq!(rows.as_array().unwrap().len(), 2);
 }
 
+/// The crates section counts the manifest's `[[crate]]` rows by the
+/// directory each is laid down in, from the manifest alone, so a region
+/// that renders it is held by `inputs=seams.toml` (#2250); every row, with
+/// whether its directory holds a `Cargo.toml`, is under `--uncut` and in
+/// JSON.
+#[test]
+fn crates_counts_the_manifest_rows_by_directory_and_lists_each_under_uncut() {
+    let root = scratch("crates");
+    std::fs::create_dir_all(root.join("crates/php_heap")).unwrap();
+    std::fs::write(root.join("crates/php_heap/Cargo.toml"), "").unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    let count = |dir: &str, feature: bool| {
+        manifest
+            .crates
+            .iter()
+            .filter(|c| c.path().starts_with(dir) && (!feature || c.feature.is_some()))
+            .count()
+    };
+
+    let (ok, md, err) = status(&root, &["--section", "crates"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.starts_with("| directory | crates | behind a feature |\n|---|---|---|\n"),
+        "{md}"
+    );
+    for dir in ["crates", "ext", "sapi"] {
+        let line = format!(
+            "| {dir}/ | {} | {} |\n",
+            count(dir, false),
+            count(dir, true)
+        );
+        assert!(md.contains(&line), "{line}in {md}");
+    }
+    assert!(md.ends_with("| xtask | 1 | 0 |\n"), "{md}");
+
+    let (ok, uncut, err) = status(&root, &["--section", "crates", "--uncut"]);
+    assert!(ok, "{err}");
+    assert!(
+        uncut.starts_with("| crate | directory | feature | created |\n"),
+        "{uncut}"
+    );
+    assert!(
+        uncut.contains("| php_heap | crates/php_heap |  | yes |\n"),
+        "{uncut}"
+    );
+    assert!(
+        uncut.contains("| php_jit | crates/php_jit | jit | no |\n"),
+        "{uncut}"
+    );
+    assert!(
+        uncut.contains("| ext/pcre | ext/pcre |  | no |\n"),
+        "{uncut}"
+    );
+    assert_eq!(uncut.lines().count(), manifest.crates.len() + 2, "{uncut}");
+
+    let (ok, json, err) = status(&root, &["--section", "crates", "--format", "json"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), manifest.crates.len());
+    let heap = rows.iter().find(|r| r["crate"] == "php_heap").unwrap();
+    assert_eq!(heap["directory"], "crates/php_heap");
+    assert_eq!(heap["created"], true);
+    assert_eq!(heap["feature"], serde_json::Value::Null);
+    let jit = rows.iter().find(|r| r["crate"] == "php_jit").unwrap();
+    assert_eq!(jit["feature"], "jit");
+    assert_eq!(jit["created"], false);
+}
+
+/// The edges section is the manifest's `[[edge]]` rows in its order, each
+/// with where it reaches, how the row qualifies it and its ADRs, from the
+/// manifest alone (#2250); in JSON the rows are the manifest's as it
+/// parses them.
+#[test]
+fn edges_renders_every_edge_row_with_its_qualifiers_and_adrs() {
+    let root = scratch("edges");
+    let manifest = Manifest::load(&root).unwrap();
+
+    let (ok, md, err) = status(&root, &["--section", "edges"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.starts_with("| from | to | as | adr |\n|---|---|---|---|\n"),
+        "{md}"
+    );
+    assert_eq!(md.lines().count(), manifest.edges.len() + 2, "{md}");
+    for edge in &manifest.edges {
+        let to: Vec<&str> = edge.to.iter().collect();
+        let head = format!("| {} | {} | ", edge.from, to.join(", "));
+        assert!(md.contains(&head), "{head}in {md}");
+    }
+    let row = |from: &str| {
+        md.lines()
+            .find(|l| l.starts_with(&format!("| {from} |")))
+            .unwrap_or_else(|| panic!("no edge from {from}: {md}"))
+            .to_owned()
+    };
+    assert!(
+        row("php_engine::{executor,kernels}").contains("| denied |"),
+        "{md}"
+    );
+    assert!(row("php_ext").contains("| re-exports only |"), "{md}");
+    assert!(
+        row("php_bundle").ends_with("| registration order | ADR-0004, ADR-0006 |"),
+        "{md}"
+    );
+    assert!(
+        row("php_jit").contains("| imports only what tier.lock lists | ADR-0006 |"),
+        "{md}"
+    );
+    assert!(row("php_sapi").contains("| through sapi.lock |"), "{md}");
+    assert!(row("ext/*").contains("| these only | ADR-0004 |"), "{md}");
+
+    let (ok, json, err) = status(&root, &["--section", "edges", "--format", "json"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(rows, serde_json::to_value(&manifest.edges).unwrap());
+}
+
 #[test]
 fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     let root = scratch("readings");
