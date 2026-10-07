@@ -16,7 +16,7 @@ use php_ext_random::Rng;
 
 use super::sort::key_value;
 use super::stack::Stack;
-use super::{HT_MAX_SIZE, copied, give_up_rows, returned, row_copied};
+use super::{HT_MAX_SIZE, copied, give_up_rows, returned};
 use crate::math::math_round;
 
 /// `string|int|float`, a bound of `range`.
@@ -177,19 +177,18 @@ fn merge_recursive(
     // `ZEND_HASH_FOREACH_STR_KEY_VAL(src, string_key, src_entry)`
     // (`Z/ext/standard/array.c:4041`), no owner of the table taken: the
     // argument holds it while an object's cast or a destructor an
-    // overwrite serves runs. A count read of the row is php's, less the
-    // walk's own owner of it (`Row::refcount`); where the two rows are
-    // one reference, that is the reference's.
+    // overwrite serves runs. A count read of the row is php's; where the
+    // two rows are one reference, that is the reference's.
     walk::foreach(req, src, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let src_entry = *row.value();
         let Key::Str(_) = key else {
-            let value = row_copied(req, row);
+            let value = copied(req, *row.value());
             dest.append(req, value)?;
             return Ok(ControlFlow::Continue(()));
         };
         let Some(dest_entry) = dest.get(&key) else {
-            let value = row_copied(req, row);
+            let value = copied(req, *row.value());
             let key = Owner::take(req, key.clone());
             dest.set(req, key, value)?;
             return Ok(ControlFlow::Continue(()));
@@ -199,7 +198,7 @@ fn merge_recursive(
         let thash = dest_value.as_array().copied();
         let same_cell = matches!(
             (src_entry.as_php_ref(), dest_entry.as_php_ref()),
-            (Some(a), Some(b)) if a == b && row.refcount() % 2 == 1
+            (Some(a), Some(b)) if a == b && src_entry.refcount() % 2 == 1
         );
         if thash.is_some_and(|thash| thash.is_recursive()) || same_cell {
             return Err(throw_error(req, "Error", "Recursion detected"));
@@ -354,7 +353,7 @@ fn replace_flat(
     // it while an overwrite's release serves a destructor.
     walk::foreach(req, src, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
-        let value = row_copied(req, row);
+        let value = copied(req, *row.value());
         let key = Owner::take(req, key.clone());
         dest.set(req, key, value)?;
         Ok(ControlFlow::Continue(()))
@@ -381,7 +380,7 @@ fn replace_recursive(
             .and_then(|entry| entry.deref().as_array().copied());
         let (Some(src_array), Some(dest_array)) = (src_value.as_array().copied(), dest_array)
         else {
-            let value = row_copied(req, row);
+            let value = copied(req, *row.value());
             let key = Owner::take(req, key.clone());
             dest.set(req, key, value)?;
             return Ok(ControlFlow::Continue(()));

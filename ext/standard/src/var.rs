@@ -691,6 +691,28 @@ const INDENT: usize = 4;
 /// )
 /// ```
 ///
+/// An array's rows are walked as `print_hash` walks them, holding no
+/// owner of a row: a count a `__debugInfo` reads of its own object is
+/// php's, the array's and the call's (#2159).
+///
+/// ```php
+/// class F { public $x = 1; function __debugInfo() { debug_zval_dump($this); return []; } }
+/// $s = [new F];
+/// print_r($s);
+/// ```
+/// ```expect
+/// *RECURSION*
+/// object(F)#1 (0) refcount(2){
+/// }
+/// Array
+/// (
+///     [0] => F Object
+///         (
+///         )
+///
+/// )
+/// ```
+///
 /// The object's guard is cleared before the table is released, so a
 /// destructor the release serves prints the object whole:
 ///

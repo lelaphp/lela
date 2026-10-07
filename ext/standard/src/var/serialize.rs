@@ -170,7 +170,7 @@ impl Serializer {
         out: &mut Vec<u8>,
         value: &Value,
     ) -> Result<(), Thrown> {
-        write(req, out, value, value.refcount(), self, false, true)
+        write(req, out, value, self, false, true)
     }
 
     /// `PHP_VAR_SERIALIZE_DESTROY`: the var hash handed back to the
@@ -229,7 +229,7 @@ impl Serializer {
     /// D gone
     /// a:2:{i:0;O:1:"R":1:{i:0;O:1:"D":0:{}}i:1;O:1:"R":1:{i:0;O:1:"D":0:{}}}
     /// ```
-    fn add(&mut self, req: &mut Request, value: &Value, refcount: u32, in_rcn_array: bool) -> i64 {
+    fn add(&mut self, req: &mut Request, value: &Value, in_rcn_array: bool) -> i64 {
         self.hash.n += 1;
         let (held, is_ref, recorded) = match value.as_ref() {
             ValueRef::Reference(cell) => match cell.get().as_object() {
@@ -239,7 +239,7 @@ impl Serializer {
             ValueRef::Object(object) => {
                 let object = *object;
                 if !in_rcn_array
-                    && refcount == 1
+                    && value.refcount() == 1
                     && !object.properties_shared()
                     && !has_method(req, object.class(), b"__serialize")
                     && !has_method(req, object.class(), b"__sleep")
@@ -335,14 +335,13 @@ fn write(
     req: &mut Request,
     out: &mut Vec<u8>,
     value: &Value,
-    refcount: u32,
     hash: &mut Serializer,
     in_rcn_array: bool,
     is_root: bool,
 ) -> Result<(), Thrown> {
     // `php_serialize_check_stack_limit`.
     call_stack_limit(req)?;
-    let already = hash.add(req, value, refcount, in_rcn_array);
+    let already = hash.add(req, value, in_rcn_array);
     if already != 0 {
         if already == -1 {
             out.extend_from_slice(b"N;");
@@ -359,11 +358,8 @@ fn write(
     }
     // `struc = Z_REFVAL_P(struc)`: what a reference holds is counted as
     // the reference holds it.
-    let refcount = match value.as_php_ref() {
-        Some(cell) => cell.get().refcount(),
-        None => refcount,
-    };
     let value = value.deref();
+    let refcount = value.refcount();
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"b:0;"),
         ValueRef::Bool(true) => out.extend_from_slice(b"b:1;"),
@@ -420,6 +416,20 @@ fn write(
 /// ```
 /// ```expect
 /// a:1:{i:0;a:2:{i:0;O:1:"C":0:{}i:1;s:3:"new";}}
+/// ```
+///
+/// Nor does it hold an owner of a row, so two tables down a row the
+/// program rewrites through its reference is rewritten in place and
+/// written as it now is, as php writes it (#2159):
+///
+/// ```php
+/// class C { function __serialize(): array { $GLOBALS['r'][0][1] = 'new'; return []; } }
+/// $r = [[new C, 1]];
+/// $o = [&$r];
+/// echo serialize($o), "\n";
+/// ```
+/// ```expect
+/// a:1:{i:0;a:1:{i:0;a:2:{i:0;O:1:"C":0:{}i:1;s:3:"new";}}}
 /// ```
 ///
 /// ```php
@@ -482,20 +492,19 @@ fn nested(
             Key::Int(n) => write_long(out, *n),
             Key::Str(s) => write_string(out, s.as_bytes()),
         }
-        // `Z_ISREF_P(data) && Z_REFCOUNT_P(data) == 1`, counted as php's
-        // walk counts it, without the walk's own owner of the row.
-        let (data, refcount) = match row.value().as_php_ref() {
-            Some(cell) if row.refcount() == 1 => (cell.get(), cell.get().refcount()),
-            _ => (*row.value(), row.refcount()),
+        // `Z_ISREF_P(data) && Z_REFCOUNT_P(data) == 1`.
+        let data = match row.value().as_php_ref() {
+            Some(cell) if row.value().refcount() == 1 => cell.get(),
+            _ => *row.value(),
         };
         if let (Some(inner), Some(outer_array)) = (data.as_array(), outer.as_array())
             && inner.is_same(*outer_array)
         {
-            hash.add(req, outer, outer.refcount(), in_rcn_array);
+            hash.add(req, outer, in_rcn_array);
             out.extend_from_slice(b"N;");
             return Ok(ControlFlow::Continue(()));
         }
-        write(req, out, &data, refcount, hash, in_rcn_array, false)?;
+        write(req, out, &data, hash, in_rcn_array, false)?;
         Ok(ControlFlow::<()>::Continue(()))
     })?;
     out.push(b'}');
@@ -506,10 +515,27 @@ fn is_magic(key: &Key) -> bool {
     matches!(key, Key::Str(s) if s.as_bytes() == MAGIC_MEMBER)
 }
 
-/// An object whose class has `__serialize`: the array the method
-/// answers written as the object's data, `php_var_serialize_nested_data`
-/// over it, and php's `TypeError` for anything else.
+/// An object whose class has `__serialize`, held across the call and
+/// the rows as `ZVAL_OBJ_COPY(&obj, Z_OBJ_P(struc))`
+/// (`Z/ext/standard/var.c:1148`) holds it, so a count the method reads
+/// of it is php's.
 fn serialize_method(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: PhpObject,
+    name: &[u8],
+    hash: &mut Serializer,
+) -> Result<(), Thrown> {
+    let held = Owner::take(req, object);
+    let written = serialized_data(req, out, object, name, hash);
+    held.give_up(req);
+    written
+}
+
+/// [`serialize_method`]'s body: the array `__serialize` answers written
+/// as the object's data, `php_var_serialize_nested_data` over it, and
+/// php's `TypeError` for anything else.
+fn serialized_data(
     req: &mut Request,
     out: &mut Vec<u8>,
     object: PhpObject,
@@ -572,26 +598,11 @@ fn object_value(
         return custom(req, out, object, &name, hash);
     }
     if name != INCOMPLETE_CLASS && has_method(req, object.class(), b"__sleep") {
-        let names = locked(req, |req| call_method(req, &object, b"__sleep", &[]))?;
-        let Some(list) = names.as_array().copied() else {
-            names.give_up(req);
-            let shown = String::from_utf8_lossy(&name).into_owned();
-            docref(
-                req,
-                Level::Warning,
-                &format!(
-                    "{shown}::__sleep() should return an array only containing the names of instance-variables to serialize"
-                ),
-            );
-            out.extend_from_slice(b"N;");
-            return Ok(());
-        };
-        let table = sleep_props(req, object, &name, list);
-        names.give_up(req);
-        let table = table?;
-        write_class_name(req, out, object);
-        let written = nested(req, out, &object.as_value(), *table, hash, false, false);
-        table.give_up(req);
+        // `ZVAL_OBJ_COPY(&tmp, Z_OBJ_P(struc))` (`Z/ext/standard/var.c:1222`):
+        // the object held across `__sleep` and its rows.
+        let held = Owner::take(req, object);
+        let written = sleep_serialized(req, out, object, &name, hash);
+        held.give_up(req);
         return written;
     }
     let incomplete = write_class_name(req, out, object);
@@ -613,6 +624,39 @@ fn object_value(
     if written.is_err() {
         hash.fail(object);
     }
+    written
+}
+
+/// An object whose class has `__sleep`, held by its caller: the names
+/// the method answers read off the object, `php_var_serialize_class`
+/// over them, and php's warning and `N;` where it answers no array.
+fn sleep_serialized(
+    req: &mut Request,
+    out: &mut Vec<u8>,
+    object: PhpObject,
+    name: &[u8],
+    hash: &mut Serializer,
+) -> Result<(), Thrown> {
+    let names = locked(req, |req| call_method(req, &object, b"__sleep", &[]))?;
+    let Some(list) = names.as_array().copied() else {
+        names.give_up(req);
+        let shown = String::from_utf8_lossy(name).into_owned();
+        docref(
+            req,
+            Level::Warning,
+            &format!(
+                "{shown}::__sleep() should return an array only containing the names of instance-variables to serialize"
+            ),
+        );
+        out.extend_from_slice(b"N;");
+        return Ok(());
+    };
+    let table = sleep_props(req, object, name, list);
+    names.give_up(req);
+    let table = table?;
+    write_class_name(req, out, object);
+    let written = nested(req, out, &object.as_value(), *table, hash, false, false);
+    table.give_up(req);
     written
 }
 

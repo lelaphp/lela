@@ -142,6 +142,7 @@ Heap::object_with
 Heap::objects
 Heap::observe_allocations
 Heap::overflow_rendered
+Heap::pin_block
 Heap::proptable_to_symtable
 Heap::reference
 Heap::reference_separate
@@ -177,6 +178,7 @@ Heap::take_sensed
 Heap::trace_allocations
 Heap::unobserve_allocations
 Heap::unpin
+Heap::unpin_block
 HeapHooks
 HeapHooks::destruct
 HeapHooks::forget_lazy

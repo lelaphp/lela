@@ -1314,7 +1314,6 @@ values::walk::ObjectTable
 values::walk::Row
 values::walk::Row::key
 values::walk::Row::make_ref
-values::walk::Row::refcount
 values::walk::Row::uninitialized
 values::walk::Row::value
 values::walk::Rows

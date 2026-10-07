@@ -86,6 +86,8 @@ pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, Slot, VmStack};
 pub use string::{FreshStr, Intern, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
+use gc::Refcounted;
+
 /// The per-request heap (design §5.13): the allocator every string,
 /// array, object and frame passes through, and the only accountant of
 /// memory. `memory_get_usage()` reads it; no other item lets a native
@@ -389,7 +391,8 @@ impl Heap {
     /// the caller.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_string(&mut self, s: Str) {
-        if s.is_interned() || s.delref() != 0 {
+        // A pinned string's free waits for its pin ([`Heap::unpin_block`]).
+        if s.is_interned() || s.delref() != 0 || s.gc().pinned() {
             return;
         }
         if s.is_persistent() {
@@ -523,7 +526,7 @@ impl Heap {
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
         match Heap::give_up(hooks, z) {
             GivenUp::Owned => Heap::gc_check_possible_root(hooks, z),
-            GivenUp::Freed => {}
+            GivenUp::Freed | GivenUp::Pinned => {}
             GivenUp::Last(last) => Heap::destroy(hooks, last),
         }
     }
@@ -537,7 +540,7 @@ impl Heap {
     pub fn release_nogc(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
         match Heap::give_up(hooks, z) {
             GivenUp::Owned => true,
-            GivenUp::Freed => false,
+            GivenUp::Freed | GivenUp::Pinned => false,
             GivenUp::Last(last) => {
                 Heap::destroy(hooks, last);
                 false
@@ -570,34 +573,101 @@ impl Heap {
             hooks.heap().release_string(s);
             return GivenUp::Freed;
         }
+        // At zero, the one test a pin costs: the count's word is in hand,
+        // and a pinned block's free waits for its pin
+        // ([`Heap::unpin_block`]).
         if let Some(a) = z.as_arr() {
             if a.delref() == 0 {
+                if a.gc().pinned() {
+                    return GivenUp::Pinned;
+                }
                 return GivenUp::Last(Last::Table(a));
             }
         } else if let Some(o) = z.as_obj() {
             if o.delref() == 0 {
+                if o.gc().pinned() {
+                    return GivenUp::Pinned;
+                }
                 Heap::store_del(hooks, o);
                 return GivenUp::Freed;
             }
         } else if let Some(r) = z.as_resource() {
             if r.delref() == 0 {
+                if r.gc().pinned() {
+                    return GivenUp::Pinned;
+                }
                 Heap::resource_free(hooks, r);
             }
             return GivenUp::Freed;
         } else if let Some(r) = z.as_reference()
             && r.delref() == 0
         {
+            if r.gc().pinned() {
+                return GivenUp::Pinned;
+            }
             return GivenUp::Last(Last::Cell(r));
         }
         GivenUp::Owned
     }
+
+    /// A walk's pin over the block `z` names (design §4.4, #2197): an
+    /// uncounted guard, so where the block's last owner goes while the
+    /// pin stands, its free, and an object's destructor with it, waits
+    /// for [`Heap::unpin_block`], and where an owner is taken again
+    /// meanwhile nothing is freed at all. The count is untouched, so
+    /// every count php reads and every separation it makes stand as
+    /// php's. Not the pin a frame takes of its receiver ([`Obj::pin`]),
+    /// which frees an object's members at php's moment and keeps only
+    /// its bytes. Whether this call set it: not for a value that carries
+    /// no count, and not for a block pinned already, which the pin that
+    /// set it keeps until after this one is let go, as a walk's steps
+    /// nest.
+    #[must_use = "a pin that was set is let go with Heap::unpin_block"]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn pin_block(z: Zval) -> bool {
+        counted_header(z, Refcounted::pin).unwrap_or(false)
+    }
+
+    /// The pin [`Heap::pin_block`] set over `z` let go: where the block's
+    /// last owner went while it stood, the block is freed now as that
+    /// release would have freed it, an object's destructor served first,
+    /// and a table's rows and a reference's value released with it,
+    /// never a possible root of the cycle collector.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn unpin_block(hooks: &mut dyn HeapHooks, z: Zval) {
+        if counted_header(z, Refcounted::unpin) == Some(0) {
+            hooks.heap().addref(z);
+            Heap::release_nogc(hooks, z);
+        }
+    }
+}
+
+/// `f` over the refcounted header of the block `z` names, `Z_COUNTED`;
+/// none for a value that carries no count.
+fn counted_header<R>(z: Zval, f: impl FnOnce(&Refcounted) -> R) -> Option<R> {
+    if !z.is_refcounted() {
+        return None;
+    }
+    if let Some(s) = z.as_str() {
+        (!s.is_interned()).then(|| f(s.gc()))
+    } else if let Some(a) = z.as_arr() {
+        Some(f(a.gc()))
+    } else if let Some(o) = z.as_obj() {
+        Some(f(o.gc()))
+    } else if let Some(r) = z.as_resource() {
+        Some(f(r.gc()))
+    } else {
+        z.as_reference().map(|r| f(r.gc()))
+    }
 }
 
 /// What one owner fewer left: owners still, nothing to free or freed
-/// already, or a table or a reference cell whose last owner it was.
+/// already, the last owner gone from a pinned block whose free waits
+/// for its pin, or a table or a reference cell whose last owner it was.
 enum GivenUp {
     Owned,
     Freed,
+    Pinned,
     Last(Last),
 }
 

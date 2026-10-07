@@ -292,7 +292,8 @@ impl Str {
     /// and the old bytes only when a block moves. Any other string,
     /// interned or shared, is `zend_string_alloc` of the new length with
     /// the old bytes copied in, and the caller's owner of it given up
-    /// (`GC_DELREF`); the other holders see it as it was. The hash is
+    /// (`GC_DELREF`); the other holders see it as it was, and a string
+    /// a walk pins is copied the same way. The hash is
     /// forgotten, and the UTF-8 verdict kept where both sides had it
     /// (`ZSTR_GET_COPYABLE_CONCAT_PROPERTIES_BOTH`). `tail` may be `s`
     /// itself, `$s .= $s`, whose bytes are then read where the realloc
@@ -310,23 +311,30 @@ impl Str {
         };
         let utf8 = s.is_valid_utf8() && tail.is_valid_utf8();
         let same = s.is_same(tail);
-        let grown = if !s.is_interned() && !s.is_persistent() && s.refcount() == 1 {
-            // SAFETY: `s` is the request's and its one owner is the
-            // caller's, handed here, so nothing names the allocation but
-            // this; its header, bytes and NUL are initialised.
-            let at =
-                unsafe { mm.realloc(s.address(), HEADER + old + 1, Str::allocation_size(len)) }?;
-            Str(at.cast())
-        } else {
-            let at = mm.alloc(Str::allocation_size(len))?;
-            // SAFETY: a fresh allocation of the size a string of `len`
-            // bytes takes, which the `old` bytes of `s` fit in.
-            let copy = unsafe { Str::init(at, s.bytes(), 0) };
-            if !s.is_interned() && !s.is_persistent() {
-                s.delref();
-            }
-            copy
-        };
+        // A pinned string is named by the walk that pinned it, which
+        // holds no count (`Heap::pin_block`): it is copied, as a shared
+        // one is, and its free waits for the pin, so the block the pin
+        // names never moves.
+        let grown =
+            if !s.is_interned() && !s.is_persistent() && s.refcount() == 1 && !s.gc().pinned() {
+                // SAFETY: `s` is the request's, its one owner is the
+                // caller's, handed here, and no walk pins it, so nothing
+                // names the allocation but this; its header, bytes and NUL
+                // are initialised.
+                let at = unsafe {
+                    mm.realloc(s.address(), HEADER + old + 1, Str::allocation_size(len))
+                }?;
+                Str(at.cast())
+            } else {
+                let at = mm.alloc(Str::allocation_size(len))?;
+                // SAFETY: a fresh allocation of the size a string of `len`
+                // bytes takes, which the `old` bytes of `s` fit in.
+                let copy = unsafe { Str::init(at, s.bytes(), 0) };
+                if !s.is_interned() && !s.is_persistent() {
+                    s.delref();
+                }
+                copy
+            };
         let from = if same { grown } else { tail };
         // SAFETY: the bytes of a live string sit right after its header.
         let src = unsafe { from.0.as_ptr().cast::<u8>().add(HEADER) };
@@ -384,6 +392,11 @@ impl Str {
         // is live while its owner holds it, which is the same contract
         // php's `zend_string *` carries.
         unsafe { self.0.as_ref() }
+    }
+
+    /// `zend_refcounted_h gc`: the count and the flags.
+    pub(crate) fn gc(&self) -> &Refcounted {
+        &self.header().gc
     }
 
     /// The bytes, `ZSTR_VAL` over `ZSTR_LEN`, without the NUL.
