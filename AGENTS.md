@@ -109,14 +109,15 @@ third-engine-design.md
 |---|---|---|---|---|
 | heap | heap.lock | 390 |  | pass |
 | process | process.lock | 17 |  | pass |
-| unit | unit.lock | 122 |  | pass |
+| unit | unit.lock | 86 |  | pass |
+| link | link.lock | 36 |  | pass |
 | ops | ops.lock | 209 |  | pass |
 | api | api.lock | 1317 | 1500 | pass |
 | sapi | sapi.lock | 35 |  | pass |
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 372 |  | pass |
 
-<!-- /computed in=54c402c600c445a2e05b26b925dc01f7549be3edcc9576f63bc77685ab2f8b9c out=963ffb6697bcffb9f7e6655a9cfe50615553ad7878b8156332641fc7e0d17bf0 -->
+<!-- /computed in=cfe31bf892afa67a92771381121b99f7fbc62d5ce34afcb7de13da4af366ed32 out=e0cfb4e272b3f4be9819aebfdc9ca7845181788f9769f568ed83df234c13859f -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -137,19 +138,19 @@ third-engine-design.md
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | fail |
-| ticket.close |  | deny_argv | fail |
-| ticket.close-api |  | deny_pattern | fail |
+| git.no-verify |  | deny_argv | no reading |
+| ticket.close |  | deny_argv | no reading |
+| ticket.close-api |  | deny_pattern | no reading |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | fail |
+| lanes.nightly |  | deny_pattern | no reading |
 | lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | fail |
+| lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
 | harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=264816a7ea9a5cb0964a15c52ba6ac697c4093df2a81319ede7106ae4f27d6c0 out=81c5fd38e09d43769bfaa6193fe7a3818a0a3c60900153d819318d78cf805a3e -->
+<!-- /computed in=b675d57fd9001f345e9a64bfef8d5a3542ffdb39dda21839d1056ba176d790ff out=2b9bb90b318b58f8594badd95f4c1bb90b6b414b51123a96fd57ce46b04a6699 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -196,6 +197,7 @@ Options:
 ├── php_engine
 ├── php_ext
 ├── php_heap
+├── php_link
 ├── php_macros
 ├── php_process
 ├── php_proto
@@ -204,7 +206,7 @@ Options:
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=f0c7b431c0b09dd1f77217aa12a1df01ec11c8acda891c0c220c5b01f645a614 out=41028121a5904b9375f2470827c829ad35eb7f8905d93b9e3304c072dee99ea0 -->
+<!-- /computed in=a6ae36102f3fb2438f430e76078d6bc209005a653df755e1364367643b4e3fd2 out=2aea06da2e5135b2c82210bff019bf591f30d1a7eb6d65c5346cbb72921b7485 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

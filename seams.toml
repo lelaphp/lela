@@ -58,6 +58,10 @@ name = "php_unit"
 budget = 6000
 lock = "unit.lock"
 [[crate]]
+name = "php_link"
+budget = 5500                               # the linker and the linked class record, moved out of php_unit (ADR-0012; #2193, #2228)
+lock = "link.lock"
+[[crate]]
 name = "php_compile"
 budget = 22000
 [[crate]]
@@ -501,6 +505,12 @@ consumers = ["php_compile", "php_engine", "php_jit", "php_link"]
 lock = "unit.lock"
 adr = "0001"
 [[seam]]
+name = "link"
+producer = "php_link"
+consumers = ["php_compile", "php_engine", "php_jit"]
+lock = "link.lock"
+adr = "0012"
+[[seam]]
 name = "ops"
 producer = "ops.toml"
 consumers = ["php_unit", "php_engine", "php_compile", "xtask"]
@@ -547,6 +557,9 @@ lock = "xtask.lock"
 [[edge]]
 from = "php_unit"
 to = ["php_heap"]
+[[edge]]
+from = "php_link"
+to = ["php_unit", "php_heap"]
 [[edge]]
 from = "php_compile"
 to = ["php_syntax", "php_unit", "php_link", "php_heap"]
