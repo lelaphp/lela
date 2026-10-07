@@ -683,6 +683,9 @@ impl Request {
             }
             published.push(function);
         }
+        // `zend_shared_alloc_save_state`: a restart keeps what the
+        // preload published.
+        self.arena.keep();
         self.declared.clear_own();
         self.aliases.clear_own();
         self.own_classes.clear();
