@@ -118,6 +118,11 @@ impl Res {
         unsafe { self.0.as_ref() }
     }
 
+    /// `zend_refcounted_h gc`: the count and the flags.
+    pub(crate) fn gc(&self) -> &Refcounted {
+        &self.header().gc
+    }
+
     /// Where the header sits, which is where the allocation starts, for
     /// the heap that frees it.
     pub(crate) const fn address(self) -> NonNull<u8> {

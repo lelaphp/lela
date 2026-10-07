@@ -43,9 +43,25 @@ pub(crate) fn refuses_freed(
 #[derive(Debug)]
 #[repr(C)]
 pub(crate) struct Refcounted {
+    /// php's count in the low thirty-one bits, and above them the pin
+    /// ([`PINNED`]), which php's header has no room for elsewhere.
     refcount: Cell<u32>,
     type_info: Cell<u32>,
 }
+
+/// A walk's pin over the block (design §4.4, #2197): the top bit of the
+/// count's word, which no count reaches, since two to the thirty-one
+/// owners would be thirty-two gigabytes of zvals naming one block. php's
+/// header has no bit to spare beside it: each of the six bits
+/// `GC_FLAGS_MASK` spans is taken by some kind (`IS_STR_VALID_UTF8`,
+/// `IS_OBJ_FREE_CALLED`, `GC_PROTECTED`), and the collector's
+/// twenty-two are all its own once an address is compressed. The bit is no count: [`Refcounted::refcount`]
+/// and [`Refcounted::delref`] read the count beneath it, so the pin shows
+/// in no count php's would differ from, and a release that takes the
+/// count to zero asks it once there, from the word it has in hand.
+const PINNED: u32 = 1 << 31;
+/// The count's thirty-one bits beneath the pin.
+const COUNT: u32 = !PINNED;
 
 /// `GC_FLAGS_MASK` (`Z/Zend/zend_types.h:769`); the type byte is the low
 /// four bits below it and the collector's colour the bits above.
@@ -142,9 +158,9 @@ impl Refcounted {
         }
     }
 
-    /// `GC_REFCOUNT`.
+    /// `GC_REFCOUNT`: the count, beneath a pin.
     pub(crate) fn refcount(&self) -> u32 {
-        self.refcount.get()
+        self.refcount.get() & COUNT
     }
 
     /// `GC_ADDREF`: one more owner. This and [`Refcounted::delref`] are
@@ -158,13 +174,16 @@ impl Refcounted {
         if self.refuses(crate::sensed::RefOp::Addref) {
             return;
         }
-        self.refcount.set(self.refcount.get().saturating_add(1));
+        // The count saturates beneath the pin's bit ([`PINNED`]).
+        let word = self.refcount.get();
+        self.refcount.set(word + u32::from(word & COUNT != COUNT));
     }
 
     /// `GC_SET_REFCOUNT`: the count as `zend_objects_store_del` holds it
-    /// at one across a destructor.
+    /// at one across a destructor, a pin kept.
     pub(crate) fn set_refcount(&self, count: u32) {
-        self.refcount.set(count);
+        let word = self.refcount.get();
+        self.refcount.set((word & PINNED) | (count & COUNT));
     }
 
     /// `GC_DELREF`: one owner fewer, and the count that is left. A count
@@ -178,7 +197,45 @@ impl Refcounted {
         if self.refuses(crate::sensed::RefOp::Release) {
             return 1;
         }
-        let count = self.refcount.get().saturating_sub(1);
+        let word = self.refcount.get();
+        let count = (word & COUNT).saturating_sub(1);
+        self.refcount.set((word & PINNED) | count);
+        count
+    }
+
+    /// Whether a walk pins the block ([`PINNED`]): what a release that
+    /// took its count to zero asks before it frees it.
+    pub(crate) fn pinned(&self) -> bool {
+        self.refcount.get() & PINNED != 0
+    }
+
+    /// The pin set; whether it was not set already. A block pinned
+    /// already is kept by the pin that set it, which is let go after
+    /// this one, as a walk's steps nest. A debug build's freed-use guard
+    /// refuses a pin of a block the heap has freed, as it refuses an
+    /// addref, and sets nothing.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn pin(&self) -> bool {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::RefOp::Addref) {
+            return false;
+        }
+        let word = self.refcount.get();
+        self.refcount.set(word | PINNED);
+        word & PINNED == 0
+    }
+
+    /// The pin let go; the count beneath it, which is zero where the
+    /// block's last owner went while it stood. A debug build's freed-use
+    /// guard refuses it over a block the heap has freed, as it refuses a
+    /// release, and answers one owner left, so nothing is freed twice.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn unpin(&self) -> u32 {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::RefOp::Release) {
+            return 1;
+        }
+        let count = self.refcount.get() & COUNT;
         self.refcount.set(count);
         count
     }

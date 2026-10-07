@@ -850,7 +850,7 @@ impl Request {
         // (`Z/Zend/zend_exceptions.c:641`), no owner of the trace taken: the
         // property holds it while a warning reaches the program's handler.
         // Each field is looked up in the frame as `_build_trace_string`
-        // looks it up, when it is read; the walk's owner of the frame keeps
+        // looks it up, when it is read; the walk's pin of the frame keeps
         // it for the step.
         let walked = walk::foreach(self, trace, Hold::None, |req, frame| -> walk::Step {
             let Some(row) = frame.value().as_array().copied() else {
