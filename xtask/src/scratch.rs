@@ -198,7 +198,8 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
 }
 
 /// A scratch repository at `to` holding `workspace`'s files, tracked or
-/// not yet but not ignored, as the one commit on `main`, with the hooks
+/// not yet but not ignored and standing in the working tree
+/// ([`crate::git::files`]), as the one commit on `main`, with the hooks
 /// path the clone's own is set to and that commit made unsigned and
 /// unhooked: a person's `commit.gpgsign` is not the scratch repository's,
 /// and the real pre-commit measuring the scratch's files is not what a
@@ -207,23 +208,12 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
 /// worktree of it builds the harness under test.
 pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
-    let listed = git(
-        workspace,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-        None,
-    )?;
-    for file in listed.split('\0').filter(|f| !f.is_empty()) {
-        let target = to.join(file);
+    for file in crate::git::files(workspace, Path::new("."))? {
+        let target = to.join(&file);
         if let Some(dir) = target.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        std::fs::copy(workspace.join(file), &target)
+        std::fs::copy(workspace.join(&file), &target)
             .with_context(|| format!("copying {file} into {}", to.display()))?;
     }
     git(to, &["init", "-q", "-b", "main"], None)?;

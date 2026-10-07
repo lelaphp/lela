@@ -68,49 +68,17 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// Main's checkout of this working tree's files: one commit on
-    /// `main`, pushed to `origin`, and the checkout on `main`.
+    /// Main's checkout of this working tree's files, laid by
+    /// [`scratch::repository`]: one commit on `main`, pushed to `origin`,
+    /// and the checkout on `main`.
     fn lay(name: &str) -> Scratch {
         let dir = Tree::new(&format!("track-work-{name}")).unwrap();
         let root = dir.join("repo");
         let origin = dir.join("origin.git");
-        fs::create_dir_all(&root).unwrap();
+        scratch::repository(workspace(), &root).unwrap();
         fs::create_dir_all(&origin).unwrap();
         fs::create_dir_all(dir.join("bin")).unwrap();
-        let listed = sh(
-            workspace(),
-            &[
-                "git",
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-        );
-        for file in listed.split('\0').filter(|f| !f.is_empty()) {
-            let to = root.join(file);
-            fs::create_dir_all(to.parent().unwrap()).unwrap();
-            fs::copy(workspace().join(file), &to).unwrap_or_else(|e| panic!("{file}: {e}"));
-        }
         sh(&origin, &["git", "init", "-q", "--bare", "-b", "main"]);
-        sh(&root, &["git", "init", "-q", "-b", "main"]);
-        sh(&root, &["git", "config", "core.hooksPath", "scripts/hooks"]);
-        sh(&root, &["git", "add", "-A"]);
-        sh(
-            &root,
-            &[
-                "git",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/var/empty",
-                "commit",
-                "-q",
-                "-m",
-                "scratch",
-            ],
-        );
         sh(
             &root,
             &["git", "remote", "add", "origin", origin.to_str().unwrap()],

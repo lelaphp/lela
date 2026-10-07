@@ -164,34 +164,15 @@ impl std::ops::Deref for Repository {
     }
 }
 
-/// A scratch repository: this working tree's files, tracked or not yet, so the
-/// `xtask` a worktree of it builds is this one and the manifest, the pin,
-/// the registry, the map, the tracked settings and the hooks are the
-/// real ones; and one commit on `main`, which every ticket's branch is
-/// cut from (ADR-0009).
+/// A scratch repository laid by [`scratch::repository`]: this working
+/// tree's files, so the `xtask` a worktree of it builds is this one and the
+/// manifest, the pin, the registry, the map, the tracked settings and the
+/// hooks are the real ones; and one commit on `main`, which every ticket's
+/// branch is cut from (ADR-0009).
 fn repository(name: &str) -> Repository {
     let tree = Tree::new(&format!("worktree-{name}")).unwrap();
     let root = tree.join("repo");
-    let listed = sh(
-        workspace(),
-        &[
-            "git",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-    );
-    for file in listed.split('\0').filter(|f| !f.is_empty()) {
-        let to = root.join(file);
-        fs::create_dir_all(to.parent().unwrap()).unwrap();
-        fs::copy(workspace().join(file), &to).unwrap_or_else(|e| panic!("{file}: {e}"));
-    }
-    sh(&root, &["git", "init", "-q", "-b", "main"]);
-    sh(&root, &["git", "config", "core.hooksPath", "scripts/hooks"]);
-    sh(&root, &["git", "add", "-A"]);
-    commit(&root, "scratch");
+    scratch::repository(workspace(), &root).unwrap();
     Repository { _tree: tree, root }
 }
 
