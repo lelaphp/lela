@@ -311,6 +311,7 @@ attr::php_class
 attr::php_const
 attr::php_function
 call::Function
+call::Function::is_published
 call::Iter
 call::Iter::as_value
 call::Iter::invalidate
@@ -501,6 +502,7 @@ request::BuildDefs::configure
 request::BuildDefs::date
 request::BuildDefs::provider
 request::BuildDefs::system
+request::CacheBudget
 request::CacheStatus
 request::CachedFile
 request::Cast
@@ -736,6 +738,7 @@ request::Request::ini_value
 request::Request::input_bytes
 request::Request::input_variables
 request::Request::instantiable
+request::Request::interfaces
 request::Request::interrupt
 request::Request::is_pending
 request::Request::is_uploaded_file
@@ -980,6 +983,7 @@ request::Syslog
 request::TemporaryGuard
 request::TimeLimitSuspended
 request::UnitCache
+request::UnitCache::bound
 request::UnitCache::compile
 request::UnitCache::holds
 request::UnitCache::invalidate
@@ -1075,6 +1079,7 @@ values::ArrayIter::advance
 values::ArrayIter::key
 values::ArrayIter::value
 values::ClassId
+values::ClassId::is_published
 values::ClosureInfo
 values::DeclaredRows
 values::Emalloc

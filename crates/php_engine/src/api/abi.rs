@@ -229,6 +229,11 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         }
     }
 
+    /// How many keys are held.
+    pub(crate) fn len(&self) -> usize {
+        self.entries().len()
+    }
+
     /// The value held for `key`, built by nothing: what the unit cache
     /// asks before it compiles, so a hit and a miss are told apart.
     pub(crate) fn get(&self, key: &K) -> Option<Arc<V>> {

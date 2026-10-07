@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=56cd61f4a02e66e4d257b4f6ab385562a77cc7be9d2502dd2b3b1c01fe837f5f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -115,7 +115,7 @@ third-engine-design.md
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=90abce63a0771caeee84ab5997cfe81c8e14bd1f6620b718de2c0f0f501e00d2 out=0fc882c9107f8a4afc589996f09b07d1e2b487f6cfe85939301aece4a7da0fbb -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -146,8 +146,9 @@ third-engine-design.md
 | computed.force |  | deny_pattern | no reading |
 | harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
+| owner.no-assign-discard |  | deny_pattern | fail |
 
-<!-- /computed in=20bb5515d95c9ce1417e1cc956d4e856bfb9fcc5df95c1da37e6b98db8c8acd3 out=6038e7364920afa63f4780852abfb2752f866f0c2935909accf6ebd5e1a421c8 -->
+<!-- /computed in=41b262995fd0534786112bfcf420ba6e61149ceba2c66a087720baabdcecca5d out=37d2841e1c624e9d804f3b375c92dc0d330fe3b72df8eba45023ab6930446199 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

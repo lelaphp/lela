@@ -8,6 +8,9 @@
 //! in the order php appends them: the classes as `preload_sort_classes`
 //! leaves the preload's table of classes, and the functions reversed, as
 //! `preload_move_user_functions` walks the function table from its end.
+//! Its classes and functions are the first rows of the engine's
+//! published arena (design §5.14, *Identities*), so every request names
+//! them by the same numbers and reads them with nothing taken.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,30 +19,72 @@ use php_unit::decl::{ClassDecl, Name, shown};
 use php_unit::link::{Linked, Obligation};
 use php_unit::{AutoGlobal, Level, Unit};
 
-use super::{Bound, Declared, PreloadStatistics, Request, UserFunction, user_function_decl};
+use super::{PreloadStatistics, Request, UserFunction, user_function_decl};
+use crate::api::call::Function;
 use crate::api::values::ClassId;
 use crate::engine::Cached;
-use crate::enums::EnumMethod;
 use crate::exec::Body;
 use crate::unit_cache::{Held, full_path};
 
-/// One of a request's tables that starts from the preload's rows and
-/// grows past them: php's `EG(class_table)` and `EG(function_table)`,
-/// which `preload_load` extended once, at startup, so every request
-/// finds the preloaded classes and functions before its first line.
-/// The preload's rows are the engine's, shared; the request's own
-/// follow them and are dropped with it.
-pub(crate) struct Stacked<T> {
-    preloaded: Arc<[T]>,
-    own: Vec<T>,
+/// Where each key of a table stands: the row, counted as [`Keyed::get`]
+/// counts it.
+type Keys = HashMap<Box<[u8]>, usize>;
+
+/// The preload's rows of a keyed table with their keys, shared by every
+/// request as the preload's table is: php's `CG(class_table)` as
+/// `preload_load` left it, which each request's starts from.
+pub(crate) struct Rows<T> {
+    rows: Arc<[T]>,
+    keys: Arc<Keys>,
 }
 
-impl<T> Stacked<T> {
-    /// A table whose first rows are `preloaded`.
-    pub(crate) fn over(preloaded: Arc<[T]>) -> Stacked<T> {
-        Stacked {
-            preloaded,
+impl<T> Rows<T> {
+    /// The rows, each under its key, the first row of a key kept, as
+    /// `zend_hash_add` refuses a key the table holds.
+    fn of(keyed: Vec<(Box<[u8]>, T)>) -> Rows<T> {
+        let mut keys = Keys::with_capacity(keyed.len());
+        let mut rows = Vec::with_capacity(keyed.len());
+        for (at, (key, row)) in keyed.into_iter().enumerate() {
+            keys.entry(key).or_insert(at);
+            rows.push(row);
+        }
+        Rows {
+            rows: rows.into(),
+            keys: Arc::new(keys),
+        }
+    }
+}
+
+impl<T> Default for Rows<T> {
+    fn default() -> Rows<T> {
+        Rows {
+            rows: Arc::new([]),
+            keys: Arc::default(),
+        }
+    }
+}
+
+/// A table of `EG(class_table)`, found by key in one hash lookup, as
+/// `zend_hash_find` finds a bucket, and walked in the order its rows
+/// were added: the preload's rows and keys, shared with every request,
+/// then the request's own, dropped with it. A row is what the table
+/// files under the name, never the class's own row, which is the
+/// arena's or the request's (design §5.14, *Identities*).
+pub(crate) struct Keyed<T> {
+    preloaded: Arc<[T]>,
+    preloaded_keys: Arc<Keys>,
+    own: Vec<T>,
+    own_keys: Keys,
+}
+
+impl<T> Keyed<T> {
+    /// A table whose first rows are the preload's.
+    fn over(preloaded: &Rows<T>) -> Keyed<T> {
+        Keyed {
+            preloaded: Arc::clone(&preloaded.rows),
+            preloaded_keys: Arc::clone(&preloaded.keys),
             own: Vec::new(),
+            own_keys: Keys::new(),
         }
     }
 
@@ -58,145 +103,42 @@ impl<T> Stacked<T> {
         self.preloaded.iter().chain(self.own.iter())
     }
 
-    /// The row at `at` to change, where it is the request's own; none
-    /// for the preload's, which are published and shared.
-    fn own_mut(&mut self, at: usize) -> Option<&mut T> {
-        self.own.get_mut(at.checked_sub(self.preloaded.len())?)
+    /// The row filed under the lowered `key`.
+    pub(crate) fn find(&self, key: &[u8]) -> Option<&T> {
+        let at = *self
+            .preloaded_keys
+            .get(key)
+            .or_else(|| self.own_keys.get(key))?;
+        self.get(at)
     }
 
-    pub(crate) fn push(&mut self, row: T) {
+    /// `row` filed under the lowered `key`, which the table must not
+    /// hold yet: a second row of a key is never found by it.
+    pub(crate) fn push(&mut self, key: Box<[u8]>, row: T) {
+        let at = self.len();
+        self.own_keys.entry(key).or_insert(at);
         self.own.push(row);
     }
 
-    pub(crate) fn extend(&mut self, rows: impl IntoIterator<Item = T>) {
-        self.own.extend(rows);
-    }
-
-    /// The request's own rows, taken out.
-    fn take_own(&mut self) -> Vec<T> {
-        std::mem::take(&mut self.own)
-    }
-}
-
-impl<T> Default for Stacked<T> {
-    fn default() -> Stacked<T> {
-        Stacked::over(Arc::new([]))
-    }
-}
-
-/// A row's key in `EG(class_table)`: the lowered name `zend_hash_add`
-/// files it under, none for a row no name finds.
-pub(crate) trait Key {
-    fn key(&self) -> Option<Box<[u8]>>;
-}
-
-/// Where each key of a table stands: the row, counted as
-/// [`Stacked::get`] counts it.
-type Keys = HashMap<Box<[u8]>, usize>;
-
-/// The keys of `rows`, the first row of a key kept, as `zend_hash_add`
-/// refuses a key the table holds.
-fn keys_of<T: Key>(rows: &[T], from: usize) -> Keys {
-    let mut keys = Keys::with_capacity(rows.len());
-    for (at, row) in (from..).zip(rows) {
-        if let Some(key) = row.key() {
-            keys.entry(key).or_insert(at);
-        }
-    }
-    keys
-}
-
-/// The preload's rows of a keyed table with their keys, shared by every
-/// request as the rows are.
-pub(crate) struct Rows<T> {
-    rows: Arc<[T]>,
-    keys: Arc<Keys>,
-}
-
-impl<T: Key> Rows<T> {
-    fn of(rows: Vec<T>) -> Rows<T> {
-        let keys = Arc::new(keys_of(&rows, 0));
-        Rows {
-            rows: rows.into(),
-            keys,
-        }
-    }
-}
-
-/// A [`Stacked`] table of `EG(class_table)` found by key in one hash lookup,
-/// as `zend_hash_find` finds a bucket, as well as by row: each row
-/// under its [`Key`], the preload's keys shared with the preload's rows
-/// and the request's own dropped with its own.
-pub(crate) struct Keyed<T> {
-    rows: Stacked<T>,
-    preloaded: Arc<Keys>,
-    own: Keys,
-}
-
-impl<T: Key> Keyed<T> {
-    /// A table whose first rows are the preload's.
-    fn over(preloaded: &Rows<T>) -> Keyed<T> {
-        Keyed {
-            rows: Stacked::over(Arc::clone(&preloaded.rows)),
-            preloaded: Arc::clone(&preloaded.keys),
-            own: Keys::new(),
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub(crate) fn get(&self, at: usize) -> Option<&T> {
-        self.rows.get(at)
-    }
-
-    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &T> {
-        self.rows.iter()
-    }
-
-    /// The row at `at` to change, where it is the request's own
-    /// ([`Stacked::own_mut`]); what changes must leave its key as it is.
-    pub(crate) fn own_mut(&mut self, at: usize) -> Option<&mut T> {
-        self.rows.own_mut(at)
-    }
-
-    /// The row filed under the lowered `key`, and where it stands.
-    pub(crate) fn find(&self, key: &[u8]) -> Option<(usize, &T)> {
-        let at = *self.preloaded.get(key).or_else(|| self.own.get(key))?;
-        Some((at, self.rows.get(at)?))
-    }
-
-    pub(crate) fn push(&mut self, row: T) {
-        if let Some(key) = row.key() {
-            self.own.entry(key).or_insert(self.rows.len());
-        }
-        self.rows.push(row);
-    }
-
-    /// The request's own rows, taken out with their keys.
-    fn take_own(&mut self) -> Vec<T> {
+    /// The request's own rows and their keys, given up.
+    fn clear_own(&mut self) {
         self.own.clear();
-        self.rows.take_own()
+        self.own_keys.clear();
     }
 }
 
-impl<T: Key> Default for Keyed<T> {
+impl<T> Default for Keyed<T> {
     fn default() -> Keyed<T> {
-        Keyed::over(&Rows::of(Vec::new()))
+        Keyed::over(&Rows::default())
     }
 }
 
-impl Key for Alias {
-    fn key(&self) -> Option<Box<[u8]>> {
-        Some(self.1.clone().into_boxed_slice())
-    }
-}
-
-impl Key for Declared {
-    fn key(&self) -> Option<Box<[u8]>> {
-        Some(self.decl()?.name.0.to_ascii_lowercase().into_boxed_slice())
-    }
+/// A class's row of `EG(class_table)`: the bucket it stands in and the
+/// class it names, the arena's or the request's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Named {
+    pub(crate) place: Bucket,
+    pub(crate) class: ClassId,
 }
 
 /// An alias row of the table of classes: the bucket it stands in, the
@@ -263,10 +205,14 @@ impl Buckets {
 /// preload's request and read by every request after; nothing in it
 /// changes but the scripts' hit counters.
 pub(crate) struct Preloaded {
-    pub(crate) classes: Rows<Declared>,
+    /// The preload's `EG(class_table)`: each class in its bucket under
+    /// its lowered name, its row the engine's published arena's, which
+    /// the preload is the first to publish into (design §5.14).
+    pub(crate) classes: Rows<Named>,
     pub(crate) aliases: Rows<Alias>,
-    pub(crate) functions: Arc<[UserFunction]>,
-    pub(crate) enum_functions: Arc<[(ClassId, EnumMethod)]>,
+    /// The preload's functions, published, in the order its
+    /// `EG(function_table)` holds them.
+    pub(crate) functions: Arc<[Function]>,
     /// `ping_auto_globals_mask`: the superglobals the preloaded code
     /// names, armed at every request's start (`preload_activate`).
     pub(crate) arms: Vec<AutoGlobal>,
@@ -509,7 +455,7 @@ impl Request {
                     continue;
                 };
                 let bound = self
-                    .declared
+                    .own_classes
                     .iter()
                     .any(|declared| Arc::ptr_eq(&declared.unit, unit) && declared.at == at);
                 if bound || !(decl.flags.is_top_level || decl.flags.is_anonymous) {
@@ -598,9 +544,11 @@ impl Request {
 
     /// The end of `accel_preload` once its file was served and the request
     /// shut its program down: `preload_link`, then the preload's tables
-    /// taken out of the request in the order php appends them, the
-    /// scripts made the cache's saved scripts, and the statistics
-    /// `opcache_get_status()` reports.
+    /// published in the order php appends them, the scripts made the
+    /// cache's saved scripts, and the statistics `opcache_get_status()`
+    /// reports. None where nothing is published: no preload, or a class
+    /// whose record could not be built, which ends the request with an
+    /// internal error.
     pub(crate) fn publish_preload(&mut self) -> Option<Preloaded> {
         let candidates = self.preload_link();
         let preloading = self.preloading.take()?;
@@ -615,9 +563,8 @@ impl Request {
                 }
             }
         }
-        self.rebuild_tables(&rows);
         let mut declared: HashMap<usize, UnitDeclarations> = HashMap::new();
-        for row in self.declared.iter() {
+        for row in &self.own_classes {
             let held = declared.entry(address(&row.unit)).or_default();
             held.classes.push(row.at);
         }
@@ -629,6 +576,13 @@ impl Request {
             let held = declared.entry(address(&user.unit)).or_default();
             held.functions.push(user.body);
         }
+        let tables = match self.publish_tables(&rows) {
+            Ok(tables) => tables,
+            Err(message) => {
+                crate::api::raising::fatal(self, &message);
+                return None;
+            }
+        };
         let scripts = preloading
             .scripts
             .into_iter()
@@ -636,10 +590,9 @@ impl Request {
             .map(|((path, unit, size), order)| Arc::new(Held::preloaded(unit, path, size, order)))
             .collect();
         Some(Preloaded {
-            classes: Rows::of(self.declared.take_own()),
-            aliases: Rows::of(self.aliases.take_own()),
-            functions: self.user_functions.take_own().into(),
-            enum_functions: self.enum_functions.take_own().into(),
+            classes: tables.classes,
+            aliases: tables.aliases,
+            functions: tables.functions,
             arms,
             scripts,
             declared,
@@ -650,13 +603,13 @@ impl Request {
     /// The preload request's table of classes in its order, the aliases its
     /// program added where they were added, and the classes that never
     /// linked after the rest.
-    fn class_rows(&mut self, candidates: Vec<Candidate>, aliases_before: usize) -> Vec<Row> {
-        let natives = self.shared.classes.len();
-        let aliases = self.aliases.take_own().into_iter().skip(aliases_before);
-        let mut placed: Vec<(Bucket, Row)> = (natives..)
-            .zip(self.declared.iter())
-            .map(|(at, row)| (row.place, Row::Class(class_id(at))))
-            .chain(aliases.map(|(place, alias, class)| (place, Row::Alias(alias, class))))
+    fn class_rows(&self, candidates: Vec<Candidate>, aliases_before: usize) -> Vec<Row> {
+        let aliases = self.aliases.iter().skip(aliases_before);
+        let mut placed: Vec<(Bucket, Row)> = self
+            .declared
+            .iter()
+            .map(|named| (named.place, Row::Class(named.class)))
+            .chain(aliases.map(|(place, alias, class)| (*place, Row::Alias(alias.clone(), *class))))
             .collect();
         placed.sort_by_key(|(place, _)| *place);
         let mut rows: Vec<Row> = placed.into_iter().map(|(_, row)| row).collect();
@@ -669,16 +622,47 @@ impl Request {
         rows
     }
 
-    /// The tables again from nothing, in the order `rows` stand: each
-    /// class a new number and each alias the number of its class, the
-    /// functions reversed, then each class's members numbered past them.
-    fn rebuild_tables(&mut self, rows: &[Row]) {
-        let natives = self.shared.classes.len();
-        let mut slots: Vec<Option<Declared>> =
-            self.declared.take_own().into_iter().map(Some).collect();
-        let functions: Vec<UserFunction> = self
-            .user_functions
-            .take_own()
+    /// The preload's classes and functions published into the engine's
+    /// arena (design §5.14), the preload its first publisher, and the
+    /// tables every request starts from built over them in the order
+    /// `rows` stand: each class in a bucket of its own and each alias
+    /// naming its class's published number, then the functions
+    /// reversed. The classes are published each after the classes it
+    /// extends, implements and uses ([`Request::publication_order`]),
+    /// whatever order `rows` leave them in, so every record is built
+    /// from its parent's published one; the request's own rows are
+    /// taken out. `Err` is the internal error of a class whose record
+    /// could not be built.
+    fn publish_tables(&mut self, rows: &[Row]) -> Result<Published, String> {
+        let mut renumbered: HashMap<ClassId, ClassId> = HashMap::new();
+        for local in self.publication_order(rows) {
+            let published = self.publish_class(local, &renumbered)?;
+            renumbered.insert(local, published);
+        }
+        let shared = |class: ClassId| renumbered.get(&class).copied().unwrap_or(class);
+        self.buckets = Buckets::default();
+        let mut classes = Vec::new();
+        let mut aliases = Vec::new();
+        for row in rows {
+            match row {
+                Row::Class(local) => {
+                    let Some(decl) = self.class_decl(*local) else {
+                        continue;
+                    };
+                    let key = decl.name.0.to_ascii_lowercase().into_boxed_slice();
+                    let place = self.buckets.take();
+                    let class = shared(*local);
+                    classes.push((key, Named { place, class }));
+                }
+                Row::Alias(alias, class) => {
+                    let place = self.buckets.take();
+                    let key = alias.clone().into_boxed_slice();
+                    aliases.push((key, (place, alias.clone(), shared(*class))));
+                }
+                Row::Unlinked(_) => {}
+            }
+        }
+        let functions: Vec<UserFunction> = std::mem::take(&mut self.user_functions)
             .into_iter()
             .filter(|user| {
                 user.member.is_none()
@@ -686,47 +670,101 @@ impl Request {
             })
             .rev()
             .collect();
-        let _ = self.enum_functions.take_own();
-        self.buckets = Buckets::default();
-        let mut renumbered: Vec<(ClassId, ClassId)> = Vec::new();
+        let count = u32::try_from(functions.len()).map_err(|_| ARENA_FULL.to_string())?;
+        let numbers = self
+            .arena
+            .reserve_functions(count)
+            .ok_or_else(|| ARENA_FULL.to_string())?;
+        let mut published = Vec::with_capacity(functions.len());
+        for (number, user) in numbers.zip(functions) {
+            let function = Function(number);
+            if !self.arena.publish_function(function, user) {
+                return Err(ARENA_FULL.to_string());
+            }
+            published.push(function);
+        }
+        // `zend_shared_alloc_save_state`: a restart keeps what the
+        // preload published.
+        self.arena.keep();
+        self.declared.clear_own();
+        self.aliases.clear_own();
+        self.own_classes.clear();
+        self.enum_functions.clear();
+        Ok(Published {
+            classes: Rows::of(classes),
+            aliases: Rows::of(aliases),
+            functions: published.into(),
+        })
+    }
+
+    /// The order the preload's classes are published in: each in the
+    /// order `rows` stand, after every class of the request's own it
+    /// names as its parent, an interface or a trait, so no record is
+    /// built before the records it copies. A class that named itself
+    /// through its chain would come before what it names; no linked
+    /// class can.
+    fn publication_order(&self, rows: &[Row]) -> Vec<ClassId> {
+        let mut order = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for row in rows {
-            match row {
-                Row::Class(old) => {
-                    let Some(declared) = usize::try_from(old.0)
-                        .ok()
-                        .and_then(|at| at.checked_sub(natives))
-                        .and_then(|at| slots.get_mut(at))
-                        .and_then(Option::take)
-                    else {
-                        continue;
-                    };
-                    renumbered.push((*old, class_id(natives + self.declared.len())));
-                    let place = self.buckets.take();
-                    // Renumbered, so the placed rows are built again
-                    // under the new numbers, and the members bound again
-                    // below.
-                    self.declared.push(Declared {
-                        place,
-                        placed: std::sync::OnceLock::new(),
-                        bound: Bound::default(),
-                        ..declared
-                    });
+            let Row::Class(first) = row else {
+                continue;
+            };
+            let mut stack = vec![(*first, false)];
+            while let Some((class, named)) = stack.pop() {
+                if named {
+                    order.push(class);
+                    continue;
                 }
-                Row::Alias(alias, old) => {
-                    let class = renumbered
-                        .iter()
-                        .find(|(from, _)| from == old)
-                        .map_or(*old, |(_, to)| *to);
-                    let place = self.buckets.take();
-                    self.aliases.push((place, alias.clone(), class));
+                if class.is_published() || !seen.insert(class) {
+                    continue;
                 }
-                Row::Unlinked(_) => {}
+                stack.push((class, true));
+                let Some(decl) = self.class_decl(class) else {
+                    continue;
+                };
+                let depends = (decl.parent.iter())
+                    .chain(&decl.interfaces)
+                    .chain(&decl.traits)
+                    .filter_map(|name| self.class_named(&name.0));
+                for depend in depends.collect::<Vec<_>>().into_iter().rev() {
+                    stack.push((depend, false));
+                }
             }
         }
-        self.user_functions.extend(functions);
-        for (_, class) in renumbered {
-            self.bind_members(class, None);
-        }
+        order
+    }
+
+    /// The request's own class `local` published ([`Request::publish`]):
+    /// its record built over the published classes `renumbered` names,
+    /// whose every class it extends, implements or uses is one already.
+    fn publish_class(
+        &mut self,
+        local: ClassId,
+        renumbered: &HashMap<ClassId, ClassId>,
+    ) -> Result<ClassId, String> {
+        let name = self.class_name(local);
+        let shared = |class: ClassId| match renumbered.get(&class) {
+            Some(published) => Some(*published),
+            None => class.is_published().then_some(class),
+        };
+        let Some(row) = self.declared_row(local) else {
+            return Err(format!(
+                "InternalError: the preload's class {name} has no row"
+            ));
+        };
+        let Some(record) = self.record_over(row, &|name| shared(self.class_named(name)?)) else {
+            return Err(format!(
+                "InternalError: the preload's class {name} has no record: a class it names was not published before it"
+            ));
+        };
+        let parent = row
+            .decl()
+            .and_then(|decl| self.class_named(&decl.parent.as_ref()?.0))
+            .and_then(shared);
+        let composed = row.composed.as_deref().cloned();
+        self.publish(&Arc::clone(&row.unit), row.at, composed, record, parent)
+            .ok_or_else(|| ARENA_FULL.to_string())
     }
 
     /// `preload_sort_classes`, php's own swap sort and not a stable one:
@@ -735,7 +773,6 @@ impl Request {
     /// an alias of it included, and the row it moved to is looked at
     /// again.
     fn sort_classes(&self, rows: &mut [Row]) {
-        let natives = self.shared.classes.len();
         let named = |row: &Row| match row {
             Row::Class(class) | Row::Alias(_, class) => Some(*class),
             Row::Unlinked(_) => None,
@@ -752,7 +789,7 @@ impl Request {
                             .iter()
                             .chain(decl.interfaces.iter())
                             .filter_map(|name| self.class_named(&name.0))
-                            .filter(|class| usize::try_from(class.0).is_ok_and(|c| c >= natives))
+                            .filter(|class| !class.is_published())
                             .collect()
                     })
                     .unwrap_or_default(),
@@ -813,18 +850,23 @@ impl Request {
     }
 }
 
-/// The class numbered `at`.
-fn class_id(at: usize) -> ClassId {
-    ClassId(u32::try_from(at).unwrap_or(u32::MAX))
+/// What the arena could not take: more classes or functions published
+/// than a number can name.
+const ARENA_FULL: &str = "InternalError: the engine's published arena is full";
+
+/// The preload's tables as [`Request::publish_tables`] left them.
+struct Published {
+    classes: Rows<Named>,
+    aliases: Rows<Alias>,
+    functions: Arc<[Function]>,
 }
 
-/// The four tables a request starts from: the preload's rows where the
+/// The tables a request starts from: the preload's rows where the
 /// engine preloaded, and none where it did not.
 pub(crate) struct Tables {
-    pub(crate) classes: Keyed<Declared>,
+    pub(crate) classes: Keyed<Named>,
     pub(crate) aliases: Keyed<Alias>,
-    pub(crate) functions: Stacked<UserFunction>,
-    pub(crate) enum_functions: Stacked<(ClassId, EnumMethod)>,
+    pub(crate) functions: Arc<[Function]>,
 }
 
 impl Tables {
@@ -833,14 +875,12 @@ impl Tables {
             Some(preloaded) => Tables {
                 classes: Keyed::over(&preloaded.classes),
                 aliases: Keyed::over(&preloaded.aliases),
-                functions: Stacked::over(Arc::clone(&preloaded.functions)),
-                enum_functions: Stacked::over(Arc::clone(&preloaded.enum_functions)),
+                functions: Arc::clone(&preloaded.functions),
             },
             None => Tables {
                 classes: Keyed::default(),
                 aliases: Keyed::default(),
-                functions: Stacked::default(),
-                enum_functions: Stacked::default(),
+                functions: Arc::new([]),
             },
         }
     }
@@ -870,3 +910,187 @@ impl Request {
 
 /// What `php_error_cb` names for no file, `error_filename` unset.
 const UNKNOWN: &[u8] = b"Unknown";
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+
+    use super::{Request, Row};
+    use crate::api::values::ClassId;
+    use crate::engine::{Engine, RequestDescription};
+    use php_unit::decl::PropertyDecl;
+
+    /// How many rounds each side runs.
+    const ROUNDS: usize = 40;
+
+    /// One thread publishes into the engine's arena as the preload does,
+    /// round after round, while a request on another declares classes of
+    /// its own and reads each class the first published as it is handed
+    /// its number (design §5.14, *Identities*). Neither side's numbers
+    /// move for the other's: the request's classes keep the numbers they
+    /// were declared under and stay its own, and every published number
+    /// names the class it was published as, read by the request with nothing
+    /// taken however far the arena grew after it.
+    #[test]
+    fn a_publisher_and_a_request_on_two_threads_never_move_each_others_numbers() {
+        let engine = Engine::builder().build();
+        let (handed, taken) = mpsc::channel::<(ClassId, String)>();
+        std::thread::scope(|scope| {
+            let shared = Arc::clone(&engine.shared);
+            let publisher = scope.spawn(move || {
+                let mut published = Vec::new();
+                for round in 0..ROUNDS {
+                    let mut req = Request::new(Arc::clone(&shared), RequestDescription::default());
+                    req.begin_preload();
+                    let code = format!(
+                        "class P{round} {{ function m() {{ return {round}; }} }} class Q{round} extends P{round} {{}}"
+                    );
+                    assert!(req.eval_stringl(code.as_bytes(), b"publisher").is_ok());
+                    let Some(preloaded) = req.publish_preload() else {
+                        return Err(format!("round {round} published nothing"));
+                    };
+                    for named in preloaded.classes.rows.iter() {
+                        let name = req.class_name(named.class);
+                        assert!(named.class.is_published(), "{name} is published");
+                        published.push((named.class, name.clone()));
+                        if handed.send((named.class, name)).is_err() {
+                            return Err(String::from("the request stopped listening"));
+                        }
+                    }
+                    // Every number published so far still names its
+                    // class, however many the request declared meanwhile.
+                    for (class, name) in &published {
+                        assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                    }
+                }
+                Ok(published)
+            });
+            let for_request = Arc::clone(&engine.shared);
+            let request = scope.spawn(move || {
+                let mut req = Request::new(for_request, RequestDescription::default());
+                let mut own: Vec<(ClassId, String)> = Vec::new();
+                let mut seen: Vec<(ClassId, String)> = Vec::new();
+                for round in 0..ROUNDS {
+                    let name = format!("R{round}");
+                    let code = format!("class {name} {{ function m() {{ return {round}; }} }}");
+                    assert!(req.eval_stringl(code.as_bytes(), b"request").is_ok());
+                    let Some(class) = req.class_named(name.as_bytes()) else {
+                        return Err(format!("{name} was not declared"));
+                    };
+                    assert!(!class.is_published(), "{name} is the request's own");
+                    assert_eq!(
+                        Some(class),
+                        ClassId::local(round),
+                        "{name} took the next row"
+                    );
+                    own.push((class, name));
+                    // A round's two classes, waited for, so each round of
+                    // the request's reads what the publisher published
+                    // while it declared, as the publisher goes on.
+                    for _ in 0..2 {
+                        let Ok(handed) = taken.recv() else {
+                            return Err(String::from("the publisher stopped"));
+                        };
+                        seen.push(handed);
+                    }
+                    for (class, name) in own.iter().chain(&seen) {
+                        assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                    }
+                }
+                seen.extend(taken.iter());
+                for (class, name) in own.iter().chain(&seen) {
+                    assert_eq!(req.class_name(*class), *name, "{class:?} moved");
+                }
+                let child = seen
+                    .iter()
+                    .find(|(_, name)| name == "Q0")
+                    .map(|(class, _)| *class);
+                let inherited = child.and_then(|child| req.method_named(child, b"m"));
+                assert!(
+                    inherited.is_some_and(crate::api::call::Function::is_published),
+                    "Q0 inherits P0's m"
+                );
+                Ok(seen.len())
+            });
+            let numbers = publisher
+                .join()
+                .unwrap_or_else(|_| Err(String::from("panicked")));
+            let seen = request
+                .join()
+                .unwrap_or_else(|_| Err(String::from("panicked")));
+            assert_eq!(seen, Ok(2 * ROUNDS));
+            let reader = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+            assert_eq!(numbers.as_ref().map(Vec::len), Ok(2 * ROUNDS));
+            for (class, name) in numbers.unwrap_or_default() {
+                assert_eq!(reader.class_name(class), name, "{class:?} moved");
+            }
+        });
+    }
+
+    /// The preload's table with a class before its parent, which it
+    /// names through an alias, and before the trait it uses: the order
+    /// `preload_sort_classes` would leave where its guard ran out. Every
+    /// class is published after what it extends and uses all the same,
+    /// so its record is built from its parent's and holds the inherited
+    /// and the trait's methods, the alias names the parent's published
+    /// number, and the table keeps the order it was handed.
+    #[test]
+    fn a_class_before_its_parent_in_the_table_is_published_with_its_record() {
+        let engine = Engine::builder().build();
+        let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        req.begin_preload();
+        let code = "trait T { public $t; function t() {} } \
+                    class P { public $p; private $q; function p() {} } \
+                    class_alias('P', 'PA'); class C extends PA { use T; public $c; public $p; }";
+        assert!(req.eval_stringl(code.as_bytes(), b"preload").is_ok());
+        let mut rows = req.class_rows(Vec::new(), 0);
+        let child = req.class_named(b"c");
+        let at = rows
+            .iter()
+            .position(|row| matches!(row, Row::Class(class) if Some(*class) == child));
+        if let Some(at) = at {
+            rows[..=at].rotate_right(1);
+        }
+        let published = req.publish_tables(&rows);
+        let names: Vec<(ClassId, String)> = published
+            .iter()
+            .flat_map(|published| published.classes.rows.iter())
+            .map(|named| (named.class, req.class_name(named.class)))
+            .collect();
+        let order: Vec<&str> = names.iter().map(|(_, name)| name.as_str()).collect();
+        assert_eq!(order, ["C", "T", "P"]);
+        let child = names.first().map(|(class, _)| *class);
+        assert!(child.is_some_and(ClassId::is_published));
+        // The placed properties came with the published row: the
+        // parent's slots first, the redeclared `$p` in the parent's,
+        // naming the published classes.
+        let placed = |class: ClassId| -> Vec<(ClassId, String)> {
+            req.arena.class(class).map_or_else(Vec::new, |row| {
+                let shown = |(holder, p): &(ClassId, PropertyDecl)| {
+                    (*holder, String::from_utf8_lossy(&p.name.0).into_owned())
+                };
+                row.bound.placed.iter().map(shown).collect()
+            })
+        };
+        let parent = names.last().map(|(class, _)| *class);
+        if let (Some(child), Some(parent)) = (child, parent) {
+            let expect = |pairs: &[(ClassId, &str)]| -> Vec<(ClassId, String)> {
+                pairs.iter().map(|(c, n)| (*c, (*n).to_string())).collect()
+            };
+            assert_eq!(placed(parent), expect(&[(parent, "p"), (parent, "q")]));
+            let own = [(child, "p"), (parent, "q"), (child, "c"), (child, "t")];
+            assert_eq!(placed(child), expect(&own));
+        }
+        for method in [&b"t"[..], b"p"] {
+            let found = child.and_then(|child| req.method_named(child, method));
+            assert!(found.is_some_and(|found| req.user_function(found).is_some()));
+        }
+        let alias = published
+            .iter()
+            .flat_map(|published| published.aliases.rows.iter())
+            .map(|(_, alias, class)| (alias.clone(), *class))
+            .next();
+        assert_eq!(alias, parent.map(|parent| (b"pa".to_vec(), parent)));
+    }
+}

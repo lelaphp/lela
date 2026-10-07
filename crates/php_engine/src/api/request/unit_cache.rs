@@ -60,6 +60,16 @@ pub struct CacheStatus {
     pub last_restart_time: i64,
     /// `ZCSG(manual_restarts)`: resets carried out.
     pub manual_restarts: u64,
+    /// `ZCSG(oom_restarts)`: restarts the memory running out scheduled.
+    pub oom_restarts: u64,
+    /// `ZCSG(hash_restarts)`: restarts the names running out scheduled.
+    pub hash_restarts: u64,
+    /// `ZSMMG(wasted_shared_memory)`: what the files discarded since the
+    /// last restart weighed, in bytes.
+    pub wasted: u64,
+    /// `ZSMMG(memory_exhausted)`: a file found no room since the last
+    /// restart.
+    pub cache_full: bool,
     /// The strings the engine's interned table holds.
     pub interned_strings: u64,
     /// The names the files are held under, each file's full path and
@@ -107,6 +117,21 @@ pub struct CachedFile {
     /// `dynamic_members.revalidate`; zero for a file cached without its
     /// timestamps validated.
     pub revalidate: i64,
+}
+
+/// The bounds of the unit cache's memory, which the extension that
+/// configures it tells once ([`UnitCache::bound`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheBudget {
+    /// `opcache.memory_consumption`, in bytes: what the files held and
+    /// wasted may weigh together.
+    pub memory: u64,
+    /// `opcache.max_wasted_percentage`, a percentage of `memory`: what
+    /// must be wasted for a cache that runs out to restart.
+    pub max_wasted: u32,
+    /// `ZCSG(hash).max_num_entries`: how many names files are held
+    /// under.
+    pub keys: u64,
 }
 
 /// What [`UnitCache::reset`] did.
@@ -212,6 +237,11 @@ impl Request {
         }
         shared.units.hit(&held, validation, now);
         self.accel_loaded = held.unit.as_ref().ok().cloned();
+        self.early_bound =
+            (held.unit.as_ref().ok()).map(|unit| (Arc::clone(unit), Arc::clone(&held.early)));
+        if let Ok(unit) = &held.unit {
+            self.note_held(unit);
+        }
         Some(held)
     }
 
@@ -375,12 +405,13 @@ impl Request {
         let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
         let holds = |name: &[u8]| self.class_named(name).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
-        let (cached, filed) = shared.units.file(
+        let (cached, filed, early) = shared.units.file(
             asked,
             |source| {
                 shared.publish_file(source, path, &self.cwd, stack, request_classes, multibyte)
             },
             |body| shared.publish_kept(body),
+            |unit| self.publish_unit(unit),
         );
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
@@ -389,6 +420,18 @@ impl Request {
         // what it compiled as php without it.
         let loaded = validation != Validation::EveryHit && filed != Filed::Compiled;
         self.accel_loaded = cached.clone().and_then(Result::ok).filter(|_| loaded);
+        // The classes its compiler bound early, published as it was held,
+        // which its load declares by their numbers.
+        self.early_bound = cached
+            .clone()
+            .and_then(Result::ok)
+            .zip(early)
+            .filter(|(_, early)| early.iter().any(Option::is_some));
+        // php keeps a link in its inheritance cache only under opcache,
+        // whose loaded classes are immutable (`ZEND_ACC_IMMUTABLE`).
+        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, true) = (&cached, filed, loaded) {
+            self.note_held(unit);
+        }
         // The file opened as a stream where php compiles it or resolves
         // it to look it up by its full path, and not for a hit whose key
         // the cache files: one by the full path, or read back from the
@@ -646,10 +689,19 @@ impl UnitCache<'_> {
     }
 
     /// `zend_accel_schedule_restart(ACCEL_RESTART_USER)`, what
-    /// `opcache_reset` asks: the cache empties at the next request's
-    /// start, and until then what is compiled is held nowhere.
+    /// `opcache_reset` asks: the cache and the published arena empty at
+    /// the start of the first request no other request runs beside
+    /// (design §5.14), and until then what is compiled is held nowhere.
     pub fn reset(&self) -> Restart {
         self.req.shared.units.schedule_restart()
+    }
+
+    /// The cache's bounds, told once as the cache starts
+    /// (`zend_accel_init_shm`): a file that does not fit is held
+    /// nowhere, and a cache that runs out restarts once what it wasted
+    /// reaches `max_wasted` percent of its memory.
+    pub fn bound(&self, budget: CacheBudget) {
+        self.req.shared.units.set_budget(budget);
     }
 }
 
@@ -659,5 +711,44 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
         directory: &file_cache.directory,
         read_only: file_cache.read_only,
         build,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::Request;
+    use crate::engine::{Engine, RequestDescription};
+
+    /// `accel_activate`'s restart under `accel_is_inactive`: a reset
+    /// waits while a request of the arena's epoch runs, so a request
+    /// starting beside it is handed the same arena with its rows; the
+    /// first request to start once none runs empties the cache and the
+    /// arena, whose numbers are reserved from the first again.
+    #[test]
+    fn a_restart_waits_for_the_epochs_requests_and_empties_the_arena() {
+        let engine = Engine::builder().build();
+        let start = || Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let first = start();
+        assert!(first.arena.reserve_class().is_some());
+        assert_eq!(first.arena.counts(), [1, 0, 0]);
+        assert_eq!(
+            engine.shared.units.schedule_restart(),
+            super::Restart::Scheduled
+        );
+        let beside = start();
+        assert!(
+            Arc::ptr_eq(&first.arena, &beside.arena),
+            "the epoch is still held"
+        );
+        assert!(engine.shared.units.restart_pending());
+        assert_eq!(beside.arena.counts(), [1, 0, 0]);
+        drop(first);
+        drop(beside);
+        let after = start();
+        assert!(!engine.shared.units.restart_pending());
+        assert_eq!(after.arena.counts(), [0, 0, 0], "an empty arena");
+        assert_eq!(engine.shared.units.status(0).manual_restarts, 1);
     }
 }

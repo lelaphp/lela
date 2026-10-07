@@ -6,7 +6,7 @@
 //! by name and number that read them all. Which classes a load bound
 //! early is [`Classes`]'s, whose field no file but this one reads.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use php_heap::{FrameRef, Heap};
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
@@ -21,9 +21,37 @@ use crate::exec;
 use crate::observer::LinkedAtLoad;
 
 use super::{
-    Bound, Declared, Deprecations, Keyed, Member, MemberAt, Request, UserFunction, lowered_key,
-    preload, user_function_decl,
+    Bound, Declared, Deprecations, Keyed, Member, MemberAt, Named, Request, UserFunction,
+    lowered_key, preload, user_function_decl,
 };
+
+/// A class's members before they are numbered ([`Request::members_of`]):
+/// for each of its methods whether it is an enum's own, and the rows of
+/// its methods and hooks, each method's beside its index.
+pub(super) struct Members {
+    served: Vec<Option<crate::enums::EnumMethod>>,
+    rows: Vec<(Option<u32>, UserFunction)>,
+}
+
+/// What numbering a class's members settles: the function each of its
+/// methods is, by its index, and the numbers its members took.
+pub(super) type Numbered = (Box<[Option<Function>]>, std::ops::Range<u32>);
+
+impl Members {
+    /// The function each method is, the members numbered from `numbers`
+    /// in order and an enum's own left for its caller.
+    fn functions(&self, numbers: std::ops::Range<u32>) -> Vec<Option<Function>> {
+        let mut functions = vec![None; self.served.len()];
+        for (number, (method, _)) in numbers.zip(&self.rows) {
+            if let Some(slot) =
+                method.and_then(|method| functions.get_mut(usize::try_from(method).ok()?))
+            {
+                *slot = Some(Function(number));
+            }
+        }
+        functions
+    }
+}
 
 /// The classes a load bound early, whose field no file but this one
 /// reads.
@@ -45,7 +73,6 @@ impl Request {
     /// classes, each native alias after its class, then the request's
     /// rows in their buckets.
     pub(crate) fn class_table(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
-        let natives = self.shared.classes.len();
         let mut rows: Vec<(ClassId, Option<Vec<u8>>)> = (0u32..)
             .zip(&self.shared.classes)
             .flat_map(|(at, decl)| {
@@ -55,15 +82,10 @@ impl Request {
                     .map(move |alias| (ClassId(at), alias))
             })
             .collect();
-        let mut own: Vec<(preload::Bucket, ClassId, Option<Vec<u8>>)> = (natives..)
-            .zip(self.declared.iter())
-            .map(|(at, row)| {
-                (
-                    row.place,
-                    ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
-                    None,
-                )
-            })
+        let mut own: Vec<(preload::Bucket, ClassId, Option<Vec<u8>>)> = self
+            .declared
+            .iter()
+            .map(|named| (named.place, named.class, None))
             .chain(
                 self.aliases
                     .iter()
@@ -194,6 +216,9 @@ impl Request {
             .collect();
         let accelerated = self.preloading.is_some()
             || (self.accel_loaded.take()).is_some_and(|loaded| Arc::ptr_eq(&loaded, unit));
+        let early = (self.early_bound.take())
+            .filter(|(loaded, _)| Arc::ptr_eq(loaded, unit))
+            .map(|(_, early)| early);
         let mut linked = LinkedAtLoad {
             accelerated,
             classes: Vec::new(),
@@ -233,8 +258,12 @@ impl Request {
                 self.end_in_compile_time(Level::CompileError, &message, &file, decl.line);
                 return None;
             }
+            let published = early.as_ref().and_then(|early| *early.get(at)?);
             let at = u32::try_from(at).ok()?;
-            self.bind_declared(unit, at, None, None);
+            match published {
+                Some(class) => self.declare_published(unit, at, class, decl),
+                None => self.bind_declared(unit, at, None, None),
+            }
             linked.classes.push(at);
         }
         for (at, decl) in tried {
@@ -405,22 +434,66 @@ impl Request {
         composed: Option<php_unit::link::Composed>,
         record: Option<LinkedClass<ClassId>>,
     ) {
-        let class = self
-            .shared
-            .classes
-            .len()
-            .saturating_add(self.declared.len());
-        let class = ClassId(u32::try_from(class).unwrap_or(u32::MAX));
+        let Some(class) = ClassId::local(self.own_classes.len()) else {
+            return;
+        };
         let place = self.buckets.claim(unit, at);
-        self.declared.push(Declared {
+        let row = Declared {
             unit: Arc::clone(unit),
             at,
             composed: composed.map(Box::new),
-            place,
-            placed: OnceLock::new(),
             bound: Bound::default(),
-        });
+        };
+        if let Some(decl) = row.decl() {
+            let key = decl.name.0.to_ascii_lowercase().into_boxed_slice();
+            self.declared.push(key, Named { place, class });
+        }
+        self.own_classes.push(row);
         self.bind_members(class, record);
+    }
+
+    /// `zend_accel_class_hash_copy` for one class a held unit published
+    /// with itself (design §6.3, [`Request::publish_unit`]): the class's
+    /// number filed under its lowered name in the bucket its load takes,
+    /// and nothing else. Its record, its methods and its placed
+    /// properties are the published row's; what the request changes of
+    /// it, its statics and the constants and defaults it evaluates, the
+    /// request keeps under the number, so the next request reads them
+    /// fresh. Served by the built-in server, whose requests share the
+    /// unit cache, the second request serves the unit the first one held:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/early' . bin2hex(random_bytes(8));
+    /// mkdir($dir);
+    /// file_put_contents("$dir/index.php", '<?php define("V", $_GET["v"]);
+    /// class P { const K = V . "k"; public static $s = V; public $d = [V]; function f() { return __CLASS__; } }
+    /// class C extends P { public $e = self::K; }
+    /// $c = new C;
+    /// echo C::K, " ", C::$s, " ", $c->d[0], " ", $c->e, " ", $c->f(), " ";
+    /// C::$s .= "!"; P::$s .= "?";
+    /// echo C::$s, " ", implode(",", array_slice(get_declared_classes(), -2)), "\n";');
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach (['a', 'b'] as $v) { echo file_get_contents("http://127.0.0.1:$port/?v=$v"); }
+    /// proc_terminate($p); proc_close($p);
+    /// unlink("$dir/index.php"); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// ak a a ak P a!? P,C
+    /// bk b b bk P b!? P,C
+    /// ```
+    pub(super) fn declare_published(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: u32,
+        class: ClassId,
+        decl: &ClassDecl,
+    ) {
+        let place = self.buckets.claim(unit, at);
+        let key = decl.name.0.to_ascii_lowercase().into_boxed_slice();
+        self.declared.push(key, Named { place, class });
     }
 
     /// The members of `class`, bound, into the function table beside it:
@@ -456,12 +529,58 @@ impl Request {
     /// }
     /// ```
     pub(super) fn bind_members(&mut self, class: ClassId, record: Option<LinkedClass<ClassId>>) {
-        let Some(decl) = self.class_decl(class) else {
+        let parent = self
+            .class_decl(class)
+            .and_then(|decl| self.class_named(&decl.parent.as_ref()?.0));
+        let Some(members) = self
+            .declared_row(class)
+            .and_then(|row| self.members_of(row, class))
+        else {
             return;
         };
-        let first = self.user_functions.len();
+        let Some((functions, members)) = self.place_own(class, members) else {
+            return;
+        };
+        let record = record.or_else(|| self.record_at_bind(class));
+        let placed = self
+            .class_decl(class)
+            .map_or_else(super::Placed::default, |decl| {
+                self.placed_over(class, decl, record.as_ref(), parent)
+            });
+        if let Some(declared) = self.declared_mut(class) {
+            declared.bound = Bound {
+                record,
+                functions,
+                members,
+                parent,
+                placed,
+            };
+        }
+    }
+
+    /// The placed properties of `class`, declared by `decl`, over its
+    /// parent's, read off `record` ([`super::placed_of`]): built once as
+    /// the class binds, so a publisher hands the number on with them
+    /// built.
+    pub(super) fn placed_over(
+        &self,
+        class: ClassId,
+        decl: &ClassDecl,
+        record: Option<&LinkedClass<ClassId>>,
+        parent: Option<ClassId>,
+    ) -> super::Placed {
+        let above = parent.map_or(&[][..], |parent| self.placed_properties(parent));
+        super::placed_of(class, decl, record, above)
+    }
+
+    /// The members the class `row` declares binding settles under the
+    /// number `class`, before they are numbered: each method and each
+    /// hook of its own properties a user function's row, and which of its
+    /// methods are an enum's own `cases`, `from` and `tryFrom`.
+    pub(super) fn members_of(&self, row: &Declared, class: ClassId) -> Option<Members> {
+        let decl = row.decl()?;
         let enum_backing = (decl.kind == ClassKind::Enum).then_some(decl.backing);
-        let keys: Vec<Option<crate::enums::EnumMethod>> = decl
+        let served: Vec<Option<crate::enums::EnumMethod>> = decl
             .methods
             .iter()
             .map(|method| {
@@ -473,113 +592,117 @@ impl Request {
                 enum_backing.and_then(|backing| crate::enums::EnumMethod::of(&key, backing))
             })
             .collect();
-        let mut functions = Vec::with_capacity(keys.len());
-        for (method, served) in (0u32..).zip(keys) {
-            let numbered = self.bind_method(class, method);
-            functions.push(match served {
-                Some(served) => {
-                    let at = u32::try_from(self.enum_functions.len()).ok();
-                    self.enum_functions.push((class, served));
-                    at.and_then(|at| crate::enums::ENUM_FUNCTIONS.checked_add(at))
-                        .map(Function)
-                }
-                None => numbered,
+        // The rows the class's members take, in the order php's tables
+        // list them, each method's beside its place among the methods.
+        let mut rows: Vec<(Option<u32>, UserFunction)> = Vec::new();
+        for ((method, served), decl) in (0u32..).zip(&served).zip(&decl.methods) {
+            if served.is_some() {
+                continue;
+            }
+            let Some((unit, body)) = self.method_body(row, method) else {
+                continue;
+            };
+            let member = Some(Member {
+                class,
+                at: MemberAt::Method(method),
             });
+            let flags = crate::attributes::Flags::of(&decl.function.attributes);
+            rows.push((
+                Some(method),
+                UserFunction {
+                    unit,
+                    body,
+                    member,
+                    flags,
+                },
+            ));
         }
         // Each hook of the class's own properties, `prop_info->hooks`,
         // a function of its own that php's function table never lists.
-        let hooks: Vec<(u32, HookKind)> = self.class_decl(class).map_or_else(Vec::new, |decl| {
-            decl.properties
-                .iter()
-                .enumerate()
-                .flat_map(|(at, property)| {
-                    let at = u32::try_from(at).unwrap_or(u32::MAX);
-                    HookKind::ALL.into_iter().filter_map(move |kind| {
-                        property
-                            .hooks
-                            .as_ref()
-                            .and_then(|hooks| hooks.of(kind))
-                            .map(|_| (at, kind))
-                    })
-                })
-                .collect()
-        });
-        for (property, kind) in hooks {
-            let Some((unit, body)) = self.hook_body(class, property, kind) else {
-                continue;
-            };
-            let flags = self
-                .class_decl(class)
-                .and_then(|decl| decl.properties.get(usize::try_from(property).ok()?))
-                .and_then(|property| property.hooks.as_ref()?.of(kind))
-                .map(|hook| crate::attributes::Flags::of(&hook.function.attributes))
-                .unwrap_or_default();
-            self.user_functions.push(UserFunction {
-                unit,
-                body,
-                member: Some(Member {
+        for (property, declared) in (0u32..).zip(&decl.properties) {
+            for kind in HookKind::ALL {
+                let Some(hook) = declared.hooks.as_ref().and_then(|hooks| hooks.of(kind)) else {
+                    continue;
+                };
+                let Some((unit, body)) = self.hook_body(row, property, kind) else {
+                    continue;
+                };
+                let member = Some(Member {
                     class,
                     at: MemberAt::Hook { property, kind },
-                }),
-                flags,
-            });
+                });
+                let flags = crate::attributes::Flags::of(&hook.function.attributes);
+                rows.push((
+                    None,
+                    UserFunction {
+                        unit,
+                        body,
+                        member,
+                        flags,
+                    },
+                ));
+            }
         }
-        let record = record.or_else(|| self.record_at_bind(class));
-        let bound = Bound {
-            record,
-            functions: functions.into_boxed_slice(),
-            members: first..self.user_functions.len(),
-            parent: self
-                .class_decl(class)
-                .and_then(|decl| self.class_named(&decl.parent.as_ref()?.0)),
-        };
-        if let Some(declared) = self.declared_mut(class) {
-            declared.bound = bound;
-        }
+        Some(Members { served, rows })
     }
 
-    /// The method at `method` of `class` into the function table: its
-    /// body and flags as a user function's row, and the number it is
-    /// known by; none where the declaration has no body for it.
-    fn bind_method(&mut self, class: ClassId, method: u32) -> Option<Function> {
-        let (unit, body) = self.method_body(class, method)?;
-        let flags = self
-            .class_decl(class)
-            .and_then(|decl| decl.methods.get(usize::try_from(method).ok()?))
-            .map(|method| crate::attributes::Flags::of(&method.function.attributes))
-            .unwrap_or_default();
-        let function = self.user_function_id(self.user_functions.len());
-        self.user_functions.push(UserFunction {
-            unit,
-            body,
-            member: Some(Member {
-                class,
-                at: MemberAt::Method(method),
-            }),
-            flags,
-        });
-        function
+    /// A class of the request's own's members numbered among the
+    /// request's rows: the function each method is and the numbers its
+    /// members took.
+    fn place_own(&mut self, class: ClassId, members: Members) -> Option<Numbered> {
+        let first = Function::local(self.user_functions.len())?.0;
+        let count = u32::try_from(members.rows.len()).ok()?;
+        let numbers = first..first.checked_add(count)?;
+        let mut functions = members.functions(numbers.clone());
+        self.user_functions
+            .extend(members.rows.into_iter().map(|(_, row)| row));
+        for (slot, served) in functions.iter_mut().zip(members.served) {
+            if let Some(served) = served {
+                *slot = Function::local_enum(self.enum_functions.len());
+                self.enum_functions.push((class, served));
+            }
+        }
+        Some((functions.into_boxed_slice(), numbers))
     }
 
-    /// The row of a class the request declared, or the preload did;
-    /// none for an engine's class.
+    /// A published class's members published into the engine's arena
+    /// (design §5.14): the function each method is and the numbers its
+    /// members took. None where the arena has no room for them.
+    pub(super) fn place_published(&self, class: ClassId, members: Members) -> Option<Numbered> {
+        let count = u32::try_from(members.rows.len()).ok()?;
+        let numbers = self.arena.reserve_functions(count)?;
+        let mut functions = members.functions(numbers.clone());
+        for (number, (_, row)) in numbers.clone().zip(members.rows) {
+            self.arena
+                .publish_function(Function(number), row)
+                .then_some(())?;
+        }
+        for (slot, served) in functions.iter_mut().zip(members.served) {
+            if let Some(served) = served {
+                let function = self.arena.reserve_enum_method()?;
+                self.arena
+                    .publish_enum_method(function, (class, served))
+                    .then_some(())?;
+                *slot = Some(function);
+            }
+        }
+        Some((functions.into_boxed_slice(), numbers))
+    }
+
+    /// The row of a class the request declared, or the engine published
+    /// into its arena, the preload's among them; none for an engine's
+    /// class.
     pub(super) fn declared_row(&self, class: ClassId) -> Option<&Declared> {
-        self.declared.get(self.declared_at(class)?)
+        match class.local_at() {
+            Some(at) => self.own_classes.get(at),
+            None => self.arena.class(class),
+        }
     }
 
     /// The row of a class the request declared, to bind; none for an
-    /// engine's class and for one the preload published.
+    /// engine's class and for a published one.
     fn declared_mut(&mut self, class: ClassId) -> Option<&mut Declared> {
-        let at = self.declared_at(class)?;
-        self.declared.own_mut(at)
-    }
-
-    /// Where a declared class's row stands among the declared rows: its
-    /// number past the engine's classes.
-    fn declared_at(&self, class: ClassId) -> Option<usize> {
-        usize::try_from(class.0)
-            .ok()?
-            .checked_sub(self.shared.classes.len())
+        self.own_classes.get_mut(class.local_at()?)
     }
 
     /// Where the op array of a hook of the property at `property` of a
@@ -587,17 +710,12 @@ impl Request {
     /// property a trait gave the class the body in the trait's unit,
     /// which php shares between the copies as it shares a method's
     /// (`zend_do_traits_property_binding`).
-    fn hook_body(
-        &self,
-        class: ClassId,
+    fn hook_body<'r>(
+        &'r self,
+        declared: &'r Declared,
         property: u32,
         kind: HookKind,
     ) -> Option<(Arc<Unit>, exec::Body)> {
-        let declared = self.declared.get(
-            usize::try_from(class.0)
-                .ok()?
-                .checked_sub(self.shared.classes.len())?,
-        )?;
         let decl = declared.decl()?;
         let name = &decl.properties.get(usize::try_from(property).ok()?)?.name;
         let own = declared
@@ -608,11 +726,7 @@ impl Request {
             Some(at) => (declared, at),
             None => decl.traits.iter().find_map(|trait_name| {
                 let holder = self.class_named(&trait_name.0)?;
-                let from = self.declared.get(
-                    usize::try_from(holder.0)
-                        .ok()?
-                        .checked_sub(self.shared.classes.len())?,
-                )?;
+                let from = self.declared_row(holder)?;
                 let at = from
                     .decl()?
                     .properties
@@ -664,12 +778,11 @@ impl Request {
     ///   string(1) "A"
     /// }
     /// ```
-    fn method_body(&self, class: ClassId, method: u32) -> Option<(Arc<Unit>, exec::Body)> {
-        let declared = self.declared.get(
-            usize::try_from(class.0)
-                .ok()?
-                .checked_sub(self.shared.classes.len())?,
-        )?;
+    fn method_body<'r>(
+        &'r self,
+        declared: &'r Declared,
+        method: u32,
+    ) -> Option<(Arc<Unit>, exec::Body)> {
         let Some(composed) = &declared.composed else {
             return Some((
                 Arc::clone(&declared.unit),
@@ -685,11 +798,7 @@ impl Request {
             declared
         } else {
             let holder = self.class_named(&body.class.0)?;
-            self.declared.get(
-                usize::try_from(holder.0)
-                    .ok()?
-                    .checked_sub(self.shared.classes.len())?,
-            )?
+            self.declared_row(holder)?
         };
         Some((
             Arc::clone(&from.unit),
@@ -1094,16 +1203,31 @@ impl Request {
         decl: &ClassDecl,
         early: bool,
     ) -> Result<bool, Thrown> {
-        let linking = self.link_against_table(decl);
-        if early && !linking.obligations.is_empty() {
-            return Ok(false);
-        }
         let Ok(at) = u32::try_from(at) else {
             return Err(crate::api::raising::fatal(
                 self,
                 "InternalError: a unit declares more classes than can be numbered",
             ));
         };
+        // `zend_inheritance_cache_get` before anything is checked, over
+        // what was fetched (design §6.2).
+        let fetched = self.fetched(unit, decl);
+        if let Some(fetched) = &fetched
+            && let Some(entry) = self.cached_link(unit, at, fetched)?
+        {
+            self.declare_cached(unit, at, decl, &entry);
+            return Ok(true);
+        }
+        let (linking, read) = self.link_reading(decl);
+        if early && !linking.obligations.is_empty() {
+            return Ok(false);
+        }
+        if let Some(fetched) = fetched
+            && let Some(entry) = self.publish_link(unit, at, fetched, &linking, &read, early)
+        {
+            self.declare_cached(unit, at, decl, &entry);
+            return Ok(true);
+        }
         self.link_settled(unit, at, linking)?;
         Ok(true)
     }
@@ -1155,12 +1279,14 @@ impl Request {
     /// A class as the link reads the table: its declaration, and the
     /// bodies of its methods where it was composed with traits.
     pub(super) fn held_class(&self, name: &[u8]) -> Option<php_unit::link::Held<'_, ClassId>> {
-        let class = self.class_named(name)?;
+        self.held_as(self.class_named(name)?)
+    }
+
+    /// [`Request::held_class`] of the class `class` names.
+    fn held_as(&self, class: ClassId) -> Option<php_unit::link::Held<'_, ClassId>> {
         let decl = self.class_decl(class)?;
-        let bodies = usize::try_from(class.0)
-            .ok()
-            .and_then(|at| at.checked_sub(self.shared.classes.len()))
-            .and_then(|at| self.declared.get(at))
+        let bodies = self
+            .declared_row(class)
             .and_then(|declared| declared.composed.as_ref())
             .map(|composed| composed.bodies.as_slice());
         Some(php_unit::link::Held {
@@ -1176,12 +1302,24 @@ impl Request {
     /// whose every class the class names is linked. The traits' abstract
     /// methods a composed class took stand after its parent's.
     fn record_at_bind(&self, class: ClassId) -> Option<LinkedClass<ClassId>> {
-        let decl = self.class_decl(class)?;
-        let abstracts = self
-            .declared_row(class)
-            .and_then(|declared| declared.composed.as_ref())
+        let row = self.declared_row(class)?;
+        self.record_over(row, &|name| self.class_named(name))
+    }
+
+    /// The record of the class `row` declares over the classes `named`
+    /// finds by name, which a publication points at the published ones
+    /// ([`Request::record_at_bind`]).
+    pub(super) fn record_over(
+        &self,
+        row: &Declared,
+        named: &dyn Fn(&[u8]) -> Option<ClassId>,
+    ) -> Option<LinkedClass<ClassId>> {
+        let decl = row.decl()?;
+        let abstracts = row
+            .composed
+            .as_ref()
             .map_or(0, |composed| composed.abstracts);
-        let lookup = |name: &[u8]| self.held_class(name);
+        let lookup = |name: &[u8]| self.held_as(named(name)?);
         let holder = |holder: ClassId| self.class_decl(holder);
         php_unit::link::linked_class(
             decl,
@@ -1226,10 +1364,27 @@ impl Request {
         {
             return u32::try_from(i).ok().map(Function);
         }
-        let position = self.user_functions.iter().position(|user| {
-            user_function_decl(user).is_some_and(|decl| decl.name.0.to_ascii_lowercase() == wanted)
-        })?;
-        self.user_function_id(position)
+        self.function_table()
+            .find(|(_, user)| {
+                user_function_decl(user)
+                    .is_some_and(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+            })
+            .map(|(function, _)| function)
+    }
+
+    /// The user functions the request's `EG(function_table)` can find,
+    /// each with its number, in the order the table took them: the
+    /// preload's, published, then the request's own rows, which hold its
+    /// closures and methods beside its functions.
+    pub(crate) fn function_table(&self) -> impl Iterator<Item = (Function, &UserFunction)> {
+        let preloaded = self
+            .preloaded_functions
+            .iter()
+            .filter_map(|function| Some((*function, self.arena.function(*function)?)));
+        let own = (0..)
+            .zip(&self.user_functions)
+            .filter_map(|(at, user)| Some((Function::local(at)?, user)));
+        preloaded.chain(own)
     }
 
     /// `zend_hash_add_ptr(CG(function_table), …)` for every function the
@@ -1279,7 +1434,7 @@ impl Request {
             let message = format!("Cannot redeclare function {name}(){site}");
             return Err(crate::api::raising::fatal(self, &message));
         }
-        let declared = self.user_function_id(self.user_functions.len());
+        let declared = Function::local(self.user_functions.len());
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body: exec::Body::Dynamic(at),
@@ -1311,15 +1466,16 @@ impl Request {
             .iter()
             .position(|user| user.body == body && Arc::ptr_eq(&user.unit, unit))
         {
-            return self.user_function_id(position);
+            return Function::local(position);
         }
+        let function = Function::local(self.user_functions.len())?;
         self.user_functions.push(UserFunction {
             unit: Arc::clone(unit),
             body,
             member: None,
             flags: dynamic_flags(unit, at),
         });
-        self.user_function_id(self.user_functions.len() - 1)
+        Some(function)
     }
 
     /// `EX(func)->common.scope` of a frame, the class whose body the op
@@ -1488,11 +1644,18 @@ impl Request {
     /// The declaration of a linked class.
     #[must_use]
     pub fn class_decl(&self, class: ClassId) -> Option<&ClassDecl> {
-        let at = usize::try_from(class.0).ok()?;
-        match at.checked_sub(self.shared.classes.len()) {
-            None => self.shared.classes.get(at),
-            Some(declared) => self.declared.get(declared)?.decl(),
+        if let Some(native) = self.native_class_at(class) {
+            return self.shared.classes.get(native);
         }
+        self.declared_row(class)?.decl()
+    }
+
+    /// Where an engine's class stands among the engine's; none for any
+    /// other class.
+    pub(crate) fn native_class_at(&self, class: ClassId) -> Option<usize> {
+        usize::try_from(class.published_number()?)
+            .ok()
+            .filter(|at| *at < self.shared.classes.len())
     }
 
     /// `ce->ce_flags` of a linked class: its declaration's flags with
@@ -1605,9 +1768,10 @@ impl Request {
     /// `get_declared_classes()`, in declaration order.
     #[must_use]
     pub fn declared_classes(&self) -> Vec<ClassId> {
-        let count = self.shared.classes.len() + self.declared.len();
-        (0..u32::try_from(count).unwrap_or(u32::MAX))
+        let natives = u32::try_from(self.shared.classes.len()).unwrap_or(u32::MAX);
+        (0..natives)
             .map(ClassId)
+            .chain(self.declared.iter().map(|named| named.class))
             .collect()
     }
 
@@ -1631,9 +1795,8 @@ impl Request {
             .map(|decl| decl.name.0.to_ascii_lowercase())
             .collect();
         let user: Vec<Vec<u8>> = self
-            .user_functions
-            .iter()
-            .filter_map(user_function_decl)
+            .function_table()
+            .filter_map(|(_, user)| user_function_decl(user))
             .map(|decl| decl.name.0.to_ascii_lowercase())
             .filter(|name| !name.starts_with(b"{"))
             .collect();
@@ -1663,8 +1826,9 @@ impl Request {
             return false;
         }
         let place = self.buckets.take();
-        self.aliases
-            .push((place, alias.to_ascii_lowercase(), class));
+        let lowered = alias.to_ascii_lowercase();
+        let key = lowered.clone().into_boxed_slice();
+        self.aliases.push(key, (place, lowered, class));
         if crate::observer::classes_linked_observed(self) && !self.native_class(class) {
             crate::observer::class_linked(self, class, &alias.to_ascii_lowercase());
         }
@@ -1680,7 +1844,7 @@ impl Request {
 /// the `ClassId` past the engine's classes.
 fn class_in(
     shared: &Shared,
-    declared: &Keyed<Declared>,
+    declared: &Keyed<Named>,
     aliases: &Keyed<preload::Alias>,
     name: &[u8],
 ) -> Option<ClassId> {
@@ -1688,9 +1852,8 @@ fn class_in(
         shared.class_keys.get(key).copied().or_else(|| {
             declared
                 .find(key)
-                .and_then(|(at, _)| u32::try_from(shared.classes.len().checked_add(at)?).ok())
-                .map(ClassId)
-                .or_else(|| aliases.find(key).map(|(_, (_, _, class))| *class))
+                .map(|named| named.class)
+                .or_else(|| aliases.find(key).map(|(_, _, class)| *class))
         })
     })
 }
