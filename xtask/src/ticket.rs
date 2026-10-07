@@ -196,11 +196,46 @@ const HEADING: &str = "acceptance criteria";
 pub const CAP: u64 = 100;
 
 /// What `xtask ticket` does: read the criteria, or read them and close
-/// under a verdict, naming what the work opened.
+/// under a verdict, naming what the work opened, at a commit that stands
+/// where [`Reach`] says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     Read,
-    Close(Verdict, Successors),
+    Close(Verdict, Successors, Reach),
+}
+
+/// Where the commit a close is made at stands against `main` (#2249). A
+/// ticket closed on a commit `main` does not contain says work is in
+/// `main` that is not, which hides it from the frontier and from every
+/// reader of the tracker, as #2163 to #2168 were closed on a stack that
+/// had not merged; so a close of work done is refused off `main`, and a
+/// withdrawal, which says nothing is in the tree, is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// `main` contains the commit.
+    Landed,
+    /// `main` does not contain the commit, on the branch named.
+    Unmerged { commit: String, branch: String },
+}
+
+impl Reach {
+    /// Where `root`'s `HEAD` stands against its `main`, its own or
+    /// `origin`'s: contained when the merge base of the two is `HEAD`.
+    pub fn of(root: &Path) -> Result<Reach> {
+        let head = crate::git::git(root, &["rev-parse", "HEAD"], None)?
+            .trim()
+            .to_owned();
+        if crate::track::merge_base(root, &head, MAIN)? == head {
+            return Ok(Reach::Landed);
+        }
+        let branch = crate::git::git(root, &["rev-parse", "--abbrev-ref", "HEAD"], None)?
+            .trim()
+            .to_owned();
+        Ok(Reach::Unmerged {
+            commit: crate::track::short(&head).to_owned(),
+            branch,
+        })
+    }
 }
 
 /// What a close says of the ticket: done, every box ticked, or withdrawn,
@@ -970,6 +1005,14 @@ fn mislabel(ticket: Ticket, rows: &[&Denied], nothing: &str) -> String {
 
 /// What a reading says of a withdrawal refused by a ticked box (#185):
 /// the boxes ticked by name, and what work half done is instead.
+/// What a close of work done at a commit `main` does not contain is
+/// refused with: the commit, its branch and the two ways on (#2249).
+fn unlanded(commit: &str, branch: &str) -> String {
+    format!(
+        "{commit} on {branch} is not in main: merge it first, or close with --withdrawn where nothing of the work is in the tree"
+    )
+}
+
 fn half_done(criteria: &Criteria) -> String {
     format!(
         "a withdrawal is of a ticket with no box ticked, and {} {}: {}; work half done is not withdrawn, it is finished or its boxes are unticked by a person",
@@ -1116,7 +1159,7 @@ pub fn run(
     reading.rule = denied
         .first()
         .map_or_else(String::new, |first| first.rule.clone());
-    if let Act::Close(verdict, successors) = &act {
+    if let Act::Close(verdict, successors, _) = &act {
         reading.count("opens", successors.tickets().len() as u64)?;
         reading.count("withdrawn", u64::from(verdict.withdrawn().is_some()))?;
     }
@@ -1138,15 +1181,15 @@ pub fn run(
     let (status, message) = match act {
         // A withdrawal is held to the boxes the other way round: one
         // ticked is work half done, and half-done work is not withdrawn.
-        Act::Close(Verdict::Withdrawn(_), _) if !criteria.ticked.is_empty() => (
+        Act::Close(Verdict::Withdrawn(_), ..) if !criteria.ticked.is_empty() => (
             Status::Fail,
             format!("{ticket}: {boxes}; {}{nothing}", half_done(&criteria)),
         ),
-        Act::Close(Verdict::Withdrawn(_), _) if issue.state == State::Closed => (
+        Act::Close(Verdict::Withdrawn(_), ..) if issue.state == State::Closed => (
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
         ),
-        Act::Close(Verdict::Withdrawn(reason), successors) => {
+        Act::Close(Verdict::Withdrawn(reason), successors, _) => {
             let comment = format!(
                 "Withdrawn by `xtask ticket close` at {}: {reason}; {boxes}",
                 reading.commit
@@ -1176,11 +1219,17 @@ pub fn run(
             Status::Pass,
             format!("{ticket}: {boxes}; {}", issue.state.as_str()),
         ),
-        Act::Close(Verdict::Done, _) if issue.state == State::Closed => (
+        Act::Close(Verdict::Done, ..) if issue.state == State::Closed => (
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
         ),
-        Act::Close(Verdict::Done, successors) => {
+        // Every box ticked says the work is done, and a commit `main`
+        // does not contain says it is not there yet (#2249).
+        Act::Close(Verdict::Done, _, Reach::Unmerged { commit, branch }) => (
+            Status::Fail,
+            format!("{ticket}: {boxes}; {}{nothing}", unlanded(&commit, &branch)),
+        ),
+        Act::Close(Verdict::Done, successors, Reach::Landed) => {
             let comment = format!(
                 "Closed by `xtask ticket close` at {}: {boxes}",
                 reading.commit
