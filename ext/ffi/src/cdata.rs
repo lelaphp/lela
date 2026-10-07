@@ -17,7 +17,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
-use php_ext::coerce::{BinaryOp, to_double, to_long, to_string, truthy, value_name};
+use php_ext::coerce::{BinaryOp, to_double, to_long, to_string, truthy, value_name, with_string};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{
@@ -661,11 +661,12 @@ pub(crate) fn write_value(
                 ffi::write(ptr, u8::from(truth));
             }
             Scalar::Char => {
-                let text = to_string(req, &value)?;
-                let bytes = text.as_bytes().to_vec();
-                text.give_up(req);
-                if let [byte] = bytes.as_slice() {
-                    ffi::write(ptr, *byte);
+                let byte = with_string(req, &value, |bytes| match bytes {
+                    [byte] => Some(*byte),
+                    _ => None,
+                })?;
+                if let Some(byte) = byte {
+                    ffi::write(ptr, byte);
                 } else {
                     return Err(assign_incompatible(req, &value, ty)?);
                 }

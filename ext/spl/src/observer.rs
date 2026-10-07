@@ -34,12 +34,15 @@ enum RowKey {
     Hash(Vec<u8>),
 }
 
+/// One row: its key, and its owners of the object and the information.
+type Row = (RowKey, Owner<PhpObject>, Owner<Value>);
+
 /// `spl_SplObjectStorage`: the rows with their places, what php's table
 /// lays down for them, the position, `intern->index`, and
 /// `MultipleIterator`'s flags.
 #[derive(Default)]
 pub(crate) struct StorageState {
-    rows: Vec<Option<(RowKey, PhpObject, Value)>>,
+    rows: Vec<Option<Row>>,
     places: HashMap<RowKey, usize>,
     table: Table,
     pos: usize,
@@ -61,7 +64,7 @@ impl StorageState {
         self.rows
             .iter()
             .flatten()
-            .map(|(_, object, inf)| (*object, *inf))
+            .map(|(_, object, inf)| (**object, **inf))
             .collect()
     }
 
@@ -92,7 +95,7 @@ impl StorageState {
         self.rows
             .get(at)
             .and_then(Option::as_ref)
-            .map(|(_, object, inf)| (at, *object, *inf))
+            .map(|(_, object, inf)| (at, **object, **inf))
     }
 
     fn forward(&mut self) {
@@ -119,18 +122,26 @@ impl StorageState {
 
     /// The information replaced, or a row appended; the old value or,
     /// for a new row, `None`.
-    fn attach(&mut self, key: RowKey, object: PhpObject, inf: Value) -> Result<Value, PhpObject> {
+    /// The row under `key` given `inf`, the information it held and the
+    /// owner of the object it needs none of answered; or a new row, which
+    /// keeps both.
+    fn attach(
+        &mut self,
+        key: RowKey,
+        object: Owner<PhpObject>,
+        inf: Owner<Value>,
+    ) -> Option<(Owner<Value>, Owner<PhpObject>)> {
         if let Some(at) = self.places.get(&key)
             && let Some(Some(row)) = self.rows.get_mut(*at)
         {
-            return Ok(std::mem::replace(&mut row.2, inf));
+            return Some((std::mem::replace(&mut row.2, inf), object));
         }
         self.places.insert(key.clone(), self.rows.len());
         self.rows.push(Some((key, object, inf)));
-        Err(object)
+        None
     }
 
-    fn detach(&mut self, key: &RowKey) -> Option<(PhpObject, Value)> {
+    fn detach(&mut self, key: &RowKey) -> Option<(Owner<PhpObject>, Owner<Value>)> {
         let at = self.places.remove(key)?;
         self.rows
             .get_mut(at)
@@ -544,7 +555,7 @@ impl SplObjectStorage {
     /// `setInfo(mixed $info): void`; the witness is `getInfo`'s.
     #[php(tentative)]
     fn setInfo(req: &mut Request, this: This<Self>, info: Value) -> Result<(), Thrown> {
-        let inf = crate::copied(req, info);
+        let inf = Owner::take(req, info.deref());
         let old = with(req, this.object(), |s| {
             let at = s.valid_from(s.pos);
             match s.rows.get_mut(at).and_then(Option::as_mut) {
@@ -553,7 +564,7 @@ impl SplObjectStorage {
             }
         })?;
         match old {
-            Ok(old) | Err(old) => req.release(old),
+            Ok(old) | Err(old) => old.give_up(req),
         }
         Ok(())
     }
@@ -707,9 +718,7 @@ impl SplObjectStorage {
         let mut replaced = Vec::new();
         let read = read_storage(req, this, &mut reader, &data, &mut replaced);
         let read = reader.finish(req, read);
-        for held in replaced {
-            req.release(held);
-        }
+        crate::give_up_all(req, replaced);
         let broke_at = read?;
         match broke_at {
             Some(at) => Err(throw(
@@ -791,7 +800,7 @@ impl SplObjectStorage {
         let found = with(req, this, |s| {
             s.places
                 .get(&key)
-                .and_then(|at| s.rows[*at].as_ref().map(|row| row.2))
+                .and_then(|at| s.rows[*at].as_ref().map(|row| *row.2))
         })?;
         match found {
             Some(inf) => Ok(inf.deref()),
@@ -1346,7 +1355,7 @@ fn with<R>(
 fn row_key(req: &mut Request, this: PhpObject, object: PhpObject) -> Result<RowKey, Thrown> {
     let (key, string) = hashed(req, this, object)?;
     if let Some(string) = string {
-        req.release(string);
+        string.give_up(req);
     }
     Ok(key)
 }
@@ -1358,13 +1367,13 @@ fn hashed(
     req: &mut Request,
     this: PhpObject,
     object: PhpObject,
-) -> Result<(RowKey, Option<Value>), Thrown> {
+) -> Result<(RowKey, Option<Owner<Value>>), Thrown> {
     if !crate::overridden(req, this, b"gethash") {
         return Ok((RowKey::Id(object.index()), None));
     }
     let answered = call_method(req, &this, b"getHash", &[object.as_value()])?;
     if let Some(bytes) = answered.as_str_bytes().map(<[u8]>::to_vec) {
-        return Ok((RowKey::Hash(bytes), Some(answered.hand_on_unmigrated())));
+        return Ok((RowKey::Hash(bytes), Some(answered)));
     }
     let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
     let name = value_name(req, &answered);
@@ -1457,24 +1466,25 @@ fn storage_attach(
     inf: Value,
 ) -> Result<(), Thrown> {
     let (key, string) = hashed(req, this, object)?;
-    let inf = crate::copied(req, inf);
-    match with(req, this, |s| s.attach(key.clone(), object, inf))? {
-        Ok(old) => {
-            if let Some(string) = string {
-                req.release(string);
-            }
-            req.release(old);
-        }
-        Err(object) => {
-            req.addref(&object.as_value());
-            let copied = overridden_bits(req, this)? & SOS_OVERRIDDEN_WRITE != 0;
-            let mut table = with(req, this, |s| std::mem::take(&mut s.table))?;
-            let placed = table.place(req, key, string, copied);
-            with(req, this, |s| s.table = table)?;
-            placed?;
-        }
+    let inf = Owner::take(req, inf.deref());
+    let held = Owner::take(req, object);
+    if let Some((old, held)) = with(req, this, |s| s.attach(key.clone(), held, inf))? {
+        crate::give_up(req, string);
+        held.give_up(req);
+        old.give_up(req);
+        return Ok(());
     }
-    Ok(())
+    let copied = match overridden_bits(req, this) {
+        Ok(bits) => bits & SOS_OVERRIDDEN_WRITE != 0,
+        Err(thrown) => {
+            crate::give_up(req, string);
+            return Err(thrown);
+        }
+    };
+    let mut table = with(req, this, |s| std::mem::take(&mut s.table))?;
+    let placed = table.place(req, key, string, copied);
+    with(req, this, |s| s.table = table)?;
+    placed
 }
 
 /// `spl_object_storage_detach`: `true` where a row went.
@@ -1496,7 +1506,7 @@ fn detach_key(req: &mut Request, this: PhpObject, key: &RowKey) -> Result<bool, 
     let (string, element) = held.map_or((None, None), |(s, e)| (s, Some(e)));
     // `zend_hash_del` releases the key before the destructor runs.
     if let Some(string) = string {
-        req.release(string);
+        string.give_up(req);
     }
     give_up_row(req, object, inf, element);
     Ok(true)
@@ -1506,9 +1516,14 @@ fn detach_key(req: &mut Request, this: PhpObject, key: &RowKey) -> Result<bool, 
 /// detach or the storage's end gives up: the object released, then the
 /// information, `zend_object_release(el->obj)` before
 /// `zval_ptr_dtor(&el->inf)`, then the element, `efree(el)`.
-fn give_up_row(req: &mut Request, object: PhpObject, inf: Value, element: Option<Emalloc>) {
-    req.release(object.as_value());
-    req.release(inf);
+fn give_up_row(
+    req: &mut Request,
+    object: Owner<PhpObject>,
+    inf: Owner<Value>,
+    element: Option<Emalloc>,
+) {
+    object.give_up(req);
+    inf.give_up(req);
     if let Some(element) = element {
         element.free(req);
     }
@@ -1547,7 +1562,7 @@ impl ObjectHandlers for Handlers {
                 .map_or((None, None), |(s, e)| (s, Some(e)));
             give_up_row(req, object, inf, element);
             if let Some(string) = string {
-                req.release(string);
+                string.give_up(req);
             }
         }
         table.free(req);
@@ -1582,7 +1597,7 @@ impl ObjectHandlers for Handlers {
                 let found = with(req, object, |s| {
                     s.places
                         .get(&RowKey::Id(target.index()))
-                        .and_then(|at| s.rows[*at].as_ref().map(|row| row.2))
+                        .and_then(|at| s.rows[*at].as_ref().map(|row| *row.2))
                 })?;
                 match found {
                     Some(inf) => Ok(Owner::take(req, inf.deref())),
@@ -1648,7 +1663,7 @@ impl ObjectHandlers for Handlers {
         let found = with(req, object, |s| {
             s.places
                 .get(&RowKey::Id(target.index()))
-                .and_then(|at| s.rows[*at].as_ref().map(|row| row.2))
+                .and_then(|at| s.rows[*at].as_ref().map(|row| *row.2))
         })?;
         match found {
             None => Ok(false),
@@ -1733,7 +1748,7 @@ impl ObjectHandlers for Handlers {
             s.rows
                 .get(at)
                 .and_then(Option::as_ref)
-                .map(|(key, _, inf)| (at, key.clone(), *inf))
+                .map(|(key, _, inf)| (at, key.clone(), **inf))
         })? {
             from = at + 1;
             let other = with(req, r, |s| {
@@ -1741,7 +1756,7 @@ impl ObjectHandlers for Handlers {
                     .get(&key)
                     .and_then(|at| s.rows.get(*at))
                     .and_then(Option::as_ref)
-                    .map(|row| row.2)
+                    .map(|row| *row.2)
             })?;
             let Some(other) = other else {
                 return Ok(Some(std::cmp::Ordering::Greater));
@@ -1902,7 +1917,7 @@ fn read_storage(
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
-    replaced: &mut Vec<Value>,
+    replaced: &mut Vec<Owner<Value>>,
 ) -> Result<Option<usize>, Thrown> {
     if !data.starts_with(b"x:") {
         return Ok(Some(0));
@@ -1927,18 +1942,25 @@ fn read_storage(
         let Some(entry) = reader.local(req)? else {
             return Ok(Some(reader.offset()));
         };
-        let mut inf = Value::null();
-        if data.get(reader.offset()) == Some(&b',') {
+        let inf = if data.get(reader.offset()) == Some(&b',') {
             reader.set_offset(reader.offset() + 1);
-            let Some(read) = reader.local(req)? else {
-                req.release(entry);
-                return Ok(Some(reader.offset()));
-            };
-            inf = read;
-        }
+            match reader.local(req) {
+                Ok(Some(read)) => read,
+                Ok(None) => {
+                    entry.give_up(req);
+                    return Ok(Some(reader.offset()));
+                }
+                Err(thrown) => {
+                    entry.give_up(req);
+                    return Err(thrown);
+                }
+            }
+        } else {
+            Owner::take(req, Value::null())
+        };
         let Some(target) = entry.as_object().copied() else {
-            req.release(entry);
-            req.release(inf);
+            entry.give_up(req);
+            inf.give_up(req);
             return Ok(Some(reader.offset()));
         };
         // A row read again keeps its information and its object until
@@ -1947,25 +1969,23 @@ fn read_storage(
         let key = match row_key(req, this, target) {
             Ok(key) => key,
             Err(thrown) => {
-                req.release(entry);
-                req.release(inf);
+                entry.give_up(req);
+                inf.give_up(req);
                 return Err(thrown);
             }
         };
         let found = with(req, this, |s| {
             s.places
                 .get(&key)
-                .and_then(|at| s.rows[*at].as_ref().map(|row| (row.1, row.2)))
+                .and_then(|at| s.rows[*at].as_ref().map(|row| (*row.1, *row.2)))
         })?;
         if let Some((object, old)) = found {
-            req.addref(&old);
-            replaced.push(old);
-            req.addref(&object.as_value());
-            replaced.push(object.as_value());
+            replaced.push(Owner::take(req, old));
+            replaced.push(Owner::take(req, object.as_value()));
         }
-        let attached = storage_attach(req, this, target, inf);
-        req.release(entry);
-        req.release(inf);
+        let attached = storage_attach(req, this, target, *inf);
+        entry.give_up(req);
+        inf.give_up(req);
         attached?;
     }
     if data.get(reader.offset()) != Some(&b';') {

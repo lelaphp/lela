@@ -786,7 +786,7 @@ impl SimpleXMLElement {
         }
         let released = sxe_mut(req, this).and_then(|s| s.current.take());
         if let Some(old) = released {
-            req.release(old.as_value());
+            old.give_up(req);
         }
         let ns = Ns::of(Some(namespaceOrPrefix.as_bytes()), isPrefix);
         adopt(req, this, doc, ns);
@@ -1120,7 +1120,7 @@ impl SimpleXMLElement {
     fn hasChildren(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let this = this.object();
         let attributes = matches!(View::of(req, this).walk, Walk::Attributes(_));
-        let Some(current) = sxe(req, this).and_then(|s| s.current) else {
+        let Some(current) = sxe(req, this).and_then(|s| s.current.as_deref().copied()) else {
             return Ok(false);
         };
         if attributes {

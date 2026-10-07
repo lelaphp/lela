@@ -50,7 +50,7 @@ use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, View};
 use php_ext_standard::Serializer;
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
@@ -305,13 +305,6 @@ fn answered<T: FromArgument>(value: Owner<Value>) -> Owner<Raw<T>> {
     value.into_raw()
 }
 
-/// A value handed back with one more owner, `RETURN_COPY`.
-fn copied(req: &Request, value: Value) -> Value {
-    let value = value.deref();
-    req.addref(&value);
-    value
-}
-
 // ---- a `Traversable` walked from a native, as `spl_iterator_apply` walks one
 
 /// One method served on `object` with no arguments; the return is the
@@ -336,20 +329,30 @@ fn valid(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     Ok(valid)
 }
 
-/// A value that is its one owner, as the `Owner` a native returns.
+/// The owner of a value with a reference followed, `ZVAL_DEREF` then
+/// `ZVAL_COPY` of what an iterator answered: an owner of what the
+/// reference holds, the reference's given up.
 #[cfg_attr(debug_assertions, track_caller)]
-pub(crate) fn owner_of(req: &mut Request, value: Value) -> Owner<Value> {
-    let owner = Owner::take(req, value);
-    req.release(value);
-    owner
+pub(crate) fn dereferenced(req: &mut Request, value: Owner<Value>) -> Owner<Value> {
+    if value.as_php_ref().is_none() {
+        return value;
+    }
+    let bare = Owner::take(req, value.deref());
+    value.give_up(req);
+    bare
 }
 
-/// A value with a reference followed, the owner moved to what it holds.
-pub(crate) fn owned(req: &mut Request, value: Value) -> Value {
-    let bare = value.deref();
-    req.addref(&bare);
-    req.release(value);
-    bare
+/// What a slot of a native's state held before it was written, given up,
+/// `zval_ptr_dtor`.
+pub(crate) fn give_up<T: View>(req: &mut Request, old: Option<Owner<T>>) {
+    give_up_all(req, old);
+}
+
+/// Each owner given up, in order.
+pub(crate) fn give_up_all<T: View>(req: &mut Request, owners: impl IntoIterator<Item = Owner<T>>) {
+    for owner in owners {
+        owner.give_up(req);
+    }
 }
 
 /// `spl_iterator_apply`, exported to ext/phar for `phar_build` (design
@@ -415,21 +418,20 @@ fn set_key(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     key: &Value,
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
     let (key, value) = keyed(req, key, value)?;
     array.set(req, key, value)
 }
 
-/// [`set_key`]'s key and value, each one owner, for an array the
-/// caller writes itself.
+/// [`set_key`]'s key and value, each one owner, the value's reference
+/// followed, for an array the caller writes itself.
 fn keyed(
     req: &mut Request,
     key: &Value,
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(Owner<Key>, Owner<Value>), Thrown> {
-    let value = owned(req, value);
-    let value = owner_of(req, value);
+    let value = dereferenced(req, value);
     let key = match zval_key(req, &key.deref()) {
         Ok(key) => key,
         Err(thrown) => {

@@ -177,7 +177,7 @@ struct State {
     var: var::Nesting,
     /// `BG(last_http_headers)`: the headers the http wrapper's last
     /// request read, one owner the state's, given back in `rshutdown`.
-    last_http_headers: Option<php_ext::values::PhpArray>,
+    last_http_headers: Option<php_ext::values::Owner<php_ext::values::PhpArray>>,
 }
 
 /// The extension value (design §7.1): declarations paired with entries,
@@ -786,22 +786,9 @@ pub fn extension() -> Extension {
         .stream_hooks(STREAM_HOOKS)
         .info(basic_functions::minfo)
         .rshutdown(rshutdown)
+        .post_deactivate(post_deactivate)
         .rinit(rinit)
         .build("standard")
-}
-
-/// `zval_get_tmp_string` and `zend_tmp_string_release` around a read
-/// whose bytes are kept: the value's text, as `to_string` converts it,
-/// and the string the conversion handed over given up. What a native
-/// reading a value's text once calls, so no conversion outlives it.
-pub(crate) fn tmp_string_bytes(
-    req: &mut Request,
-    value: &php_ext::values::Value,
-) -> Result<Vec<u8>, Thrown> {
-    let text = php_ext::coerce::to_string(req, value)?;
-    let bytes = text.as_bytes().to_vec();
-    text.give_up(req);
-    Ok(bytes)
 }
 
 /// The `on_modify` of each entry that has one, php's `PHP_INI_MH` at
@@ -859,6 +846,14 @@ fn rshutdown(req: &mut Request) {
     assert::rshutdown(req);
     url_scanner::rshutdown(req);
     http_fopen_wrapper::clear_last_headers(req);
+}
+
+/// `FG(default_context)` given up past the request's resources' close:
+/// php keeps no value of it and frees it with the regular list after
+/// `shutdown_executor`, and a stream opened in any extension's
+/// `RSHUTDOWN` or closed by the list's close may still make it.
+fn post_deactivate(req: &mut Request) {
+    php_ext::request::StreamCtx::release_default(req);
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`

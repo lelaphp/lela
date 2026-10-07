@@ -1072,6 +1072,7 @@ fn key_exists(req: &mut Request, key: Untyped<Value>, array: PhpArray) -> Result
 }
 
 fn key_exists_as(req: &mut Request, key: Value, array: PhpArray) -> Result<bool, Thrown> {
+    let mut made = None;
     let key = match key.as_ref() {
         ValueRef::Str(s) => Key::lookup(*s),
         ValueRef::Int(n) => Key::Int(n),
@@ -1080,7 +1081,10 @@ fn key_exists_as(req: &mut Request, key: Value, array: PhpArray) -> Result<bool,
                 req,
                 "Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead",
             );
-            Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated())
+            let empty = PhpString::new(req, b"")?.into_key();
+            let key = Key::clone(&empty);
+            made = Some(empty);
+            key
         }
         ValueRef::Float(f) => Key::Int(lval_safe(req, f)),
         ValueRef::Bool(b) => Key::Int(i64::from(b)),
@@ -1096,7 +1100,11 @@ fn key_exists_as(req: &mut Request, key: Value, array: PhpArray) -> Result<bool,
             return Err(arg_type_error(req, 1, "be a valid array offset type"));
         }
     };
-    Ok(array.contains(&key))
+    let found = array.contains(&key);
+    if let Some(made) = made {
+        made.give_up(req);
+    }
+    Ok(found)
 }
 
 /// `zend_dval_to_lval_safe`: the float as a key, and the 8.1

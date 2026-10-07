@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Stream, Streams as _, Whence};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Owner, PhpString, Value};
 
 use crate::table::Table;
@@ -78,8 +78,9 @@ pub(crate) enum Content {
     Ufp,
     /// `PHAR_MOD`: a buffer of the entry's own, which a write made.
     Mod(Vec<u8>),
-    /// `PHAR_TMP`: the file `tmp` names, mounted, opened when first read.
-    Tmp(Option<Stream>),
+    /// `PHAR_TMP`: the file `tmp` names, mounted, opened when first read,
+    /// the entry holding its owner.
+    Tmp(Option<Owner<Stream>>),
 }
 
 /// `phar->fp`: the archive's bytes, shared with each entry stream opened
@@ -129,10 +130,10 @@ impl Fp {
 }
 
 /// `phar_metadata_tracker`: the value `setMetadata()` was given, the
-/// serialised string, or both.
+/// serialised string, or both; an owner of the value.
 #[derive(Default)]
 pub(crate) struct Metadata {
-    pub(crate) val: Option<Value>,
+    pub(crate) val: Option<Owner<Value>>,
     pub(crate) str: Option<Vec<u8>>,
 }
 
@@ -146,18 +147,15 @@ impl Metadata {
     pub(crate) fn free(&mut self, req: &mut Request) {
         self.str = None;
         if let Some(val) = self.val.take() {
-            req.release(val);
+            val.give_up(req);
         }
     }
 
     /// `phar_metadata_tracker_copy`: another owner of the value, a copy
     /// of the string.
-    pub(crate) fn copied(&self, req: &mut Request) -> Metadata {
-        if let Some(val) = &self.val {
-            req.addref(val);
-        }
+    pub(crate) fn copied(&self, req: &Request) -> Metadata {
         Metadata {
-            val: self.val,
+            val: self.val.as_deref().map(|val| Owner::take(req, *val)),
             str: self.str.clone(),
         }
     }
@@ -198,6 +196,15 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
+    /// `destroy_phar_manifest_entry`: the entry's `metadata` freed and a mounted
+    /// file's stream closed.
+    pub(crate) fn free(mut self, req: &mut Request) {
+        self.metadata.free(req);
+        if let Content::Tmp(Some(stream)) = self.content {
+            stream.free(req);
+        }
+    }
+
     /// An entry with every field zero, `memset(&entry, 0, ...)`.
     pub(crate) fn new(filename: &[u8]) -> Entry {
         Entry {
@@ -399,11 +406,8 @@ impl Archive {
     /// `metadata` values and the mounted files' streams.
     pub(crate) fn release_all(&mut self, req: &mut Request) {
         self.metadata.free(req);
-        for mut entry in self.manifest.clear() {
-            entry.metadata.free(req);
-            if let Content::Tmp(Some(stream)) = entry.content {
-                stream.free(req);
-            }
+        for entry in self.manifest.clear() {
+            entry.free(req);
         }
     }
 }

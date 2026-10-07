@@ -2,7 +2,7 @@
 
 use php_ext::abi::{Instance, OrFalse, Raw, Ref, True, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
-use php_ext::coerce::{to_long, to_string, truthy, type_name};
+use php_ext::coerce::{to_long, truthy, type_name, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
@@ -760,10 +760,7 @@ fn xml_parser_set_option(
             }
         }
         Setting::TargetEncoding => {
-            let name = to_string(req, &value)?;
-            let target = Target::named(name.as_bytes());
-            name.give_up(req);
-            let Some(target) = target else {
+            let Some(target) = with_string(req, &value, Target::named)? else {
                 return Err(argument_error(
                     req,
                     "ValueError",

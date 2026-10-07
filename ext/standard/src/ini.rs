@@ -113,17 +113,24 @@ fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<
                 _ => None,
             };
             let key = match (index, label.as_php_string()) {
-                (Some(n), _) => Key::Int(n),
-                (None, Some(s)) => Key::Str(*s),
-                (None, None) => Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated()),
+                (Some(n), _) => Owner::take(req, Key::Int(n)),
+                (None, Some(s)) => Owner::take(req, Key::Str(*s)),
+                (None, None) => PhpString::new(req, b"")?.into_key(),
             };
             let found = arr.get(&key).and_then(|v| v.as_array().copied());
             let mut inner = if let Some(inner) = found {
+                key.give_up(req);
                 inner
             } else {
-                let inner = PhpArray::new(req)?;
+                let inner = match PhpArray::new(req) {
+                    Ok(inner) => inner,
+                    Err(thrown) => {
+                        key.give_up(req);
+                        return Err(thrown);
+                    }
+                };
                 let held = *inner;
-                arr.set(req, Owner::take(req, key), inner.into_value())?;
+                arr.set(req, key, inner.into_value())?;
                 held
             };
             let value = Owner::take(req, *value);

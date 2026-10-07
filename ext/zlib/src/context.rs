@@ -8,7 +8,7 @@
 use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Raw, Refusals, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::{to_long, to_string, value_name};
+use php_ext::coerce::{to_long, value_name, with_string};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
@@ -191,18 +191,17 @@ impl Options {
             ValueRef::Array(array) => {
                 let mut out = Vec::new();
                 for (_, element) in array {
-                    let string = to_string(req, &element)?;
-                    let bytes = string.as_bytes();
-                    let refused = if bytes.is_empty() {
-                        Some("not contain empty strings")
-                    } else if bytes.contains(&0) {
-                        Some("not contain strings with null bytes")
-                    } else {
-                        out.extend_from_slice(bytes);
-                        out.push(0);
-                        None
-                    };
-                    string.give_up(req);
+                    let refused = with_string(req, &element, |bytes| {
+                        if bytes.is_empty() {
+                            Some("not contain empty strings")
+                        } else if bytes.contains(&0) {
+                            Some("not contain strings with null bytes")
+                        } else {
+                            out.extend_from_slice(bytes);
+                            out.push(0);
+                            None
+                        }
+                    })?;
                     if let Some(refused) = refused {
                         return Err(arg_value_error(req, 2, refused));
                     }

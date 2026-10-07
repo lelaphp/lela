@@ -127,7 +127,6 @@ pub(super) struct Diagnostics {
     /// `EG(user_exception_handlers)`, the same shape without a mask.
     exception_handler: Option<Callable>,
     exception_handlers: Vec<Option<Callable>>,
-    assert_callback: Option<Value>,
     /// `PG(in_error_log)`: an entry is being logged, from `php_log_err`'s
     /// start to its end, the host's log and what it runs inside it
     /// included, so what that raises is not logged again
@@ -1454,17 +1453,6 @@ impl Request {
         {
             self.diagnostics.exception_handler = top;
         }
-    }
-
-    /// `assert_options(ASSERT_CALLBACK)` as it stands.
-    #[must_use]
-    pub fn assert_callback(&self) -> Option<&Value> {
-        self.diagnostics.assert_callback.as_ref()
-    }
-
-    /// Set the assertion callback.
-    pub fn set_assert_callback(&mut self, callback: Option<Value>) {
-        self.diagnostics.assert_callback = callback;
     }
 }
 

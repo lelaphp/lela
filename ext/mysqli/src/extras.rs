@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Instance, OrFalse, Ref, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::to_string;
+use php_ext::coerce::{to_string, with_string};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -259,7 +259,7 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
             }
             None => 0,
         };
-        let message = match cell(2).map(|v| crate::string_of(req, &v)) {
+        let message = match cell(2).map(|v| with_string(req, &v, <[u8]>::to_vec)) {
             Some(Ok(bytes)) => bytes,
             Some(Err(thrown)) => {
                 row.give_up(req);

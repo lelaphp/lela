@@ -11,6 +11,7 @@ use std::ffi::{CStr, CString};
 use std::ops::ControlFlow;
 
 use php_ext::abi::{Instance, OrFalse, Union};
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, argument_error, docref, raise};
 use php_ext::request::{Request, Resolve};
 use php_ext::values::walk::{self, Hold};
@@ -246,7 +247,7 @@ pub(crate) fn cert_from_value(
     {
         return Ok(held.cert.clone());
     }
-    let text = crate::xp_ssl::string_of(req, value)?;
+    let text = with_string(req, value, <[u8]>::to_vec)?;
     Ok(cert_from_str(req, &text, origin))
 }
 

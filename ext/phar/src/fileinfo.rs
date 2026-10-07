@@ -590,8 +590,9 @@ impl PharFileInfo {
             unserializeOptions,
             "PharFileInfo::getMetadata",
         );
-        if let Some(e) = entry_of(req, this) {
-            e.metadata = meta;
+        match entry_of(req, this) {
+            Some(e) => e.metadata = meta,
+            None => meta.free(req),
         }
         value
     }

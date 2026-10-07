@@ -153,21 +153,6 @@ fn is_null(value: &Value) -> bool {
     matches!(value.deref().as_ref(), ValueRef::Null | ValueRef::Undef)
 }
 
-/// A value handed on with one more owner, `ZVAL_COPY`.
-fn copied(req: &Request, value: Value) -> Value {
-    let value = value.deref();
-    req.addref(&value);
-    value
-}
-
-/// A value the fetch engine or a `pdo_*` extension answers with its one
-/// owner, the caller's, as the owner it is: what a native returns of it.
-pub(crate) fn owned(req: &mut Request, value: Value) -> Owner<Value> {
-    let owner = Owner::take(req, value);
-    req.release(value);
-    owner
-}
-
 /// A string value of `bytes`, one owner the caller's.
 fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     Ok(PhpString::new(req, bytes)?.into_value())

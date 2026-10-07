@@ -183,8 +183,8 @@ pub(crate) fn url_wrap_http(
         thrown: None,
     };
     let opened = wrap_http_ex(req, &mut chain, path, PHP_URL_REDIRECT_MAX, Hop::First);
-    if let Some(headers) = chain.headers {
-        let value = Owner::take(req, Value::array(headers));
+    if let Some(headers) = chain.headers.take() {
+        let value = Owner::take(req, Value::array(*headers));
         req.state::<State>().last_http_headers = Some(headers);
         req.set_local_var(b"http_response_header", value);
     }
@@ -207,14 +207,14 @@ pub(crate) fn url_wrap_http(
 /// wrapper and `http_clear_last_response_headers()` start with.
 pub(crate) fn clear_last_headers(req: &mut Request) {
     if let Some(headers) = req.state::<State>().last_http_headers.take() {
-        req.release(Value::array(headers));
+        headers.give_up(req);
     }
 }
 
 /// `BG(last_http_headers)`: the headers the last request of the wrapper
 /// read, a view of them.
 pub(crate) fn last_headers(req: &mut Request) -> Option<PhpArray> {
-    req.state::<State>().last_http_headers
+    req.state::<State>().last_http_headers.as_deref().copied()
 }
 
 /// The `http` options of the `context` a chain of requests is made
@@ -388,7 +388,7 @@ struct Chain {
     options: HttpOptions,
     opening: Opening,
     mode: Vec<u8>,
-    headers: Option<PhpArray>,
+    headers: Option<Owner<PhpArray>>,
     thrown: Option<Thrown>,
 }
 
@@ -433,18 +433,17 @@ impl Chain {
     }
 
     /// The headers array, made where no request made it yet.
-    fn headers(&mut self, req: &mut Request) -> Result<PhpArray, Thrown> {
-        if let Some(headers) = self.headers {
-            return Ok(headers);
-        }
-        let headers = PhpArray::new(req)?.hand_on_unmigrated();
-        self.headers = Some(headers);
-        Ok(headers)
+    fn headers(&mut self, req: &mut Request) -> Result<&mut Owner<PhpArray>, Thrown> {
+        let headers = match self.headers.take() {
+            Some(headers) => headers,
+            None => PhpArray::new(req)?,
+        };
+        Ok(self.headers.insert(headers))
     }
 
     /// One line appended to the headers array.
     fn add_header(&mut self, req: &mut Request, line: &[u8]) -> Result<(), Thrown> {
-        let mut headers = self.headers(req)?;
+        let headers = self.headers(req)?;
         let line = PhpString::new(req, line)?.into_value();
         headers.append(req, line)
     }
@@ -1435,10 +1434,9 @@ fn out(
         return Ok(None);
     };
     if hop.header_init()
-        && let Some(headers) = chain.headers
+        && let Some(headers) = chain.headers.as_deref().copied()
     {
-        let value = Value::array(headers);
-        req.addref(&value);
+        let value = Owner::take(req, Value::array(headers));
         stream.set_wrapper_data(req, value);
     }
     if chain.thrown.is_none() {

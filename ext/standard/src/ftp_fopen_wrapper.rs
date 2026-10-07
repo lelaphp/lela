@@ -15,8 +15,8 @@
 use php_ext::coerce::truthy;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Closer, DirListing, Handshake, Notification, NotifyCode, Opening, Request, SocketOptions,
-    Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
+    Closer, DirListing, Handshake, Notification, NotifyCode, Opening, OwnedStream as _, Request,
+    SocketOptions, Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_uri::UriStruct;
@@ -160,7 +160,7 @@ fn log(req: &mut Request, report: Report, message: &[u8]) {
 /// and, for an `ftps://` URL, whether its data connections are secured
 /// too (`use_ssl_on_data`).
 struct Session {
-    control: Stream,
+    control: Owner<Stream>,
     resource: UriStruct,
     ssl_on_data: bool,
 }
@@ -231,7 +231,7 @@ fn connect(
         context: ctx,
     };
     let control = match req.xport_create(&transport, xport)? {
-        Ok(stream) => stream.hand_on_unmigrated(),
+        Ok(stream) => stream,
         Err(XportFailure { text, .. }) => {
             let text = if text.is_empty() {
                 "Unspecified error"
@@ -243,6 +243,35 @@ fn connect(
         }
     };
     control.set_ctx(req, ctx);
+    // `connect_errexit`: the control connection closed wherever the
+    // session is not made.
+    match handshake(req, *control, ctx, &resource, report) {
+        Ok(Some(ssl_on_data)) => Ok(Some(Session {
+            control,
+            resource,
+            ssl_on_data,
+        })),
+        Ok(None) => {
+            control.free(req);
+            Ok(None)
+        }
+        Err(thrown) => {
+            control.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// The exchange of `php_ftp_fopen_connect` over the connected `control`:
+/// the greeting, `ftps://`'s securing and the login; whether the data
+/// connections are secured too, and `None` where the session failed.
+fn handshake(
+    req: &mut Request,
+    control: Stream,
+    ctx: Option<StreamCtx>,
+    resource: &UriStruct,
+    report: Report,
+) -> Result<Option<bool>, Thrown> {
     notify_info(req, ctx, NotifyCode::Connect, None, 0)?;
     let greeting = get_result(req, control)?;
     if greeting.class() != Class::Completion {
@@ -253,7 +282,6 @@ fn connect(
             Some(&greeting.line),
             greeting.code,
         )?;
-        control.free(req);
         return Ok(None);
     }
     let use_ssl = resource
@@ -262,22 +290,28 @@ fn connect(
         .is_some_and(|scheme| scheme.len() > 3 && scheme[3] == b's');
     let ssl_on_data = if use_ssl {
         let Some(on_data) = secure_control(req, control, report)? else {
-            control.free(req);
             return Ok(None);
         };
         on_data
     } else {
         false
     };
-    if !login(req, control, ctx, &resource, report)? {
-        control.free(req);
+    if !login(req, control, ctx, resource, report)? {
         return Ok(None);
     }
-    Ok(Some(Session {
-        control,
-        resource,
-        ssl_on_data,
-    }))
+    Ok(Some(ssl_on_data))
+}
+
+/// `body` over the session's control connection, then the connection
+/// closed, whatever `body` came to.
+fn closing<T>(
+    req: &mut Request,
+    control: Owner<Stream>,
+    body: impl FnOnce(&mut Request, Stream) -> Result<T, Thrown>,
+) -> Result<T, Thrown> {
+    let answer = body(req, *control);
+    control.free(req);
+    answer
 }
 
 /// The login of `php_ftp_fopen_connect`: `USER`, the user the URL names
@@ -525,26 +559,28 @@ impl Transfer {
 /// reply that ends an upload, warns where it is no `226` or `250`, and
 /// quits.
 struct Control {
-    stream: Stream,
+    stream: Owner<Stream>,
     transfer: Transfer,
 }
 
 impl Closer for Control {
     fn close(self: Box<Self>, req: &mut Request) -> Result<(), Thrown> {
-        if self.transfer != Transfer::Read {
-            let reply = get_result(req, self.stream)?;
-            if reply.code != 226 && reply.code != 250 {
-                let text = format!(
-                    "FTP server error {}:{}",
-                    reply.code,
-                    String::from_utf8_lossy(cstr(&reply.line))
-                );
-                docref(req, Level::Warning, &text);
+        let Control { stream, transfer } = *self;
+        closing(req, stream, |req, stream| {
+            if transfer != Transfer::Read {
+                let reply = get_result(req, stream)?;
+                if reply.code != 226 && reply.code != 250 {
+                    let text = format!(
+                        "FTP server error {}:{}",
+                        reply.code,
+                        String::from_utf8_lossy(cstr(&reply.line))
+                    );
+                    docref(req, Level::Warning, &text);
+                }
             }
-        }
-        command(req, self.stream, b"QUIT", None);
-        self.stream.free(req);
-        Ok(())
+            command(req, stream, b"QUIT", None);
+            Ok(())
+        })
     }
 }
 
@@ -648,7 +684,6 @@ fn prepare(
 /// bool(false)
 /// string(%d) "fopen(ftp://127.0.0.1:1/x): Failed to open stream: FTP proxy may only be used in read mode"
 /// ```
-#[expect(clippy::too_many_lines, reason = "one C function, kept whole")]
 fn open(
     req: &mut Request,
     path: &[u8],
@@ -680,29 +715,78 @@ fn open(
     else {
         return Ok(None);
     };
-    let file = resource.path.clone().unwrap_or_default();
-    let refused = |req: &mut Request,
-                   reply: Reply,
-                   data_error: Option<String>|
-     -> Result<Option<Owner<Stream>>, Thrown> {
-        notify_error(req, ctx, NotifyCode::Failure, Some(&reply.line), reply.code)?;
-        control.free(req);
-        if !cstr(&reply.line).is_empty() {
-            let mut message = b"FTP server reports ".to_vec();
-            message.extend_from_slice(cstr(&reply.line));
-            req.wrapper_log_error(&String::from_utf8_lossy(&message));
+    let started = start(req, *control, ctx, transfer, &resource, ssl_on_data);
+    let data = match started {
+        Ok(Started::Data(data)) => data,
+        Ok(Started::Refused(reply, data_error)) => {
+            refused(req, ctx, control, &reply, data_error.as_deref())?;
+            return Ok(None);
         }
-        if let Some(text) = data_error {
-            req.wrapper_log_error(&format!("Failed to set up data channel: {text}"));
+        Err(thrown) => {
+            control.free(req);
+            return Err(thrown);
         }
-        Ok(None)
     };
+    let closer = Box::new(Control {
+        stream: control,
+        transfer,
+    });
+    if let Err(thrown) = data.set_closer(req, closer) {
+        closed(req, data);
+        return Err(thrown);
+    }
+    Ok(Some(data))
+}
+
+/// What the transfer's start came to: the data connection, or the reply
+/// that refused it, with the reason a data connection was not made.
+enum Started {
+    Data(Owner<Stream>),
+    Refused(Reply, Option<String>),
+}
+
+/// `errexit` of `php_stream_url_wrap_ftp` and `opendir_errexit`: the
+/// notifier told of the reply, the control connection closed, and the
+/// server's line and the data connection's failure logged.
+fn refused(
+    req: &mut Request,
+    ctx: Option<StreamCtx>,
+    control: Owner<Stream>,
+    reply: &Reply,
+    data_error: Option<&str>,
+) -> Result<(), Thrown> {
+    let notified = notify_error(req, ctx, NotifyCode::Failure, Some(&reply.line), reply.code);
+    control.free(req);
+    notified?;
+    if !cstr(&reply.line).is_empty() {
+        let mut message = b"FTP server reports ".to_vec();
+        message.extend_from_slice(cstr(&reply.line));
+        req.wrapper_log_error(&String::from_utf8_lossy(&message));
+    }
+    if let Some(text) = data_error {
+        req.wrapper_log_error(&format!("Failed to set up data channel: {text}"));
+    }
+    Ok(())
+}
+
+/// The exchange of `php_stream_url_wrap_ftp` over the logged-in
+/// `control`: the transfer prepared, the passive data connection made,
+/// `REST` sent for a `resume_pos`, and the transfer started.
+fn start(
+    req: &mut Request,
+    control: Stream,
+    ctx: Option<StreamCtx>,
+    transfer: Transfer,
+    resource: &UriStruct,
+    ssl_on_data: bool,
+) -> Result<Started, Thrown> {
+    let file = resource.path.clone().unwrap_or_default();
     let (mut last, file_size) = match prepare(req, control, ctx, transfer, &file)? {
         Prepared::Ready { last, file_size } => (last, file_size),
-        Prepared::Refused(reply) => return refused(req, reply, None),
+        Prepared::Refused(reply) => return Ok(Started::Refused(reply, None)),
     };
     let Some(passive) = passive(req, control)? else {
-        return refused(req, last, None);
+        return Ok(Started::Refused(last, None));
     };
     if transfer == Transfer::Read
         && let Some(ctx) = ctx
@@ -714,7 +798,7 @@ fn open(
         last = get_result(req, control)?;
         if last.class() != Class::Intermediate {
             req.wrapper_log_error(&format!("Unable to resume from offset {at}"));
-            return refused(req, last, None);
+            return Ok(Started::Refused(last, None));
         }
     }
     command(req, control, transfer.verb(), Some(&file));
@@ -734,7 +818,9 @@ fn open(
     };
     let data = match req.xport_create(&transport, xport)? {
         Ok(data) => data,
-        Err(XportFailure { text, .. }) => return refused(req, Reply::default(), Some(text)),
+        Err(XportFailure { text, .. }) => {
+            return Ok(Started::Refused(Reply::default(), Some(text)));
+        }
     };
     let reply = match get_result(req, control) {
         Ok(reply) => reply,
@@ -745,7 +831,7 @@ fn open(
     };
     if reply.code != 150 && reply.code != 125 {
         closed(req, data);
-        return refused(req, reply, None);
+        return Ok(Started::Refused(reply, None));
     }
     let init = Notification::ProgressInit {
         sofar: 0,
@@ -757,17 +843,9 @@ fn open(
     }
     if !data_secured(req, *data, ctx, ssl_on_data) {
         closed(req, data);
-        return refused(req, Reply::default(), None);
+        return Ok(Started::Refused(Reply::default(), None));
     }
-    let closer = Box::new(Control {
-        stream: control,
-        transfer,
-    });
-    if let Err(thrown) = data.set_closer(req, closer) {
-        closed(req, data);
-        return Err(thrown);
-    }
-    Ok(Some(data))
+    Ok(Started::Data(data))
 }
 
 /// `php_stream_ftp_opendir` (`Z/ext/standard/ftp_fopen_wrapper.c:689`):
@@ -793,23 +871,47 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
     else {
         return Ok(None);
     };
-    let refused = |req: &mut Request, reply: Reply| -> Result<Option<DirListing>, Thrown> {
-        notify_error(req, ctx, NotifyCode::Failure, Some(&reply.line), reply.code)?;
-        control.free(req);
-        if !cstr(&reply.line).is_empty() {
-            let mut message = b"FTP server reports ".to_vec();
-            message.extend_from_slice(cstr(&reply.line));
-            req.wrapper_log_error(&String::from_utf8_lossy(&message));
+    match listing(req, *control, ctx, &resource, ssl_on_data) {
+        Ok(Listed::Names(names, data)) => {
+            control.free(req);
+            data.free(req);
+            Ok(Some(DirListing::Names(names)))
         }
-        Ok(None)
-    };
+        Ok(Listed::Refused(reply)) => {
+            refused(req, ctx, control, &reply, None)?;
+            Ok(None)
+        }
+        Err(thrown) => {
+            control.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// What the listing came to: the names `NLST` listed and the data
+/// connection they were read off, or the reply that refused it.
+enum Listed {
+    Names(Vec<Vec<u8>>, Owner<Stream>),
+    Refused(Reply),
+}
+
+/// The exchange of `php_stream_ftp_opendir` over the logged-in
+/// `control`: the names `NLST` listed and the data connection they were
+/// read off, or the reply that refused the listing.
+fn listing(
+    req: &mut Request,
+    control: Stream,
+    ctx: Option<StreamCtx>,
+    resource: &UriStruct,
+    ssl_on_data: bool,
+) -> Result<Listed, Thrown> {
     command(req, control, b"TYPE A", None);
     let reply = get_result(req, control)?;
     if reply.class() != Class::Completion {
-        return refused(req, reply);
+        return Ok(Listed::Refused(reply));
     }
     let Some(passive) = passive(req, control)? else {
-        return refused(req, Reply::default());
+        return Ok(Listed::Refused(Reply::default()));
     };
     let host = passive
         .host
@@ -826,7 +928,7 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
         context: None,
     };
     let data = match req.xport_create(&transport, xport)? {
-        Ok(data) => data.hand_on_unmigrated(),
+        Ok(data) => data,
         Err(XportFailure { text, .. }) => {
             let text = if text.is_empty() {
                 "Unspecified error"
@@ -834,30 +936,39 @@ fn open_dir(req: &mut Request, path: &[u8]) -> Result<Option<DirListing>, Thrown
                 &text
             };
             docref(req, Level::Warning, &format!("connect() failed: {text}"));
-            return refused(req, Reply::default());
+            return Ok(Listed::Refused(Reply::default()));
         }
     };
     let listed = resource.path.clone().unwrap_or_else(|| b"/".to_vec());
     command(req, control, b"NLST", Some(&listed));
-    let reply = get_result(req, control)?;
+    let reply = match get_result(req, control) {
+        Ok(reply) => reply,
+        Err(thrown) => {
+            data.free(req);
+            return Err(thrown);
+        }
+    };
     if reply.code != 150 && reply.code != 125 {
         data.free(req);
-        return refused(req, reply);
+        return Ok(Listed::Refused(reply));
     }
-    if !data_secured(req, data, ctx, ssl_on_data) {
+    if !data_secured(req, *data, ctx, ssl_on_data) {
         data.free(req);
-        return refused(req, Reply::default());
+        return Ok(Listed::Refused(Reply::default()));
     }
     let mut names = Vec::new();
     while !data.eof(req) {
-        let Some(line) = data.get_line(req, Some(MAXPATHLEN))? else {
-            break;
+        let line = match data.get_line(req, Some(MAXPATHLEN)) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(thrown) => {
+                data.free(req);
+                return Err(thrown);
+            }
         };
         names.push(entry_name(&line));
     }
-    control.free(req);
-    data.free(req);
-    Ok(Some(DirListing::Names(names)))
+    Ok(Listed::Names(names, data))
 }
 
 /// `sizeof(ent->d_name)`, `MAXPATHLEN`.
@@ -907,34 +1018,37 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<Owner<PhpArray>>, Th
         return Ok(None);
     };
     let file = resource.path.clone().unwrap_or_else(|| b"/".to_vec());
-    let mut mode = 0o644;
-    command(req, control, b"CWD", Some(&file));
-    let reply = get_result(req, control)?;
-    let dir = reply.class() == Class::Completion;
-    mode |= if dir { S_IFDIR | S_IXALL } else { S_IFREG };
-    command(req, control, b"TYPE I", None);
-    if get_result(req, control)?.class() != Class::Completion {
-        control.free(req);
-        return Ok(None);
-    }
-    command(req, control, b"SIZE", Some(&file));
-    let reply = get_result(req, control)?;
-    let size = if reply.class() == Class::Completion {
-        strtol(reply.line.get(4..).unwrap_or_default())
-    } else if dir {
-        0
-    } else {
-        control.free(req);
+    let stated = closing(req, control, |req, control| {
+        let mut mode = 0o644;
+        command(req, control, b"CWD", Some(&file));
+        let reply = get_result(req, control)?;
+        let dir = reply.class() == Class::Completion;
+        mode |= if dir { S_IFDIR | S_IXALL } else { S_IFREG };
+        command(req, control, b"TYPE I", None);
+        if get_result(req, control)?.class() != Class::Completion {
+            return Ok(None);
+        }
+        command(req, control, b"SIZE", Some(&file));
+        let reply = get_result(req, control)?;
+        let size = if reply.class() == Class::Completion {
+            strtol(reply.line.get(4..).unwrap_or_default())
+        } else if dir {
+            0
+        } else {
+            return Ok(None);
+        };
+        command(req, control, b"MDTM", Some(&file));
+        let reply = get_result(req, control)?;
+        let mtime = if reply.code == 213 {
+            mdtm(&reply.line)
+        } else {
+            -1
+        };
+        Ok(Some((mode, size, mtime)))
+    })?;
+    let Some((mode, size, mtime)) = stated else {
         return Ok(None);
     };
-    command(req, control, b"MDTM", Some(&file));
-    let reply = get_result(req, control)?;
-    let mtime = if reply.code == 213 {
-        mdtm(&reply.line)
-    } else {
-        -1
-    };
-    control.free(req);
     let blocks = (4095 + size) / 4096;
     let sb = [0, 0, mode, 1, 0, 0, -1, size, -1, mtime, -1, 4096, blocks];
     let mut out = PhpArray::new(req)?;
@@ -1017,9 +1131,10 @@ fn unlink(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
         return Ok(false);
     };
     let file = resource.path.clone().unwrap_or_default();
-    command(req, control, b"DELE", Some(&file));
-    let reply = get_result(req, control)?;
-    control.free(req);
+    let reply = closing(req, control, |req, control| {
+        command(req, control, b"DELE", Some(&file));
+        get_result(req, control)
+    })?;
     if reply.class() != Class::Completion {
         let text = format!(
             "Error Deleting file: {}",
@@ -1074,20 +1189,26 @@ fn rename(req: &mut Request, from: &[u8], to: &[u8]) -> Result<bool, Thrown> {
         docref(req, Level::Warning, &text);
         return Ok(false);
     };
-    command(req, control, b"RNFR", source.path.as_deref());
-    let reply = get_result(req, control)?;
-    if reply.class() != Class::Intermediate {
-        control.free(req);
-        let text = format!(
-            "Error Renaming file: {}",
-            String::from_utf8_lossy(cstr(&reply.line))
-        );
-        docref(req, Level::Warning, &text);
-        return Ok(false);
-    }
-    command(req, control, b"RNTO", target.path.as_deref());
-    let reply = get_result(req, control)?;
-    control.free(req);
+    let reply = closing(req, control, |req, control| {
+        command(req, control, b"RNFR", source.path.as_deref());
+        let reply = get_result(req, control)?;
+        if reply.class() != Class::Intermediate {
+            return Ok(Err(reply));
+        }
+        command(req, control, b"RNTO", target.path.as_deref());
+        get_result(req, control).map(Ok)
+    })?;
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(reply) => {
+            let text = format!(
+                "Error Renaming file: {}",
+                String::from_utf8_lossy(cstr(&reply.line))
+            );
+            docref(req, Level::Warning, &text);
+            return Ok(false);
+        }
+    };
     if reply.class() != Class::Completion {
         let text = format!(
             "Error Renaming file: {}",
@@ -1129,13 +1250,14 @@ fn mkdir(req: &mut Request, url: &[u8], _mode: i64, recursive: bool) -> Result<b
         return Ok(false);
     };
     let path = cstr(resource.path.as_deref().unwrap_or_default()).to_vec();
-    let reply = if recursive {
-        make_parents(req, control, &path)?
-    } else {
-        command(req, control, b"MKD", Some(&path));
-        get_result(req, control)?
-    };
-    control.free(req);
+    let reply = closing(req, control, |req, control| {
+        if recursive {
+            make_parents(req, control, &path)
+        } else {
+            command(req, control, b"MKD", Some(&path));
+            get_result(req, control)
+        }
+    })?;
     Ok(reply.class() == Class::Completion)
 }
 
@@ -1213,9 +1335,10 @@ fn rmdir(req: &mut Request, url: &[u8]) -> Result<bool, Thrown> {
         return Ok(false);
     };
     let path = resource.path.clone().unwrap_or_default();
-    command(req, control, b"RMD", Some(&path));
-    let reply = get_result(req, control)?;
-    control.free(req);
+    let reply = closing(req, control, |req, control| {
+        command(req, control, b"RMD", Some(&path));
+        get_result(req, control)
+    })?;
     if reply.class() != Class::Completion {
         let text = String::from_utf8_lossy(cstr(&reply.line)).into_owned();
         docref(req, Level::Warning, &text);

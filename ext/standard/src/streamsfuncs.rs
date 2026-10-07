@@ -87,7 +87,7 @@ use std::os::unix::ffi::OsStrExt;
 
 use php_ext::abi::{OrFalse, Passed, Path, Raw, True, Union, Untyped};
 use php_ext::attr::php_function;
-use php_ext::coerce::callable_checked;
+use php_ext::coerce::{callable_checked, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, arity, deprecated, docref,
     throw_error,
@@ -1231,7 +1231,7 @@ fn stream_is_local(req: &mut Request, stream: Untyped<Value>) -> Result<bool, Th
         }
         return Ok(true);
     }
-    let path = crate::string::string_bytes(req, &given)?;
+    let path = with_string(req, &given, <[u8]>::to_vec)?;
     let path = path.as_slice();
     let n = path
         .iter()

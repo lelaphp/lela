@@ -559,7 +559,13 @@ fn set_metadata(
     meta: &Metadata,
 ) -> Result<(), Thrown> {
     let mut copy = meta.copied(req);
-    let text = write::serialized(req, &mut copy)?;
+    let text = match write::serialized(req, &mut copy) {
+        Ok(text) => text,
+        Err(thrown) => {
+            copy.free(req);
+            return Err(thrown);
+        }
+    };
     let Some(e) = archives(req)
         .get_mut(id)
         .and_then(|a| a.manifest.at_mut(slot))
@@ -590,15 +596,16 @@ fn add_magic(id: ArchiveId, req: &mut Request, name: &[u8]) -> Option<usize> {
 
 /// The archive's own `metadata`, borrowed out and back.
 fn with_archive_metadata(req: &mut Request, id: ArchiveId, slot: usize) -> Result<(), Thrown> {
-    let Some(meta) = archives(req)
+    let Some(mut meta) = archives(req)
         .get_mut(id)
         .map(|a| std::mem::take(&mut a.metadata))
     else {
         return Ok(());
     };
     let set = set_metadata(req, id, slot, &meta);
-    if let Some(a) = archives(req).get_mut(id) {
-        a.metadata = meta;
+    match archives(req).get_mut(id) {
+        Some(a) => a.metadata = meta,
+        None => meta.free(req),
     }
     set
 }
@@ -628,11 +635,11 @@ fn setup_metadata(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
             }
             let (head, tail) = (b".phar/.metadata/".len(), b"/.metadata.bin".len());
             if name.len() > head + tail && !a.manifest.contains(&name[head..name.len() - tail]) {
-                if let Some(mut gone) = archives(req)
+                if let Some(gone) = archives(req)
                     .get_mut(id)
                     .and_then(|a| a.manifest.remove_at(slot))
                 {
-                    gone.metadata.free(req);
+                    gone.free(req);
                 }
                 at -= 1;
             }
@@ -647,8 +654,8 @@ fn setup_metadata(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
                 let gone = a.manifest.slot(&lookfor)?;
                 a.manifest.remove_at(gone).map(|e| (gone, e))
             });
-            if let Some((gone, mut e)) = removed {
-                e.metadata.free(req);
+            if let Some((gone, e)) = removed {
+                e.free(req);
                 if gone < slot {
                     at -= 1;
                 }
@@ -665,7 +672,7 @@ fn setup_metadata(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
                 None => continue,
             },
         };
-        let Some(meta) = archives(req)
+        let Some(mut meta) = archives(req)
             .get_mut(id)
             .and_then(|a| a.manifest.at_mut(slot))
             .map(|e| std::mem::take(&mut e.metadata))
@@ -673,11 +680,12 @@ fn setup_metadata(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
             continue;
         };
         let set = set_metadata(req, id, target, &meta);
-        if let Some(e) = archives(req)
+        match archives(req)
             .get_mut(id)
             .and_then(|a| a.manifest.at_mut(slot))
         {
-            e.metadata = meta;
+            Some(e) => e.metadata = meta,
+            None => meta.free(req),
         }
         set?;
     }
@@ -747,8 +755,8 @@ pub(crate) fn flush(
                 a.manifest.add(b".phar/stub.php", e).ok();
             }
         }
-        for mut e in dropped {
-            e.metadata.free(req);
+        for e in dropped {
+            e.free(req);
         }
     }
     let has_meta = archives(req).get(id).is_some_and(|a| a.metadata.has_data());
@@ -779,11 +787,11 @@ pub(crate) fn flush(
         }
         if e.is_deleted {
             if e.can_remove()
-                && let Some(mut gone) = archives(req)
+                && let Some(gone) = archives(req)
                     .get_mut(id)
                     .and_then(|a| a.manifest.remove_at(slot))
             {
-                gone.metadata.free(req);
+                gone.free(req);
             }
             continue;
         }

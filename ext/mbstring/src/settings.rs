@@ -231,7 +231,7 @@ pub(crate) struct State {
     /// decoder state while it converts.
     pub(crate) outconv: Option<u32>,
     /// `all_encodings_list`, one owner held until `rshutdown`.
-    pub(crate) all_encodings: Option<PhpArray>,
+    pub(crate) all_encodings: Option<Owner<PhpArray>>,
     pub(crate) regex: crate::regex::State,
 }
 
@@ -565,26 +565,28 @@ pub(crate) fn encoding_array(
     // argument holds it while `zval_try_get_string` runs `__toString`.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let value = row.value().deref();
-        let text = php_ext::coerce::to_string(req, &value)?;
-        let name = text.as_bytes();
-        if name.eq_ignore_ascii_case(b"auto") {
-            if !auto {
-                auto = true;
-                list.extend(numbered(default_detect));
+        let invalid = php_ext::coerce::with_string(req, &value, |name| {
+            if name.eq_ignore_ascii_case(b"auto") {
+                if !auto {
+                    auto = true;
+                    list.extend(numbered(default_detect));
+                }
+                None
+            } else if let Some(encoding) = Encoding::named(name) {
+                list.push(encoding);
+                None
+            } else {
+                let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                Some(String::from_utf8_lossy(&name[..end]).into_owned())
             }
-        } else if let Some(encoding) = Encoding::named(name) {
-            list.push(encoding);
-        } else {
-            let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-            let name = String::from_utf8_lossy(&name[..end]).into_owned();
-            text.give_up(req);
+        })?;
+        if let Some(name) = invalid {
             return Err(value_error(
                 req,
                 arg,
                 &format!("contains invalid encoding \"{name}\""),
             ));
         }
-        text.give_up(req);
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(list)

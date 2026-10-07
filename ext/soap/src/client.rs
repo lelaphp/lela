@@ -152,12 +152,6 @@ fn str_option(options: PhpArray, name: &[u8]) -> Option<Value> {
         .filter(|v| v.as_str_bytes().is_some())
 }
 
-/// A copy of a string value, one owner.
-fn owned(req: &mut Request, v: Value) -> Value {
-    req.addref(&v);
-    v
-}
-
 /// `SoapClient`.
 ///
 /// ```php
@@ -307,8 +301,7 @@ impl SoapClient {
         name: PhpString,
         args: PhpArray,
     ) -> R<Owner<Value>> {
-        let value = call_common(req, this.object(), name, args, None, None, None, None, None)?;
-        Ok(answered(req, value))
+        call_common(req, this.object(), name, args, None, None, None, None, None)
     }
 
     /// `SoapClient::__soapCall(string $name, array $args, ?array $options =
@@ -385,7 +378,7 @@ impl SoapClient {
             }
         };
         let out_ref = output.map(|()| &outputHeaders);
-        let value = call_common(
+        call_common(
             req,
             object,
             name,
@@ -395,8 +388,7 @@ impl SoapClient {
             uri.as_deref(),
             soap_headers,
             out_ref,
-        )?;
-        Ok(answered(req, value))
+        )
     }
 
     /// `SoapClient::__getFunctions(): ?array`: the description's
@@ -725,17 +717,10 @@ impl SoapClient {
     }
 }
 
-/// A string slot with one more owner, the caller's; none for `null`.
+/// A view of a string slot, none for `null`: returned as it stands, the
+/// engine takes its own owner (`RETURN_COPY`).
 fn slot_string(this: PhpObject, which: ClientSlot) -> Option<PhpString> {
     client_slot(this, which).as_php_string().copied()
-}
-
-/// What the call pipeline answers, the value its one owner the
-/// caller's, as the owner it is.
-fn answered(req: &mut Request, value: Value) -> Owner<Value> {
-    let owner = Owner::take(req, value);
-    req.release(value);
-    owner
 }
 
 /// `FETCH_THIS_SDL`.
@@ -1062,7 +1047,7 @@ fn call_common(
     uri: Option<&[u8]>,
     soap_headers: Option<Vec<Value>>,
     output_headers: Option<&Ref<Untyped<Value>>>,
-) -> R<Value> {
+) -> R<Owner<Value>> {
     let mut headers = soap_headers;
     if let ValueRef::Array(defaults) = client_slot(this, ClientSlot::DefaultHeaders).as_ref() {
         // `ZEND_HASH_FOREACH_VAL(default_headers, tmp)`
@@ -1178,7 +1163,7 @@ fn do_soap_call(
     call_uri: Option<&[u8]>,
     soap_headers: Option<&[Value]>,
     output_headers: Option<&Ref<Untyped<Value>>>,
-) -> R<Value> {
+) -> R<Owner<Value>> {
     let saved = begin(req, this);
     if matches!(
         client_slot(this, ClientSlot::Trace).as_ref(),
@@ -1258,9 +1243,9 @@ fn soap_call_body(
     soap_headers: Option<&[Value]>,
     output_headers: Option<&Ref<Untyped<Value>>>,
     soap_version: i64,
-) -> Res<Value> {
+) -> Res<Owner<Value>> {
     let mut ret = false;
-    let mut return_value = Value::null();
+    let mut return_value: Option<Owner<Value>> = None;
     if let Some(sdl_ref) = sdl {
         if let Some(fn_) = get_function(Some(sdl_ref), function) {
             let binding = crate::message::binding_of(sdl_ref, fn_);
@@ -1327,7 +1312,7 @@ fn soap_call_body(
                     resp.give_up(req);
                     let (r, v) = parsed?;
                     ret = r;
-                    return_value = v;
+                    return_value = Some(v);
                 } else {
                     resp.give_up(req);
                 }
@@ -1410,7 +1395,7 @@ fn soap_call_body(
                     resp.give_up(req);
                     let (r, v) = parsed?;
                     ret = r;
-                    return_value = v;
+                    return_value = Some(v);
                 } else {
                     resp.give_up(req);
                 }
@@ -1418,19 +1403,22 @@ fn soap_call_body(
         }
     }
     let fault = client_slot(this, ClientSlot::SoapFault);
-    if !ret {
-        req.release(return_value);
-        if fault.as_object().is_some() {
-            return_value = owned(req, fault);
-        } else {
-            let made =
-                add_soap_fault_ex(req, this, b"Client", b"Unknown Error", None, None, b"en")?;
-            return_value = made.into_value().hand_on_unmigrated();
+    let return_value = if !ret || fault.as_object().is_some() {
+        if let Some(v) = return_value {
+            v.give_up(req);
         }
-    } else if fault.as_object().is_some() {
-        req.release(return_value);
-        return_value = owned(req, fault);
-    }
+        if fault.as_object().is_some() {
+            Owner::take(req, fault)
+        } else {
+            add_soap_fault_ex(req, this, b"Client", b"Unknown Error", None, None, b"en")?
+                .into_value()
+        }
+    } else {
+        match return_value {
+            Some(v) => v,
+            None => Owner::take(req, Value::null()),
+        }
+    };
     if let ValueRef::Object(o) = return_value.as_ref()
         && instance_of(req, *o, "SoapFault")
         && !matches!(
@@ -1439,7 +1427,7 @@ fn soap_call_body(
         )
     {
         let thrown = throw_value(req, &return_value);
-        req.release(return_value);
+        return_value.give_up(req);
         return Err(Error::Thrown(thrown));
     }
     Ok(return_value)

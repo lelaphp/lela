@@ -388,7 +388,7 @@ fn msg_receive(
     };
     if let Err(thrown) = reader.finish(req, outcome) {
         if let Some(value) = read {
-            req.release(value);
+            value.give_up(req);
         }
         return Err(thrown);
     }
@@ -397,10 +397,7 @@ fn msg_receive(
         message.set(req, Value::bool(false))?;
         return Ok(false);
     };
-    // The unserialised value is its one owner, the cell's to keep.
-    let owner = Owner::take(req, value);
-    req.release(value);
-    message.set(req, owner)?;
+    message.set(req, value)?;
     Ok(true)
 }
 

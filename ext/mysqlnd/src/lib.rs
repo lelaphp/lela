@@ -290,6 +290,7 @@ impl Handle {
         if let Some(mut conn) = taken {
             conn.send_close(req).ok();
             flush(req, &mut conn);
+            conn.free_contents(req);
         }
     }
 }

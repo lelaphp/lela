@@ -27,7 +27,7 @@ pub(crate) trait Walk: Send {
         req: &mut Request,
         iterator: PhpObject,
         index: &mut i64,
-    ) -> Result<Option<Value>, Thrown>;
+    ) -> Result<Option<Owner<Value>>, Thrown>;
 
     /// `rewind` up to its `move_forward`: whether to move to the first
     /// element now.
@@ -56,7 +56,7 @@ pub(crate) trait Walk: Send {
 /// iterator's `index`.
 pub(crate) struct Cursor {
     walk: Box<dyn Walk>,
-    current: Option<Value>,
+    current: Option<Owner<Value>>,
     index: i64,
 }
 
@@ -119,7 +119,7 @@ impl IntlIterator {
         let object = this.object();
         fetch(req, object)?;
         let current = cursor(req, object)
-            .and_then(|c| c.current)
+            .and_then(|c| c.current.as_deref().copied())
             .unwrap_or_else(Value::null);
         Ok(current)
     }
@@ -207,7 +207,7 @@ fn with_cursor<T>(
 /// `invalidate_current`, then the walk's `move_forward`.
 fn forward(req: &mut Request, object: PhpObject, cursor: &mut Cursor) -> Result<(), Thrown> {
     if let Some(old) = cursor.current.take() {
-        req.release(old);
+        old.give_up(req);
     }
     cursor.current = cursor.walk.forward(req, object, &mut cursor.index)?;
     Ok(())
@@ -216,7 +216,7 @@ fn forward(req: &mut Request, object: PhpObject, cursor: &mut Cursor) -> Result<
 /// `funcs->rewind`: the walk reset, then moved to its first element.
 fn rewind(req: &mut Request, object: PhpObject, cursor: &mut Cursor) -> Result<(), Thrown> {
     if let Some(old) = cursor.current.take() {
-        req.release(old);
+        old.give_up(req);
     }
     if cursor.walk.reset(req, object)? {
         forward(req, object, cursor)?;
@@ -227,7 +227,7 @@ fn rewind(req: &mut Request, object: PhpObject, cursor: &mut Cursor) -> Result<(
 /// `zoi_with_current_dtor` with `destroy_it`.
 fn release(req: &mut Request, cursor: &mut Cursor) {
     if let Some(old) = cursor.current.take() {
-        req.release(old);
+        old.give_up(req);
     }
     cursor.walk.release(req);
 }
@@ -279,7 +279,7 @@ impl Walk for Strings {
         req: &mut Request,
         iterator: PhpObject,
         _: &mut i64,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let mut status = Code::ZERO;
         let next = self.0.next(&mut status);
         error::errors_set_code::<IteratorObject>(req, iterator, status);
@@ -289,9 +289,7 @@ impl Walk for Strings {
             return Ok(None);
         }
         match next {
-            Some(text) => Ok(Some(Value::string(
-                PhpString::new(req, &text)?.hand_on_unmigrated(),
-            ))),
+            Some(text) => Ok(Some(PhpString::new(req, &text)?.into_value())),
             None => Ok(None),
         }
     }
@@ -335,7 +333,7 @@ impl ObjectHandlers for Handlers {
                 .walk
                 .data()
                 .into_iter()
-                .chain(cursor.current)
+                .chain(cursor.current.as_deref().copied())
                 .for_each(visit);
         }
     }
@@ -389,7 +387,7 @@ impl ClassIterator for Shared {
 
     fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let current = cursor(req, object)
-            .and_then(|c| c.current)
+            .and_then(|c| c.current.as_deref().copied())
             .unwrap_or_else(Value::null);
         Ok(Owner::take(req, current))
     }

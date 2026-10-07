@@ -27,7 +27,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_const};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::coerce::{to_string, truthy};
+use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw_error,
 };
@@ -891,9 +891,7 @@ impl XSLTProcessor {
                 return Err(arg_value_error(req, 3, tail));
             }
             let key = parameter_key(req, namespace, key.as_bytes())?;
-            let text = to_string(req, &entry)?;
-            let entry = text.as_bytes().to_vec();
-            text.give_up(req);
+            let entry = with_string(req, &entry, <[u8]>::to_vec)?;
             if entry.contains(&0) {
                 let tail = "not contain values with any null bytes";
                 return Err(arg_value_error(req, 3, tail));

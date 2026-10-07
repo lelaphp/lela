@@ -370,13 +370,13 @@ impl Connection for Handle {
     }
 
     /// `pdo_sqlite_get_attribute`.
-    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Value>, Failure> {
+    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Owner<Value>>, Failure> {
         match attr {
             ATTR_CLIENT_VERSION | ATTR_SERVER_VERSION => {
                 let version = PhpString::new(req, ffi::version().as_bytes())?;
-                Ok(Some(Value::string(version.hand_on_unmigrated())))
+                Ok(Some(version.into_value()))
             }
-            ATTR_TRANSACTION_MODE => Ok(Some(Value::int(self.transaction_mode))),
+            ATTR_TRANSACTION_MODE => Ok(Some(Owner::take(req, Value::int(self.transaction_mode)))),
             _ => Ok(None),
         }
     }
@@ -452,17 +452,6 @@ impl Stmt {
             Some(thrown) => Err(Failure::from(thrown)),
             None => Ok(()),
         }
-    }
-}
-
-/// A value the callback converts in place, through the reference where the
-/// parameter holds one, as php's `convert_to_*` writes.
-fn replace(req: &mut Request, value: &mut Value, new: Owner<Value>) {
-    if let Some(cell) = value.as_php_ref().copied() {
-        cell.convert(req, new);
-    } else {
-        let old = std::mem::replace(value, new.hand_on_unmigrated());
-        req.release(old);
     }
 }
 
@@ -569,22 +558,21 @@ impl Statement for Stmt {
         req: &mut Request,
         column: usize,
         ty: Option<BindKind>,
-    ) -> Result<Value, Failure> {
+    ) -> Result<Owner<Value>, Failure> {
         let _ = ty;
         if column >= self.handle.data_count() {
             return Err(self.failed(None));
         }
-        Ok(match self.handle.column_type(column) {
+        let scalar = match self.handle.column_type(column) {
             ffi::SQLITE_NULL => Value::null(),
             ffi::SQLITE_INTEGER => Value::int(self.handle.column_int64(column)),
             ffi::SQLITE_FLOAT => Value::float(self.handle.column_double(column)),
-            ffi::SQLITE_BLOB => Value::string(
-                PhpString::new(req, &self.handle.column_blob(column))?.hand_on_unmigrated(),
-            ),
-            _ => Value::string(
-                PhpString::new(req, &self.handle.column_text(column))?.hand_on_unmigrated(),
-            ),
-        })
+            ffi::SQLITE_BLOB => {
+                return Ok(PhpString::new(req, &self.handle.column_blob(column))?.into_value());
+            }
+            _ => return Ok(PhpString::new(req, &self.handle.column_text(column))?.into_value()),
+        };
+        Ok(Owner::take(req, scalar))
     }
 
     /// `pdo_sqlite_stmt_param_hook` at `PDO_PARAM_EVT_EXEC_PRE`: a named
@@ -714,14 +702,14 @@ impl Statement for Stmt {
     }
 
     /// `pdo_sqlite_stmt_get_attribute`.
-    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Value>, Failure> {
-        let _ = req;
-        Ok(match attr {
-            ATTR_READONLY_STATEMENT => Some(Value::bool(self.handle.readonly())),
-            ATTR_BUSY_STATEMENT => Some(Value::bool(self.handle.busy())),
-            ATTR_EXPLAIN_STATEMENT => Some(Value::int(self.handle.explain())),
-            _ => None,
-        })
+    fn attribute(&mut self, req: &mut Request, attr: i64) -> Result<Option<Owner<Value>>, Failure> {
+        let value = match attr {
+            ATTR_READONLY_STATEMENT => Value::bool(self.handle.readonly()),
+            ATTR_BUSY_STATEMENT => Value::bool(self.handle.busy()),
+            ATTR_EXPLAIN_STATEMENT => Value::int(self.handle.explain()),
+            _ => return Ok(None),
+        };
+        Ok(Some(Owner::take(req, value)))
     }
 
     /// `pdo_sqlite_stmt_col_meta`.
@@ -730,7 +718,7 @@ impl Statement for Stmt {
         req: &mut Request,
         column: usize,
         executed: bool,
-    ) -> Result<PhpArray, Failure> {
+    ) -> Result<Owner<PhpArray>, Failure> {
         if !executed {
             return Err(Failure::silent());
         }
@@ -767,7 +755,7 @@ impl Statement for Stmt {
         )?;
         let key = PhpString::new(req, b"flags")?.into_key();
         out.set(req, key, flags.into_value())?;
-        Ok(out.hand_on_unmigrated())
+        Ok(out)
     }
 
     /// `pdo_sqlite_stmt_cursor_closer`.
@@ -848,4 +836,14 @@ pub(super) fn register_collation(
             }
         }
     })
+}
+
+/// `zval_ptr_dtor(parameter)` and `new` in its place: a bound value
+/// replaced, through its reference for `bindParam()`, as php's
+/// `convert_to_*` writes in place.
+fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
+    match value.as_php_ref().copied() {
+        Some(cell) => cell.convert(req, new),
+        None => std::mem::replace(value, new).give_up(req),
+    }
 }

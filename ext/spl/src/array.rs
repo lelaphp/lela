@@ -49,11 +49,22 @@ const CLONE_MASK: i64 = 0x0100_FFFF;
 /// php's `spl_array_object` beside the `std` object: the storage, the
 /// flags a user sets, the position, the class `getIterator()` makes and
 /// the count of sorts under way (`nApplyCount`).
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 pub(crate) struct SplArrayObject {
-    storage: Storage,
+    storage: Held,
     /// `ar_flags` less `SPL_ARRAY_IS_SELF` and `SPL_ARRAY_USE_OTHER`,
     /// which the storage is.
+    flags: i64,
+    position: Position,
+    iterator_class: Option<ClassId>,
+    sorting: u32,
+}
+
+/// The payload as a handler reads it, copied out: the storage's views
+/// beside the fields.
+#[derive(Clone, Copy)]
+struct Payload {
+    storage: Storage,
     flags: i64,
     position: Position,
     iterator_class: Option<ClassId>,
@@ -63,24 +74,58 @@ pub(crate) struct SplArrayObject {
 /// What `intern->array` is, with the two bits php reads it by
 /// (`SPL_ARRAY_IS_SELF`, `SPL_ARRAY_USE_OTHER`) folded in, decoded
 /// once: each handler matches it, and no bit is tested beside it.
-#[derive(Default, Clone, Copy)]
-enum Storage {
+/// The payload's owner of what it holds, given up where the storage is
+/// replaced and as the object is freed.
+#[derive(Default)]
+enum Held {
     /// Nothing written yet: php's `array_init` in
-    /// `spl_array_object_new_ex`, laid down as [`Storage::Array`] on the
+    /// `spl_array_object_new_ex`, laid down as [`Held::Array`] on the
     /// first touch.
     #[default]
     Fresh,
-    /// An array the object holds, one owner of it, shared copy-on-write
-    /// with whoever else holds it.
-    Array(PhpArray),
+    /// An array the object holds, shared copy-on-write with whoever else
+    /// holds it.
+    Array(Owner<PhpArray>),
     /// `SPL_ARRAY_USE_OTHER`: another `ArrayObject` or `ArrayIterator`
-    /// read through, one owner of it; what `getIterator()` hands out.
-    Other(PhpObject),
-    /// Another object's property table, one owner of the object.
-    Object(PhpObject),
+    /// read through; what `getIterator()` hands out.
+    Other(Owner<PhpObject>),
+    /// Another object's property table, held by the object.
+    Object(Owner<PhpObject>),
     /// `SPL_ARRAY_IS_SELF`: this object's own property table, no owner
     /// taken.
     OwnProps,
+}
+
+/// [`Held`]'s views, what a read of the payload matches.
+#[derive(Clone, Copy)]
+enum Storage {
+    Fresh,
+    Array(PhpArray),
+    Other(PhpObject),
+    Object(PhpObject),
+    OwnProps,
+}
+
+impl Held {
+    /// The views of what the storage holds.
+    fn seen(&self) -> Storage {
+        match self {
+            Held::Fresh => Storage::Fresh,
+            Held::Array(array) => Storage::Array(**array),
+            Held::Other(object) => Storage::Other(**object),
+            Held::Object(object) => Storage::Object(**object),
+            Held::OwnProps => Storage::OwnProps,
+        }
+    }
+
+    /// The storage's owner given up, `zval_ptr_dtor(&intern->array)`.
+    fn give_up(self, req: &mut Request) {
+        match self {
+            Held::Array(array) => array.give_up(req),
+            Held::Other(object) | Held::Object(object) => object.give_up(req),
+            Held::Fresh | Held::OwnProps => {}
+        }
+    }
 }
 
 /// Where the object's walk stands, php's `ht_iter`.
@@ -108,7 +153,7 @@ impl Storage {
         }
     }
 
-    /// What the storage holds of the heap, one owner, as a value.
+    /// What the storage holds of the heap, as a value.
     fn held(self) -> Option<Value> {
         match self {
             Storage::Array(array) => Some(Value::array(array)),
@@ -835,14 +880,18 @@ impl ArrayObject {
             },
         };
         let iterator = php_ext::call::new_object(req, class)?;
-        req.addref(&this.as_value());
+        let held = Owner::take(req, this);
         let old = with(req, *iterator, |p| {
             p.flags = flags & CLONE_MASK;
             p.iterator_class = None;
-            std::mem::replace(&mut p.storage, Storage::Other(this))
-        })?;
-        if let Some(old) = old.held() {
-            req.release(old);
+            std::mem::replace(&mut p.storage, Held::Other(held))
+        });
+        match old {
+            Ok(old) => old.give_up(req),
+            Err(thrown) => {
+                iterator.give_up(req);
+                return Err(thrown);
+            }
         }
         Ok(iterator.into_instance())
     }
@@ -1236,9 +1285,15 @@ impl RecursiveArrayIterator {
 
 /// The payload of `object`, copied out, or the internal-error fatal
 /// for an object that has none, which no class of this file makes.
-fn payload(req: &mut Request, object: PhpObject) -> Result<SplArrayObject, Thrown> {
+fn payload(req: &mut Request, object: PhpObject) -> Result<Payload, Thrown> {
     if let Some(p) = object.native::<SplArrayObject>(req) {
-        return Ok(*p);
+        return Ok(Payload {
+            storage: p.storage.seen(),
+            flags: p.flags,
+            position: p.position,
+            iterator_class: p.iterator_class,
+            sorting: p.sorting,
+        });
     }
     Err(missing(req))
 }
@@ -1279,12 +1334,7 @@ fn table(req: &mut Request, object: PhpObject) -> Result<Table, Thrown> {
             Storage::Object(backing) => return Ok(Table::Props(backing)),
             Storage::Other(backing) => at = backing,
             Storage::Array(array) => return Ok(Table::Array(at, array)),
-            Storage::Fresh => {
-                // The payload's own array, which the table reads through.
-                let array = PhpArray::new(req)?.hand_on_unmigrated();
-                with(req, at, |p| p.storage = Storage::Array(array))?;
-                return Ok(Table::Array(at, array));
-            }
+            Storage::Fresh => return Ok(Table::Array(at, laid_down(req, at)?)),
         }
     }
     Err(php_ext::raising::fatal(
@@ -1298,11 +1348,44 @@ fn is_object(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
     Ok(matches!(table(req, object)?, Table::Props(_)))
 }
 
-/// The array written back to the object that holds it, after a write
-/// that may have separated it.
-fn store(req: &mut Request, owner: PhpObject, array: PhpArray) -> Result<(), Thrown> {
-    with(req, owner, |p| p.storage = Storage::Array(array))?;
-    Ok(())
+/// `array_init(&intern->array)` on the first touch: the payload's own
+/// empty array laid down, its view answered.
+fn laid_down(req: &mut Request, owner: PhpObject) -> Result<PhpArray, Thrown> {
+    let array = PhpArray::new(req)?;
+    let view = *array;
+    let old = with(req, owner, |p| {
+        std::mem::replace(&mut p.storage, Held::Array(array))
+    })?;
+    old.give_up(req);
+    Ok(view)
+}
+
+/// `SEPARATE_ARRAY` on the array `owner`'s payload holds, through the
+/// payload's owner, which moves to the copy where one is made: the view a
+/// write then writes in place, the array the payload's alone. The owner is
+/// out of the payload for the separation only, which runs no code of the
+/// program.
+fn separated(req: &mut Request, owner: PhpObject) -> Result<PhpArray, Thrown> {
+    let held = with(req, owner, |p| match std::mem::take(&mut p.storage) {
+        Held::Array(array) => Some(array),
+        other => {
+            p.storage = other;
+            None
+        }
+    })?;
+    let Some(mut array) = held else {
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: an SPL array written through a storage that holds no array",
+        ));
+    };
+    let separated = array.separate(req);
+    let view = *array;
+    let old = with(req, owner, |p| {
+        std::mem::replace(&mut p.storage, Held::Array(array))
+    })?;
+    old.give_up(req);
+    separated.map(|()| view)
 }
 
 /// Whether `key` is a protected or private property's mangled name,
@@ -1355,10 +1438,16 @@ impl Table {
     /// `key` a view, the array taking its own owner of a string key.
     fn set(self, req: &mut Request, key: &Key, value: Owner<Value>) -> Result<(), Thrown> {
         match self {
-            Table::Array(owner, mut array) => {
+            Table::Array(owner, _) => {
+                let mut array = match separated(req, owner) {
+                    Ok(array) => array,
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                };
                 let key = Owner::take(req, key.clone());
-                array.set(req, key, value)?;
-                store(req, owner, array)
+                array.set(req, key, value)
             }
             Table::Props(object) => {
                 let name = match key.to_prop_name(req) {
@@ -1437,9 +1526,15 @@ impl Table {
         // php ignores what `zend_hash_next_index_insert` answers, so a
         // taken next element is no `Error` here, as it is for `$a[]`.
         match self {
-            Table::Array(owner, mut array) => {
-                array.try_append(req, value)?;
-                store(req, owner, array)
+            Table::Array(owner, _) => {
+                let mut array = match separated(req, owner) {
+                    Ok(array) => array,
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                };
+                array.try_append(req, value).map(drop)
             }
             Table::Props(object) => object.append_row(req, value).map(drop),
         }
@@ -1447,9 +1542,11 @@ impl Table {
 
     fn unset(self, req: &mut Request, key: &Key) -> Result<(), Thrown> {
         match self {
-            Table::Array(owner, mut array) => {
-                array.unset(req, key)?;
-                store(req, owner, array)
+            Table::Array(owner, array) => {
+                if !array.contains(key) {
+                    return Ok(());
+                }
+                separated(req, owner)?.unset(req, key).map(drop)
             }
             Table::Props(object) => {
                 let name = key.to_prop_name(req)?;
@@ -1506,20 +1603,18 @@ impl Table {
         found: Option<Value>,
     ) -> Result<Owner<PhpRef>, Thrown> {
         match self {
-            Table::Array(owner, mut array) => {
+            Table::Array(owner, _) => {
                 if let Some(cell) = found.and_then(|v| v.as_php_ref().copied()) {
                     return Ok(Owner::take(req, cell));
                 }
+                let mut array = separated(req, owner)?;
                 let held = Owner::take(req, found.map_or_else(Value::null, |v| v.deref()));
                 // The cell's first owner goes to the slot's caller, a second
                 // to the table.
                 let cell = PhpRef::new(req, held)?;
                 let kept = Owner::take(req, cell.as_value());
                 let key = Owner::take(req, key.clone());
-                let stored = array
-                    .set(req, key, kept)
-                    .and_then(|()| store(req, owner, array));
-                if let Err(thrown) = stored {
+                if let Err(thrown) = array.set(req, key, kept) {
                     cell.give_up(req);
                     return Err(thrown);
                 }
@@ -1556,7 +1651,8 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
                 req,
                 "Using null as an array offset is deprecated, use an empty string instead",
             );
-            Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated())
+            // `ZSTR_EMPTY_ALLOC()`: the interned empty string, no owner.
+            Key::Str(PhpString::interned(req, b"")?)
         }
         ValueRef::Str(s) => Key::lookup(*s),
         ValueRef::Resource(r) => {
@@ -1889,18 +1985,13 @@ impl ObjectHandlers for Handlers {
     /// `array_init(&intern->array)`, the table a constructor replaces.
     fn create_object(&self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         let array = PhpArray::new(req)?;
-        let fresh = object
-            .native::<SplArrayObject>(req)
-            .is_some_and(|p| matches!(p.storage, Storage::Fresh));
-        if !fresh {
-            array.give_up(req);
-            return Ok(());
-        }
-        // The payload's own array from here.
-        let array = array.hand_on_unmigrated();
-        if let Some(p) = object.native_mut::<SplArrayObject>(req) {
-            p.storage = Storage::Array(array);
-        }
+        let left = match object.native_mut::<SplArrayObject>(req) {
+            Some(p) if matches!(p.storage, Held::Fresh) => {
+                std::mem::replace(&mut p.storage, Held::Array(array))
+            }
+            _ => Held::Array(array),
+        };
+        left.give_up(req);
         Ok(())
     }
 
@@ -1908,16 +1999,16 @@ impl ObjectHandlers for Handlers {
         forget_position(req, object).ok();
         let held = object
             .native_mut::<SplArrayObject>(req)
-            .and_then(|p| std::mem::take(&mut p.storage).held());
+            .map(|p| std::mem::take(&mut p.storage));
         if let Some(held) = held {
-            req.release(held);
+            held.give_up(req);
         }
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(held) = object
             .native::<SplArrayObject>(req)
-            .and_then(|p| p.storage.held())
+            .and_then(|p| p.storage.seen().held())
         {
             visit(held);
         }
@@ -2147,9 +2238,8 @@ impl ObjectHandlers for Handlers {
             table.set(req, &key, null)?;
         }
         match table {
-            Table::Array(owner, mut array) => {
-                array.separate(req)?;
-                store(req, owner, array)?;
+            Table::Array(owner, _) => {
+                let array = separated(req, owner)?;
                 Ok(array.place(&key))
             }
             Table::Props(backing) => backing.row_place(req, &key).map(Some),
@@ -2383,12 +2473,7 @@ fn spl_array_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<Ph
     }
     let storage = match payload(req, object)?.storage {
         Storage::OwnProps => return Ok(out),
-        Storage::Fresh => {
-            // The payload's own array, which the debug table shares.
-            let array = PhpArray::new(req)?.hand_on_unmigrated();
-            with(req, object, |p| p.storage = Storage::Array(array))?;
-            Value::array(array)
-        }
+        Storage::Fresh => Value::array(laid_down(req, object)?),
         Storage::Array(array) => Value::array(array),
         Storage::Other(backing) | Storage::Object(backing) => backing.as_value(),
     };
@@ -2413,14 +2498,11 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>,
         (p.flags, p.iterator_class, p.storage)
     };
     let storage = match storage {
-        Storage::OwnProps => Storage::OwnProps,
+        Storage::OwnProps => Held::OwnProps,
         _ if crate::is_a(req, object.class(), b"ArrayObject") => {
-            Storage::Array(table(req, object)?.copy(req)?.hand_on_unmigrated())
+            Held::Array(table(req, object)?.copy(req)?)
         }
-        _ => {
-            req.addref(&object.as_value());
-            Storage::Other(object)
-        }
+        _ => Held::Other(Owner::take(req, object)),
     };
     let copy = SplArrayObject {
         storage,
@@ -2489,10 +2571,9 @@ fn set_array(
         // one more owner (`ZVAL_COPY`); a shared one, and an immutable
         // one, whose count php keeps at two, copied (`zend_array_dup`).
         if given.is_refcounted() && given.refcount() == 1 {
-            req.addref(&given);
-            Storage::Array(*array)
+            Held::Array(Owner::take(req, *array))
         } else {
-            Storage::Array(array.copy(req)?.hand_on_unmigrated())
+            Held::Array(array.copy(req)?)
         }
     } else if let Some(other) = given.as_object().copied() {
         let what = if crate::is_a(req, object.class(), b"ArrayIterator") {
@@ -2512,10 +2593,9 @@ fn set_array(
                 flags = payload(req, other)?.flags & !INT_MASK;
             }
             if other == object {
-                Storage::OwnProps
+                Held::OwnProps
             } else {
-                req.addref(&given);
-                Storage::Other(other)
+                Held::Other(Owner::take(req, other))
             }
         } else {
             if other.handlers(req).properties_overloaded() {
@@ -2542,8 +2622,7 @@ fn set_array(
                     &format!("Enums are not compatible with {class}"),
                 ));
             }
-            req.addref(&given);
-            Storage::Object(other)
+            Held::Object(Owner::take(req, other))
         }
     } else {
         return Ok(());
@@ -2552,11 +2631,9 @@ fn set_array(
         p.flags |= flags;
         std::mem::replace(&mut p.storage, storage)
     })?;
-    forget_position(req, object)?;
-    if let Some(old) = old.held() {
-        req.release(old);
-    }
-    Ok(())
+    let forgot = forget_position(req, object);
+    old.give_up(req);
+    forgot
 }
 
 /// `Z_PARAM_ARRAY_OR_OBJECT` over `given`, the argument at `position`.
@@ -2672,13 +2749,10 @@ fn put_back(req: &mut Request, table: Table, sorted: PhpArray) -> Result<(), Thr
     let sorted = Owner::take(req, sorted);
     match table {
         Table::Array(owner, _) => {
-            let sorted = sorted.hand_on_unmigrated();
             let old = with(req, owner, |p| {
-                std::mem::replace(&mut p.storage, Storage::Array(sorted))
+                std::mem::replace(&mut p.storage, Held::Array(sorted))
             })?;
-            if let Some(old) = old.held() {
-                req.release(old);
-            }
+            old.give_up(req);
             Ok(())
         }
         Table::Props(object) => object.replace_table(req, sorted),
@@ -2769,10 +2843,10 @@ fn set_flags_and_self(req: &mut Request, object: PhpObject, flags: i64) -> Resul
     let own = flags & IS_SELF != 0;
     let old = with(req, object, |p| {
         p.flags = (p.flags & !CLONE_MASK) | (flags & CLONE_MASK & !IS_SELF);
-        own.then(|| std::mem::replace(&mut p.storage, Storage::OwnProps))
+        own.then(|| std::mem::replace(&mut p.storage, Held::OwnProps))
     })?;
-    if let Some(old) = old.and_then(Storage::held) {
-        req.release(old);
+    if let Some(old) = old {
+        old.give_up(req);
     }
     Ok(())
 }
@@ -2795,10 +2869,9 @@ fn position(req: &mut Request, object: PhpObject) -> Result<(Table, u32), Thrown
             Ok((table, iterator.position(req, &array)))
         }
         (Table::Props(_), Position::Row(row)) => Ok((table, row)),
-        (Table::Array(owner, mut array), _) => {
+        (Table::Array(owner, _), _) => {
             forget_position(req, object)?;
-            array.separate(req)?;
-            store(req, owner, array)?;
+            let array = separated(req, owner)?;
             let iterator = HashIterator::new(req, &array, 0);
             with(req, object, |p| p.position = Position::Hash(iterator))?;
             Ok((Table::Array(owner, array), 0))

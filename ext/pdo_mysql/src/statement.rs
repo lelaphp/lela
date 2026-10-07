@@ -29,7 +29,7 @@ pub(crate) struct Stmt {
     /// `S->fields`.
     fields: Vec<Field>,
     /// `S->current_row`, one owner of each value.
-    current_row: Vec<Value>,
+    current_row: Vec<Owner<Value>>,
     /// `S->num_params`.
     pub(crate) num_params: u32,
     /// `S->max_length`.
@@ -78,7 +78,7 @@ impl Stmt {
     /// `pdo_mysql_free_result`.
     fn free_rows(&mut self, req: &mut Request) -> Result<(), Failure> {
         for value in std::mem::take(&mut self.current_row) {
-            req.release(value);
+            value.give_up(req);
         }
         self.has_metadata = false;
         if let Some(result) = self.result.take() {
@@ -158,17 +158,6 @@ impl Stmt {
             }
         }
         Ok(true)
-    }
-}
-
-/// `zval_ptr_dtor(parameter); ZVAL_STR(parameter, ...)`: the bound value
-/// replaced, through its reference for `bindParam()`.
-fn replace(req: &mut Request, value: &mut Value, new: Owner<Value>) {
-    if let Some(cell) = value.as_php_ref().copied() {
-        cell.convert(req, new);
-    } else {
-        let old = std::mem::replace(value, new.hand_on_unmigrated());
-        req.release(old);
     }
 }
 
@@ -272,7 +261,7 @@ impl Statement for Stmt {
         match result.fetch(req)? {
             Fetched::Row(row) => {
                 for value in std::mem::replace(&mut self.current_row, row) {
-                    req.release(value);
+                    value.give_up(req);
                 }
                 Ok(true)
             }
@@ -312,7 +301,7 @@ impl Statement for Stmt {
         req: &mut Request,
         column: usize,
         ty: Option<BindKind>,
-    ) -> Result<Value, Failure> {
+    ) -> Result<Owner<Value>, Failure> {
         let _ = ty;
         if !self.has_result() || column >= self.fields.len() {
             return Err(Failure::silent());
@@ -320,13 +309,8 @@ impl Statement for Stmt {
         if let Some(ps) = &self.ps {
             return Ok(ps.column_value(req, u32::try_from(column).unwrap_or(u32::MAX)));
         }
-        let value = self
-            .current_row
-            .get(column)
-            .copied()
-            .unwrap_or(Value::null());
-        req.addref(&value);
-        Ok(value)
+        let value = self.current_row.get(column).map_or(Value::null(), |v| **v);
+        Ok(Owner::take(req, value))
     }
 
     /// `pdo_mysql_stmt_param_hook`: a server-side statement's parameter
@@ -360,7 +344,8 @@ impl Statement for Stmt {
                 let n = u32::try_from(*param.position).unwrap_or(u32::MAX);
                 let value = param.value.deref();
                 if param.ty.kind() == BindKind::Null || matches!(value.as_ref(), ValueRef::Null) {
-                    ps.bind_parameter(req, n, Value::null(), FieldType::Null);
+                    let null = Owner::take(req, Value::null());
+                    ps.bind_parameter(req, n, null, FieldType::Null);
                     return Ok(());
                 }
                 match param.ty.kind() {
@@ -385,7 +370,7 @@ impl Statement for Stmt {
                     ValueRef::Float(_) => FieldType::Double,
                     _ => return Err(Failure::silent()),
                 };
-                req.addref(&value);
+                let value = Owner::take(req, value);
                 ps.bind_parameter(req, n, value, ty);
                 Ok(())
             }
@@ -399,7 +384,7 @@ impl Statement for Stmt {
         req: &mut Request,
         column: usize,
         executed: bool,
-    ) -> Result<PhpArray, Failure> {
+    ) -> Result<Owner<PhpArray>, Failure> {
         let _ = executed;
         if !self.has_result() {
             return Err(Failure::silent());
@@ -454,7 +439,7 @@ impl Statement for Stmt {
         set(req, &mut meta, b"flags", flags.into_value())?;
         let table = PhpString::new(req, &field.table)?.into_value();
         set(req, &mut meta, b"table", table)?;
-        Ok(meta.hand_on_unmigrated())
+        Ok(meta)
     }
 
     /// `pdo_mysql_stmt_next_rowset`.
@@ -498,5 +483,15 @@ impl Statement for Stmt {
         if !self.done {
             self.drain(req).ok();
         }
+    }
+}
+
+/// `zval_ptr_dtor(parameter)` and `new` in its place: a bound value
+/// replaced, through its reference for `bindParam()`, as php's
+/// `convert_to_*` writes in place.
+fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
+    match value.as_php_ref().copied() {
+        Some(cell) => cell.convert(req, new),
+        None => std::mem::replace(value, new).give_up(req),
     }
 }

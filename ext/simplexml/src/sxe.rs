@@ -9,7 +9,7 @@ use php_ext::abi::{
     PropertyPurpose, PropertyRead, PropertyTest, Std,
 };
 use php_ext::call::{call_method, lookup_class, new_object};
-use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
+use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name, with_string};
 use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
@@ -60,15 +60,17 @@ pub(crate) struct SxeState {
     pub(crate) obj: NodeObject,
     pub(crate) walk: Walk,
     pub(crate) ns: Option<Ns>,
-    /// `iter.data`, one owner.
-    pub(crate) current: Option<PhpObject>,
+    /// `iter.data`, the object's owner of it.
+    pub(crate) current: Option<Owner<PhpObject>>,
     pub(crate) xpath: Option<XPath>,
-    /// `sxe->properties`, one owner: kept until the next read or the
-    /// object's free, so what it holds lives as long as php's does.
-    pub(crate) properties: Option<PhpArray>,
-    /// `sxe->tmp`, one owner: the element a write through a missing name
-    /// made, kept until the next such write or the object's free.
-    pub(crate) made: Option<PhpObject>,
+    /// `sxe->properties`, the object's owner of it: kept until the next
+    /// read or the object's free, so what it holds lives as long as
+    /// php's does.
+    pub(crate) properties: Option<Owner<PhpArray>>,
+    /// `sxe->tmp`, the object's owner of it: the element a write through
+    /// a missing name made, kept until the next such write or the
+    /// object's free.
+    pub(crate) made: Option<Owner<PhpObject>>,
 }
 
 /// The payload: `php_sxe_object`'s fields, boxed, inside the `sizeof` php
@@ -368,10 +370,10 @@ impl Member {
             ValueRef::Int(n) => Ok(Member::Index(n)),
             ValueRef::Str(s) => Ok(Member::Name(s.as_bytes().to_vec())),
             _ => {
-                let s = to_string(req, &offset)?;
-                let bytes = s.as_bytes().to_vec();
-                s.give_up(req);
-                Ok(Member::Name(if trim { trimmed(&bytes) } else { bytes }))
+                let name = with_string(req, &offset, |bytes| {
+                    if trim { trimmed(bytes) } else { bytes.to_vec() }
+                })?;
+                Ok(Member::Name(name))
             }
         }
     }
@@ -545,10 +547,7 @@ fn plain_text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     if let Some(o) = value.as_object() {
         return Ok(cast_text(req, *o)?.unwrap_or_default());
     }
-    let s = to_string(req, &value)?;
-    let bytes = s.as_bytes().to_vec();
-    s.give_up(req);
-    Ok(bytes)
+    with_string(req, &value, <[u8]>::to_vec)
 }
 
 /// php's warning for an element written past the ones there are.
@@ -1142,15 +1141,17 @@ pub(crate) fn debug_table(req: &mut Request, object: PhpObject) -> Result<Owner<
 /// it held before released first, as `zend_hash_clean` empties php's.
 fn properties(req: &mut Request, object: PhpObject) -> Result<PhpArray, Thrown> {
     if let Some(old) = sxe_mut(req, object).and_then(|s| s.properties.take()) {
-        req.release(Value::array(old));
+        old.give_up(req);
     }
     let rows = prop_hash(req, object, false)?;
+    let built = table(req, rows)?;
+    let view = *built;
     // The payload keeps the table's owner.
-    let built = table(req, rows)?.hand_on_unmigrated();
-    if let Some(s) = sxe_mut(req, object) {
-        s.properties = Some(built);
+    match sxe_mut(req, object) {
+        Some(s) => s.properties = Some(built),
+        None => built.give_up(req),
     }
-    Ok(built)
+    Ok(view)
 }
 
 // ---- casts and counts
@@ -1238,7 +1239,7 @@ fn overridden(req: &mut Request, object: PhpObject, lowered: &[u8]) -> bool {
 /// first node.
 pub(crate) fn rewind(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     if let Some(old) = sxe_mut(req, object).and_then(|s| s.current.take()) {
-        req.release(old.as_value());
+        old.give_up(req);
     }
     let view = View::of(req, object);
     let base = view.node(req)?;
@@ -1254,8 +1255,8 @@ pub(crate) fn move_forward(req: &mut Request, object: PhpObject) -> Result<(), T
     let Some(current) = sxe_mut(req, object).and_then(|s| s.current.take()) else {
         return Ok(());
     };
-    let node = View::of(req, current).node(req);
-    req.release(current.as_value());
+    let node = View::of(req, *current).node(req);
+    current.give_up(req);
     let node = node?;
     let view = View::of(req, object);
     if let Some(next) = view.fetch(node.next()) {
@@ -1267,19 +1268,19 @@ pub(crate) fn move_forward(req: &mut Request, object: PhpObject) -> Result<(), T
 
 fn set_current(req: &mut Request, object: PhpObject, made: Owner<PhpObject>) {
     match sxe_mut(req, object) {
-        Some(s) => s.current = Some(made.hand_on_unmigrated()),
+        Some(s) => s.current = Some(made),
         None => made.give_up(req),
     }
 }
 
 /// `iter.data`, a view of it.
 pub(crate) fn current(req: &mut Request, object: PhpObject) -> Option<Value> {
-    Some(sxe(req, object)?.current?.as_value())
+    Some(sxe(req, object)?.current.as_deref()?.as_value())
 }
 
 /// The name of the node `iter.data` stands for, `php_sxe_iterator_current_key`.
 pub(crate) fn current_name(req: &Request, object: PhpObject) -> Option<Vec<u8>> {
-    let current = sxe(req, object)?.current?;
+    let current = *sxe(req, object)?.current.as_deref()?;
     sxe(req, current)?.obj.bound().map(Node::name)
 }
 
@@ -1378,10 +1379,10 @@ impl ObjectHandlers for Handlers {
             None => (None, None, None),
         };
         for held in [current, made].into_iter().flatten() {
-            req.release(held.as_value());
+            held.give_up(req);
         }
         if let Some(p) = properties {
-            req.release(Value::array(p));
+            p.give_up(req);
         }
         // `sxe_object_free_iterxpath`, then
         // `php_libxml_node_decrement_resource`.
@@ -1419,13 +1420,13 @@ impl ObjectHandlers for Handlers {
                 let wrapped = wrap(req, object, n, Walk::Node, view.ns)?;
                 let value = Owner::take(req, wrapped.as_value());
                 let old = if let Some(s) = sxe_mut(req, object) {
-                    s.made.replace(wrapped.hand_on_unmigrated())
+                    s.made.replace(wrapped)
                 } else {
                     wrapped.give_up(req);
                     None
                 };
                 if let Some(old) = old {
-                    req.release(old.as_value());
+                    old.give_up(req);
                 }
                 return Ok(value);
             }
@@ -1596,8 +1597,8 @@ impl ObjectHandlers for Handlers {
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(p) = sxe(req, object).and_then(|s| s.properties) {
-            visit(Value::array(p));
+        if let Some(p) = sxe(req, object).and_then(|s| s.properties.as_deref()) {
+            visit(Value::array(*p));
         }
     }
 

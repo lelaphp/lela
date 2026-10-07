@@ -661,16 +661,29 @@ impl MimeBuilder {
 
     /// A `CURLFile` part: read from `source` by the callbacks, of `size`
     /// bytes where it is known, seekable where its stream opened.
+    /// A part not made, or not named, closes `source` here, as no
+    /// `free_cb` will.
     pub(crate) fn add_file(
         &mut self,
+        req: &mut Request,
         name: &[u8],
-        source: Source,
+        mut source: Source,
         size: Option<i64>,
         filename: &[u8],
         mime: &[u8],
     ) -> Option<i32> {
         let seekable = source.is_open();
-        let part = self.part()?;
+        let Some(part) = self.part() else {
+            source.close(req);
+            return None;
+        };
+        let name = c_string(name);
+        // SAFETY: a live part and a NUL-terminated name the library copies.
+        let rc = unsafe { sys::curl_mime_name(part.as_ptr(), name.as_ptr()) };
+        if rc != sys::CURLE_OK {
+            source.close(req);
+            return Some(code(rc));
+        }
         let file = Box::into_raw(Box::new(FilePart {
             session: self.session.clone(),
             source,
@@ -678,12 +691,6 @@ impl MimeBuilder {
         // SAFETY: `into_raw` never answers null.
         let file = unsafe { NonNull::new_unchecked(file) };
         self.mime.files.push(file);
-        let name = c_string(name);
-        // SAFETY: a live part and a NUL-terminated name the library copies.
-        let rc = unsafe { sys::curl_mime_name(part.as_ptr(), name.as_ptr()) };
-        if rc != sys::CURLE_OK {
-            return Some(code(rc));
-        }
         let seek: Option<sys::curl_seek_callback> = if seekable { Some(file_seek) } else { None };
         // SAFETY: a live part, the trampolines and their argument, which
         // the tree holds until after `curl_mime_free`.

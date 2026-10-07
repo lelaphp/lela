@@ -507,7 +507,7 @@ pub(crate) fn parse(
                 || e.uncompressed_filesize != get32(header, 22)
                 || e.compressed_filesize != get32(header, 18)
             {
-                e.metadata.free(req);
+                e.free(req);
                 return fail(
                     &mut phar,
                     req,
@@ -521,14 +521,14 @@ pub(crate) fn parse(
                     actual_alias = Some(read);
                 }
                 Err(text) => {
-                    e.metadata.free(req);
+                    e.free(req);
                     return fail(&mut phar, req, text);
                 }
             }
         }
         e.set_inode(fname, 1, false);
-        if let Err(mut refused) = phar.manifest.add(&filename, e) {
-            refused.metadata.free(req);
+        if let Err(refused) = phar.manifest.add(&filename, e) {
+            refused.free(req);
         }
     }
     phar.is_data = !phar.manifest.contains(b".phar/stub.php");
@@ -801,8 +801,8 @@ pub(crate) fn flush(
             None => dropped.extend(a.manifest.remove(b".phar/alias.txt")),
         }
         let (fname, registered) = (a.fname.clone(), a.alias.clone().filter(|a| !a.is_empty()));
-        for mut e in dropped {
-            e.metadata.free(req);
+        for e in dropped {
+            e.free(req);
         }
         if let Some(registered) = registered
             && let Err(error) = archive::get_archive(req, &fname, Some(&registered))
@@ -837,8 +837,8 @@ pub(crate) fn flush(
                 a.manifest.add(b".phar/stub.php", e).ok();
             }
         }
-        for mut e in dropped {
-            e.metadata.free(req);
+        for e in dropped {
+            e.free(req);
         }
     }
     let Some(a) = archives(req).get_mut(id) else {
@@ -876,11 +876,11 @@ pub(crate) fn flush(
         }
         if e.is_deleted {
             if e.can_remove()
-                && let Some(mut gone) = archives(req)
+                && let Some(gone) = archives(req)
                     .get_mut(id)
                     .and_then(|a| a.manifest.remove_at(slot))
             {
-                gone.metadata.free(req);
+                gone.free(req);
             }
             continue;
         }

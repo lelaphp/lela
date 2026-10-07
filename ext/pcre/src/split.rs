@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
-use php_ext::coerce::to_string;
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -302,10 +302,10 @@ fn preg_grep(
     // argument holds it while `__toString` and a notice's handler run.
     let kept = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let entry = *row.value();
-        let text = to_string(req, &entry)?;
-        let mut subject = Subject::new(text.as_bytes());
-        let rc = scratch.run(&pattern, &mut subject, 0, 0, true);
-        text.give_up(req);
+        let rc = with_string(req, &entry, |text| {
+            let mut subject = Subject::new(text);
+            scratch.run(&pattern, &mut subject, 0, 0, true)
+        })?;
         let keep = if rc >= 0 {
             if rc == 0 {
                 docref(req, Level::Notice, "Matched, but too many substrings");

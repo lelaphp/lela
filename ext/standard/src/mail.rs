@@ -19,7 +19,7 @@ use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{FormatDate, Request, Streams as _};
+use php_ext::request::{FormatDate, OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
@@ -319,7 +319,7 @@ pub fn php_mail(
             };
             if let Some(stream) = req.open_stream_with(&log, b"a", opening)? {
                 stream.write(req, &entry);
-                stream.hand_on_unmigrated().free(req);
+                stream.free(req);
             }
         }
     }

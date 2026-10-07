@@ -612,31 +612,77 @@ impl ResultSet {
             Fetched::Done => return Ok(Owner::take(req, Value::null())),
             Fetched::Failed => return Ok(Owner::take(req, Value::bool(false))),
         };
-        let mut array = php_ext::values::PhpArray::new(req)?;
-        for (i, value) in row.into_iter().enumerate() {
-            let field = self.res.fields.get(i);
-            // `zend_hash_index_add` for the number: a column a numeric
-            // name put at the same index first keeps it.
-            let at = php_ext::values::Key::Int(i64::try_from(i).unwrap_or(i64::MAX));
-            if flags & fetch::NUM != 0 && !array.contains(&at) {
-                array.set(req, Owner::take(req, at), Owner::take(req, value))?;
+        let mut array = match php_ext::values::PhpArray::new(req) {
+            Ok(array) => array,
+            Err(thrown) => {
+                for value in row {
+                    value.give_up(req);
+                }
+                return Err(thrown);
             }
-            if flags & fetch::ASSOC != 0 {
-                let key = match field.and_then(|f| f.num_key) {
-                    Some(n) => Owner::take(req, php_ext::values::Key::Int(n)),
-                    None => php_ext::values::PhpString::new(
-                        req,
-                        field.map(|f| f.name.as_slice()).unwrap_or_default(),
-                    )?
-                    .into_key(),
-                };
-                array.set(req, key, Owner::take(req, value))?;
+        };
+        let mut values = row.into_iter();
+        let mut filled = Ok(());
+        for (i, value) in values.by_ref().enumerate() {
+            filled = self.fill(req, &mut array, i, flags, value);
+            if filled.is_err() {
+                break;
             }
-            // The row's own owner of the value, each key above having
-            // taken one of its own.
-            req.release(value);
         }
-        Ok(array.into_value())
+        for value in values {
+            value.give_up(req);
+        }
+        match filled {
+            Ok(()) => Ok(array.into_value()),
+            Err(thrown) => {
+                array.give_up(req);
+                Err(thrown)
+            }
+        }
+    }
+
+    /// Column `i`'s value written into the fetched array: under its
+    /// number, `zend_hash_index_add`, so a column a numeric name put at
+    /// the same index first keeps it, and under its name; the row's owner
+    /// handed to the last key written, another taken for the first.
+    fn fill(
+        &self,
+        req: &mut Request,
+        array: &mut Owner<php_ext::values::PhpArray>,
+        i: usize,
+        flags: u32,
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        let field = self.res.fields.get(i);
+        let at = php_ext::values::Key::Int(i64::try_from(i).unwrap_or(i64::MAX));
+        let numbered = flags & fetch::NUM != 0 && !array.contains(&at);
+        if flags & fetch::ASSOC == 0 {
+            if numbered {
+                return array.set(req, Owner::take(req, at), value);
+            }
+            value.give_up(req);
+            return Ok(());
+        }
+        if numbered
+            && let Err(thrown) = array.set(req, Owner::take(req, at), Owner::take(req, *value))
+        {
+            value.give_up(req);
+            return Err(thrown);
+        }
+        let key = match field.and_then(|f| f.num_key) {
+            Some(n) => Owner::take(req, php_ext::values::Key::Int(n)),
+            None => match php_ext::values::PhpString::new(
+                req,
+                field.map(|f| f.name.as_slice()).unwrap_or_default(),
+            ) {
+                Ok(name) => name.into_key(),
+                Err(thrown) => {
+                    value.give_up(req);
+                    return Err(thrown);
+                }
+            },
+        };
+        array.set(req, key, value)
     }
 
     /// The columns' descriptions, `mysqlnd_fetch_fields`.

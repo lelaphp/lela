@@ -444,12 +444,7 @@ fn run_query(
     };
     stmt::set_id(req, stmt_object, id);
     let result_object = instantiate(req, b"SQLite3Result")?;
-    result::attach(
-        req,
-        *result_object,
-        stmt_owner.hand_on_unmigrated(),
-        Origin::Query,
-    );
+    result::attach(req, *result_object, stmt_owner, Origin::Query);
     let Some(mut taken) = take(req, object, id) else {
         result_object.give_up(req);
         return Err(not_ready(req, "SQLite3"));

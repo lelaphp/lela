@@ -23,7 +23,7 @@ use crate::api::abi::PersistentList;
 use super::sockets::Socket;
 use super::{PhpStream, Request, Stream};
 use crate::api::raising::Thrown;
-use crate::api::request::{OptionAnswer, StreamOption};
+use crate::api::request::{OptionAnswer, OwnedStream, StreamOption};
 use crate::api::values::{Owner, Resource};
 use crate::state::Layer;
 use crate::streams::StreamLayer;
@@ -213,15 +213,15 @@ pub(crate) fn give_back(pool: &PersistentList, held: Vec<Held>) {
 /// that the connection is its owner's alone: the socket of `stream` taken
 /// out, its owed write flushed first, out of the request's persistent list
 /// and out of the resource, which is closed, and the caller's owner given
-/// up. `None`, and the stream left as it is, for a stream that is not a
-/// socket's.
-pub(crate) fn keep(req: &mut Request, stream: Stream) -> Option<Entry> {
+/// up. `None`, and the stream freed, for a stream that is not a socket's.
+pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
     let res = stream.resource();
-    let socket = req.stream_op(stream, |_, s| s.ops.as_socket().is_some());
+    let socket = req.stream_op(*stream, |_, s| s.ops.as_socket().is_some());
     if socket != Some(true) {
+        stream.free(req);
         return None;
     }
-    req.stream_op(stream, |req, s| s.flush_owed(req));
+    req.stream_op(*stream, |req, s| s.flush_owed(req));
     let taken = res
         .native_mut::<Option<PhpStream>>(req)
         .and_then(Option::take);
@@ -234,7 +234,7 @@ pub(crate) fn keep(req: &mut Request, stream: Stream) -> Option<Entry> {
         req.streams().pclose_ret = taken.release(req);
         Some(Entry { socket, orig_path })
     });
-    req.release(stream.as_value());
+    stream.give_up(req);
     kept
 }
 

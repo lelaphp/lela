@@ -5,7 +5,7 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 
 use crate::consts::{FieldType, NULL_LENGTH, column};
 use crate::result::{Field, Row};
@@ -133,7 +133,7 @@ pub(crate) fn decode_binary(
         let start = p.position();
         let value = if is_null {
             stats.inc(Stat::BinaryTypeFetchedNull);
-            Value::null()
+            Owner::take(req, Value::null())
         } else {
             if start >= bytes.len() {
                 docref(
@@ -144,8 +144,13 @@ pub(crate) fn decode_binary(
                 return Ok(give_up(req, row));
             }
             let left = bytes.len() - start;
-            let Some(value) = fetch(req, field, &mut p, left)? else {
-                return Ok(give_up(req, row));
+            let value = match fetch(req, field, &mut p, left) {
+                Ok(Some(value)) => value,
+                Ok(None) => return Ok(give_up(req, row)),
+                Err(thrown) => {
+                    release(req, row);
+                    return Err(thrown);
+                }
             };
             stats.inc(binary_stat(field.field_type()));
             value
@@ -162,10 +167,20 @@ pub(crate) fn decode_binary(
 
 /// The values made before a column failed, given back.
 fn give_up(req: &mut Request, row: Row) -> Result<Row, ()> {
-    for value in row {
-        req.release(value);
-    }
+    release(req, row);
     Err(())
+}
+
+/// A row's values given up, `zval_ptr_dtor` over each.
+fn release(req: &mut Request, row: Row) {
+    for value in row {
+        value.give_up(req);
+    }
+}
+
+/// A column's text as the string php makes of it, one owner.
+fn text(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `ps_fetch_over_read_error`.
@@ -184,7 +199,7 @@ fn fetch(
     field: &Field,
     p: &mut Body<'_>,
     left: usize,
-) -> Result<Option<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     let fixed = |req: &mut Request, p: &mut Body<'_>, n: usize| -> Option<Vec<u8>> {
         if n > left {
             over_read(req);
@@ -203,15 +218,15 @@ fn fetch(
         }
         Some(p.take(len).to_vec())
     };
-    let long = |bits: Bits, req: &mut Request| -> Result<Value, Thrown> {
-        Ok(match bits {
-            Bits::Long(n) => Value::int(n),
-            Bits::Text(s) => Value::string(PhpString::new(req, s.as_bytes())?.hand_on_unmigrated()),
-        })
+    let long = |bits: Bits, req: &mut Request| -> Result<Owner<Value>, Thrown> {
+        match bits {
+            Bits::Long(n) => Ok(Owner::take(req, Value::int(n))),
+            Bits::Text(s) => text(req, s.as_bytes()),
+        }
     };
     let ty = field.field_type();
     Ok(Some(match ty {
-        FieldType::Null => Value::null(),
+        FieldType::Null => Owner::take(req, Value::null()),
         FieldType::Tiny => match fixed(req, p, 1) {
             Some(b) => long(from_1_to_8_bytes(field, &b), req)?,
             None => return Ok(None),
@@ -236,32 +251,27 @@ fn fetch(
                 } else {
                     Some(field.decimals as usize)
                 };
-                Value::float(float_to_double(f, decimals))
+                Owner::take(req, Value::float(float_to_double(f, decimals)))
             }
             None => return Ok(None),
         },
         FieldType::Double => match fixed(req, p, 8) {
-            Some(b) => Value::float(f64::from_le_bytes(
-                b.as_slice().try_into().unwrap_or([0; 8]),
-            )),
+            Some(b) => {
+                let d = f64::from_le_bytes(b.as_slice().try_into().unwrap_or([0; 8]));
+                Owner::take(req, Value::float(d))
+            }
             None => return Ok(None),
         },
         FieldType::Time => match variable(req, p) {
-            Some(b) => {
-                Value::string(PhpString::new(req, time(field, &b).as_bytes())?.hand_on_unmigrated())
-            }
+            Some(b) => text(req, time(field, &b).as_bytes())?,
             None => return Ok(None),
         },
         FieldType::Date => match variable(req, p) {
-            Some(b) => {
-                Value::string(PhpString::new(req, date(&b).as_bytes())?.hand_on_unmigrated())
-            }
+            Some(b) => text(req, date(&b).as_bytes())?,
             None => return Ok(None),
         },
         FieldType::DateTime | FieldType::Timestamp => match variable(req, p) {
-            Some(b) => Value::string(
-                PhpString::new(req, datetime(field, &b).as_bytes())?.hand_on_unmigrated(),
-            ),
+            Some(b) => text(req, datetime(field, &b).as_bytes())?,
             None => return Ok(None),
         },
         // `ps_fetch_bit`: an over-read is warned once, by `variable`.
@@ -274,7 +284,7 @@ fn fetch(
             None => return Ok(None),
         },
         _ => match variable(req, p) {
-            Some(b) => Value::string(PhpString::new(req, &b)?.hand_on_unmigrated()),
+            Some(b) => text(req, &b)?,
             None => return Ok(None),
         },
     }))

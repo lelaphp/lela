@@ -20,7 +20,7 @@ use php_ext::call::{Function, call_method, instantiate, lookup_class, new_object
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
-use php_ext::request::{Request, Stream, Streams as _, Whence};
+use php_ext::request::{OwnedStream, Request, Stream, Streams as _, Whence};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::{Countable, RecursiveIterator, SeekableIterator, Stringable};
@@ -54,7 +54,7 @@ pub(crate) struct Fs {
     open_mode: Vec<u8>,
     orig_path: Option<Vec<u8>>,
     line: Option<Vec<u8>>,
-    csv: Option<Value>,
+    csv: Option<Owner<Value>>,
     line_num: i64,
     max_line_len: i64,
     delimiter: u8,
@@ -64,19 +64,19 @@ pub(crate) struct Fs {
 }
 
 /// The directory or the file an object opened, `u.dir.dirp` or
-/// `u.file.stream`: the object is one owner of its resource, and the only
-/// way to let go of it is [`Open::close`], so a close that keeps the
-/// resource listed cannot be written.
-struct Open(Stream);
+/// `u.file.stream`: the object's owner of its resource, and the only way
+/// to let go of it is [`Open::close`], so a close that keeps the resource
+/// listed cannot be written.
+struct Open(Owner<Stream>);
 
 impl Open {
     /// The stream, for an operation on it.
-    const fn stream(&self) -> Stream {
-        self.0
+    fn stream(&self) -> Stream {
+        *self.0
     }
 
-    /// `php_stream_close`: the stream closed, then the object's hold on
-    /// its resource given up, [`Stream::free`].
+    /// `php_stream_close`: the stream closed, then the object's owner of
+    /// its resource given up, [`OwnedStream::free`].
     fn close(self, req: &mut Request) {
         self.0.free(req);
     }
@@ -695,15 +695,14 @@ impl SplFileInfo {
         }
         let name = file_name(req, this)?;
         let name_value = crate::string_value(req, &name)?;
-        let mode_value = Value::string(mode);
-        req.addref(&mode_value);
+        let mode_value = Owner::take(req, Value::string(mode));
         let opened = instantiate(
             req,
             class,
-            &[*name_value, mode_value, Value::bool(useIncludePath)],
+            &[*name_value, *mode_value, Value::bool(useIncludePath)],
         );
         name_value.give_up(req);
-        req.release(mode_value);
+        mode_value.give_up(req);
         opened.map(Owner::into_instance)
     }
 
@@ -1467,7 +1466,7 @@ impl SplFileObject {
         if !read_csv(req, this, true, (delimiter, enclosure, escape))? {
             return Ok(OrFalse::False);
         }
-        let csv = fs(req, this, |it| it.csv)?;
+        let csv = fs(req, this, |it| it.csv.as_deref().copied())?;
         Ok(match csv.and_then(|c| c.as_array().copied()) {
             Some(csv) => OrFalse::Value(csv),
             None => OrFalse::False,
@@ -1780,7 +1779,9 @@ impl SplFileObject {
         if fs(req, this, |it| it.line.is_none() && it.csv.is_none())? {
             read_line(req, this, true)?;
         }
-        let (line, csv, flags) = fs(req, this, |it| (it.line.clone(), it.csv, it.flags))?;
+        let (line, csv, flags) = fs(req, this, |it| {
+            (it.line.clone(), it.csv.as_deref().copied(), it.flags)
+        })?;
         if let Some(line) = line
             && (flags & Self::READ_CSV == 0 || csv.is_none())
         {
@@ -2107,7 +2108,7 @@ impl ObjectHandlers for Handlers {
                 open.close(req);
             }
             if let Some(csv) = csv {
-                req.release(csv);
+                csv.give_up(req);
             }
         }
     }
@@ -2567,9 +2568,9 @@ fn dir_open(req: &mut Request, this: PhpObject, path: &[u8]) -> Result<(), Throw
             &format!("Failed to open directory \"{shown}\""),
         ));
     };
-    // The object's own handle on the directory from here.
-    let dir = dir.hand_on_unmigrated();
-    fs(req, this, |it| it.dir = Some(Open(dir)))?;
+    if let Some(old) = fs(req, this, |it| it.dir.replace(Open(dir)))? {
+        old.close(req);
+    }
     dir_step(req, this)
 }
 
@@ -2648,10 +2649,7 @@ fn file_open(
     // path resolved where it was searched.
     stream.forbid_fclose(req);
     let orig = stream.orig_path(req).unwrap_or_else(|| name.to_vec());
-    // The object's own handle on the stream from here.
-    let stream = stream.hand_on_unmigrated();
-    fs(req, this, |it| {
-        it.stream = Some(Open(stream));
+    let old = fs(req, this, |it| {
         it.file_name = Some(trimmed.to_vec());
         it.orig_path = Some(orig);
         it.open_mode = mode.to_vec();
@@ -2659,7 +2657,12 @@ fn file_open(
         it.enclosure = b'"';
         it.escape = Some(b'\\');
         it.escape_set = false;
-    })
+        it.stream.replace(Open(stream))
+    })?;
+    if let Some(old) = old {
+        old.close(req);
+    }
+    Ok(())
 }
 
 /// `CHECK_SPL_FILE_OBJECT_IS_INITIALIZED`: the receiver and its stream.
@@ -2676,7 +2679,7 @@ fn free_line(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         it.line = None;
         it.csv.take()
     })? {
-        req.release(csv);
+        csv.give_up(req);
     }
     Ok(())
 }
@@ -2793,19 +2796,19 @@ fn read_csv(
         return Err(thrown);
     }
     let mut parsed = PhpArray::new(req)?;
-    match fields {
-        None => parsed.append(req, Owner::take(req, Value::null()))?,
-        Some(fields) => {
-            for field in fields {
-                let value = crate::string_value(req, &field)?;
-                parsed.append(req, value)?;
-            }
-        }
+    let filled = match fields {
+        None => parsed.append(req, Owner::take(req, Value::null())),
+        Some(fields) => fields.iter().try_for_each(|field| {
+            let value = crate::string_value(req, field)?;
+            parsed.append(req, value)
+        }),
+    };
+    if let Err(thrown) = filled {
+        parsed.give_up(req);
+        return Err(thrown);
     }
-    if let Some(old) = fs(req, this, |it| {
-        it.csv.replace(parsed.into_value().hand_on_unmigrated())
-    })? {
-        req.release(old);
+    if let Some(old) = fs(req, this, |it| it.csv.replace(parsed.into_value()))? {
+        old.give_up(req);
     }
     Ok(true)
 }

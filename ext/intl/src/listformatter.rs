@@ -2,7 +2,7 @@
 
 use php_ext::abi::{OrFalse, Refusals, This};
 use php_ext::attr::php_class;
-use php_ext::coerce::to_string;
+use php_ext::coerce::with_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
@@ -101,10 +101,7 @@ fn format(
     }
     let mut items = Vec::with_capacity(strings.len());
     for (_, value) in &strings {
-        let text = to_string(req, &value)?;
-        let converted = ffi::to_utf16(text.as_bytes());
-        text.give_up(req);
-        match converted {
+        match with_string(req, &value, ffi::to_utf16)? {
             Ok(units) => items.push(units),
             Err(code) => {
                 let message = "Failed to convert string to UTF-16";

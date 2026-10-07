@@ -9,7 +9,7 @@
 
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_double, to_long, to_string};
+use php_ext::coerce::{to_double, to_long, to_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
@@ -113,15 +113,15 @@ fn pack(
     let mut converted = Vec::new();
     let format = format.as_bytes().to_vec();
     let packed = packed(req, &format, &mut argv, &mut converted);
-    for at in converted {
-        req.release(argv[at]);
+    for string in converted {
+        string.give_up(req);
     }
     packed
 }
 
 /// `pack`'s three passes over `argv`. An argument a `*` count reads
 /// whole is converted where it stands, as php's `try_convert_to_string`
-/// converts the frame's slot, and its index is pushed onto `converted`:
+/// converts the frame's slot, and its owner is pushed onto `converted`:
 /// the string is the native's to give up once the passes are done,
 /// whichever way they end, as the frame's slot is php's.
 #[allow(clippy::too_many_lines)]
@@ -129,7 +129,7 @@ fn packed(
     req: &mut Request,
     format: &[u8],
     argv: &mut [Value],
-    converted: &mut Vec<usize>,
+    converted: &mut Vec<Owner<PhpString>>,
 ) -> Result<Owner<PhpString>, Thrown> {
     let num_args = argv.len();
     // Pass one: the codes and their counts.
@@ -173,8 +173,8 @@ fn packed(
                     // it stands, so the packing pass reads the string.
                     let s = to_string(req, &argv[currentarg].deref())?;
                     arg = i64::try_from(s.len()).unwrap_or(INT_MAX);
-                    argv[currentarg] = Value::string(s.hand_on_unmigrated());
-                    converted.push(currentarg);
+                    argv[currentarg] = Value::string(*s);
+                    converted.push(s);
                     if code == b'Z' {
                         arg += 1;
                     }
@@ -275,16 +275,18 @@ fn packed(
                     count
                 };
                 let value = next_value(&mut current);
-                let s = crate::tmp_string_bytes(req, &value)?;
                 let pad = if code == b'A' { b' ' } else { 0 };
-                out[pos..pos + count].fill(pad);
-                let n = s.len().min(copy);
-                out[pos..pos + n].copy_from_slice(&s[..n]);
+                let field = &mut out[pos..pos + count];
+                with_string(req, &value, |s| {
+                    field.fill(pad);
+                    let n = s.len().min(copy);
+                    field[..n].copy_from_slice(&s[..n]);
+                })?;
                 pos += count;
             }
             b'h' | b'H' => {
                 let value = next_value(&mut current);
-                let digits = crate::tmp_string_bytes(req, &value)?;
+                let digits = with_string(req, &value, <[u8]>::to_vec)?;
                 let mut left = count;
                 if left > digits.len() {
                     docref(

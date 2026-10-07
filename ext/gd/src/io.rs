@@ -8,7 +8,7 @@ use php_ext::abi::{Instance, OrFalse, Path, True, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
-use php_ext::request::{Opening, Request, Stream, Streams as _};
+use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Emalloc, Owner, PhpString, Value, ValueRef};
 
 use crate::ffi::{self, Encode, Format, GdFormat, Image, Rect, Reported};
@@ -507,8 +507,10 @@ struct Sink {
 enum To {
     /// The request's stdout, `php_write`.
     Output,
-    /// A stream, closed by `gd_free` where the native opened it.
-    Stream(Stream, bool),
+    /// A stream resource the program handed, left open by `gd_free`.
+    Stream(Stream),
+    /// A stream the native opened, its owner closed by `gd_free`.
+    Opened(Owner<Stream>),
 }
 
 impl Sink {
@@ -518,7 +520,7 @@ impl Sink {
         match Emalloc::new(req, ffi::CTX_SIZE) {
             Ok(ctx) => Ok(Sink { to, ctx }),
             Err(thrown) => {
-                if let To::Stream(stream, true) = to {
+                if let To::Opened(stream) = to {
                     stream.free(req);
                 }
                 Err(thrown)
@@ -530,12 +532,13 @@ impl Sink {
     /// target took, `php_write` all of them, `php_stream_write` its own
     /// count or `-1`.
     fn put(&self, req: &mut Request, bytes: &[u8]) -> i32 {
-        let took = match self.to {
+        let took = match &self.to {
             To::Output => {
                 req.write(bytes);
                 Some(bytes.len())
             }
-            To::Stream(stream, _) => stream.write(req, bytes),
+            To::Stream(stream) => stream.write(req, bytes),
+            To::Opened(stream) => stream.write(req, bytes),
         };
         took.map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
     }
@@ -543,7 +546,7 @@ impl Sink {
     /// `gd_free`: the stream closed where it was opened here, then the
     /// `gdIOCtx` freed.
     fn free(self, req: &mut Request) {
-        if let To::Stream(stream, true) = self.to {
+        if let To::Opened(stream) = self.to {
             stream.free(req);
         }
         self.ctx.free(req);
@@ -593,7 +596,7 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
     match file.as_ref() {
         ValueRef::Null => Sink::new(req, To::Output).map(Some),
         ValueRef::Resource(_) => match Stream::from_value(req, file) {
-            Some(stream) => Sink::new(req, To::Stream(stream, false)).map(Some),
+            Some(stream) => Sink::new(req, To::Stream(stream)).map(Some),
             None => Err(php_ext::raising::throw_error(
                 req,
                 "TypeError",
@@ -606,9 +609,7 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
             }
             let path = path.as_bytes().to_vec();
             match req.open_stream(&path, b"wb", false)? {
-                Some(stream) => {
-                    Sink::new(req, To::Stream(stream.hand_on_unmigrated(), true)).map(Some)
-                }
+                Some(stream) => Sink::new(req, To::Opened(stream)).map(Some),
                 None => Ok(None),
             }
         }
@@ -684,7 +685,7 @@ fn imagexbm(
     let im = im(req, image)?;
     let to = match &filename {
         Some(path) => match req.open_stream(path.0.as_bytes(), b"wb", false)? {
-            Some(stream) => To::Stream(stream.hand_on_unmigrated(), true),
+            Some(stream) => To::Opened(stream),
             None => return Ok(false),
         },
         None => To::Output,

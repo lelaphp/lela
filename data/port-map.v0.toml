@@ -1133,8 +1133,8 @@ api = "request::Request::set_time_limit"
 mahout = "RequestCtx::assert_callback"
 sites = 2
 crates = 1
-status = "same"
-api = "request::Request::assert_callback"
+status = "gone"
+rule = "ext/standard's own request state keeps ASSERTG(callback) as an owner; the engine read nothing of it (#1999)"
 
 [[item]]
 mahout = "RequestCtx::current_file"
@@ -1238,8 +1238,8 @@ api = "request::Request::script_name"
 mahout = "RequestCtx::set_assert_callback"
 sites = 2
 crates = 1
-status = "same"
-api = "request::Request::set_assert_callback"
+status = "gone"
+rule = "ext/standard's own request state keeps ASSERTG(callback) as an owner; the engine read nothing of it (#1999)"
 
 [[item]]
 mahout = "RequestCtx::set_error_handler"

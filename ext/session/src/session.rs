@@ -10,7 +10,7 @@ use std::io::Read;
 use php_ext::decl::{Attribute, AttributeArgument, ConstExpr, Name};
 use php_ext::raising::{Cause, Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpArray, Value};
+use php_ext::values::PhpArray;
 
 use crate::{
     Format, Module, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool, ini_long,
@@ -401,7 +401,7 @@ pub(super) fn rshutdown(req: &mut Request) {
     let handlers = std::mem::take(&mut req.state::<State>().handlers);
     handlers.release(req);
     for first in std::mem::take(&mut req.state::<State>().overwritten) {
-        req.release(Value::string(first));
+        first.give_up(req);
     }
     req.state::<State>().thrown = None;
 }

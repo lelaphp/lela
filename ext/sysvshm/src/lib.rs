@@ -546,21 +546,15 @@ fn shm_get_var(
     };
     if let Err(thrown) = reader.finish(req, outcome) {
         if let Some(value) = read {
-            req.release(value);
+            value.give_up(req);
         }
         return Err(thrown);
     }
     match read {
-        // The unserializer's value is owned as a bare value: the one
-        // owner taken over from it.
-        Some(value) if bytes.is_some() => {
-            let owned = Owner::take(req, value);
-            req.release(value);
-            Ok(owned)
-        }
+        Some(value) if bytes.is_some() => Ok(value),
         read => {
             if let Some(value) = read {
-                req.release(value);
+                value.give_up(req);
             }
             docref(
                 req,
