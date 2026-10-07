@@ -528,7 +528,7 @@ pub enum HostServes {
 /// A page a host answers a started request with: its response code, the
 /// header lines it sets, each replacing the lines of its name, and its
 /// body, written through the `php_output` layer.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostPage {
     pub code: i64,
     pub headers: Vec<Vec<u8>>,
