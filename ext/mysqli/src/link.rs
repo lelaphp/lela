@@ -314,6 +314,22 @@ fn give_to_pool(req: &mut Request, key: &[u8], handle: Mysqlnd) {
     }
 }
 
+/// What php's `zend_shutdown` does to mysqli's free links when it
+/// destroys `EG(persistent_list)` (`Z/Zend/zend.c:1166`): each the pool
+/// keeps closed on the shutdown request, the last given back first, as
+/// `php_mysqli_dtor` cleans `plist->free_links` with
+/// `php_mysqli_dtor_p_elements` (`mysqli.c:89-104`), an implicit close
+/// that sends the server its `COM_QUIT` (#1961).
+pub(crate) fn engine_end(req: &mut Request) {
+    let idle = req
+        .engine::<crate::Pooled>()
+        .map(|crate::Pooled(pool)| pool.drain())
+        .unwrap_or_default();
+    for (_, idle) in idle {
+        idle.close(req).ok();
+    }
+}
+
 /// `php_mysqli_close`'s persistent half before the push:
 /// `mysqlnd_end_psession`, and the rollback `mysqli.rollback_on_cached_plink`
 /// asks for; `false` where that rollback failed, which closes the

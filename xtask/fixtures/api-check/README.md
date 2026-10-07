@@ -13,6 +13,7 @@ built; the instrument reads manifests and sources.
 | `lock-order` | a lock whose every item has its line, in an order `--write` would rewrite (#403) | fail |
 | `ceiling`   | `api.lock` over `[budget] api_items`, and its `__private` lines over `api_private_items`; the crate's `Cargo.toml` alone, its items laid down by the test at one past the ceiling the manifest carries, one cap at a time (#338, #953) | fail |
 | `edge`      | a crate dependency outside its `[[edge]]` rows  | fail |
+| `harness-edge` | a crate no `[[edge]]` row names depending on a workspace crate: the harness linking `php_bundle`, which the tracked manifest forbids since #2213 | fail |
 | `host-edge` | a host under `sapi/` depending on `php_engine` past its facade (ADR-0008), beside one within its edges | fail |
 | `deny-edge` | a `use` path across a `deny = true` module edge | fail |
 | `bundle`    | a bundle order that is not topological          | fail |
