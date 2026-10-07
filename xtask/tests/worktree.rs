@@ -403,21 +403,14 @@ fn a_branch_is_cut_from_mains_tip_through_the_add_command() {
 /// alone, and what the worktree holds afterwards is a `target/debug/xtask`
 /// built from its own sources, whose root is the worktree, with no
 /// `CARGO_TARGET_DIR` set and no `.cargo/config.toml` written. The clone
-/// here holds this workspace's dependency build, seeded the way the add
-/// seeds, so on a volume without clonefile it is the cold branch that is
-/// held: one line saying so and a worktree ready all the same. The retire
-/// removes the seeded copy with the worktree and leaves the clone's.
+/// here holds a build of its own ([`warm_clone`]), so on a volume without
+/// clonefile it is the cold branch that is held: one line saying so and a
+/// worktree ready all the same. The retire removes the seeded copy with the
+/// worktree and leaves the clone's.
 #[test]
 fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_alone() {
     let root = repository("seed");
-    fs::create_dir_all(root.join("target")).unwrap();
-    let cloned = Command::new("cp")
-        .args(["-c", "-R"])
-        .arg(workspace().join("target/debug"))
-        .arg(root.join("target/debug"))
-        .output()
-        .unwrap();
-    let warm = cloned.status.success();
+    let warm = warm_clone(&root);
     write(
         &root,
         "target/harness/log.jsonl",
@@ -508,6 +501,55 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
             .contains("the-clones-own"),
         "the clone's log stands, split into the log of each instrument and kept whole: {out}"
     );
+}
+
+/// The clone at `root` given a `target/debug` warm for the build the add
+/// makes, where the volume clones: this workspace's copied in as a head
+/// start and then built in the clone, so what the copy lacks the clone
+/// compiles here and the worktree does not. The copy alone was the clone's
+/// build until #2261, and it lacked every dependency whenever a
+/// `cargo sweep --maxsize` had pruned this workspace's `target/` during the
+/// run, the oldest artifacts first: the worktree then compiled them all
+/// and the test failed on a tree it does not own. Whether the volume
+/// clones, which is the branch the add takes; where it does not, the
+/// clone holds no build and the add says it starts cold.
+fn warm_clone(root: &Path) -> bool {
+    let target = root.join("target");
+    fs::create_dir_all(&target).unwrap();
+    let probe = target.join("clones");
+    let clones = Command::new("cp")
+        .arg("-c")
+        .arg(root.join("Cargo.toml"))
+        .arg(&probe)
+        .output()
+        .unwrap()
+        .status
+        .success();
+    fs::remove_file(&probe).ok();
+    if !clones {
+        return false;
+    }
+    // A sweep mid-copy fails the copy with the files it took; the build
+    // below compiles them, so the copy's exit is not this test's.
+    Command::new("cp")
+        .args(["-c", "-R"])
+        .arg(workspace().join("target/debug"))
+        .arg(target.join("debug"))
+        .output()
+        .unwrap();
+    let built = Command::new("cargo")
+        .args(["build", "-p", "xtask"])
+        .current_dir(root)
+        .env_remove("CARGO")
+        .env_remove("CARGO_MANIFEST_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "the clone's build: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    true
 }
 
 /// The retire half: a worktree's readings live in its own `target/harness/`
