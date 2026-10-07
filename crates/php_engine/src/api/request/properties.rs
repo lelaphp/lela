@@ -384,9 +384,7 @@ impl Request {
     /// declares the name declares it so.
     fn property_root(&self, declaring: ClassId, name: &[u8]) -> ClassId {
         let mut root = declaring;
-        let mut at = self.class_parent(declaring);
-        for _ in 0..64 {
-            let Some(here) = at else { break };
+        for here in self.ancestors(declaring) {
             let own = self.class_decl(here).and_then(|decl| {
                 decl.properties
                     .iter()
@@ -398,7 +396,6 @@ impl Request {
                 Some(_) => root = here,
                 None => {}
             }
-            at = self.class_parent(here);
         }
         root
     }
@@ -472,20 +469,11 @@ impl Request {
         name: &[u8],
         silent: bool,
     ) -> Option<Result<(), Visibility>> {
-        let mut at = Some(class);
-        let mut row = None;
-        for _ in 0..64 {
-            let Some(here) = at else { break };
-            if let Some(p) = self
-                .class_decl(here)
-                .and_then(|decl| decl.properties.iter().find(|p| &*p.name.0 == name))
-            {
-                row = Some((here, p.is_instance, p.visibility));
-                break;
-            }
-            at = self.class_parent(here);
-        }
-        let (declaring, is_instance, visibility) = row?;
+        let (declaring, is_instance, visibility) = self.lineage(class).find_map(|here| {
+            let decl = self.class_decl(here)?;
+            let p = decl.properties.iter().find(|p| &*p.name.0 == name)?;
+            Some((here, p.is_instance, p.visibility))
+        })?;
         let scope = self.property_scope();
         if scope != Some(declaring) {
             // `ZEND_ACC_CHANGED`: the scope's own private `static` wins

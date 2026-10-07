@@ -991,13 +991,7 @@ impl Request {
     /// each row the name, the class whose declaration it is and its
     /// visibility.
     fn hooked_object_keys(&self, class: ClassId) -> Vec<(Box<[u8]>, ClassId, Visibility)> {
-        let mut chain = Vec::new();
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(here) = at else { break };
-            chain.push(here);
-            at = self.class_parent(here);
-        }
+        let chain: Vec<ClassId> = self.lineage(class).collect();
         let mut keys: Vec<(Box<[u8]>, KeyOwner, ClassId, Visibility)> = Vec::new();
         for here in chain.into_iter().rev() {
             let Some(decl) = self.class_decl(here) else {
@@ -1116,20 +1110,10 @@ impl Request {
     /// Whether any class of `class`'s chain declares a hooked property,
     /// php's `ce->num_hooked_props`.
     pub(crate) fn class_has_hooks(&self, class: ClassId) -> bool {
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(here) = at else {
-                return false;
-            };
-            if self
-                .class_decl(here)
+        self.lineage(class).any(|here| {
+            self.class_decl(here)
                 .is_some_and(|decl| decl.properties.iter().any(|p| p.hooks.is_some()))
-            {
-                return true;
-            }
-            at = self.class_parent(here);
-        }
-        false
+        })
     }
 
     /// `zend_hooked_object_build_properties`, the table

@@ -1696,19 +1696,16 @@ impl Request {
     pub fn class_flags(&self, class: ClassId) -> Option<ClassFlags> {
         use php_unit::decl::DynamicProperties;
         let mut flags = self.class_decl(class)?.flags;
-        let mut at = self.class_parent(class);
-        for _ in 0..64 {
-            let Some(parent) = at else { break };
-            let Some(passed) = self.class_decl(parent).map(|decl| decl.flags) else {
-                break;
-            };
+        let passed = self
+            .ancestors(class)
+            .map_while(|parent| self.class_decl(parent).map(|decl| decl.flags));
+        for passed in passed {
             flags.not_serializable |= passed.not_serializable;
             if passed.dynamic_properties == DynamicProperties::Allowed
                 && flags.dynamic_properties == DynamicProperties::Deprecated
             {
                 flags.dynamic_properties = DynamicProperties::Allowed;
             }
-            at = self.class_parent(parent);
         }
         Some(flags)
     }
