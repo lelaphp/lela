@@ -799,8 +799,7 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     }
     let caller = req.stack_mut().current();
     if let Some((at, slot)) = returns_to {
-        let previous = req.set_slot(at, slot, object.as_value());
-        req.release(previous);
+        req.replace_slot(at, slot, object.as_value());
     }
     req.vm_mut().advance(caller);
     Ok(crate::tier::Stepped::Moved(caller))

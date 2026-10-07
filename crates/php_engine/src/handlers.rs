@@ -845,9 +845,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
         Ok(made) => made,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, made.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, made.as_value());
     Ok(advance(req, frame))
 }
 
@@ -1163,8 +1161,7 @@ pub(crate) fn bind_static<T: Tier>(
         req.addref(&held);
         held
     };
-    let previous = req.set_slot(frame, op.op1, bound);
-    req.release(previous);
+    req.replace_slot(frame, op.op1, bound);
     Ok(advance(req, frame))
 }
 
@@ -1216,8 +1213,7 @@ pub(crate) fn bind_init_static_or_jmp<T: Tier>(
     };
     let bound = cell.as_value();
     req.addref(&bound);
-    let previous = req.set_slot(frame, op.op1, bound);
-    req.release(previous);
+    req.replace_slot(frame, op.op1, bound);
     jump_to(req, frame, op.op2)
 }
 
@@ -1276,8 +1272,7 @@ pub(crate) fn bind_global<T: Tier>(
         Ok(cell) => cell,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let previous = req.set_slot(frame, op.op1, cell.as_value());
-    req.release(previous);
+    req.replace_slot(frame, op.op1, cell.as_value());
     Ok(advance(req, frame))
 }
 
@@ -2936,9 +2931,7 @@ pub(crate) fn assert_check<T: Tier>(
         return Ok(advance(req, frame));
     }
     if op.out_type != OperandKind::Unused {
-        let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, Value::bool(true));
-        req.release(previous);
+        set_out(req, frame, code, op, Value::bool(true));
     }
     jump_to(req, frame, op.op2)
 }
@@ -3413,8 +3406,7 @@ fn answered(
 ) -> Edge {
     match returns_to {
         Some((at, slot)) => {
-            let previous = req.set_slot(at, slot, value);
-            req.release(previous);
+            req.replace_slot(at, slot, value);
         }
         None => req.release(value),
     }
@@ -3719,8 +3711,7 @@ fn verify_arg_type(
     let at = usize::try_from(number.saturating_sub(1)).unwrap_or(usize::MAX);
     let argument = req.slot(frame, slot);
     if let Some(coerced) = verified_arg(req, frame, number, at, &argument)? {
-        let previous = req.set_slot(frame, slot, coerced);
-        req.release(previous);
+        req.replace_slot(frame, slot, coerced);
     }
     Ok(())
 }
@@ -3892,8 +3883,7 @@ pub(crate) fn recv_variadic<T: Tier>(
         Ok(collected) => collected,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let previous = req.set_slot(frame, op.out, collected.to_value());
-    req.release(previous);
+    req.replace_slot(frame, op.out, collected.to_value());
     for step in 0..count {
         let Some(argument) = req
             .vm()
@@ -4122,8 +4112,7 @@ pub(crate) fn verify_return_type<T: Tier>(
         req.release(previous);
         return Ok(advance(req, frame));
     }
-    let previous = req.set_slot(frame, slot, coerced);
-    req.release(previous);
+    req.replace_slot(frame, slot, coerced);
     Ok(advance(req, frame))
 }
 
@@ -4306,9 +4295,7 @@ pub(crate) fn callable_convert<T: Tier>(
         Ok(made) => made,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, made.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, made.as_value());
     Ok(advance(req, frame))
 }
 
@@ -4607,8 +4594,7 @@ pub(crate) fn recv_init<T: Tier>(
             Err(thrown) => return threw(req, frame, &thrown),
         };
         let evaluated = default.1;
-        let previous = req.set_slot(frame, op.out, default.0);
-        req.release(previous);
+        req.replace_slot(frame, op.out, default.0);
         // php goes on to `recv_init_check_type` for a default it
         // evaluated and returns for one it copied, so a constant
         // expression's value is held to the parameter's type and a
@@ -4725,9 +4711,7 @@ pub(crate) fn new<T: Tier>(
         Ok(object) => object,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, object.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, object.as_value());
     let count = usize::try_from(op.extended_value).unwrap_or(0);
     // `Z_OBJ_HT_P(result)->get_constructor`: the table's answer, which
     // is `zend_std_get_constructor`'s visibility check for a user class
@@ -5707,9 +5691,7 @@ pub(crate) fn fetch_this<T: Tier>(
     };
     let value = this.as_value();
     req.addref(&value);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -5976,12 +5958,7 @@ pub(crate) fn fetch_globals<T: Tier>(
         Ok(array) => array,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let previous = req.set_slot(
-        frame,
-        exec::temporary_slot(code, op.out),
-        Value::array(array),
-    );
-    req.release(previous);
+    set_out(req, frame, code, op, Value::array(array));
     Ok(advance(req, frame))
 }
 
@@ -6170,8 +6147,7 @@ fn fetch_by_name(
             if !lock {
                 exec::free_operand(req, frame, code, op.op1_type, op.op1);
             }
-            let previous = req.set_slot(frame, out, Value::undef());
-            req.release(previous);
+            req.replace_slot(frame, out, Value::undef());
             return threw(req, frame, &thrown);
         }
     };
@@ -6246,8 +6222,7 @@ fn fetch_by_name(
     if !lock {
         exec::free_operand(req, frame, code, op.op1_type, op.op1);
     }
-    let previous = req.set_slot(frame, out, value.unwrap_or_else(Value::null));
-    req.release(previous);
+    req.replace_slot(frame, out, value.unwrap_or_else(Value::null));
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
@@ -6337,8 +6312,7 @@ fn static_member(
 fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName) -> Edge {
     let value = match (req.vm().this(frame), mode) {
         (_, ByName::W | ByName::Rw | ByName::Unset) => {
-            let previous = req.set_slot(frame, out, Value::undef());
-            req.release(previous);
+            req.replace_slot(frame, out, Value::undef());
             let message = if mode == ByName::Unset {
                 "Cannot unset $this"
             } else {
@@ -6358,8 +6332,7 @@ fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName
         }
         (None, ByName::Is) => Value::null(),
     };
-    let previous = req.set_slot(frame, out, value);
-    req.release(previous);
+    req.replace_slot(frame, out, value);
     Ok(advance(req, frame))
 }
 
@@ -6412,9 +6385,7 @@ pub(crate) fn begin_silence<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let standing = req.error_reporting();
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::int(standing));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::int(standing));
     if !has_only_fatal_errors(standing) {
         req.set_error_reporting(standing & E_FATAL_ERRORS);
         req.silence_modifies_error_reporting();
@@ -6599,9 +6570,7 @@ pub(crate) fn fetch_class_constant<T: Tier>(
         Ok(value) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -6708,9 +6677,7 @@ pub(crate) fn fetch_constant<T: Tier>(
         return threw(req, frame, &thrown);
     };
     req.addref(&value);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     // `if (ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED)`
     // (`Z/Zend/zend_execute.c:5439`): the value is copied first and the
     // deprecation raised after, and the opline then advances under
@@ -7012,8 +6979,7 @@ fn static_prop_place(
         if held.as_object().is_some() || (mode == StaticFetch::Unset && unwritten) {
             let copied = held.undef_as_null();
             req.addref(&copied);
-            let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), copied);
-            req.release(previous);
+            set_out(req, frame, code, op, copied);
             return Ok(advance(req, frame));
         }
         if let Some(thrown) = req.set_refused(declaring, &property, "indirectly modify") {
@@ -7041,8 +7007,7 @@ fn static_prop_place(
         .flatten();
     if let Some(cell) = bound {
         req.addref(&cell.as_value());
-        let previous = req.set_slot(frame, out, cell.as_value());
-        req.release(previous);
+        req.replace_slot(frame, out, cell.as_value());
         return Ok(advance(req, frame));
     }
     let Some(var) = req.slot_ptr(frame, out) else {
@@ -7070,9 +7035,7 @@ fn fetch_static_prop(
         Ok(value) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -7303,9 +7266,7 @@ fn fetch_obj(
         Ok(value) => req.unwrap_reference(value),
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -8131,8 +8092,7 @@ fn fetch_obj_read(
             return threw(req, frame, &thrown);
         }
     };
-    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     exec::free_container_var(req, frame, code, op);
     Ok(advance(req, frame))
 }
@@ -8292,9 +8252,7 @@ pub(crate) fn fetch_dim_r<T: Tier>(
         Ok(value) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -8351,9 +8309,7 @@ pub(crate) fn fetch_dim_is<T: Tier>(
         Ok(value) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -8428,9 +8384,7 @@ fn list_read(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) ->
         Ok(value) => value,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -10028,9 +9982,7 @@ pub(crate) fn clone<T: Tier>(
         Ok(object) => object,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, object.as_value());
-    req.release(previous);
+    set_out(req, frame, code, op, object.as_value());
     Ok(advance(req, frame))
 }
 
@@ -10204,8 +10156,7 @@ fn hold_class(
     class: crate::api::values::ClassId,
 ) {
     let slot = exec::temporary_slot(code, out);
-    let previous = req.set_slot(frame, slot, Value::int(i64::from(class.0)));
-    req.release(previous);
+    req.replace_slot(frame, slot, Value::int(i64::from(class.0)));
 }
 
 /// `ZEND_FETCH_CLASS_NAME` (`Z/Zend/zend_vm_def.h:8895`), `C::class`
@@ -10299,9 +10250,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::string(name));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::string(name));
     Ok(advance(req, frame))
 }
 
@@ -10383,8 +10332,7 @@ pub(crate) fn fetch_class<T: Tier>(
         }
         // `Z_CE_P(EX_VAR(opline->result.var)) = NULL`.
         Ok(None) => {
-            let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), Value::null());
-            req.release(previous);
+            set_out(req, frame, code, op, Value::null());
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -10843,9 +10791,7 @@ fn frameless_call(
     let width = if arguments.len() == 3 { 2 } else { 1 };
     match served {
         Ok(value) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, value);
-            req.release(previous);
+            set_out(req, frame, code, op, value);
             req.vm_mut().jump(frame, at.saturating_add(width));
             Ok(Stepped::Same(frame))
         }
@@ -10958,9 +10904,7 @@ pub(crate) fn assign<T: Tier>(
     };
     if op.out_type != OperandKind::Unused {
         req.addref(&landed);
-        let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, landed);
-        req.release(previous);
+        set_out(req, frame, code, op, landed);
     }
     req.release(garbage);
     Ok(advance(req, frame))
@@ -11058,8 +11002,7 @@ pub(crate) fn assign_op<T: Tier>(
     let held = if op.op1_type == OperandKind::Cv {
         let held = exec::operand(req, frame, code, op.op1_type, op.op1);
         if req.slot(frame, op.op1).tag() == TypeTag::Undef {
-            let previous = req.set_slot(frame, op.op1, Value::null());
-            req.release(previous);
+            req.replace_slot(frame, op.op1, Value::null());
         }
         held
     } else {
@@ -13403,8 +13346,7 @@ pub(crate) fn separate<T: Tier>(
     // taken for the slot before the cell lets its own go.
     let inner = cell.get();
     req.addref(&inner);
-    let previous = req.set_slot(frame, slot, inner);
-    req.release(previous);
+    req.replace_slot(frame, slot, inner);
     Ok(advance(req, frame))
 }
 
@@ -15301,6 +15243,12 @@ fn place_of(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<Propert
     table.get_property_ptr_ptr(req, object, name)
 }
 
+/// `ZVAL_COPY_VALUE(EX_VAR(opline->result.var), value)`: the temporary
+/// `out` names takes `value`'s owner, and what it held is released.
+fn set_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, value: Value) {
+    req.replace_slot(frame, exec::temporary_slot(code, op.out), value);
+}
+
 /// `if (RETURN_VALUE_USED(opline)) ZVAL_COPY(EX_VAR(opline->result.var), value)`:
 /// the temporary `out` names one more owner of `value`, and nothing
 /// where the compiler marked the temporary `UNUSED`.
@@ -15309,8 +15257,7 @@ fn write_out(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, va
         return;
     }
     req.addref(value);
-    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), *value);
-    req.release(previous);
+    set_out(req, frame, code, op, *value);
 }
 
 /// `ZEND_RETURNS_FUNCTION` (`Z/Zend/zend_compile.h:1198`), on an
@@ -15540,9 +15487,7 @@ pub(crate) fn fetch_obj_unset<T: Tier>(
     }
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    let out = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, out, Value::null());
-    req.release(previous);
+    set_out(req, frame, code, op, Value::null());
     Ok(advance(req, frame))
 }
 
@@ -15895,9 +15840,7 @@ pub(crate) fn init_array<T: Tier>(
         Ok(array) => array,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::array(array));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::array(array));
     if op.op1_type == OperandKind::Unused {
         return Ok(advance(req, frame));
     }
@@ -16720,8 +16663,7 @@ pub(crate) fn fe_reset_r<T: Tier>(
         } else {
             req.addref(&subject);
         }
-        let previous = req.set_slot(frame, slot, subject);
-        req.release(previous);
+        req.replace_slot(frame, slot, subject);
         if let Some(cell) = req.slot_ptr(frame, slot) {
             // `Z_FE_POS_P(EX_VAR(opline->result.var)) = pos`, which php
             // writes after the copy and not through it: the word is the
@@ -16746,8 +16688,7 @@ pub(crate) fn fe_reset_r<T: Tier>(
         } else {
             req.addref(&subject);
         }
-        let previous = req.set_slot(frame, slot, subject);
-        req.release(previous);
+        req.replace_slot(frame, slot, subject);
         set_fe_iter(req, frame, slot, started);
         if op.op1_type == OperandKind::Var {
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
@@ -16808,8 +16749,7 @@ fn fe_reset_iterator(
         Ok((wrapper, _)) => wrapper.as_value(),
         Err(_) => Value::undef(),
     };
-    let previous = req.set_slot(frame, exec::temporary_slot(code, op.out), held);
-    req.release(previous);
+    set_out(req, frame, code, op, held);
     let free = |req: &mut Request| exec::free_operand(req, frame, code, op.op1_type, op.op1);
     match reset {
         Ok((_, empty)) => {
@@ -16862,8 +16802,7 @@ fn fe_reset_refused(
         ),
     );
     let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::undef());
-    req.release(previous);
+    req.replace_slot(frame, slot, Value::undef());
     set_fe_iter(req, frame, slot, None);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     req.vm_mut().jump(frame, op.op2);
@@ -17147,9 +17086,7 @@ pub(crate) fn fe_fetch_r<T: Tier>(
             Ok(key) => key,
             Err(thrown) => return threw(req, frame, &thrown),
         };
-        let out = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, out, key);
-        req.release(previous);
+        set_out(req, frame, code, op, key);
     }
     let assigned = fe_assign(req, frame, code, op, value);
     if let Some(owned) = owned {
@@ -17191,9 +17128,7 @@ fn fe_fetch_iterator(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     if let Some(key) = key {
-        let out = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, out, key);
-        req.release(previous);
+        set_out(req, frame, code, op, key);
     }
     let assigned = fe_assign(req, frame, code, op, current);
     req.release(current);
@@ -17252,8 +17187,7 @@ fn fe_assign(
     if op.op2_type == OperandKind::Var {
         req.addref(&value);
         let out = exec::temporary_slot(code, op.op2);
-        let previous = req.set_slot(frame, out, value);
-        req.release(previous);
+        req.replace_slot(frame, out, value);
         return Ok(advance(req, frame));
     }
     let value = value.deref();
@@ -17261,8 +17195,7 @@ fn fe_assign(
     if let Some(r) = req.slot(frame, op.op2).as_php_ref() {
         req.reference_set(r.heap(), value);
     } else {
-        let garbage = req.set_slot(frame, op.op2, value);
-        req.release(garbage);
+        req.replace_slot(frame, op.op2, value);
     }
     Ok(advance(req, frame))
 }
@@ -17426,8 +17359,7 @@ pub(crate) fn fe_reset_rw<T: Tier>(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     req.addref(&cell.as_value());
-    let previous = req.set_slot(frame, slot, cell.as_value());
-    req.release(previous);
+    req.replace_slot(frame, slot, cell.as_value());
     let started = if is_array {
         match req.reference_separate(cell.heap()) {
             Ok(Some(array)) => Some(req.heap_mut().iterator_add(array, 0)),
@@ -17483,8 +17415,7 @@ fn fe_reset_rw_value(
             Ok(cell) => cell,
             Err(thrown) => return threw(req, frame, &thrown),
         };
-        let previous = req.set_slot(frame, slot, cell.as_value());
-        req.release(previous);
+        req.replace_slot(frame, slot, cell.as_value());
         let started = match req.reference_separate(cell.heap()) {
             Ok(Some(array)) => Some(HashIter(req.heap_mut().iterator_add(array, 0))),
             Ok(None) => None,
@@ -17500,8 +17431,7 @@ fn fe_reset_rw_value(
             return fe_reset_iterator(req, frame, code, op, object, true);
         }
         let _ = req.take_slot(frame, exec::temporary_slot(code, op.op1));
-        let previous = req.set_slot(frame, slot, subject);
-        req.release(previous);
+        req.replace_slot(frame, slot, subject);
         let started = match req.object_walk_start(object) {
             Ok(started) => started.map(HashIter),
             Err(thrown) => return threw(req, frame, &thrown),
@@ -17634,8 +17564,7 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
     };
     if let Some(key) = key {
         let out = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, out, key);
-        req.release(previous);
+        req.replace_slot(frame, out, key);
     }
     let bound = cell.as_value();
     if op.op2_type == OperandKind::Cv {
@@ -17645,14 +17574,12 @@ pub(crate) fn fe_fetch_rw<T: Tier>(
             .is_some_and(|held| *held == cell);
         if !same {
             req.addref(&bound);
-            let garbage = req.set_slot(frame, op.op2, bound);
-            req.release(garbage);
+            req.replace_slot(frame, op.op2, bound);
         }
     } else {
         req.addref(&bound);
         let out = exec::temporary_slot(code, op.op2);
-        let garbage = req.set_slot(frame, out, bound);
-        req.release(garbage);
+        req.replace_slot(frame, out, bound);
     }
     if owned {
         req.release(bound);
@@ -18147,9 +18074,7 @@ pub(crate) fn rope_init<T: Tier>(
         Ok(rope) => rope,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::array(rope));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::array(rope));
     rope_piece(req, frame, code, op, rope)
 }
 
@@ -18268,9 +18193,7 @@ pub(crate) fn rope_end<T: Tier>(
     req.release(held);
     match joined {
         Ok(joined) => {
-            let out = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, out, Value::string(joined));
-            req.release(previous);
+            set_out(req, frame, code, op, Value::string(joined));
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -19220,9 +19143,7 @@ pub(crate) fn func_get_args<T: Tier>(
     })();
     match copied {
         Ok(array) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, Value::array(array));
-            req.release(previous);
+            set_out(req, frame, code, op, Value::array(array));
             Ok(advance(req, frame))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -19252,9 +19173,7 @@ pub(crate) fn func_num_args<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let passed = req.vm().at(frame).map_or(0, |state| state.num_args);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::int(i64::from(passed)));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::int(i64::from(passed)));
     Ok(advance(req, frame))
 }
 
@@ -19392,9 +19311,7 @@ fn class_name_into(
         Ok(name) => name,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, Value::string(name));
-    req.release(previous);
+    set_out(req, frame, code, op, Value::string(name));
     Ok(advance(req, frame))
 }
 
@@ -19713,9 +19630,7 @@ pub(crate) fn jmp_set<T: Tier>(
         return Ok(advance(req, frame));
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, taken);
-    req.release(previous);
+    set_out(req, frame, code, op, taken);
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))
 }
@@ -19794,9 +19709,7 @@ pub(crate) fn jmp_null<T: Tier>(
         SHORT_CIRCUITING_CHAIN_ISSET => Value::bool(false),
         _ => Value::bool(true),
     };
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, result);
-    req.release(previous);
+    set_out(req, frame, code, op, result);
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))
 }
@@ -19850,9 +19763,7 @@ pub(crate) fn coalesce<T: Tier>(
         return Ok(advance(req, frame));
     }
     let taken = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, taken);
-    req.release(previous);
+    set_out(req, frame, code, op, taken);
     req.vm_mut().jump(frame, op.op2);
     Ok(Stepped::Same(frame))
 }
@@ -20015,9 +19926,7 @@ pub(crate) fn qm_assign<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -20044,9 +19953,7 @@ pub(crate) fn copy_tmp<T: Tier>(
 ) -> Edge {
     let value = req.slot(frame, exec::temporary_slot(code, op.op1));
     req.addref(&value);
-    let slot = exec::temporary_slot(code, op.out);
-    let previous = req.set_slot(frame, slot, value);
-    req.release(previous);
+    set_out(req, frame, code, op, value);
     Ok(advance(req, frame))
 }
 
@@ -20147,8 +20054,7 @@ fn returned_to_caller<T: Tier>(
 fn handed_back(req: &mut Request, into: Option<(FrameRef, u32)>, value: Value) -> bool {
     match into {
         Some((at, slot)) => {
-            let previous = req.set_slot(at, slot, value);
-            req.release(previous);
+            req.replace_slot(at, slot, value);
         }
         None => req.release(value),
     }
@@ -20201,9 +20107,7 @@ fn computed_into(
 ) -> Edge {
     match computed {
         Ok(value) => {
-            let slot = exec::temporary_slot(code, op.out);
-            let previous = req.set_slot(frame, slot, value);
-            req.release(previous);
+            set_out(req, frame, code, op, value);
             Ok(advance(req, frame))
         }
         Err(thrown) => {
@@ -20344,8 +20248,7 @@ fn incdec_typed_ref(
             RefStep::Refused(thrown) => {
                 if op.out_type != OperandKind::Unused {
                     let out = exec::temporary_slot(code, op.out);
-                    let previous = req.set_slot(frame, out, Value::null());
-                    req.release(previous);
+                    req.replace_slot(frame, out, Value::null());
                 }
                 exec::free_operand(req, frame, code, op.op1_type, op.op1);
                 req.leave_pending(&thrown);
@@ -20356,8 +20259,7 @@ fn incdec_typed_ref(
         let out = exec::temporary_slot(code, op.out);
         let value = if post { held } else { stored };
         req.addref(&value);
-        let previous = req.set_slot(frame, out, value);
-        req.release(previous);
+        req.replace_slot(frame, out, value);
     }
     req.reference_set(cell.heap(), stored);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
@@ -20486,8 +20388,7 @@ fn incdec(
                 let out = exec::temporary_slot(code, op.out);
                 let value = if post { held } else { stepped };
                 req.addref(&value);
-                let previous = req.set_slot(frame, out, value);
-                req.release(previous);
+                req.replace_slot(frame, out, value);
             }
             // The kernel's one owner of the stepped value is the
             // variable's from here, and what stood there is released,
@@ -20499,8 +20400,7 @@ fn incdec(
                 place.write(stepped.into_zval());
                 req.release(previous);
             } else {
-                let previous = req.set_slot(frame, op.op1, stepped);
-                req.release(previous);
+                req.replace_slot(frame, op.op1, stepped);
             }
             // `FREE_OP1()`: a `VAR` holding an `IS_INDIRECT` owns
             // nothing, and one holding what `offsetGet` answered gives
@@ -20796,8 +20696,7 @@ pub(crate) fn catch<T: Tier>(
                 return threw(req, frame, &thrown);
             }
         } else {
-            let garbage = req.set_slot(frame, op.out, value);
-            req.release(garbage);
+            req.replace_slot(frame, op.out, value);
         }
     } else {
         req.release(caught.as_value());
@@ -21378,8 +21277,7 @@ pub(crate) fn r#yield<T: Tier>(
         .then(|| exec::take_operand(req, frame, code, op.op2_type, op.op2));
     let send_target = (op.out_type != OperandKind::Unused).then(|| {
         let slot = exec::temporary_slot(code, op.out);
-        let previous = req.set_slot(frame, slot, Value::null());
-        req.release(previous);
+        req.replace_slot(frame, slot, Value::null());
         slot
     });
     crate::generator::yielded(req, generator, value, key, send_target);
@@ -21511,8 +21409,7 @@ pub(crate) fn yield_from<T: Tier>(
         Ok(crate::generator::From::Finished(retval)) => {
             match out {
                 Some(slot) => {
-                    let previous = req.set_slot(frame, slot, retval);
-                    req.release(previous);
+                    req.replace_slot(frame, slot, retval);
                 }
                 None => req.release(retval),
             }
@@ -21520,8 +21417,7 @@ pub(crate) fn yield_from<T: Tier>(
         }
         Ok(crate::generator::From::Delegating) => {
             if let Some(slot) = out {
-                let previous = req.set_slot(frame, slot, Value::null());
-                req.release(previous);
+                req.replace_slot(frame, slot, Value::null());
             }
             crate::observer::generator_yielded(req, frame, generator);
             crate::generator::suspend(req, generator)?;
@@ -21633,8 +21529,7 @@ pub(crate) fn make_ref<T: Tier>(
             None => req.take_slot(frame, at),
         }
     };
-    let previous = req.set_slot(frame, out, held);
-    req.release(previous);
+    req.replace_slot(frame, out, held);
     Ok(advance(req, frame))
 }
 
@@ -22513,8 +22408,7 @@ mod tests {
                 "an object is made on pass {pass}"
             );
             let Some(Ok(object)) = made else { continue };
-            let previous = req.set_slot(frame, 0, object.as_value());
-            req.release(previous);
+            req.replace_slot(frame, 0, object.as_value());
             req.vm_mut().jump(frame, 0);
             assert_eq!(
                 init_method_call::<Nop>(&mut req, frame, code, &op),
@@ -22972,8 +22866,7 @@ mod tests {
         // Two CVs would share the cell; this frame has one, and the test
         // is the second holder.
         req.addref(&cell.as_value());
-        let previous = req.set_slot(frame, 0, cell.as_value());
-        req.release(previous);
+        req.replace_slot(frame, 0, cell.as_value());
 
         assert_eq!(
             assign::<Nop>(&mut req, frame, code, &op),

@@ -70,8 +70,7 @@ impl Request {
             };
             // The CV was `UNDEF` when the frame was pushed, or is its
             // own value taken back, so the slot gives up nothing.
-            let previous = self.set_slot(frame, at, value);
-            self.release(previous);
+            self.replace_slot(frame, at, value);
         }
     }
 
