@@ -805,15 +805,16 @@ fn sleep_props(
     class: &[u8],
     list: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    // The rows as they stand, `None` once program code may have written
-    // them.
-    let mut rows: Option<Vec<(Key, Value)>> = None;
+    // `zend_get_properties_for` before the names are walked, which
+    // initializes a lazy object first; the rows as they stand, `None`
+    // once program code may have written them.
+    let mut rows = Some(object.props_for(req, PropertyPurpose::Serialize)?);
     let shown_class = String::from_utf8_lossy(class).into_owned();
     let mut out = PhpArray::new(req)?;
     // `ZEND_HASH_FOREACH_VAL_IND(sleep_retval, name_val)`
     // (`Z/ext/standard/var.c:919`), which holds nothing: the caller owns
     // what `__sleep()` answered.
-    walk::foreach(req, list, Hold::None, |req, row| {
+    let walked = walk::foreach(req, list, Hold::None, |req, row| {
         // A name the list holds by reference is what the reference holds.
         let name = row.value().deref();
         if name.as_php_string().is_none() {
@@ -881,8 +882,14 @@ fn sleep_props(
         let key = Owner::take(req, key);
         out.set(req, key, value)?;
         Ok(ControlFlow::<()>::Continue(()))
-    })?;
-    Ok(out)
+    });
+    match walked {
+        Ok(_) => Ok(out),
+        Err(thrown) => {
+            out.give_up(req);
+            Err(thrown)
+        }
+    }
 }
 
 /// `zend_gcvt(value, serialize_precision, '.', 'E', buf)`, which

@@ -360,3 +360,17 @@ echo serialize($o), "\n";
     );
     assert_eq!(stdout, "O:1:\"T\":1:{s:1:\"b\";N;}\n");
 }
+
+/// A `__sleep` name whose conversion throws ends the walk, and the
+/// array the arm was gathering is given up (#2103).
+#[test]
+fn a_sleep_name_that_throws_keeps_no_array() {
+    let stdout = armed(
+        r#"<?php
+class N { function __toString(): string { throw new Exception("n"); } }
+class T { public $a = 1; function __sleep() { return ['a', new N]; } }
+try { echo serialize(new T), "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert!(stdout.ends_with("n\n"), "{stdout}");
+}
