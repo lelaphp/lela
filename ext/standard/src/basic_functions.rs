@@ -185,8 +185,9 @@ fn getenv(
             if name.is_empty() || name.iter().any(|c| matches!(c, b' ' | b'.' | b'[')) {
                 continue;
             }
-            let key = Key::from_string(PhpString::new(req, &name)?.hand_on_unmigrated());
-            let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
+            let key = PhpString::new(req, &name)?;
+            let key = Key::from_string(req, key);
+            let value = PhpString::new(req, &value)?.into_value();
             array.set(req, key, value)?;
         }
         return Ok(Union::A(array));
@@ -389,15 +390,15 @@ fn getopt(
         let key = if !(name.len() > 1 && name[0] == b'0')
             && let Some(n) = numeric_string(&name).and_then(|v| v.as_int())
         {
-            Key::Int(n)
+            Owner::take(req, Key::Int(n))
         } else {
-            Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated())
+            PhpString::new(req, &name)?.into_key()
         };
         let mut items = Vec::new();
         for value in values {
             items.push(match value {
-                Some(bytes) => Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated()),
-                None => Value::bool(false),
+                Some(bytes) => PhpString::new(req, &bytes)?.into_value(),
+                None => Owner::take(req, Value::bool(false)),
             });
         }
         let value = if items.len() == 1 {
@@ -407,7 +408,7 @@ fn getopt(
             for item in items {
                 list.append(req, item)?;
             }
-            Value::array(list.hand_on_unmigrated())
+            list.into_value()
         };
         result.set(req, key, value)?;
     }
@@ -1356,7 +1357,8 @@ fn ini_get_all(
     }
     let mut all = PhpArray::new(req)?;
     for entry in entries {
-        let key = Key::from_string(PhpString::new(req, &entry.decl.name.0)?.hand_on_unmigrated());
+        let key = PhpString::new(req, &entry.decl.name.0)?;
+        let key = Key::from_string(req, key);
         let value = if details {
             let access = (i64::from(entry.decl.user) * INI_USER)
                 | (i64::from(entry.decl.per_dir) * INI_PERDIR)
@@ -1368,12 +1370,12 @@ fn ini_get_all(
             for (name, value) in [
                 (&b"global_value"[..], ini_value(req, global)?),
                 (b"local_value", ini_value(req, entry.value.as_deref())?),
-                (b"access", Value::int(access)),
+                (b"access", Owner::take(req, Value::int(access))),
             ] {
-                let name = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+                let name = PhpString::new(req, name)?.into_key();
                 option.set(req, name, value)?;
             }
-            Value::array(option.hand_on_unmigrated())
+            option.into_value()
         } else {
             ini_value(req, entry.value.as_deref())?
         };
@@ -1384,10 +1386,10 @@ fn ini_get_all(
 
 /// An entry's value as `ini_get_all()` answers it: the string, or `null`
 /// where the entry has none (php's `NULL`).
-fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Value, Thrown> {
+fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Owner<Value>, Thrown> {
     Ok(match value {
-        Some(value) => Value::string(PhpString::new(req, value)?.hand_on_unmigrated()),
-        None => Value::null(),
+        Some(value) => PhpString::new(req, value)?.into_value(),
+        None => Owner::take(req, Value::null()),
     })
 }
 
@@ -1654,7 +1656,7 @@ fn sys_getloadavg(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown>
     };
     let mut array = PhpArray::new(req)?;
     for average in load {
-        array.append(req, Value::float(average))?;
+        array.append(req, Owner::take(req, Value::float(average)))?;
     }
     Ok(OrFalse::Value(array))
 }

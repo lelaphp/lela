@@ -38,9 +38,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{
-    ClassId, Key, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef,
-};
+use php_ext::values::{ClassId, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
     Answer, ClassType, Exported, Item, Kind, Name, Node, Parser, Returned, Scope, Source, XPath,
 };
@@ -495,7 +493,7 @@ impl SimpleXMLElement {
             };
             if let Some(target) = target {
                 let made = wrap(req, this, target, walk, ns)?;
-                out.append(req, made.into_value().hand_on_unmigrated())?;
+                out.append(req, made.into_value())?;
             }
         }
         Ok(Some(OrFalse::Value(out)))
@@ -1321,9 +1319,9 @@ fn namespace_array(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (prefix, href) in found {
-        let key = Key::Str(PhpString::new(req, &prefix)?.hand_on_unmigrated());
+        let key = PhpString::new(req, &prefix)?.into_key();
         let value = sxe::string(req, &href)?;
-        out.set(req, key, value.hand_on_unmigrated())?;
+        out.set(req, key, value)?;
     }
     Ok(out)
 }

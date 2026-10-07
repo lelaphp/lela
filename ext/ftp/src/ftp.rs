@@ -14,7 +14,7 @@ use php_ext::request::{
     Handshake, OptionAnswer, Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _,
     Xport, XportFailure,
 };
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 /// `FTP_BUFSIZE`: the most one read asks for and the longest line.
 pub(crate) const BUFSIZE: usize = 4096;
@@ -1427,8 +1427,8 @@ pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<Owner<P
     };
     let mut entry = PhpArray::new(req)?;
     let name = PhpString::new(req, &line[blank + 1..])?;
-    let key = Key::Str(PhpString::new(req, b"name")?.hand_on_unmigrated());
-    entry.set(req, key, Value::string(name.hand_on_unmigrated()))?;
+    let key = PhpString::new(req, b"name")?.into_key();
+    entry.set(req, key, name.into_value())?;
     let mut facts = &line[..blank];
     while !facts.is_empty() {
         let fact = facts.iter().position(|&b| b == b';').and_then(|semi| {
@@ -1440,9 +1440,9 @@ pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<Owner<P
             entry.give_up(req);
             return Ok(None);
         };
-        let key = Key::Str(PhpString::new(req, &facts[..eq])?.hand_on_unmigrated());
+        let key = PhpString::new(req, &facts[..eq])?.into_key();
         let value = PhpString::new(req, &facts[eq + 1..semi])?;
-        entry.set(req, key, Value::string(value.hand_on_unmigrated()))?;
+        entry.set(req, key, value.into_value())?;
         facts = &facts[semi + 1..];
     }
     Ok(Some(entry))

@@ -438,11 +438,8 @@ fn read_body(
                         },
                     };
                     let key = PhpString::new(req, param.param_name.as_deref().unwrap_or_default())?;
-                    return_value.set(
-                        req,
-                        PhpKey::from_string(key.hand_on_unmigrated()),
-                        tmp.hand_on_unmigrated(),
-                    )?;
+                    let key = PhpKey::from_string(req, key);
+                    return_value.set(req, key, tmp)?;
                     param_count += 1;
                 }
             }
@@ -462,32 +459,28 @@ fn read_body(
                     if v.has_name() {
                         let name = v.name();
                         if let Some(existing) = return_value.find(&name) {
-                            if let Some(mut arr) = existing.deref().as_array().copied() {
-                                req.addref(&Value::array(arr));
-                                arr.separate(req)?;
-                                arr.append(req, tmp.hand_on_unmigrated())?;
-                                let key = PhpKey::from_string(
-                                    PhpString::new(req, &name)?.hand_on_unmigrated(),
-                                );
-                                return_value.set(req, key, Value::array(arr))?;
+                            if let Some(arr) = existing.deref().as_array().copied() {
+                                let mut arr = Owner::take(req, arr);
+                                arr.append(req, tmp)?;
+                                let key = PhpString::new(req, &name)?;
+                                let key = PhpKey::from_string(req, key);
+                                return_value.set(req, key, arr.into_value())?;
                             } else {
                                 tmp.give_up(req);
                             }
                         } else if v.next().is_some() && get_node(v.next(), &name, None).is_some() {
                             let mut arr = PhpArray::new(req)?;
-                            arr.append(req, tmp.hand_on_unmigrated())?;
-                            let key = PhpKey::from_string(
-                                PhpString::new(req, &name)?.hand_on_unmigrated(),
-                            );
-                            return_value.set(req, key, arr.into_value().hand_on_unmigrated())?;
+                            arr.append(req, tmp)?;
+                            let key = PhpString::new(req, &name)?;
+                            let key = PhpKey::from_string(req, key);
+                            return_value.set(req, key, arr.into_value())?;
                         } else {
-                            let key = PhpKey::from_string(
-                                PhpString::new(req, &name)?.hand_on_unmigrated(),
-                            );
-                            return_value.set(req, key, tmp.hand_on_unmigrated())?;
+                            let key = PhpString::new(req, &name)?;
+                            let key = PhpKey::from_string(req, key);
+                            return_value.set(req, key, tmp)?;
                         }
                     } else {
-                        return_value.append(req, tmp.hand_on_unmigrated())?;
+                        return_value.append(req, tmp)?;
                     }
                     param_count += 1;
                 }
@@ -538,8 +531,9 @@ fn read_body(
                         return Err(err);
                     }
                 };
-                let key = PhpKey::from_string(PhpString::new(req, &t.name())?.hand_on_unmigrated());
-                headers.set(req, key, val.hand_on_unmigrated())?;
+                let key = PhpString::new(req, &t.name())?;
+                let key = PhpKey::from_string(req, key);
+                headers.set(req, key, val)?;
             }
             trav = t.next();
         }

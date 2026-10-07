@@ -248,8 +248,8 @@ pub(super) fn raise_impl(
     let code = crate::string(req, state.as_str().as_bytes())?;
     let mut info = PhpArray::new(req)?;
     let text = crate::string(req, state.as_str().as_bytes())?;
-    info.append(req, text.hand_on_unmigrated())?;
-    info.append(req, Value::int(0))?;
+    info.append(req, text)?;
+    info.append(req, Owner::take(req, Value::int(0)))?;
     Err(throw_pdo(req, &message, code, Some(info)))
 }
 
@@ -269,9 +269,9 @@ pub(super) fn fetch_error(
         _ => crate::dbh::state(req, dbh).and_then(|h| h.native_error.clone()),
     };
     if let Some((code, message)) = recorded {
-        info.append(req, Value::int(code))?;
+        info.append(req, Owner::take(req, Value::int(code)))?;
         let text = crate::string(req, &message)?;
-        info.append(req, text.hand_on_unmigrated())?;
+        info.append(req, text)?;
     }
     Ok(())
 }
@@ -303,7 +303,7 @@ pub(super) fn handle(
     let description = description(state).unwrap_or("<<Unknown error>>");
     let mut info = PhpArray::new(req)?;
     let text = crate::string(req, state.as_str().as_bytes())?;
-    info.append(req, text.hand_on_unmigrated())?;
+    info.append(req, text)?;
     fetch_error(req, dbh, on, &mut info)?;
     let code = info
         .get(&php_ext::values::Key::Int(1))
@@ -404,10 +404,10 @@ pub(super) fn throw_connect(req: &mut Request, failure: Failure) -> Thrown {
     let info = (|| {
         let mut info = PhpArray::new(req)?;
         let text = crate::string(req, error.state.as_str().as_bytes())?;
-        info.append(req, text.hand_on_unmigrated())?;
-        info.append(req, Value::int(error.code))?;
+        info.append(req, text)?;
+        info.append(req, Owner::take(req, Value::int(error.code)))?;
         let text = crate::string(req, &error.message)?;
-        info.append(req, text.hand_on_unmigrated())?;
+        info.append(req, text)?;
         Ok::<Owner<PhpArray>, Thrown>(info)
     })();
     match info {

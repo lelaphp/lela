@@ -2998,11 +2998,11 @@ fn add_unpacked_element(
     // then written.
     let rows: Vec<(Key, Value)> = walk::rows(req, source).collect();
     for (key, value) in rows {
-        req.addref(&value);
+        let value = Owner::take(req, value);
         match key {
-            Key::Str(name) => {
-                req.addref(&Value::string(name));
-                array.set(req, Key::Str(name), value)?;
+            Key::Str(_) => {
+                let key = Owner::take(req, key);
+                array.set(req, key, value)?;
             }
             Key::Int(_) => array.append(req, value)?,
         }

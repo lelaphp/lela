@@ -8,7 +8,7 @@ use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{Who, rusage};
 use crate::uniqid::now;
@@ -80,8 +80,8 @@ fn getrusage(
     };
     let mut usage = PhpArray::new(req)?;
     for (name, value) in fields {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
-        usage.set(req, key, Value::int(value))?;
+        let key = PhpString::new(req, name.as_bytes())?.into_key();
+        usage.set(req, key, Owner::take(req, Value::int(value)))?;
     }
     Ok(OrFalse::Value(usage))
 }
@@ -194,8 +194,8 @@ fn gettimeofday(
         (b"dsttime", i64::from(offset.is_dst)),
     ];
     for (name, value) in rows {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        array.set(req, key, Value::int(value))?;
+        let key = PhpString::new(req, name)?.into_key();
+        array.set(req, key, Owner::take(req, Value::int(value)))?;
     }
     Ok(Union::A(array))
 }

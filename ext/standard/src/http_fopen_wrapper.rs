@@ -446,7 +446,7 @@ impl Chain {
     /// One line appended to the headers array.
     fn add_header(&mut self, req: &mut Request, line: &[u8]) -> Result<(), Thrown> {
         let mut headers = self.headers(req)?;
-        let line = Value::string(PhpString::new(req, line)?.hand_on_unmigrated());
+        let line = PhpString::new(req, line)?.into_value();
         headers.append(req, line)
     }
 }

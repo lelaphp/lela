@@ -338,14 +338,14 @@ fn valid(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
 
 /// A value that is its one owner, as the `Owner` a native returns.
 #[cfg_attr(debug_assertions, track_caller)]
-fn owner_of(req: &mut Request, value: Value) -> Owner<Value> {
+pub(crate) fn owner_of(req: &mut Request, value: Value) -> Owner<Value> {
     let owner = Owner::take(req, value);
     req.release(value);
     owner
 }
 
 /// A value with a reference followed, the owner moved to what it holds.
-fn owned(req: &mut Request, value: Value) -> Value {
+pub(crate) fn owned(req: &mut Request, value: Value) -> Value {
     let bare = value.deref();
     req.addref(&bare);
     req.release(value);
@@ -423,12 +423,17 @@ fn set_key(
 
 /// [`set_key`]'s key and value, each one owner, for an array the
 /// caller writes itself.
-fn keyed(req: &mut Request, key: &Value, value: Value) -> Result<(Key, Value), Thrown> {
+fn keyed(
+    req: &mut Request,
+    key: &Value,
+    value: Value,
+) -> Result<(Owner<Key>, Owner<Value>), Thrown> {
     let value = owned(req, value);
+    let value = owner_of(req, value);
     let key = match zval_key(req, &key.deref()) {
         Ok(key) => key,
         Err(thrown) => {
-            req.release(value);
+            value.give_up(req);
             return Err(thrown);
         }
     };
@@ -436,18 +441,19 @@ fn keyed(req: &mut Request, key: &Value, value: Value) -> Result<(Key, Value), T
 }
 
 /// The key [`set_key`] places a value under, one owner of a string key.
-fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
+fn zval_key(req: &mut Request, key: &Value) -> Result<Owner<Key>, Thrown> {
     if let Some(s) = key.as_php_string() {
-        return key_of(req, &Value::string(*s)).map(Owner::hand_on_unmigrated);
+        return key_of(req, &Value::string(*s));
     }
     if let Some(n) = key.as_int() {
-        return Ok(Key::Int(n));
+        return Ok(Owner::take(req, Key::Int(n)));
     }
     if let Some(b) = key.as_bool() {
-        return Ok(Key::Int(i64::from(b)));
+        return Ok(Owner::take(req, Key::Int(i64::from(b))));
     }
     if let Some(f) = key.as_float() {
-        return Ok(Key::Int(float_key(req, f)?));
+        let n = float_key(req, f)?;
+        return Ok(Owner::take(req, Key::Int(n)));
     }
     if let Some(resource) = key.as_resource() {
         let id = resource.id();
@@ -456,7 +462,7 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
             &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
         );
         php_ext::raising::pending(req)?;
-        return Ok(Key::Int(id));
+        return Ok(Owner::take(req, Key::Int(id)));
     }
     if key.as_array().is_none() && key.as_object().is_none() {
         php_ext::raising::deprecated(
@@ -464,7 +470,7 @@ fn zval_key(req: &mut Request, key: &Value) -> Result<Key, Thrown> {
             "Using null as an array offset is deprecated, use an empty string instead",
         );
         php_ext::raising::pending(req)?;
-        return Ok(Key::Str(PhpString::new(req, b"")?.hand_on_unmigrated()));
+        return Ok(PhpString::new(req, b"")?.into_key());
     }
     let name = zval_type_name(req, key);
     Err(throw_error(
@@ -576,21 +582,10 @@ fn std_properties(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Valu
 ///   }
 /// }
 /// ```
-fn members(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
-    let mut out = PhpArray::new(req)?;
-    for (key, value) in std_properties(req, object)? {
-        req.addref(&value);
-        let key = owned_key(req, &key);
-        out.set(req, key, value)?;
-    }
-    Ok(out)
-}
-
-/// A view of a key made one the caller may hand to [`PhpArray::set`],
-/// which takes a string key's owner: `zend_string_copy` over a string
-/// key, nothing over an integer one. A dynamic property's name read
-/// through a view survives the table built from it, so an object
-/// serialized twice names it twice.
+///
+/// Each key is an owner of its own, taken of the view the table holds,
+/// so a dynamic property's name survives the table built from it and an
+/// object serialized twice names it twice.
 ///
 /// ```php
 /// #[AllowDynamicProperties] class S extends SplObjectStorage {}
@@ -601,11 +596,13 @@ fn members(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thro
 /// x:i:0;m:a:1:{s:6:"ababab";i:1;}
 /// x:i:0;m:a:1:{s:6:"ababab";i:1;}
 /// ```
-pub(crate) fn owned_key(req: &Request, key: &Key) -> Key {
-    if let Key::Str(s) = key {
-        req.addref(&Value::string(*s));
+fn members(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
+    let mut out = PhpArray::new(req)?;
+    for (key, value) in std_properties(req, object)? {
+        let (key, value) = (Owner::take(req, key), Owner::take(req, value));
+        out.set(req, key, value)?;
     }
-    key.clone()
+    Ok(out)
 }
 
 /// `object_properties_load`: each member written onto the object, a

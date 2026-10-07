@@ -14,7 +14,7 @@ use crate::api::abi::{Encoding, Multibyte};
 use crate::api::raising::{Level, Thrown, docref, throw};
 use crate::api::request::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
-use crate::api::values::{PhpArray, Value};
+use crate::api::values::{Owner, PhpArray, PhpString, Value};
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;
@@ -451,11 +451,11 @@ impl Handler {
         req: &mut Request,
         into: PhpArray,
         name: &[u8],
-        value: Value,
+        value: Owner<Value>,
         override_protection: bool,
     ) -> Result<(), Thrown> {
         if !override_protection && self.protected.contains(&normalize_protected(name)) {
-            req.release(value);
+            value.give_up(req);
             return Ok(());
         }
         req.register_in(into, name, value, false)
@@ -469,7 +469,7 @@ impl Handler {
         value: &[u8],
         override_protection: bool,
     ) -> Result<(), Thrown> {
-        let value = Value::string(req.string(value)?);
+        let value = PhpString::new(req, value)?.into_value();
         self.register(req, self.files, name, value, override_protection)
     }
 }
@@ -673,10 +673,13 @@ fn parts(
                     name: c_str(&param),
                     value: &shown,
                 };
-                if req.upload_event(&event)? {
-                    upload.register(req, upload.post, &param, kept, false)?;
-                } else {
-                    req.release(kept);
+                match req.upload_event(&event) {
+                    Ok(true) => upload.register(req, upload.post, &param, kept, false)?,
+                    Ok(false) => kept.give_up(req),
+                    Err(thrown) => {
+                        kept.give_up(req);
+                        return Err(thrown);
+                    }
                 }
             } else {
                 if count == max_input_vars + 1 {
@@ -887,11 +890,17 @@ fn parts(
             req,
             upload.files,
             &slot("error"),
-            Value::int(cancel_upload),
+            Owner::take(req, Value::int(cancel_upload)),
             false,
         )?;
         let size = if cancel_upload != 0 { 0 } else { total_bytes };
-        upload.register(req, upload.files, &slot("size"), Value::int(size), false)?;
+        upload.register(
+            req,
+            upload.files,
+            &slot("size"),
+            Owner::take(req, Value::int(size)),
+            false,
+        )?;
     }
     Ok(())
 }

@@ -1126,13 +1126,9 @@ impl Request {
             return Ok(None);
         };
         let mut rows = self.array()?;
-        self.addref(&instance.as_value());
-        let key = self.string(b"instance")?;
-        rows.set(
-            self,
-            crate::api::values::Key::from_string(key),
-            instance.as_value(),
-        )?;
+        let key = crate::api::values::PhpString::new(self, b"instance")?.into_key();
+        let instance = crate::api::values::Owner::take(self, instance.as_value());
+        rows.set(self, key, instance)?;
         Ok(Some(rows))
     }
 }

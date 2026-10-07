@@ -122,8 +122,8 @@ fn request_parse_body(
     }
     let (post, files) = req.parse_body(&limits)?;
     let mut pair = PhpArray::new(req)?;
-    pair.append(req, Value::array(post.hand_on_unmigrated()))?;
-    pair.append(req, Value::array(files.hand_on_unmigrated()))?;
+    pair.append(req, post.into_value())?;
+    pair.append(req, files.into_value())?;
     Ok(pair)
 }
 

@@ -356,7 +356,10 @@ fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Own
                 let k = key_of(req, &key);
                 req.release(key);
                 match k {
-                    Ok(k) => copy.set(req, k.hand_on_unmigrated(), val)?,
+                    Ok(k) => {
+                        let val = crate::classes::owner_of(req, val);
+                        copy.set(req, k, val)?;
+                    }
                     Err(t) => {
                         req.release(val);
                         return Err(t.into());
@@ -862,15 +865,15 @@ fn fill_array(
                 None => {
                     let fresh = PhpArray::new(req)?;
                     let view = *fresh;
-                    ar.set(req, k, fresh.into_value().hand_on_unmigrated())?;
+                    ar.set(req, Owner::take(req, k), fresh.into_value())?;
                     ar = view;
                 }
             }
         }
         ar.set(
             req,
-            Key::Int(i64::from(pos[dimension - 1])),
-            tmp.hand_on_unmigrated(),
+            Owner::take(req, Key::Int(i64::from(pos[dimension - 1]))),
+            tmp,
         )?;
         let mut i = dimension;
         while i > 0 {
@@ -990,14 +993,14 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
         let k = match key.as_ref() {
             ValueRef::Str(s) => {
                 let s = PhpString::new(req, s.as_bytes())?;
-                Some(Key::from_string(s.hand_on_unmigrated()))
+                Some(Key::from_string(req, s))
             }
-            ValueRef::Int(n) => Some(Key::Int(n)),
+            ValueRef::Int(n) => Some(Owner::take(req, Key::Int(n))),
             _ => None,
         };
         key.give_up(req);
         match k {
-            Some(k) => ret.set(req, k, value.hand_on_unmigrated())?,
+            Some(k) => ret.set(req, k, value)?,
             None => {
                 value.give_up(req);
                 return Err(soap_error(

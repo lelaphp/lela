@@ -744,14 +744,14 @@ impl SplDoublyLinkedList {
         let this = this.object();
         let (flags, values) = with(req, this, |l| (l.flags, l.values()))?;
         let mut out = PhpArray::new(req)?;
-        out.append(req, Value::int(flags))?;
+        out.append(req, Owner::take(req, Value::int(flags)))?;
         let mut list = PhpArray::new(req)?;
         for value in values {
-            list.append(req, crate::copied(req, value))?;
+            list.append(req, Owner::take(req, value.deref()))?;
         }
-        out.append(req, list.into_value().hand_on_unmigrated())?;
+        out.append(req, list.into_value())?;
         let members = crate::members(req, this)?;
-        out.append(req, members.into_value().hand_on_unmigrated())?;
+        out.append(req, members.into_value())?;
         Ok(out)
     }
 
@@ -1014,21 +1014,16 @@ fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     let (flags, values) = with(req, object, |l| (l.flags, l.values()))?;
     let mut out = PhpArray::new(req)?;
     for (key, value) in crate::std_properties(req, object)? {
-        req.addref(&value);
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0flags")?;
-    out.set(req, Key::Str(name.hand_on_unmigrated()), Value::int(flags))?;
+    out.set(req, name.into_key(), Owner::take(req, Value::int(flags)))?;
     let mut list = PhpArray::new(req)?;
     for value in values {
-        list.append(req, crate::copied(req, value))?;
+        list.append(req, Owner::take(req, value.deref()))?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0dllist")?;
-    out.set(
-        req,
-        Key::Str(name.hand_on_unmigrated()),
-        list.into_value().hand_on_unmigrated(),
-    )?;
+    out.set(req, name.into_key(), list.into_value())?;
     Ok(out)
 }
 

@@ -121,34 +121,31 @@ fn returned<T: FromArgument>(value: Owner<Value>) -> Owner<Raw<T>> {
 /// `zval_add_ref` on an element being copied into a new array: a
 /// reference with no other owner is followed to its value, which is
 /// what the copy holds, and anything else is one more owner.
-fn copied(req: &Request, value: Value) -> Value {
+fn copied(req: &Request, value: Value) -> Owner<Value> {
     let value = match value.as_ref() {
         ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
         _ => value,
     };
-    req.addref(&value);
-    value
+    Owner::take(req, value)
+}
+
+/// Rows taken with [`copied`] that no write took, given up: the way out
+/// of a write that failed while they were held.
+fn give_up_rows(req: &mut Request, rows: impl Iterator<Item = (Key, Owner<Value>)>) {
+    for (_, value) in rows {
+        value.give_up(req);
+    }
 }
 
 /// [`copied`] over a row a foreach walk lends: the reference followed
 /// where php's walk reads it held by one owner, the walk's own for the
 /// step not counted ([`Row::refcount`]).
-fn row_copied(req: &mut Request, row: &Row) -> Value {
+fn row_copied(req: &mut Request, row: &Row) -> Owner<Value> {
     let value = match row.value().as_ref() {
         ValueRef::Reference(reference) if row.refcount() == 1 => reference.get(),
         _ => *row.value(),
     };
-    req.addref(&value);
-    value
-}
-
-/// A key written into another array: a string key one more owner, as
-/// `zend_hash_add_new` takes it.
-fn key_copy(req: &Request, key: &Key) -> Key {
-    if let Key::Str(s) = key {
-        req.addref(&Value::string(*s));
-    }
-    key.clone()
+    Owner::take(req, value)
 }
 
 /// `array_merge(array ...$arrays): array`, php's `PHP_FUNCTION(array_merge)`
@@ -279,9 +276,9 @@ fn array_merge(
             // walk's own owner not counted.
             let value = row_copied(req, row);
             match row.key() {
-                Key::Str(name) => {
-                    req.addref(&Value::string(*name));
-                    merged.set(req, Key::Str(*name), value)?;
+                Key::Str(_) => {
+                    let key = Owner::take(req, row.key().clone());
+                    merged.set(req, key, value)?;
                 }
                 Key::Int(_) => merged.append(req, value)?,
             }
@@ -604,10 +601,7 @@ fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray
         }
         let value = row_copied(req, row);
         let key = row.key().clone();
-        if let Key::Str(s) = &key {
-            req.addref(&Value::string(*s));
-        }
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), value)?;
         Ok(ControlFlow::Continue(()))
     });
     if let Err(thrown) = walked {

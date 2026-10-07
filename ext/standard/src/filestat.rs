@@ -55,7 +55,7 @@ use php_ext::attr::php_function;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, argument_error, docref};
 use php_ext::request::{Request, Streams as _, UrlStat, WrapperOp};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi;
 
@@ -164,19 +164,19 @@ fn realpath_cache_get(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         };
         let mut row = PhpArray::new(req)?;
         for (name, value) in [
-            (&b"key"[..], key),
-            (b"is_dir", Value::bool(entry.is_dir)),
+            (&b"key"[..], Owner::take(req, key)),
+            (b"is_dir", Owner::take(req, Value::bool(entry.is_dir))),
             (
                 b"realpath",
-                Value::string(PhpString::new(req, &entry.realpath)?.hand_on_unmigrated()),
+                PhpString::new(req, &entry.realpath)?.into_value(),
             ),
-            (b"expires", Value::int(entry.expires)),
+            (b"expires", Owner::take(req, Value::int(entry.expires))),
         ] {
-            let name = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+            let name = PhpString::new(req, name)?.into_key();
             row.set(req, name, value)?;
         }
-        let path = Key::Str(PhpString::new(req, &entry.path)?.hand_on_unmigrated());
-        all.set(req, path, Value::array(row.hand_on_unmigrated()))?;
+        let path = PhpString::new(req, &entry.path)?.into_key();
+        all.set(req, path, row.into_value())?;
     }
     Ok(all)
 }
@@ -486,11 +486,11 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Owner<Valu
         Fs::Lstat | Fs::Stat => {
             let mut out = PhpArray::new(req)?;
             for field in sb {
-                out.append(req, Value::int(field))?;
+                out.append(req, Owner::take(req, Value::int(field)))?;
             }
             for (name, field) in STAT_NAMES.iter().zip(sb) {
-                let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                out.set(req, key, Value::int(field))?;
+                let key = PhpString::new(req, name)?.into_key();
+                out.set(req, key, Owner::take(req, Value::int(field)))?;
             }
             return Ok(out.into_value());
         }

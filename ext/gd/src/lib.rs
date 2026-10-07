@@ -36,7 +36,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 /// `gd.jpeg_ignore_warning`, `PHP_INI_ALL`, on by default.
 const JPEG_IGNORE_WARNING: &str = "gd.jpeg_ignore_warning";
@@ -427,22 +427,17 @@ fn info(req: &mut Request) {
 fn gd_info(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut info = PhpArray::new(req)?;
     let version = PhpString::new(req, constants::GD_VERSION.as_bytes())?;
+    set(req, &mut info, "GD Version", version.into_value())?;
     set(
         req,
         &mut info,
-        "GD Version",
-        version.into_value().hand_on_unmigrated(),
+        "FreeType Support",
+        Owner::take(req, Value::bool(true)),
     )?;
-    set(req, &mut info, "FreeType Support", Value::bool(true))?;
     let linkage = PhpString::new(req, b"with freetype")?;
-    set(
-        req,
-        &mut info,
-        "FreeType Linkage",
-        linkage.into_value().hand_on_unmigrated(),
-    )?;
+    set(req, &mut info, "FreeType Linkage", linkage.into_value())?;
     for (name, on) in SUPPORT {
-        set(req, &mut info, name, Value::bool(on))?;
+        set(req, &mut info, name, Owner::take(req, Value::bool(on)))?;
     }
     Ok(info)
 }
@@ -452,17 +447,23 @@ pub(crate) fn set(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     name: &str,
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, name.as_bytes())?;
-    array.set(req, Key::Str(key.hand_on_unmigrated()), value)
+    let key = match PhpString::new(req, name.as_bytes()) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
+    array.set(req, key, value)
 }
 
 /// A packed array of `values`, `add_index_*` from zero.
 pub(crate) fn list(req: &mut Request, values: &[Value]) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for value in values {
-        array.append(req, *value)?;
+        array.append(req, Owner::take(req, *value))?;
     }
     Ok(array)
 }

@@ -554,16 +554,18 @@ fn compact_var(
             let bytes = name.as_bytes().to_vec();
             if let Some(value) = req.caller_var(&bytes) {
                 let value = value.deref();
-                req.addref(&value);
-                let key = Key::from_string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
+                let value = Owner::take(req, value);
+                let key = PhpString::new(req, &bytes)?;
+                let key = Key::from_string(req, key);
                 out.set(req, key, value)?;
             } else if bytes == b"this" {
                 // `zend_get_this_object`: the object the caller runs on,
                 // which no symbol table holds.
                 if let Some(object) = req.this_object() {
                     let value = object.as_value();
-                    req.addref(&value);
-                    let key = Key::from_string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
+                    let value = Owner::take(req, value);
+                    let key = PhpString::new(req, &bytes)?;
+                    let key = Key::from_string(req, key);
                     out.set(req, key, value)?;
                 }
             } else {

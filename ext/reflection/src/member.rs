@@ -350,7 +350,7 @@ impl Reflection {
         let mut names = PhpArray::new(req)?;
         for word in words {
             let value = string_value(req, word.as_bytes())?;
-            names.append(req, value.hand_on_unmigrated())?;
+            names.append(req, value)?;
         }
         Ok(names)
     }
@@ -1716,10 +1716,8 @@ impl ReflectionProperty {
         let mut hooks = PhpArray::new(req)?;
         for (kind, (scope, decl)) in declared {
             let reflector = hook_reflector(req, scope, &decl)?;
-            let key = php_ext::values::Key::Str(
-                php_ext::values::PhpString::new(req, kind.name().as_bytes())?.hand_on_unmigrated(),
-            );
-            hooks.set(req, key, reflector.into_value().hand_on_unmigrated())?;
+            let key = php_ext::values::PhpString::new(req, kind.name().as_bytes())?.into_key();
+            hooks.set(req, key, reflector.into_value())?;
         }
         Ok(hooks)
     }

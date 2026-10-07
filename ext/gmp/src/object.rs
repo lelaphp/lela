@@ -101,22 +101,18 @@ impl GMP {
         let text = held(req, object, |n| n.to_text(16));
         let mut array = PhpArray::new(req)?;
         let text = PhpString::new(req, &text)?;
-        array.append(req, text.into_value().hand_on_unmigrated())?;
+        array.append(req, text.into_value())?;
         let rows = object.entries(req)?;
         if !rows.is_empty() {
             let mut props = PhpArray::new(req)?;
             for (key, value) in rows {
                 let key = match key {
-                    Key::Str(name) => {
-                        req.addref(&Value::string(name));
-                        Key::from_string(name)
-                    }
-                    Key::Int(n) => Key::Int(n),
+                    Key::Str(name) => Owner::take(req, Key::lookup(name)),
+                    Key::Int(n) => Owner::take(req, Key::Int(n)),
                 };
-                req.addref(&value);
-                props.set(req, key, value)?;
+                props.set(req, key, Owner::take(req, value))?;
             }
-            array.append(req, props.into_value().hand_on_unmigrated())?;
+            array.append(req, props.into_value())?;
         }
         Ok(array)
     }
@@ -386,20 +382,13 @@ impl ObjectHandlers for Handlers {
         let rows = object.entries(req)?;
         let mut table = PhpArray::new(req)?;
         for (key, value) in rows {
-            if let Key::Str(name) = &key {
-                req.addref(&Value::string(*name));
-            }
-            req.addref(&value);
-            table.set(req, key, value)?;
+            let key = Owner::take(req, key.clone());
+            table.set(req, key, Owner::take(req, value))?;
         }
         let text = held(req, object, |n| n.to_text(10));
         let num = PhpString::new(req, &text)?;
         let key = PhpString::new(req, b"num")?;
-        table.set(
-            req,
-            Key::Str(key.hand_on_unmigrated()),
-            num.into_value().hand_on_unmigrated(),
-        )?;
+        table.set(req, key.into_key(), num.into_value())?;
         Ok(Some(table.into()))
     }
 

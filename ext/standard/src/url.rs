@@ -10,7 +10,7 @@ use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::{Request, StreamCtx, Streams as _};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
+use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
 use crate::streamsfuncs::{NullContext, context_of};
@@ -165,16 +165,16 @@ fn add_header(
     associative: bool,
 ) -> Result<(), Thrown> {
     let Some(at) = line.iter().position(|c| *c == b':').filter(|_| associative) else {
-        let value = Value::string(PhpString::new(req, line)?.hand_on_unmigrated());
+        let value = PhpString::new(req, line)?.into_value();
         return headers.append(req, value);
     };
     let mut start = at + 1;
     while line.get(start).is_some_and(u8::is_ascii_whitespace) {
         start += 1;
     }
-    let value = Value::string(PhpString::new(req, &line[start..])?.hand_on_unmigrated());
+    let value = PhpString::new(req, &line[start..])?.into_value();
     let Some(previous) = headers.find(&line[..at]) else {
-        let name = Key::Str(PhpString::new(req, &line[..at])?.hand_on_unmigrated());
+        let name = PhpString::new(req, &line[..at])?.into_key();
         return headers.set(req, name, value);
     };
     if let Some(list) = previous.as_array() {
@@ -182,11 +182,10 @@ fn add_header(
         return list.append(req, value);
     }
     let mut list = PhpArray::new(req)?;
-    req.addref(&previous);
-    list.append(req, previous)?;
+    list.append(req, Owner::take(req, previous))?;
     list.append(req, value)?;
-    let name = Key::Str(PhpString::new(req, &line[..at])?.hand_on_unmigrated());
-    headers.set(req, name, Value::array(list.hand_on_unmigrated()))
+    let name = PhpString::new(req, &line[..at])?.into_key();
+    headers.set(req, name, list.into_value())
 }
 
 /// `php_url`: the components `php_url_parse_ex2` found.
@@ -586,16 +585,16 @@ fn parse_url(
     for (id, name, bytes) in parts {
         let value = if id == PHP_URL_PORT {
             match url.port {
-                Some(port) => Value::int(i64::from(port)),
+                Some(port) => Owner::take(req, Value::int(i64::from(port))),
                 None => continue,
             }
         } else {
             match bytes {
-                Some(bytes) => Value::string(PhpString::new(req, bytes)?.hand_on_unmigrated()),
+                Some(bytes) => PhpString::new(req, bytes)?.into_value(),
                 None => continue,
             }
         };
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+        let key = PhpString::new(req, name)?.into_key();
         array.set(req, key, value)?;
     }
     Ok(Some(OrFalse::Value(Union::B(Union::A(array)))))

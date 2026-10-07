@@ -43,7 +43,7 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OrFa
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use settings::{Mode, State, Substitute, named_or_pass, settings};
 use tables::{MBFL_VERSION_MAJOR, MBFL_VERSION_MINOR, MBFL_VERSION_TEENY};
 use text::{new_string, value_error};
@@ -387,7 +387,7 @@ fn names(req: &mut Request, list: &[Encoding]) -> Result<Owner<PhpArray>, Thrown
     let mut out = PhpArray::new(req)?;
     for enc in list {
         let name = new_string(req, enc.name())?;
-        out.append(req, name.into_value().hand_on_unmigrated())?;
+        out.append(req, name.into_value())?;
     }
     Ok(out)
 }
@@ -658,11 +658,7 @@ fn mb_get_info(
                     Union::B(Union::B(n)) => Owner::take(req, Value::int(n)),
                 };
                 let key = PhpString::new(req, key.as_bytes())?;
-                out.set(
-                    req,
-                    Key::Str(key.hand_on_unmigrated()),
-                    value.hand_on_unmigrated(),
-                )?;
+                out.set(req, key.into_key(), value)?;
             }
         }
         return Ok(Some(OrFalse::Value(Union::A(out))));

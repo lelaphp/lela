@@ -13,7 +13,7 @@ use php_ext::coerce::{
 };
 use php_ext::raising::{Thrown, arg_value_error, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
+use php_ext::values::{Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 /// `gettype(mixed $value): string`, php's `PHP_FUNCTION(gettype)` over
 /// `zend_zval_get_legacy_type`: the names php has kept since PHP 4,
@@ -290,10 +290,10 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
             &format!("unexpected NAN value was coerced to {target}"),
         );
         let now = var.reference().map_or(current, |cell| cell.get());
-        req.addref(&now);
+        let now = Owner::take(req, now);
         let converted = match target {
             "null" => {
-                req.release(now);
+                now.give_up(req);
                 Owner::take(req, Value::null())
             }
             "array" => {
@@ -305,7 +305,7 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
             // the object an array of that one row casts to.
             _ => {
                 let mut row = PhpArray::new(req)?;
-                let key = Key::Str(PhpString::new(req, b"scalar")?.hand_on_unmigrated());
+                let key = PhpString::new(req, b"scalar")?.into_key();
                 row.set(req, key, now)?;
                 let object = to_object(req, &Value::array(*row));
                 row.give_up(req);

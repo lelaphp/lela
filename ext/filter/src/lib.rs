@@ -129,7 +129,7 @@ fn sapi_filter(
     input: Input,
     name: &[u8],
     value: &[u8],
-) -> Result<Option<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     if req.state::<State>().slot(input).is_some() {
         let kept = req.state::<State>().slot(input).and_then(|slot| *slot);
         let array = if let Some(array) = kept {
@@ -142,7 +142,7 @@ fn sapi_filter(
             array
         };
         let raw = string_value(req, value)?;
-        req.register_variable(array, name, raw.hand_on_unmigrated())?;
+        req.register_variable(array, name, raw)?;
     }
     let raw = string_value(req, value)?;
     let default = req
@@ -154,7 +154,7 @@ fn sapi_filter(
         })
         .map_or(FILTER_DEFAULT, |(_, id, _)| *id);
     if value.is_empty() || default == FILTER_UNSAFE_RAW {
-        return Ok(Some(raw.hand_on_unmigrated()));
+        return Ok(Some(raw));
     }
     // `OnUpdateFlags`: no value is `FILTER_FLAG_NO_ENCODE_QUOTES`, any
     // value its `atoi`, so the empty string is 0.
@@ -166,7 +166,7 @@ fn sapi_filter(
         options: None,
         native: "filter",
     };
-    zval_filter(req, raw, default, &run).map(|value| Some(value.hand_on_unmigrated()))
+    zval_filter(req, raw, default, &run).map(Some)
 }
 
 /// C's `atoi`.
@@ -815,7 +815,7 @@ fn filter_elements(
         }
         let element = Owner::take(req, element);
         let filtered = zval_filter_recursive(req, element, filter, run)?;
-        array.replace(req, &key, filtered.hand_on_unmigrated())?;
+        array.replace(req, &key, filtered)?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(())
@@ -911,7 +911,7 @@ fn filter_call(
     let filtered = zval_filter(req, value, filter, &run)?;
     if flags & FILTER_FORCE_ARRAY != 0 {
         let mut wrapped = PhpArray::new(req)?;
-        wrapped.append(req, filtered.hand_on_unmigrated())?;
+        wrapped.append(req, filtered)?;
         return Ok(wrapped.into_value());
     }
     Ok(filtered)
@@ -958,8 +958,8 @@ fn array_handler(
         };
         let Some(found) = lookup(req, input, name.as_bytes(), false) else {
             if add_empty {
-                req.addref(&Value::string(name));
-                out.set(req, Key::Str(name), Value::null())?;
+                let key = Owner::take(req, Key::Str(name));
+                out.set(req, key, Owner::take(req, Value::null()))?;
             }
             return Ok(ControlFlow::Continue(()));
         };
@@ -975,8 +975,8 @@ fn array_handler(
         };
         let found = Owner::take(req, found.deref());
         let filtered = filter_call(req, native, found, -1, arguments, FILTER_REQUIRE_SCALAR, 2)?;
-        req.addref(&Value::string(name));
-        out.set(req, Key::Str(name), filtered.hand_on_unmigrated())?;
+        let key = Owner::take(req, Key::Str(name));
+        out.set(req, key, filtered)?;
         Ok(ControlFlow::Continue(()))
     });
     if let Err(thrown) = walked {
@@ -1342,7 +1342,7 @@ fn filter_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, _, _) in FILTERS {
         let name = string_value(req, name.as_bytes())?;
-        array.append(req, name.hand_on_unmigrated())?;
+        array.append(req, name)?;
     }
     Ok(array)
 }

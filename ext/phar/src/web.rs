@@ -266,9 +266,9 @@ fn swap_server(
     new: &[u8],
 ) -> Result<(), Thrown> {
     let value = PhpString::new(req, new)?.into_value();
-    req.update_server(name, value.hand_on_unmigrated())?;
+    req.update_server(name, value)?;
     let value = PhpString::new(req, old)?.into_value();
-    req.update_server(kept, value.hand_on_unmigrated())
+    req.update_server(kept, value)
 }
 
 /// `phar_mung_server_vars` (`Z/ext/phar/phar_object.c:57`): `PATH_INFO`

@@ -10,7 +10,7 @@
 use php_heap::{FrameRef, Slot, Zval, ZvalRef};
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, PhpArray, PhpRef, TypeTag, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpRef, PhpString, TypeTag, Value};
 use crate::exec::{self, TableId};
 
 use super::{Request, Symbol, SymbolTable};
@@ -615,8 +615,10 @@ impl Request {
         let rows = self.symbol_rows(TableId::GLOBAL);
         let mut array = self.array()?;
         for (name, value) in rows {
+            let key = PhpString::new(self, &name)?;
+            let key = Key::from_string(self, key);
             let value = self.dup_value(value, None);
-            let key = Key::from_string(self.string(&name)?);
+            let value = Owner::adopt(self, value);
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -644,8 +646,9 @@ impl Request {
             _ => self.array()?,
         };
         for (name, value) in rows {
+            let key = PhpString::new(self, &name)?.into_key();
             let value = self.dup_value(value, None);
-            let key = Key::Str(self.string(&name)?);
+            let value = Owner::adopt(self, value);
             array.set(self, key, value)?;
         }
         Ok(array)

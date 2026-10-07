@@ -21,9 +21,7 @@ use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
 use php_ext::request::{Request, Stream, Streams as _, Whence};
-use php_ext::values::{
-    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
-};
+use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::{Countable, RecursiveIterator, SeekableIterator, Stringable};
 
@@ -1573,7 +1571,7 @@ impl SplFileObject {
         let mut out = PhpArray::new(req)?;
         for bytes in [vec![d], vec![e], x.map(|x| vec![x]).unwrap_or_default()] {
             let value = crate::string_value(req, &bytes)?;
-            out.append(req, value.hand_on_unmigrated())?;
+            out.append(req, value)?;
         }
         Ok(out)
     }
@@ -2463,11 +2461,7 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thr
                value: Owner<Value>| {
         let name = [b"\0".as_slice(), class, b"\0", field].concat();
         let name = PhpString::new(req, &name)?;
-        out.set(
-            req,
-            Key::Str(name.hand_on_unmigrated()),
-            value.hand_on_unmigrated(),
-        )
+        out.set(req, name.into_key(), value)
     };
     let value = crate::string_value(req, &path_name)?;
     set(req, &mut out, b"SplFileInfo", b"pathName", value)?;
@@ -2800,11 +2794,11 @@ fn read_csv(
     }
     let mut parsed = PhpArray::new(req)?;
     match fields {
-        None => parsed.append(req, Value::null())?,
+        None => parsed.append(req, Owner::take(req, Value::null()))?,
         Some(fields) => {
             for field in fields {
                 let value = crate::string_value(req, &field)?;
-                parsed.append(req, value.hand_on_unmigrated())?;
+                parsed.append(req, value)?;
             }
         }
     }

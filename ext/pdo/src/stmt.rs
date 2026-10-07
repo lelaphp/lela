@@ -1292,12 +1292,12 @@ impl PDOStatement {
         let state = read(req, stmt, |s| s.error_code).flatten();
         let mut out = PhpArray::new(req)?;
         let made = crate::string(req, state.as_ref().map_or("", SqlState::as_str).as_bytes())?;
-        out.append(req, made.hand_on_unmigrated())?;
+        out.append(req, made)?;
         if state != Some(SqlState::NONE) {
             error::fetch_error(req, dbh, On::Stmt(stmt), &mut out)?;
         }
         while out.len() < 3 {
-            out.append(req, Value::null())?;
+            out.append(req, Owner::take(req, Value::null()))?;
         }
         Ok(out)
     }
@@ -1703,16 +1703,20 @@ impl PDOStatement {
             owner
         };
         if let Some(info) = info {
-            let key = PhpString::new(req, b"name")?.hand_on_unmigrated();
+            let key = PhpString::new(req, b"name")?.into_key();
             let made = crate::string(req, &info.name)?;
-            meta.set(req, Key::Str(key), made.hand_on_unmigrated())?;
-            let key = PhpString::new(req, b"len")?.hand_on_unmigrated();
+            meta.set(req, key, made)?;
+            let key = PhpString::new(req, b"len")?.into_key();
             // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(req, Key::Str(key), Value::int(info.max_len as i64))?;
-            let key = PhpString::new(req, b"precision")?.hand_on_unmigrated();
+            meta.set(req, key, Owner::take(req, Value::int(info.max_len as i64)))?;
+            let key = PhpString::new(req, b"precision")?.into_key();
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(req, Key::Str(key), Value::int(info.precision as i64))?;
+            meta.set(
+                req,
+                key,
+                Owner::take(req, Value::int(info.precision as i64)),
+            )?;
         }
         Ok(OrFalse::Value(meta))
     }

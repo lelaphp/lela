@@ -24,7 +24,7 @@ use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
 use php_ext::raising::{Thrown, arg_value_error, throw, throw_chained, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, FreshString, Key, Owner, PhpArray, PhpObject, PhpString};
+use php_ext::values::{ClassId, FreshString, Owner, PhpArray, PhpObject, PhpString};
 
 use super::{
     class_is, class_name_of, class_named, default_value_string, is_internal, keep_attribute,
@@ -250,7 +250,7 @@ pub(super) fn reflect_attributes(
                 file: subject.file.map(<[u8]>::to_vec),
             };
             let object = attribute_factory(req, &kept)?;
-            out.append(req, object.into_value().hand_on_unmigrated())?;
+            out.append(req, object.into_value())?;
         }
         Ok(())
     })();
@@ -489,13 +489,9 @@ impl ReflectionAttribute {
                 match &argument.name {
                     Some(name) => {
                         let key = PhpString::new(req, &name.0)?;
-                        out.set(
-                            req,
-                            Key::Str(key.hand_on_unmigrated()),
-                            value.hand_on_unmigrated(),
-                        )?;
+                        out.set(req, key.into_key(), value)?;
                     }
-                    None => out.append(req, value.hand_on_unmigrated())?,
+                    None => out.append(req, value)?,
                 }
             }
             Ok(())

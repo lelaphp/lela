@@ -10,7 +10,7 @@ use php_ext::coerce::to_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::constants::{
     PREG_GREP_INVERT, PREG_INTERNAL_ERROR, PREG_NO_ERROR, PREG_SPLIT_DELIM_CAPTURE,
@@ -162,7 +162,7 @@ pub(super) fn split_impl(
         } else {
             piece(req, bytes, start, end)?
         };
-        out.append(req, value.hand_on_unmigrated())
+        out.append(req, value)
     };
     if limit == 0 {
         limit = -1;
@@ -318,12 +318,9 @@ fn preg_grep(
             return Ok(ControlFlow::Break(()));
         };
         if keep {
-            req.addref(&entry);
+            let entry = Owner::take(req, entry);
             let key = row.key().clone();
-            if let Key::Str(s) = &key {
-                req.addref(&Value::string(*s));
-            }
-            out.set(req, key, entry)?;
+            out.set(req, Owner::take(req, key), entry)?;
         }
         Ok(ControlFlow::Continue(()))
     })

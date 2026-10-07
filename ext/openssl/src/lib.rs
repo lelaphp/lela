@@ -182,9 +182,15 @@ pub(crate) fn put(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = Key::from_string(PhpString::new(req, name)?.hand_on_unmigrated());
+    let key = match PhpString::new(req, name) {
+        Ok(key) => Key::from_string(req, key),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     array.set(req, key, value)
 }
 
@@ -195,7 +201,7 @@ pub(crate) fn put_bytes(
     name: &[u8],
     bytes: &[u8],
 ) -> Result<(), Thrown> {
-    let value = Value::string(PhpString::new(req, bytes)?.hand_on_unmigrated());
+    let value = PhpString::new(req, bytes)?.into_value();
     put(req, array, name, value)
 }
 

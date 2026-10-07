@@ -595,14 +595,10 @@ fn serialize<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<P
     let uri = recompose::<P>(req, this, Recomposition::RawAscii)?;
     let mut state = PhpArray::new(req)?;
     let key = PhpString::new(req, URI_FIELD)?;
-    state.set(
-        req,
-        Key::Str(key.hand_on_unmigrated()),
-        Value::string(uri.hand_on_unmigrated()),
-    )?;
+    state.set(req, key.into_key(), uri.into_value())?;
     let mut out = PhpArray::new(req)?;
-    out.append(req, Value::array(state.hand_on_unmigrated()))?;
-    out.append(req, Value::array(PhpArray::empty()))?;
+    out.append(req, state.into_value())?;
+    out.append(req, Owner::take(req, Value::array(PhpArray::empty())))?;
     Ok(out)
 }
 
@@ -661,8 +657,7 @@ fn serialized_uri(data: PhpArray) -> Option<Vec<u8>> {
 fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in this.props(req)? {
-        req.addref(&value);
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     if !is_set::<P>(req, this) {
         return Ok(out);
@@ -705,7 +700,7 @@ fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<
             req,
             &mut out,
             b"port",
-            port.map_or_else(Value::null, Value::int),
+            Owner::take(req, port.map_or_else(Value::null, Value::int)),
         )?;
     }
     if let Ok(path) = path {
@@ -726,8 +721,8 @@ fn put_string(
     value: Option<Vec<u8>>,
 ) -> Result<(), Thrown> {
     let value = match value {
-        Some(bytes) => Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated()),
-        None => Value::null(),
+        Some(bytes) => PhpString::new(req, &bytes)?.into_value(),
+        None => Owner::take(req, Value::null()),
     };
     put(req, array, name, value)
 }
@@ -736,10 +731,16 @@ fn put(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = PhpString::new(req, name)?;
-    array.set(req, Key::Str(key.hand_on_unmigrated()), value)
+    let key = match PhpString::new(req, name) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
+    array.set(req, key, value)
 }
 
 /// Core's `Exception`, `Uri\UriException`'s parent.

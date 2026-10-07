@@ -37,13 +37,17 @@ fn add_errors(
         (b"error_count", b"errors", &errors.errors),
     ] {
         let n = i64::try_from(messages.len()).unwrap_or(i64::MAX);
-        set_str(req, array, count, Value::int(n))?;
+        set_str(req, array, count, Owner::take(req, Value::int(n)))?;
         let mut element = PhpArray::new(req)?;
         for message in messages {
-            let text = Value::string(PhpString::new(req, &message.text)?.hand_on_unmigrated());
-            element.set(req, Key::Int(i64::from(message.position)), text)?;
+            let text = PhpString::new(req, &message.text)?.into_value();
+            element.set(
+                req,
+                Owner::take(req, Key::Int(i64::from(message.position))),
+                text,
+            )?;
         }
-        set_str(req, array, list, Value::array(element.hand_on_unmigrated()))?;
+        set_str(req, array, list, element.into_value())?;
     }
     Ok(())
 }
@@ -124,7 +128,7 @@ fn element(
     } else {
         Value::int(n)
     };
-    set_str(req, array, name, value)
+    set_str(req, array, name, Owner::take(req, value))
 }
 
 /// `php_date_do_return_parsed_time`.
@@ -146,20 +150,25 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
     } else {
         Value::float(t.us as f64 / 1_000_000.0)
     };
-    set_str(req, &mut array, b"fraction", fraction)?;
+    set_str(req, &mut array, b"fraction", Owner::take(req, fraction))?;
     add_errors(req, &mut array, errors)?;
     set_str(
         req,
         &mut array,
         b"is_localtime",
-        Value::bool(t.is_localtime != 0),
+        Owner::take(req, Value::bool(t.is_localtime != 0)),
     )?;
     if t.is_localtime != 0 {
         element(req, &mut array, b"zone_type", i64::from(t.zone_type))?;
         match t.zone_type {
             ZONETYPE_OFFSET => {
                 element(req, &mut array, b"zone", i64::from(t.z))?;
-                set_str(req, &mut array, b"is_dst", Value::bool(t.dst != 0))?;
+                set_str(
+                    req,
+                    &mut array,
+                    b"is_dst",
+                    Owner::take(req, Value::bool(t.dst != 0)),
+                )?;
             }
             ZONETYPE_ID => {
                 if !t.tz_abbr().is_empty() {
@@ -171,7 +180,12 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
             }
             ZONETYPE_ABBR => {
                 element(req, &mut array, b"zone", i64::from(t.z))?;
-                set_str(req, &mut array, b"is_dst", Value::bool(t.dst != 0))?;
+                set_str(
+                    req,
+                    &mut array,
+                    b"is_dst",
+                    Owner::take(req, Value::bool(t.dst != 0)),
+                )?;
                 set_string(req, &mut array, b"tz_abbr", t.tz_abbr())?;
             }
             _ => {}
@@ -188,13 +202,23 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
             (b"minute", r.i),
             (b"second", r.s),
         ] {
-            set_str(req, &mut rel, name, Value::int(n))?;
+            set_str(req, &mut rel, name, Owner::take(req, Value::int(n)))?;
         }
         if r.have_weekday_relative != 0 {
-            set_str(req, &mut rel, b"weekday", Value::int(i64::from(r.weekday)))?;
+            set_str(
+                req,
+                &mut rel,
+                b"weekday",
+                Owner::take(req, Value::int(i64::from(r.weekday))),
+            )?;
         }
         if r.have_special_relative != 0 && r.special_type == SPECIAL_WEEKDAY {
-            set_str(req, &mut rel, b"weekdays", Value::int(r.special_amount))?;
+            set_str(
+                req,
+                &mut rel,
+                b"weekdays",
+                Owner::take(req, Value::int(r.special_amount)),
+            )?;
         }
         if r.first_last_day_of != 0 {
             let name: &[u8] = if r.first_last_day_of == FIRST_DAY_OF_MONTH {
@@ -202,14 +226,9 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
             } else {
                 b"last_day_of_month"
             };
-            set_str(req, &mut rel, name, Value::bool(true))?;
+            set_str(req, &mut rel, name, Owner::take(req, Value::bool(true)))?;
         }
-        set_str(
-            req,
-            &mut array,
-            b"relative",
-            Value::array(rel.hand_on_unmigrated()),
-        )?;
+        set_str(req, &mut array, b"relative", rel.into_value())?;
     }
     Ok(array)
 }

@@ -401,8 +401,7 @@ fn array_of(
     let mut out = PhpArray::new(req)?;
     for (value, conn) in links {
         if kept.contains(conn) {
-            req.addref(value);
-            out.append(req, *value)?;
+            out.append(req, Owner::take(req, *value))?;
         }
     }
     Ok(out)

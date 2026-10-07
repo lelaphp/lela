@@ -8,7 +8,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{self, Tzdb};
 use crate::obj::set_str;
@@ -127,7 +127,7 @@ pub(super) fn identifiers(
         };
         if keep {
             let id = PhpString::new(req, entry.id)?;
-            array.append(req, Value::string(id.hand_on_unmigrated()))?;
+            array.append(req, id.into_value())?;
         }
     }
     Ok(array)
@@ -226,19 +226,29 @@ pub(super) fn abbreviations(req: &mut Request) -> Result<Owner<PhpArray>, Thrown
         let mut list = PhpArray::new(req)?;
         for row in rows {
             let mut element = PhpArray::new(req)?;
-            set_str(req, &mut element, b"dst", Value::bool(row.is_dst))?;
+            set_str(
+                req,
+                &mut element,
+                b"dst",
+                Owner::take(req, Value::bool(row.is_dst)),
+            )?;
             #[allow(clippy::cast_possible_truncation)]
             let offset = row.gmtoffset as i64;
-            set_str(req, &mut element, b"offset", Value::int(offset))?;
+            set_str(
+                req,
+                &mut element,
+                b"offset",
+                Owner::take(req, Value::int(offset)),
+            )?;
             let id = match row.full_tz_name {
-                Some(id) => Value::string(PhpString::new(req, id)?.hand_on_unmigrated()),
-                None => Value::null(),
+                Some(id) => PhpString::new(req, id)?.into_value(),
+                None => Owner::take(req, Value::null()),
             };
             set_str(req, &mut element, b"timezone_id", id)?;
-            list.append(req, Value::array(element.hand_on_unmigrated()))?;
+            list.append(req, element.into_value())?;
         }
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        array.set(req, key, Value::array(list.hand_on_unmigrated()))?;
+        let key = PhpString::new(req, name)?.into_key();
+        array.set(req, key, list.into_value())?;
     }
     Ok(array)
 }

@@ -102,13 +102,13 @@ fn unset_zval_property(req: &mut Request, object: &Value, name: &[u8]) -> Res<()
 /// `add_assoc_zval`: `val` is the array's from here.
 fn add_assoc(req: &mut Request, arr: &mut PhpArray, name: &[u8], val: Owner<Value>) -> Res<()> {
     let key = match PhpString::new(req, name) {
-        Ok(name) => Key::from_string(name.hand_on_unmigrated()),
+        Ok(name) => Key::from_string(req, name),
         Err(thrown) => {
             val.give_up(req);
             return Err(thrown.into());
         }
     };
-    Ok(arr.set(req, key, val.hand_on_unmigrated())?)
+    Ok(arr.set(req, key, val)?)
 }
 
 /// `array_init` with one element, `val`.
@@ -120,7 +120,7 @@ fn array_of(req: &mut Request, val: Owner<Value>) -> Res<Owner<PhpArray>> {
             return Err(thrown.into());
         }
     };
-    arr.append(req, val.hand_on_unmigrated())?;
+    arr.append(req, val)?;
     Ok(arr)
 }
 
@@ -134,7 +134,7 @@ fn append_to_prop(
     val: Owner<Value>,
 ) -> Res<()> {
     let mut a = arr;
-    a.append(req, val.hand_on_unmigrated())?;
+    a.append(req, val)?;
     if !a.is_same(arr) {
         // The copy the append separated has one owner, this caller's,
         // which a view's separation cannot name as an owner: it is taken
@@ -199,10 +199,11 @@ fn any_step(
         let mut arr = PhpArray::new(req)?;
         match name.as_deref() {
             Some(nm) => {
-                let key = Key::from_string(PhpString::new(req, nm)?.hand_on_unmigrated());
-                arr.set(req, key, a.hand_on_unmigrated())?;
+                let key = PhpString::new(req, nm)?;
+                let key = Key::from_string(req, key);
+                arr.set(req, key, a)?;
             }
-            None => arr.append(req, a.hand_on_unmigrated())?,
+            None => arr.append(req, a)?,
         }
         *any = Some(arr.into_value());
     }
@@ -235,8 +236,9 @@ fn any_step(
         None => {
             if let Some(nm) = name.take() {
                 let mut arr = PhpArray::new(req)?;
-                let key = Key::from_string(PhpString::new(req, &nm)?.hand_on_unmigrated());
-                arr.set(req, key, val.hand_on_unmigrated())?;
+                let key = PhpString::new(req, &nm)?;
+                let key = Key::from_string(req, key);
+                arr.set(req, key, val)?;
                 *any = Some(arr.into_value());
             } else {
                 *any = Some(val);
@@ -248,7 +250,7 @@ fn any_step(
                 match arr.find(nm) {
                     Some(el) if el.as_array().is_some() => {
                         let mut inner = el.as_array().copied().unwrap_or_else(PhpArray::empty);
-                        inner.append(req, val.hand_on_unmigrated())?;
+                        inner.append(req, val)?;
                     }
                     // php puts the old element and this one in an
                     // array it keeps nowhere: the value is lost.
@@ -256,7 +258,7 @@ fn any_step(
                     None => add_assoc(req, &mut arr, nm, val)?,
                 }
             } else {
-                arr.append(req, val.hand_on_unmigrated())?;
+                arr.append(req, val)?;
             }
             // The rows went into the array `a` owns, written in
             // place: it has the one owner, so nothing separated.
@@ -342,7 +344,7 @@ fn model_to_zval_object(
                             return Err(err);
                         }
                     };
-                    array.append(req, v.hand_on_unmigrated())?;
+                    array.append(req, v)?;
                     next = n.next().and_then(|m| get_node(Some(m), &name, None));
                 }
                 val = array.into_value();
@@ -707,7 +709,7 @@ fn plain_fill(req: &mut Request, cx: &mut Cx, ret: &Value, data: Node) -> Res<()
                         tmp.give_up(req);
                         return Err(err);
                     }
-                    view.append(req, tmp.hand_on_unmigrated())?;
+                    view.append(req, tmp)?;
                 }
             },
         }

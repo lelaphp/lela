@@ -95,34 +95,48 @@ fn convert_array(
         let value = row.value().deref();
         let key = match key {
             Key::Str(name) => match convert_from(req, name.as_bytes(), to, from) {
-                Some(name) => Key::Str(new_string(req, &name)?.hand_on_unmigrated()),
+                Some(name) => new_string(req, &name)?.into_key(),
                 None => return Ok(ControlFlow::Continue(())),
             },
-            Key::Int(n) => Key::Int(n),
+            Key::Int(n) => Owner::take(req, Key::Int(n)),
         };
         let value = value.deref();
         let converted = match value.as_ref() {
             ValueRef::Str(s) => match convert_from(req, s.as_bytes(), to, from) {
-                Some(s) => new_string(req, &s)?.into_value(),
-                None => return Ok(ControlFlow::Continue(())),
+                Some(s) => new_string(req, &s).map(|s| Some(s.into_value())),
+                None => Ok(None),
             },
             ValueRef::Null | ValueRef::Bool(_) | ValueRef::Int(_) | ValueRef::Float(_) => {
-                Owner::take(req, value)
+                Ok(Some(Owner::take(req, value)))
             }
             ValueRef::Array(inner) => {
                 let inner = *inner;
-                match convert_array(req, inner, to, from)? {
-                    Some(array) => array.into_value(),
-                    // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
-                    None => Owner::take(req, Value::array(PhpArray::empty())),
-                }
+                convert_array(req, inner, to, from).map(|array| {
+                    Some(match array {
+                        Some(array) => array.into_value(),
+                        // `ZVAL_EMPTY_ARRAY` (`Z/ext/mbstring/mbstring.c:2799`).
+                        None => Owner::take(req, Value::array(PhpArray::empty())),
+                    })
+                })
             }
             _ => {
                 docref(req, Level::Warning, "Object is not supported");
-                return Ok(ControlFlow::Continue(()));
+                Ok(None)
             }
         };
-        out.set(req, key, converted.hand_on_unmigrated())?;
+        // The key made for an element left out is given up with it.
+        let converted = match converted {
+            Ok(Some(converted)) => converted,
+            Ok(None) => {
+                key.give_up(req);
+                return Ok(ControlFlow::Continue(()));
+            }
+            Err(thrown) => {
+                key.give_up(req);
+                return Err(thrown);
+            }
+        };
+        out.set(req, key, converted)?;
         Ok(ControlFlow::Continue(()))
     });
     input.unprotect();
@@ -474,7 +488,7 @@ fn mb_list_encodings(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut all = PhpArray::new(req)?;
     for enc in Encoding::all() {
         let name = new_string(req, enc.name())?;
-        all.append(req, name.into_value().hand_on_unmigrated())?;
+        all.append(req, name.into_value())?;
     }
     let kept = Owner::take(req, *all);
     req.state::<State>().all_encodings = Some(kept.hand_on_unmigrated());
@@ -522,7 +536,7 @@ fn mb_encoding_aliases(req: &mut Request, encoding: PhpString) -> Result<Owner<P
     let mut out = PhpArray::new(req)?;
     for alias in enc.aliases() {
         let alias = new_string(req, alias)?;
-        out.append(req, alias.into_value().hand_on_unmigrated())?;
+        out.append(req, alias.into_value())?;
     }
     Ok(out)
 }
@@ -932,7 +946,7 @@ fn convert_array_in(
             Walk::Stopped => return Ok(ControlFlow::Break(true)),
             Walk::Kept => {}
             Walk::Replace(new) => {
-                if !array.replace(req, row.key(), new.hand_on_unmigrated())? {
+                if !array.replace(req, row.key(), new)? {
                     return Err(fatal(
                         req,
                         "InternalError: mb_convert_variables lost a key of the array it converts",

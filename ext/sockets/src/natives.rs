@@ -166,11 +166,7 @@ fn from_fd_set(
         .collect();
     for ((key, element), set) in rows.into_iter().zip(ready) {
         if *set {
-            req.addref(&element);
-            if let Key::Str(s) = &key {
-                req.addref(&Value::string(*s));
-            }
-            out.set(req, key, element)?;
+            out.set(req, Owner::take(req, key), Owner::take(req, element))?;
         }
     }
     target.set(req, Some(out))
@@ -1276,7 +1272,7 @@ fn socket_create_pair(
     let mut out = PhpArray::new(req)?;
     for fd in fds {
         let made = new_socket(req, Sock::owning(fd, c_int(domain)))?;
-        out.append(req, made.into_value().hand_on_unmigrated())?;
+        out.append(req, made.into_value())?;
     }
     assign(req, &pair, out.into_value())?;
     Ok(true)

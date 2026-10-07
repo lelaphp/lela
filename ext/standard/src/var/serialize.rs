@@ -598,11 +598,7 @@ fn object_value(
     let props = object.props_for(req, PropertyPurpose::Serialize)?;
     let mut table = PhpArray::new(req)?;
     for (key, value) in props {
-        req.addref(&value);
-        if let Key::Str(prop) = key {
-            req.addref(&Value::string(prop));
-        }
-        table.set(req, key, value)?;
+        table.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let written = nested(
         req,
@@ -810,8 +806,8 @@ fn sleep_props(
             );
             return Ok(ControlFlow::Continue(()));
         }
-        req.addref(&value);
-        req.addref(&Value::string(prop));
+        let value = Owner::take(req, value);
+        let key = Owner::take(req, key);
         out.set(req, key, value)?;
         Ok(ControlFlow::<()>::Continue(()))
     })?;

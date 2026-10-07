@@ -7,7 +7,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
     DirListing, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
 };
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::archive::{self, ArchiveId, archives, lossy};
 use crate::entry::{self, Dir, EntryData, Target};
@@ -446,8 +446,8 @@ const STAT_NAMES: [&[u8]; 13] = [
 fn stat_array(req: &mut Request, sb: [i64; 13]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        out.set(req, key, Value::int(field))?;
+        let key = PhpString::new(req, name)?.into_key();
+        out.set(req, key, Owner::take(req, Value::int(field)))?;
     }
     Ok(out)
 }

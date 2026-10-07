@@ -314,8 +314,7 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
         };
         let value = Owner::take(req, value);
         if plain {
-            let name = name.hand_on_unmigrated();
-            table.set(req, Key::Str(name), value.hand_on_unmigrated())?;
+            table.set(req, name.into_key(), value)?;
         } else {
             let scope = PropertyScope::Of(ClassRef(made.class()));
             let wrote = match &pending {
@@ -398,7 +397,7 @@ pub(crate) fn fetch_all(req: &mut Request, on: On, mode: i64) -> Result<Owner<Ph
                 row.give_up(req);
                 break;
             }
-            all.append(req, row.hand_on_unmigrated())?;
+            all.append(req, row)?;
         }
         Ok(all)
     })
@@ -478,7 +477,7 @@ pub(crate) fn fetch_fields(req: &mut Request, on: On) -> Result<Owner<PhpArray>,
     let mut out = PhpArray::new(req)?;
     for field in &fields {
         let object = field_object(req, field)?;
-        out.append(req, object.into_value().hand_on_unmigrated())?;
+        out.append(req, object.into_value())?;
     }
     Ok(out)
 }
@@ -530,7 +529,10 @@ fn lengths_of(set: &ResultSet) -> Option<Vec<u64>> {
 fn lengths_array(req: &mut Request, lengths: &[u64]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for n in lengths {
-        out.append(req, Value::int(i64::try_from(*n).unwrap_or(i64::MAX)))?;
+        out.append(
+            req,
+            Owner::take(req, Value::int(i64::try_from(*n).unwrap_or(i64::MAX))),
+        )?;
     }
     Ok(out)
 }

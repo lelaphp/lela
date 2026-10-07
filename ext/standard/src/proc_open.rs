@@ -920,8 +920,11 @@ fn proc_open(
         };
         if let Some(stream) = stream {
             let value = stream.as_value();
-            req.addref(&value);
-            opened.set(req, Key::Int(index), value)?;
+            opened.set(
+                req,
+                Owner::take(req, Key::Int(index)),
+                Owner::take(req, value),
+            )?;
             held.push(stream.hand_on_unmigrated().resource());
         }
     }
@@ -1156,11 +1159,9 @@ fn proc_get_status(req: &mut Request, process: Resource) -> Result<Owner<PhpArra
     let command = process.command.clone();
     let pid = process.child;
     let mut out = PhpArray::new(req)?;
+    let command = PhpString::new(req, &command)?;
     let rows: [(&[u8], Value); 9] = [
-        (
-            b"command",
-            Value::string(PhpString::new(req, &command)?.hand_on_unmigrated()),
-        ),
+        (b"command", Value::string(*command)),
         (b"pid", Value::int(i64::from(pid))),
         (b"cached", Value::bool(cached)),
         (b"running", Value::bool(running)),
@@ -1171,8 +1172,9 @@ fn proc_get_status(req: &mut Request, process: Resource) -> Result<Owner<PhpArra
         (b"stopsig", Value::int(i64::from(stopsig))),
     ];
     for (name, value) in rows {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        out.set(req, key, value)?;
+        let key = PhpString::new(req, name)?.into_key();
+        out.set(req, key, Owner::take(req, value))?;
     }
+    command.give_up(req);
     Ok(out)
 }

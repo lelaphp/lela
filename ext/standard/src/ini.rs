@@ -9,7 +9,7 @@ use php_ext::coerce::numeric_string;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::syntax::{IniEvent as Event, IniScanner};
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::basic_functions::{INI_SCANNER_NORMAL, INI_SCANNER_RAW, INI_SCANNER_TYPED};
 
@@ -75,9 +75,11 @@ impl Callback {
         }
         match event {
             Event::Section(name) => {
-                let section = PhpArray::new(req)?.hand_on_unmigrated();
+                let section = PhpArray::new(req)?;
                 let key = key_of(req, &name)?;
-                self.top.set(req, key, Value::array(section))?;
+                let held = *section;
+                self.top.set(req, key, section.into_value())?;
+                let section = held;
                 self.active = Some(section);
                 Ok(())
             }
@@ -89,25 +91,19 @@ impl Callback {
 
 /// `zend_symtable_update`'s key for a label: an index for a canonical
 /// decimal integer, the string otherwise, with the owner the table takes.
-fn key_of(req: &mut Request, label: &Value) -> Result<Key, Thrown> {
-    let s = match label.as_php_string() {
-        Some(s) => *s,
-        None => PhpString::new(req, b"")?.hand_on_unmigrated(),
-    };
-    let key = Key::from_string(s);
-    if matches!(key, Key::Str(_)) {
-        req.addref(&Value::string(s));
+fn key_of(req: &mut Request, label: &Value) -> Result<Owner<Key>, Thrown> {
+    match label.as_php_string() {
+        Some(s) => Ok(Owner::take(req, Key::lookup(*s))),
+        None => Ok(PhpString::new(req, b"")?.into_key()),
     }
-    Ok(key)
 }
 
 /// `php_simple_ini_parser_cb` into `arr`.
 fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<(), Thrown> {
     match event {
         Event::Entry(label, Some(value)) => {
-            req.addref(value);
             let key = key_of(req, label)?;
-            arr.set(req, key, *value)
+            arr.set(req, key, Owner::take(req, *value))
         }
         Event::PopEntry(label, value, offset) => {
             let name = label.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
@@ -125,27 +121,19 @@ fn simple(req: &mut Request, mut arr: PhpArray, event: &Event<Value>) -> Result<
             let mut inner = if let Some(inner) = found {
                 inner
             } else {
-                let inner = PhpArray::new(req)?.hand_on_unmigrated();
-                if let Key::Str(s) = &key {
-                    req.addref(&Value::string(*s));
-                }
-                arr.set(req, key, Value::array(inner))?;
-                inner
+                let inner = PhpArray::new(req)?;
+                let held = *inner;
+                arr.set(req, Owner::take(req, key), inner.into_value())?;
+                held
             };
-            req.addref(value);
+            let value = Owner::take(req, *value);
             match offset.as_php_string() {
                 Some(o) if !o.as_bytes().is_empty() => {
-                    let o = *o;
-                    let key = Key::from_string(o);
-                    if matches!(key, Key::Str(_)) {
-                        req.addref(&Value::string(o));
-                    }
-                    inner.set(req, key, *value)
+                    let key = Owner::take(req, Key::lookup(*o));
+                    inner.set(req, key, value)
                 }
                 _ => {
-                    if !inner.try_append(req, *value)? {
-                        req.release(*value);
-                    }
+                    inner.try_append(req, value)?;
                     Ok(())
                 }
             }

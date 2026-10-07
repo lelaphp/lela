@@ -22,7 +22,7 @@ use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, t
 use php_ext::request::{
     Cast, HostPath, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _,
 };
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Resource, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
 use crate::State;
 use crate::ffi::{Action, Code, Compress, Decompress};
@@ -891,15 +891,11 @@ fn bzerror(req: &mut Request, bz: Stream) -> Result<Owner<PhpArray>, Thrown> {
     let errno = PhpString::new(req, b"errno")?;
     array.set(
         req,
-        Key::Str(errno.hand_on_unmigrated()),
-        Value::int(code.number()),
+        errno.into_key(),
+        Owner::take(req, Value::int(code.number())),
     )?;
     let errstr = PhpString::new(req, b"errstr")?;
     let text = PhpString::new(req, error_text(code).as_bytes())?;
-    array.set(
-        req,
-        Key::Str(errstr.hand_on_unmigrated()),
-        text.into_value().hand_on_unmigrated(),
-    )?;
+    array.set(req, errstr.into_key(), text.into_value())?;
     Ok(array)
 }

@@ -1111,7 +1111,7 @@ fn allowed_names(
         if names.find(lowered.as_bytes()).is_some() {
             lowered.give_up(req);
         } else {
-            names.set(req, Key::Str(lowered.hand_on_unmigrated()), Value::null())?;
+            names.set(req, lowered.into_key(), Owner::take(req, Value::null()))?;
         }
         Ok(ControlFlow::Continue(()))
     })?;
@@ -1270,10 +1270,8 @@ impl State<'_> {
             }
             Slot::Element(array, key) => {
                 let mut array = *array;
-                if let Key::Str(s) = key {
-                    req.addref(&Value::string(*s));
-                }
-                array.set(req, key.clone(), value.hand_on_unmigrated())?;
+                let key = Owner::take(req, key.clone());
+                array.set(req, key, value)?;
             }
             Slot::Property(object, name) => {
                 let name = Owner::take(req, *name);
@@ -1754,9 +1752,11 @@ impl State<'_> {
             let key = match self.key(req) {
                 Some(Scalar::Long(n)) => Key::Int(n),
                 // A key is `zend_string_init_existing_interned`'s.
-                Some(Scalar::Str(bytes)) => Key::from_string(
-                    PhpString::existing_interned(req, &bytes)?.hand_on_unmigrated(),
-                ),
+                // The var hash keeps a string key's owner, below.
+                Some(Scalar::Str(bytes)) => {
+                    let made = PhpString::existing_interned(req, &bytes)?;
+                    Key::from_string(req, made).hand_on_unmigrated()
+                }
                 _ => return Ok(false),
             };
             // The key's own owner is the var hash's, whose slots name it
@@ -1771,10 +1771,8 @@ impl State<'_> {
                 self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Element(array, key.clone()));
             }
-            if let Key::Str(s) = &key {
-                req.addref(&Value::string(*s));
-            }
-            array.set(req, key.clone(), Value::null())?;
+            let at = Owner::take(req, key.clone());
+            array.set(req, at, Owner::take(req, Value::null()))?;
             if !self.value(req, Some(Slot::Element(array, key)))? {
                 return Ok(false);
             }

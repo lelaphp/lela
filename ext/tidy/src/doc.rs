@@ -787,8 +787,9 @@ fn get_config(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, T
     })?;
     let mut out = PhpArray::new(req)?;
     for (name, value) in rows.unwrap_or_default() {
-        let key = Key::from_string(new_string(req, &name)?.hand_on_unmigrated());
-        out.set(req, key, value.hand_on_unmigrated())?;
+        let key = new_string(req, &name)?;
+        let key = Key::from_string(req, key);
+        out.set(req, key, value)?;
     }
     Ok(out)
 }

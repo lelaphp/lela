@@ -5,7 +5,7 @@ use php_ext::abi::{ExtensionBuilder, OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Thrown, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::error;
 use crate::ffi::Code;
@@ -111,7 +111,6 @@ fn convert(
     error::set_code(req, converted.status);
     let text = PhpString::new(req, &converted.bytes)?;
     if wants {
-        req.addref(&Value::string(*text));
         let mut info = PhpArray::new(req)?;
         let pairs = [
             (&b"result"[..], Value::string(*text)),
@@ -123,7 +122,7 @@ fn convert(
         ];
         for (key, value) in pairs {
             let key = PhpString::new(req, key)?;
-            info.set(req, Key::Str(key.hand_on_unmigrated()), value)?;
+            info.set(req, key.into_key(), Owner::take(req, value))?;
         }
         if let Err(thrown) = idna_info.set(req, Untyped(info.into_value())) {
             text.give_up(req);

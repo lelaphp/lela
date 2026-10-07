@@ -853,8 +853,7 @@ fn unserialize(
 fn wakeup(req: &mut Request, class: &str, object: PhpObject) -> Result<(), Thrown> {
     let mut hash = PhpArray::new(req)?;
     for (key, value) in object.props(req)? {
-        req.addref(&value);
-        hash.set(req, key, value)?;
+        hash.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let done = initialize_from_hash(req, object, *hash);
     hash.give_up(req);

@@ -415,19 +415,14 @@ fn stream_context_get_params(
     let (options, notification) = (res.options(req), res.notifier(req));
     let mut array = PhpArray::new(req)?;
     if let Some(notification) = notification {
-        req.addref(&notification);
-        let key = Key::Str(PhpString::new(req, b"notification")?.hand_on_unmigrated());
-        array.set(req, key, notification)?;
+        let key = PhpString::new(req, b"notification")?.into_key();
+        array.set(req, key, Owner::take(req, notification))?;
     }
     let options = match options {
-        Some(options) => {
-            let value = Value::array(options);
-            req.addref(&value);
-            value
-        }
-        None => Value::array(PhpArray::new(req)?.hand_on_unmigrated()),
+        Some(options) => Owner::take(req, Value::array(options)),
+        None => PhpArray::new(req)?.into_value(),
     };
-    let key = Key::Str(PhpString::new(req, b"options")?.hand_on_unmigrated());
+    let key = PhpString::new(req, b"options")?.into_key();
     array.set(req, key, options)?;
     Ok(array)
 }
@@ -1200,7 +1195,7 @@ fn stream_resolve_include_path(
 fn stream_get_wrappers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for scheme in req.stream_wrappers() {
-        let scheme = Value::string(PhpString::new(req, scheme.as_bytes())?.hand_on_unmigrated());
+        let scheme = PhpString::new(req, scheme.as_bytes())?.into_value();
         array.append(req, scheme)?;
     }
     Ok(array)

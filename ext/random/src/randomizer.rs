@@ -458,8 +458,7 @@ impl Randomizer {
         handle.shuffle(req, &mut values)?;
         let mut out = PhpArray::new(req)?;
         for value in values {
-            req.addref(&value);
-            out.append(req, value)?;
+            out.append(req, Owner::take(req, value))?;
         }
         Ok(out)
     }
@@ -524,8 +523,7 @@ impl Randomizer {
                 Key::Int(n) => Value::int(n),
                 Key::Str(s) => Value::string(s),
             };
-            req.addref(&value);
-            out.append(req, value)?;
+            out.append(req, Owner::take(req, value))?;
         }
         Ok(out)
     }
@@ -541,7 +539,7 @@ impl Randomizer {
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let members = crate::members(req, this.object())?;
         let mut out = PhpArray::new(req)?;
-        out.append(req, Value::array(members.hand_on_unmigrated()))?;
+        out.append(req, members.into_value())?;
         Ok(out)
     }
 

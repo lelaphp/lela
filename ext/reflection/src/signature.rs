@@ -1736,7 +1736,7 @@ impl ReflectionUnionType {
         let mut types = PhpArray::new(req)?;
         for member in &members {
             let object = type_factory(req, member, false)?;
-            types.append(req, object.into_value().hand_on_unmigrated())?;
+            types.append(req, object.into_value())?;
         }
         Ok(types)
     }

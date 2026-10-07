@@ -9,7 +9,7 @@ use php_ext::call::passthrough;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::archive::{self, ENT_PERM_MASK, archives, lossy};
 use crate::path::{self, Create, Exec};
@@ -553,11 +553,11 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
         Fs::Lstat | Fs::Stat => {
             let mut out = PhpArray::new(req)?;
             for field in sb {
-                out.append(req, Value::int(field))?;
+                out.append(req, Owner::take(req, Value::int(field)))?;
             }
             for (name, field) in NAMES.iter().zip(sb) {
-                let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                out.set(req, key, Value::int(field))?;
+                let key = PhpString::new(req, name)?.into_key();
+                out.set(req, key, Owner::take(req, Value::int(field)))?;
             }
             return Ok(out.into_value());
         }

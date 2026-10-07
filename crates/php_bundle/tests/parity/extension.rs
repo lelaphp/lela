@@ -96,7 +96,7 @@ fn explode(
     let mut array = PhpArray::new(req)?;
     for piece in pieces {
         let piece = PhpString::new(req, piece)?.into_value();
-        array.append(req, piece.hand_on_unmigrated())?;
+        array.append(req, piece)?;
     }
     Ok(array)
 }
@@ -278,13 +278,9 @@ fn array_keys(
         if keep {
             let key = match key {
                 Key::Int(n) => Value::int(n),
-                Key::Str(s) => {
-                    let key = Value::string(s);
-                    req.addref(&key);
-                    key
-                }
+                Key::Str(s) => Value::string(s),
             };
-            out.append(req, key)?;
+            out.append(req, Owner::take(req, key))?;
         }
         Ok(ControlFlow::Continue(()))
     });
@@ -307,8 +303,7 @@ fn array_push(
         return Ok(0);
     };
     for value in values.0 {
-        req.addref(&value);
-        target.append(req, value)?;
+        target.append(req, Owner::take(req, value))?;
     }
     Ok(i64::try_from(target.len()).unwrap_or(0))
 }

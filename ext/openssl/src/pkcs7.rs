@@ -150,8 +150,12 @@ pub(crate) fn pem_list(
     for list in [certs, crls] {
         for (i, pem) in list.into_iter().enumerate() {
             if let Some(pem) = pem {
-                let pem = Value::string(PhpString::new(req, &pem)?.hand_on_unmigrated());
-                out.set(req, Key::Int(i64::try_from(i).unwrap_or(0)), pem)?;
+                let pem = PhpString::new(req, &pem)?.into_value();
+                out.set(
+                    req,
+                    Owner::take(req, Key::Int(i64::try_from(i).unwrap_or(0))),
+                    pem,
+                )?;
             }
         }
     }
