@@ -1,6 +1,8 @@
 //! The natives of `dba.c`, in `dba.stub.php`'s order, over the links of
 //! [`crate::link`].
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{False, Instance, OrFalse, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::{lookup_class, new_object};
@@ -10,6 +12,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, arity, deprecated, docref, pending, throw,
 };
 use php_ext::request::{Cast, Request, Resolve, Stream, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::flatfile::{Flatfile, Stored};
@@ -530,19 +533,29 @@ fn key_bytes(req: &mut Request, key: Union<PhpArray, PhpString>) -> Result<Vec<u
         ));
     }
     let mut parts = Vec::with_capacity(2);
-    for (_, value) in array.snapshot() {
-        let text = php_ext::coerce::to_string(req, &value)?;
+    // `zend_hash_get_current_data_ex` and `zend_hash_move_forward_ex` over a
+    // position of its own (`Z/ext/dba/dba.c:107`), no owner of the table
+    // taken: the argument holds it while `zval_try_get_string` runs
+    // `__toString`. A table freed after the group ends the walk, and the
+    // name is then empty.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let text = php_ext::coerce::to_string(req, &row.value().deref())?;
         parts.push(text.as_bytes().to_vec());
         text.give_up(req);
-    }
-    let (group, name) = (&parts[0], &parts[1]);
+        Ok(ControlFlow::Continue(()))
+    })?;
+    let mut parts = parts.into_iter();
+    let (group, name) = (
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+    );
     if group.is_empty() {
-        return Ok(name.clone());
+        return Ok(name);
     }
     let mut out = b"[".to_vec();
-    out.extend_from_slice(c_text(group).as_bytes());
+    out.extend_from_slice(c_text(&group).as_bytes());
     out.push(b']');
-    out.extend_from_slice(c_text(name).as_bytes());
+    out.extend_from_slice(c_text(&name).as_bytes());
     Ok(out)
 }
 

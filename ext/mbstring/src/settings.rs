@@ -10,6 +10,8 @@
 //! makes before it changes anything, so what php's `RINIT` read is what
 //! is read.
 
+use std::ops::ControlFlow;
+
 use crate::ffi::mbfl::{Encoding, Language};
 use crate::tables::{
     ENCODING_8859_9, ENCODING_ARMSCII8, ENCODING_ASCII, ENCODING_BIG5, ENCODING_CHARSET_MIN,
@@ -27,6 +29,7 @@ use php_ext::abi::IniStage;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `MBFL_OUTPUTFILTER_ILLEGAL_MODE_*`.
@@ -557,7 +560,11 @@ pub(crate) fn encoding_array(
     let default_detect = settings(req).default_detect;
     let mut list = Vec::new();
     let mut auto = false;
-    for (_, value) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(target_hash, hash_entry)`
+    // (`Z/ext/mbstring/mbstring.c:385`), no owner of the table taken: the
+    // argument holds it while `zval_try_get_string` runs `__toString`.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let value = row.value().deref();
         let text = php_ext::coerce::to_string(req, &value)?;
         let name = text.as_bytes();
         if name.eq_ignore_ascii_case(b"auto") {
@@ -578,7 +585,8 @@ pub(crate) fn encoding_array(
             ));
         }
         text.give_up(req);
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(list)
 }
 

@@ -18,6 +18,7 @@ tier::Named
 tier::Opcode
 tier::Position
 tier::Request
+tier::Rows
 tier::SafepointIdx
 tier::Serves
 tier::Shape
@@ -52,6 +53,7 @@ tier::oplines
 tier::pending
 tier::position
 tier::restore
+tier::rows
 tier::serves
 tier::set_argv
 tier::set_aside

@@ -548,10 +548,13 @@ impl ObjectHandlers for WeakMapHandlers {
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
         let mut table = PhpArray::new(req)?;
-        for (key, value) in entries_of(req, object)
-            .map(|e| e.snapshot_refs())
-            .unwrap_or_default()
-        {
+        // The map's own table, read under the borrowed request: building
+        // the pairs runs no code of the program.
+        let entries: Vec<(Key, Value)> = match entries_of(req, object) {
+            Some(entries) => crate::api::values::walk::rows(req, entries).collect(),
+            None => Vec::new(),
+        };
+        for (key, value) in entries {
             let Key::Int(id) = key else { continue };
             let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id)) else {
                 continue;

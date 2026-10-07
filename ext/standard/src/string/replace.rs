@@ -2,12 +2,15 @@
 //! over `php_str_replace_in_subject`, `strtr` over `php_strtr_ex` and
 //! `php_strtr_array`, and `substr_replace`.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Raw, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{coerce_param, to_long, to_string};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, argument_error, arity, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use super::{long, lower, memnstr, str_copy, string_bytes};
@@ -123,20 +126,22 @@ fn replace_common(
     let result = match subject {
         Union::A(subjects) => {
             let mut out = PhpArray::new(req)?;
-            for (key, entry) in subjects.snapshot() {
-                let subject = match to_string(req, &entry.deref()) {
-                    Ok(subject) => subject,
-                    Err(thrown) => {
-                        out.give_up(req);
-                        return Err(thrown);
-                    }
-                };
+            // `ZEND_HASH_FOREACH_KEY_VAL(subject_ht, num_key, string_key,
+            // subject_entry)` (`Z/ext/standard/string.c:4501`), no owner of the
+            // table taken: the argument holds it while `__toString` runs.
+            let walked = walk::foreach(req, subjects, Hold::None, |req, row| -> walk::Step {
+                let subject = to_string(req, &row.value().deref())?;
                 let replaced = in_subject(req, &search, &replace, *subject, case_sensitive);
                 subject.give_up(req);
                 let (value, n) = replaced?;
                 count += n;
-                let key = owned_key(req, &key);
+                let key = owned_key(req, row.key());
                 out.set(req, key, Value::string(value.hand_on_unmigrated()))?;
+                Ok(ControlFlow::Continue(()))
+            });
+            if let Err(thrown) = walked {
+                out.give_up(req);
+                return Err(thrown);
             }
             Union::A(out)
         }
@@ -172,22 +177,26 @@ fn in_subject(
     let mut current: Option<Vec<u8>> = None;
     match search {
         Union::A(searches) => {
-            let mut replacements = match replace {
-                Union::A(array) => Some(array.snapshot().into_iter()),
-                Union::B(_) => None,
-            };
-            for (_, entry) in searches.snapshot() {
-                let needle = string_bytes(req, &entry.deref())?;
-                let with: Vec<u8> = match (&mut replacements, replace) {
-                    (Some(iter), _) => match iter.next() {
-                        Some((_, value)) => string_bytes(req, &value.deref())?,
+            let mut replace_at = 0;
+            // `ZEND_HASH_FOREACH_VAL(search_ht, search_entry)`
+            // (`Z/ext/standard/string.c:4344`), no owner of the searches
+            // taken: the argument holds them while `zval_get_tmp_string`
+            // runs `__toString`. The replacement is read at the next bucket
+            // of its table that holds one, as it stands at the step.
+            let emptied = walk::foreach(req, *searches, Hold::None, |req, row| -> walk::Step {
+                let needle = string_bytes(req, &row.value().deref())?;
+                let with: Vec<u8> = match replace {
+                    Union::A(all) => match all.live_from(replace_at) {
+                        Some((found, _, value)) => {
+                            replace_at = found.saturating_add(1);
+                            string_bytes(req, &value.deref())?
+                        }
                         None => Vec::new(),
                     },
-                    (None, Union::B(s)) => s.as_bytes().to_vec(),
-                    (None, Union::A(_)) => Vec::new(),
+                    Union::B(s) => s.as_bytes().to_vec(),
                 };
                 if needle.is_empty() {
-                    continue;
+                    return Ok(ControlFlow::Continue(()));
                 }
                 let haystack = current.as_deref().unwrap_or(subject.as_bytes());
                 let (replaced, n) = replace_bytes(haystack, &needle, &with, case_sensitive);
@@ -196,8 +205,12 @@ fn in_subject(
                     current = Some(replaced);
                 }
                 if current.as_ref().is_some_and(Vec::is_empty) {
-                    return Ok((PhpString::new(req, b"")?, count));
+                    return Ok(ControlFlow::Break(()));
                 }
+                Ok(ControlFlow::Continue(()))
+            })?;
+            if emptied.is_some() {
+                return Ok((PhpString::new(req, b"")?, count));
             }
         }
         Union::B(needle) => {
@@ -355,7 +368,14 @@ fn strtr_array(
     from: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
-    let entries = from.snapshot();
+    // `php_strtr_array_ex` (`Z/ext/standard/string.c:2919`) reads the
+    // pattern table's keys and finds each match's value in it as it
+    // writes, the table the argument holds: the rows are read under the
+    // borrowed request, views the argument keeps while a value's
+    // `__toString` runs.
+    let entries: Vec<(Key, Value)> = walk::rows(req, from)
+        .map(|(key, value)| (key, value.deref()))
+        .collect();
     if entries.is_empty() {
         return Ok(str_copy(req, string));
     }
@@ -536,20 +556,22 @@ pub(super) fn substr_replace(
         }
         Union::A(strings) => {
             let mut out = PhpArray::new(req)?;
-            let mut froms = match from {
-                Union::A(array) => Some(array.snapshot().into_iter()),
-                Union::B(_) => None,
+            let (mut from_at, mut length_at, mut replace_at) = (0, 0, 0);
+            // The next row of a table walked by bucket position, as
+            // `substr_replace` reads `from_ht`, `len_ht` and `repl_ht` beside
+            // its walk (`tmp_from = &from_ht->arData[from_idx].val`): the
+            // value at the next bucket that holds one, as it stands.
+            let next = |table: PhpArray, at: &mut u32| {
+                let (found, _, value) = table.live_from(*at)?;
+                *at = found.saturating_add(1);
+                Some(value.deref())
             };
-            let mut lengths = match length {
-                Some(Union::A(array)) => Some(array.snapshot().into_iter()),
-                _ => None,
-            };
-            let mut replaces = match replace {
-                Union::A(array) => Some(array.snapshot().into_iter()),
-                Union::B(_) => None,
-            };
-            for (key, entry) in strings.snapshot() {
-                let s = string_bytes(req, &entry.deref())?;
+            // `ZEND_HASH_FOREACH_KEY_VAL(str_ht, num_index, str_index,
+            // tmp_str)` (`Z/ext/standard/string.c:2443`), no owner of the
+            // strings taken: the argument holds them while `__toString`
+            // runs.
+            walk::foreach(req, strings, Hold::None, |req, row| -> walk::Step {
+                let s = string_bytes(req, &row.value().deref())?;
                 let slen = long(s.len());
                 let clamp_from = |f: i64| {
                     if f < 0 {
@@ -558,21 +580,20 @@ pub(super) fn substr_replace(
                         f.min(slen)
                     }
                 };
-                let f = match (&mut froms, &from) {
-                    (Some(iter), _) => match iter.next() {
-                        Some((_, value)) => clamp_from(to_long(req, &value.deref())?),
+                let f = match from {
+                    Union::A(all) => match next(all, &mut from_at) {
+                        Some(value) => clamp_from(to_long(req, &value)?),
                         None => 0,
                     },
-                    (None, Union::B(f)) => clamp_from(*f),
-                    (None, Union::A(_)) => 0,
+                    Union::B(f) => clamp_from(f),
                 };
-                let mut l = match (&mut lengths, &length) {
-                    (Some(iter), _) => match iter.next() {
-                        Some((_, value)) => to_long(req, &value.deref())?,
+                let mut l = match length {
+                    Some(Union::A(all)) => match next(all, &mut length_at) {
+                        Some(value) => to_long(req, &value)?,
                         None => slen,
                     },
-                    (None, Some(Union::B(l))) => *l,
-                    (None, _) => slen,
+                    Some(Union::B(l)) => l,
+                    None => slen,
                 };
                 if l < 0 {
                     l = ((slen - f) + l).max(0);
@@ -580,13 +601,12 @@ pub(super) fn substr_replace(
                 if f.saturating_add(l) > slen {
                     l = slen - f;
                 }
-                let with: Vec<u8> = match (&mut replaces, &replace) {
-                    (Some(iter), _) => match iter.next() {
-                        Some((_, value)) => string_bytes(req, &value.deref())?,
+                let with: Vec<u8> = match replace {
+                    Union::A(all) => match next(all, &mut replace_at) {
+                        Some(value) => string_bytes(req, &value)?,
                         None => Vec::new(),
                     },
-                    (None, Union::B(r)) => r.as_bytes().to_vec(),
-                    (None, Union::A(_)) => Vec::new(),
+                    Union::B(r) => r.as_bytes().to_vec(),
                 };
                 let (f, l) = (
                     usize::try_from(f).unwrap_or(0),
@@ -597,9 +617,10 @@ pub(super) fn substr_replace(
                 bytes.extend_from_slice(&with);
                 bytes.extend_from_slice(&s[f + l..]);
                 let value = Value::string(PhpString::new(req, &bytes)?.hand_on_unmigrated());
-                let key = owned_key(req, &key);
+                let key = owned_key(req, row.key());
                 out.set(req, key, value)?;
-            }
+                Ok(ControlFlow::Continue(()))
+            })?;
             Ok(Union::A(out))
         }
     }

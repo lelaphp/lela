@@ -8,11 +8,14 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::State;
@@ -447,13 +450,19 @@ fn get_browser(
         return Ok(Union::B(OrFalse::Value(array)));
     };
     let object = new_object(req, class)?;
-    for (key, value) in array.snapshot() {
+    // `object_and_properties_init` over the browser's row
+    // (`Z/ext/standard/browscap.c:793`), which runs no code of the program;
+    // each row is lent while it is written.
+    walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         if let Key::Str(name) = key {
             let value = Owner::take(req, value);
             let name = Owner::take(req, name);
             object.set_prop(req, name, value)?;
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     array.give_up(req);
     Ok(Union::A(object))
 }

@@ -239,6 +239,16 @@ impl<T: View> Owner<T> {
         req.release(self.counted);
     }
 
+    /// The owner given up as `zval_ptr_dtor_nogc` gives one up: the value
+    /// destroyed at its last owner, and where owners are left no possible
+    /// root of the cycle collector (design §5.12). What a walk gives up of
+    /// what it held where php's held nothing, and `zend_array_release`.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn give_up_nogc(mut self, req: &mut Request) {
+        self.consume();
+        req.release_nogc(self.counted);
+    }
+
     /// The owner given up as `GC_DELREF` gives one up, and what is left
     /// of the value: at the last owner the value is destroyed,
     /// `zend_array_destroy`, `zend_string_efree` or

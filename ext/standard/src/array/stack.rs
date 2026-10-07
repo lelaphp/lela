@@ -12,6 +12,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::to_array;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value};
 
 use super::{copied, key_copy};
@@ -322,7 +323,10 @@ fn unwrapped(req: &mut Request, taken: Value) -> Owner<Value> {
 #[php_function]
 fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Thrown> {
     let mut stack = Stack::of(req, array)?;
-    let rows = stack.array.snapshot_refs();
+    // The rebuild runs no code of the program, as php's in-place one runs
+    // none: the rows are read under the borrowed request, views the table
+    // the stack holds keeps until it is replaced.
+    let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
     let Some((_, first)) = rows.first().cloned() else {
         stack.finish(req);
         return Ok(Owner::take(req, Value::null()));
@@ -439,7 +443,11 @@ fn array_unshift(
         req.addref(&value);
         rebuilt.append(req, value)?;
     }
-    for (key, element) in stack.array.snapshot_refs() {
+    // The rebuild runs no code of the program, as php's in-place one runs
+    // none: the rows are read under the borrowed request, views the table
+    // the stack holds keeps until it is replaced.
+    let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
+    for (key, element) in rows {
         req.addref(&element);
         match key {
             Key::Str(_) => {
@@ -664,7 +672,10 @@ fn array_splice(
         walk.iter_pos = stack.array.iterators_lower_pos(req, walk.iter_pos);
     }
     if let Some(replacement) = &replacement {
-        for (_, value) in replacement.snapshot_refs() {
+        // The replacement's rows, which this native owns, appended; no code
+        // of the program runs between.
+        let values: Vec<Value> = walk::rows(req, **replacement).map(|(_, v)| v).collect();
+        for value in values {
             req.addref(&value);
             rebuilt.append(req, value)?;
             walk.pos += 1;
@@ -910,7 +921,10 @@ fn array_slice(
         return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
-    let rows = input.snapshot_refs();
+    // `ZEND_HASH_FOREACH_KEY_VAL` over the slice's range, which no code of
+    // the program reaches: the rows read under the borrowed request, views
+    // the argument keeps.
+    let rows: Vec<(Key, Value)> = walk::rows(req, input).collect();
     let from = usize::try_from(start).unwrap_or(usize::MAX);
     let count = usize::try_from(taken).unwrap_or(usize::MAX);
     for (key, element) in rows.into_iter().skip(from).take(count) {

@@ -7,6 +7,7 @@
 //! (`Z/ext/standard/strnatcmp.c`) for `SORT_NATURAL`.
 
 use std::cmp::Ordering;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -14,6 +15,7 @@ use php_ext::call::call;
 use php_ext::coerce::{compare, to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self as rows, Hold, Row};
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, zend_sort};
 
 use constants::{
@@ -119,7 +121,7 @@ fn returned<T: FromArgument>(value: Owner<Value>) -> Owner<Raw<T>> {
 /// `zval_add_ref` on an element being copied into a new array: a
 /// reference with no other owner is followed to its value, which is
 /// what the copy holds, and anything else is one more owner.
-fn copied(req: &mut Request, value: Value) -> Value {
+fn copied(req: &Request, value: Value) -> Value {
     let value = match value.as_ref() {
         ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
         _ => value,
@@ -128,9 +130,21 @@ fn copied(req: &mut Request, value: Value) -> Value {
     value
 }
 
+/// [`copied`] over a row a foreach walk lends: the reference followed
+/// where php's walk reads it held by one owner, the walk's own for the
+/// step not counted ([`Row::refcount`]).
+fn row_copied(req: &mut Request, row: &Row) -> Value {
+    let value = match row.value().as_ref() {
+        ValueRef::Reference(reference) if row.refcount() == 1 => reference.get(),
+        _ => *row.value(),
+    };
+    req.addref(&value);
+    value
+}
+
 /// A key written into another array: a string key one more owner, as
 /// `zend_hash_add_new` takes it.
-fn key_copy(req: &mut Request, key: &Key) -> Key {
+fn key_copy(req: &Request, key: &Key) -> Key {
     if let Key::Str(s) = key {
         req.addref(&Value::string(*s));
     }
@@ -256,21 +270,23 @@ fn array_merge(
     }
     let mut merged = PhpArray::new(req)?;
     for array in arrays {
-        for (key, value) in array.snapshot_refs() {
-            // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`.
-            let value = match value.as_ref() {
-                ValueRef::Reference(_) if value.refcount() == 1 => value.deref(),
-                _ => value,
-            };
-            req.addref(&value);
-            match key {
+        // `php_array_merge`'s `ZEND_HASH_FOREACH_STR_KEY_VAL(src, string_key,
+        // src_entry)` (`Z/ext/standard/array.c:4131`), no owner of the table
+        // taken: the argument holds it while an update's release serves a
+        // destructor.
+        rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
+            // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`, the
+            // walk's own owner not counted.
+            let value = row_copied(req, row);
+            match row.key() {
                 Key::Str(name) => {
-                    req.addref(&Value::string(name));
-                    merged.set(req, Key::Str(name), value)?;
+                    req.addref(&Value::string(*name));
+                    merged.set(req, Key::Str(*name), value)?;
                 }
                 Key::Int(_) => merged.append(req, value)?,
             }
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
     }
     Ok(returned(merged.into_value()))
 }
@@ -522,7 +538,10 @@ fn array_unique(
     if flags == SORT_STRING {
         return unique_by_string(req, array);
     }
-    let entries = array.snapshot_refs();
+    // php copies the buckets into `arTmp` (`Z/ext/standard/array.c:5038`),
+    // taking no owner, and sorts them under the comparison: the rows read
+    // under the borrowed request, views the argument keeps.
+    let entries: Vec<(Key, Value)> = rows::rows(req, array).collect();
     let mut copy = array.copy(req)?;
     let mut order: Vec<usize> = (0..entries.len()).collect();
     let mut pending: Option<Thrown> = None;
@@ -574,26 +593,26 @@ fn array_unique(
 fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut seen = std::collections::HashSet::new();
     let mut out = PhpArray::new(req)?;
-    for (key, value) in array.snapshot_refs() {
-        let bytes = match crate::string::string_bytes(req, &value) {
-            Ok(bytes) => bytes,
-            Err(thrown) => {
-                out.give_up(req);
-                return Err(thrown);
-            }
-        };
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(array), num_key, str_key, val)`
+    // (`Z/ext/standard/array.c:4993`), no owner of the table taken: the
+    // argument holds it while a value's `__toString` runs. A reference is
+    // read as held by one owner less the walk's own (`Row::refcount`).
+    let walked = rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
+        let bytes = crate::string::string_bytes(req, row.value())?;
         if !seen.insert(bytes) {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
-        let value = match value.as_php_ref() {
-            Some(reference) if value.refcount() == 1 => reference.get(),
-            _ => value,
-        };
-        req.addref(&value);
+        let value = row_copied(req, row);
+        let key = row.key().clone();
         if let Key::Str(s) = &key {
             req.addref(&Value::string(*s));
         }
         out.set(req, key, value)?;
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }

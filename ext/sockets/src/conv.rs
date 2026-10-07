@@ -9,11 +9,13 @@
 //! and its two conversions.
 
 use std::net::{Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::ops::ControlFlow;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use php_ext::coerce::{float_to_long, numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
@@ -458,13 +460,24 @@ impl Conv {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for (at, (_, element)) in array.snapshot().into_iter().enumerate() {
-            let key = format!("element #{}", at + 1);
+        let mut at = 0;
+        // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), elem)`
+        // (`Z/ext/sockets/conversions.c:956`), no owner of the table taken:
+        // the argument holds it while a stream's cast runs its wrapper.
+        let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+            at += 1;
+            let key = format!("element #{at}");
+            let element = row.value().deref();
             let fd = self.under(&key, |c| c.fd_of(req, &element));
             if self.failed() {
-                break;
+                return Ok(ControlFlow::Break(()));
             }
             out.extend_from_slice(&fd.to_ne_bytes());
+            Ok(ControlFlow::Continue(()))
+        });
+        match walked {
+            // The body answers no throwable.
+            Ok(_) | Err(_) => {}
         }
         out
     }
@@ -504,13 +517,21 @@ impl Conv {
         let Some(array) = self.table(value) else {
             return Ok(out);
         };
-        for (at, (_, element)) in array.snapshot().into_iter().enumerate() {
+        let mut at = 0;
+        // `from_array_iterate`'s `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), elem)`
+        // (`Z/ext/sockets/conversions.c:228`), no owner of the table taken:
+        // the argument holds it while a field's conversion runs
+        // `__toString`.
+        walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
             if self.failed() {
-                break;
+                return Ok(ControlFlow::Break(()));
             }
             let key = format!("element #{at}");
+            at += 1;
+            let element = row.value().deref();
             self.under(&key, |c| c.cmsghdr(req, &element, &mut out))?;
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(out)
     }
 
@@ -590,9 +611,13 @@ impl Conv {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
-        for (_, element) in array.snapshot() {
-            out.push(Conv::text(req, &element)?);
-        }
+        // `from_array_iterate` (`Z/ext/sockets/conversions.c:228`), no
+        // owner of the table taken: the argument holds it while
+        // `zval_try_get_string` runs `__toString`.
+        walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+            out.push(Conv::text(req, &row.value().deref())?);
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(out)
     }
 

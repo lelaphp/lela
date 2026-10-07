@@ -3,6 +3,7 @@
 //! check for a purpose against a store (`php_openssl_setup_verify`,
 //! `php_openssl_check_cert`), with `openssl_get_cert_locations`.
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use php_ext::abi::{Instance, OrFalse, Ref, Refusals, Union, Untyped};
@@ -10,6 +11,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::decode::{
@@ -711,16 +713,21 @@ pub(crate) fn setup_verify(
         return Ok(None);
     };
     let (mut files, mut dirs) = (0, 0);
-    for (_, item) in calist.map(|a| a.snapshot()).unwrap_or_default() {
-        let text = crate::xp_ssl::string_of(req, &item)?;
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(calist), item)`
+    // (`Z/ext/openssl/openssl_backend_common.c:792`), no owner of the table
+    // taken: the argument holds it while `zval_try_get_string` runs
+    // `__toString`.
+    let calist = calist.unwrap_or_else(PhpArray::empty);
+    walk::foreach(req, calist, Hold::None, |req, row| -> walk::Step {
+        let text = crate::xp_ssl::string_of(req, &row.value().deref())?;
         let Some(path) = check_path(req, &text, Origin::Item(arg, None), false) else {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let shown = String::from_utf8_lossy(path.as_bytes()).into_owned();
         let host = std::path::Path::new(std::ffi::OsStr::from_bytes(path.as_bytes()));
         let Ok(meta) = std::fs::metadata(host) else {
             docref(req, Level::Warning, &format!("Unable to stat {shown}"));
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let dir = !meta.is_file();
         if store.load(dir, Some(&path)) {
@@ -738,7 +745,8 @@ pub(crate) fn setup_verify(
                 &format!("Error loading {what} {shown}"),
             );
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     if files == 0 && !store.load(false, None) {
         store_errors(req);
     }

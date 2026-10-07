@@ -158,7 +158,13 @@ fn from_fd_set(
     ready: &[bool],
 ) -> Result<(), Thrown> {
     let mut out = PhpArray::new(req)?;
-    for ((key, element), set) in array.snapshot().into_iter().zip(ready) {
+    // `php_sock_array_from_fd_set`'s `ZEND_HASH_FOREACH_KEY_VAL`, which no
+    // code of the program reaches: the rows read under the borrowed
+    // request, views the argument keeps, then written.
+    let rows: Vec<(Key, Value)> = walk::rows(req, array)
+        .map(|(key, element)| (key, element.deref()))
+        .collect();
+    for ((key, element), set) in rows.into_iter().zip(ready) {
         if *set {
             req.addref(&element);
             if let Key::Str(s) = &key {

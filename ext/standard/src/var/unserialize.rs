@@ -7,6 +7,8 @@
 //! order their objects were finished once the whole string is read; and
 //! php's warnings, with the byte offset where the scanner stood.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
@@ -15,6 +17,7 @@ use php_ext::raising::{
     Level, Thrown, call_stack_end, deprecated, docref, throw, throw_error, warning,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     ClassId, Emalloc, Key, Layout, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
 };
@@ -1063,7 +1066,11 @@ fn allowed_names(
     list: PhpArray,
     function: &str,
 ) -> Result<(), Thrown> {
-    for (_, entry) in list.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(classes), entry)`
+    // (`Z/ext/standard/var.c:1416`), no owner of the table taken: the
+    // option holds it while `__toString` runs.
+    walk::foreach(req, list, Hold::None, |req, row| -> walk::Step {
+        let entry = row.value().deref();
         let entry = entry.deref();
         if !matches!(entry.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             let name = value_name(req, &entry);
@@ -1106,7 +1113,8 @@ fn allowed_names(
         } else {
             names.set(req, Key::Str(lowered.hand_on_unmigrated()), Value::null())?;
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 

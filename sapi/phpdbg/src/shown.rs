@@ -7,7 +7,7 @@
 //! reads the zvals themselves; this copy is what stands in for holding
 //! one across a step.
 
-use php_sapi::tier::{self, FrameRef, Identity, Request, Thrown, TypeTag, Value, ValueKey};
+use php_sapi::tier::{self, FrameRef, Identity, Request, Thrown, TypeTag, Value, ValueKey, rows};
 
 /// A key of an array, or a property's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,8 +97,9 @@ pub struct TraceRow {
 }
 
 /// `value` copied, its arrays to `depth` levels; an array that holds
-/// itself is copied without its elements.
-fn shown(req: &mut Request, value: Value, depth: u32) -> Shown {
+/// itself is copied without its elements. Read under the borrowed
+/// request ([`rows`]): nothing here runs code of the program.
+fn shown(req: &Request, value: Value, depth: u32) -> Shown {
     match value.tag() {
         TypeTag::Undef => Shown::Undef,
         TypeTag::Null | TypeTag::Number => Shown::Null,
@@ -118,13 +119,11 @@ fn shown(req: &mut Request, value: Value, depth: u32) -> Shown {
                 Vec::new()
             } else {
                 array.protect();
-                let rows = array
-                    .snapshot()
-                    .into_iter()
-                    .map(|(key, value)| (key_copied(&key), shown(req, value, depth - 1)))
+                let copied = rows(req, array)
+                    .map(|(key, value)| (key_copied(&key), shown(req, value.deref(), depth - 1)))
                     .collect();
                 array.unprotect();
-                rows
+                copied
             };
             Shown::Array {
                 id: Identity::of(value),
@@ -250,30 +249,34 @@ pub fn backtrace(req: &mut Request, limit: i64) -> Vec<TraceRow> {
         let Some(trace) = trace.as_array().copied() else {
             return Vec::new();
         };
+        let req: &Request = req;
         let mut read = Vec::new();
-        for (_, row) in trace.snapshot() {
+        for (_, row) in rows(req, trace) {
             let Some(row) = row.as_array().copied() else {
                 continue;
             };
-            let fields = row.snapshot();
             let field = |name: &[u8]| {
-                fields.iter().find_map(|(key, value)| match key {
-                    ValueKey::Str(s) if s.as_bytes() == name => Some(*value),
+                rows(req, row).find_map(|(key, value)| match key {
+                    ValueKey::Str(s) if s.as_bytes() == name => Some(value.deref()),
                     _ => None,
                 })
             };
             let bytes =
                 |value: Option<Value>| value.and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
-            let args: Vec<Value> = field(b"args")
+            let args = field(b"args")
                 .and_then(|v| v.as_array().copied())
-                .map(|args| args.snapshot().into_iter().map(|(_, v)| v).collect())
+                .map(|args| {
+                    rows(req, args)
+                        .map(|(_, v)| shown(req, v.deref(), 1))
+                        .collect()
+                })
                 .unwrap_or_default();
             read.push(TraceRow {
                 function: bytes(field(b"function")).unwrap_or_default(),
                 class: bytes(field(b"class")).zip(bytes(field(b"type"))),
                 file: bytes(field(b"file")),
                 line: field(b"line").and_then(|v| v.as_int()),
-                args: args.into_iter().map(|value| shown(req, value, 1)).collect(),
+                args,
             });
         }
         read

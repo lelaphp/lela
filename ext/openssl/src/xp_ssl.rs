@@ -15,6 +15,7 @@
 
 use std::any::Any;
 use std::ffi::{CString, c_int};
+use std::ops::ControlFlow;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,7 @@ use php_ext::request::{
     Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, StreamCtx, Streams as _,
     XportFactory,
 };
+use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk};
 use php_ext_standard::UriParser;
 
@@ -479,27 +481,32 @@ fn sni_option(req: &mut Request, value: &Value) -> Result<SniOption, Thrown> {
         return Ok(SniOption::NotArray);
     };
     let mut entries = Vec::new();
-    for (key, item) in array.snapshot() {
-        let name = match key {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(val), key_index, key, current)`
+    // (`Z/ext/openssl/xp_ssl.c:1374`), no owner of the table taken: the
+    // stream context holds it while `zval_try_get_string` runs
+    // `__toString`, as it does over each pair's rows.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let name = match row.key() {
             Key::Str(name) => Some(name.as_bytes().to_vec()),
             Key::Int(_) => None,
         };
-        let item = item.deref();
+        let item = row.value().deref();
         let certs = match item.as_ref() {
             ValueRef::Array(pair) => {
                 let mut local_cert = None;
                 let mut local_pk = None;
-                for (k, v) in pair.snapshot() {
-                    match k {
+                walk::foreach(req, *pair, Hold::None, |req, row| -> walk::Step {
+                    match row.key() {
                         Key::Str(k) if k.as_bytes() == b"local_cert" => {
-                            local_cert = Some(string_of(req, &v)?);
+                            local_cert = Some(string_of(req, &row.value().deref())?);
                         }
                         Key::Str(k) if k.as_bytes() == b"local_pk" => {
-                            local_pk = Some(string_of(req, &v)?);
+                            local_pk = Some(string_of(req, &row.value().deref())?);
                         }
                         _ => {}
                     }
-                }
+                    Ok(ControlFlow::Continue(()))
+                })?;
                 SniCerts::Pair {
                     local_cert,
                     local_pk,
@@ -509,7 +516,8 @@ fn sni_option(req: &mut Request, value: &Value) -> Result<SniOption, Thrown> {
             _ => SniCerts::Other,
         };
         entries.push(SniEntry { name, certs });
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(SniOption::Entries(entries))
 }
 

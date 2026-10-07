@@ -8,12 +8,15 @@
 //! each element off as the walk passes it, and `SplQueue` and
 //! `SplStack` freeze the direction (`SPL_DLLIST_IT_FIX`).
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::{ArrayAccess, Countable, Iterator, Serializable};
@@ -771,10 +774,15 @@ impl SplDoublyLinkedList {
             ));
         };
         with(req, this, |l| l.flags = flags)?;
-        for (_, value) in storage.snapshot() {
+        // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(storage_zv), elem)`
+        // (`Z/ext/spl/spl_dllist.c:1153`), no owner of the table taken: the
+        // argument holds it.
+        walk::foreach(req, storage, Hold::None, |req, row| -> walk::Step {
+            let value = row.value().deref();
             let value = crate::copied(req, value);
             with(req, this, |l| l.push(value))?;
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         crate::load_members(req, this, &Value::array(members))
     }
 }

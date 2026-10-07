@@ -9,6 +9,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Thrown, arg_value_error, fatal, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::rng::Rng;
@@ -449,7 +450,10 @@ impl Randomizer {
         this: This<Self>,
         array: PhpArray,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        let mut values: Vec<Value> = array.snapshot_refs().into_iter().map(|(_, v)| v).collect();
+        // php shuffles a copy of the array's rows (`zend_array_dup`, then
+        // `php_array_data_shuffle`): the rows read under the borrowed
+        // request, views the argument keeps while the engine runs.
+        let mut values: Vec<Value> = walk::rows(req, array).map(|(_, v)| v).collect();
         let handle = engine(req, this.object())?;
         handle.shuffle(req, &mut values)?;
         let mut out = PhpArray::new(req)?;

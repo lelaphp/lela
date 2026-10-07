@@ -5,13 +5,16 @@
 
 #![allow(non_camel_case_types)]
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Instance, OrFalse, Ref, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::walk::{self, Hold};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_mysqlnd::client::{CLIENT_INFO, CLIENT_VERSION, Mysqlnd};
 
 use crate::link::{self, Link, Need};
@@ -243,8 +246,12 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
             row.give_up(req);
             break;
         };
-        let cells = array.snapshot();
-        let errno = match cells.get(1).map(|(_, v)| php_ext::coerce::to_long(req, v)) {
+        // `zend_hash_internal_pointer_reset`, `zend_hash_move_forward`
+        // and `zend_hash_get_current_data` (`Z/ext/mysqli/mysqli_warning.c:83`)
+        // over the row this native owns, a list: its second and third
+        // cells, looked up when each is read.
+        let cell = |at: i64| array.get(&Key::Int(at)).map(|v| v.deref());
+        let errno = match cell(1).map(|v| php_ext::coerce::to_long(req, &v)) {
             Some(Ok(n)) => n,
             Some(Err(thrown)) => {
                 row.give_up(req);
@@ -252,7 +259,7 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
             }
             None => 0,
         };
-        let message = match cells.get(2).map(|(_, v)| crate::string_of(req, v)) {
+        let message = match cell(2).map(|v| crate::string_of(req, &v)) {
             Some(Ok(bytes)) => bytes,
             Some(Err(thrown)) => {
                 row.give_up(req);
@@ -352,13 +359,18 @@ impl mysqli_sql_exception {
 fn links_of(req: &mut Request, array: PhpArray) -> Result<Vec<(Value, Mysqlnd)>, Thrown> {
     let mut out = Vec::new();
     let class = link::link_class(req)?;
-    for (i, (_, element)) in array.snapshot().into_iter().enumerate() {
-        let element = element.deref();
+    let mut i = 0usize;
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(in_array), elem)`
+    // (`Z/ext/mysqli/mysqli_nonapi.c:658`), no owner of the table taken:
+    // the argument holds it while an error reaches the program.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        i += 1;
+        let element = row.value().deref();
         let object = match element.as_ref() {
             ValueRef::Object(o) if o.instance_of(req, class) => *o,
             _ => {
                 let given = php_ext::coerce::value_name(req, &element);
-                let n = u32::try_from(i + 1).unwrap_or(u32::MAX);
+                let n = u32::try_from(i).unwrap_or(u32::MAX);
                 return Err(arg_type_error(
                     req,
                     n,
@@ -374,7 +386,8 @@ fn links_of(req: &mut Request, array: PhpArray) -> Result<Vec<(Value, Mysqlnd)>,
         if let Some(conn) = conn {
             out.push((element, conn));
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 

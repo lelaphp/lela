@@ -5,10 +5,13 @@
 //! the tag buffer an allowed-tags set is matched against by
 //! `php_tag_find`.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::Union;
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `strip_tags(string $string, array|string|null $allowed_tags = null):
@@ -45,12 +48,17 @@ pub(super) fn strip_tags(
         Some(Union::B(s)) => Some(s.as_bytes().to_vec()),
         Some(Union::A(array)) => {
             let mut set = Vec::new();
-            for (_, value) in array.snapshot() {
-                let tag = crate::string::string_bytes(req, &value.deref())?;
+            // `ZEND_HASH_FOREACH_VAL(allow_ht, tmp)`
+            // (`Z/ext/standard/string.c:4842`), no owner of the table
+            // taken: the argument holds it while `__toString` runs.
+            walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+                let value = row.value().deref();
+                let tag = crate::string::string_bytes(req, &value)?;
                 set.push(b'<');
                 set.extend_from_slice(&tag);
                 set.push(b'>');
-            }
+                Ok(ControlFlow::Continue(()))
+            })?;
             if set.is_empty() { None } else { Some(set) }
         }
     };

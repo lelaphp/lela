@@ -1111,8 +1111,6 @@ values::HashIterator::set_position
 values::HeldProperties
 values::HeldProperties::count
 values::HeldProperties::release
-values::HeldProperties::rows
-values::HeldRow
 values::Key
 values::Key::from_string
 values::Key::to_prop_name
@@ -1175,8 +1173,6 @@ values::PhpArray::separate
 values::PhpArray::set
 values::PhpArray::set_next_free
 values::PhpArray::sized
-values::PhpArray::snapshot
-values::PhpArray::snapshot_refs
 values::PhpArray::sort_by
 values::PhpArray::to_value
 values::PhpArray::try_append
@@ -1316,10 +1312,12 @@ values::walk::Row
 values::walk::Row::key
 values::walk::Row::make_ref
 values::walk::Row::refcount
+values::walk::Row::uninitialized
 values::walk::Row::value
 values::walk::Rows
 values::walk::Step
 values::walk::Table
+values::walk::Unwritten
 values::walk::detached
 values::walk::foreach
 values::walk::foreach_guarded

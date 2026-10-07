@@ -7,9 +7,12 @@
 //! (`soap_create_typemap`) and the signatures `__getFunctions()` and
 //! `__getTypes()` print.
 
+use std::ops::ControlFlow;
+
 use php_ext::call::lookup_class;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext::values::walk::Hold;
 use php_ext::values::{
     Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk,
 };
@@ -411,15 +414,48 @@ fn serialize_response_call2(
     } else if param_count > 1
         && let ValueRef::Array(arr) = ret.deref().as_ref()
     {
-        for (i, (key, data)) in (0u32..).zip(arr.snapshot()) {
-            let (pname, pindex): (Option<Vec<u8>>, u64) = match &key {
-                PhpKey::Str(s) => (Some(s.as_bytes().to_vec()), u64::from(i)),
-                PhpKey::Int(n) => (None, u64::try_from(*n).unwrap_or(u64::MAX)),
-            };
-            let parameter = get_param(function, pname.as_deref(), pindex, true);
-            if style == Style::Rpc {
-                if let Some(m) = method {
-                    serialize_parameter(
+        // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(ret), param_index, param_name,
+        // data)` (`Z/ext/soap/soap.c:3587`), no owner of the table taken:
+        // the return value holds it while an encoder runs a type map's
+        // `to_xml` or `__toString`.
+        let mut i = 0u32;
+        // A throwable ends the walk as one; a SOAP error ends it with the
+        // error, raised after.
+        let carried = |error: crate::Error| match error {
+            crate::Error::Thrown(thrown) => Err(thrown),
+            other => Ok(ControlFlow::Break(other)),
+        };
+        let failed = walk::foreach(
+            req,
+            *arr,
+            Hold::None,
+            |req, row| -> walk::Step<crate::Error> {
+                let key = row.key().clone();
+                let data = row.value().deref();
+                let (pname, pindex): (Option<Vec<u8>>, u64) = match &key {
+                    PhpKey::Str(s) => (Some(s.as_bytes().to_vec()), u64::from(i)),
+                    PhpKey::Int(n) => (None, u64::try_from(*n).unwrap_or(u64::MAX)),
+                };
+                let parameter = get_param(function, pname.as_deref(), pindex, true);
+                if style == Style::Rpc {
+                    if let Some(m) = method {
+                        let written = serialize_parameter(
+                            req,
+                            cx,
+                            sdl,
+                            parameter,
+                            data,
+                            i,
+                            pname.as_deref(),
+                            use_,
+                            m,
+                        );
+                        if let Err(error) = written {
+                            return carried(error);
+                        }
+                    }
+                } else {
+                    let param = match serialize_parameter(
                         req,
                         cx,
                         sdl,
@@ -428,31 +464,27 @@ fn serialize_response_call2(
                         i,
                         pname.as_deref(),
                         use_,
-                        m,
-                    )?;
+                        body,
+                    ) {
+                        Ok(param) => param,
+                        Err(error) => return carried(error),
+                    };
+                    if fnb.is_some()
+                        && let Some(param) = param
+                        && let Some(element) =
+                            parameter.and_then(|p| p.element).and_then(|e| sdl?.ty(e))
+                    {
+                        let ns = add_ns(req, param, element.namens.as_deref());
+                        param.set_name(element.name.as_deref().unwrap_or_default());
+                        param.set_ns_call(ns);
+                    }
                 }
-            } else {
-                let param = serialize_parameter(
-                    req,
-                    cx,
-                    sdl,
-                    parameter,
-                    data,
-                    i,
-                    pname.as_deref(),
-                    use_,
-                    body,
-                )?;
-                if fnb.is_some()
-                    && let Some(param) = param
-                    && let Some(element) =
-                        parameter.and_then(|p| p.element).and_then(|e| sdl?.ty(e))
-                {
-                    let ns = add_ns(req, param, element.namens.as_deref());
-                    param.set_name(element.name.as_deref().unwrap_or_default());
-                    param.set_ns_call(ns);
-                }
-            }
+                i += 1;
+                Ok(ControlFlow::Continue(()))
+            },
+        )?;
+        if let Some(error) = failed {
+            return Err(error);
         }
     }
     if use_ == Use::Encoded
@@ -1438,8 +1470,11 @@ pub(crate) fn soap_create_typemap(
     ht: PhpArray,
 ) -> Result<Option<Typemap>, Thrown> {
     let mut typemap: Option<Typemap> = None;
-    for (_, tmp) in ht.snapshot() {
-        let tmp = tmp.deref();
+    // `ZEND_HASH_FOREACH_VAL(ht, tmp)` (`Z/ext/soap/soap.c:814`), no owner
+    // of the table taken: the option's array holds it while a `TypeError`
+    // reaches the program's handler.
+    walk::foreach(req, ht, Hold::None, |req, row| -> walk::Step {
+        let tmp = row.value().deref();
         let ValueRef::Array(entry) = tmp.as_ref() else {
             let given = php_ext::coerce::value_name(req, &tmp);
             return Err(php_ext::raising::throw(
@@ -1475,7 +1510,9 @@ pub(crate) fn soap_create_typemap(
                 }
             }
         }
-        let Some(type_name) = type_name else { continue };
+        let Some(type_name) = type_name else {
+            return Ok(ControlFlow::Continue(()));
+        };
         let found = match &type_ns {
             Some(ns) => crate::sdl::get_encoder(sdl, Some(ns), &type_name),
             None => crate::sdl::get_encoder_ex(sdl, &type_name),
@@ -1529,7 +1566,8 @@ pub(crate) fn soap_create_typemap(
                 to_zval,
             },
         );
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(typemap)
 }
 

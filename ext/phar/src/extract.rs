@@ -2,12 +2,14 @@
 //! the name kept under the destination as `virtual_file_ex` expands it
 //! from `/`.
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use php_ext::abi::Union;
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::{Opening, Request, Resolve, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{PhpArray, PhpString};
 
 use crate::archive::{
@@ -288,7 +290,12 @@ pub(crate) fn extract_to(
             if list.is_empty() {
                 return Ok(false);
             }
-            for (_, value) in list.snapshot() {
+            // `ZEND_HASH_FOREACH_VAL(files_ht, zval_file)`
+            // (`Z/ext/phar/phar_object.c:4417`), no owner of the table
+            // taken: the argument holds it while an extraction writes
+            // through a stream wrapper.
+            let walked = walk::foreach(req, list, Hold::None, |req, row| -> walk::Step<bool> {
+                let value = row.value().deref();
                 let Some(name) = value.deref().as_str_bytes().map(<[u8]>::to_vec) else {
                     return Err(throw(
                         req,
@@ -297,12 +304,13 @@ pub(crate) fn extract_to(
                     ));
                 };
                 match extract_matching(req, id, Some(&name), dest, overwrite)? {
-                    Err(error) => return fail(req, error),
-                    Ok(0) => return missing(req, &name),
+                    Err(error) => return fail(req, error).map(ControlFlow::Break),
+                    Ok(0) => return missing(req, &name).map(ControlFlow::Break),
                     Ok(_) => {}
                 }
-            }
-            Ok(true)
+                Ok(ControlFlow::Continue(()))
+            })?;
+            Ok(walked.unwrap_or(true))
         }
         other => {
             let name = match other {

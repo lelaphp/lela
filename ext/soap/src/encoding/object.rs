@@ -795,7 +795,8 @@ fn model_to_xml_object(
                     && let Some(arr) = data.as_array().copied()
                     && arr.is_list()
                 {
-                    with_rows(req, rows(arr), |req, rows| {
+                    let read = rows(req, arr);
+                    with_rows(req, read, |req, rows| {
                         for (_, val) in rows {
                             let property = element_to_xml(req, cx, el, *val, style, node)?;
                             name_property(req, el, property, style);
@@ -853,7 +854,8 @@ fn model_to_xml_object(
                 && let Some(arr) = data.as_array().copied()
                 && arr.is_list()
             {
-                with_rows(req, rows(arr), |req, rows| {
+                let read = rows(req, arr);
+                with_rows(req, read, |req, rows| {
                     for (_, val) in rows {
                         master_to_xml(req, cx, Some(anyxml), *val, style, node)?;
                     }
@@ -938,7 +940,7 @@ fn model_array_element(model: &ContentModel, sdl: &Sdl) -> Option<TypeId> {
 /// names unmangled (`zend_unmangle_property_name`).
 fn prop_rows(req: &mut Request, data: &Value) -> Res<Vec<(K, Value)>> {
     match data.as_ref() {
-        ValueRef::Array(a) => Ok(rows(*a)),
+        ValueRef::Array(a) => Ok(rows(req, *a)),
         ValueRef::Object(o) => {
             let table = o.property_table(req)?;
             Ok(walk::rows(req, table)
@@ -1035,7 +1037,8 @@ pub(super) fn to_xml_object(
             && let Some(el) = sdl_arc.ty(el_id)
             && let Some(arr) = data.as_array().copied()
         {
-            with_rows(req, rows(arr), |req, rows| {
+            let read = rows(req, arr);
+            with_rows(req, read, |req, rows| {
                 for (_, val) in rows {
                     let property = if matches!(val.deref().as_ref(), ValueRef::Null) && el.nillable
                     {

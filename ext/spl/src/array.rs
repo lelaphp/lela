@@ -1318,7 +1318,7 @@ impl Table {
     /// what `spl_array_get_properties_for` hands a cast; views.
     fn every_row(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
         match self {
-            Table::Array(_, array) => Ok(array.snapshot_refs()),
+            Table::Array(_, array) => Ok(walk::rows(req, array).collect()),
             Table::Props(object) => {
                 let table = object.property_table(req)?;
                 Ok(walk::rows(req, table).collect())
