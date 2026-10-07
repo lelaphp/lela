@@ -355,7 +355,8 @@ impl Request {
     ///
     /// Two seconds of a three-second limit spent before the fork leave one
     /// after it; a limit counted again from the fork would end the program
-    /// two seconds later.
+    /// two seconds later. The fatal's line is masked, as php's tests mask it:
+    /// a loaded machine spends that second in `pcntl_waitpid`, not the loop.
     ///
     /// ```php
     /// $start = microtime(true);
@@ -369,7 +370,7 @@ impl Request {
     /// for (;;) {}
     /// ```
     /// ```expect exit=255 process wall=3s
-    /// Fatal error: Maximum execution time of 3 seconds exceeded in %s on line 10
+    /// Fatal error: Maximum execution time of 3 seconds exceeded in %s on line %d
     /// counted from before the fork
     /// ```
     ///
