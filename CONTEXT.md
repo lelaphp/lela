@@ -83,11 +83,11 @@ The set of extensions compiled into one binary, in module-startup order, chosen 
 _Avoid_: registry, plugin list, enabled extensions (the list, not the concept)
 
 **Request state**:
-One extension's per-request value, declared on its extension, built at request start and dropped after the shutdown hooks, in bundle order and its reverse. Reached through the request, never ambient; private to the extension that declared it.
+One extension's per-request value, declared on its extension, built at request start and dropped after the request-end phases (`rshutdown`, `deactivate`, `post_deactivate`), in startup order and its reverse. Reached through the request, never ambient; private to the extension that declared it.
 _Avoid_: tenant, ext state, globals (php's word for the per-thread struct this replaces half of), thread-local
 
 **Engine state**:
-One extension's per-engine value, built at module startup from the startup ini and immutable afterwards, shared by every request. What changes across requests lives in the engine's cache of immutable values inside it, never behind a lock the extension owns.
+One extension's per-engine value, built at engine start, in startup order, from what `Start` carries (the startup ini, the host's name and the process states), immutable afterwards, shared by every request, and dropped after the engine-end phase. Beside it, an extension's process state is built at most once per process, before its engine start, and never ended: process exit releases it (ADR-0010). What changes across requests lives in the engine's cache of immutable values inside it, never behind a lock the extension owns.
 _Avoid_: module globals, persistent state, static (php's `read_static_prop`, `write_static_prop`; `abi::Static`, php's `static` return type)
 
 ### Requests
@@ -133,7 +133,7 @@ The opaque two-atomic slot the engine allocates per safepoint of a function, and
 _Avoid_: feedback (the per-request `MapPtr<[Feedback]>` of `research/third-engine-design.r2.md` §5.14, which the next engine revision deletes), counter, flag
 
 **Interrupt**:
-The one flag on a request that the execution timer and signal delivery set and nothing else touches. The loop tests it at a back-edge, at a frame's activation, after every `Resume` and after an internal call returns; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal or dispatches the pending signals.
+The one flag on a request that the execution timer, signal delivery and an extension's periodic interrupt set and nothing else touches. The loop tests it at a back-edge, at a frame's activation, after every `Resume` and after an internal call returns; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal, or dispatches the pending signals and serves every extension's interrupt hook.
 _Avoid_: vm_interrupt (php's field), timeout flag, pending signal, tick (php's `register_tick_function`, `unregister_tick_function`)
 
 **Trace**:
