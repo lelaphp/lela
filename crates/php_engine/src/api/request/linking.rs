@@ -24,18 +24,33 @@ use std::sync::Arc;
 
 use php_unit::Level;
 use php_unit::Unit;
-use php_unit::decl::{ClassDecl, ConstExpr};
+use php_unit::decl::{ClassDecl, ClassKind, ConstExpr, Name};
 use php_unit::link::{Composed, Held, Linked, Linking, Obligation, Refused};
 
 use super::Request;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Key, Value, ValueRef, walk};
 
-/// The classes whose link is under way, and `CG(delayed_autoloads)`.
+/// The classes whose link is under way, `CG(delayed_autoloads)`, and
+/// the units the cache served the request from what it holds, whose
+/// declarations are php's immutable ones (`ZEND_ACC_IMMUTABLE`), the
+/// only ones the inheritance cache keeps a link of.
 #[derive(Default)]
 pub(crate) struct Links {
     unlinked: Vec<Unlinked>,
     autoloads: Vec<Vec<u8>>,
+    held: Vec<Arc<Unit>>,
+}
+
+/// What a link read of the table beside what it linked: each class a
+/// check looked up by name, lowered, with the class it found; whether a
+/// check read a class whose link is under way; and whether the traits'
+/// composition compared values the request evaluated.
+#[derive(Default)]
+pub(super) struct Read {
+    names: Vec<(Box<[u8]>, Option<ClassId>)>,
+    unlinked: bool,
+    evaluated: bool,
 }
 
 /// One class the table holds under its name that is not
@@ -179,16 +194,37 @@ impl Request {
     /// check reads it: the linked classes and those whose link is under
     /// way, a class still fetching marked as read.
     pub(super) fn link_against_table(&mut self, decl: &ClassDecl) -> Linking<ClassId> {
+        self.link_reading(decl).0
+    }
+
+    /// [`Request::link_against_table`] beside what the link read
+    /// ([`Read`]), which the inheritance cache keys a published link by.
+    pub(super) fn link_reading(&mut self, decl: &ClassDecl) -> (Linking<ClassId>, Read) {
         let values = self.trait_values(decl);
         let read = RefCell::new(Vec::new());
+        // What a check read of another class than the one linking:
+        // `track_class_dependency` passes over the class itself.
+        let names = RefCell::new(Vec::new());
+        let foreign = std::cell::Cell::new(false);
         let linking = {
             let lookup = |name: &[u8]| {
+                let bare = name.strip_prefix(b"\\").unwrap_or(name);
+                let own = bare.eq_ignore_ascii_case(&decl.name.0);
+                let lowered = bare.to_ascii_lowercase().into_boxed_slice();
                 if let Some(held) = self.held_class(name) {
+                    let found = held.record.as_ref().map(|(class, _)| *class);
+                    if !own {
+                        names.borrow_mut().push((lowered, found));
+                    }
                     return Some(held);
+                }
+                if !own {
+                    names.borrow_mut().push((lowered, None));
                 }
                 let at = self.unlinked_named(name)?;
                 let unlinked = self.links.unlinked.get(at)?;
                 read.borrow_mut().push(at);
+                foreign.set(foreign.get() || !own);
                 let bodies = match &unlinked.stage {
                     Stage::Nearly {
                         composed: Some(composed),
@@ -211,7 +247,13 @@ impl Request {
             };
             php_unit::link::link(decl, &lookup, &holder, &evaluated)
         };
-        for at in read.into_inner() {
+        let read = read.into_inner();
+        let reading = Read {
+            names: names.into_inner(),
+            unlinked: foreign.get(),
+            evaluated: !values.is_empty(),
+        };
+        for at in read {
             if let Some(Unlinked {
                 stage: Stage::Fetching { used },
                 ..
@@ -220,7 +262,7 @@ impl Request {
                 *used = true;
             }
         }
-        linking
+        (linking, reading)
     }
 
     /// `zval_update_constant_ex` over what the traits' composition
@@ -528,4 +570,347 @@ fn literal_of(req: &Request, value: &Value) -> Option<ConstExpr> {
         }
         _ => return None,
     })
+}
+
+/// The classes a link fetched before it checked anything, the key an
+/// inheritance cache's link is found by beside the declaration: the
+/// parent, then the traits and the interfaces in the order written.
+pub(super) struct Fetched {
+    parent: Option<ClassId>,
+    uses: Box<[ClassId]>,
+}
+
+impl Request {
+    /// A unit the cache served this request from what it holds.
+    pub(super) fn note_held(&mut self, unit: &Arc<Unit>) {
+        if !self.links.held.iter().any(|held| Arc::ptr_eq(held, unit)) {
+            self.links.held.push(Arc::clone(unit));
+        }
+    }
+
+    /// What `decl`'s link fetched, each a class every request shares;
+    /// none where one is the request's own, or not linked, which no
+    /// cached link can be keyed by (`UPDATE_IS_CACHEABLE`), or where the
+    /// declaration is no held unit's, which php's is not immutable, or is
+    /// an enum's, whose internal methods php will not cache.
+    pub(super) fn fetched(&self, unit: &Arc<Unit>, decl: &ClassDecl) -> Option<Fetched> {
+        if decl.kind == ClassKind::Enum
+            || !self.links.held.iter().any(|held| Arc::ptr_eq(held, unit))
+        {
+            return None;
+        }
+        let shared = |name: &Name| {
+            self.class_named(&name.0)
+                .filter(|class| class.is_published())
+        };
+        let parent = match &decl.parent {
+            Some(name) => Some(shared(name)?),
+            None => None,
+        };
+        let uses = (decl.traits.iter())
+            .chain(&decl.interfaces)
+            .map(shared)
+            .collect::<Option<Box<[ClassId]>>>()?;
+        Some(Fetched { parent, uses })
+    }
+
+    /// `zend_accel_inheritance_cache_get`: the link of the declaration at
+    /// `at` of `unit` an earlier request published against the classes
+    /// `fetched` names, where each class its checks read by name is,
+    /// looked up without autoloading, the one it read then. One whose
+    /// dependency the table does not hold yet is `needs_autoload`: each
+    /// dependency is autoloaded, and the entry looked at again. None
+    /// where no entry holds, which links the class afresh; what an
+    /// autoloader threw is the `Err`.
+    ///
+    /// Served by the built-in server, whose requests share the cache: the
+    /// third request declares a `D` of another file, so `B`'s check of
+    /// `f(): D` against `f(): Base` reads another class, the link the
+    /// first published is not the third's, and the third links afresh
+    /// and is refused. `B` implements an interface, so it is linked as
+    /// the program runs (`zend_do_link_class`), which reads its variance
+    /// dependencies; a class bound early at the load is not checked
+    /// again (`zend_try_early_bind`), and keeps no dependency:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/inherit' . bin2hex(random_bytes(8));
+    /// mkdir($dir);
+    /// file_put_contents("$dir/base.php", '<?php class Base {} interface I {} class A { function f(): Base { return new Base; } }');
+    /// file_put_contents("$dir/d1.php", '<?php class D extends Base {}');
+    /// file_put_contents("$dir/d2.php", '<?php class D {}');
+    /// file_put_contents("$dir/b.php", '<?php class B extends A implements I { function f(): D { return new D; } }');
+    /// file_put_contents("$dir/index.php", '<?php require __DIR__ . "/base.php"; require __DIR__ . "/d" . $_GET["d"] . ".php"; require __DIR__ . "/b.php"; echo get_class((new B)->f()), "\n";');
+    /// foreach (glob("$dir/*.php") as $file) { touch($file, time() - 10); }
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-d', 'html_errors=0', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', "$dir/log", 'w']], $pipes);
+    /// for ($i = 0, $line = ''; $i < 300 && !str_contains($line, 'started'); $i++) { usleep(100000); $line = (string) @file("$dir/log")[0]; }
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach ([1, 1, 2] as $d) { echo preg_replace('/ in \S+ on/', ' in %s on', file_get_contents("http://127.0.0.1:$port/?d=$d")); }
+    /// proc_terminate($p); proc_close($p);
+    /// array_map('unlink', glob("$dir/*")); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// D
+    /// D
+    ///
+    /// Fatal error: Declaration of B::f(): D must be compatible with A::f(): Base in %s on line 1
+    /// Stack trace:
+    /// #0 %s(1): require()
+    /// #1 {main}
+    /// ```
+    pub(super) fn cached_link(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: u32,
+        fetched: &Fetched,
+    ) -> Result<Option<Arc<crate::inheritance_cache::Entry>>, Thrown> {
+        let Some(chain) = self.arena.inheritance.find(unit, at) else {
+            return Ok(None);
+        };
+        // php prepends, so the newest entry is the first it reads.
+        for entry in chain.iter().rev() {
+            if entry.parent != fetched.parent || entry.uses != fetched.uses {
+                continue;
+            }
+            let mut autoloaded = false;
+            loop {
+                let mut needs_autoload = false;
+                let mut holds = true;
+                for (name, class) in &entry.dependencies {
+                    match self.class_named(name) {
+                        Some(found) if found == *class => {}
+                        Some(_) => {
+                            holds = false;
+                            break;
+                        }
+                        None => needs_autoload = true,
+                    }
+                }
+                if !holds {
+                    break;
+                }
+                if !needs_autoload {
+                    return Ok(Some(Arc::clone(entry)));
+                }
+                if autoloaded {
+                    return Ok(None);
+                }
+                for (name, _) in &entry.dependencies {
+                    if crate::api::call::autoload(self, name)?.is_none() {
+                        return Ok(None);
+                    }
+                }
+                autoloaded = true;
+            }
+        }
+        Ok(None)
+    }
+
+    /// `zend_inheritance_cache_add`: the class `linking` linked at `at` of
+    /// `unit` published ([`Request::publish`]) and its link kept, where
+    /// it is php's to cache: linked with no obligation left, every class
+    /// its checks read one every request shares, none whose link was
+    /// under way, and no value of the request's compared. A class bound
+    /// early as its unit loads keeps no dependency, as `zend_try_early_bind`
+    /// links it with no class tracked (`CG(current_linking_class)` unset
+    /// while `zend_can_early_bind` checks it), so a later request finds it
+    /// by its parent alone. None where it is not php's to cache, or the
+    /// arena has no room, which leaves the class to bind as the request's
+    /// own.
+    ///
+    /// Served by the built-in server: `B` is bound early as `b.php`
+    /// loads, so the third request, whose `D` is another file's, is
+    /// served the link the first published, as php's is:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/early' . bin2hex(random_bytes(8));
+    /// mkdir($dir);
+    /// file_put_contents("$dir/base.php", '<?php class Base {} class A { function f(): Base { return new Base; } }');
+    /// file_put_contents("$dir/d1.php", '<?php class D extends Base {}');
+    /// file_put_contents("$dir/d2.php", '<?php class D {}');
+    /// file_put_contents("$dir/b.php", '<?php class B extends A { function f(): D { return new D; } }');
+    /// file_put_contents("$dir/index.php", '<?php require __DIR__ . "/base.php"; require __DIR__ . "/d" . $_GET["d"] . ".php"; require __DIR__ . "/b.php"; echo get_class((new B)->f()), "\n";');
+    /// foreach (glob("$dir/*.php") as $file) { touch($file, time() - 10); }
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-d', 'html_errors=0', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', "$dir/log", 'w']], $pipes);
+    /// for ($i = 0, $line = ''; $i < 300 && !str_contains($line, 'started'); $i++) { usleep(100000); $line = (string) @file("$dir/log")[0]; }
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach ([1, 1, 2] as $d) { echo file_get_contents("http://127.0.0.1:$port/?d=$d"); }
+    /// proc_terminate($p); proc_close($p);
+    /// array_map('unlink', glob("$dir/*")); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// D
+    /// D
+    /// D
+    /// ```
+    pub(super) fn publish_link(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: u32,
+        fetched: Fetched,
+        linking: &Linking<ClassId>,
+        read: &Read,
+        early: bool,
+    ) -> Option<Arc<crate::inheritance_cache::Entry>> {
+        if !matches!(linking.outcome, Linked::Linked)
+            || !linking.obligations.is_empty()
+            || read.unlinked
+            || read.evaluated
+        {
+            return None;
+        }
+        let mut dependencies: Vec<(Box<[u8]>, ClassId)> = Vec::new();
+        for (name, found) in read.names.iter().filter(|_| !early) {
+            let class = (*found).filter(|class| class.is_published())?;
+            // `track_class_dependency` leaves out the engine's own classes,
+            // which are the same in every request.
+            if self.native_class_at(class).is_some()
+                || dependencies.iter().any(|(seen, _)| seen == name)
+            {
+                continue;
+            }
+            dependencies.push((name.clone(), class));
+        }
+        let record = linking.record.clone()?;
+        let class = self.publish(unit, at, linking.composed.clone(), record, fetched.parent)?;
+        let entry = crate::inheritance_cache::Entry {
+            parent: fetched.parent,
+            uses: fetched.uses,
+            dependencies: dependencies.into(),
+            class,
+            raised: linking.raised.clone().into(),
+        };
+        Some(self.arena.inheritance.add(unit, at, entry))
+    }
+
+    /// The class at `at` of `unit` declared as the published class
+    /// `entry` holds, what its link raised raised again
+    /// (`zend_emit_recorded_errors_ex`) where a link of it raises them,
+    /// at its end, and the class out of the links under way. A link that
+    /// raised a deprecation raises it on every request the cache serves
+    /// it to:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/replay' . bin2hex(random_bytes(8));
+    /// mkdir($dir);
+    /// file_put_contents("$dir/index.php", '<?php class C implements Countable { function count() { return 0; } } echo count(new C), "\n";');
+    /// touch("$dir/index.php", time() - 10);
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-d', 'html_errors=0', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', "$dir/log", 'w']], $pipes);
+    /// for ($i = 0, $line = ''; $i < 300 && !str_contains($line, 'started'); $i++) { usleep(100000); $line = (string) @file("$dir/log")[0]; }
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach ([1, 2] as $n) { echo preg_replace('/ in \S+ on/', ' in %s on', file_get_contents("http://127.0.0.1:$port/")); }
+    /// proc_terminate($p); proc_close($p);
+    /// array_map('unlink', glob("$dir/*")); rmdir($dir);
+    /// ```
+    /// ```expect process
+    ///
+    /// Deprecated: Return type of C::count() should either be compatible with Countable::count(): int, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice in %s on line 1
+    /// 0
+    ///
+    /// Deprecated: Return type of C::count() should either be compatible with Countable::count(): int, or the #[\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice in %s on line 1
+    /// 0
+    /// ```
+    pub(super) fn declare_cached(
+        &mut self,
+        unit: &Arc<Unit>,
+        at: u32,
+        decl: &ClassDecl,
+        entry: &crate::inheritance_cache::Entry,
+    ) {
+        let recording = self.begin_recording();
+        for raised in &entry.raised {
+            self.note_error_in(
+                raised.level(),
+                &raised.to_string(),
+                &raised.site().file.0,
+                raised.site().line,
+            );
+        }
+        self.pause_recording(recording);
+        if let Some(standing) = self.unlinked_named(&decl.name.0) {
+            self.links.unlinked.remove(standing);
+        }
+        self.declare_published(unit, at, entry.class, decl);
+        self.emit_recorded(recording);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::Request;
+    use crate::api::abi::{Admission, ExtensionBuilder, Lookup, Validation};
+    use crate::api::values::ClassId;
+    use crate::engine::{Engine, RequestDescription};
+
+    /// An engine whose every file is held as opcache holds it.
+    fn engine() -> Engine {
+        let held = ExtensionBuilder::default()
+            .admission(|_, _| Admission::Held {
+                validation: Validation::Never,
+                lookup: Lookup::Resolved,
+                protection: 0,
+                file_cache: None,
+            })
+            .build("held");
+        Engine::cli_builder().extensions(&[held]).build()
+    }
+
+    /// A link made as the program serves whose parent, interface and every class its checks
+    /// read are published is published once and kept: the second request
+    /// links nothing, takes the same number and lays down no row of its
+    /// own for the class or its methods. One whose parent is the
+    /// request's own is linked in every request and never published.
+    #[test]
+    fn a_link_over_published_classes_is_published_once_and_one_over_the_request_s_never() {
+        let dir = std::env::temp_dir().join(format!("inheritance-{}", std::process::id()));
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let shared = dir.join("shared.php");
+        let own = dir.join("own.php");
+        let written = [
+            (
+                &shared,
+                "<?php interface I {} class P { function p() {} } \
+                       class C extends P implements I { function c(): ?I { return null; } }",
+            ),
+            (
+                &own,
+                "<?php class Q extends R implements I { function q() {} }",
+            ),
+        ];
+        for (path, source) in written {
+            assert!(std::fs::write(path, source).is_ok());
+        }
+        let engine = engine();
+        let code = format!(
+            "require '{}'; class R {{}} require '{}';",
+            shared.display(),
+            own.display()
+        );
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+            assert!(req.eval_stringl(code.as_bytes(), b"loader").is_ok());
+            let c = req.class_named(b"c");
+            let q = req.class_named(b"q");
+            assert!(c.is_some_and(ClassId::is_published), "C is published");
+            assert!(
+                q.is_some_and(|q| !q.is_published()),
+                "Q is the request's own"
+            );
+            let inherited = c.and_then(|c| req.method_named(c, b"p"));
+            assert!(inherited.is_some_and(|m| req.user_function(m).is_some()));
+            let rows: Vec<String> = (req.own_classes.iter())
+                .filter_map(|row| Some(String::from_utf8_lossy(&row.decl()?.name.0).into_owned()))
+                .collect();
+            assert_eq!(rows, ["R", "Q"], "no row of C's");
+            seen.push(c);
+        }
+        assert_eq!(
+            seen.first(),
+            seen.last(),
+            "the second request took the first's number"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

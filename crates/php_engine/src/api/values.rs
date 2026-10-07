@@ -82,9 +82,47 @@ pub enum TypeTag {
     Number,
 }
 
-/// The identity of a linked class.
+/// The identity of a linked class, one word (design §5.14,
+/// *Identities*): with its top bit clear, a class every request shares,
+/// the engine's own numbered from zero and then the rows of the
+/// engine's published arena past them, the preload's among them; with
+/// it set, one of the request's own, numbered among its rows. Either
+/// stays the class's for as long as the request runs, whatever another
+/// request publishes or declares meanwhile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ClassId(pub u32);
+pub struct ClassId(pub(crate) u32);
+
+impl ClassId {
+    /// The bit that marks a class of the request's own.
+    pub(crate) const LOCAL: u32 = 1 << 31;
+
+    /// Whether every request shares the class: one of the engine's, or a
+    /// row of its published arena; not one only this request declared.
+    #[must_use]
+    pub fn is_published(self) -> bool {
+        self.0 & ClassId::LOCAL == 0
+    }
+
+    /// The request's own class at `at` among its rows.
+    pub(crate) fn local(at: usize) -> Option<ClassId> {
+        let at = u32::try_from(at).ok()?;
+        (at & ClassId::LOCAL == 0).then_some(ClassId(at | ClassId::LOCAL))
+    }
+
+    /// Where the class stands among the request's own rows, if it is one.
+    pub(crate) fn local_at(self) -> Option<usize> {
+        if self.is_published() {
+            return None;
+        }
+        usize::try_from(self.0 & !ClassId::LOCAL).ok()
+    }
+
+    /// The class's number among those every request shares, if it is one
+    /// of them: the engine's own below the arena's.
+    pub(crate) fn published_number(self) -> Option<u32> {
+        self.is_published().then_some(self.0)
+    }
+}
 
 /// A byte string: php's `zend_string *`, one allocation of the request's
 /// heap holding the refcounted header, the cached hash, the length and

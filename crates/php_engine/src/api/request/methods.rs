@@ -198,40 +198,41 @@ impl Request {
     /// The linked record of a class: a native class's as startup linked
     /// it, a declared class's as it bound ([`Request::bind_members`]).
     pub(crate) fn linked_class(&self, class: ClassId) -> Option<&LinkedClass<ClassId>> {
-        let at = usize::try_from(class.0).ok()?;
-        match at.checked_sub(self.shared.classes.len()) {
-            None => self.shared.records.get(at),
-            Some(declared) => self.declared.get(declared)?.bound.record.as_ref(),
+        match self.native_class_at(class) {
+            Some(native) => self.shared.records.get(native),
+            None => self.declared_row(class)?.bound.record.as_ref(),
         }
     }
 
     /// The function the method at `at` among `class`'s own declarations
     /// is.
     fn method_function(&self, class: ClassId, at: u32) -> Option<Function> {
-        let class_at = usize::try_from(class.0).ok()?;
         let at = usize::try_from(at).ok()?;
-        let functions = match class_at.checked_sub(self.shared.classes.len()) {
-            None => self.shared.method_functions.get(class_at)?,
-            Some(declared) => &self.declared.get(declared)?.bound.functions,
+        let functions = match self.native_class_at(class) {
+            Some(native) => self.shared.method_functions.get(native)?,
+            None => &self.declared_row(class)?.bound.functions,
         };
         functions.get(at).copied().flatten()
     }
 
-    /// The enum method a function number past
-    /// [`crate::enums::ENUM_FUNCTIONS`] names, and its enum.
+    /// The enum method an enum's function number names, the request's
+    /// own or the published arena's ([`Function::ENUM`]), and its enum.
     pub(super) fn enum_method_of(
         &self,
         function: Function,
     ) -> Option<(ClassId, crate::enums::EnumMethod)> {
-        let at = function.0.checked_sub(crate::enums::ENUM_FUNCTIONS)?;
-        self.enum_functions.get(usize::try_from(at).ok()?).copied()
+        match function.local_enum_at() {
+            Some(at) => self.enum_functions.get(at).copied(),
+            None => self.arena.enum_method(function),
+        }
     }
 
     /// The place of a native among the natives, in one count from zero:
     /// a native function or method at its own number, which is dense
     /// from zero, and an enum's method after them at its place among
-    /// the request's enum methods; none for any other function, a user
-    /// one, a call's trampoline or `zend_pass_function`. Where php's
+    /// the published enums' methods and the request's; none for any
+    /// other function, a user one, a call's trampoline or
+    /// `zend_pass_function`. Where php's
     /// internal runtime cache gives each native its own extension slot
     /// (`zend_observer_fcall_internal_function_extension`).
     pub(super) fn native_place(&self, function: Function) -> Option<usize> {
@@ -245,8 +246,14 @@ impl Request {
             return Some(at);
         }
         self.enum_method_of(function)?;
-        let enum_at =
-            usize::try_from(function.0.checked_sub(crate::enums::ENUM_FUNCTIONS)?).ok()?;
+        // The published enums' methods and the request's own take turns,
+        // so neither's count moves the other's places.
+        let enum_at = match function.local_enum_at() {
+            Some(at) => at.checked_mul(2)?.checked_add(1)?,
+            None => usize::try_from(function.published_enum_at()?)
+                .ok()?
+                .checked_mul(2)?,
+        };
         natives.checked_add(enum_at)
     }
 
@@ -305,16 +312,14 @@ impl Request {
     }
 
     /// The number of the user function a class's declaration holds at
-    /// `member`, a method or a hook, among the functions the request
-    /// declared with it: one of the rows the class took as it bound.
+    /// `member`, a method or a hook, among the functions bound with it:
+    /// one of the numbers the class took as it bound, in its own space.
     pub(crate) fn member_function(&self, member: Member) -> Option<Function> {
         let members = self.declared_row(member.class)?.bound.members.clone();
-        let position = members.into_iter().find(|&row| {
-            self.user_functions
-                .get(row)
+        members.map(Function).find(|function| {
+            self.user_function(*function)
                 .is_some_and(|user| user.member == Some(member))
-        })?;
-        self.user_function_id(position)
+        })
     }
 
     /// `ZSTR_VAL(ce->name)` as a message's `%s` prints it: the name a
@@ -336,35 +341,55 @@ impl Request {
     }
 
     /// `instanceof_function`: whether `class` is `of`, extends it, or
-    /// implements it, the parents walked and each one's interfaces with
-    /// it. A chain longer than any declaration can make is cut, so a
-    /// declaration naming itself as its parent ends here rather than
-    /// never.
+    /// implements it. An interface is one scan of the class's linked
+    /// `ce->interfaces`, which holds every interface it implements
+    /// directly, through its parents and through their parents; a class
+    /// is a walk up the linked parents. Nothing is looked up by name. A
+    /// chain longer than any declaration can make is cut.
+    ///
+    /// ```php
+    /// interface I0 {} interface I1 extends I0 {} interface J {} interface K extends J {}
+    /// class G implements I1 {} class P extends G {} class C extends P implements K {}
+    /// $c = new C;
+    /// var_dump($c instanceof I0, $c instanceof I1, $c instanceof J, $c instanceof G, $c instanceof Countable, new P instanceof K);
+    /// echo implode(",", class_implements($c)), "\n";
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// I0,I1,K,J
+    /// ```
     pub(crate) fn instance_of(&self, class: ClassId, of: ClassId) -> bool {
-        let mut at = Some(class);
-        let mut depth = 0;
-        while let Some(class) = at {
-            if class == of {
-                return true;
+        if class == of {
+            return true;
+        }
+        if self
+            .class_decl(of)
+            .is_some_and(|decl| decl.kind == ClassKind::Interface)
+        {
+            return self.interfaces(class).contains(&of);
+        }
+        let mut at = class;
+        for _ in 0..64 {
+            match self.linked_parent(at) {
+                Some(parent) if parent == of => return true,
+                Some(parent) => at = parent,
+                None => return false,
             }
-            let Some(decl) = self.class_decl(class) else {
-                return false;
-            };
-            if decl
-                .interfaces
-                .iter()
-                .filter_map(|name| self.class_named(&name.0))
-                .any(|interface| depth < 64 && self.instance_of(interface, of))
-            {
-                return true;
-            }
-            depth += 1;
-            if depth > 64 {
-                return false;
-            }
-            at = self.class_parent(class);
         }
         false
+    }
+
+    /// `ce->interfaces` of a linked class: every interface it implements,
+    /// each once, in php's order, which `class_implements` lists;
+    /// nothing for a class with no linked record.
+    pub fn interfaces(&self, class: ClassId) -> &[ClassId] {
+        self.linked_class(class)
+            .map_or(&[][..], |record| &record.interfaces)
     }
 
     /// `ce->parent`: the linked parent of a class, none at a root; an
@@ -385,6 +410,15 @@ impl Request {
             .parent
             .as_ref()
             .and_then(|name| self.class_named(&name.0))
+    }
+
+    /// `ce->parent` as the link left it, read by number: an engine's
+    /// class's as startup linked it, a declared class's as it bound.
+    fn linked_parent(&self, class: ClassId) -> Option<ClassId> {
+        match self.native_class_at(class) {
+            Some(at) => self.shared.parents.get(at).copied().flatten(),
+            None => self.declared_row(class)?.bound.parent,
+        }
     }
 
     /// `zend_check_protected`: whether `scope` is `class` or one of its

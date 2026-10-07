@@ -21,6 +21,7 @@
 )]
 
 pub mod api;
+mod arena;
 mod attributes;
 mod classes;
 mod command_line;
@@ -33,6 +34,7 @@ mod fiber;
 mod fork;
 mod generator;
 mod handlers;
+mod inheritance_cache;
 mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
