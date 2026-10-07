@@ -344,6 +344,25 @@ fn a_crate_depending_outside_its_edges_fails_with_the_adr() {
     assert_eq!(json.adr, "0004");
 }
 
+/// A crate no `[[edge]]` row names may depend on no workspace crate
+/// (design §4.2): the harness, which the tracked manifest gives no row
+/// since #2213, linking `php_bundle` back in fails naming the missing
+/// row, and nothing else in the fixture does.
+#[test]
+fn a_crate_with_no_edge_row_depending_on_a_workspace_crate_fails() {
+    let readings = readings("harness-edge");
+    let harness = of(&readings, "xtask");
+    assert_eq!(harness.status, Status::Fail, "{}", harness.message);
+    assert!(
+        harness
+            .message
+            .contains("xtask depends on php_bundle; no [[edge]] row gives xtask a dependency"),
+        "{}",
+        harness.message
+    );
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
 /// A host reaches the engine through its facade and never past it
 /// (ADR-0008): `sapi/cli` naming `php_engine` fails with the ADR, and
 /// `sapi/cgi` on the facade, the codecs and the bundle is within its
