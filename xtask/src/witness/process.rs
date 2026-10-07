@@ -10,10 +10,9 @@
 //!
 //! The binary is `php`, `sapi/cli`'s host as it is built for every other
 //! lane (#2168), which this module builds once per run with cargo where
-//! the run meets its first such fence, in the profile this harness was
-//! built in (`Profile::this_build`, #1994). A lane whose harness is the
-//! correctness lanes' build serves its `process` fences in that build
-//! too, and a phpt run in the same profile has built it already. It runs
+//! the run meets its first such fence, in the lanes' profile whatever
+//! profile this harness was built in (`profile::build`, harness revision
+//! 86, #2217), the build the phpt lane looks for first. It runs
 //! under the recipe exactly as the oracle does
 //! ([`Oracle::run_under`]), and every request it serves appends the
 //! natives it entered to the file `PHP_WITNESS_TRACE` names, a forked
@@ -251,7 +250,7 @@ fn built<'a>(
         .map_err(|why| anyhow!("{why}"))
 }
 
-/// The host's own binary, built in this harness's profile
+/// The host's own binary, built in the lanes' profile
 /// ([`profile::build`]): every request it serves records the natives it
 /// entered where `PHP_WITNESS_TRACE` names a file, with no build of its
 /// own for the lane (#2168).

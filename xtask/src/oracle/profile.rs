@@ -3,8 +3,8 @@
 //! the directory cargo builds it into, of the order the phpt lane looks
 //! for the engine's binary in, and of the profile the correctness lanes
 //! run, [`LANE`]. `Runner::resolve`, the cargo line a stale binary's skip
-//! names, and the witness lane's build of a `process` fence's host all
-//! read it, and none spells a profile.
+//! names, and [`build`], which builds every binary the harness serves
+//! through, all read it, and none spells a profile.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,44 +59,24 @@ impl Profile {
     pub(crate) fn binary(self, target: &Path, binary: &str) -> PathBuf {
         target.join(self.dir()).join(binary)
     }
-
-    /// The profile whose directory is `dir`, where it is one of these.
-    fn of_dir(dir: &str) -> Option<Profile> {
-        PREFERRED.into_iter().find(|profile| profile.dir() == dir)
-    }
-
-    /// The profile this harness was built in, which `build.rs` reads off
-    /// the directory cargo built it into: the witness lane serves its
-    /// fences through the engine linked into this binary, and builds the
-    /// host of a `process` fence in the same profile, so the fence runs
-    /// the build the rest of the lane does and the two share the engine's
-    /// compiled crates. A harness built in a profile this module does not
-    /// name has none, and the build that would need one says which
-    /// directory it was built in rather than guess.
-    pub(crate) fn this_build() -> Result<Profile, String> {
-        let dir = env!("XTASK_PROFILE_DIR");
-        Profile::of_dir(dir).ok_or_else(|| {
-            format!(
-                "this harness was built into the profile directory `{dir}`, which names none of the profiles `oracle::profile` states; build it in one of them, as `cargo run --profile {} -p xtask`",
-                LANE.name()
-            )
-        })
-    }
 }
 
-/// `cargo build --profile <this build's> -p <package> --bin <binary>`,
+/// `cargo build --profile <the lanes'> -p <package> --bin <binary>`,
 /// with `--features <features>` where there are any, in `root`, and where
-/// cargo put the binary: the
-/// target directory cargo was told of, or `root`'s own. A lane whose
-/// harness is the correctness lanes' build builds what it serves through
-/// in that build too (#1994).
+/// cargo put the binary: the target directory cargo was told of, or
+/// `root`'s own. Every binary the harness builds, `php-linked` and the
+/// hosts' own, is built in the lanes' profile, whatever profile the
+/// harness itself was built in (harness revision 86, #2217): a reading's
+/// key covers the source and not the profile, so one key is read off one
+/// build, and the `php` the witness lane builds is the one the phpt lane
+/// looks for first.
 pub(crate) fn build(
     root: &Path,
     package: &str,
     binary: &str,
     features: Option<&str>,
 ) -> Result<PathBuf> {
-    let profile = Profile::this_build().map_err(anyhow::Error::msg)?;
+    let profile = LANE;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .args([
@@ -225,16 +205,35 @@ mod tests {
         );
     }
 
-    /// The directory each profile is built into names that profile back,
-    /// and a directory no profile here names is none of them.
+    /// What the harness builds is built in the lanes' profile whatever
+    /// profile the harness was built in (revision 86, #2217): this test
+    /// runs in a dev build, and a binary it builds lands under the lanes'
+    /// directory and not under `debug/`.
     #[test]
-    fn a_profiles_directory_names_it() {
-        assert_eq!(PREFERRED[0], LANE, "the lanes' build is looked for first");
-        for profile in PREFERRED {
-            assert_eq!(Profile::of_dir(profile.dir()), Some(profile));
-        }
+    fn a_binary_the_harness_builds_is_built_in_the_lanes_profile() {
+        let root = crate::scratch::Tree::new("profile-build").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[[bin]]\nname = \"probe\"\npath = \"main.rs\"\n\n[profile.release-da]\ninherits = \"release\"\ndebug-assertions = true\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+        let built = build(&root, "probe", "probe", None).unwrap();
+        assert!(built.is_file(), "{}", built.display());
+        assert_eq!(
+            built.parent().and_then(Path::file_name),
+            Some(std::ffi::OsStr::new(LANE.dir())),
+            "{}",
+            built.display()
+        );
+    }
+
+    /// The lanes' build is looked for first, and `dev`'s directory is
+    /// cargo's `debug`.
+    #[test]
+    fn the_lanes_build_is_looked_for_first() {
+        assert_eq!(PREFERRED[0], LANE);
         assert_eq!(Profile::Dev.dir(), "debug");
-        assert_eq!(Profile::of_dir("dev"), None);
-        assert_eq!(Profile::of_dir("bench"), None);
+        assert_eq!(LANE.dir(), LANE.name());
     }
 }
