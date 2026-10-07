@@ -13,11 +13,11 @@
 //! one the per-commit phpt lane runs: the lane runs the subsets of every
 //! row it carries, `done` asks a touched crate it carries for a `phpt`
 //! reading, and `crosscheck` renders every extension it carries (§4.5
-//! condition 1). The engine linked into this harness is the other,
-//! declared by `xtask/Cargo.toml` as this build was compiled against it:
-//! `crosscheck` serves an extension through it where it carries the
-//! extension and through the binary where it does not, which is `pcntl`
-//! (revision 61).
+//! condition 1). `php-linked`, the engine the lanes serve a snippet
+//! through, is the other: [`BINARY`]'s crate with the bundle's `linked` set
+//! on top (revision 84; #2166). `crosscheck` serves an extension through
+//! it where it carries the extension and through the binary where it does
+//! not.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -36,6 +36,9 @@ pub const BINARY: &str = "sapi/cli";
 
 /// The package every build turns its extension features on through.
 const BUNDLE: &str = "php_bundle";
+
+/// The bundle's feature `php-linked` is built with on top of [`BINARY`]'s.
+const LINKED: &str = "linked";
 
 /// The `php_bundle` features one build turns on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -59,10 +62,32 @@ impl Carried {
         }
     }
 
-    /// What the engine linked into this harness carries: `xtask`'s own
-    /// `Cargo.toml` as this build was compiled against it.
-    pub(crate) fn linked() -> Result<Carried> {
-        Carried::declared(include_str!("../Cargo.toml")).context("xtask/Cargo.toml")
+    /// What `php-linked` carries, the engine the witness and crosscheck
+    /// lanes serve a snippet through (harness §8, revision 84): it is
+    /// [`BINARY`]'s crate built with the bundle's `linked` set, so what
+    /// that crate declares and every feature the set turns on, read from
+    /// `php_bundle`'s own `Cargo.toml` under `root`.
+    pub(crate) fn linked(root: &Path) -> Result<Carried> {
+        let mut carried = Carried::binary(root)?;
+        let path = root.join("crates").join(BUNDLE).join("Cargo.toml");
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(carried),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let table: toml::Table =
+            toml::from_str(&text).with_context(|| format!("{}", path.display()))?;
+        let set = table
+            .get("features")
+            .and_then(|features| features.get(LINKED))
+            .and_then(Value::as_array);
+        carried.features.extend(
+            set.into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+        Ok(carried)
     }
 
     /// The features a crate's `Cargo.toml` turns on in its `php_bundle`

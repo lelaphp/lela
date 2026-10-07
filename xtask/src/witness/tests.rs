@@ -625,9 +625,9 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
 
 /// A fence marked `process` is served by the `php` binary in a process
 /// of its own and covered by what that process entered, a forked child's
-/// request beside its parent's; the same snippet unmarked is served by the
-/// linked engine, which carries no pcntl, so it fails on the undefined
-/// function and forks nothing here (harness §8, revision 61; #1062).
+/// request beside its parent's; the same snippet unmarked is served by
+/// `php-linked` and forks that, never the harness (harness §8, revisions
+/// 61 and 84; #1062, #2166).
 #[test]
 fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     if oracle().is_none() {
@@ -657,10 +657,13 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     let (judgement, _) = only(&judge_text(&marked, &registry("")));
     assert_eq!(judgement, Judgement::Pass);
 
+    // Unmarked, the fence forks `php-linked`, which carries pcntl as the
+    // CLI does and serves one request at a time: its child ends with its
+    // own request and never reads the next, so the fence passes there too,
+    // and nothing forks the harness (harness §8, revision 84; #2166).
     let unmarked = marked.replace("expect process", "expect");
     let (judgement, note) = only(&judge_text(&unmarked, &registry("")));
-    assert_eq!(judgement, Judgement::Fail, "{note}");
-    assert!(note.contains("pcntl_fork"), "{note}");
+    assert_eq!(judgement, Judgement::Pass, "{note}");
 }
 
 /// The set rustc prints for `--print cfg` over `triple`, which it prints

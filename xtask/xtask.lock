@@ -176,7 +176,6 @@ oracle::Recipe
 oracle::Regime
 oracle::Runner
 oracle::Runner::binary
-oracle::Runner::or_linked
 oracle::Runner::resolve
 oracle::Runner::stamp
 oracle::Source

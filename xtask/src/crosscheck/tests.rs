@@ -515,7 +515,7 @@ fn a_staged_change_beyond_the_key_renders_again_though_the_reading_stands() {
     let reads = Reads::of(
         &graph,
         &manifest,
-        &Carried::linked().unwrap(),
+        &Carried::linked(&tree).unwrap(),
         "ctype",
         Host::Cli,
     );

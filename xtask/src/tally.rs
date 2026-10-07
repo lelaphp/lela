@@ -417,6 +417,38 @@ pub fn cores() -> NonZeroUsize {
     thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
 }
 
+/// `each` over every item on as many threads as the machine has, each
+/// item once, the answers in the items' order: for a lane whose items
+/// share nothing and spend their wall waiting on processes, as
+/// `crosscheck`'s renderings do (#2166).
+pub(crate) fn each_beside<T: Sync, R: Send>(items: &[T], each: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let answers: Mutex<Vec<Option<R>>> = Mutex::new(items.iter().map(|_| None).collect());
+    thread::scope(|scope| {
+        for _ in 0..cores().get().min(items.len()) {
+            scope.spawn(|| {
+                loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(item) = items.get(at) else {
+                        break;
+                    };
+                    let answer = each(item);
+                    let mut held = answers.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(slot) = held.get_mut(at) {
+                        *slot = Some(answer);
+                    }
+                }
+            });
+        }
+    });
+    answers
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// The items not yet started and what the running ones hold: where the
 /// threads of [`Tally::judge_apart`] take their next item from.
 #[derive(Debug, Default)]

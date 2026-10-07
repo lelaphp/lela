@@ -293,18 +293,19 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
     let reading = run(&root, &registry(&accepted("echo 1;")), false);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
 
-    // A fence the oracle meets and the engine misses: the oracle carries
-    // pcntl and the bundle the harness links does not. `__FILE__` was the
-    // difference once, until the engine compiled a served source under
-    // its name expanded, as the oracle does (#1569).
+    // A fence the oracle meets and the engine misses: the bundle
+    // `php-linked` serves carries zend_test and the oracle does not.
+    // `__FILE__` was the difference once, until the engine compiled a
+    // served source under its name expanded, as the oracle does (#1569),
+    // and pcntl after it, until the linked engine was the CLI's (#2166).
     let root = scratch(
         "diverged",
-        "/// ```php\n/// var_dump(function_exists('pcntl_fork'));\n/// ```\n/// ```expect\n/// bool(true)\n/// ```\npub fn native() {}\n",
+        "/// ```php\n/// var_dump(extension_loaded('zend_test'));\n/// ```\n/// ```expect\n/// bool(false)\n/// ```\npub fn native() {}\n",
     );
     assert_eq!(run(&root, &registry(""), false).status, Status::Fail);
     let reading = run(
         &root,
-        &registry(&accepted("var_dump(function_exists('pcntl_fork'));")),
+        &registry(&accepted("var_dump(extension_loaded('zend_test'));")),
         false,
     );
     assert_eq!(
@@ -948,14 +949,15 @@ fn with_no_binary_built_the_linked_engine_carries_each_feature_extension() {
 /// What makes the two above true, held where it is written: the bundle's
 /// `linked` feature is every extension feature the bundle declares, so the
 /// linked engine is the extensions the oracle has and not the default set
-/// (harness §7, revision 43), save `pcntl`, whose fences the `php` binary
-/// serves so that nothing forks the harness (revision 61); and `xtask`'s
-/// `Cargo.toml` links the bundle with `linked`. The two lists are one file,
+/// (harness §7, revision 43), save `pcntl`, which the CLI's own build
+/// carries (revision 61); `php-linked`, the binary the lanes serve a
+/// snippet through, is `sapi/cli` built with that set; and `xtask` links no
+/// bundle of its own (revision 84; #2166). The two lists are one file,
 /// which `new-ext` writes both of, so an extension a branch adds is linked
 /// at its merge (#1252). A feature the bundle gains and `linked` does not
 /// name is this test red, and so is `pcntl` named.
 #[test]
-fn xtask_links_the_bundle_with_every_extension_feature_but_pcntl() {
+fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
     let bundle: toml::Value = toml::from_str(
         &fs::read_to_string(workspace().join("crates/php_bundle/Cargo.toml")).unwrap(),
     )
@@ -986,17 +988,24 @@ fn xtask_links_the_bundle_with_every_extension_feature_but_pcntl() {
     }
     assert!(
         declared.contains(&"pcntl") && !linked.contains(&"pcntl"),
-        "the harness links pcntl, so a fence could fork it: {linked:?}"
+        "the bundle's `linked` names pcntl: {linked:?}"
     );
-    let xtask: toml::Value =
-        toml::from_str(&fs::read_to_string(workspace().join("xtask/Cargo.toml")).unwrap()).unwrap();
-    let enabled: Vec<&str> = xtask["dependencies"]["php_bundle"]["features"]
+    let cli: toml::Value =
+        toml::from_str(&fs::read_to_string(workspace().join("sapi/cli/Cargo.toml")).unwrap())
+            .unwrap();
+    let served: Vec<&str> = cli["features"]["linked"]
         .as_array()
         .unwrap()
         .iter()
         .map(|f| f.as_str().unwrap())
         .collect();
-    assert_eq!(enabled, ["test", "witness-trace", "linked"]);
+    assert_eq!(served, ["witness-trace", "php_bundle/linked"]);
+    let xtask: toml::Value =
+        toml::from_str(&fs::read_to_string(workspace().join("xtask/Cargo.toml")).unwrap()).unwrap();
+    assert!(
+        xtask["dependencies"].get("php_bundle").is_none(),
+        "the harness links no engine of its own"
+    );
 }
 
 /// Nothing to run is complete only with the pinned oracle here to have
@@ -1283,14 +1292,15 @@ fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
     assert_ne!(readings[0].status, Status::Fail, "{:#?}", readings[0]);
 }
 
-/// A run that dies on a signal says so (#1037, #1043, #1060): the
-/// fixture's one witness sends `SIGABRT` to the process serving it, and
-/// the command still ends with a line naming the signal and a failing
-/// reading for the crate that names it and the snippet being served. The
-/// fixture is laid over a scratch workspace, whose registry and pin the
-/// served process reads.
+/// A witness that ends the process serving it is that witness's failure
+/// and no other's (#1037, #1043, #2166): the fixture's first witness
+/// sends `SIGABRT` to `php-linked`, which serves it. The witness borks
+/// naming the signal, the crate's reading fails, and the witness after it
+/// is served by a binary started again and judged; the harness itself
+/// runs on. The fixture is laid over a scratch workspace, whose registry
+/// and pin the run reads.
 #[test]
-fn a_run_that_dies_on_a_signal_leaves_a_failing_reading_naming_it() {
+fn a_witness_that_kills_its_server_fails_alone_and_the_next_is_served() {
     if oracle().is_none() {
         return;
     }
@@ -1312,23 +1322,29 @@ fn a_run_that_dies_on_a_signal_leaves_a_failing_reading_naming_it() {
         .args(["witness", "--crate", "ext/pcre"])
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("witness: the served run died on SIGABRT (signal 6); being served: ext/pcre at ext/pcre/src/lib.rs:17"),
-        "{stderr}"
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
     );
+    assert!(!out.status.success(), "{said}");
     let reading = Store::of_workspace(root.path())
         .read("witness", "ext/pcre")
         .unwrap()
         .unwrap();
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
-    assert_eq!(count(&reading, "signal"), 6, "{reading:#?}");
     assert!(
-        reading.message.starts_with(
-            "ext/pcre: the witness run died on SIGABRT (signal 6) while serving ext/pcre/src/lib.rs:17;"
-        ),
-        "{}",
+        said.contains("lib.rs:17") && said.contains("died on signal 6"),
+        "the witness's line names the signal: {said}"
+    );
+    assert!(
+        reading.message.contains("ext/pcre/src/lib.rs:17"),
+        "the reading names the witness: {}",
         reading.message
+    );
+    assert_eq!(
+        count(&reading, "passed"),
+        1,
+        "the witness after it is served and judged: {reading:#?}"
     );
 }

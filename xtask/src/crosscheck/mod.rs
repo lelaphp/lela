@@ -82,6 +82,7 @@ use crate::manifest::Manifest;
 use crate::oracle::{self, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked};
 use crate::reading::{Reading, Status, Store, listed, plural};
 use crate::sources::{self, Standing};
+use crate::tally;
 use crate::witness::Binary;
 use crate::{git, key};
 use host::Host;
@@ -367,19 +368,23 @@ pub fn run(
     let variants = manifest.variants();
     let oracles = Oracles::new(&manifest.pin, &variants);
     let engines = Engines {
-        linked: Carried::linked()?,
+        linked: Carried::linked(root)?,
         binary: Binary::of(root),
     };
     // The tree before anything renders: what each reading is stamped with.
     let snapshot = Snapshot::disk(root)?;
-    extensions(manifest, &Carried::binary(root)?, ask)
+    let names = extensions(manifest, &Carried::binary(root)?, ask);
+    let items: Vec<(&String, Host, Column)> = names
         .iter()
         .flat_map(|name| {
             host::hosts(oracle::module_name(name))
                 .iter()
                 .flat_map(move |host| Column::ALL.iter().map(move |column| (name, *host, *column)))
         })
-        .map(|(name, host, column)| {
+        .collect();
+    // Each rendering waits on two processes and shares nothing with the
+    // next, so the items run side by side, in their order still (#2166).
+    tally::each_beside(&items, |&(name, host, column)| {
             let mut reading = reading_of(&snapshot, manifest, name, host, column)?;
             let recipe = recipe(manifest, name, host, column);
             // A row whose crate the linked engine's workspace has not
@@ -462,8 +467,9 @@ pub fn run(
                 ),
             };
             told(reading)
-        })
-        .collect()
+    })
+    .into_iter()
+    .collect()
 }
 
 /// What serves the engine's side of one run: the engine linked into this
@@ -683,7 +689,7 @@ pub(crate) fn staged(
         .map(|change| PathBuf::from(change.path))
         .collect();
     let graph = key::Graph::of(root)?;
-    let linked = Carried::linked()?;
+    let linked = Carried::linked(root)?;
     let mut pairs = Vec::new();
     let mut scopes = Vec::new();
     for name in carried {
