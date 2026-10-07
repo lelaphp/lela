@@ -14,7 +14,6 @@ workspace = true
 
 [dependencies]
 php_heap = { path = "../php_heap" }
-hashbrown.workspace = true
 
 [build-dependencies]
 toml.workspace = true

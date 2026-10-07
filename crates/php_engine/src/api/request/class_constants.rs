@@ -7,8 +7,8 @@
 //! and the constants being worded are [`ClassConstants`]'s, whose fields
 //! no file but this one reads.
 
+use php_link::Row;
 use php_unit::decl::{ClassConstDecl, ClassKind, Visibility};
-use php_unit::link::Row;
 
 use crate::api::call::write_prop;
 use crate::api::raising::Thrown;

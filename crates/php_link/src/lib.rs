@@ -13,9 +13,10 @@
 //! while the file compiles, where `zend_try_early_bind` runs these
 //! checks and an unresolved one leaves the class to its
 //! `ZEND_DECLARE_CLASS`, and that opline as the program serves. So it
-//! lives here, below the compiler and the engine alike (ADR-0001), and
-//! reads the classes it links against through a lookup by name each
-//! caller hands it. Each refusal is `E_COMPILE_ERROR` at the site php
+//! is a crate of its own, between the unit format it reads and the
+//! compiler and the engine that call it (ADR-0012), and reads the
+//! classes it links against through a lookup by name each caller hands
+//! it. Each refusal is `E_COMPILE_ERROR` at the site php
 //! names, the child method's first line for what is about a method and
 //! the class's line otherwise.
 //!
@@ -31,13 +32,25 @@
 //! inherited, so [`traits`] composes a declaration of the class with
 //! them as its own, each method with the [`Body`] it serves, and the
 //! checks above are made over that ([`Composed`]).
+//!
+//! `link.lock` is this crate's public surface.
+#![forbid(unsafe_code)]
+// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
-use crate::Level;
-use crate::decl::{
+use php_unit::Level;
+use php_unit::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
     MethodDecl, Name, Parameter, PropertyDecl, Type, Visibility,
 };
-use crate::type_to_string;
+use php_unit::type_to_string;
 use std::fmt;
 
 mod hooks;
@@ -1252,9 +1265,9 @@ fn strength(visibility: Visibility) -> u8 {
     }
 }
 
-/// A name for a message, as php's `%s` prints it ([`crate::decl::shown`]).
+/// A name for a message, as php's `%s` prints it ([`php_unit::decl::shown`]).
 fn text(bytes: &[u8]) -> String {
-    crate::decl::shown(bytes).into_owned()
+    php_unit::decl::shown(bytes).into_owned()
 }
 
 /// `required_num_args`: the parameters up to the last one with no
@@ -2895,7 +2908,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         if child.kind == ClassKind::Trait {
             return None;
         }
-        let marked = |attributes: &[crate::decl::Attribute]| {
+        let marked = |attributes: &[php_unit::decl::Attribute]| {
             attributes
                 .iter()
                 .any(|a| a.name.0.eq_ignore_ascii_case(b"Override"))

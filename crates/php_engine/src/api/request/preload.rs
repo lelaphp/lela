@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use php_link::{Linked, Obligation};
 use php_unit::decl::{ClassDecl, Name, shown};
-use php_unit::link::{Linked, Obligation};
 use php_unit::{AutoGlobal, Level, Unit};
 
 use super::{PreloadStatistics, Request, UserFunction, user_function_decl};

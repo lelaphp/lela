@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
+use php_link::{Composed, LinkedClass};
 use php_unit::Unit;
-use php_unit::link::{Composed, LinkedClass};
 
 use super::{Bound, Declared, Request};
 use crate::api::values::ClassId;

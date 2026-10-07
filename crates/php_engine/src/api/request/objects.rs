@@ -10,8 +10,8 @@
 use std::any::Any;
 
 use php_heap::{Fatal, Heap, Obj, Zval};
+use php_link::{LinkedClass, Row};
 use php_unit::decl::{ClassDecl, ClassKind, PropertyDecl, Visibility};
-use php_unit::link::{LinkedClass, Row};
 
 use crate::api::abi::{DimensionRead, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;

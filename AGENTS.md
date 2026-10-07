@@ -87,7 +87,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=b650599c789eda8003b09aef7a46d3f3fcc8f719b3f3013ee964425a0a858fdd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=de7f8fb22ef34b9efde79b29e7d14ff972e977cb818c0bfb93177731e62dd581 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -101,8 +101,9 @@ third-engine-design.md
 - ADR-0009 (accepted, 2026-10-03): Branch tracks are removed; a track is a label on the tracker, worked from main
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 - ADR-0011 (accepted, 2026-10-06): A reading's key covers its crate's whole dependency closure, not the locks of the crates it depends on
+- ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 
-<!-- /computed in=5529edd9c45b6b0b1813b2ed64be47761bec3e13fe0055e19aa53743db32499a out=a717c7dcef6bb51d05f58dcc2aaebb45f624853d7634b25efa867cd7428ec528 -->
+<!-- /computed in=cdde5a55c0d2e56a5af707bbc3e086f4e00eefcc15e5bece29d9686f5ed4e362 out=fae392bd0f8f57b71c3f942b943934350316907e133b235a4b1f431a8bfc99ed -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -110,13 +111,14 @@ third-engine-design.md
 | heap | heap.lock | 390 |  | pass |
 | process | process.lock | 17 |  | pass |
 | unit | unit.lock | 122 |  | pass |
+| link | link.lock |  |  | no reading |
 | ops | ops.lock | 209 |  | pass |
 | api | api.lock | 1317 | 1500 | pass |
 | sapi | sapi.lock | 35 |  | pass |
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 372 |  | pass |
 
-<!-- /computed in=d9610d3d6dac47420fa412106510440984dba5ea0fa6ab2417b76a5efebea95d out=963ffb6697bcffb9f7e6655a9cfe50615553ad7878b8156332641fc7e0d17bf0 -->
+<!-- /computed in=83ad264e6092670f8c3aa2fa00b3c84b4f86568cc18508867ffcc63d86eae177 out=0cc0e18d82d697b0e8f9d5cd104315e48b5386ed9cb00f7d182923d41d469b2a -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -149,7 +151,7 @@ third-engine-design.md
 | divergence.reason |  | check | pass |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=f6d5f76b8c3275d2cd4ac151609d94cc5b3b6490a91cc80b910d1a876be4eec1 out=fafc2ac0ed8216291cf39da7c91daec747492c9063cd80c8f8f2b1403ef6ce96 -->
+<!-- /computed in=61493ab7b564fb2434625a26a5221b8145ac539eaeac200f6a907ee1346662c5 out=fafc2ac0ed8216291cf39da7c91daec747492c9063cd80c8f8f2b1403ef6ce96 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -196,6 +198,7 @@ Options:
 ├── php_engine
 ├── php_ext
 ├── php_heap
+├── php_link
 ├── php_macros
 ├── php_process
 ├── php_proto
@@ -204,7 +207,7 @@ Options:
 ├── php_syntax
 └── php_unit
 ```
-<!-- /computed in=f0c7b431c0b09dd1f77217aa12a1df01ec11c8acda891c0c220c5b01f645a614 out=41028121a5904b9375f2470827c829ad35eb7f8905d93b9e3304c072dee99ea0 -->
+<!-- /computed in=a6ae36102f3fb2438f430e76078d6bc209005a653df755e1364367643b4e3fd2 out=2aea06da2e5135b2c82210bff019bf591f30d1a7eb6d65c5346cbb72921b7485 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

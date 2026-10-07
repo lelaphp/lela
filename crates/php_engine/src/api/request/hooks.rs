@@ -9,8 +9,8 @@
 //! written directly (`zend_should_call_hook`), and a virtual property,
 //! which has none, is refused.
 
+use php_link::{Held, Resolved, ResolvedHook, resolve_property};
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility};
-use php_unit::link::{Held, Resolved, ResolvedHook, resolve_property};
 
 use super::{Link, Member, MemberAt, Request};
 use crate::api::__private::{native_function, parameter};
