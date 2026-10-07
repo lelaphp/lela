@@ -106,16 +106,16 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 388 |  | pass |
+| heap | heap.lock | 390 |  | pass |
 | process | process.lock | 17 |  | pass |
 | unit | unit.lock | 122 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1315 | 1500 | pass |
+| api | api.lock | 1314 | 1500 | pass |
 | sapi | sapi.lock | 35 |  | pass |
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 364 |  | pass |
 
-<!-- /computed in=b60b65d2939a92388f5d8b31bfcf21508d66155e0496e9231405e7e2871fd3dd out=5cdd9f38e06d2cb17dc127c5de1eb6fa7217d21b7d11df527773465a98c5e3f9 -->
+<!-- /computed in=e47391219ddbc5677949d20e416332600a33439f9ed25b9f2d7a1e8796ec6795 out=d0426c9c293a8172bb16cda724ed1793eaeac2908bfa7bb0dfd124793c5afdbc -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -144,11 +144,11 @@ third-engine-design.md
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | fail |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | pass |
+| harness.self |  | deny | fail |
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=0916b61481da36955fa020014e903a526ac8ed66e898f448fe50bc079f318728 out=0525dffefe4ef93cd822f740f6b7b60297e1443e58837e618e2f02c32c1fdb9a -->
+<!-- /computed in=a7e379cf76613fcb2910bb3ad77e5f37f64b770022932b5799a1ef2f8d7866f5 out=81c5fd38e09d43769bfaa6193fe7a3818a0a3c60900153d819318d78cf805a3e -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

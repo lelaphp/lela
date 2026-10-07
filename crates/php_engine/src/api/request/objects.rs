@@ -1724,7 +1724,7 @@ impl Request {
         // `__set`.
         let walked = walk::foreach(self, properties, Hold::None, |req, row| -> walk::Step {
             let value = match row.value().as_php_ref() {
-                Some(_) if row.refcount() > 1 => {
+                Some(_) if row.value().refcount() > 1 => {
                     return Err(crate::api::raising::throw_error(
                         req,
                         "Error",

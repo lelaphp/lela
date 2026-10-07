@@ -2308,7 +2308,7 @@ impl crate::Heap {
                 Heap::gc_check_possible_root(hooks, z);
                 None
             }
-            GivenUp::Freed => None,
+            GivenUp::Freed | GivenUp::Pinned => None,
             GivenUp::Last(last) => Some(last),
         }
     }
