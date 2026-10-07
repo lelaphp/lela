@@ -245,19 +245,7 @@ impl Request {
             || name.eq_ignore_ascii_case(b"false")
             || name.eq_ignore_ascii_case(b"null");
         if special || self.constant_named(name).is_some() {
-            // `%s` over `ZSTR_VAL(name)`: the name up to a NUL in it.
-            let shown = name
-                .iter()
-                .position(|b| *b == 0)
-                .map_or(name, |nul| &name[..nul]);
-            crate::api::raising::warning(
-                self,
-                &format!(
-                    "Constant {} already defined, this will be an error in PHP 9",
-                    String::from_utf8_lossy(shown)
-                ),
-            );
-            value.give_up(self);
+            self.refuse_constant(name, value);
             return false;
         }
         // `zend_get_executed_filename_ex`: the innermost frame's file,
@@ -275,6 +263,25 @@ impl Request {
             deprecated,
         });
         true
+    }
+
+    /// `zend_register_constant` refusing `name`: php's warning, the name
+    /// up to a NUL in it as `%s` prints `ZSTR_VAL(name)`, and then the
+    /// value given up, `zval_ptr_dtor_nogc`, so a destructor it serves
+    /// runs after the warning.
+    fn refuse_constant(&mut self, name: &[u8], value: Owner<Value>) {
+        let shown = name
+            .iter()
+            .position(|b| *b == 0)
+            .map_or(name, |nul| &name[..nul]);
+        crate::api::raising::warning(
+            self,
+            &format!(
+                "Constant {} already defined, this will be an error in PHP 9",
+                String::from_utf8_lossy(shown)
+            ),
+        );
+        value.give_up(self);
     }
 
     /// `zend_constant.filename`: the file a constant the program
@@ -325,9 +332,9 @@ impl Request {
     /// owner and attributes and takes `value`, the old value released,
     /// which is what an extension writes through the `zval` that
     /// `zend_get_constant_str` finds. A sink: the row takes the value's
-    /// owner; `false`, and the owner given up, as `zend_register_constant`
-    /// gives up what it does not register, for a name the engine or an
-    /// extension declared as it started, which no request writes. The
+    /// owner; `false`, php's warning raised and the owner given up after
+    /// it, as `zend_register_constant` refuses a name, for one the engine
+    /// or an extension declared as it started, which no request writes. The
     /// session's `SID` is the witness, in `ext/session`.
     pub fn register_constant(
         &mut self,
@@ -347,7 +354,7 @@ impl Request {
             return true;
         }
         if name == b"PHP_SAPI" || self.shared.constant(name).is_some() {
-            value.give_up(self);
+            self.refuse_constant(name, value);
             return false;
         }
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
