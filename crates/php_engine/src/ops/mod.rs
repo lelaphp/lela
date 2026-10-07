@@ -3684,33 +3684,11 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Object(&o) => {
-            // `increment_function`'s object arm: `do_operation(ZEND_ADD)` with one,
-            // where the class answers it, then `cast_object` to
-            // `_IS_NUMBER` and the step over the number.
-            let table = req.object_handlers(o.heap());
-            if let Some(stepped) =
-                table.do_operation(req, BinaryOp::Add, value, Some(&Value::int(1)))?
-            {
-                return Ok(stepped.hand_on());
-            }
-            if let Some(number) = object_number(req, o)? {
-                return increment(req, &number);
-            }
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot increment {name}"),
-            ))
-        }
-        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot increment {name}"),
-            ))
+        ValueRef::Object(_)
+        | ValueRef::Array(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => {
+            stepped_other(req, value, BinaryOp::Add, "increment", increment)
         }
     }
 }
@@ -3826,35 +3804,42 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Object(&o) => {
-            // `decrement_function`'s object arm: `do_operation(ZEND_SUB)` with one,
-            // where the class answers it, then `cast_object` to
-            // `_IS_NUMBER` and the step over the number.
-            let table = req.object_handlers(o.heap());
-            if let Some(stepped) =
-                table.do_operation(req, BinaryOp::Sub, value, Some(&Value::int(1)))?
-            {
-                return Ok(stepped.hand_on());
-            }
-            if let Some(number) = object_number(req, o)? {
-                return decrement(req, &number);
-            }
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot decrement {name}"),
-            ))
-        }
-        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot decrement {name}"),
-            ))
+        ValueRef::Object(_)
+        | ValueRef::Array(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => {
+            stepped_other(req, value, BinaryOp::Sub, "decrement", decrement)
         }
     }
+}
+
+/// The arms `increment_function` and `decrement_function` share past
+/// the scalars: an object's `do_operation` with one where the class
+/// answers it, then `cast_object` to `_IS_NUMBER` and `step` over the
+/// number; an object that answers neither, an array and a resource are
+/// the `TypeError` naming what could not be stepped.
+fn stepped_other(
+    req: &mut Request,
+    value: &Value,
+    op: BinaryOp,
+    verb: &str,
+    step: fn(&mut Request, &Value) -> Result<Value, Thrown>,
+) -> Result<Value, Thrown> {
+    if let ValueRef::Object(&o) = value.as_ref() {
+        let table = req.object_handlers(o.heap());
+        if let Some(stepped) = table.do_operation(req, op, value, Some(&Value::int(1)))? {
+            return Ok(stepped.hand_on());
+        }
+        if let Some(number) = object_number(req, o)? {
+            return step(req, &number);
+        }
+    }
+    let name = value_name(req, value);
+    Err(throw_error(
+        req,
+        "TypeError",
+        &format!("Cannot {verb} {name}"),
+    ))
 }
 
 /// `increment_string` (`Z/Zend/zend_operators.c:2613`), "Perl style
