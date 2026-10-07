@@ -321,3 +321,24 @@ try { unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}'); } catch (Exception 
     );
     assert_eq!(stdout, "no B\n");
 }
+
+/// `array_splice` holds its table across the removal and deletes from
+/// it in place, as `php_splice` does under `GC_ADDREF(in_hash)` and
+/// `HT_ALLOW_COW_VIOLATION`, so a copy of the table a throwing
+/// destructor's trace takes while the removal runs is no second name
+/// for it (#2089, `ext/standard/tests/array/gh19926.phpt`).
+#[test]
+fn a_splice_whose_destructors_throw_releases_no_freed_table() {
+    let stdout = armed(
+        r#"<?php
+class T { function __destruct() { throw new Exception("t"); } }
+function f() {
+    $arr = [new T, new T, 3];
+    try { array_splice($arr, 0, 2); } catch (Exception $e) { echo $e->getMessage(), " ", $e->getPrevious()->getMessage(), "\n"; }
+    var_dump($arr);
+}
+f();
+"#,
+    );
+    assert_eq!(stdout, "t t\narray(1) {\n  [0]=>\n  int(3)\n}\n");
+}

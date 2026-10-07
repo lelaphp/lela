@@ -1180,6 +1180,7 @@ values::PhpArray::to_value
 values::PhpArray::try_append
 values::PhpArray::unprotect
 values::PhpArray::unset
+values::PhpArray::unset_in_place
 values::PhpObject
 values::PhpObject::append_row
 values::PhpObject::as_value

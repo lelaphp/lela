@@ -742,6 +742,19 @@ impl PhpArray {
         Ok(req.array_del(self.0, key.heap()))
     }
 
+    /// Remove `key` from this very table, whatever its owners,
+    /// `zend_hash_del` under `HT_ALLOW_COW_VIOLATION`: `true` when it was
+    /// there, its value released. What `php_splice` does to the table it
+    /// holds an owner of across its removal (`GC_ADDREF(in_hash)`,
+    /// `Z/ext/standard/array.c:3321`), so a holder that took the table
+    /// while a destructor of the removal ran sees the removal rather than
+    /// a copy separated from under the caller's name. The caller holds an
+    /// owner of the table for as long as it deletes. An immutable table,
+    /// which no request may write, is left as it is.
+    pub fn unset_in_place(&self, req: &mut Request, key: &Key) -> bool {
+        !self.0.is_immutable() && self.contains(key) && req.array_del(self.0, key.heap())
+    }
+
     /// `nNextFreeElement`: the index `$a[] = ...` writes at, one past the
     /// greatest integer key the array has held, `ZEND_LONG_MIN` for an
     /// array that never held one.
