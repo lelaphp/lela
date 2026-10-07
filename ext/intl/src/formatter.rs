@@ -47,7 +47,7 @@ impl ObjectHandlers for Handlers {
 
 /// `NumberFormatter_object_clone`: the members and `unum_clone`, or
 /// php's `Error` once the copy is made.
-fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let mut status = Code::ZERO;
     let copy = object
         .native::<FormatterObject>(req)
@@ -66,7 +66,7 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<PhpObject, Th
     let message = match held.then_some(()) {
         None => "Cannot clone uninitialized NumberFormatter",
         Some(()) if status.is_failure() => "Failed to clone NumberFormatter",
-        Some(()) => return Ok(new.hand_on_unmigrated()),
+        Some(()) => return Ok(new),
     };
     new.give_up(req);
     Err(throw_error(req, "Error", message))

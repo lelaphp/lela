@@ -1064,7 +1064,7 @@ pub(crate) fn scalar_type_hint(
             ValueRef::Object(object) => {
                 let table = req.object_handlers(object.heap());
                 if let Some(text) = table.cast_object(req, *object, TypeTag::String)? {
-                    return Ok(Some(text));
+                    return Ok(Some(text.hand_on()));
                 }
             }
             _ => {}

@@ -851,11 +851,11 @@ fn read_property(
     object: PhpObject,
     name: &[u8],
     read: PropertyRead,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     match handler(req, object, name) {
         Some(prop) => Ok(match (prop.read)(req, object)? {
-            Some(read) => read.hand_on_unmigrated(),
-            None => Value::null(),
+            Some(read) => read,
+            None => Owner::take(req, Value::null()),
         }),
         None => Std.read_property(req, object, name, read),
     }
@@ -1032,7 +1032,7 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
         out.set(req, key, value)?;
     }
     let Some(table) = table_of(req, object) else {
-        return Ok(Some(out.hand_on_unmigrated().into()));
+        return Ok(Some(out.into()));
     };
     let mut pending: Option<Thrown> = None;
     let omitted = string(req, b"(object value omitted)")?;
@@ -1071,7 +1071,7 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
     omitted.give_up(req);
     req.state::<State>().suppress_warnings = false;
     Ok(Some(DebugInfo {
-        table: out.hand_on_unmigrated(),
+        table: out,
         thrown: pending,
     }))
 }
@@ -1381,7 +1381,7 @@ fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) {
 /// document given private data of its own; a namespace node is
 /// `dom_object_namespace_node_clone_obj`'s, a fresh declaration node on
 /// the same element, which the clone keeps alive too.
-fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let node = node_of(req, object);
     let mut payload = crate::object::Dom::default();
     let mut copied = None;
@@ -1407,9 +1407,9 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             let shared = shared_doc(req, object);
             payload.obj.attach(req, cloned, shared);
         }
-        let clone = object.clone_with(req, payload)?.hand_on_unmigrated();
-        if let Some(d) = dom_mut(req, clone) {
-            d.obj.set_object(clone);
+        let clone = object.clone_with(req, payload)?;
+        if let Some(d) = dom_mut(req, *clone) {
+            d.obj.set_object(*clone);
         }
         return Ok(clone);
     }
@@ -1443,7 +1443,7 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
         }
     }
     let clone = match object.clone_with(req, payload) {
-        Ok(clone) => clone.hand_on_unmigrated(),
+        Ok(clone) => clone,
         Err(thrown) => {
             if let Some(private) = fresh {
                 private.free(req);
@@ -1451,16 +1451,16 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<PhpObject, Throw
             return Err(thrown);
         }
     };
-    if let Some(d) = dom_mut(req, clone) {
-        d.obj.set_object(clone);
+    if let Some(d) = dom_mut(req, *clone) {
+        d.obj.set_object(*clone);
     }
     if let Some((n, cloned)) = copied
         && cloned.doc() != n.doc()
     {
-        copy_document_ref(req, object, clone);
+        copy_document_ref(req, object, *clone);
     }
     if let Some(private) = fresh {
-        private::lay_down(req, clone, private);
+        private::lay_down(req, *clone, private);
     }
     Ok(clone)
 }

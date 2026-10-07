@@ -542,9 +542,9 @@ impl<T: Clone + Default + Any + Send> ObjectHandlers for Copying<T> {
 fn clone_engine<T: Clone + Default + Any + Send>(
     req: &mut Request,
     object: PhpObject,
-) -> Result<PhpObject, Thrown> {
+) -> Result<Owner<PhpObject>, Thrown> {
     let state = object.native::<T>(req).cloned().unwrap_or_default();
-    clone_with(req, &object, state).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, state)
 }
 
 pub(crate) static MT19937: Copying<EngineMt19937> = Copying(PhantomData);

@@ -21,7 +21,9 @@ use crate::api::call::Function;
 use crate::api::coerce;
 use crate::api::raising::{Thrown, arg_type_error, arg_value_error, fatal};
 use crate::api::request::Request;
-use crate::api::values::{PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef};
+use crate::api::values::{
+    Owner, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value, ValueRef,
+};
 
 /// `MAY_BE_NULL`, `MAY_BE_FALSE` and the rest of `zend_type_info.h`'s
 /// bits the const assertions read.
@@ -751,9 +753,9 @@ impl<T> Ref<T> {
     pub fn set(&self, req: &mut Request, value: impl IntoReturn) -> Result<(), Thrown> {
         let value = value.into_return(req)?;
         if let Some(cell) = self.cell {
-            return cell.set(req, value);
+            return cell.set(req, value.hand_on_unmigrated());
         }
-        req.release(value);
+        value.give_up(req);
         Ok(())
     }
 }
@@ -925,8 +927,10 @@ pub trait IntoReturn: Sized {
     const MASK: u32;
     /// The declared return type; `None` declares none.
     fn declared() -> Option<Type>;
-    /// The value the engine is handed, owned; an `Err` passes through.
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown>;
+    /// The value the engine is handed, its owner the engine's: a view's
+    /// taken, `RETURN_COPY`, and an owner's moved; an `Err` passes
+    /// through.
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown>;
 }
 
 /// `void`, and nothing on `__construct` and `__destruct`.
@@ -935,8 +939,8 @@ impl IntoReturn for () {
     fn declared() -> Option<Type> {
         Some(Type::Void)
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
-        Ok(Value::null())
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, Value::null()))
     }
 }
 
@@ -945,9 +949,8 @@ impl IntoReturn for Value {
     fn declared() -> Option<Type> {
         Some(Type::Mixed)
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
-        req.addref(&self);
-        Ok(self)
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, self))
     }
 }
 
@@ -957,7 +960,7 @@ impl<T: IntoReturn> IntoReturn for Untyped<T> {
     fn declared() -> Option<Type> {
         None
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         self.0.into_return(req)
     }
 }
@@ -970,9 +973,8 @@ impl<T: FromArgument> IntoReturn for Raw<T> {
     fn declared() -> Option<Type> {
         T::declared()
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
-        req.addref(&self.value);
-        Ok(self.value)
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, self.value))
     }
 }
 
@@ -985,10 +987,8 @@ macro_rules! plain_return {
             fn declared() -> Option<Type> {
                 Some($ty)
             }
-            fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
-                let value = ($make)(self);
-                req.addref(&value);
-                Ok(value)
+            fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+                Ok(Owner::take(req, ($make)(self)))
             }
         }
     };
@@ -1049,7 +1049,7 @@ impl IntoReturn for Never {
     fn declared() -> Option<Type> {
         Some(Type::Never)
     }
-    fn into_return(self, _: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, _: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {}
     }
 }
@@ -1060,10 +1060,8 @@ impl IntoReturn for Resource {
     fn declared() -> Option<Type> {
         None
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
-        let value = Value::resource(self);
-        req.addref(&value);
-        Ok(value)
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, Value::resource(self)))
     }
 }
 
@@ -1074,10 +1072,8 @@ impl IntoReturn for Callable {
     fn declared() -> Option<Type> {
         Some(Type::Callable)
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
-        let value = self.value();
-        req.addref(&value);
-        Ok(value)
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, self.value()))
     }
 }
 
@@ -1086,10 +1082,8 @@ impl<C: Class> IntoReturn for Instance<C> {
     fn declared() -> Option<Type> {
         Some(named::<C>())
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
-        let value = self.object.as_value();
-        req.addref(&value);
-        Ok(value)
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::take(req, self.object.as_value()))
     }
 }
 
@@ -1104,10 +1098,10 @@ impl<T: IntoReturn> IntoReturn for Option<T> {
             other => Type::Nullable(Box::new(other)),
         })
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             Some(value) => value.into_return(req),
-            None => Ok(Value::null()),
+            None => Ok(Owner::take(req, Value::null())),
         }
     }
 }
@@ -1124,10 +1118,10 @@ impl<T: IntoReturn> IntoReturn for OrFalse<T> {
     fn declared() -> Option<Type> {
         Some(flatten([T::declared(), Some(Type::False)]))
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             OrFalse::Value(value) => value.into_return(req),
-            OrFalse::False => Ok(Value::bool(false)),
+            OrFalse::False => Ok(Owner::take(req, Value::bool(false))),
         }
     }
 }
@@ -1137,7 +1131,7 @@ impl<A: IntoReturn, B: IntoReturn> IntoReturn for Union<A, B> {
     fn declared() -> Option<Type> {
         Some(flatten([A::declared(), B::declared()]))
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             Union::A(a) => a.into_return(req),
             Union::B(b) => b.into_return(req),
@@ -1152,7 +1146,7 @@ impl<T: IntoReturn> IntoReturn for Result<T, Thrown> {
     fn declared() -> Option<Type> {
         T::declared()
     }
-    fn into_return(self, req: &mut Request) -> Result<Value, Thrown> {
+    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         self?.into_return(req)
     }
 }

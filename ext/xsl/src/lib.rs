@@ -173,7 +173,7 @@ fn validated(name: &[u8]) -> bool {
 fn read_int(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<i64, Thrown> {
     let value = Std.read_property(req, object, name, PropertyRead::Silent)?;
     let n = value.as_int().unwrap_or(0);
-    req.release(value);
+    value.give_up(req);
     Ok(n)
 }
 
@@ -221,7 +221,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         if validated(name) && matches!(read, PropertyRead::Write | PropertyRead::Unset) {
             let (class, name) = (
                 class_name(req, object.class()),
@@ -483,7 +483,7 @@ fn transform(
     }
     let xinclude = Std.read_property(req, this, b"doXInclude", PropertyRead::Warning)?;
     let xinclude_on = truthy(req, &xinclude);
-    req.release(xinclude);
+    xinclude.give_up(req);
     let depth = read_int(req, this, b"maxTemplateDepth")?;
     let vars = read_int(req, this, b"maxTemplateVars")?;
     ctxt.set_limits(xinclude_on, depth, vars);
@@ -663,7 +663,7 @@ impl XSLTProcessor {
         settled?;
         let clone = Std.read_property(req, this, b"cloneDocument", PropertyRead::Warning)?;
         let has_keys = truthy(req, &clone) || sheet.doc().is_some_and(declares_keys);
-        req.release(clone);
+        clone.give_up(req);
         if let Some(i) = intern(req, this) {
             i.has_keys = has_keys;
             i.sheet = Some(sheet);

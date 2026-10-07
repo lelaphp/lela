@@ -1585,7 +1585,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         offset: Option<&Value>,
         read: DimensionRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let target = offset.and_then(|o| o.deref().as_object().copied());
         match target {
             Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_READ == 0 => {
@@ -1595,8 +1595,8 @@ impl ObjectHandlers for Handlers {
                         .and_then(|at| s.rows[*at].as_ref().map(|row| row.2))
                 })?;
                 match found {
-                    Some(inf) => Ok(crate::copied(req, inf)),
-                    None if read == DimensionRead::Silent => Ok(Value::null()),
+                    Some(inf) => Ok(Owner::take(req, inf.deref())),
+                    None if read == DimensionRead::Silent => Ok(Owner::take(req, Value::null())),
                     None => Err(throw(req, "UnexpectedValueException", "Object not found")),
                 }
             }
@@ -1609,23 +1609,33 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
         offset: Option<&Value>,
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let target = offset.and_then(|o| o.deref().as_object().copied());
+        // The bits are read only for an object offset, as the guard
+        // read them; the value's owner is given up where they fail.
+        let bits = match target.map(|_| overridden_bits(req, object)) {
+            Some(Err(thrown)) => {
+                value.give_up(req);
+                return Err(thrown);
+            }
+            Some(Ok(bits)) => bits,
+            None => 0,
+        };
         match target {
-            Some(target) if overridden_bits(req, object)? & SOS_OVERRIDDEN_WRITE == 0 => {
+            Some(target) if bits & SOS_OVERRIDDEN_WRITE == 0 => {
                 if crate::is_a(req, object.class(), b"MultipleIterator")
                     && !crate::is_a(req, target.class(), b"Iterator")
                 {
-                    req.release(value);
+                    value.give_up(req);
                     return Err(throw_error(
                         req,
                         "TypeError",
                         "Can only attach objects that implement the Iterator interface",
                     ));
                 }
-                let attached = storage_attach(req, object, target, value);
-                req.release(value);
+                let attached = storage_attach(req, object, target, *value);
+                value.give_up(req);
                 attached
             }
             _ => Std.write_dimension(req, object, offset, value),
@@ -1848,7 +1858,7 @@ fn overridden_bits(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> 
 /// int(1)
 /// int(0)
 /// ```
-fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_storage(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let copy = new_object(req, object.class())?;
     let filled = add_all(req, *copy, object).and_then(|()| clone_members(req, &copy, &object));
     if let Err(thrown) = filled {
@@ -1856,7 +1866,7 @@ fn clone_storage(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thro
         return Err(thrown);
     }
     // The `clone_obj` slot's return, the one owner the copy was made with.
-    Ok(copy.hand_on_unmigrated())
+    Ok(copy)
 }
 
 /// `SplObjectStorage::serialize`'s walk over the storage, live by a

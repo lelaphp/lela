@@ -141,7 +141,7 @@ impl ObjectHandlers for NodeHandlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         read_property(req, object, name, read)
     }
 

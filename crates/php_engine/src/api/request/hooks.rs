@@ -634,25 +634,26 @@ impl Request {
     pub(crate) fn write_hooked(
         &mut self,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
         hooked: Hooked,
     ) -> Result<(), Thrown> {
         let bytes = name.as_bytes().to_vec();
-        let refused = |req: &mut Request, sentence: &str| {
-            req.release(value);
-            req.release(Value::string(name));
+        let refused = |req: &mut Request, name: Owner<PhpString>, value: Owner<Value>, sentence| {
+            value.give_up(req);
+            name.give_up(req);
             Err(req.hooked_error(object, &bytes, sentence))
         };
         let Some(set) = hooked.set else {
             if hooked.is_virtual {
-                return refused(self, "Property {class}::${name} is read-only");
+                return refused(self, name, value, "Property {class}::${name} is read-only");
             }
             return self.write_backing(object, name, value, hooked);
         };
         if !self.should_call_hook(&hooked, &bytes, object) {
             if hooked.is_virtual {
-                return refused(self, "Must not write to virtual property {class}::${name}");
+                let sentence = "Must not write to virtual property {class}::${name}";
+                return refused(self, name, value, sentence);
             }
             return self.write_backing(object, name, value, hooked);
         }
@@ -666,13 +667,13 @@ impl Request {
                 &bytes,
                 "modify",
             );
-            self.release(value);
-            self.release(Value::string(name));
+            value.give_up(self);
+            name.give_up(self);
             return Err(thrown);
         }
-        let served = self.call_hook(object, set, &[value]);
-        self.release(value);
-        self.release(Value::string(name));
+        let served = self.call_hook(object, set, &[*value]);
+        value.give_up(self);
+        name.give_up(self);
         let answered = served?;
         self.release(answered);
         Ok(())
@@ -685,8 +686,8 @@ impl Request {
     fn write_backing(
         &mut self,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
         hooked: Hooked,
     ) -> Result<(), Thrown> {
         if let Some(set_visibility) = hooked.set_visibility
@@ -699,8 +700,8 @@ impl Request {
                 name.as_bytes(),
                 "modify",
             );
-            self.release(value);
-            self.release(Value::string(name));
+            value.give_up(self);
+            name.give_up(self);
             return Err(thrown);
         }
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes())
@@ -969,7 +970,7 @@ fn trampoline_call(
 /// `zend_parent_hook_get_trampoline`: the property read through the
 /// object's `read_property`, which finds the trampoline running and so
 /// reads what the parent's property holds.
-fn parent_hook_get(req: &mut Request) -> Result<Value, Thrown> {
+fn parent_hook_get(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Get, 0)?;
     let table = req.object_handlers(this.heap());
     table.read_property(req, this, &name, PropertyRead::Warning)
@@ -977,20 +978,20 @@ fn parent_hook_get(req: &mut Request) -> Result<Value, Thrown> {
 
 /// `zend_parent_hook_set_trampoline`: the value written through the
 /// object's `write_property`, and returned.
-fn parent_hook_set(req: &mut Request) -> Result<Value, Thrown> {
+fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
     let value = req.argument(1).unwrap_or_else(Value::null).deref();
     let key = req.string(&name)?;
     let key = Owner::adopt(req, key);
     // The return's owner, and the write's.
-    req.addref(&value);
+    let returned = Owner::take(req, value);
     let written = Owner::take(req, value);
     let table = req.object_handlers(this.heap());
     if let Err(thrown) = table.write_property(req, this, key, written) {
-        req.release(value);
+        returned.give_up(req);
         return Err(thrown);
     }
-    Ok(value)
+    Ok(returned)
 }
 
 /// One row of [`Request::hooked_object_rows`]: the name as declared,
@@ -1442,16 +1443,16 @@ impl Request {
     pub(crate) fn write_raw(
         &mut self,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let Some(hooked) = self.row_hooked(object.class(), name.as_bytes()) else {
             return self.write_property(object, name, value);
         };
         if hooked.is_virtual {
             let bytes = name.as_bytes().to_vec();
-            self.release(value);
-            self.release(Value::string(name));
+            value.give_up(self);
+            name.give_up(self);
             return Err(self.hooked_error(
                 object,
                 &bytes,

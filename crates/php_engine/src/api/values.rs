@@ -996,7 +996,7 @@ impl HeldProperties {
             // `zend_array_release`: one owner fewer, the table destroyed at
             // the last, and no possible root of the cycle collector.
             Held::Table(_, table) => {
-                req.release_nogc(table.hand_on_counted());
+                table.give_up_nogc(req);
                 Ok(())
             }
             Held::Rows(rows) => {
@@ -1009,7 +1009,7 @@ impl HeldProperties {
                 Ok(())
             }
             Held::Debug(table, thrown) => {
-                req.release_nogc(table.hand_on_counted());
+                table.give_up_nogc(req);
                 thrown.map_or(Ok(()), Err)
             }
         }
@@ -1452,8 +1452,7 @@ impl PhpObject {
             // of until its release.
             Answered::Debug(info) => {
                 let count = info.table.len();
-                let table = Owner::adopt(req, info.table);
-                (Held::Debug(table, info.thrown), count)
+                (Held::Debug(info.table, info.thrown), count)
             }
         };
         Ok(HeldProperties { held, count })

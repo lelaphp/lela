@@ -8,7 +8,7 @@ use php_ext::abi::ExtensionBuilder;
 use php_ext::call::passthrough;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::{Owner, Value, ValueRef};
 
 use crate::ini::flag;
 use crate::{Startup, state};
@@ -26,7 +26,7 @@ pub(crate) fn install(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// `accel_file_exists`, `accel_is_file` and `accel_is_readable`: a call
 /// of one non-empty string names a file `filename_is_in_cache` finds,
 /// and is `true`; anything else is the replaced entry's to answer.
-fn in_cache(req: &mut Request) -> Result<Value, Thrown> {
+fn in_cache(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let named = match req.argument(1).map(|value| value.deref()) {
         Some(value) if req.argument_count() == 1 => match value.as_ref() {
             ValueRef::Str(name) if !name.as_bytes().is_empty() => Some(name.as_bytes().to_vec()),
@@ -38,7 +38,7 @@ fn in_cache(req: &mut Request) -> Result<Value, Thrown> {
         && overriding(req)
         && req.unit_cache().holds(&name, None)?
     {
-        return Ok(Value::bool(true));
+        return Ok(Owner::take(req, Value::bool(true)));
     }
     passthrough(req, None)
 }

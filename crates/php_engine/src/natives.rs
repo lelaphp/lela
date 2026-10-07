@@ -503,8 +503,7 @@ fn clone(
         Passed::Given(with) => Some(with),
         Passed::Omitted => None,
     };
-    let made = req.clone_object(object, with);
-    crate::api::values::adopted(req, made)
+    req.clone_object(object, with)
 }
 
 /// `exit(string|int $status = 0): never`, `ZEND_FUNCTION(exit)`
@@ -2059,7 +2058,7 @@ fn dump_rows(
     out: &mut Vec<u8>,
     common: &str,
     object: crate::api::values::PhpObject,
-    rows: PhpArray,
+    rows: Owner<PhpArray>,
     level: usize,
 ) {
     out.extend_from_slice(format!("{common}object(").as_bytes());
@@ -2071,7 +2070,7 @@ fn dump_rows(
     // (`Z/ext/standard/var.c:196`) over the table `zend_get_properties_for`
     // answered, which this arm's owner holds until
     // `zend_release_properties`: the walk takes none of its own.
-    let walked = walk::foreach(req, rows, Hold::None, |req, row| -> walk::Step {
+    let walked = walk::foreach(req, *rows, Hold::None, |req, row| -> walk::Step {
         if too_deep(out, level, req.stack_limit().overflowed()) {
             return Ok(ControlFlow::Continue(()));
         }
@@ -2084,7 +2083,7 @@ fn dump_rows(
         // The body answers no throwable.
         Ok(_) | Err(_) => {}
     }
-    req.release(Value::array(rows));
+    rows.give_up(req);
     if level > 1 {
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }

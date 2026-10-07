@@ -867,7 +867,7 @@ impl Props for StmtProps {
         object: PhpObject,
         name: &str,
         quiet: bool,
-    ) -> Result<Option<Value>, Thrown> {
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         let made_enough = matches!(name, "errno" | "error" | "error_list" | "sqlstate");
         let status = match crate::payload::<StmtObj>(req, object).map(std::mem::take) {
             Some(StmtObj::Prepared(s)) => {
@@ -890,18 +890,16 @@ impl Props for StmtProps {
             _ => return props::gone(req, object, quiet),
         };
         let value = match name {
-            "affected_rows" => affected(req, status.affected_rows)?.hand_on_unmigrated(),
-            "insert_id" => long_or_string(req, status.insert_id)?.hand_on_unmigrated(),
-            "num_rows" => long_or_string(req, status.num_rows)?.hand_on_unmigrated(),
-            "param_count" => Value::int(i64::from(status.parameter_count)),
-            "field_count" => Value::int(i64::from(status.field_count)),
-            "errno" => Value::int(i64::from(status.errno)),
-            "error" => string(req, &status.error)?.hand_on_unmigrated(),
-            "error_list" => props::error_list(req, &status.error_list)?
-                .into_value()
-                .hand_on_unmigrated(),
-            "sqlstate" => string(req, &status.sqlstate)?.hand_on_unmigrated(),
-            "id" => Value::int(i64::from(status.id)),
+            "affected_rows" => affected(req, status.affected_rows)?,
+            "insert_id" => long_or_string(req, status.insert_id)?,
+            "num_rows" => long_or_string(req, status.num_rows)?,
+            "param_count" => Owner::take(req, Value::int(i64::from(status.parameter_count))),
+            "field_count" => Owner::take(req, Value::int(i64::from(status.field_count))),
+            "errno" => Owner::take(req, Value::int(i64::from(status.errno))),
+            "error" => string(req, &status.error)?,
+            "error_list" => props::error_list(req, &status.error_list)?.into_value(),
+            "sqlstate" => string(req, &status.sqlstate)?,
+            "id" => Owner::take(req, Value::int(i64::from(status.id))),
             _ => return Ok(None),
         };
         Ok(Some(value))

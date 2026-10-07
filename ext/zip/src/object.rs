@@ -222,9 +222,9 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         match Prop::of(name) {
-            Some(p) => Ok(p.read(req, object)?.hand_on_unmigrated()),
+            Some(p) => p.read(req, object),
             None => Std.read_property(req, object, name, read),
         }
     }

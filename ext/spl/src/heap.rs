@@ -886,7 +886,7 @@ impl ObjectHandlers for Handlers {
 }
 
 /// `spl_heap_object_clone`: the elements with one more owner each.
-fn clone_heap(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+fn clone_heap(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     state_ready(req, object)?;
     let copy = read(req, object, |h| HeapState {
         elements: h.elements.clone(),
@@ -901,7 +901,7 @@ fn clone_heap(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown>
         req.addref(a);
         req.addref(b);
     }
-    clone_with(req, &object, Box::new(copy)).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, Box::new(copy))
 }
 
 /// `spl_heap_object_get_debug_info`: the properties, then `flags`,

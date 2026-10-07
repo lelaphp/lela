@@ -359,7 +359,7 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> syn::Result<Tokens> {
                     declaration.attributes = vec![#(#attributes),*];
                     (declaration, entry as #root::__private::Entry)
                 }
-                fn entry(__request: &mut #root::request::Request) -> Result<#root::values::Value, #root::raising::Thrown> {
+                fn entry(__request: &mut #root::request::Request) -> Result<#root::values::Owner<#root::values::Value>, #root::raising::Thrown> {
                     #prologue
                     #root::abi::IntoReturn::into_return(super::#ident(#request #(#arguments),*), __request)
                 }

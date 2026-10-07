@@ -1415,31 +1415,32 @@ mod tests {
 
     /// `str_repeat(string $string, int $times)` as far as its one
     /// `ValueError` goes.
-    fn str_repeat(req: &mut Request) -> Result<Value, Thrown> {
+    fn str_repeat(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
         Err(arg_value_error(req, 2, "be greater than or equal to 0"))
     }
 
     /// `array_merge(array ...$arrays)` as far as its `TypeError` goes.
-    fn array_merge(req: &mut Request) -> Result<Value, Thrown> {
+    fn array_merge(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
         Err(arg_type_error(req, 1, "be of type array, int given"))
     }
 
     /// What `token_get_all("<?php if (", TOKEN_PARSE)` throws: a
     /// `ParseError` at the compiled site, the empty file name and the
     /// scanner's line.
-    fn refuse(req: &mut Request) -> Result<Value, Thrown> {
+    fn refuse(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
         Err(throw_at(req, "ParseError", "Unclosed '('", b"", 1))
     }
 
     /// A native whose body throws a class the bundle may not link, as
     /// `php_macros`' parity test met it (#970).
-    fn unlinked(req: &mut Request) -> Result<Value, Thrown> {
+    fn unlinked(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
         Err(throw(req, "LogicException", "never returns"))
     }
 
     /// The same class made and not thrown.
-    fn unlinked_made(req: &mut Request) -> Result<Value, Thrown> {
-        new_throwable(req, "LogicException", "never made").map(crate::api::values::Owner::hand_on)
+    fn unlinked_made(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
+        new_throwable(req, "LogicException", "never made")
+            .map(crate::api::values::Owner::into_value)
     }
 
     /// The fatal a source comes to under an engine with the natives

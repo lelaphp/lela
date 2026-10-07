@@ -16,7 +16,7 @@ use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{
-    ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value,
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, adopted,
 };
 
 use frames::Link;
@@ -1803,7 +1803,7 @@ impl Request {
         object: PhpObject,
         name: &[u8],
         read: PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         let silent = read == PropertyRead::Silent;
         // What nothing holds is `null`, quietly, under `BP_VAR_IS` and
         // `BP_VAR_UNSET`; only the first asks `__isset`.
@@ -1812,7 +1812,7 @@ impl Request {
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
         if let Some(read) = self.read_hooked_arm(object, name, read) {
-            return read;
+            return adopted(self, read);
         }
         // `ZEND_WRONG_PROPERTY_OFFSET`: the placement found a property
         // the scope may not reach and said so quietly, because a
@@ -1825,9 +1825,7 @@ impl Request {
             if self.reaches(&placed) {
                 let z = o.slot(placed.slot);
                 if !z.is_undef() {
-                    let value = Value::of_zval(z).deref();
-                    self.addref(&value);
-                    return Ok(value);
+                    return Ok(Owner::take(self, Value::of_zval(z).deref()));
                 }
                 // `IS_PROP_UNINIT | IS_PROP_LAZY`: a slot that waits for
                 // the initializer skips `__get` too, and the object is
@@ -1845,7 +1843,7 @@ impl Request {
                     || (silent && self.serves_accessor(class, b"__isset"));
                 if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
                     if quiet {
-                        return Ok(Value::null());
+                        return Ok(Owner::take(self, Value::null()));
                     }
                     return Err(self.uninitialized_property(placed.declaring, name));
                 }
@@ -1870,9 +1868,7 @@ impl Request {
                 .find(|(k, _)| matches!(k, php_heap::Key::Str(s) if s.bytes() == name))
                 .map(|(_, z)| Value::of_zval(z));
             if let Some(value) = dynamic {
-                let value = value.deref();
-                self.addref(&value);
-                return Ok(value);
+                return Ok(Owner::take(self, value.deref()));
             }
         }
         let getter = self.magic_accessor(class, b"__get");
@@ -1899,13 +1895,14 @@ impl Request {
             let served = self.isset_then_get(object, name, read, issetter, getter);
             held.give_up(self);
             if let Some(served) = served? {
-                return Ok(served);
+                return Ok(Owner::adopt(self, served));
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
                 let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
                 self.overloaded_write_notice(class, name, read, &got);
-                return self.hold_magic_get(class, name, getter, got);
+                let held = self.hold_magic_get(class, name, getter, got);
+                return adopted(self, held);
             }
             // `zend_wrong_offset`: the guard stands and the placement
             // was a wrong offset, so it is made again, loudly, and the
@@ -1932,7 +1929,7 @@ impl Request {
             let class = self.class_name(class);
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }
-        Ok(Value::null())
+        Ok(Owner::take(self, Value::null()))
     }
 
     /// `zend_std_write_property`'s `found` arm over a slot that holds a
@@ -2473,8 +2470,8 @@ impl Request {
     pub(crate) fn write_property(
         &mut self,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let class = object.class();
         // `if (Z_TYPE_P(variable_ptr) != IS_UNDEF) goto found` and
@@ -2491,8 +2488,8 @@ impl Request {
             }
             if !self.serves_accessor(class, b"__set") {
                 let thrown = self.inaccessible_property(class, hooked.visibility, name.as_bytes());
-                self.release(value);
-                self.release(Value::string(name));
+                value.give_up(self);
+                name.give_up(self);
                 return Err(thrown);
             }
         }
@@ -2502,8 +2499,8 @@ impl Request {
         {
             if !o.slot(p.slot).is_undef() {
                 if let Some(thrown) = self.found_refusal(o, p, name.as_bytes()) {
-                    self.release(value);
-                    self.release(Value::string(name));
+                    value.give_up(self);
+                    name.give_up(self);
                     return Err(thrown);
                 }
                 return self.write_std_property(object, name, value);
@@ -2526,15 +2523,15 @@ impl Request {
             && !self.serves_accessor(class, b"__set")
         {
             let thrown = self.inaccessible_property(class, p.visibility, name.as_bytes());
-            self.release(value);
-            self.release(Value::string(name));
+            value.give_up(self);
+            name.give_up(self);
             return Err(thrown);
         }
         let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
         if bad_name && !self.serves_accessor(class, b"__set") {
             let thrown = self.bad_property_name_error();
-            self.release(value);
-            self.release(Value::string(name));
+            value.give_up(self);
+            name.give_up(self);
             return Err(thrown);
         }
         let held = placed.is_none()
@@ -2560,9 +2557,9 @@ impl Request {
         let bytes = name.as_bytes().to_vec();
         let wrong = bad_name || placed.as_ref().is_some_and(|p| !self.reaches(p));
         if self.guard_word(object, &bytes) & IN_SET == 0 {
-            let served = self.call_accessor(object, setter, IN_SET, &bytes, &[value]);
-            self.release(value);
-            self.release(Value::string(name));
+            let served = self.call_accessor(object, setter, IN_SET, &bytes, &[*value]);
+            value.give_up(self);
+            name.give_up(self);
             let answered = served?;
             self.release(answered);
             return Ok(());
@@ -2570,8 +2567,8 @@ impl Request {
         // `zend_wrong_offset`: the guard stands, so the placement is
         // made again and the `Error` it raises is the answer.
         if wrong && let Some(thrown) = self.wrong_offset(class, &bytes) {
-            self.release(value);
-            self.release(Value::string(name));
+            value.give_up(self);
+            name.give_up(self);
             return Err(thrown);
         }
         if lazy {
@@ -2586,8 +2583,8 @@ impl Request {
         {
             let thrown =
                 self.set_inaccessible_property(placed.declaring, set, false, &bytes, "modify");
-            self.release(value);
-            self.release(Value::string(name));
+            value.give_up(self);
+            name.give_up(self);
             return Err(thrown);
         }
         self.write_std_property(object, name, value)
@@ -2601,15 +2598,15 @@ impl Request {
     pub(super) fn lazy_write(
         &mut self,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
         guarded: bool,
     ) -> Result<(), Thrown> {
         let instance = match self.lazy_init(object) {
             Ok(instance) => instance,
             Err(thrown) => {
-                self.release(value);
-                self.release(Value::string(name));
+                value.give_up(self);
+                name.give_up(self);
                 return Err(thrown);
             }
         };
@@ -2706,36 +2703,37 @@ impl Request {
     pub(super) fn write_std_property(
         &mut self,
         object: PhpObject,
-        name: PhpString,
-        value: Value,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         let o = object.heap();
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes()) {
             let value = if placed.typed {
                 let Some(typed) = self.declared_typed_property(object.class(), name.as_bytes())
                 else {
-                    self.release(value);
-                    self.release(Value::string(name));
+                    value.give_up(self);
+                    name.give_up(self);
                     return self.fatal_of(Err(Fatal::Error(String::from(
                         "InternalError: write_property placed a typed property whose declared type the class does not carry",
                     ))));
                 };
                 let strict = self.property_strict_types();
+                let value = value.hand_on();
                 match self.hold_to_property_type_of(object, &typed, name.as_bytes(), value, strict)
                 {
                     Ok(value) => value,
                     Err(thrown) => {
-                        self.release(Value::string(name));
+                        name.give_up(self);
                         return Err(thrown);
                     }
                 }
             } else {
-                value
+                value.hand_on()
             };
             match self.assign_declared_slot(o, placed.slot, value, self.property_strict_types()) {
                 Ok((_, garbage)) => self.release(garbage),
                 Err(thrown) => {
-                    self.release(Value::string(name));
+                    name.give_up(self);
                     return Err(thrown);
                 }
             }
@@ -2749,8 +2747,8 @@ impl Request {
                 match self.separated_properties(o) {
                     Ok(_) => {}
                     Err(thrown) => {
-                        self.release(value);
-                        self.release(Value::string(name));
+                        value.give_up(self);
+                        name.give_up(self);
                         return Err(thrown);
                     }
                 }
@@ -2766,19 +2764,33 @@ impl Request {
                 .and_then(|table| table.get(key))
                 .and_then(|found| Value::of_zval(found).as_php_ref().copied());
             if let Some(cell) = bound {
-                self.release(Value::string(name));
+                name.give_up(self);
                 let strict = self.property_strict_types();
-                return self.assign_to_reference(cell.heap(), value.undef_as_null(), strict);
+                return self.assign_to_reference(
+                    cell.heap(),
+                    value.hand_on().undef_as_null(),
+                    strict,
+                );
             }
             if !held && let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
-                self.release(value);
-                self.release(Value::string(name));
+                value.give_up(self);
+                name.give_up(self);
                 return Err(thrown);
             }
-            let table = self.separated_properties(o)?;
-            self.array_update(table, key, value)?;
+            let table = match self.separated_properties(o) {
+                Ok(table) => table,
+                Err(thrown) => {
+                    value.give_up(self);
+                    name.give_up(self);
+                    return Err(thrown);
+                }
+            };
+            if let Err(thrown) = self.array_update(table, key, value.hand_on()) {
+                name.give_up(self);
+                return Err(thrown);
+            }
         }
-        self.release(Value::string(name));
+        name.give_up(self);
         Ok(())
     }
 

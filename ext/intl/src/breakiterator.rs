@@ -812,12 +812,13 @@ impl ClassIterator for Boundaries {
         Ok(self.current.is_some())
     }
 
-    fn current(&mut self, _: &mut Request, _: PhpObject) -> Answer<Value> {
-        Ok(self.current.map_or_else(Value::null, Value::int))
+    fn current(&mut self, req: &mut Request, _: PhpObject) -> Answer<Owner<Value>> {
+        let current = self.current.map_or_else(Value::null, Value::int);
+        Ok(Owner::take(req, current))
     }
 
-    fn key(&mut self, _: &mut Request, _: PhpObject) -> Answer<Value> {
-        Ok(Value::int(self.index))
+    fn key(&mut self, req: &mut Request, _: PhpObject) -> Answer<Owner<Value>> {
+        Ok(Owner::take(req, Value::int(self.index)))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Answer<()> {
@@ -880,7 +881,7 @@ impl ObjectHandlers for Handlers {
             let key = Key::Str(PhpString::new(req, b"type")?.hand_on_unmigrated());
             table.set(req, key, kind)?;
         }
-        Ok(Some(DebugInfo::from(table.hand_on_unmigrated())))
+        Ok(Some(DebugInfo::from(table)))
     }
 
     /// `BreakIterator_objects_free`.
@@ -927,7 +928,7 @@ impl ObjectHandlers for Handlers {
 
 /// `BreakIterator_clone_obj`: a clone of ICU's iterator over the same
 /// text.
-fn clone_break(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
+fn clone_break(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
     let (copy, text) = match object.native::<BreakObject>(req) {
         Some(BreakObject {
             biter: Some(b),
@@ -951,5 +952,5 @@ fn clone_break(req: &mut Request, object: PhpObject) -> Answer<PhpObject> {
         biter: Some(copy),
         text,
     };
-    clone_with(req, &object, payload).map(Owner::hand_on_unmigrated)
+    clone_with(req, &object, payload)
 }

@@ -795,8 +795,8 @@ impl Standing {
             Standing::Immutable => {}
             Standing::Built(rows) => {
                 for (key, value) in rows {
-                    req.release_nogc(value.hand_on_counted());
-                    req.release_nogc(key.hand_on_counted());
+                    value.give_up_nogc(req);
+                    key.give_up_nogc(req);
                 }
             }
         }
@@ -1048,7 +1048,7 @@ impl Row {
     fn lend(&mut self, req: &mut Request, cell: PhpRef) -> PhpRef {
         let owned = Owner::take(req, cell.as_value());
         let value = std::mem::replace(&mut self.value, owned);
-        req.release_nogc(value.hand_on_counted());
+        value.give_up_nogc(req);
         cell
     }
 
@@ -1057,8 +1057,8 @@ impl Row {
     /// row, so giving the walk's up leaves no possible root of the cycle
     /// collector where php leaves none.
     fn give_up(self, req: &mut Request) {
-        req.release_nogc(self.value.hand_on_counted());
-        req.release_nogc(self.key.hand_on_counted());
+        self.value.give_up_nogc(req);
+        self.key.give_up_nogc(req);
     }
 }
 

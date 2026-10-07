@@ -447,7 +447,7 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
             fn into_return(
                 self,
                 request: &mut #root::request::Request,
-            ) -> Result<#root::values::Value, #root::raising::Thrown> {
+            ) -> Result<#root::values::Owner<#root::values::Value>, #root::raising::Thrown> {
                 #root::__private::case_value(request, self)
             }
         }
@@ -825,7 +825,7 @@ fn method_entry(class: &Ident, method: &Method, entry: &Ident, manual: bool) -> 
         #[doc(hidden)]
         pub(crate) fn #entry(
             __request: &mut #root::request::Request,
-        ) -> Result<#root::values::Value, #root::raising::Thrown> {
+        ) -> Result<#root::values::Owner<#root::values::Value>, #root::raising::Thrown> {
             #prologue
             #this
             #root::abi::IntoReturn::into_return(Self::#ident(#(#arguments),*), __request)

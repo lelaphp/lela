@@ -361,16 +361,16 @@ impl ClassIterator for Rows {
         Ok(self.ahead.is_some())
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         self.start(req, object)?;
         let row = self.ahead.unwrap_or_default();
-        req.addref(&row);
-        Ok(row)
+        Ok(Owner::take(req, row))
     }
 
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Value, Thrown> {
+    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         self.start(req, object)?;
-        Ok(self.key.map_or_else(Value::null, Value::int))
+        let key = self.key.map_or_else(Value::null, Value::int);
+        Ok(Owner::take(req, key))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

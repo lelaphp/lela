@@ -1110,7 +1110,7 @@ pub fn write_raw_property(
     name: Owner<PhpString>,
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    req.write_raw(*object, name.hand_on(), value.hand_on())
+    req.write_raw(*object, name, value)
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the
@@ -1439,8 +1439,7 @@ pub(crate) fn new_object_made(req: &mut Request, class: ClassId) -> Result<PhpOb
 /// `zend_bad_method_call`'s. The copy is the caller's, one owner.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn clone(req: &mut Request, object: &PhpObject) -> Result<Owner<PhpObject>, Thrown> {
-    let made = req.clone_object(*object, None);
-    adopted(req, made)
+    req.clone_object(*object, None)
 }
 
 /// A class's `clone_obj` over an object with a native payload, php's
@@ -1518,8 +1517,9 @@ pub fn internal_iterator(
 /// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry the
 /// interception serving the call replaced
 /// ([`crate::api::abi::ExtensionBuilder::intercept`]), served on the same
-/// call, its arguments and its return the caller's, the first argument
-/// replaced by `first` where one is given, as phar's interceptors open
+/// call, its arguments and its return's owner the caller's, the first
+/// argument replaced by `first`, a sink of its owner, where one is
+/// given, as phar's interceptors open
 /// the `phar://` name they made of a relative path; `null` where the
 /// entry serving is the native's own. Interceptions stack in bundle
 /// order, as php saves each handler over the one before it, so the
@@ -1535,15 +1535,16 @@ pub fn internal_iterator(
 /// bool(false)
 /// bool(false)
 /// ```
-pub fn passthrough(req: &mut Request, first: Option<Value>) -> Result<Value, Thrown> {
+pub fn passthrough(req: &mut Request, first: Option<Owner<Value>>) -> Result<Owner<Value>, Thrown> {
     let Some((entry, beneath)) = req.replaced_entry() else {
         if let Some(first) = first {
-            req.release(first);
+            first.give_up(req);
         }
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     if let Some(first) = first {
-        req.replace_first_argument(first);
+        // The frame's argument slot holds the count from here.
+        req.replace_first_argument(first.hand_on());
     }
     let above = beneath.saturating_sub(1);
     req.serve_beneath(beneath);
@@ -2577,7 +2578,9 @@ fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, 
             "Fetching properties on non-enums in constant expressions is not allowed",
         ));
     }
-    let value = req.read_property(instance, name, PropertyRead::Warning)?;
+    let value = req
+        .read_property(instance, name, PropertyRead::Warning)?
+        .hand_on();
     Ok(Chained {
         value,
         short: false,

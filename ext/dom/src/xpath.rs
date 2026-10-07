@@ -1124,7 +1124,7 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         object: PhpObject,
         name: &[u8],
         read: php_ext::abi::PropertyRead,
-    ) -> Result<Value, Thrown> {
+    ) -> Result<Owner<Value>, Thrown> {
         crate::read_property(req, object, name, read)
     }
 

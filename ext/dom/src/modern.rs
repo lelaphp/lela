@@ -410,10 +410,16 @@ fn forget(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(), Throw
 /// array(0) {
 /// }
 /// ```
-pub(crate) fn clone_element(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+pub(crate) fn clone_element(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<Owner<PhpObject>, Thrown> {
     let clone = crate::clone_object(req, object)?;
-    forget(req, clone, b"classList")?;
-    forget(req, clone, b"children")?;
+    let forgot = forget(req, *clone, b"classList").and_then(|()| forget(req, *clone, b"children"));
+    if let Err(thrown) = forgot {
+        clone.give_up(req);
+        return Err(thrown);
+    }
     Ok(clone)
 }
 
@@ -445,9 +451,15 @@ pub(crate) fn clone_element(req: &mut Request, object: PhpObject) -> Result<PhpO
 /// array(0) {
 /// }
 /// ```
-pub(crate) fn clone_parent(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
+pub(crate) fn clone_parent(
+    req: &mut Request,
+    object: PhpObject,
+) -> Result<Owner<PhpObject>, Thrown> {
     let clone = crate::clone_object(req, object)?;
-    forget(req, clone, b"children")?;
+    if let Err(thrown) = forget(req, *clone, b"children") {
+        clone.give_up(req);
+        return Err(thrown);
+    }
     Ok(clone)
 }
 
