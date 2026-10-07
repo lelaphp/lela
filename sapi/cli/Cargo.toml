@@ -41,7 +41,7 @@ linked = ["php_bundle/linked", "php_bundle/test"]
 # §7.2, revision 35), `sockets`, php's `--enable-sockets` (revision 36),
 # `bz2`, php's `--with-bz2` (revision 39), `openssl`, php's
 # `--with-openssl`, which the oracle is built with and ext/phar's
-# OpenSSL signatures call into (#1108), `bcmath`, php's
+# OpenSSL signatures call into (design §7.2, revision 97; #1108), `bcmath`, php's
 # `--enable-bcmath`, which the oracle is built with (#1163, #1166),
 # `calendar`, php's `--enable-calendar`, which the oracle is built with
 # (#1163, #1206), `mbstring`, php's `--enable-mbstring`, which the
