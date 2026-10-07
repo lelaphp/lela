@@ -230,9 +230,12 @@ impl Drop for ShareInner {
     }
 }
 
-// SAFETY: as for `Session`: one request's.
+// SAFETY: a share is used by one request at a time: one request's, or a
+// persistent one the engine's pool lends to one request at a time and
+// takes back only once no handle of the request that held it remains
+// (`Share::alone`), so libcurl never sees two threads in it at once.
 unsafe impl Send for ShareInner {}
-// SAFETY: as for `Session`.
+// SAFETY: as for `Send`.
 unsafe impl Sync for ShareInner {}
 
 /// A `CURLSH *`, held by its object and by every `CURL *` pointed
@@ -246,6 +249,12 @@ impl Share {
         // SAFETY: no argument.
         let raw = NonNull::new(unsafe { sys::curl_share_init() })?;
         Some(Share(Arc::new(ShareInner { raw })))
+    }
+
+    /// The share where nothing else holds it, no object and no `CURL *`:
+    /// one that may be lent to another request, on another thread.
+    pub(crate) fn alone(self) -> Option<Share> {
+        (Arc::strong_count(&self.0) == 1).then_some(self)
     }
 
     /// `curl_share_setopt(sh->share, option, (long) value)`.
