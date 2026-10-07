@@ -4,6 +4,8 @@
 //! mirror covers. A mirror's body is faithful where `behaviour.php`
 //! calls it and a stand-in where only its declaration is held.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{
     Callable, ClassRef, ConstArray, ConstValue, ExtensionBuilder, False, Instance, Iterable,
     NamedVariadic, Never, OrFalse, Passed, Raw, Ref, Static, This, True, Typed, Union, Untyped,
@@ -13,6 +15,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{identical, loose_eq, to_string};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 #[php_const]
@@ -228,17 +231,22 @@ fn in_array(
     haystack: PhpArray,
     #[php(default = false)] strict: bool,
 ) -> Result<bool, Thrown> {
-    for (_, value) in haystack.snapshot() {
-        let value = value.deref();
-        if if strict {
+    // `ZEND_HASH_FOREACH_VAL(ht, entry)`, no owner of the table taken:
+    // the argument holds it while `loose_eq` serves `__toString`.
+    let found = walk::foreach(req, haystack, Hold::None, |req, row| -> walk::Step {
+        let value = row.value().deref();
+        let same = if strict {
             identical(req, &needle, &value)?
         } else {
             loose_eq(req, &needle, &value)?
-        } {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        };
+        Ok(if same {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        })
+    })?;
+    Ok(found.is_some())
 }
 
 /// `array_keys(array $array, mixed $filter_value = UNKNOWN, bool $strict = false): array`
@@ -250,7 +258,11 @@ fn array_keys(
     #[php(default = false)] strict: bool,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (key, value) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL`, no owner of the table taken: the argument
+    // holds it while `loose_eq` serves `__toString`.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = *row.value();
         let keep = match &filter_value {
             Passed::Omitted => true,
             Passed::Given(filter) => {
@@ -260,13 +272,7 @@ fn array_keys(
                 } else {
                     loose_eq(req, filter, &value)
                 };
-                match same {
-                    Ok(same) => same,
-                    Err(thrown) => {
-                        out.give_up(req);
-                        return Err(thrown);
-                    }
-                }
+                same?
             }
         };
         if keep {
@@ -276,6 +282,11 @@ fn array_keys(
             };
             out.append(req, Owner::take(req, key))?;
         }
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }

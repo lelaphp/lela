@@ -5,6 +5,8 @@
 
 #![allow(non_camel_case_types)]
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{
     ClassIterator, ClassRef, Instance, IntoReturn, ObjectHandlers, OrFalse, Raw, Refusals, This,
     True, Union,
@@ -18,6 +20,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error, while_pending,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value};
 use php_ext_mysqlnd::client::{Field, ResultSet};
 
@@ -298,7 +301,13 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
     let plain = declares_nothing(req, made.class());
     let mut table = PhpArray::new(req)?;
     let mut pending: Option<Thrown> = None;
-    for (key, value) in row.snapshot() {
+    // `zend_merge_properties`' `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(properties, key,
+    // value)` (`Z/Zend/zend_API.c:1418`), no owner of the row taken: this native
+    // holds it while a property write serves `__set`. A fatal the write
+    // raises gives the table up.
+    let walked = walk::foreach(req, row, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let name = match key {
             Key::Str(name) => PhpString::new(req, name.as_bytes())?,
             Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
@@ -316,10 +325,9 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
                 None => made.write_prop_in(req, scope, name, value),
             };
             let Err(thrown) = wrote else {
-                continue;
+                return Ok(ControlFlow::Continue(()));
             };
             if thrown.exception().is_none() {
-                table.give_up(req);
                 return Err(thrown);
             }
             pending = Some(match pending.take() {
@@ -327,6 +335,11 @@ fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thro
                 None => thrown,
             });
         }
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        table.give_up(req);
+        return Err(thrown);
     }
     if plain {
         made.replace_table(req, table)?;

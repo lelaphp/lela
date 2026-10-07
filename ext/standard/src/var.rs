@@ -19,7 +19,7 @@ use php_ext::coerce::{Exponent, float_format, to_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Guarded, Hold};
+use php_ext::values::walk::{self, Guarded, Hold, Unwritten};
 use php_ext::values::{Key, Owner, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
@@ -838,7 +838,7 @@ pub(super) fn render(
         let held = object.props_held(req, PropertyPurpose::Debug)?;
         object.protect_in(req, RecursionGuard::Debug);
         let mut printed = Printed::open(out, indent, true);
-        let walked = walk::properties(req, &held, |req, row| {
+        let walked = walk::properties(req, &held, Unwritten::Skipped, |req, row| {
             printed.row(req, out, row.key(), row.value())?;
             Ok(ControlFlow::<()>::Continue(()))
         });
@@ -1133,34 +1133,38 @@ pub fn export(
         }
     } else if let Some(s) = value.as_php_string() {
         quoted(out, s.as_bytes());
-    } else if let Some(array) = value.as_array() {
-        if array.is_recursive() {
-            out.extend_from_slice(b"NULL");
-            circular(req);
-            return Ok(());
-        }
-        array.protect();
+    } else if let Some(array) = value.as_array().copied() {
+        // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` beside
+        // `GC_PROTECT_RECURSION(myht)` and `ZEND_HASH_FOREACH_KEY_VAL`
+        // (`Z/ext/standard/var.c:560`): a foreach walk holding the array and
+        // guarding its recursion, so a user error handler the circular
+        // warning or an object's export reaches that assigns over the
+        // array's holder leaves it standing until the walk is done. The
+        // text is laid down before the walk and taken back where the walk
+        // found the array marked, since php writes `NULL` in its place.
+        let opened = out.len();
         if level > 1 {
             out.push(b'\n');
             out.extend(std::iter::repeat_n(b' ', level - 1));
         }
         out.extend_from_slice(b"array (\n");
-        let mut written = Ok(());
-        for (key, element) in array.snapshot() {
+        let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
             out.extend(std::iter::repeat_n(b' ', level + 1));
-            match key {
+            match row.key() {
                 Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
                 Key::Str(s) => quoted(out, s.as_bytes()),
             }
             out.extend_from_slice(b" => ");
-            written = export(req, out, &element, level + 2);
-            if written.is_err() {
-                break;
-            }
+            export(req, out, row.value(), level + 2)?;
             out.extend_from_slice(b",\n");
+            Ok(ControlFlow::Continue(()))
+        })?;
+        if let Guarded::Recursive = walked {
+            out.truncate(opened);
+            out.extend_from_slice(b"NULL");
+            circular(req);
+            return Ok(());
         }
-        array.unprotect();
-        written?;
         if level > 1 {
             out.extend(std::iter::repeat_n(b' ', level - 1));
         }

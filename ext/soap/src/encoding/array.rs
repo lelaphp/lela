@@ -32,10 +32,11 @@ pub(super) enum K {
     Str(Vec<u8>),
 }
 
-/// The elements of an array in order, references kept.
-pub(super) fn rows(arr: PhpArray) -> Vec<(K, Value)> {
-    arr.snapshot_refs()
-        .into_iter()
+/// The elements of an array in order, references kept, read under the
+/// borrowed request ([`walk::rows`]): views, which [`with_rows`] holds
+/// while a program's converter runs.
+pub(super) fn rows(req: &Request, arr: PhpArray) -> Vec<(K, Value)> {
+    walk::rows(req, arr)
         .map(|(k, v)| {
             let k = match k {
                 Key::Int(n) => K::Int(n),
@@ -296,7 +297,8 @@ fn add_xml_array_elements(
         return Err(value_error(req, "Recursive array cannot be encoded"));
     }
     arr.protect();
-    let out = with_rows(req, rows(arr), |req, rows| {
+    let read = rows(req, arr);
+    let out = with_rows(req, read, |req, rows| {
         let mut j = 0;
         for (_, zdata) in rows {
             if j >= first {
@@ -912,7 +914,8 @@ pub(super) fn to_xml_map(
             return Err(value_error(req, "Recursive array cannot be encoded"));
         }
         arr.protect();
-        let out = with_rows(req, rows(arr), |req, rows| {
+        let read = rows(req, arr);
+        let out = with_rows(req, read, |req, rows| {
             for (k, temp) in rows {
                 let item = new_node(parent.doc(), b"item")?;
                 x_param.add_child(item);

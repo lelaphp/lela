@@ -1007,12 +1007,16 @@ fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool,
     crate::api::raising::call_stack_end(req)?;
     array.protect();
     let mut acyclic = Ok(true);
-    for (_, v) in array.snapshot() {
-        if let Some(nested) = v.as_array() {
-            acyclic = constant_array_is_acyclic(req, *nested);
-            if !matches!(acyclic, Ok(true)) {
-                break;
-            }
+    // The nested arrays read under the borrowed request: the walk runs no
+    // code of the program, and the array, being a constant's value, is
+    // held by what defines it.
+    let nested: Vec<PhpArray> = walk::rows(req, array)
+        .filter_map(|(_, v)| v.deref().as_array().copied())
+        .collect();
+    for nested in nested {
+        acyclic = constant_array_is_acyclic(req, nested);
+        if !matches!(acyclic, Ok(true)) {
+            break;
         }
     }
     array.unprotect();
@@ -1026,7 +1030,12 @@ fn constant_array_is_acyclic(req: &mut Request, array: PhpArray) -> Result<bool,
 fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     crate::api::raising::call_stack_end(req)?;
     let mut copy = PhpArray::new(req)?;
-    for (key, value) in array.snapshot() {
+    // Read under the borrowed request, as the check before it reads them:
+    // the copy runs no code of the program.
+    let rows: Vec<(Key, Value)> = walk::rows(req, array)
+        .map(|(key, value)| (key, value.deref()))
+        .collect();
+    for (key, value) in rows {
         let value = if let Some(nested) = value.as_array()
             && value.is_refcounted()
         {
@@ -2024,7 +2033,21 @@ fn c_string(bytes: &[u8]) -> &[u8] {
 /// and `["name"]=>` for a string one, with the value under it. A string
 /// key is unmangled as any property name is, so a table that carries
 /// `\0*\0p` shows `["p":protected]`. The table has one owner and is
-/// given up last.
+/// given up last. A reference row is shown as `COMMON` shows one, `&`
+/// before a value another name shares:
+///
+/// ```php
+/// class D { function __debugInfo() { global $y; return ['a' => &$y, 'c' => 'z']; } }
+/// $y = 5; var_dump(new D);
+/// ```
+/// ```expect
+/// object(D)#1 (2) {
+///   ["a"]=>
+///   &int(5)
+///   ["c"]=>
+///   string(1) "z"
+/// }
+/// ```
 fn dump_rows(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -2038,12 +2061,22 @@ fn dump_rows(
     let name = object.handlers(req).get_class_name(req, object);
     out.extend_from_slice(php_unit::decl::shown_bytes(&name));
     out.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), rows.len()).as_bytes());
-    for (key, value) in rows.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(myht, num, key, val)`
+    // (`Z/ext/standard/var.c:196`) over the table `zend_get_properties_for`
+    // answered, which this arm's owner holds until
+    // `zend_release_properties`: the walk takes none of its own.
+    let walked = walk::foreach(req, *rows, Hold::None, |req, row| -> walk::Step {
         if too_deep(out, level, req.stack_limit().overflowed()) {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
-        dump_row_key(req, out, level, &key);
-        dump(req, out, &value, level + 2);
+        dump_row_key(req, out, level, row.key());
+        // The walk owns the row for the step, which `COMMON` does not count.
+        dump_held(req, out, row.value(), level + 2, Held::Owned);
+        Ok(ControlFlow::Continue(()))
+    });
+    match walked {
+        // The body answers no throwable.
+        Ok(_) | Err(_) => {}
     }
     rows.give_up(req);
     if level > 1 {

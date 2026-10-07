@@ -8,10 +8,12 @@
 //! gives is [`crate::key::key_from`].
 
 use std::ffi::{CStr, CString};
+use std::ops::ControlFlow;
 
 use php_ext::abi::{Instance, OrFalse, Union};
 use php_ext::raising::{Level, Thrown, argument_error, docref, raise};
 use php_ext::request::{Request, Resolve};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpString, Value, ValueRef, View};
 
 use crate::csr::OpenSSLCertificateSigningRequest;
@@ -260,24 +262,36 @@ pub(crate) fn cert_stack(
     let Some(mut stack) = CertStack::new() else {
         return Ok(None);
     };
-    let values: Vec<Value> = match value.as_ref() {
-        ValueRef::Array(array) => array.snapshot().into_iter().map(|(_, v)| v).collect(),
-        _ => vec![*value],
-    };
-    let from_array = matches!(value.as_ref(), ValueRef::Array(_));
-    for item in values {
-        let origin = if from_array {
-            Origin::Item(arg, option)
-        } else {
-            Origin::Arg(arg)
-        };
-        let Some(cert) = cert_from_value(req, &item, origin)? else {
-            return Ok(None);
+    // One certificate onto the stack: `false` once it is not one, or the
+    // stack refused it.
+    let mut pushed = |req: &mut Request, item: &Value, origin: Origin| -> Result<bool, Thrown> {
+        let Some(cert) = cert_from_value(req, item, origin)? else {
+            return Ok(false);
         };
         if !stack.push(cert) {
             store_errors(req);
-            return Ok(None);
+            return Ok(false);
         }
+        Ok(true)
+    };
+    let Some(array) = value.as_array().copied() else {
+        let pushed = pushed(req, value, Origin::Arg(arg))?;
+        return Ok(pushed.then_some(stack));
+    };
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(zcerts), zcertval)`
+    // (`Z/ext/openssl/openssl_backend_common.c:872`), no owner of the
+    // table taken: the argument holds it while a certificate's string
+    // runs `__toString`.
+    let refused = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let item = row.value().deref();
+        if pushed(req, &item, Origin::Item(arg, option))? {
+            Ok(ControlFlow::Continue(()))
+        } else {
+            Ok(ControlFlow::Break(()))
+        }
+    })?;
+    if refused.is_some() {
+        return Ok(None);
     }
     Ok(Some(stack))
 }

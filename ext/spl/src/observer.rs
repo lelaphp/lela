@@ -10,6 +10,7 @@
 mod table;
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{
     CloneObj, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers, Std, This, Union, Untyped,
@@ -19,6 +20,7 @@ use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::Serializer;
 
@@ -989,16 +991,29 @@ impl SplObjectStorage {
                 "Odd number of elements",
             ));
         }
-        let values: Vec<Value> = storage.snapshot().into_iter().map(|(_, v)| v).collect();
-        for pair in values.chunks(2) {
-            let (Some(object), Some(inf)) = (pair.first(), pair.get(1)) else {
-                break;
+        // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(storage_zv), val)`
+        // (`Z/ext/spl/spl_observer.c:1068`), no owner of the table taken:
+        // the argument holds it while an attach serves the class's
+        // `getHash`. Each key row is kept for the next step by an owner of
+        // its own, where php keeps a pointer into the table.
+        let mut key: Option<Owner<Value>> = None;
+        let walked = walk::foreach(req, storage, Hold::None, |req, row| -> walk::Step {
+            let Some(object) = key.take() else {
+                key = Some(Owner::take(req, *row.value()));
+                return Ok(ControlFlow::Continue(()));
             };
-            let Some(target) = object.as_object().copied() else {
+            let target = object.as_object().copied();
+            object.give_up(req);
+            let Some(target) = target else {
                 return Err(throw(req, "UnexpectedValueException", "Non-object key"));
             };
-            storage_attach(req, this, target, *inf)?;
+            storage_attach(req, this, target, row.value().deref())?;
+            Ok(ControlFlow::Continue(()))
+        });
+        if let Some(object) = key {
+            object.give_up(req);
         }
+        walked?;
         crate::load_members(req, this, &members)
     }
 

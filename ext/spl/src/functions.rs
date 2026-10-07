@@ -12,6 +12,7 @@ use php_ext::call::{autoload, call, call_array, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::{State, Traversable};
@@ -752,10 +753,22 @@ fn iterator_to_array(
             if keys {
                 return Ok(Owner::take(req, array));
             }
+            // `zend_array_to_list`, which no code of the program reaches: the
+            // rows read under the borrowed request, each taken as
+            // `zval_add_ref` takes it, then appended.
             let mut out = PhpArray::new(req)?;
-            for (_, value) in array.snapshot() {
-                let value = Owner::take(req, value.deref());
-                out.append(req, value)?;
+            let values: Vec<Owner<Value>> = walk::rows(req, array)
+                .map(|(_, value)| Owner::take(req, value.deref()))
+                .collect();
+            let mut values = values.into_iter();
+            while let Some(value) = values.next() {
+                if let Err(thrown) = out.append(req, value) {
+                    for value in values {
+                        value.give_up(req);
+                    }
+                    out.give_up(req);
+                    return Err(thrown);
+                }
             }
             return Ok(out);
         }

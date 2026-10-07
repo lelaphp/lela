@@ -4,12 +4,14 @@
 //! sign it into a certificate.
 
 use std::ffi::c_long;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{Instance, OrFalse, Path, Ref, Refusals, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::config::{Settings, parse};
@@ -121,9 +123,14 @@ fn default_field(name: &[u8]) -> Option<&[u8]> {
 /// string key a name the library knows, its value or each value of its
 /// list an entry; php's warning for a name it does not know.
 fn subject_from_dn(req: &mut Request, csr: &Csr, dn: PhpArray) -> Result<bool, Thrown> {
-    for (key, item) in dn.snapshot() {
-        let Key::Str(name) = key else {
-            continue;
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(dn), strindex, item)` and,
+    // for a list, `ZEND_HASH_FOREACH_NUM_KEY_VAL(Z_ARRVAL_P(item), i,
+    // subitem)` (`Z/ext/openssl/openssl_backend_common.c:983`, `:988`), no
+    // owner of either table taken: the argument holds them while
+    // `zval_try_get_string` runs `__toString`.
+    let walked = walk::foreach(req, dn, Hold::None, |req, row| -> walk::Step {
+        let Key::Str(name) = row.key() else {
+            return Ok(ControlFlow::Continue(()));
         };
         let nid = ffi::text_nid(&c_string(name.as_bytes()));
         if nid == 0 {
@@ -132,19 +139,32 @@ fn subject_from_dn(req: &mut Request, csr: &Csr, dn: PhpArray) -> Result<bool, T
                 String::from_utf8_lossy(name.as_bytes())
             );
             docref(req, Level::Warning, &text);
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
-        let items = match item.as_ref() {
-            ValueRef::Array(list) => list.snapshot().into_iter().map(|(_, v)| v).collect(),
-            _ => vec![item],
+        let item = row.value().deref();
+        let Some(list) = item.as_array().copied() else {
+            let added = add_subject_entry(req, csr, nid, &item)?;
+            return Ok(if added {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            });
         };
-        for item in items {
-            if !add_subject_entry(req, csr, nid, &item)? {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
+        let refused = walk::foreach(req, list, Hold::None, |req, row| -> walk::Step {
+            let added = add_subject_entry(req, csr, nid, &row.value().deref())?;
+            Ok(if added {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            })
+        })?;
+        Ok(if refused.is_some() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        })
+    })?;
+    Ok(walked.is_none())
 }
 
 /// The distinguished name section's `_default` lines, each added where
@@ -185,14 +205,19 @@ fn attributes(
     attribs: PhpArray,
     lines: &[(Vec<u8>, Vec<u8>)],
 ) -> Result<bool, Thrown> {
-    for (key, item) in attribs.snapshot() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(attribs), strindex, item)`
+    // (`Z/ext/openssl/openssl_backend_common.c:1052`), no owner of the
+    // table taken: the argument holds it while `__toString` runs.
+    let walked = walk::foreach(req, attribs, Hold::None, |req, row| -> walk::Step<bool> {
+        let key = row.key().clone();
+        let item = row.value().deref();
         let Key::Str(name) = key else {
             docref(
                 req,
                 Level::Warning,
                 "attributes: numeric fild names are not supported",
             );
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let nid = ffi::text_nid(&c_string(name.as_bytes()));
         if nid == 0 {
@@ -201,7 +226,7 @@ fn attributes(
                 String::from_utf8_lossy(name.as_bytes())
             );
             docref(req, Level::Warning, &text);
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         let text = string_of(req, &item)?;
         if !csr.add_attribute(nid, &text) {
@@ -211,8 +236,12 @@ fn attributes(
                 String::from_utf8_lossy(c_string(&text).as_bytes())
             );
             docref(req, Level::Warning, &message);
-            return Ok(false);
+            return Ok(ControlFlow::Break(false));
         }
+        Ok(ControlFlow::Continue(()))
+    })?;
+    if let Some(answer) = walked {
+        return Ok(answer);
     }
     for (name, value) in lines {
         let name = c_string(name);

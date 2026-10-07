@@ -518,7 +518,14 @@ impl Request {
         mut dest: Owner<PhpArray>,
         source: PhpArray,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        for (key, value) in source.snapshot() {
+        // `ZEND_HASH_FOREACH_KEY_VAL(src, num_key, string_key, src_entry)`
+        // (`Z/main/php_variables.c:761`), which no code of the program
+        // reaches, the request's variables holding strings and arrays: the
+        // rows read under the borrowed request, then written.
+        let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(self, source)
+            .map(|(key, value)| (key, value.deref()))
+            .collect();
+        for (key, value) in rows {
             let into = dest.get(&key).and_then(|had| had.as_array().copied());
             if let (Some(nested), Some(into)) = (value.as_array().copied(), into) {
                 let into = into.copy(self)?;

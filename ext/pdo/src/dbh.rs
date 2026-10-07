@@ -3,6 +3,8 @@
 //! the methods, each checking the connection was constructed and clearing
 //! the error state where php does, in php's order.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{
     Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This, Variadic,
 };
@@ -14,6 +16,7 @@ use php_ext::raising::{
     Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
 };
 use php_ext::request::{Request, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef,
 };
@@ -682,11 +685,17 @@ fn apply_options(
     options: Option<PhpArray>,
 ) -> Result<(), Thrown> {
     if let Some(options) = options {
-        for (key, value) in options.snapshot() {
+        // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(options), …)`
+        // (`Z/ext/pdo/pdo_dbh.c:509`), no owner of the table taken: the
+        // argument holds it while an attribute's conversion runs.
+        walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+            let key = row.key().clone();
+            let value = row.value().deref();
             if let Key::Int(attr) = key {
                 attribute_set(req, object, attr, &value.deref(), 3)?;
             }
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
     }
     Ok(())
 }

@@ -8,6 +8,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Untyped, Variadic};
@@ -17,6 +18,7 @@ use php_ext::coerce::{numeric_string, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
 use php_ext::request::{Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use constants::{CONNECTION_ABORTED, INI_PERDIR, INI_SYSTEM, INI_USER};
@@ -352,11 +354,16 @@ fn getopt(
         return Ok(OrFalse::False);
     }
     let mut opts = crate::getopt::short_options(c_string(spec.as_bytes()));
-    for (_, value) in long_options.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(p_longopts), entry)`
+    // (`Z/ext/standard/basic_functions.c:1012`), no owner of the table
+    // taken: the argument holds it while `__toString` runs.
+    walk::foreach(req, long_options, Hold::None, |req, row| -> walk::Step {
+        let value = row.value().deref();
         let text = to_string(req, &value)?;
         opts.push(long_option(c_string(text.as_bytes())));
         text.give_up(req);
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     let mut walk = Getopt::new(&argv, &opts);
     // Each option found, by name in the order first found, with each
     // value it was given.

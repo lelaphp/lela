@@ -9,11 +9,13 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, True};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::Thrown;
 use php_ext::request::{InfoRow, PHP_VERSION, Request, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpString};
 
 use crate::arg_value_error;
@@ -390,7 +392,12 @@ fn gpcse(req: &mut Request, name: &str) -> Result<Vec<u8>, Thrown> {
     else {
         return Ok(out);
     };
-    for (key, value) in array.snapshot() {
+    // The rows are walked with no owner of the table taken: the symbol
+    // table holds it, and where the program frees it under the walk, the
+    // walk ends there.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         if html {
             out.extend_from_slice(b"<tr><td class=\"e\">");
         }
@@ -426,7 +433,8 @@ fn gpcse(req: &mut Request, name: &str) -> Result<Vec<u8>, Thrown> {
             }
         }
         out.extend_from_slice(if html { b"</td></tr>\n" } else { b"\n" });
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 

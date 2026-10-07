@@ -14,11 +14,12 @@ use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
 
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
-use super::copied;
 use super::pointer::ArrayOrObject;
+use super::row_copied;
 use super::sort::key_value;
 
 /// `array_walk(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
@@ -458,18 +459,35 @@ fn array_reduce(
     callback: Callable,
     #[php(default = null)] initial: Value,
 ) -> Result<Owner<Value>, Thrown> {
-    let mut carry = Owner::take(req, initial);
-    for (_, operand) in array.snapshot_refs() {
-        let answer = call(req, &callback, &[*carry, operand]);
-        carry.give_up(req);
-        carry = answer?;
-        if let Some(reference) = carry.as_php_ref().copied() {
+    let mut carry = Some(Owner::take(req, initial));
+    // `ZEND_HASH_FOREACH_VAL(htbl, operand)` (`Z/ext/standard/array.c:6546`),
+    // no owner of the table taken: the argument holds it while the
+    // callback runs. The carry is the body's to take and give back.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let Some(held) = carry.take() else {
+            return Ok(ControlFlow::Break(()));
+        };
+        let answer = call(req, &callback, &[*held, *row.value()]);
+        held.give_up(req);
+        let mut next = answer?;
+        if let Some(reference) = next.as_php_ref().copied() {
             let inner = Owner::take(req, reference.get());
-            carry.give_up(req);
-            carry = inner;
+            next.give_up(req);
+            next = inner;
+        }
+        carry = Some(next);
+        Ok(ControlFlow::Continue(()))
+    });
+    match (walked, carry) {
+        (Ok(_), Some(carry)) => Ok(carry),
+        (Ok(_), None) => Ok(Owner::take(req, Value::null())),
+        (Err(thrown), carry) => {
+            if let Some(carry) = carry {
+                carry.give_up(req);
+            }
+            Err(thrown)
         }
     }
-    Ok(carry)
 }
 
 /// `array_filter(array $array, ?callable $callback = null, int $mode = 0):
@@ -523,21 +541,20 @@ fn array_filter(
         return Ok(Owner::take(req, PhpArray::empty()));
     }
     let mut out = PhpArray::new(req)?;
-    for (key, operand) in array.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(array), num_key, string_key,
+    // operand)` (`Z/ext/standard/array.c:6620`), no owner of the table
+    // taken: the argument holds it while the callback runs. A row kept is
+    // taken as `zval_add_ref` takes it, the walk's own owner not counted.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let operand = *row.value();
         let keep = match &callback {
             Some(callback) => {
                 let arguments = match mode {
-                    ARRAY_FILTER_USE_KEY => vec![key_value(&key)],
-                    ARRAY_FILTER_USE_BOTH => vec![operand, key_value(&key)],
+                    ARRAY_FILTER_USE_KEY => vec![key_value(row.key())],
+                    ARRAY_FILTER_USE_BOTH => vec![operand, key_value(row.key())],
                     _ => vec![operand],
                 };
-                let answer = match call(req, callback, &arguments) {
-                    Ok(answer) => answer,
-                    Err(thrown) => {
-                        out.give_up(req);
-                        return Err(thrown);
-                    }
-                };
+                let answer = call(req, callback, &arguments)?;
                 let truth = truthy(req, &answer);
                 answer.give_up(req);
                 truth
@@ -545,12 +562,30 @@ fn array_filter(
             None => truthy(req, &operand.deref()),
         };
         if keep {
-            let value = copied(req, operand);
-            let key = Owner::take(req, key.clone());
+            let value = row_copied(req, row);
+            let key = Owner::take(req, row.key().clone());
             out.set(req, key, value)?;
         }
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
+}
+
+/// The row [`find`] found: an owner of its key and of its value.
+type Found = (Owner<Key>, Owner<Value>);
+
+/// Whether [`find`] found a row, its owners given up.
+fn given_up(req: &mut Request, found: Option<Found>) -> bool {
+    let Some((key, value)) = found else {
+        return false;
+    };
+    value.give_up(req);
+    key.give_up(req);
+    true
 }
 
 /// What `php_array_find` found: the value and the key of the first
@@ -560,16 +595,25 @@ fn find(
     array: PhpArray,
     callback: &Callable,
     negate: bool,
-) -> Result<Option<(Key, Value)>, Thrown> {
-    for (key, operand) in array.snapshot_refs() {
-        let answer = call(req, callback, &[operand, key_value(&key)])?;
+) -> Result<Option<Found>, Thrown> {
+    // `ZEND_HASH_FOREACH_KEY_VAL(array, num_key, str_key, operand)`
+    // (`Z/ext/standard/array.c:6684`), no owner of the table taken: the
+    // argument holds it while the callback runs. The row found is taken an
+    // owner of before the walk gives its own back, as php copies it out
+    // inside its loop.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<Found> {
+        let answer = call(req, callback, &[*row.value(), key_value(row.key())])?;
         let truth = truthy(req, &answer);
         answer.give_up(req);
-        if truth != negate {
-            return Ok(Some((key, operand)));
+        if truth == negate {
+            return Ok(ControlFlow::Continue(()));
         }
-    }
-    Ok(None)
+        let found = (
+            Owner::take(req, row.key().clone()),
+            Owner::take(req, *row.value()),
+        );
+        Ok(ControlFlow::Break(found))
+    })
 }
 
 /// `array_find(array $array, callable $callback): mixed`, php's
@@ -586,10 +630,19 @@ fn find(
 /// NULL
 /// ```
 #[php_function]
-fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
+fn array_find(
+    req: &mut Request,
+    array: PhpArray,
+    callback: Callable,
+) -> Result<Owner<Value>, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((_, value)) => Ok(value.deref()),
-        None => Ok(Value::null()),
+        Some((key, value)) => {
+            key.give_up(req);
+            let inner = Owner::take(req, value.deref());
+            value.give_up(req);
+            Ok(inner)
+        }
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -606,10 +659,19 @@ fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<
 /// NULL
 /// ```
 #[php_function]
-fn array_find_key(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
+fn array_find_key(
+    req: &mut Request,
+    array: PhpArray,
+    callback: Callable,
+) -> Result<Owner<Value>, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((key, _)) => Ok(key_value(&key)),
-        None => Ok(Value::null()),
+        Some((key, value)) => {
+            value.give_up(req);
+            let shown = Owner::take(req, key_value(&key));
+            key.give_up(req);
+            Ok(shown)
+        }
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -626,7 +688,8 @@ fn array_find_key(req: &mut Request, array: PhpArray, callback: Callable) -> Res
 /// ```
 #[php_function]
 fn array_any(req: &mut Request, array: PhpArray, callback: Callable) -> Result<bool, Thrown> {
-    Ok(find(req, array, &callback, false)?.is_some())
+    let found = find(req, array, &callback, false)?;
+    Ok(given_up(req, found))
 }
 
 /// `array_all(array $array, callable $callback): bool`, php's
@@ -644,7 +707,8 @@ fn array_any(req: &mut Request, array: PhpArray, callback: Callable) -> Result<b
 /// ```
 #[php_function]
 fn array_all(req: &mut Request, array: PhpArray, callback: Callable) -> Result<bool, Thrown> {
-    Ok(find(req, array, &callback, true)?.is_none())
+    let found = find(req, array, &callback, true)?;
+    Ok(!given_up(req, found))
 }
 
 /// `array_map(?callable $callback, array $array, array ...$arrays):
@@ -782,34 +846,52 @@ fn mapped(
             return Ok(Some(Owner::take(req, input)));
         }
         let mut out = PhpArray::new(req)?;
-        for (key, operand) in input.snapshot_refs() {
-            let answer = match call(req, &callback, &[operand]) {
-                Ok(answer) => answer,
-                Err(thrown) => {
-                    out.give_up(req);
-                    return Err(thrown);
-                }
-            };
+        // `ZEND_HASH_MAP_FOREACH_KEY_VAL(input, num_key, str_key,
+        // fci.params)` (`Z/ext/standard/array.c:6854`), no owner of the table taken:
+        // the argument holds it while the callback runs. An answer of
+        // nothing, a callback that threw past its frame, ends the walk with
+        // no array.
+        let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
+            let answer = call(req, &callback, &[*row.value()])?;
             if matches!(answer.as_ref(), ValueRef::Undef) {
                 answer.give_up(req);
+                return Ok(ControlFlow::Break(()));
+            }
+            let key = Owner::take(req, row.key().clone());
+            out.set(req, key, answer)?;
+            Ok(ControlFlow::Continue(()))
+        });
+        match walked {
+            Ok(None) => {}
+            Ok(Some(())) => {
                 out.give_up(req);
                 return Ok(None);
             }
-            let key = Owner::take(req, key.clone());
-            out.set(req, key, answer)?;
+            Err(thrown) => {
+                out.give_up(req);
+                return Err(thrown);
+            }
         }
         return Ok(Some(out));
     }
-    let columns: Vec<Vec<Value>> = arrays
-        .iter()
-        .map(|array| array.snapshot_refs().into_iter().map(|(_, v)| v).collect())
-        .collect();
-    let longest = columns.iter().map(Vec::len).max().unwrap_or(0);
+    // The arrays read at once by bucket position, as php reads each at its
+    // `array_pos[i]` (`Z/ext/standard/array.c:6889`, `:6933`): the value at the next
+    // bucket that holds one as it stands at the step, `null` past the end,
+    // no owner of any table taken while the callback runs.
+    let longest = arrays.iter().map(PhpArray::len).max().unwrap_or(0);
+    let mut positions = vec![0u32; arrays.len()];
     let mut out = PhpArray::new(req)?;
-    for k in 0..longest {
-        let row: Vec<Value> = columns
+    for _ in 0..longest {
+        let row: Vec<Value> = arrays
             .iter()
-            .map(|column| column.get(k).copied().unwrap_or_default())
+            .zip(&mut positions)
+            .map(|(array, at)| match array.live_from(*at) {
+                Some((found, _, value)) => {
+                    *at = found.saturating_add(1);
+                    value
+                }
+                None => Value::null(),
+            })
             .collect();
         let element = match &callback {
             None => {

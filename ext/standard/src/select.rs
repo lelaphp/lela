@@ -33,12 +33,14 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::ops::ControlFlow;
 use std::os::fd::RawFd;
 
 use php_ext::abi::{OrFalse, Ref};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Cast, Request, Stream};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef};
 
 /// `?array &$read` and its two siblings: the caller's array, or `null`,
@@ -75,14 +77,19 @@ pub(super) fn fetch_stream(
 /// fd.
 fn to_fd_set(req: &mut Request, array: PhpArray) -> Result<Vec<RawFd>, Thrown> {
     let mut fds = Vec::new();
-    for (_, element) in array.snapshot() {
+    // The array is walked with no owner of it taken: the by-reference
+    // argument holds it while code of the program runs under the walk,
+    // and where that code frees it, the walk ends there.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let element = row.value().deref();
         let stream = fetch_stream(req, "stream_select", &element)?;
         if let Some(fd) = stream.cast(req, Cast::Select, true)
             && fd != -1
         {
             fds.push(fd);
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(fds)
 }
 
@@ -96,14 +103,20 @@ fn from_fd_set(
     set: &[RawFd],
 ) -> Result<(), Thrown> {
     let mut out = PhpArray::new(req)?;
-    for (key, element) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(stream_array), …)`
+    // (`Z/ext/standard/streamsfuncs.c:648`), holding nothing, as
+    // [`to_fd_set`] walks.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let element = row.value().deref();
         let stream = fetch_stream(req, "stream_select", &element)?;
         if let Some(fd) = stream.cast(req, Cast::Select, true)
             && set.contains(&fd)
         {
             keep(req, &mut out, &key, element)?;
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     target.set(req, Some(out))
 }
 
@@ -130,13 +143,19 @@ fn emulate_read_fd_set(
 ) -> Result<usize, Thrown> {
     let mut out = PhpArray::new(req)?;
     let mut ret = 0;
-    for (key, element) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(stream_array), …)`
+    // (`Z/ext/standard/streamsfuncs.c:694`), holding nothing, as
+    // [`to_fd_set`] walks.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let element = row.value().deref();
         let stream = fetch_stream(req, "stream_select", &element)?;
         if stream.unread(req) > 0 {
             keep(req, &mut out, &key, element)?;
             ret += 1;
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     if ret > 0 {
         target.set(req, Some(out))?;
     } else {

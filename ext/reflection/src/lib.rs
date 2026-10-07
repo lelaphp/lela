@@ -67,6 +67,7 @@ mod member;
 mod signature;
 
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{
     DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance, ObjectHandlers, OrFalse,
@@ -83,6 +84,7 @@ use php_ext::decl::{
 };
 use php_ext::raising::{Thrown, arg_count_error, throw, throw_error};
 use php_ext::request::{ExtensionId, MethodRow, Request};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef,
 };
@@ -6222,15 +6224,23 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
         ValueRef::Float(f) => default_value_string(req, &ConstExpr::Double(f)),
         ValueRef::Str(s) => format!("'{}'", escaped(s.as_bytes())),
         ValueRef::Array(array) => {
-            let rows = array.snapshot_refs();
-            let is_list = (0..).zip(&rows).all(|(i, (key, _))| *key == Key::Int(i));
+            let array = *array;
+            let is_list = (0..)
+                .zip(walk::rows(req, array))
+                .all(|(i, (key, _))| key == Key::Int(i));
             let mut out = String::from("[");
-            for (i, (key, value)) in rows.iter().enumerate() {
-                if i > 0 {
+            let mut first = true;
+            // `zend_ast_export_zval`'s `ZEND_HASH_FOREACH_KEY_VAL`
+            // (`Z/Zend/zend_ast.c:1854`), which no
+            // code of the program reaches; the walk lends each row while the
+            // value's text is made.
+            let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+                if !first {
                     out.push_str(", ");
                 }
+                first = false;
                 if !is_list {
-                    match key {
+                    match row.key() {
                         Key::Str(s) => {
                             write!(out, "'{}'", escaped(s.as_bytes())).ok();
                         }
@@ -6238,7 +6248,12 @@ fn value_default_string(req: &mut Request, value: &Value) -> String {
                     }
                     out.push_str(" => ");
                 }
-                out.push_str(&value_default_string(req, value));
+                out.push_str(&value_default_string(req, row.value()));
+                Ok(ControlFlow::Continue(()))
+            });
+            match walked {
+                // The body answers no throwable.
+                Ok(_) | Err(_) => {}
             }
             out.push(']');
             out
@@ -6324,11 +6339,14 @@ fn exported_value(req: &mut Request, value: &Value) -> String {
         return value_default_string(req, value);
     };
     let mut out = String::from("[");
-    for (i, (key, element)) in array.snapshot_refs().iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    // As [`value_default_string`] walks one.
+    let walked = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+        if !first {
             out.push_str(", ");
         }
-        match key {
+        first = false;
+        match row.key() {
             Key::Str(s) => {
                 write!(out, "'{}' => ", escaped(s.as_bytes())).ok();
             }
@@ -6336,7 +6354,12 @@ fn exported_value(req: &mut Request, value: &Value) -> String {
                 write!(out, "{n} => ").ok();
             }
         }
-        out.push_str(&exported_value(req, element));
+        out.push_str(&exported_value(req, row.value()));
+        Ok(ControlFlow::Continue(()))
+    });
+    match walked {
+        // The body answers no throwable.
+        Ok(_) | Err(_) => {}
     }
     out.push(']');
     out

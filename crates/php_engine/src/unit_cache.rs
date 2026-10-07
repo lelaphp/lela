@@ -818,7 +818,7 @@ impl UnitCache {
     /// and every file held under its full path, in the order the cache
     /// took them; a refusal is none of either.
     pub(crate) fn status(&self, interned_strings: usize) -> CacheStatus {
-        let mut held = self.held.snapshot();
+        let mut held = self.held.held();
         held.retain(|(_, held)| held.unit.is_ok());
         held.retain(|(_, held)| {
             self.preloaded()

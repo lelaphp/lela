@@ -7,12 +7,15 @@
 //! holds no state of its own: a trace reads the chain the frames and
 //! calls hold.
 
+use std::ops::ControlFlow;
+
 use php_heap::Slot;
 use php_unit::Opcode;
 use php_unit::decl::ClassKind;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
+use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, adopted,
 };
@@ -843,34 +846,34 @@ impl Request {
         use std::fmt::Write as _;
         let mut out = String::new();
         let mut num = 0usize;
-        for (index, row) in trace.snapshot_refs() {
-            let Some(row) = row.as_array().copied() else {
-                let index = match index {
+        // `ZEND_HASH_FOREACH_NUM_KEY_VAL(trace, index, frame)`
+        // (`Z/Zend/zend_exceptions.c:641`), no owner of the trace taken: the
+        // property holds it while a warning reaches the program's handler.
+        // Each field is looked up in the frame as `_build_trace_string`
+        // looks it up, when it is read; the walk's owner of the frame keeps
+        // it for the step.
+        let walked = walk::foreach(self, trace, Hold::None, |req, frame| -> walk::Step {
+            let Some(row) = frame.value().as_array().copied() else {
+                let index = match frame.key() {
                     Key::Int(n) => n.to_string(),
                     Key::Str(_) => String::from("0"),
                 };
-                crate::api::raising::warning(self, &format!("Expected array for frame {index}"));
-                continue;
+                crate::api::raising::warning(req, &format!("Expected array for frame {index}"));
+                return Ok(ControlFlow::Continue(()));
             };
-            let fields = row.snapshot_refs();
-            let field = |name: &[u8]| {
-                fields
-                    .iter()
-                    .find(|(key, _)| matches!(key, Key::Str(s) if s.as_bytes() == name))
-                    .map(|(_, value)| *value)
-            };
+            let field = |name: &[u8]| row.find(name);
             write!(out, "#{num} ").ok();
             num += 1;
             match field(b"file").map(|file| file.as_str_bytes().map(<[u8]>::to_vec)) {
                 None => out.push_str("[internal function]: "),
                 Some(None) => {
-                    crate::api::raising::warning(self, "File name is not a string");
+                    crate::api::raising::warning(req, "File name is not a string");
                     out.push_str("[unknown file]: ");
                 }
                 Some(Some(file)) => {
                     let line = match field(b"line") {
                         Some(line) => line.as_int().unwrap_or_else(|| {
-                            crate::api::raising::warning(self, "Line is not an int");
+                            crate::api::raising::warning(req, "Line is not an int");
                             0
                         }),
                         None => 0,
@@ -888,18 +891,24 @@ impl Request {
                     let text = text.split(|byte| *byte == 0).next().unwrap_or_default();
                     out.push_str(&String::from_utf8_lossy(text));
                 } else {
-                    crate::api::raising::warning(self, &format!("Value for {key} is not a string"));
+                    crate::api::raising::warning(req, &format!("Value for {key} is not a string"));
                     out.push_str("[unknown]");
                 }
             }
             out.push('(');
             if let Some(args) = field(b"args") {
                 match args.as_array() {
-                    Some(args) => out.push_str(&self.trace_arguments(&args.snapshot_refs())),
-                    None => crate::api::raising::warning(self, "args element is not an array"),
+                    Some(args) => out.push_str(&req.trace_arguments(*args)?),
+                    None => crate::api::raising::warning(req, "args element is not an array"),
                 }
             }
             out.push_str(")\n");
+            Ok(ControlFlow::Continue(()))
+        });
+        // The body answers no throwable but what a frame's arguments'
+        // walk answered, which none does.
+        match walked {
+            Ok(_) | Err(_) => {}
         }
         if include_main {
             write!(out, "#{num} {{main}}").ok();
@@ -971,19 +980,25 @@ impl Request {
     /// #1 {main}
     ///   thrown in %s on line 3
     /// ```
-    fn trace_arguments(&mut self, arguments: &[(Key, Value)]) -> String {
+    fn trace_arguments(&mut self, arguments: PhpArray) -> Result<String, Thrown> {
         let mut out = String::new();
-        for (i, (key, argument)) in arguments.iter().enumerate() {
-            if i > 0 {
+        let mut first = true;
+        // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(tmp), name, arg)`
+        // (`Z/Zend/zend_exceptions.c:616`), no owner of the table taken:
+        // the frame holds it.
+        walk::foreach(self, arguments, Hold::None, |req, row| -> walk::Step {
+            if !first {
                 out.push_str(", ");
             }
-            if let Key::Str(name) = key {
+            first = false;
+            if let Key::Str(name) = row.key() {
                 out.push_str(&String::from_utf8_lossy(name.as_bytes()));
                 out.push_str(": ");
             }
-            self.trace_argument(&mut out, &argument.deref());
-        }
-        out
+            req.trace_argument(&mut out, &row.value().deref());
+            Ok(ControlFlow::Continue(()))
+        })?;
+        Ok(out)
     }
 
     /// One argument as [`Request::trace_arguments`] renders it,

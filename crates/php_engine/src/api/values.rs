@@ -813,18 +813,6 @@ impl PhpArray {
         self.0.value_ref(key.heap()).map(Place)
     }
 
-    /// The elements in order, references followed, views of them.
-    #[must_use]
-    pub fn snapshot(&self) -> Vec<(Key, Value)> {
-        self.iter().map(|(k, v)| (k, v.deref())).collect()
-    }
-
-    /// The elements in order, references kept as references.
-    #[must_use]
-    pub fn snapshot_refs(&self) -> Vec<(Key, Value)> {
-        self.iter().collect()
-    }
-
     /// `zend_hash_sort` after `SEPARATE_ARRAY`, what every sort native
     /// of `array.c` calls: the elements ordered in place by `compare`
     /// with php's hybrid, [`zend_sort`], the internal pointer reset, and
@@ -1068,35 +1056,12 @@ enum Kept {
 /// `zend_get_typed_property_info_for_slot` finds a type for, which a
 /// dumper shows as `uninitialized(T)` with the type's text.
 #[derive(Debug, Clone)]
-pub enum HeldRow {
+pub(crate) enum HeldRow {
     Value(Value),
     Uninitialized(String),
 }
 
 impl HeldProperties {
-    /// The rows in the table's order, read under the request as a rows
-    /// walk reads them: views, which stand while the request is
-    /// borrowed and the properties held.
-    #[must_use]
-    pub fn rows(&self, req: &Request) -> Vec<(Key, HeldRow)> {
-        match &self.held {
-            Held::Table(table, _) => table.shown(req),
-            Held::Rows(rows) => rows
-                .iter()
-                .map(|(key, kept)| {
-                    let row = match kept {
-                        Kept::Value(value) => HeldRow::Value(**value),
-                        Kept::Uninitialized(ty) => HeldRow::Uninitialized(ty.clone()),
-                    };
-                    ((**key).clone(), row)
-                })
-                .collect(),
-            Held::Debug(table, _) => walk::rows(req, **table)
-                .map(|(key, value)| (key, HeldRow::Value(value.deref())))
-                .collect(),
-        }
-    }
-
     /// `zend_array_count` over the table (`Z/Zend/zend_hash.c:519`), the
     /// number a dumper prints before the rows: an uninitialised row not
     /// counted, and under [`PropertyPurpose::Debug`] a slot `unset`
@@ -1113,8 +1078,10 @@ impl HeldProperties {
     /// standing after the dump (`Z/ext/standard/var.c:184`).
     pub fn release(self, req: &mut Request) -> Result<(), Thrown> {
         match self.held {
+            // `zend_array_release`: one owner fewer, the table destroyed at
+            // the last, and no possible root of the cycle collector.
             Held::Table(_, table) => {
-                table.give_up(req);
+                table.give_up_nogc(req);
                 Ok(())
             }
             Held::Rows(rows) => {
@@ -1127,7 +1094,7 @@ impl HeldProperties {
                 Ok(())
             }
             Held::Debug(table, thrown) => {
-                table.give_up(req);
+                table.give_up_nogc(req);
                 thrown.map_or(Ok(()), Err)
             }
         }

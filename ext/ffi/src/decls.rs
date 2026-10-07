@@ -13,6 +13,7 @@ use php_ext::call::{Function, new_object};
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Thrown, arg_type_error, deprecated, pending, throw_chained, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::cdata::{
@@ -315,7 +316,7 @@ impl FFI {
         dimensions: PhpArray,
     ) -> Result<Owner<Instance<CType>>, Thrown> {
         validate_api_restriction(req)?;
-        let mut ty = ctype_of(req, r#type.object());
+        let ty = ctype_of(req, r#type.object());
         let (kind_func, incomplete_array, is_void, incomplete_tag) = {
             let t = types(req).get(ty);
             (
@@ -337,38 +338,19 @@ impl FFI {
         } else if incomplete_tag {
             return Err(ffi_error(req, "Array of incomplete type is not allowed"));
         }
-        let dims: Vec<Value> = dimensions
-            .snapshot()
-            .into_iter()
-            .map(|(_, value)| value)
+        // `ZEND_HASH_REVERSE_FOREACH_VAL(dims, val)` (`Z/ext/ffi/ffi.c:4331`):
+        // the rows last to first. The walks read first to last, so the
+        // rows are read under the borrowed request, each kept by an owner
+        // while `zval_get_long` reaches a diagnostic's handler, and given
+        // back after.
+        let dims: Vec<Owner<Value>> = walk::rows(req, dimensions)
+            .map(|(_, value)| Owner::take(req, value))
             .collect();
-        for value in dims.iter().rev() {
-            let n = to_long(req, value)?;
-            if n < 0 {
-                return Err(ffi_error(req, "negative array index"));
-            }
-            let (size, align, undimensioned) = {
-                let t = types(req).get(ty);
-                (
-                    t.size,
-                    t.align,
-                    matches!(t.kind, Kind::Array { .. }) && t.attr & attr::INCOMPLETE_ARRAY != 0,
-                )
-            };
-            if undimensioned {
-                return Err(ffi_error(
-                    req,
-                    "only the leftmost array can be undimensioned",
-                ));
-            }
-            ty = types(req).add(Type {
-                kind: Kind::Array { of: ty, len: n },
-                size: (n as usize).wrapping_mul(size),
-                align,
-                attr: if n == 0 { attr::INCOMPLETE_ARRAY } else { 0 },
-            });
+        let sized = dimensioned(req, ty, &dims);
+        for dim in dims {
+            dim.give_up(req);
         }
-        make_ctype(req, ty)
+        make_ctype(req, sized?)
     }
 
     /// `FFI::addr(FFI\CData &$ptr): FFI\CData`: a pointer to the value.
@@ -1463,4 +1445,36 @@ impl ObjectHandlers for Handlers {
     fn get_closure(&self, _: &mut Request, _: PhpObject) -> Option<php_ext::values::ClosureInfo> {
         None
     }
+}
+
+/// `ty` dimensioned by `dims`, the last one innermost.
+fn dimensioned(req: &mut Request, mut ty: TypeId, dims: &[Owner<Value>]) -> Result<TypeId, Thrown> {
+    for value in dims.iter().rev() {
+        let value = value.deref();
+        let n = to_long(req, &value)?;
+        if n < 0 {
+            return Err(ffi_error(req, "negative array index"));
+        }
+        let (size, align, undimensioned) = {
+            let t = types(req).get(ty);
+            (
+                t.size,
+                t.align,
+                matches!(t.kind, Kind::Array { .. }) && t.attr & attr::INCOMPLETE_ARRAY != 0,
+            )
+        };
+        if undimensioned {
+            return Err(ffi_error(
+                req,
+                "only the leftmost array can be undimensioned",
+            ));
+        }
+        ty = types(req).add(Type {
+            kind: Kind::Array { of: ty, len: n },
+            size: (n as usize).wrapping_mul(size),
+            align,
+            attr: if n == 0 { attr::INCOMPLETE_ARRAY } else { 0 },
+        });
+    }
+    Ok(ty)
 }

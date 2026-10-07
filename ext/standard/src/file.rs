@@ -154,6 +154,7 @@ use php_ext::raising::{
 use php_ext::request::{
     OptionAnswer, Request, Resolve, Stream, StreamOption, Streams as _, Whence, WrapperOp,
 };
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 /// `file.c`'s `auto_detect_line_endings`, `PHP_INI_ALL` and off, which
@@ -198,6 +199,7 @@ pub(crate) fn on_auto_detect_line_endings(
     Ok(true)
 }
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
 use crate::State;
@@ -1732,7 +1734,12 @@ fn write_data(
         }
         ValueRef::Array(array) => {
             let mut numbytes = 0;
-            for (_, element) in array.snapshot() {
+            // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(data), tmp)`
+            // (`Z/ext/standard/file.c:531`), no owner of the table taken:
+            // the argument holds it while `__toString` and the stream's
+            // wrapper run.
+            let walked = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+                let element = row.value().deref();
                 let text = to_string(req, &element)?;
                 let len = text.len();
                 if len > 0 {
@@ -1746,10 +1753,14 @@ fn write_data(
                             &format!("Failed to write {len} bytes to {name}"),
                         );
                         text.give_up(req);
-                        return Ok(None);
+                        return Ok(ControlFlow::Break(()));
                     }
                 }
                 text.give_up(req);
+                Ok(ControlFlow::Continue(()))
+            })?;
+            if walked.is_some() {
+                return Ok(None);
             }
             Ok(Some(numbytes))
         }

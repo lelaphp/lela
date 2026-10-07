@@ -11,6 +11,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::io::Write;
+use std::ops::ControlFlow;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 
@@ -19,6 +20,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{FormatDate, Request, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
 
 use crate::basic_functions::c_string;
@@ -109,7 +111,12 @@ fn build_elems(
     array: PhpArray,
 ) -> Result<(), Thrown> {
     let name = String::from_utf8_lossy(c_string(key)).into_owned();
-    for (element_key, element) in array.snapshot() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(val), …)`
+    // (`Z/ext/standard/mail.c:182`), no owner of the table taken: the
+    // argument holds it while a `TypeError` reaches the program.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let element_key = row.key().clone();
+        let element = row.value().deref();
         if let Key::Str(found) = element_key {
             let found = String::from_utf8_lossy(c_string(found.as_bytes())).into_owned();
             let message =
@@ -124,7 +131,8 @@ fn build_elems(
             return Err(throw_error(req, "TypeError", &message));
         }
         build_elem(req, out, key, &element)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -134,7 +142,12 @@ fn build_elems(
 /// off.
 pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Thrown> {
     let mut out = Vec::new();
-    for (key, value) in headers.snapshot() {
+    // `ZEND_HASH_FOREACH_KEY_VAL(headers, …)`
+    // (`Z/ext/standard/mail.c:218`), no owner of the table taken: the
+    // argument holds it while a `TypeError` reaches the program.
+    walk::foreach(req, headers, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let key = match key {
             Key::Str(name) => name.as_bytes().to_vec(),
             Key::Int(idx) => {
@@ -169,7 +182,8 @@ pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Th
             }
             _ => build_elem(req, &mut out, &key, &value)?,
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     out.truncate(out.len().saturating_sub(2));
     Ok(out)
 }

@@ -579,13 +579,14 @@ fn compact_var(
             }
             call_stack_end(req)?;
             array.protect();
-            let mut done = Ok(());
-            for (_, element) in array.snapshot_refs() {
-                done = compact_var(req, out, &element, position);
-                if done.is_err() {
-                    break;
-                }
-            }
+            // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(entry), value_ptr)`
+            // (`Z/ext/standard/array.c:2707`), no owner of the table taken:
+            // the argument holds it while an undefined variable's warning
+            // reaches the program.
+            let done = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+                compact_var(req, out, row.value(), position)?;
+                Ok(ControlFlow::Continue(()))
+            });
             array.unprotect();
             done?;
         }

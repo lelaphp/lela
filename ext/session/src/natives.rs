@@ -2,6 +2,8 @@
 //! `session.c` each: its parameters, its refusals and warnings, and the
 //! state machine in `session` behind it.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{Callable, OrFalse, Passed, Path, Raw, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::lookup_class;
@@ -10,6 +12,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, arity, docref, throw_error,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::user::{Slot, method_of, store};
@@ -618,7 +621,12 @@ fn session_start(
         return Ok(false);
     }
     let mut read_and_close = false;
-    for (key, value) in options.snapshot() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(options), str_idx, value)`
+    // (`Z/ext/session/session.c:2654`), no owner of the table taken: the
+    // argument holds it while a `TypeError` reaches the program.
+    walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let Key::Str(name) = key else {
             return Err(arg_value_error(
                 req,
@@ -664,7 +672,7 @@ fn session_start(
                 _ => 0,
             };
             read_and_close = n > 0;
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         let text = to_string(req, &value)?;
         let mut entry = b"session.".to_vec();
@@ -676,7 +684,8 @@ fn session_start(
                 &format!("Setting option \"{}\" failed", crate::shown(&name)),
             );
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     session::start(req)?;
     if req.state::<State>().status != Status::Active {
         clean(req)?;
@@ -691,12 +700,20 @@ fn session_start(
 /// `zend_hash_clean` over the session's array, separated first, where
 /// there is one.
 fn clean(req: &mut Request) -> Result<(), Thrown> {
-    let Some(mut array) = crate::session_array_mut(req)? else {
+    let Some(array) = crate::session_array_mut(req)? else {
         return Ok(());
     };
-    for (key, _) in array.snapshot_refs() {
-        array.unset(req, &key)?;
-    }
+    // `zend_hash_clean` (`Z/ext/session/session.c:2702`,
+    // `Z/Zend/zend_hash.c:1875`) over the separated table, each row destroyed in
+    // order and its destructor served as it goes; no owner of the table
+    // taken, the session's reference holding it. A destructor that
+    // assigns over `$_SESSION` frees the table under php's loop, which
+    // reads it freed; this walk ends there instead.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let mut table = array;
+        table.unset(req, row.key())?;
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -958,25 +975,25 @@ fn session_set_cookie_params(
             }
         }
         let mut found = 0;
-        for (key, value) in options.snapshot() {
+        // `ZEND_HASH_FOREACH_STR_KEY_VAL(options_ht, key, value)`
+        // (`Z/ext/session/session.c:1860`), no owner of the table taken: the
+        // argument holds it while `zval_get_string` runs `__toString`.
+        let walked = walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+            let key = row.key().clone();
+            let value = row.value().deref();
             let Key::Str(key) = key else {
                 docref(
                     req,
                     Level::Warning,
                     "Argument #1 ($lifetime_or_options) cannot contain numeric keys",
                 );
-                continue;
+                return Ok(ControlFlow::Continue(()));
             };
             let key = key.as_bytes().to_ascii_lowercase();
             let made = match key.as_slice() {
                 b"lifetime" | b"path" | b"domain" | b"samesite" => match to_string(req, &value) {
                     Ok(made) => Some(Cookie::Made(made.hand_on_unmigrated())),
-                    Err(thrown) => {
-                        for set in [lifetime, path, domain, samesite].into_iter().flatten() {
-                            set.release(req);
-                        }
-                        return Err(thrown);
-                    }
+                    Err(thrown) => return Err(thrown),
                 },
                 _ => None,
             };
@@ -995,7 +1012,7 @@ fn session_set_cookie_params(
                     req.state::<State>().overwritten.push(first);
                 }
                 found += 1;
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
             match key.as_slice() {
                 b"secure" => secure = Some(truthy(req, &value)),
@@ -1010,10 +1027,17 @@ fn session_set_cookie_params(
                             crate::shown(&key)
                         ),
                     );
-                    continue;
+                    return Ok(ControlFlow::Continue(()));
                 }
             }
             found += 1;
+            Ok(ControlFlow::Continue(()))
+        });
+        if let Err(thrown) = walked {
+            for set in [lifetime, path, domain, samesite].into_iter().flatten() {
+                set.release(req);
+            }
+            return Err(thrown);
         }
         if found == 0 {
             return Err(arg_value_error(req, 1, "contain at least 1 valid key"));

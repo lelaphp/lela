@@ -37,6 +37,8 @@
 mod logical;
 mod sanitizing;
 
+use std::ops::ControlFlow;
+
 use constants::{
     FILTER_CALLBACK, FILTER_DEFAULT, FILTER_FLAG_NO_ENCODE_QUOTES, FILTER_FORCE_ARRAY,
     FILTER_NULL_ON_FAILURE, FILTER_REQUIRE_ARRAY, FILTER_REQUIRE_SCALAR,
@@ -57,6 +59,7 @@ use php_ext::raising::{
     throw_value,
 };
 use php_ext::request::{Input, Request};
+use php_ext::values::walk::Hold;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
 
 /// `IF_G`'s input arrays: each variable [`sapi_filter`] was handed, raw,
@@ -792,7 +795,13 @@ fn filter_elements(
     filter: i64,
     run: &Run,
 ) -> Result<(), Thrown> {
-    for (key, element) in array.snapshot_refs() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(value), element)`
+    // (`Z/ext/filter/filter.c:409`), no owner of the table taken: the
+    // separated array holds it while a filter's callback runs, and each
+    // row is written in place as php writes it.
+    walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let element = *row.value();
         if let ValueRef::Reference(cell) = element.as_ref() {
             let cell = *cell;
             if let Some(mut held) = cell.separate_array(req)? {
@@ -802,12 +811,13 @@ fn filter_elements(
                 let filtered = zval_filter(req, held, filter, run)?;
                 cell.convert(req, filtered.hand_on_unmigrated());
             }
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
         let element = Owner::take(req, element);
         let filtered = zval_filter_recursive(req, element, filter, run)?;
         array.replace(req, &key, filtered)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 
@@ -930,15 +940,19 @@ fn array_handler(
         }
     };
     let mut out = PhpArray::new(req)?;
-    for (key, element) in table.snapshot() {
+    // `ZEND_HASH_FOREACH_STR_KEY_VAL(op_ht, arg_key, arg_elm)`
+    // (`Z/ext/filter/filter.c:612`), no owner of the table taken: the
+    // argument holds it while a filter's callback runs. A throwable gives
+    // the array made so far up.
+    let walked = walk::foreach(req, table, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let element = row.value().deref();
         let name = match key {
             Key::Str(name) if !name.is_empty() => name,
             Key::Str(_) => {
-                out.give_up(req);
                 return Err(options_error(req, 2, "cannot contain empty keys"));
             }
             Key::Int(_) => {
-                out.give_up(req);
                 return Err(arg_type_error(req, 2, "contain only string keys"));
             }
         };
@@ -947,35 +961,27 @@ fn array_handler(
                 let key = Owner::take(req, Key::Str(name));
                 out.set(req, key, Owner::take(req, Value::null()))?;
             }
-            continue;
+            return Ok(ControlFlow::Continue(()));
         };
         let element = element.deref();
         let arguments = if let Some(array) = element.as_array() {
             Union::A(*array)
         } else {
-            let id = match to_long(req, &element) {
-                Ok(id) => id,
-                Err(thrown) => {
-                    out.give_up(req);
-                    return Err(thrown);
-                }
-            };
+            let id = to_long(req, &element)?;
             if !id_exists(id) {
                 unknown_filter(req, id);
             }
             Union::B(id)
         };
         let found = Owner::take(req, found.deref());
-        match filter_call(req, native, found, -1, arguments, FILTER_REQUIRE_SCALAR, 2) {
-            Ok(filtered) => {
-                let key = Owner::take(req, Key::Str(name));
-                out.set(req, key, filtered)?;
-            }
-            Err(thrown) => {
-                out.give_up(req);
-                return Err(thrown);
-            }
-        }
+        let filtered = filter_call(req, native, found, -1, arguments, FILTER_REQUIRE_SCALAR, 2)?;
+        let key = Owner::take(req, Key::Str(name));
+        out.set(req, key, filtered)?;
+        Ok(ControlFlow::Continue(()))
+    });
+    if let Err(thrown) = walked {
+        out.give_up(req);
+        return Err(thrown);
     }
     Ok(out)
 }

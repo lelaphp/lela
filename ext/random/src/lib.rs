@@ -36,6 +36,7 @@ mod rng;
 
 use std::any::Any;
 use std::marker::PhantomData;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, Passed, Raw, Refusals};
 use php_ext::attr::{php_class, php_const, php_function};
@@ -45,6 +46,7 @@ use php_ext::raising::{
     throw_value,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 pub use rng::Rng;
@@ -419,9 +421,16 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
                 .collect()
         })
         .unwrap_or_default();
-    for (key, value) in members.snapshot_refs() {
+    // `object_properties_load`'s walk (`Z/Zend/zend_API.c:1752`), no owner
+    // of the table taken: the argument holds it while a property write
+    // runs.
+    walk::foreach(req, members, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = *row.value();
         let Key::Str(key) = key else {
-            let Key::Int(h) = key else { continue };
+            let Key::Int(h) = key else {
+                return Ok(ControlFlow::Continue(()));
+            };
             return Err(throw_error(
                 req,
                 "Error",
@@ -460,7 +469,8 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
         let name = PhpString::new(req, name)?;
         let value = Owner::take(req, value);
         object.unserialize_prop(req, name, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }
 

@@ -4,26 +4,15 @@
 //! value that is referenced from two session variables is written, and
 //! read back, once.
 
+use std::ops::ControlFlow;
+
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::walk::{self, Hold};
+use php_ext::values::{Key, PhpArray, PhpString, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
 use crate::{Format, bind_vars, session_array, session_array_mut, shown};
-
-/// `PS_ENCODE_LOOP`: each variable under a string key, a numeric one
-/// skipped with php's warning, over a copy of the array so the loop
-/// holds against what a `__sleep` does to it.
-fn variables(req: &mut Request, array: PhpArray) -> Vec<(PhpString, Value)> {
-    let mut out = Vec::new();
-    for (key, value) in array.snapshot_refs() {
-        match key {
-            Key::Str(name) => out.push((name, value)),
-            Key::Int(n) => docref(req, Level::Warning, &format!("Skipping numeric key {n}")),
-        }
-    }
-    out
-}
 
 /// `PS_SERIALIZER_ENCODE_FUNC`: the session's variables as the format
 /// writes them, `None` where `php` meets a name with `|` in it, and
@@ -50,6 +39,19 @@ fn variables(req: &mut Request, array: PhpArray) -> Vec<(PhpString, Value)> {
 /// string(0) ""
 /// bool(false)
 /// ```
+///
+/// Each variable is read from the session's array as it stands when the
+/// walk reaches its key, so one a `__sleep` unset is not written:
+///
+/// ```php
+/// ob_start(); session_start(["save_path" => __DIR__, "use_cookies" => 0, "cache_limiter" => ""]);
+/// class S { function __sleep() { unset($_SESSION['c']); return []; } }
+/// $_SESSION['a'] = 1; $_SESSION['b'] = new S; $_SESSION['c'] = 3;
+/// var_dump(session_encode()); session_destroy(); ob_end_flush();
+/// ```
+/// ```expect
+/// string(20) "a|i:1;b|O:1:"S":0:{}"
+/// ```
 pub(super) fn encode(req: &mut Request, format: Format) -> Result<Option<Vec<u8>>, Thrown> {
     let Some(array) = session_array(req) else {
         return Ok(None);
@@ -73,25 +75,36 @@ fn encode_through(
         hash.write(req, &mut buf, &array.to_value())?;
         return Ok(Some(buf));
     }
-    let copy = array.to_value();
-    req.addref(&copy);
-    let entries = variables(req, array);
     let mut wrote = false;
-    for (name, value) in entries {
-        let name = name.as_bytes().to_vec();
+    // `PS_ENCODE_LOOP` (`Z/ext/session/php_session.h:297`): `ZVAL_COPY` of
+    // the session's array "to protect against user interference" and
+    // `ZEND_HASH_FOREACH_KEY` over the copy, a numeric key skipped with
+    // php's warning, and each variable read again from the session's
+    // array as it now stands (`php_get_session_var`), so one a `__sleep`
+    // unset is left out.
+    let refused = walk::foreach(req, array, Hold::Owner, |req, row| -> walk::Step {
+        let name = match row.key() {
+            Key::Str(name) => name.as_bytes().to_vec(),
+            Key::Int(n) => {
+                docref(req, Level::Warning, &format!("Skipping numeric key {n}"));
+                return Ok(ControlFlow::Continue(()));
+            }
+        };
+        let Some(value) = session_array(req).and_then(|now| now.get(row.key())) else {
+            return Ok(ControlFlow::Continue(()));
+        };
         if format == Format::PhpBinary {
             let Ok(len) = u8::try_from(name.len()) else {
-                continue;
+                return Ok(ControlFlow::Continue(()));
             };
             if len > 127 {
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
             buf.push(len);
             buf.extend_from_slice(&name);
         } else {
             buf.extend_from_slice(&name);
             if name.contains(&b'|') {
-                req.release(copy);
                 docref(
                     req,
                     Level::Warning,
@@ -100,17 +113,17 @@ fn encode_through(
                         shown(&name)
                     ),
                 );
-                return Ok(None);
+                return Ok(ControlFlow::Break(()));
             }
             buf.push(b'|');
         }
         wrote = true;
-        if let Err(thrown) = hash.write(req, &mut buf, &value) {
-            req.release(copy);
-            return Err(thrown);
-        }
+        hash.write(req, &mut buf, &value)?;
+        Ok(ControlFlow::Continue(()))
+    })?;
+    if refused.is_some() {
+        return Ok(None);
     }
-    req.release(copy);
     Ok(wrote.then_some(buf))
 }
 

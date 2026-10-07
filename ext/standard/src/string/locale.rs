@@ -16,11 +16,13 @@
 
 use std::cmp::Ordering;
 use std::ffi::{CString, c_char};
+use std::ops::ControlFlow;
 
 use php_ext::abi::{OrFalse, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
@@ -311,9 +313,14 @@ pub(super) fn setlocale(
         let names: Vec<Vec<u8>> = match candidate.as_ref() {
             ValueRef::Array(array) => {
                 let mut names = Vec::new();
-                for (_, element) in array.snapshot() {
+                // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL(args[i]), elem)`
+                // (`Z/ext/standard/string.c:4969`), no owner of the table
+                // taken: the argument holds it while `__toString` runs.
+                walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+                    let element = row.value().deref();
                     names.push(crate::string::string_bytes(req, &element.deref())?);
-                }
+                    Ok(ControlFlow::Continue(()))
+                })?;
                 names
             }
             ValueRef::Null => vec![Vec::new()],

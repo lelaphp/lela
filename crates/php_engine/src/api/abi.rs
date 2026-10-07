@@ -273,7 +273,7 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     /// Every value held, with its key, in no order.
-    pub(crate) fn snapshot(&self) -> Vec<(K, Arc<V>)> {
+    pub(crate) fn held(&self) -> Vec<(K, Arc<V>)> {
         self.entries()
             .iter()
             .map(|(key, value)| (key.clone(), Arc::clone(value)))

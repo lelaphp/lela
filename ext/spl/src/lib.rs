@@ -37,6 +37,8 @@ mod observer;
 
 pub(crate) use iterators::{RecursiveIterator, SeekableIterator};
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, ObjectHandlers, Raw, Std,
 };
@@ -47,6 +49,7 @@ use php_ext::decl::{ClassKind, Name};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
+use php_ext::values::walk::Hold;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_standard::Serializer;
 
@@ -635,17 +638,24 @@ fn members(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thro
 /// ```
 fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result<(), Thrown> {
     if let Some(members) = members.as_array() {
-        for (key, value) in members.snapshot() {
+        // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties,
+        // …)` (`Z/Zend/zend_API.c:1752`), no owner of the table taken: the
+        // argument holds it while a write runs a hook or a deprecation
+        // reaches the program.
+        walk::foreach(req, *members, Hold::None, |req, row| -> walk::Step {
+            let key = row.key().clone();
+            let value = row.value().deref();
             if let Key::Int(h) = key {
                 integer_member(req, object, h)?;
                 let value = Owner::take(req, value);
                 object.set_row(req, &key, value)?;
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
             let name = key.to_prop_name(req)?;
             let value = Owner::take(req, value);
             object.unserialize_prop(req, name, value)?;
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
     }
     Ok(())
 }
