@@ -604,6 +604,7 @@ request::OplineView::opcode
 request::OplineView::out
 request::OptionAnswer
 request::OutputOp
+request::Overwrite
 request::PHP_VERSION
 request::Periodic
 request::Persisted
@@ -1140,6 +1141,7 @@ values::Owner::sort_by
 values::Owner::take
 values::Owner::try_append
 values::Owner::unset
+values::Owner::unset_in_place
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::contains

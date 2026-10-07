@@ -408,6 +408,19 @@ impl Owner<PhpArray> {
         answer
     }
 
+    /// Remove `key` from this very table, whatever its other owners,
+    /// `zend_hash_del` under `HT_ALLOW_COW_VIOLATION`: `true` when it was
+    /// there, its value released. What `php_splice` does to the table it
+    /// holds an owner of across its removal (`GC_ADDREF(in_hash)`,
+    /// `Z/ext/standard/array.c:3321`), so a holder that took the table
+    /// while a destructor of the removal ran sees the removal rather than
+    /// a copy separated from under the name that holds it. This owner is
+    /// that hold, kept for as long as the rewrite deletes; an immutable
+    /// table, which no request may write, is left as it is.
+    pub fn unset_in_place(&self, req: &mut Request, key: &Key) -> bool {
+        self.view.del_in_place(req, key)
+    }
+
     /// [`PhpArray::set`].
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn set(

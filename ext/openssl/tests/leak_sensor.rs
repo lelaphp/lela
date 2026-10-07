@@ -43,3 +43,22 @@ var_dump(openssl_pkcs7_sign('{dir}/in.txt', '{dir}/out.txt', $x, $k, ['X' => 42]
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(stdout, "bool(false)\nbool(false)\nbool(true)\n");
 }
+
+/// A native whose body made its answer while a deferred `ValueError`
+/// stands answers the error, and what the body made is given up, as the
+/// VM's `zval_ptr_dtor` of the return value frees it: here the
+/// `OpenSSLCertificateSigningRequest` `openssl_csr_new` makes under a
+/// refused key path (#2126, `ext/openssl/tests/bug81713.phpt`).
+#[test]
+fn an_answer_made_under_a_deferred_error_is_given_up() {
+    let stdout = armed(
+        r#"<?php
+$k = "file:///nonexistent\0foo";
+try { var_dump(openssl_csr_new(['commonName' => 'a'], $k)); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "openssl_csr_new(): Argument #2 ($private_key) must not contain any null bytes\n"
+    );
+}
