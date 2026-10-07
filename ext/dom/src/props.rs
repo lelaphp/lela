@@ -354,7 +354,11 @@ fn class_list(req: &mut Request, object: PhpObject) -> Read {
 }
 
 /// `dom_parent_node_children_read`: one `Dom\HTMLCollection` of the child
-/// elements, kept in the declared `$children` slot.
+/// elements, kept in the declared `$children` slot. The collection names
+/// the node and the slot names the collection, a cycle; where the node's
+/// owners are a temporary and the collection alone, the collection is
+/// offered to the collector as php offers it, since the temporary's
+/// release offers nothing.
 ///
 /// ```php
 /// $d = Dom\XMLDocument::createFromString('<r><a/>t<b/></r>');
@@ -375,6 +379,11 @@ pub(crate) fn children(req: &mut Request, object: PhpObject) -> Read {
     if let Err(thrown) = crate::modern::keep(req, object, b"children", &list) {
         list.give_up(req);
         return Err(thrown);
+    }
+    if object.as_value().refcount() == 2
+        && let Some(collection) = list.as_object()
+    {
+        req.gc_possible_root(*collection);
     }
     some(list)
 }
