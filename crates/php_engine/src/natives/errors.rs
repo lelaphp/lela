@@ -11,7 +11,7 @@ use php_macros::php_function;
 use php_unit::Level;
 
 use crate::api::abi::{Callable, FromArgument, Raw, True, Untyped};
-use crate::api::raising::{Thrown, arg_value_error, deprecated};
+use crate::api::raising::{Thrown, arg_value_error, deprecated, none_pending};
 use crate::api::request::Request;
 use crate::api::values::{PhpString, Value};
 
@@ -70,9 +70,7 @@ fn trigger_error(
                 req,
                 "Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             Level::UserError
         }
         512 => Level::UserWarning,

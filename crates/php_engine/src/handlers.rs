@@ -62,7 +62,7 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Thrown, none_pending};
 use crate::api::request::{Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
 use crate::api::values::{
@@ -9275,9 +9275,7 @@ fn string_held<T>(
     let stepped = step(req);
     let left = held.let_go(req);
     let stepped = stepped?;
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
+    none_pending(req)?;
     Ok((!left.freed() && keeper.stands(at, string)).then_some(stepped))
 }
 
@@ -9476,9 +9474,7 @@ fn held_alone<T>(
     let stepped = step(req);
     let left = held.let_go(req);
     let stepped = stepped?;
-    if req.is_pending() {
-        return Err(Thrown::of(None));
-    }
+    none_pending(req)?;
     Ok((!left.not_alone()).then_some(stepped))
 }
 
@@ -15529,9 +15525,7 @@ fn unset_under_nothing(
             req,
             "Automatic conversion of false to array is deprecated",
         );
-        if req.is_pending() {
-            return Err(Thrown::of(None));
-        }
+        none_pending(req)?;
     }
     if op.op2_type == OperandKind::Cv {
         let _ = exec::operand(req, frame, code, op.op2_type, op.op2);
@@ -15787,9 +15781,7 @@ fn unset_container(req: &mut Request, container: &Value, offset: &Value) -> Resu
                 req,
                 "Automatic conversion of false to array is deprecated",
             );
-            if req.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(req)?;
             Ok(())
         }
         ValueRef::Undef | ValueRef::Null => Ok(()),

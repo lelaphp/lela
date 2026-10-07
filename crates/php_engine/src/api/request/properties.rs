@@ -14,7 +14,7 @@ use php_unit::link::Row;
 
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
-use crate::api::raising::{Level, Thrown};
+use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, adopted,
 };
@@ -3091,9 +3091,7 @@ impl Request {
             return Ok(());
         }
         held.let_go(self);
-        if self.is_pending() {
-            return Err(Thrown::of(None));
-        }
+        none_pending(self)?;
         Err(crate::api::raising::throw_error(
             self,
             "Error",

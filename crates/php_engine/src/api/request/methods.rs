@@ -10,7 +10,7 @@ use php_unit::decl::{ClassKind, MethodDecl, Visibility};
 use php_unit::link::{LinkedClass, Row};
 
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Thrown, none_pending};
 use crate::api::values::{ClassId, PhpString};
 use crate::engine::{MethodAt, NativeMethod};
 
@@ -538,9 +538,7 @@ impl Request {
                     "Calling static trait method {shown} is deprecated, it should only be called on a class using the trait"
                 ),
             );
-            if self.is_pending() {
-                return Err(Thrown::of(None));
-            }
+            none_pending(self)?;
         }
         Ok(is_trait)
     }
