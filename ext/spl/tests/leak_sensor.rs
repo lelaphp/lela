@@ -108,3 +108,21 @@ var_dump($c, count($ao));
         "object(stdClass)#4 (2) {\n  [0]=>\n  string(3) \"aaa\"\n  [1]=>\n  string(2) \"bb\"\n}\nint(2)\n"
     );
 }
+
+/// An `unserialize()` whose next class's autoloader throws makes none
+/// of the `__wakeup()` calls it queued, so the throwing `__wakeup()`
+/// queued before it makes no second throwable to drop: #2231's snippet,
+/// `ext/standard/tests/serialize/bug64354_2.phpt`, armed here because
+/// `spl_autoload_register` is this extension's and ext/standard's tests
+/// cannot reach it.
+#[test]
+fn an_autoloader_throw_in_unserialize_keeps_no_wakeup_throwable() {
+    let stdout = armed(
+        r#"<?php
+class A { public function __wakeup() { throw new Exception("Failed"); } }
+spl_autoload_register(function($class) { throw new Exception("Failed"); });
+try { var_dump(unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}')); } catch (Exception $e) { var_dump($e->getMessage()); }
+"#,
+    );
+    assert_eq!(stdout, "string(6) \"Failed\"\n");
+}
