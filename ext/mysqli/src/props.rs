@@ -167,8 +167,10 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         let mut table = PhpArray::new(req)?;
         for name in P::NAMES {
             if let Some(value) = P::read(req, object, name, true)? {
+                // The table's row takes the value's owner.
+                let value = value.hand_on_unmigrated();
                 let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
-                table.set(req, key, value.hand_on_unmigrated())?;
+                table.set(req, key, value)?;
             }
         }
         Ok(Some(DebugInfo::from(table)))
