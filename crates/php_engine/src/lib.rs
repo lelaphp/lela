@@ -75,9 +75,9 @@ pub use constants::{
 #[cfg(debug_assertions)]
 pub use engine::LeakSensor;
 pub use engine::{
-    Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostValue, IniOrigin, Method,
-    Observables, OutputSink, Primary, ProcessTitle, RequestDescription, ResponseHead, Routed,
-    Uncaught, WebRequest,
+    Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostPage, HostServes, HostValue,
+    IniOrigin, Method, Observables, OutputSink, Primary, ProcessTitle, RequestDescription,
+    ResponseHead, Routed, Uncaught, WebRequest,
 };
 pub use fork::{Forked, Pid, fork};
 pub use ini_syntax::{IniEvent, IniValue};

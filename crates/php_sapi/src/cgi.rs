@@ -114,7 +114,7 @@ fn php_self(env: &Environment, info: &RequestInfo, settings: Settings) -> Vec<u8
 /// The entries `sapi_cgi_send_headers` reads at the send, `CGIG(nph)`
 /// and `CGIG(rfc2616_headers)`, which a request's [`web`] names for its
 /// head.
-pub const HEAD_INI: [&[u8]; 2] = [b"cgi.nph", b"cgi.rfc2616_headers"];
+const HEAD_INI: [&[u8]; 2] = [b"cgi.nph", b"cgi.rfc2616_headers"];
 
 /// The response's head as `sapi_cgi_send_headers` writes it, in the
 /// shape `cgi.nph` and `cgi.rfc2616_headers` give it at the send: the

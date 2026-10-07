@@ -5,25 +5,17 @@
 
 use std::fmt::Write as _;
 
-use php_sapi::HostValue;
+use php_sapi::{HostPage, HostValue};
 
 use crate::conf::Pm;
 use crate::scoreboard::{BoardView, ProcView, Stage};
-
-/// A page the host answers in place of a program: its code, its header
-/// lines after `X-Powered-By`, and its body.
-pub(crate) struct Page {
-    pub(crate) code: i64,
-    pub(crate) headers: Vec<Vec<u8>>,
-    pub(crate) body: Vec<u8>,
-}
 
 const EXPIRES: &[u8] = b"Expires: Thu, 01 Jan 1970 00:00:00 GMT";
 const CACHE_CONTROL: &[u8] = b"Cache-Control: no-cache, no-store, must-revalidate, max-age=0";
 
 /// The ping page: `ping.response` as plain text.
-pub(crate) fn ping(response: &[u8], head_only: bool) -> Page {
-    Page {
+pub(crate) fn ping(response: &[u8], head_only: bool) -> HostPage {
+    HostPage {
         code: 200,
         headers: vec![
             b"Content-Type: text/plain".to_vec(),
@@ -115,7 +107,7 @@ fn when(form: Form, epoch: i64) -> String {
 /// `fpm_status_handle_request`'s status half over `board`, a copy taken
 /// with its slots where `$_GET` names `full`; `keys` are `$_GET`'s.
 #[allow(clippy::too_many_lines)] // php's one function, kept as one
-pub(crate) fn status(board: &BoardView, keys: &[Vec<u8>], head_only: bool) -> Page {
+pub(crate) fn status(board: &BoardView, keys: &[Vec<u8>], head_only: bool) -> HostPage {
     let has = |key: &str| keys.iter().any(|k| k.as_slice() == key.as_bytes());
     let full = has("full");
     let mut headers = vec![EXPIRES.to_vec(), CACHE_CONTROL.to_vec()];
@@ -125,7 +117,7 @@ pub(crate) fn status(board: &BoardView, keys: &[Vec<u8>], head_only: bool) -> Pa
             "[pool {}] invalid status values",
             String::from_utf8_lossy(&board.pool)
         );
-        return Page {
+        return HostPage {
             code: 500,
             headers: vec![
                 b"Content-Type: text/plain".to_vec(),
@@ -136,7 +128,7 @@ pub(crate) fn status(board: &BoardView, keys: &[Vec<u8>], head_only: bool) -> Pa
         };
     }
     if head_only {
-        return Page {
+        return HostPage {
             code: 200,
             headers,
             body: Vec::new(),
@@ -237,7 +229,7 @@ max children reached: {}\nslow requests:        {}\nmemory peak:          {}\n",
             Form::Json => b"}",
             Form::OpenMetrics | Form::Plain => b"",
         });
-        return Page {
+        return HostPage {
             code: 200,
             headers,
             body,
@@ -254,7 +246,7 @@ max children reached: {}\nslow requests:        {}\nmemory peak:          {}\n",
         Form::OpenMetrics | Form::Plain => (b"", b"", b""),
     };
     if form == Form::OpenMetrics {
-        return Page {
+        return HostPage {
             code: 200,
             headers,
             body,
@@ -271,7 +263,7 @@ max children reached: {}\nslow requests:        {}\nmemory peak:          {}\n",
         body.extend_from_slice(&process(form, proc, now, now_us));
     }
     body.extend_from_slice(post);
-    Page {
+    HostPage {
         code: 200,
         headers,
         body,
