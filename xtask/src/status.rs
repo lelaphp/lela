@@ -130,13 +130,17 @@ pub fn render(
         Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
         Section::Crosscheck => (instrument(&readings, crosscheck::INSTRUMENT), INSTRUMENT),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
-        Section::Track => (last_run(&store.log()?), TRACK),
-        Section::Usage => (last_per_scope(&store.log()?, usage::INSTRUMENT), USAGE),
+        Section::Track => (last_run(&store.history(track_work::INSTRUMENT)?), TRACK),
+        Section::Usage => (
+            last_per_scope(&store.history(usage::INSTRUMENT)?, usage::INSTRUMENT),
+            USAGE,
+        ),
         Section::Permits => {
             return permits(
                 manifest,
                 &readings,
-                &store.log()?,
+                &store.history(permit::INSTRUMENT)?,
+                &store.tallies()?,
                 format,
                 session_id,
                 uncut,
@@ -310,7 +314,7 @@ pub fn session(
         facts.push('\n');
     }
     if let Some(id) = session_id {
-        let log = store.log()?;
+        let log = store.history(permit::INSTRUMENT)?;
         let rows: Vec<Row> = permit_rows(
             manifest,
             &store.readings()?.readings,
@@ -736,10 +740,10 @@ fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
 /// for the track `root` is on, [`reading::Chain::standing`], and never a
 /// retired branch's appended after it (#787). This is xtask's rule; the
 /// dashboard keeps one of its own, the latest reading in time on the
-/// chain, read off `log.jsonl` itself and not off this section, as its
+/// chain, read off the store's log itself and not off this section, as its
 /// README says (#845, #1717).
 fn standing(store: &Store, root: &Path) -> Result<Vec<Row>> {
-    let log = store.log()?;
+    let log = store.history("phpt")?;
     let chain = reading::Chain::of_head(root)?;
     let rows = chain.standing(&log.readings, "phpt").into_iter();
     Ok(rows
@@ -875,13 +879,14 @@ fn permits(
     manifest: &Manifest,
     readings: &[Reading],
     log: &Log,
+    tallies: &BTreeMap<String, Vec<(reading::Status, String)>>,
     format: Table,
     this: Option<&str>,
     uncut: bool,
 ) -> Result<String> {
     let rules = permit_rows(manifest, readings, &log.readings, this);
     let window = manifest.telemetry.as_ref().map(|t| t.silent_days);
-    let instruments = instruments(&log.readings, window)?;
+    let instruments = instruments(tallies, window)?;
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&json!({
             "session": this,
@@ -1051,8 +1056,12 @@ impl InstrumentLine {
 
 /// The log per instrument, in name order: readings, failures, the last
 /// failure's time, and, when the manifest has a window, whether no failure
-/// lies within it of now.
-fn instruments(log: &[Reading], window_days: Option<u64>) -> Result<Vec<InstrumentLine>> {
+/// lies within it of now; read off each line's status and time alone
+/// ([`Store::tallies`]).
+fn instruments(
+    tallies: &BTreeMap<String, Vec<(reading::Status, String)>>,
+    window_days: Option<u64>,
+) -> Result<Vec<InstrumentLine>> {
     let since = match window_days {
         Some(days) => {
             let days = i64::try_from(days).context("silent_days is past the calendar")?;
@@ -1060,33 +1069,33 @@ fn instruments(log: &[Reading], window_days: Option<u64>) -> Result<Vec<Instrume
         }
         None => None,
     };
-    let mut names: Vec<&str> = log.iter().map(|r| r.instrument.as_str()).collect();
-    names.sort_unstable();
-    names.dedup();
-    names
-        .into_iter()
-        .map(|name| {
-            let of: Vec<&Reading> = log.iter().filter(|r| r.instrument == name).collect();
-            let failed: Vec<&Reading> = of
+    tallies
+        .iter()
+        .filter(|(_, lines)| !lines.is_empty())
+        .map(|(name, lines)| {
+            let failed: Vec<&str> = lines
                 .iter()
-                .copied()
-                .filter(|r| r.status == reading::Status::Fail)
+                .filter(|(status, _)| *status == reading::Status::Fail)
+                .map(|(_, at)| at.as_str())
                 .collect();
             let silent = match since {
                 Some(since) => {
                     let mut recent = false;
-                    for r in &failed {
-                        recent |= reading::epoch_seconds(&r.at)? >= since;
+                    for at in &failed {
+                        let at = at
+                            .parse()
+                            .context("a log line whose `at` is not a datetime")?;
+                        recent |= reading::epoch_seconds(&at)? >= since;
                     }
                     Some(!recent)
                 }
                 None => None,
             };
             Ok(InstrumentLine {
-                name: name.to_owned(),
-                readings: of.len(),
+                name: name.clone(),
+                readings: lines.len(),
                 failures: failed.len(),
-                last_failure: failed.iter().map(|r| r.at.to_string()).max(),
+                last_failure: failed.iter().max().map(|at| (*at).to_owned()),
                 silent,
             })
         })

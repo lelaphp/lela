@@ -123,6 +123,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::cfg::Target;
 use crate::divergence::Registry;
+use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Linked, Oracle, Oracles, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
@@ -280,7 +281,7 @@ impl Tally {
 /// §4.3; #60, #65).
 pub(crate) fn reading(
     tally: &Tally,
-    root: &Path,
+    snapshot: &Snapshot,
     krate: &Crate,
     rule: Option<&Rule>,
 ) -> Result<Reading> {
@@ -379,10 +380,10 @@ pub(crate) fn reading(
         // first; the words are here so no rung is without any.
         Outcome::NothingRan => format!("{name}: no witness ran of {} found{unrun}", run.found),
     };
-    // Constructed here and not before the run, since `--accept` writes the
-    // sources the stamp is over.
+    // Over the snapshot the run took after any `--accept` it made, since
+    // that writes the sources the stamp is over.
     let mut reading = run.reading(
-        under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule),
+        under_rule(Reading::for_crate(INSTRUMENT, krate, snapshot)?, rule),
         &outcome,
         message,
     )?;
@@ -567,6 +568,9 @@ fn run_in(
     let oracles = Oracles::new(&manifest.pin, &variants);
     // One binary for the fences marked `process`, built at the first.
     let binary = Binary::of(root);
+    // The tree before any witness runs, taken again after each `--accept`
+    // that wrote a fence line: what each crate's reading is stamped with.
+    let mut snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
     let mut served = 0;
     for krate in &manifest.crates {
@@ -575,8 +579,8 @@ fn run_in(
         }
         // The reading of a crate no witness runs for: the harness's, or
         // one not yet created, which carries no stamp.
-        let mut unrun =
-            under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule).under(&manifest.pin);
+        let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
+            .under(&manifest.pin);
         if krate.name == crate::done::HARNESS {
             // The harness measures the engine and carries no witness of its
             // own; `done` asks it for none either (§4.5).
@@ -600,8 +604,9 @@ fn run_in(
             // pass over sources never seen, or never held to an oracle,
             // would say the crate was measured when it was not.
             Err(unread) => {
-                let mut failed = under_rule(Reading::for_crate(INSTRUMENT, krate, root)?, rule)
-                    .under(&manifest.pin);
+                let mut failed =
+                    under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
+                        .under(&manifest.pin);
                 failed.status = Status::Fail;
                 failed.message = format!("{}: {unread:#}", krate.name);
                 readings.push(failed);
@@ -625,8 +630,9 @@ fn run_in(
         {
             println!("witness: {n} of {} did not run; {why}", krate.name);
         }
-        if ask.accept {
+        if ask.accept && !tally.captured.is_empty() {
             capture(root, &tally.captured)?;
+            snapshot = Snapshot::disk(root)?;
         }
         for captured in &tally.captured {
             println!(
@@ -646,7 +652,7 @@ fn run_in(
                 tally.witnesses.judged.len()
             );
         }
-        let mut judged = reading(&tally, root, krate, rule)?.under(&manifest.pin);
+        let mut judged = reading(&tally, &snapshot, krate, rule)?.under(&manifest.pin);
         if let Some(under) = oracle.pin().oracle.read_under() {
             judged.message = format!("{}; {under}", judged.message);
         }
@@ -920,13 +926,15 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
 }
 
 /// Every crate that exists less those whose `witness` reading passes and
-/// was taken over the crate's key now ([`crate::key::of`], its tree and its
-/// dependency closure's, #1318) under the pin now, `done`'s fresh: what the merge
-/// check measures after pre-commit measured the staged crates (#1312).
+/// was taken over the crate's key now ([`Snapshot::key`], its tree and
+/// its dependency closure's, #1318) under the pin now, `done`'s fresh:
+/// what the merge check measures after pre-commit measured the staged
+/// crates (#1312).
 fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<String>> {
+    let snapshot = Snapshot::disk(root)?;
     let mut left = Vec::new();
     for krate in manifest.crates.iter().filter(|k| sources::exists(root, k)) {
-        let tree = crate::key::of(root, &krate.path(), crate::key::Content::Disk)?;
+        let tree = snapshot.key(&krate.path())?;
         let stands = store
             .read(INSTRUMENT, &krate.name)?
             .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin.digest()));

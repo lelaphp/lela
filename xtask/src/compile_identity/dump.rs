@@ -5,12 +5,10 @@
 //! (harness §4.3). The tally, the corpus and the reading are the lane's;
 //! this is the per-file judge it contributes.
 //!
-//! **Which compiler dumps.** Design §6.1: the lane compiles in this
-//! process, through `php_bundle`, and [`Compiler::Linked`] is that
-//! adapter; [`Compiler::Binary`] is the rung above it, a binary standing
-//! where the engine's will once it honours php's dump flags, one process
-//! per program under the same recipe. Both answer one [`Dumped`], so the
-//! verdict never learns which of the two printed it.
+//! **Which compiler dumps.** A binary, one process per program under the
+//! same recipe as php: the engine's own, which honours php's dump flags,
+//! or the pinned oracle standing in as the lane's control. The harness
+//! links no compiler of its own (harness §8, revision 84; #2166).
 //!
 //! **Why one program under one name.** php prints the name it was given
 //! into each block of the dump, so two programs under two names would
@@ -24,31 +22,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::{Corpus, Judged, Judgement, LINT, linked};
+use super::{Corpus, Judged, Judgement, LINT};
 use crate::divergence::Registry;
 use crate::oracle::{self, Invocation, Oracle, Program, Verdict as Compared};
 use crate::phpt::file::Phpt;
 use crate::scratch::Tree;
 
-/// What takes the engine's side of one dump.
-pub(super) enum Compiler<'a> {
-    /// The compiler linked into this process, reached through
-    /// `php_bundle` (design §6.1): what the lane stands on from day 1,
-    /// with no binary built.
-    Linked(php_bundle::test::Engine),
-    /// A binary of its own, one process per program under the pin's
-    /// recipe: the pinned oracle standing in as the lane's control, and
-    /// the engine's own binary once it honours php's dump flags.
-    Binary(&'a Path),
-}
-
-/// The two dumps of one run: the oracle and the registry, the compiler
+/// The two dumps of one run: the oracle and the registry, the binary
 /// whose dump is held to the oracle's, and the directory the programs are
 /// written in, which is taken away when the run ends.
 pub(super) struct Dumps<'a> {
     oracle: &'a Oracle<'a>,
     registry: &'a Registry,
-    compiler: Compiler<'a>,
+    compiler: &'a Path,
     dir: Programs,
     /// `-l`, the one flag before the program, held as the invocation takes
     /// it.
@@ -61,7 +47,7 @@ impl<'a> Dumps<'a> {
     pub(super) fn new(
         oracle: &'a Oracle<'a>,
         registry: &'a Registry,
-        compiler: Compiler<'a>,
+        compiler: &'a Path,
         regimes: &[&'a str],
     ) -> Result<Dumps<'a>> {
         Ok(Dumps {
@@ -85,11 +71,10 @@ impl<'a> Dumps<'a> {
         };
         let program = self.dir.write(file, &body)?;
         let expected = self.dump(&self.oracle.pin().oracle.path, &program)?;
-        let actual = self.engine_dump(&program, &body);
+        let actual = self.dump(self.compiler, &program);
         fs::remove_file(&program).ok();
         // Trouble on the engine's side is one file's and never the
-        // lane's, whichever compiler it was: a panic inside the linked
-        // one (design §8) as much as a binary that would not start. The
+        // lane's: a binary that would not start or died (design §8). The
         // rest of the corpus is still measured and this file is counted
         // against the reading.
         let actual = match actual {
@@ -100,18 +85,6 @@ impl<'a> Dumps<'a> {
             }
         };
         Ok(verdict(self.registry, &id, &name, &expected, &actual))
-    }
-
-    /// The engine's side of one dump: the linked compiler over the
-    /// program's own bytes, under the path php was given for them, or the
-    /// binary compiling the file php compiled.
-    fn engine_dump(&self, program: &Path, body: &[u8]) -> Result<Dumped> {
-        match &self.compiler {
-            Compiler::Linked(engine) => {
-                linked::dump(engine, &self.oracle.pin().recipe.normalise, body, program)
-            }
-            Compiler::Binary(binary) => self.dump(binary, program),
-        }
     }
 
     /// What one binary prints compiling the program: the pin's recipe, its

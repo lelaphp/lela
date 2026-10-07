@@ -931,8 +931,7 @@ fn phpt_takes_the_reading_at_the_track_tip_and_never_a_retired_branchs() {
             phpt("ext/spl", &branch, "2026-09-24T17:36:00Z", 1),
         ])
         .unwrap();
-    let retired = std::fs::read(worktree.root().join("log.jsonl")).unwrap();
-    assert_eq!(track.append(&retired).unwrap(), 2);
+    assert_eq!(track.land(&worktree).unwrap(), 2);
 
     let (ok, json, err) = status(&root, &["--section", "phpt", "--format", "json"]);
     assert!(ok, "{err}");
@@ -1964,8 +1963,8 @@ fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render()
     std::fs::write(root.join("AGENTS.md"), "# The map\n").unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/store/torn.jsonl");
     let store = Store::of_workspace(&root);
-    std::fs::create_dir_all(store.root()).unwrap();
-    std::fs::copy(&fixture, store.root().join("log.jsonl")).unwrap();
+    std::fs::create_dir_all(store.root().join("log")).unwrap();
+    std::fs::copy(&fixture, store.root().join("log/permit.jsonl")).unwrap();
 
     let (ok, md, err) = status(&root, &["--section", "permits"]);
     assert!(ok, "{err}");
@@ -1977,7 +1976,7 @@ fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render()
     let row = md.lines().find(|l| l.contains("lanes.nightly")).unwrap();
     assert!(row.contains("| 1 |"), "and the one after the tear: {row}");
     assert!(
-        md.contains("log.jsonl: 2 lines unreadable at 2, 3."),
+        md.contains("log: 2 lines unreadable at 2, 3."),
         "the torn lines are named: {md}"
     );
 
@@ -1992,10 +1991,7 @@ fn a_torn_log_line_is_named_and_the_rest_of_the_section_and_the_session_render()
     assert!(ok, "{err}");
     assert!(text.starts_with("# The map\n"), "{text}");
     assert!(text.contains("## permits this session"), "{text}");
-    assert!(
-        text.contains("log.jsonl: 2 lines unreadable at 2, 3."),
-        "{text}"
-    );
+    assert!(text.contains("log: 2 lines unreadable at 2, 3."), "{text}");
 }
 
 /// A reading file a crash left empty, or cut short, costs its own row and

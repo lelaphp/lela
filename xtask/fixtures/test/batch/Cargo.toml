@@ -1,0 +1,11 @@
+# The fixture workspace of #2165: one crate clean, one with a lint, one
+# built on it, one that does not compile, one built on that, and a
+# proc-macro crate.
+[workspace]
+resolver = "3"
+members = ["crates/php_heap", "crates/php_macros", "crates/php_unit", "crates/php_syntax", "crates/php_compile", "crates/php_engine"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"

@@ -108,7 +108,7 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
 
 /// The readings that stand for a commit (#1143): of one instrument, each
 /// that passes and was taken over exactly what the index holds of its
-/// scope and of its dependency closure ([`key::of`], #1318), by scope, so pre-commit measures what none covers and writes no
+/// scope and of its dependency closure ([`key::Snapshot::key`], #1318), by scope, so pre-commit measures what none covers and writes no
 /// reading for the rest. The one asked is the latest reading over that
 /// content, [`Store::latest_over`]'s: the scope's file, or a line of the
 /// log, which is where a retired worktree's pass is when its branch is
@@ -196,7 +196,7 @@ impl Standing {
     /// [`Standing::for_commit`] over scopes each named with the path its
     /// reading is stamped over, for an instrument whose scope is no name
     /// [`Manifest::scope_path`] maps, such as crosscheck's `ext/<name>/ri`
-    /// (#1159): the key is still [`key::of`] over that path.
+    /// (#1159): the key is still [`key::Snapshot::key`] over that path.
     pub(crate) fn for_commit_over(
         root: &Path,
         manifest: &Manifest,
@@ -228,10 +228,10 @@ impl Standing {
                 Reach::Harness => harness = harness.or(Some(change.path)),
             }
         }
-        let index = git::Index::read(root)?;
+        let index = key::Snapshot::index(root, &git::Index::read(root)?)?;
         let mut trees = BTreeMap::new();
         for (scope, path) in scopes {
-            let key = key::of(root, path, key::Content::Index(&index))?;
+            let key = index.key(path)?;
             trees.insert(scope.clone(), key);
         }
         let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
@@ -409,7 +409,9 @@ mod tests {
     /// A passing `clippy` reading over the crate as it is on disk now.
     fn pass(tree: &Tree, manifest: &Manifest, store: &Store) {
         let krate = manifest.crate_named("xtask").unwrap();
-        let mut reading = Reading::for_crate("clippy", krate, tree).unwrap();
+        let mut reading =
+            Reading::for_crate("clippy", krate, &crate::key::Snapshot::disk(tree).unwrap())
+                .unwrap();
         reading.status = Status::Pass;
         store.record(&[reading]).unwrap();
     }
@@ -475,7 +477,9 @@ mod tests {
         committing(tree, &["add", "--", "crates"]);
         committing(tree, &["commit", "-q", "-m", "heap"]);
         let krate = manifest.crate_named("php_heap").unwrap();
-        let mut reading = Reading::for_crate("clippy", krate, tree).unwrap();
+        let mut reading =
+            Reading::for_crate("clippy", krate, &crate::key::Snapshot::disk(tree).unwrap())
+                .unwrap();
         reading.status = Status::Pass;
         store.record(&[reading]).unwrap();
     }
@@ -545,7 +549,9 @@ mod tests {
         fs::write(beside.join("xtask/src/lib.rs"), "b\n").unwrap();
         committing(&beside, &["commit", "-q", "-am", "the branch's change"]);
         let krate = manifest.crate_named("xtask").unwrap();
-        let mut reading = Reading::for_crate("test", krate, &beside).unwrap();
+        let mut reading =
+            Reading::for_crate("test", krate, &crate::key::Snapshot::disk(&beside).unwrap())
+                .unwrap();
         reading.status = Status::Pass;
         Store::of_workspace(&beside).record(&[reading]).unwrap();
 
@@ -589,7 +595,9 @@ mod tests {
             .to_vec();
         for name in &scopes {
             let krate = manifest.crate_named(name).unwrap();
-            let mut reading = Reading::for_crate("clippy", krate, &tree).unwrap();
+            let mut reading =
+                Reading::for_crate("clippy", krate, &crate::key::Snapshot::disk(&tree).unwrap())
+                    .unwrap();
             reading.status = Status::Pass;
             store.record(&[reading]).unwrap();
         }

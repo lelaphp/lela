@@ -21,14 +21,12 @@
 //! `-e`, is the second regime the per-commit corpus is held under
 //! (#1822), and its reading keeps a scope of its own,
 //! `php-src@regime=extended-info`, beside the plain one. The engine's side is the ladder of
-//! [`oracle::Runner`]: a binary where one is named or built, and below it
-//! [`Runner::Linked`], the compiler linked into this process and reached
-//! through `php_bundle` as `witness` reaches the engine (design §6.1,
-//! §4.2). So the lane needs no engine binary and no crate on the `xtask`
-//! edge, and it reads red rather than absent from design §11's day 1. The
-//! pinned oracle named as the binary is the lane's control, which must be
-//! identical on every file, and whose reading is a skip and not a reading
-//! of the engine.
+//! [`oracle::Runner`]: the engine's binary where one is named or built,
+//! which honours php's dump flags; the harness links no compiler of its
+//! own (harness §8, revision 84; #2166), so where none is built the lane
+//! dumps nothing and its reading says why. The pinned oracle named as the
+//! binary is the lane's control, which must be identical on every file,
+//! and whose reading is a skip and not a reading of the engine.
 //!
 //! **What a corpus is.** A directory of files that are PHP: a `.phpt` of
 //! the pinned tree, whose program is its `--FILE--` section, and a `.php`
@@ -43,17 +41,17 @@
 //! [`dump`] and the words of the corpus's message.
 
 mod dump;
-mod linked;
 #[cfg(test)]
 mod tests;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::divergence::Registry;
+use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{Linked, Oracle, Runner};
+use crate::oracle::{Oracle, Runner};
 use crate::phpt::Scope;
 use crate::reading::{Reading, listed};
 use crate::tally::{self, Judgement as _, Outcome};
@@ -235,7 +233,7 @@ pub(crate) type Tally = tally::Tally<Judgement>;
 /// no denominator says nothing about the compiler's distance.
 pub(crate) fn reading(
     tally: &Tally,
-    root: &Path,
+    snapshot: &Snapshot,
     corpus: &Corpus,
     runner: &Runner,
     regime: Option<&str>,
@@ -303,7 +301,7 @@ pub(crate) fn reading(
     // dump under measurement is a function of is the whole engine, so the
     // reading is stamped over the workspace.
     let mut reading = tally.reading(
-        Reading::stamped_over(INSTRUMENT, &scope, root, Path::new("."))?,
+        Reading::stamped_over(INSTRUMENT, &scope, snapshot, Path::new("."))?,
         &outcome,
         message,
     )?;
@@ -372,17 +370,16 @@ pub fn run(
             .with_context(|| format!("{INSTRUMENT}: `--regime {name}`"))?;
     }
     let regimes = ask.regimes();
-    // The rung below the binary is the compiler linked into this process,
-    // which the lane needs no binary for (design §6.1). It is built from
-    // the tree the reading is stamped with, so a binary the tree has moved
-    // past falls to it here rather than to a skip, and the lane says which
-    // of the two it took (#475).
-    let found = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
-    if let Runner::Absent(why) | Runner::Stale(why) = &found {
+    // The tree before anything is dumped: what the reading is stamped
+    // with, so an edit while the corpus runs stales it.
+    let snapshot = Snapshot::disk(root)?;
+    // The engine's binary, built from the tree the reading is stamped
+    // with; one the tree has moved past, or none, dumps nothing, and the
+    // lane says why (#475, #2166).
+    let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
+    if let Runner::Absent(why) | Runner::Stale(why) = &runner {
         println!("{INSTRUMENT}: {why}");
-        println!("{INSTRUMENT}: the linked compiler dumps each file");
     }
-    let runner = found.or_linked();
     // One oracle for the run: the digest is asserted before the first file
     // and never per file (harness §4.3). A binary that is not at the pin's
     // path refuses nothing: nothing is dumped, every file is counted as
@@ -422,7 +419,7 @@ pub fn run(
     )?;
     Ok(vec![reading(
         &tally,
-        root,
+        &snapshot,
         &corpus,
         &runner,
         ask.regime.as_deref(),
@@ -442,52 +439,22 @@ pub(crate) fn judge(
     corpus: &Corpus,
 ) -> Result<Tally> {
     let files = corpus.files()?;
-    let (Some(compiler), None) = (compiler(oracle, runner, regimes)?, oracle_absent) else {
+    let (Some(compiler), None) = (compiler(runner), oracle_absent) else {
         return Ok(Tally::found(files.len()));
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;
     Tally::judge(&files, |file| dumps.judge(corpus, file))
 }
 
-/// Which compiler takes the engine's side of the dump, and none where
-/// the runner found nothing to measure. The linked one is built once for
-/// the run, under the recipe's ini and each regime's after it, `dump`'s
-/// first, so one recipe stands behind both sides; a regime's `-e` builds
-/// it with extended info as a host's `-e` does, and any other argument
-/// refuses it, since the linked compiler has no command line to hand
-/// them and a binary's side would be handed them (#1780, #1822).
-fn compiler<'a>(
-    oracle: &Oracle<'_>,
-    runner: &'a Runner,
-    regimes: &[&str],
-) -> Result<Option<dump::Compiler<'a>>> {
-    Ok(match runner {
-        Runner::Engine(binary) | Runner::Control(binary) => Some(dump::Compiler::Binary(binary)),
-        Runner::Linked => {
-            let pin = oracle.pin();
-            let mut linked = Linked::default();
-            for name in regimes {
-                let Some(regime) = pin.regime.get(*name) else {
-                    continue;
-                };
-                let taken = Linked::of([regime]).map_err(|why| {
-                    anyhow!(
-                        "{INSTRUMENT}: `[regime.{name}]` {why:#}; the linked compiler cannot dump under it, and an engine binary named with `--engine` can"
-                    )
-                })?;
-                linked.ini.extend(taken.ini);
-                linked.extended_info |= taken.extended_info;
-            }
-            let ini: Vec<String> = pin.recipe.ini.iter().chain(&linked.ini).cloned().collect();
-            Some(dump::Compiler::Linked(linked::engine(
-                &ini,
-                linked.extended_info,
-            )))
-        }
-        // Neither reaches this lane: `or_linked` takes both rungs where
-        // nothing ran down to the linked compiler before the run begins.
-        Runner::Stale(_) | Runner::Absent(_) => None,
-    })
+/// The binary that takes the engine's side of the dump, and none where
+/// the runner found nothing to measure. A regime's arguments go to it on
+/// its command line as they go to php's, so every regime is one it can
+/// dump under.
+fn compiler(runner: &Runner) -> Option<&Path> {
+    match runner {
+        Runner::Engine(binary) | Runner::Control(binary) => Some(binary),
+        Runner::Linked | Runner::Stale(_) | Runner::Absent(_) => None,
+    }
 }
 
 /// The corpus one file on request is named inside: the pinned tree's,
@@ -522,8 +489,8 @@ fn one(
     if let Some(why) = oracle_absent {
         bail!("{INSTRUMENT}: {why}");
     }
-    let Some(compiler) = compiler(oracle, runner, regimes)? else {
-        bail!("{INSTRUMENT}: there is nothing to dump the file with");
+    let Some(compiler) = compiler(runner) else {
+        bail!("{INSTRUMENT}: there is nothing to dump the file with; build the engine's binary");
     };
     let dumps = dump::Dumps::new(oracle, registry, compiler, regimes)?;
     let judged = dumps.judge(corpus, file)?;

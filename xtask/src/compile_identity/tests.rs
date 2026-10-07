@@ -220,13 +220,29 @@ fn every_reading_states_the_denominator() {
     let root = crate::built_root();
     let (_tree, corpus) = corpus("reading", &[]);
     let red = tally(3, &[Judgement::Fail, Judgement::Fail, Judgement::Fail]);
-    let red = reading(&red, &root, &corpus, &engine(), None, None).unwrap();
+    let red = reading(
+        &red,
+        &crate::key::Snapshot::disk(&root).unwrap(),
+        &corpus,
+        &engine(),
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(red.instrument, INSTRUMENT);
     assert_eq!(red.status, Status::Fail);
     assert!(red.message.contains("3 of 3 files differ"), "{red:#?}");
 
     let green = tally(2, &[Judgement::Pass, Judgement::Pass]);
-    let green = reading(&green, &root, &corpus, &engine(), None, None).unwrap();
+    let green = reading(
+        &green,
+        &crate::key::Snapshot::disk(&root).unwrap(),
+        &corpus,
+        &engine(),
+        None,
+        None,
+    )
+    .unwrap();
     assert_eq!(green.status, Status::Pass);
     assert!(green.message.contains("2 of 2"), "{green:#?}");
 
@@ -234,7 +250,7 @@ fn every_reading_states_the_denominator() {
     // a skip that says why, never a pass over a corpus nothing measured.
     let none = reading(
         &Tally::found(6288),
-        &root,
+        &crate::key::Snapshot::disk(&root).unwrap(),
         &corpus,
         &engine(),
         None,
@@ -257,7 +273,7 @@ fn the_control_is_scoped_apart_from_the_engines_reading() {
     let control = Runner::Control(PathBuf::from("/pinned/php"));
     let control = reading(
         &tally(1, &[Judgement::Pass]),
-        &root,
+        &crate::key::Snapshot::disk(&root).unwrap(),
         &corpus,
         &control,
         None,
@@ -270,7 +286,7 @@ fn the_control_is_scoped_apart_from_the_engines_reading() {
     let under = |runner: &Runner| {
         reading(
             &tally(1, &[Judgement::Pass]),
-            &root,
+            &crate::key::Snapshot::disk(&root).unwrap(),
             &corpus,
             runner,
             Some("extended-info"),

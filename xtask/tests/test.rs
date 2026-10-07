@@ -201,13 +201,28 @@ fn done_is_red_for_a_crate_with_a_failing_test_and_green_once_it_passes() {
     let manifest = Manifest::load(&root).unwrap();
     let registry = Registry::load(&root).unwrap();
     let store = Store::of_workspace(&root);
-    let judge = || done::judge(&root, &manifest, &registry, &store, Some("HEAD")).unwrap();
+    let judge = || {
+        done::judge(
+            &xtask::key::Snapshot::disk(&root).unwrap(),
+            &manifest,
+            &registry,
+            &store,
+            Some("HEAD"),
+        )
+        .unwrap()
+    };
     let fresh_rest = || {
         for instrument in done::FRESH {
             if instrument == "test" || instrument == "phpt" || instrument == "port-map" {
                 continue;
             }
-            let mut reading = Reading::for_scope(instrument, "php_heap", &manifest, &root).unwrap();
+            let mut reading = Reading::for_scope(
+                instrument,
+                "php_heap",
+                &manifest,
+                &xtask::key::Snapshot::disk(&root).unwrap(),
+            )
+            .unwrap();
             if xtask::reading::UNDER_RECIPE.contains(&instrument) {
                 reading = reading.under(&manifest.pin);
             }

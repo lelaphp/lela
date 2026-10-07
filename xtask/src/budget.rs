@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 
 use crate::generated;
 use crate::git;
+use crate::key::Snapshot;
 use crate::layout;
 use crate::lines;
 use crate::lock::CargoLock;
@@ -80,6 +81,7 @@ pub(crate) fn measure(
 /// each counts toward the workspace's total with the numbers its standing
 /// reading carries, and writes no reading of its own.
 fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Reading>> {
+    let snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
     let mut total = Count::default();
     for krate in &manifest.crates {
@@ -92,14 +94,14 @@ fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Rea
             total.bindings += number(numbers::BINDINGS);
             continue;
         }
-        let (reading, count) = crate_reading(root, krate)?;
+        let (reading, count) = crate_reading(&snapshot, krate)?;
         total.lines += count.lines;
         total.bindings += count.bindings;
         readings.push(reading);
     }
-    readings.push(workspace_reading(root, manifest, total)?);
-    readings.push(scripts_reading(root, manifest)?);
-    readings.extend(generated_readings(root, manifest)?);
+    readings.push(workspace_reading(&snapshot, manifest, total)?);
+    readings.push(scripts_reading(&snapshot, manifest)?);
+    readings.extend(generated_readings(&snapshot, manifest)?);
     Ok(readings)
 }
 
@@ -115,8 +117,9 @@ const SCRIPTS_LINE_TEXT: &str =
 /// since a row that says one thing while the count does another is worse
 /// than no row. Without the row, which a person writes, the count is
 /// measured and held to nothing: a skip that says the number.
-fn scripts_reading(root: &Path, manifest: &Manifest) -> Result<Reading> {
-    let mut reading = Reading::for_scope(INSTRUMENT, manifest::SCRIPTS, manifest, root)?;
+fn scripts_reading(snapshot: &Snapshot, manifest: &Manifest) -> Result<Reading> {
+    let root = snapshot.root();
+    let mut reading = Reading::for_scope(INSTRUMENT, manifest::SCRIPTS, manifest, snapshot)?;
     let row = manifest.budget.scripts.as_ref();
     let generators: &[String] = row.map_or(&[], |s| s.generators.as_slice());
     let mut counted = Vec::new();
@@ -187,8 +190,9 @@ fn scripts_reading(root: &Path, manifest: &Manifest) -> Result<Reading> {
 
 /// One crate against its ceiling, and what it counted. A crate not yet
 /// created is measured by nothing and its reading carries no stamp.
-fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, root)?;
+fn crate_reading(snapshot: &Snapshot, krate: &Crate) -> Result<(Reading, Count)> {
+    let root = snapshot.root();
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     reading.count(numbers::CEILING, krate.budget)?;
     if !sources::exists(root, krate) {
         reading.message = format!("{}: {}", krate.name, sources::NOT_YET_CREATED);
@@ -217,8 +221,9 @@ fn crate_reading(root: &Path, krate: &Crate) -> Result<(Reading, Count)> {
 
 /// The workspace against `[budget]`: the pooled counts, every crate
 /// declared, no committed generated code outside the exceptions.
-fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<Reading> {
-    let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, root)?;
+fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> Result<Reading> {
+    let root = snapshot.root();
+    let mut reading = Reading::for_scope(INSTRUMENT, WORKSPACE, manifest, snapshot)?;
     let budget: &Budget = &manifest.budget;
     let mut failures = Vec::new();
     let mut ceiling = |name: &str, value: u64, limit: u64, what: &str| -> Result<()> {
@@ -295,11 +300,12 @@ fn workspace_reading(root: &Path, manifest: &Manifest, total: Count) -> Result<R
 /// Each generated, committed file against its rendering
 /// (`generated.committed`). The reading's ADR is the source rule's, which
 /// decided the list the file carries, beside the generated rule's own.
-fn generated_readings(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
+fn generated_readings(snapshot: &Snapshot, manifest: &Manifest) -> Result<Vec<Reading>> {
+    let root = snapshot.root();
     let mut readings = Vec::new();
     for rule in &manifest.rules {
         for (file, from) in rule.predicate.generated.iter().flatten() {
-            let mut reading = Reading::for_scope(INSTRUMENT, file, manifest, root)?;
+            let mut reading = Reading::for_scope(INSTRUMENT, file, manifest, snapshot)?;
             reading.rule.clone_from(&rule.id);
             let source = manifest.rule(from);
             let adrs: Vec<&str> = source

@@ -625,9 +625,9 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
 
 /// A fence marked `process` is served by the `php` binary in a process
 /// of its own and covered by what that process entered, a forked child's
-/// request beside its parent's; the same snippet unmarked is served by the
-/// linked engine, which carries no pcntl, so it fails on the undefined
-/// function and forks nothing here (harness §8, revision 61; #1062).
+/// request beside its parent's; the same snippet unmarked is served by
+/// `php-linked` and forks that, never the harness (harness §8, revisions
+/// 61 and 84; #1062, #2166).
 #[test]
 fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     if oracle().is_none() {
@@ -657,10 +657,13 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     let (judgement, _) = only(&judge_text(&marked, &registry("")));
     assert_eq!(judgement, Judgement::Pass);
 
+    // Unmarked, the fence forks `php-linked`, which carries pcntl as the
+    // CLI does and serves one request at a time: its child ends with its
+    // own request and never reads the next, so the fence passes there too,
+    // and nothing forks the harness (harness §8, revision 84; #2166).
     let unmarked = marked.replace("expect process", "expect");
     let (judgement, note) = only(&judge_text(&unmarked, &registry("")));
-    assert_eq!(judgement, Judgement::Fail, "{note}");
-    assert!(note.contains("pcntl_fork"), "{note}");
+    assert_eq!(judgement, Judgement::Pass, "{note}");
 }
 
 /// The set rustc prints for `--print cfg` over `triple`, which it prints
@@ -752,7 +755,12 @@ fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
     );
 
     let krate = manifest.crate_named("xtask").unwrap();
-    let mut reading = Reading::for_crate(super::INSTRUMENT, krate, &dir).unwrap();
+    let mut reading = Reading::for_crate(
+        super::INSTRUMENT,
+        krate,
+        &crate::key::Snapshot::disk(&dir).unwrap(),
+    )
+    .unwrap();
     reading.status = Status::Pass;
     store.record(&[reading.clone()]).unwrap();
     assert_eq!(
@@ -790,7 +798,12 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
     let mut manifest = manifest();
     let store = Store::at(dir.join("target/harness"));
     let krate = manifest.crate_named("xtask").unwrap();
-    let mut reading = Reading::for_crate(super::INSTRUMENT, krate, &dir).unwrap();
+    let mut reading = Reading::for_crate(
+        super::INSTRUMENT,
+        krate,
+        &crate::key::Snapshot::disk(&dir).unwrap(),
+    )
+    .unwrap();
     reading.status = Status::Pass;
     let reading = reading.under(&manifest.pin);
     store.record(std::slice::from_ref(&reading)).unwrap();
@@ -811,7 +824,10 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
     let entry = fs::read_to_string(workspace.join("fixtures/witness/recipe-env/env.toml")).unwrap();
     let changed = tracked.replacen("[recipe.env]\n", &format!("[recipe.env]\n{entry}"), 1);
     assert_ne!(changed, tracked, "the pin has a [recipe.env]");
-    let tree = crate::key::of(&dir, &krate.path(), crate::key::Content::Disk).unwrap();
+    let tree = crate::key::Snapshot::disk(&dir)
+        .unwrap()
+        .key(&krate.path())
+        .unwrap();
     manifest.pin = Pin::parse(&changed).unwrap();
     assert!(reading.fresh_for(&tree, reading.recipe.as_deref().unwrap()));
     assert!(
@@ -866,7 +882,13 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
         unserved.contains("lib.rs") && unserved.contains("the php-fpm binary did not serve it"),
         "{unserved}"
     );
-    let reading = super::reading(&tally, &root, krate, rule).unwrap();
+    let reading = super::reading(
+        &tally,
+        &crate::key::Snapshot::disk(&root).unwrap(),
+        krate,
+        rule,
+    )
+    .unwrap();
     assert!(
         reading.message.contains("1 fence the engine did not serve")
             && reading
@@ -924,7 +946,13 @@ fn a_fence_naming_a_locale_the_host_lacks_is_a_counted_skip() {
         .iter()
         .find(|krate| krate.name == "ext/pcre")
         .unwrap();
-    let reading = super::reading(&tally, &root, krate, super::coverage_rule(&manifest)).unwrap();
+    let reading = super::reading(
+        &tally,
+        &crate::key::Snapshot::disk(&root).unwrap(),
+        krate,
+        super::coverage_rule(&manifest),
+    )
+    .unwrap();
     assert_eq!(reading.status, crate::reading::Status::Skip, "{reading:#?}");
     assert_eq!(reading.numbers["skipped"].to_string(), "1", "{reading:#?}");
     assert_eq!(reading.numbers["failed"].to_string(), "0", "{reading:#?}");
@@ -967,7 +995,12 @@ fn unmeasured_measures_a_crate_again_once_a_crate_it_is_built_from_changes() {
     let pass_all = || {
         for name in crates {
             let krate = manifest.crate_named(name).unwrap();
-            let mut reading = Reading::for_crate(super::INSTRUMENT, krate, &dir).unwrap();
+            let mut reading = Reading::for_crate(
+                super::INSTRUMENT,
+                krate,
+                &crate::key::Snapshot::disk(&dir).unwrap(),
+            )
+            .unwrap();
             reading.status = Status::Pass;
             store.record(&[reading.under(&manifest.pin)]).unwrap();
         }

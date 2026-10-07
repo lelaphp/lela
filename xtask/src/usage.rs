@@ -30,6 +30,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::key::Snapshot;
 use crate::reading::{Number, Reading, Status, Store};
 use crate::ticket::{self, STAMPED_OVER};
 use crate::track;
@@ -106,7 +107,12 @@ pub fn scope_of(root: &Path, session: &str) -> Result<String> {
 /// measured, never judged.
 pub fn reading(root: &Path, usage: &SessionUsage, session: &str, turn: u64) -> Result<Reading> {
     let scope = scope_of(root, session)?;
-    let mut reading = Reading::stamped_over(INSTRUMENT, &scope, root, Path::new(STAMPED_OVER))?;
+    let mut reading = Reading::stamped_over(
+        INSTRUMENT,
+        &scope,
+        &Snapshot::disk(root)?,
+        Path::new(STAMPED_OVER),
+    )?;
     reading.status = Status::Pass;
     session.clone_into(&mut reading.session);
     reading.count(TURN, turn)?;
@@ -187,20 +193,15 @@ impl Spent {
         }
     }
 
-    /// The last usage reading under `scope` in the first of `stores` whose
-    /// log holds one, oldest store first: the worktree's own where one
-    /// still stands, then the main checkout's, which a retire appended
-    /// into. None where no store has one.
+    /// The last usage reading under `scope` in the first of `stores` that
+    /// holds one, oldest store first: the worktree's own where one still
+    /// stands, then the main checkout's, which a retire landed in. Read
+    /// off the scope's file and its index ([`Store::last_of`]), and never
+    /// the log (#2164). None where no store has one.
     pub fn last(stores: &[&Store], scope: &str) -> Result<Option<Spent>> {
         for store in stores {
-            let log = store.log()?;
-            let last = log
-                .readings
-                .iter()
-                .rev()
-                .find(|r| r.instrument == INSTRUMENT && r.scope == scope);
-            if let Some(reading) = last {
-                return Ok(Some(Spent::of(reading)));
+            if let Some(reading) = store.last_of(INSTRUMENT, scope)? {
+                return Ok(Some(Spent::of(&reading)));
             }
         }
         Ok(None)

@@ -1,0 +1,10 @@
+[package]
+name = "php_engine"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+php_compile = { path = "../php_compile" }
