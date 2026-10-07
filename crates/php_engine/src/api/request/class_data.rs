@@ -118,20 +118,11 @@ impl Request {
         {
             return layout;
         }
-        let mut at = Some(class);
-        let mut size = 0;
-        let mut declared_by = None;
-        for _ in 0..64 {
-            let Some(decl) = at.and_then(|at| self.class_decl(at)) else {
-                break;
-            };
-            if decl.object_size != 0 {
-                size = decl.object_size as usize;
-                declared_by = at;
-                break;
-            }
-            at = at.and_then(|at| self.class_parent(at));
-        }
+        let (size, declared_by) = self
+            .lineage(class)
+            .map_while(|at| self.class_decl(at).map(|decl| (at, decl.object_size)))
+            .find(|&(_, size)| size != 0)
+            .map_or((0, None), |(at, size)| (size as usize, Some(at)));
         let guards = if self.uses_guards(class) { 16 } else { 0 };
         let layout = Layout {
             custom: size.saturating_sub(ZEND_OBJECT) + guards,
@@ -379,18 +370,14 @@ impl Request {
             .placed_properties(class)
             .iter()
             .all(|(_, property)| property.default.as_ref().is_none_or(written));
-        let mut statics = true;
-        let mut at = Some(class);
-        for _ in 0..64 {
-            let Some(here) = at else { break };
-            statics &= self.class_decl(here).is_none_or(|decl| {
+        let statics = self.lineage(class).all(|here| {
+            self.class_decl(here).is_none_or(|decl| {
                 decl.properties
                     .iter()
                     .filter(|property| !property.is_instance)
                     .all(|property| property.default.as_ref().is_none_or(written))
-            });
-            at = self.class_parent(here);
-        }
+            })
+        });
         constants && defaults && statics
     }
 

@@ -874,7 +874,7 @@ pub struct MethodDecl {
 /// native's is the stub's `@virtual`, a property its class's handlers
 /// serve with no hook, as `DOMNode::$nodeName` is. The link clears it
 /// where a declaration the property overrides is backed
-/// ([`crate::link::resolve_property`]), and Reflection renders it.
+/// (`php_link::resolve_property`), and Reflection renders it.
 ///
 /// ```php
 /// $p = new ReflectionProperty('DOMNode', 'nodeName');

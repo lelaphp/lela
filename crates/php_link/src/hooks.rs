@@ -13,8 +13,8 @@ use super::{
     Check, Cls, Held, Linked, Linker, Refusal, Refused, Scope, Site, Status, at_class, resolved,
     text,
 };
-use crate::decl::{ClassDecl, HookKind, MethodDecl, PropertyDecl, Type, Visibility};
-use crate::type_to_string;
+use php_unit::decl::{ClassDecl, HookKind, MethodDecl, PropertyDecl, Type, Visibility};
+use php_unit::type_to_string;
 
 /// One hook a linked class holds for a property: the class whose
 /// declaration wrote it, which is its scope (`zend_duplicate_function`

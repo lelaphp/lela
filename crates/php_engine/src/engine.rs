@@ -24,11 +24,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
+use php_link::LinkedClass;
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
     PropertyDecl,
 };
-use php_unit::link::LinkedClass;
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
 use crate::api::abi::{
@@ -1011,14 +1011,14 @@ fn native_records(
                 let lookup = |name: &[u8]| {
                     let class = *keys.get(&*lowered(name))?;
                     let at = usize::try_from(class.0).ok()?;
-                    Some(php_unit::link::Held {
+                    Some(php_link::Held {
                         decl: classes.get(at)?,
                         bodies: None,
                         linked: true,
                         record: records.get(at)?.as_ref().map(|record| (class, record)),
                     })
                 };
-                php_unit::link::linked_class(decl, 0, &lookup, &|class| {
+                php_link::linked_class(decl, 0, &lookup, &|class| {
                     classes.get(usize::try_from(class.0).ok()?)
                 })
             };
@@ -1033,7 +1033,7 @@ fn native_records(
         .zip(classes)
         .map(|(record, decl)| {
             record
-                .or_else(|| php_unit::link::linked_class(decl, 0, &|_| None, &|_| None))
+                .or_else(|| php_link::linked_class(decl, 0, &|_| None, &|_| None))
                 .unwrap_or_default()
         })
         .collect()

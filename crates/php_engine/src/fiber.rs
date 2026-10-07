@@ -1261,27 +1261,8 @@ fn observed(req: &Request, fiber: Option<PhpObject>, status: FiberStatus) -> Obs
 /// `gc_destructor_fiber`, the collector's fiber's function
 /// ([`crate::engine::MethodAt::Unlisted`]).
 pub(crate) fn unlisted_functions() -> Vec<(php_unit::decl::MethodDecl, crate::api::abi::Entry)> {
-    let function = php_unit::decl::FunctionDecl {
-        name: php_unit::decl::Name(b"gc_destructor_fiber".as_slice().into()),
-        parameters: Vec::new(),
-        return_type: None,
-        returns_by_ref: false,
-        is_generator: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-        file: php_unit::decl::Name(Box::new([])),
-        line: 0,
-        end_line: 0,
-        frameless: Vec::new(),
-    };
-    let method = php_unit::decl::MethodDecl {
-        function,
-        visibility: php_unit::decl::Visibility::Public,
-        is_instance: false,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    };
+    let function = crate::api::__private::native_function(b"gc_destructor_fiber");
+    let method = crate::trampoline::public_method(function, false);
     vec![(method, gc_destructor_fiber)]
 }
 

@@ -1,0 +1,18 @@
+# php_link: the linker and the linked class record (design §6.2, ADR-0012),
+# between the unit format it reads and the compiler and the engine that call it.
+[package]
+name = "php_link"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The linker: zend_inheritance.c's checks over the unit's declarations, and the linked class record"
+
+[lints]
+workspace = true
+
+[dependencies]
+php_heap = { path = "../php_heap" }
+php_unit = { path = "../php_unit" }
+hashbrown.workspace = true

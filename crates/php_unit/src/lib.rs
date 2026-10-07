@@ -2,8 +2,8 @@
 //! arrays with their tables and safepoints, the constant-expression tree,
 //! and the opcode enum generated from `ops.toml` with its effects and the
 //! `safepoint` column. Types and their invariants only; the compiler and
-//! the native macros produce these values and the engine's linker consumes
-//! them. `unit.lock` is this crate's public surface.
+//! the native macros produce these values and the linker (`php_link`,
+//! ADR-0012) consumes them. `unit.lock` is this crate's public surface.
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -19,7 +19,6 @@ pub mod decl;
 mod dump;
 mod enum_methods;
 mod frameless;
-pub mod link;
 mod op;
 mod types;
 mod unit;

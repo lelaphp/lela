@@ -748,6 +748,7 @@ name = "php_compile"
 version = "0.0.0"
 dependencies = [
  "php_heap",
+ "php_link",
  "php_syntax",
  "php_unit",
 ]
@@ -758,6 +759,7 @@ version = "0.0.0"
 dependencies = [
  "php_compile",
  "php_heap",
+ "php_link",
  "php_macros",
  "php_process",
  "php_unit",
@@ -1327,6 +1329,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "php_link"
+version = "0.0.0"
+dependencies = [
+ "hashbrown",
+ "php_heap",
+ "php_unit",
+]
+
+[[package]]
 name = "php_macros"
 version = "0.0.0"
 dependencies = [
@@ -1414,7 +1425,6 @@ dependencies = [
 name = "php_unit"
 version = "0.0.0"
 dependencies = [
- "hashbrown",
  "php_heap",
  "toml",
 ]
