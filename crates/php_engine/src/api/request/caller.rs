@@ -160,8 +160,12 @@ impl Request {
     /// table where it has one, else the CV of that name, else, with
     /// `force`, the table `zend_rebuild_symbol_table` builds for it; what
     /// stood there released, which php's CV arm leaves to its callers,
-    /// whose variable is undefined. `false`, and the value given up,
-    /// where none of them takes it.
+    /// whose variable is undefined. The release is in place, before the
+    /// write ([`Overwrite::InPlace`]): `zend_hash_update` and
+    /// `zend_hash_update_ind` release so, and so does the CV arm of
+    /// `zend_set_local_var_str`, `$http_response_header`'s, where
+    /// `zend_set_local_var`'s writes without a release. `false`, and the
+    /// value given up, where none of them takes it.
     pub(super) fn set_local_var_in(
         &mut self,
         frame: FrameRef,

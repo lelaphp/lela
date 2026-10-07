@@ -337,13 +337,32 @@ impl Request {
             self.table_bytes(table, true, false);
             return;
         };
-        let Symbol::Value(held) = entries[at].1 else {
-            let old = std::mem::replace(&mut entries[at].1, Symbol::Value(value));
-            self.release_symbol(old);
-            return;
+        let held = match entries[at].1 {
+            Symbol::Value(held) => held,
+            // The bucket's own place, which a fetch by name holds: the
+            // write goes there, as php's goes into the bucket.
+            Symbol::Held(_) => {
+                let place = |req: &mut Request| req.held_place(table, &name);
+                self.overwrite_place(place, value, Overwrite::InPlace);
+                return;
+            }
+            Symbol::Indirect(..) => {
+                entries[at].1 = Symbol::Value(value);
+                return;
+            }
         };
         self.release(held);
         self.symbol_settle(table, name, value, held);
+    }
+
+    /// The place a [`Symbol::Held`] bucket keeps its value in, found by
+    /// name; none where the name is gone or holds its value otherwise.
+    fn held_place(&mut self, table: TableId, name: &[u8]) -> Option<ZvalRef> {
+        let entries = self.table_mut(table)?;
+        match entries.iter().find(|(key, _)| key == name)?.1 {
+            Symbol::Held(cell) => Some(cell.heap().val_ref()),
+            Symbol::Value(_) | Symbol::Indirect(..) => None,
+        }
     }
 
     /// The write after a release in place, which can have served a
@@ -607,12 +626,16 @@ impl Request {
             Some(Symbol::Indirect(frame, at)) => {
                 self.overwrite_place(|req| req.attached_ptr(table, frame, at), value, order);
             }
+            Some(Symbol::Held(_)) => {
+                self.overwrite_place(|req| req.held_place(table, name), value, order);
+            }
             Some(Symbol::Value(held)) if order != Overwrite::InPlace => {
                 let Some(entries) = self.table_mut(table) else {
                     self.release(value);
                     return;
                 };
                 let Some(entry) = entries.iter_mut().find(|(key, _)| key == name) else {
+                    self.release(value);
                     return;
                 };
                 if order == Overwrite::After {
