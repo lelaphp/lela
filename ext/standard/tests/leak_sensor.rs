@@ -281,3 +281,25 @@ echo implode(',', array_keys($o)), ' ', $o['arr'][0], $o[123][0], $o['a']['b']['
     );
     assert_eq!(stdout, "arr,123,a,7 foox12x\n");
 }
+
+/// A user wrapper whose class is an interface, a trait or an abstract
+/// class opens nothing and makes no throwable, as php's test of the
+/// class's kind in `user_stream_create_object` returns before
+/// `object_init_ex`; an enum's `Error` is thrown to the program (#2179,
+/// `ext/standard/tests/streams/bug74951.phpt`).
+#[test]
+fn a_wrapper_class_that_cannot_be_instantiated_keeps_no_error() {
+    let stdout = armed(
+        r#"<?php
+abstract class A {} interface I {} trait T {} enum E { case X; }
+foreach (['A', 'I', 'T', 'E'] as $c) {
+    stream_wrapper_register("w$c", $c);
+    try { var_dump(@fopen("w$c://x", 'r')); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+}
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "bool(false)\nbool(false)\nbool(false)\nCannot instantiate enum E\n"
+    );
+}
