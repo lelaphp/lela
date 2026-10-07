@@ -19,7 +19,7 @@ use php_unit::decl::{ClassDecl, Name, shown};
 use php_unit::link::{Linked, Obligation};
 use php_unit::{AutoGlobal, Level, Unit};
 
-use super::{Declared, PreloadStatistics, Request, UserFunction, user_function_decl};
+use super::{PreloadStatistics, Request, UserFunction, user_function_decl};
 use crate::api::call::Function;
 use crate::api::values::ClassId;
 use crate::engine::Cached;
@@ -636,9 +636,6 @@ impl Request {
     fn publish_tables(&mut self, rows: &[Row]) -> Result<Published, String> {
         let mut renumbered: HashMap<ClassId, ClassId> = HashMap::new();
         for local in self.publication_order(rows) {
-            // `zend_build_properties_info_table` at the link: the placed
-            // properties are built as the class binds, before any request
-            // is handed the number ([`Request::bound_as`]).
             let published = self.publish_class(local, &renumbered)?;
             renumbered.insert(local, published);
         }
@@ -735,10 +732,9 @@ impl Request {
         order
     }
 
-    /// The request's own class `local` published: a number of the arena's
-    /// taken, its members bound as published functions, and its record
-    /// built over the published classes `renumbered` names, whose every
-    /// class it extends, implements or uses is one already.
+    /// The request's own class `local` published ([`Request::publish`]):
+    /// its record built over the published classes `renumbered` names,
+    /// whose every class it extends, implements or uses is one already.
     fn publish_class(
         &mut self,
         local: ClassId,
@@ -749,37 +745,23 @@ impl Request {
             Some(published) => Some(*published),
             None => class.is_published().then_some(class),
         };
-        let Some(record) = self.record_over(local, &|name| shared(self.class_named(name)?)) else {
-            return Err(format!(
-                "InternalError: the preload's class {name} has no record: a class it names was not published before it"
-            ));
-        };
-        let parent = self
-            .class_decl(local)
-            .and_then(|decl| self.class_named(&decl.parent.as_ref()?.0))
-            .and_then(shared);
-        let class = self
-            .arena
-            .reserve_class()
-            .ok_or_else(|| ARENA_FULL.to_string())?;
-        let bound = self
-            .bound_as(local, class, Some(record), parent)
-            .ok_or_else(|| ARENA_FULL.to_string())?;
         let Some(row) = self.declared_row(local) else {
             return Err(format!(
                 "InternalError: the preload's class {name} has no row"
             ));
         };
-        let row = Declared {
-            unit: Arc::clone(&row.unit),
-            at: row.at,
-            composed: row.composed.clone(),
-            bound,
+        let Some(record) = self.record_over(row, &|name| shared(self.class_named(name)?)) else {
+            return Err(format!(
+                "InternalError: the preload's class {name} has no record: a class it names was not published before it"
+            ));
         };
-        if !self.arena.publish_class(class, row) {
-            return Err(ARENA_FULL.to_string());
-        }
-        Ok(class)
+        let parent = row
+            .decl()
+            .and_then(|decl| self.class_named(&decl.parent.as_ref()?.0))
+            .and_then(shared);
+        let composed = row.composed.as_deref().cloned();
+        self.publish(&Arc::clone(&row.unit), row.at, composed, record, parent)
+            .ok_or_else(|| ARENA_FULL.to_string())
     }
 
     /// `preload_sort_classes`, php's own swap sort and not a stable one:

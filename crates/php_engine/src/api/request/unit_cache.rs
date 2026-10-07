@@ -212,6 +212,8 @@ impl Request {
         }
         shared.units.hit(&held, validation, now);
         self.accel_loaded = held.unit.as_ref().ok().cloned();
+        self.early_bound =
+            (held.unit.as_ref().ok()).map(|unit| (Arc::clone(unit), Arc::clone(&held.early)));
         Some(held)
     }
 
@@ -375,12 +377,13 @@ impl Request {
         let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
         let holds = |name: &[u8]| self.class_named(name).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
-        let (cached, filed) = shared.units.file(
+        let (cached, filed, early) = shared.units.file(
             asked,
             |source| {
                 shared.publish_file(source, path, &self.cwd, stack, request_classes, multibyte)
             },
             |body| shared.publish_kept(body),
+            |unit| self.publish_unit(unit),
         );
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
@@ -389,6 +392,13 @@ impl Request {
         // what it compiled as php without it.
         let loaded = validation != Validation::EveryHit && filed != Filed::Compiled;
         self.accel_loaded = cached.clone().and_then(Result::ok).filter(|_| loaded);
+        // The classes its compiler bound early, published as it was held,
+        // which its load declares by their numbers.
+        self.early_bound = cached
+            .clone()
+            .and_then(Result::ok)
+            .zip(early)
+            .filter(|(_, early)| early.iter().any(Option::is_some));
         // The file opened as a stream where php compiles it or resolves
         // it to look it up by its full path, and not for a hit whose key
         // the cache files: one by the full path, or read back from the
