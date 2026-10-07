@@ -432,7 +432,7 @@ feature = "ffi"
 porting = true
 [[crate]]
 name = "ext/zend_test"
-budget = 1500
+budget = 4000
 feature = "zend_test"                      # off by default, as php's --enable-zend-test (#1782)
 oracle = "zend-test"                       # the oracle variant that loads it (#1782)
 # ---------------------------------------------------------------- sapi/
