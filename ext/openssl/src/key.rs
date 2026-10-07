@@ -10,6 +10,7 @@ use std::ffi::CString;
 use php_ext::abi::{Instance, OrFalse, Passed, Path, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, pending, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key as ArrayKey, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -201,7 +202,7 @@ pub(crate) fn key_from(
         };
         phrase = Some(match given.as_ref() {
             ValueRef::Str(s) => s.as_bytes().to_vec(),
-            _ => crate::xp_ssl::string_of(req, &given)?,
+            _ => with_string(req, &given, <[u8]>::to_vec)?,
         });
         let Some(inner) = array.get(&ArrayKey::Int(0)) else {
             let thrown = throw_error(req, "ValueError", form);
@@ -239,7 +240,7 @@ pub(crate) fn key_from(
         if !matches!(value.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             return Ok(None);
         }
-        let text = crate::xp_ssl::string_of(req, &value)?;
+        let text = with_string(req, &value, <[u8]>::to_vec)?;
         let text = text.as_slice();
         let mut file: Option<CString> = None;
         if text.len() > 7 && text.starts_with(b"file://") {

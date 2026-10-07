@@ -7,7 +7,6 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString};
 
 use super::charmask;
-use super::str_copy;
 
 /// `addslashes(string $string): string`, `php_addslashes`: a backslash
 /// before `'`, `"` and `\`, and a NUL as `\0`.
@@ -30,7 +29,7 @@ use super::str_copy;
 pub(super) fn addslashes(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     if !s.iter().any(|c| matches!(c, 0 | b'\'' | b'"' | b'\\')) {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let mut out = Vec::with_capacity(s.len() * 2);
     for &c in s {
@@ -116,7 +115,7 @@ pub(super) fn addcslashes(
         return PhpString::new(req, b"");
     }
     if what.is_empty() {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let flags = charmask(req, what.as_bytes());
     let mut out = Vec::with_capacity(string.len() * 4);

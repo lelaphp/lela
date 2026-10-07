@@ -606,7 +606,7 @@ fn list_items(
     };
     if let Some(arr) = data.as_array().copied() {
         let read = super::array::rows(req, arr);
-        super::array::with_rows(req, read, |req, rows| {
+        super::array::with_rows(req, &read, |req, rows| {
             for (_, v) in rows {
                 one(req, cx, *v)?;
             }
@@ -667,7 +667,7 @@ pub(super) fn to_xml_any(
     if let Some(arr) = data.as_array().copied() {
         let enc = super::get_conversion(ty::XSD_ANYXML)?;
         let read = super::array::rows(req, arr);
-        return super::array::with_rows(req, read, |req, rows| {
+        return super::array::with_rows(req, &read, |req, rows| {
             let mut ret = None;
             for (k, el) in rows {
                 ret = master_to_xml(req, cx, Some(enc), *el, style, parent)?;

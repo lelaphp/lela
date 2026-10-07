@@ -15,7 +15,7 @@ use php_ext::abi::{
     ObjectHandlers, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, True, Union,
 };
 use php_ext::attr::{php_class, php_function};
-use php_ext::coerce::{Exponent, float_format, to_string};
+use php_ext::coerce::{Exponent, float_format, with_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
@@ -883,10 +883,7 @@ pub(super) fn render(
     // the decimal of an int, the bytes of a string, `1` for `true`, the
     // empty string for `false` and for `null`, and a resource's
     // `Resource id #N`.
-    let string = to_string(req, &value)?;
-    out.extend_from_slice(string.as_bytes());
-    string.give_up(req);
-    Ok(())
+    with_string(req, &value, |string| out.extend_from_slice(string))
 }
 
 /// One `print_hash` as it is written: its indent, whether its keys are

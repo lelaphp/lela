@@ -781,16 +781,15 @@ fn iterator_to_array(
             let key = match iterator.key(req) {
                 Ok(key) => key,
                 Err(thrown) => {
-                    req.release(current);
+                    current.give_up(req);
                     return Err(thrown);
                 }
             };
             let set = crate::set_key(req, &mut out, &key, current);
-            req.release(key);
+            key.give_up(req);
             set?;
         } else {
-            let current = crate::owned(req, current);
-            let current = crate::owner_of(req, current);
+            let current = crate::dereferenced(req, current);
             out.append(req, current)?;
         }
         Ok(true)

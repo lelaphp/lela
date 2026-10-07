@@ -51,15 +51,13 @@ pub(super) fn rows(req: &Request, arr: PhpArray) -> Vec<(K, Value)> {
 /// program's converter cannot free one under it.
 pub(super) fn with_rows<T>(
     req: &mut Request,
-    rows: Vec<(K, Value)>,
+    rows: &[(K, Value)],
     f: impl FnOnce(&mut Request, &[(K, Value)]) -> Res<T>,
 ) -> Res<T> {
-    for (_, v) in &rows {
-        req.addref(v);
-    }
-    let out = f(req, &rows);
-    for (_, v) in rows {
-        req.release(v);
+    let held: Vec<Owner<Value>> = rows.iter().map(|(_, v)| Owner::take(req, *v)).collect();
+    let out = f(req, rows);
+    for v in held {
+        v.give_up(req);
     }
     out
 }
@@ -298,7 +296,7 @@ fn add_xml_array_elements(
     }
     arr.protect();
     let read = rows(req, arr);
-    let out = with_rows(req, read, |req, rows| {
+    let out = with_rows(req, &read, |req, rows| {
         let mut j = 0;
         for (_, zdata) in rows {
             if j >= first {
@@ -349,19 +347,16 @@ fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Own
                 let key = match it.key(req) {
                     Ok(k) => k,
                     Err(t) => {
-                        req.release(val);
+                        val.give_up(req);
                         return Err(t.into());
                     }
                 };
                 let k = key_of(req, &key);
-                req.release(key);
+                key.give_up(req);
                 match k {
-                    Ok(k) => {
-                        let val = crate::classes::owner_of(req, val);
-                        copy.set(req, k, val)?;
-                    }
+                    Ok(k) => copy.set(req, k, val)?,
                     Err(t) => {
-                        req.release(val);
+                        val.give_up(req);
                         return Err(t.into());
                     }
                 }
@@ -915,7 +910,7 @@ pub(super) fn to_xml_map(
         }
         arr.protect();
         let read = rows(req, arr);
-        let out = with_rows(req, read, |req, rows| {
+        let out = with_rows(req, &read, |req, rows| {
             for (k, temp) in rows {
                 let item = new_node(parent.doc(), b"item")?;
                 x_param.add_child(item);

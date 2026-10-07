@@ -9,7 +9,7 @@
 use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error};
-use php_ext::request::{Request, StreamCtx, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, StreamCtx, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef, walk};
 use php_ext_uri::{Parser, ReadAs, UriStruct};
 
@@ -127,7 +127,7 @@ fn get_headers(
         .and_then(|value| value.deref().as_array().copied());
     let Some(lines) = lines else {
         meta.give_up(req);
-        stream.hand_on_unmigrated().free(req);
+        stream.free(req);
         return Ok(OrFalse::False);
     };
     // The lines read first, as bytes: what `add_header` writes is the
@@ -137,7 +137,7 @@ fn get_headers(
         .filter_map(|(_, line)| line.deref().as_str_bytes().map(<[u8]>::to_vec))
         .collect();
     meta.give_up(req);
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(OrFalse::Value(header_array(req, &lines, associative)?))
 }
 

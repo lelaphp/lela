@@ -14,7 +14,7 @@ use php_ext::abi::{False, OrFalse, Passed, Path, Ref, Untyped};
 #[cfg(target_vendor = "apple")]
 use php_ext::attr::php_class;
 use php_ext::attr::php_function;
-use php_ext::coerce::{to_long, to_string};
+use php_ext::coerce::{to_long, with_string};
 #[cfg(target_vendor = "apple")]
 use php_ext::raising::arity;
 #[cfg(target_vendor = "apple")]
@@ -445,10 +445,7 @@ pub(crate) fn pcntl_exec(
     let program = CString::new(path.0.as_bytes()).unwrap_or_default();
     let mut arguments = vec![program.clone()];
     for (_, element) in &args {
-        let string = to_string(req, &element)?;
-        let bytes = string.as_bytes().to_vec();
-        string.give_up(req);
-        let Ok(argument) = CString::new(bytes) else {
+        let Ok(argument) = with_string(req, &element, |bytes| CString::new(bytes))? else {
             return Err(argument_error(
                 req,
                 "ValueError",
@@ -462,9 +459,7 @@ pub(crate) fn pcntl_exec(
         Passed::Given(env_vars) => {
             let mut envp = Vec::new();
             for (key, element) in &env_vars {
-                let string = to_string(req, &element)?;
-                let value = string.as_bytes().to_vec();
-                string.give_up(req);
+                let value = with_string(req, &element, <[u8]>::to_vec)?;
                 if value.contains(&0) {
                     return Err(argument_error(
                         req,

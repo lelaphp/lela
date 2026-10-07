@@ -9,11 +9,11 @@ use std::sync::Arc;
 use php_ext::abi::{Instance, ObjectHandlers, Refusals, Std, This, Untyped, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
-use php_ext::coerce::{callable_checked, to_string, value_name};
+use php_ext::coerce::{callable_checked, value_name, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error,
 };
-use php_ext::request::{OutputOp, Request, StartHandler, Streams as _};
+use php_ext::request::{OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 
@@ -58,10 +58,10 @@ pub(crate) struct Service {
     functions_all: bool,
     class: Option<ClassId>,
     /// `soap_class.argv`, one owner each.
-    argv: Vec<Value>,
+    argv: Vec<Owner<Value>>,
     persistence: i64,
     /// `soap_object`, one owner.
-    object: Option<Value>,
+    object: Option<Owner<Value>>,
     typemap: Option<Typemap>,
     version: i64,
     kind: ServiceKind,
@@ -69,12 +69,12 @@ pub(crate) struct Service {
     uri: Option<Vec<u8>>,
     encoding: Option<Vec<u8>>,
     /// `class_map`, a copy with one owner.
-    class_map: Option<Value>,
+    class_map: Option<Owner<Value>>,
     features: i64,
     send_errors: i64,
     /// `soap_headers_ptr` while `handle()` runs: what `addSoapHeader()`
     /// appended, one owner each.
-    added_headers: Option<Vec<Value>>,
+    added_headers: Option<Vec<Owner<Value>>>,
     trace: bool,
     last_response_body: Option<Vec<u8>>,
 }
@@ -107,19 +107,19 @@ impl Service {
     /// `delete_service`: what it owns given back.
     fn release(self, req: &mut Request) {
         for v in self.argv {
-            req.release(v);
+            v.give_up(req);
         }
         if let Some(o) = self.object {
-            req.release(o);
+            o.give_up(req);
         }
         if let Some(c) = self.class_map {
-            req.release(c);
+            c.give_up(req);
         }
         if let Some(t) = self.typemap {
             release_typemap(req, &t);
         }
         for v in self.added_headers.into_iter().flatten() {
-            req.release(v);
+            v.give_up(req);
         }
     }
 }
@@ -405,10 +405,7 @@ fn server_exception(
             .is_some_and(|s| s.send_errors != 0);
         let msg = if send {
             let m = php_ext::call::read_prop(req, &exception, b"message")?;
-            let s = to_string(req, &m)?;
-            let bytes = s.as_bytes().to_vec();
-            s.give_up(req);
-            bytes
+            with_string(req, &m, <[u8]>::to_vec)?
         } else {
             b"Internal Error".to_vec()
         };
@@ -567,11 +564,14 @@ impl SoapServer {
     fn addSoapHeader(req: &mut Request, this: This<Self>, header: Instance<SoapHeader>) -> R<()> {
         let object = this.object();
         service_of(req, object)?;
-        let value = header.object().as_value();
+        // `Z_ADDREF_P(fault)` for the list, given back with it.
+        let value = Owner::take(req, header.object().as_value());
         let Some(service) = service_mut(req, object) else {
+            value.give_up(req);
             return Ok(());
         };
         let Some(list) = service.added_headers.as_mut() else {
+            value.give_up(req);
             return Err(throw_error(
                 req,
                 "Error",
@@ -579,7 +579,6 @@ impl SoapServer {
             ));
         };
         list.push(value);
-        req.addref(&value);
         Ok(())
     }
 
@@ -667,18 +666,19 @@ impl SoapServer {
             ));
         };
         service_of(req, object)?;
-        let args: Vec<Value> = args.0;
-        for a in &args {
-            req.addref(a);
-        }
-        let old = service_mut(req, object).map(|s| {
-            s.kind = ServiceKind::Class;
-            s.class = Some(ce);
-            s.persistence = PERSISTENCE_REQUEST;
-            std::mem::replace(&mut s.argv, args)
-        });
-        for v in old.into_iter().flatten() {
-            req.release(v);
+        // `ZVAL_COPY` of each argument into `soap_class.argv`.
+        let args: Vec<Owner<Value>> = args.0.into_iter().map(|a| Owner::take(req, a)).collect();
+        let old = match service_mut(req, object) {
+            Some(s) => {
+                s.kind = ServiceKind::Class;
+                s.class = Some(ce);
+                s.persistence = PERSISTENCE_REQUEST;
+                std::mem::replace(&mut s.argv, args)
+            }
+            None => args,
+        };
+        for v in old {
+            v.give_up(req);
         }
         Ok(())
     }
@@ -702,14 +702,17 @@ impl SoapServer {
     fn setObject(req: &mut Request, this: This<Self>, object: PhpObject) -> R<()> {
         let server = this.object();
         service_of(req, server)?;
-        let value = object.as_value();
-        req.addref(&value);
-        let old = service_mut(req, server).and_then(|s| {
-            s.kind = ServiceKind::Object;
-            s.object.replace(value)
-        });
+        // `ZVAL_OBJ_COPY(&service->soap_object, obj)`.
+        let value = Owner::take(req, object.as_value());
+        let old = match service_mut(req, server) {
+            Some(s) => {
+                s.kind = ServiceKind::Object;
+                s.object.replace(value)
+            }
+            None => Some(value),
+        };
         if let Some(o) = old {
-            req.release(o);
+            o.give_up(req);
         }
         Ok(())
     }
@@ -744,6 +747,7 @@ impl SoapServer {
             ServiceKind::Object => {
                 let class = s
                     .object
+                    .as_ref()
                     .and_then(|o| o.as_object().copied())
                     .map(|o| o.class());
                 class.map_or_else(Vec::new, |c| public_methods(req, c))
@@ -1076,7 +1080,7 @@ fn construct(
             ));
         }
         let copy = a.copy(req)?;
-        service.class_map = Some(copy.into_value().hand_on_unmigrated());
+        service.class_map = Some(copy.into_value());
     }
     if let Some(tm) = option(opts, b"typemap")
         && let ValueRef::Array(a) = tm.as_ref()
@@ -1146,22 +1150,16 @@ fn construct(
 struct Call<'a> {
     function: Option<&'a Function>,
     function_name: Vec<u8>,
-    params: Vec<Value>,
+    /// The decoded arguments, one owner each.
+    params: Vec<Owner<Value>>,
     version: i64,
     headers: Vec<HeaderCall<'a>>,
 }
 
 impl Call<'_> {
     fn release(self, req: &mut Request) {
-        for v in self.params {
-            req.release(v);
-        }
-        for h in self.headers {
-            for v in h.parameters {
-                req.release(v);
-            }
-            req.release(h.retval);
-        }
+        release_all(req, self.params);
+        release_headers(req, self.headers);
     }
 }
 
@@ -1178,7 +1176,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
             s.sdl.clone(),
             s.typemap.clone(),
             s.encoding.clone(),
-            s.class_map,
+            s.class_map.as_deref().copied(),
             s.features,
             s.kind,
             s.actor.clone(),
@@ -1210,7 +1208,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
                         }
                         req.write(&buf[..n]);
                     }
-                    stream.hand_on_unmigrated().free(req);
+                    stream.free(req);
                 }
                 None => return Err(server_fault_en(req, "Server", "Couldn't find WSDL")),
             }
@@ -1324,7 +1322,7 @@ fn inflated_input(req: &mut Request) -> Res<Option<Vec<u8>>> {
         }
         body.extend_from_slice(&buf[..n]);
     }
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     if lookup_function(req, b"zlib_decode").is_none() {
         return Ok(None);
     }
@@ -1493,13 +1491,21 @@ fn serve(
         s.added_headers = Some(Vec::new());
     }
     let function = parsed.function;
+    // The object a `SOAP_CLASS` call made, the call's one owner of it:
+    // given up once the function has run (`zval_ptr_dtor(&tmp_soap)`),
+    // or on the way out.
+    let mut made: Option<Owner<Value>> = None;
     let result = (|| -> Res<()> {
-        let mut made: Option<Value> = None;
         let soap_obj: Option<Value> = match kind {
-            ServiceKind::Object => service_ref(req, this).and_then(|s| s.object),
+            ServiceKind::Object => {
+                service_ref(req, this).and_then(|s| s.object.as_deref().copied())
+            }
             ServiceKind::Class => {
                 let (class, argv, persistence) = match service_ref(req, this) {
-                    Some(s) => (s.class, s.argv.clone(), s.persistence),
+                    Some(s) => {
+                        let argv: Vec<Value> = s.argv.iter().map(|a| **a).collect();
+                        (s.class, argv, s.persistence)
+                    }
                     None => (None, Vec::new(), 0),
                 };
                 let Some(class) = class else {
@@ -1514,15 +1520,17 @@ fn serve(
                     Some(o) => Some(o),
                     None => match php_ext::call::instantiate(req, class, &argv) {
                         Ok(obj) => {
-                            // The service's own owner, kept in the session
-                            // or released as `made` when the call is done.
-                            let value = obj.hand_on_unmigrated().as_value();
-                            if session && store_session_object(req, value)? {
-                                Some(value)
+                            // The object's one owner, moved into the
+                            // session or kept as `made` until the call is
+                            // done.
+                            let obj = obj.into_value();
+                            let view = *obj;
+                            made = if session {
+                                store_session_object(req, obj)?
                             } else {
-                                made = Some(value);
-                                made
-                            }
+                                Some(obj)
+                            };
+                            Some(view)
                         }
                         Err(t) => {
                             discard(req);
@@ -1534,9 +1542,9 @@ fn serve(
             }
             ServiceKind::Functions => None,
         };
-        let release_made = |req: &mut Request, made: &mut Option<Value>| {
+        let release_made = |req: &mut Request, made: &mut Option<Owner<Value>>| {
             if let Some(v) = made.take() {
-                req.release(v);
+                v.give_up(req);
             }
         };
         // The headers' functions.
@@ -1560,14 +1568,11 @@ fn serve(
                     release_made(req, &mut made);
                     return Ok(());
                 };
-                let params = parsed.headers[i].parameters.clone();
+                let params: Vec<Value> = parsed.headers[i].parameters.iter().map(|p| **p).collect();
                 match call(req, &callable, &params) {
                     Ok(v) => {
-                        let old = std::mem::replace(
-                            &mut parsed.headers[i].retval,
-                            v.hand_on_unmigrated(),
-                        );
-                        req.release(old);
+                        let old = std::mem::replace(&mut parsed.headers[i].retval, v);
+                        old.give_up(req);
                     }
                     Err(t) => {
                         discard(req);
@@ -1614,7 +1619,8 @@ fn serve(
                 release_made(req, &mut made);
                 return Ok(());
             };
-            let called = call(req, &callable, &parsed.params);
+            let params: Vec<Value> = parsed.params.iter().map(|p| **p).collect();
+            let called = call(req, &callable, &params);
             if kind == ServiceKind::Class {
                 release_made(req, &mut made);
             }
@@ -1717,10 +1723,13 @@ fn serve(
         }
         Ok(())
     })();
+    if let Some(v) = made.take() {
+        v.give_up(req);
+    }
     if let Some(s) = service_mut(req, this) {
         let left = s.added_headers.take();
         for v in left.into_iter().flatten() {
-            req.release(v);
+            v.give_up(req);
         }
     }
     parsed.release(req);
@@ -1731,11 +1740,11 @@ fn serve(
 const SESSION_KEY: &[u8] = b"_bogus_session_name";
 
 /// A function of the program's served by name, its answer.
-fn call_named_function(req: &mut Request, name: &[u8]) -> Res<Value> {
+fn call_named_function(req: &mut Request, name: &[u8]) -> Res<Owner<Value>> {
     let n = PhpString::new(req, name)?.into_value();
     let callable = php_ext::coerce::to_callable(req, &n);
     n.give_up(req);
-    Ok(call(req, &callable?, &[])?.hand_on_unmigrated())
+    Ok(call(req, &callable?, &[])?)
 }
 
 /// The session's `$_SESSION` array, through its reference.
@@ -1747,11 +1756,12 @@ fn session_array(req: &mut Request) -> Option<Value> {
 /// `php_session_start` does where it is neither active nor disabled; a
 /// fault where it was unserialized before its class was loaded.
 fn session_object(req: &mut Request, class: ClassId) -> Res<Option<Value>> {
-    let status = call_named_function(req, b"session_status")?;
-    let status = status.as_int().unwrap_or(0);
+    let answered = call_named_function(req, b"session_status")?;
+    let status = answered.as_int().unwrap_or(0);
+    answered.give_up(req);
     if status != 2 && status != 0 {
         let started = call_named_function(req, b"session_start")?;
-        req.release(started);
+        started.give_up(req);
     }
     let Some(sess) = session_array(req) else {
         return Ok(None);
@@ -1778,22 +1788,32 @@ fn session_object(req: &mut Request, class: ClassId) -> Res<Option<Value>> {
     Ok(None)
 }
 
-/// `php_set_session_var`: the object moved into `$_SESSION`; whether the
-/// session took it.
-fn store_session_object(req: &mut Request, value: Value) -> Res<bool> {
+/// `php_set_session_var`: the object's owner moved into `$_SESSION`, or
+/// handed back where there is no session to take it.
+fn store_session_object(req: &mut Request, value: Owner<Value>) -> Res<Option<Owner<Value>>> {
     let Some(sess) = session_array(req) else {
-        return Ok(false);
+        return Ok(Some(value));
     };
     let Some(cell) = sess.as_php_ref().copied() else {
-        return Ok(false);
+        return Ok(Some(value));
     };
-    let Some(mut arr) = cell.separate_array(req)? else {
-        return Ok(false);
+    let mut arr = match cell.separate_array(req) {
+        Ok(Some(arr)) => arr,
+        Ok(None) => return Ok(Some(value)),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown.into());
+        }
     };
-    let key = PhpString::new(req, SESSION_KEY)?.into_key();
-    let value = crate::classes::owner_of(req, value);
+    let key = match PhpString::new(req, SESSION_KEY) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown.into());
+        }
+    };
     arr.set(req, key, value)?;
-    Ok(true)
+    Ok(None)
 }
 
 /// `php_output_discard`: the top buffer dropped, where there is one.
@@ -1821,8 +1841,8 @@ fn deserialize_parameters(
     sdl: Option<&Sdl>,
     params: Option<Node>,
     function: Option<&Function>,
-) -> Res<Vec<Value>> {
-    let mut out: Vec<Value> = Vec::new();
+) -> Res<Vec<Owner<Value>>> {
+    let mut out: Vec<Owner<Value>> = Vec::new();
     if let Some(f) = function {
         let Some(rp) = &f.request_parameters else {
             return Ok(out);
@@ -1834,9 +1854,9 @@ fn deserialize_parameters(
             for p in rp.values() {
                 let val = get_node(params, p.param_name.as_deref().unwrap_or_default(), None);
                 match val {
-                    None => out.push(Value::null()),
+                    None => out.push(Owner::take(req, Value::null())),
                     Some(v) => match master_to_zval(req, cx, p.encode, v) {
-                        Ok(z) => out.push(z.hand_on_unmigrated()),
+                        Ok(z) => out.push(z),
                         Err(e) => {
                             release_all(req, out);
                             return Err(e);
@@ -1882,7 +1902,7 @@ fn deserialize_parameters(
             }
         }
         match master_to_zval(req, cx, enc, node) {
-            Ok(z) => out.push(z.hand_on_unmigrated()),
+            Ok(z) => out.push(z),
             Err(e) => {
                 release_all(req, out);
                 return Err(e);
@@ -1892,9 +1912,17 @@ fn deserialize_parameters(
     Ok(out)
 }
 
-fn release_all(req: &mut Request, values: Vec<Value>) {
+fn release_all(req: &mut Request, values: Vec<Owner<Value>>) {
     for v in values {
-        req.release(v);
+        v.give_up(req);
+    }
+}
+
+/// The header blocks' arguments and answers given back.
+fn release_headers(req: &mut Request, headers: Vec<HeaderCall<'_>>) {
+    for h in headers {
+        release_all(req, h.parameters);
+        h.retval.give_up(req);
     }
 }
 
@@ -2099,7 +2127,7 @@ fn deserialize_function_call_in<'a>(
             if function.is_none() {
                 function = get_doc_function(sdl, None);
                 match function {
-                    Some(f) => function_name = f.function_name.clone(),
+                    Some(f) => function_name.clone_from(&f.function_name),
                     None => {
                         return Err(server_fault_en(
                             req,
@@ -2155,125 +2183,117 @@ fn deserialize_function_call_in<'a>(
         }
     }
     let mut headers: Vec<HeaderCall<'a>> = Vec::new();
-    // What a header refused or failed to read ends the call, and the
-    // headers read before it are given up with what they hold.
-    let read: Res<()> = 'headers: {
-        if let Some(head) = head {
-            if let Err(err) = check_env_attributes(req, head, version, "Header", true) {
-                break 'headers Err(err);
+    // The blocks read so far are given back where a later one fails.
+    let read = (|| -> Res<()> {
+        let Some(head) = head else {
+            return Ok(());
+        };
+        check_env_attributes(req, head, version, "Header", true)?;
+        let mut trav = head.children();
+        while let Some(hdr_func) = trav {
+            trav = hdr_func.next();
+            if hdr_func.kind() != Kind::Element {
+                continue;
             }
-            let mut trav = head.children();
-            while let Some(hdr_func) = trav {
-                trav = hdr_func.next();
-                if hdr_func.kind() != Kind::Element {
-                    continue;
+            if version == SOAP_1_1 {
+                if let Some(a) = get_attribute(
+                    hdr_func.properties(),
+                    b"encodingStyle",
+                    Some(SOAP_1_1_ENV_NAMESPACE),
+                ) && attr_content(a) != SOAP_1_1_ENC_NAMESPACE
+                {
+                    return Err(server_fault_en(
+                        req,
+                        "Client",
+                        "Unknown Data Encoding Style",
+                    ));
                 }
-                if version == SOAP_1_1 {
-                    if let Some(a) = get_attribute(
-                        hdr_func.properties(),
-                        b"encodingStyle",
-                        Some(SOAP_1_1_ENV_NAMESPACE),
-                    ) && attr_content(a) != SOAP_1_1_ENC_NAMESPACE
+                if let Some(a) = get_attribute(hdr_func.properties(), b"actor", Some(envelope_ns)) {
+                    let c = attr_content(a);
+                    if c != SOAP_1_1_ACTOR_NEXT && actor.is_none_or(|ac| c != ac) {
+                        continue;
+                    }
+                }
+            } else {
+                if let Some(a) = get_attribute(
+                    hdr_func.properties(),
+                    b"encodingStyle",
+                    Some(SOAP_1_2_ENV_NAMESPACE),
+                ) && attr_content(a) != SOAP_1_2_ENC_NAMESPACE
+                {
+                    return Err(server_fault_en(
+                        req,
+                        "DataEncodingUnknown",
+                        "Unknown Data Encoding Style",
+                    ));
+                }
+                if let Some(a) = get_attribute(hdr_func.properties(), b"role", Some(envelope_ns)) {
+                    let c = attr_content(a);
+                    if c != SOAP_1_2_ACTOR_UNLIMATERECEIVER
+                        && c != SOAP_1_2_ACTOR_NEXT
+                        && actor.is_none_or(|ac| c != ac)
                     {
-                        break 'headers Err(server_fault_en(
+                        continue;
+                    }
+                }
+            }
+            let mut must_understand = false;
+            if let Some(a) =
+                get_attribute(hdr_func.properties(), b"mustUnderstand", Some(envelope_ns))
+            {
+                match attr_content(a).as_slice() {
+                    b"1" | b"true" => must_understand = true,
+                    b"0" | b"false" => must_understand = false,
+                    _ => {
+                        return Err(server_fault_en(
                             req,
                             "Client",
-                            "Unknown Data Encoding Style",
+                            "mustUnderstand value is not boolean",
                         ));
                     }
-                    if let Some(a) =
-                        get_attribute(hdr_func.properties(), b"actor", Some(envelope_ns))
-                    {
-                        let c = attr_content(a);
-                        if c != SOAP_1_1_ACTOR_NEXT && actor.is_none_or(|ac| c != ac) {
-                            continue;
-                        }
-                    }
-                } else {
-                    if let Some(a) = get_attribute(
-                        hdr_func.properties(),
-                        b"encodingStyle",
-                        Some(SOAP_1_2_ENV_NAMESPACE),
-                    ) && attr_content(a) != SOAP_1_2_ENC_NAMESPACE
-                    {
-                        break 'headers Err(server_fault_en(
-                            req,
-                            "DataEncodingUnknown",
-                            "Unknown Data Encoding Style",
-                        ));
-                    }
-                    if let Some(a) =
-                        get_attribute(hdr_func.properties(), b"role", Some(envelope_ns))
-                    {
-                        let c = attr_content(a);
-                        if c != SOAP_1_2_ACTOR_UNLIMATERECEIVER
-                            && c != SOAP_1_2_ACTOR_NEXT
-                            && actor.is_none_or(|ac| c != ac)
-                        {
-                            continue;
-                        }
-                    }
                 }
-                let mut must_understand = false;
-                if let Some(a) =
-                    get_attribute(hdr_func.properties(), b"mustUnderstand", Some(envelope_ns))
-                {
-                    match attr_content(a).as_slice() {
-                        b"1" | b"true" => must_understand = true,
-                        b"0" | b"false" => must_understand = false,
-                        _ => {
-                            break 'headers Err(server_fault_en(
-                                req,
-                                "Client",
-                                "mustUnderstand value is not boolean",
-                            ));
-                        }
-                    }
-                }
-                let (hfunction, hname) = find_function(sdl, hdr_func);
-                let mut hdr = None;
-                if hfunction.is_none()
-                    && sdl.is_some()
-                    && let Some(fnb) = soap_binding(sdl, function)
-                    && let Some(ih) = &fnb.input.headers
-                {
-                    let mut key = Vec::new();
-                    if let Some(ns) = hdr_func.ns() {
-                        key.extend_from_slice(&crate::xml::href(ns));
-                        key.push(b':');
-                    }
-                    key.extend_from_slice(&hname);
-                    hdr = ih.get_str(&key);
-                }
-                let parameters = if let Some(h) = hdr {
-                    match master_to_zval(req, cx, h.encode, hdr_func) {
-                        Ok(value) => vec![value.hand_on_unmigrated()],
-                        Err(err) => break 'headers Err(err),
-                    }
-                } else {
-                    let mut node = Some(hdr_func);
-                    if let Some(fnb) = soap_binding(sdl, hfunction)
-                        && fnb.style == Style::Rpc
-                    {
-                        node = hdr_func.children();
-                    }
-                    match deserialize_parameters(req, cx, sdl, node, hfunction) {
-                        Ok(parameters) => parameters,
-                        Err(err) => break 'headers Err(err),
-                    }
-                };
-                headers.push(HeaderCall {
-                    function: hfunction,
-                    function_name: Some(hname),
-                    must_understand,
-                    parameters,
-                    retval: Value::null(),
-                    hdr,
-                });
             }
+            let (hfunction, hname) = find_function(sdl, hdr_func);
+            let mut hdr = None;
+            if hfunction.is_none()
+                && sdl.is_some()
+                && let Some(fnb) = soap_binding(sdl, function)
+                && let Some(ih) = &fnb.input.headers
+            {
+                let mut key = Vec::new();
+                if let Some(ns) = hdr_func.ns() {
+                    key.extend_from_slice(&crate::xml::href(ns));
+                    key.push(b':');
+                }
+                key.extend_from_slice(&hname);
+                hdr = ih.get_str(&key);
+            }
+            let parameters = if let Some(h) = hdr {
+                vec![master_to_zval(req, cx, h.encode, hdr_func)?]
+            } else {
+                let mut node = Some(hdr_func);
+                if let Some(fnb) = soap_binding(sdl, hfunction)
+                    && fnb.style == Style::Rpc
+                {
+                    node = hdr_func.children();
+                }
+                deserialize_parameters(req, cx, sdl, node, hfunction)?
+            };
+            headers.push(HeaderCall {
+                function: hfunction,
+                function_name: Some(hname),
+                must_understand,
+                parameters,
+                retval: Owner::take(req, Value::null()),
+                hdr,
+            });
         }
         Ok(())
-    };
+    })();
+    if let Err(e) = read {
+        release_headers(req, headers);
+        return Err(e);
+    }
     let mut params_node = func;
     if let Some(fnb) = soap_binding(sdl, function) {
         if fnb.style == Style::Rpc {
@@ -2282,16 +2302,13 @@ fn deserialize_function_call_in<'a>(
     } else {
         params_node = func.and_then(Node::children);
     }
-    let params =
-        match read.and_then(|()| deserialize_parameters(req, cx, sdl, params_node, function)) {
-            Ok(params) => params,
-            Err(err) => {
-                for h in headers {
-                    release_all(req, h.parameters);
-                }
-                return Err(err);
-            }
-        };
+    let params = match deserialize_parameters(req, cx, sdl, params_node, function) {
+        Ok(params) => params,
+        Err(e) => {
+            release_headers(req, headers);
+            return Err(e);
+        }
+    };
     if function.is_none()
         && function_name.is_empty()
         && let Some(f) = func

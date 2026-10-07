@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Stream, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _};
 
 use crate::archive::{
     self, ArchiveId, Content, ENT_PERM_DEF_FILE, Entry, TAR_FILE, archives, lossy,
@@ -422,23 +422,27 @@ fn tmp_stream(req: &mut Request, id: ArchiveId, slot: usize) -> Result<Option<St
     let Some(entry) = archives(req).get(id).and_then(|a| a.manifest.at(slot)) else {
         return Ok(None);
     };
-    if let Content::Tmp(Some(stream)) = entry.content {
-        return Ok(Some(stream));
+    if let Content::Tmp(Some(stream)) = &entry.content {
+        return Ok(Some(**stream));
     }
     let Some(tmp) = entry.tmp.clone() else {
         return Ok(None);
     };
     // The entry keeps the stream, and its owner with it.
-    let stream = req
-        .open_stream_with(&tmp, b"rb", php_ext::request::Opening::default())?
-        .map(php_ext::values::Owner::hand_on_unmigrated);
-    if let Some(entry) = archives(req)
+    let Some(stream) = req.open_stream_with(&tmp, b"rb", php_ext::request::Opening::default())?
+    else {
+        return Ok(None);
+    };
+    let view = *stream;
+    let Some(entry) = archives(req)
         .get_mut(id)
         .and_then(|a| a.manifest.at_mut(slot))
-    {
-        entry.content = Content::Tmp(stream);
-    }
-    Ok(stream)
+    else {
+        stream.free(req);
+        return Ok(None);
+    };
+    entry.content = Content::Tmp(Some(stream));
+    Ok(Some(view))
 }
 
 /// A whole entry's contents, as its stream reads them.
@@ -746,7 +750,7 @@ fn create_writeable(req: &mut Request, id: ArchiveId, slot: usize) {
         entry.link = None;
         entry.tar_type = if is_tar { TAR_FILE } else { 0 };
     }
-    entry.content = Content::Mod(Vec::new());
+    let old = std::mem::replace(&mut entry.content, Content::Mod(Vec::new()));
     entry.old_flags = entry.flags;
     entry.is_modified = true;
     entry.uncompressed_filesize = 0;
@@ -754,6 +758,9 @@ fn create_writeable(req: &mut Request, id: ArchiveId, slot: usize) {
     entry.crc32 = 0;
     entry.flags = ENT_PERM_DEF_FILE;
     entry.offset = 0;
+    if let Content::Tmp(Some(stream)) = old {
+        stream.free(req);
+    }
 }
 
 /// `phar_separate_entry_fp`: the entry's contents copied into a buffer of
@@ -783,8 +790,11 @@ fn separate(req: &mut Request, id: ArchiveId, slot: usize) -> Result<Result<(), 
             entry.tar_type = if is_tar { TAR_FILE } else { 0 };
         }
         entry.offset = 0;
-        entry.content = Content::Mod(data);
+        let old = std::mem::replace(&mut entry.content, Content::Mod(data));
         entry.is_modified = true;
+        if let Content::Tmp(Some(stream)) = old {
+            stream.free(req);
+        }
     }
     Ok(Ok(()))
 }

@@ -46,7 +46,7 @@ pub(crate) struct Cx {
     /// The values written so far, by identity, with the node each became.
     sent: HashMap<Ident, Node>,
     /// The value each node was read as, one owner each, this table's.
-    read: HashMap<Node, Value>,
+    read: HashMap<Node, Owner<Value>>,
     /// The PHP reference the value being written was reached through,
     /// php's `zval *` for an array behind one.
     slot: Option<PhpRef>,
@@ -67,7 +67,7 @@ impl Cx {
         self.sent.clear();
         self.slot = None;
         for (_, v) in self.read.drain() {
-            req.release(v);
+            v.give_up(req);
         }
     }
 }
@@ -91,9 +91,9 @@ pub(crate) fn encode_finish(req: &mut Request, cx: &mut Cx) {
     cx.tracking = false;
     let held = &mut req.state::<State>().held;
     let mark = cx.held_mark.min(held.len());
-    let done: Vec<Value> = held.drain(mark..).collect();
+    let done: Vec<Owner<Value>> = held.drain(mark..).collect();
     for v in done {
-        req.release(v);
+        v.give_up(req);
     }
 }
 
@@ -515,16 +515,16 @@ fn soap_check_xml_ref(req: &mut Request, cx: &Cx, node: Node) -> Option<Owner<Va
     if !cx.tracking {
         return None;
     }
-    let v = *cx.read.get(&node)?;
+    let v = **cx.read.get(&node)?;
     Some(Owner::take(req, v))
 }
 
 /// `soap_add_xml_ref`.
 fn soap_add_xml_ref(req: &mut Request, cx: &mut Cx, data: &Value, node: Node) {
     if cx.tracking {
-        req.addref(data);
-        if let Some(old) = cx.read.insert(node, *data) {
-            req.release(old);
+        let kept = Owner::take(req, *data);
+        if let Some(old) = cx.read.insert(node, kept) {
+            old.give_up(req);
         }
     }
 }
@@ -628,9 +628,9 @@ fn master_to_xml_int(
     parent: Node,
     check_class_map: bool,
 ) -> Res<Option<Node>> {
-    req.addref(&data);
+    let held = Owner::take(req, data);
     let out = master_to_xml_held(req, cx, encode, data, style, parent, check_class_map);
-    req.release(data);
+    held.give_up(req);
     out
 }
 

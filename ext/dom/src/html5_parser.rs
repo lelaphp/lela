@@ -6,7 +6,7 @@
 //! contents a fragment of its own.
 
 use php_ext::raising::{Thrown, arg_value_error, throw};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::encoding::{
     DECODE_CONTINUE, Decoder, Encoder, Encoding, MAX_CODEPOINT, REPLACEMENT_BYTES, Status,
@@ -1003,7 +1003,7 @@ pub(crate) fn create_from_file(
             Ok(Some(charset)) => encoding = Encoding::by_name(&charset),
             Ok(None) => {}
             Err(thrown) => {
-                stream.hand_on_unmigrated().free(req);
+                stream.free(req);
                 return Err(thrown);
             }
         }
@@ -1025,7 +1025,7 @@ pub(crate) fn create_from_file(
             Err(thrown) => break Err(thrown),
         }
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     read?;
     let (parsed, found) = parse(req, &path, &Input::File(&source, chunks), options, encoding)?;
     let url = if crate::modern::is_stream_path(&path) {

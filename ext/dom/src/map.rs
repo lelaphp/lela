@@ -44,14 +44,14 @@ pub(crate) enum MapKind {
     Entities,
     /// `php_dom_obj_map_notations`.
     Notations,
-    /// `php_dom_obj_map_nodeset`: the objects, one owner held.
-    NodeSet(PhpArray),
+    /// `php_dom_obj_map_nodeset`: the objects, the map's owner of them.
+    NodeSet(Owner<PhpArray>),
 }
 
 /// `dom_nnodemap_object`.
 pub(crate) struct Map {
-    /// `baseobj`, one owner held; none for a node set.
-    pub(crate) base: Option<PhpObject>,
+    /// `baseobj`, the map's owner of it; none for a node set.
+    pub(crate) base: Option<Owner<PhpObject>>,
     pub(crate) kind: MapKind,
     /// The `read_dimension` and `has_dimension` its class installs.
     pub(crate) dims: Dims,
@@ -121,14 +121,14 @@ fn view(req: &Request, object: PhpObject) -> View {
     else {
         return View::None;
     };
-    let Some(base) = map.base else {
+    let Some(base) = map.base.as_deref().copied() else {
         if let MapKind::NodeSet(array) = &map.kind {
-            return View::Set(*array);
+            return View::Set(**array);
         }
         return View::None;
     };
     let walk = match &map.kind {
-        MapKind::NodeSet(array) => return View::Set(*array),
+        MapKind::NodeSet(array) => return View::Set(**array),
         MapKind::ChildNodes => Walk::Children,
         MapKind::ChildElements => Walk::ChildElements,
         MapKind::Attributes => Walk::Attributes,
@@ -481,9 +481,9 @@ pub(crate) fn float_offset(req: &mut Request, f: f64) -> Result<i64, Thrown> {
     #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
     let compatible = (n as f64) == f;
     if !compatible && f.is_finite() && f.abs() < 9.2e18 {
-        let text = php_ext::coerce::to_string(req, &Value::float(f))?;
-        let shown = String::from_utf8_lossy(text.as_bytes()).into_owned();
-        text.give_up(req);
+        let shown = php_ext::coerce::with_string(req, &Value::float(f), |text| {
+            String::from_utf8_lossy(text).into_owned()
+        })?;
         php_ext::raising::deprecated(
             req,
             &format!("Implicit conversion from float {shown} to int loses precision"),
@@ -728,7 +728,7 @@ impl ObjectHandlers for MapHandlers {
         }
         let current = item(req, object, 0)?;
         Ok(Some(Box::new(NodeIter {
-            current: current.hand_on_unmigrated().as_object().copied(),
+            current: object_only(req, current),
             index: 0,
             steps: 0,
         })))
@@ -741,10 +741,10 @@ impl ObjectHandlers for MapHandlers {
         });
         if let Some(map) = map {
             if let Some(base) = map.base {
-                req.release(base.as_value());
+                base.give_up(req);
             }
             if let MapKind::NodeSet(array) = map.kind {
-                req.release(Value::array(array));
+                array.give_up(req);
             }
         }
         crate::release_libxml(req, object);
@@ -756,11 +756,11 @@ impl ObjectHandlers for MapHandlers {
             ..
         }) = dom(req, object)
         {
-            if let Some(base) = map.base {
+            if let Some(base) = map.base.as_deref() {
                 visit(base.as_value());
             }
             if let MapKind::NodeSet(array) = &map.kind {
-                visit(Value::array(*array));
+                visit(Value::array(**array));
             }
         }
     }
@@ -790,7 +790,7 @@ impl ObjectHandlers for MapHandlers {
 /// Iterator does not support rewinding
 /// ```
 struct NodeIter {
-    current: Option<PhpObject>,
+    current: Option<Owner<Value>>,
     index: i64,
     steps: u64,
 }
@@ -812,9 +812,7 @@ impl ClassIterator for NodeIter {
     }
 
     fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
-        let current = self
-            .current
-            .map_or_else(Value::null, |current| current.as_value());
+        let current = self.current.as_deref().copied().unwrap_or_default();
         Ok(Owner::take(req, current))
     }
 
@@ -824,12 +822,11 @@ impl ClassIterator for NodeIter {
         if !named_keys(req, object) {
             return Ok(Owner::take(req, Value::int(self.index)));
         }
-        let Some(node) = self.current.and_then(|o| node_of(req, o)) else {
+        let current = self.current.as_deref().and_then(|o| o.as_object().copied());
+        let Some(node) = current.and_then(|o| node_of(req, o)) else {
             return Ok(Owner::take(req, Value::null()));
         };
-        let modern = self
-            .current
-            .is_some_and(|o| crate::modern::follows_spec(req, o));
+        let modern = current.is_some_and(|o| crate::modern::follows_spec(req, o));
         let name = if modern && node.kind() == Kind::Attribute {
             crate::qualified_name(node)
         } else {
@@ -840,33 +837,61 @@ impl ClassIterator for NodeIter {
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         self.steps += 1;
-        let Some(old) = self.current.take() else {
+        let Some(garbage) = self.current.take() else {
             return Ok(());
         };
         self.index += 1;
+        let next = match garbage.as_object().copied() {
+            Some(old) => self.next(req, object, old),
+            None => Ok(Owner::take(req, Value::null())),
+        };
+        // `zval_ptr_dtor(&garbage)`, whatever the step came to.
+        garbage.give_up(req);
+        self.current = object_only(req, next?);
+        Ok(())
+    }
+
+    fn release(&mut self, req: &mut Request, _: PhpObject) {
+        if let Some(current) = self.current.take() {
+            current.give_up(req);
+        }
+    }
+}
+
+impl NodeIter {
+    /// The item after `old`: a legacy list of a node's children or
+    /// attributes steps to the node after it, every other list asks for
+    /// the item at the next index.
+    fn next(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        old: PhpObject,
+    ) -> Result<Owner<Value>, Thrown> {
         let cursor = !crate::modern::follows_spec(req, old)
             && matches!(
                 dom(req, object),
                 Some(Dom { extra: Extra::Map(m), .. })
                     if matches!(m.kind, MapKind::ChildNodes | MapKind::Attributes)
             );
-        let next = match view(req, object) {
+        match view(req, object) {
             View::Nodes { base, .. } if cursor => match node_of(req, old).and_then(Node::next) {
-                Some(node) => object_for(req, node, Some(base))?,
-                None => Owner::take(req, Value::null()),
+                Some(node) => object_for(req, node, Some(base)),
+                None => Ok(Owner::take(req, Value::null())),
             },
-            _ => item(req, object, self.index)?,
-        };
-        self.current = next.hand_on_unmigrated().as_object().copied();
-        req.release(old.as_value());
-        Ok(())
-    }
-
-    fn release(&mut self, req: &mut Request, _: PhpObject) {
-        if let Some(current) = self.current.take() {
-            req.release(current.as_value());
+            _ => item(req, object, self.index),
         }
     }
+}
+
+/// The item the walk stands at, kept where it is an object, `curobj`; a
+/// `null` past the end given up.
+fn object_only(req: &mut Request, item: Owner<Value>) -> Option<Owner<Value>> {
+    if item.as_object().is_some() {
+        return Some(item);
+    }
+    item.give_up(req);
+    None
 }
 
 /// `class DOMNodeList implements IteratorAggregate, Countable`: a live

@@ -7,7 +7,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, StreamCtx};
-use php_ext::values::{Value, ValueRef};
+use php_ext::values::{Owner, Value, ValueRef};
 use php_ext_libxml::ffi::{Node, Raised};
 
 use crate::classes::string;
@@ -47,7 +47,7 @@ pub(crate) struct Ctx {
     pub(crate) attributes: Option<Table<crate::model::Attribute>>,
     pub(crate) attribute_groups: Option<Table<crate::model::TypeId>>,
     context: Option<StreamCtx>,
-    old_header: Option<Value>,
+    old_header: Option<Owner<Value>>,
 }
 
 impl Ctx {
@@ -170,8 +170,11 @@ pub(crate) fn sdl_set_uri_credentials(
     // `php_libxml_switch_context(NULL, &context)` and back: the stream
     // libxml loads with, read where it stands.
     let context = php_ext_libxml::switch_stream_ctx(req, None);
-    php_ext_libxml::switch_stream_ctx(req, context);
-    let Some(resource) = context.and_then(|c| c.as_resource().copied()) else {
+    let resource = context.as_deref().and_then(|c| c.as_resource().copied());
+    if let Some(none) = php_ext_libxml::switch_stream_ctx(req, context) {
+        none.give_up(req);
+    }
+    let Some(resource) = resource else {
         return Ok(());
     };
     // `php_stream_context_from_zval(context_ptr, 1)`.
@@ -199,12 +202,27 @@ pub(crate) fn sdl_set_uri_credentials(
     let rest = at + crlf + 2;
     let mut new_header = bytes[..at].to_vec();
     new_header.extend_from_slice(&bytes[rest..]);
-    req.addref(&header);
-    ctx.old_header = Some(header);
-    let value = string(req, &new_header)?;
+    // `ZVAL_COPY(&ctx->old_header, header)`, kept once the new one is set.
+    let old_header = Owner::take(req, header);
+    let value = match string(req, &new_header) {
+        Ok(value) => value,
+        Err(thrown) => {
+            old_header.give_up(req);
+            return Err(thrown);
+        }
+    };
     let set = resource.set_option(req, b"http", b"header", &value);
     value.give_up(req);
-    set
+    match set {
+        Ok(()) => {
+            ctx.old_header = Some(old_header);
+            Ok(())
+        }
+        Err(thrown) => {
+            old_header.give_up(req);
+            Err(thrown)
+        }
+    }
 }
 
 /// `sdl_restore_uri_credentials`: the `http.header` put back.
@@ -215,7 +233,7 @@ pub(crate) fn sdl_restore_uri_credentials(req: &mut Request, ctx: &mut Ctx) -> R
             Some(c) => c.set_option(req, b"http", b"header", &old),
             None => Ok(()),
         };
-        req.release(old);
+        old.give_up(req);
         set?;
     }
     Ok(())

@@ -9,7 +9,7 @@
 use php_ext::abi::{OrFalse, Passed, Path as PathArg, Raw, This, True, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{instantiate, known_method, lookup_class};
-use php_ext::coerce::{to_string, value_name};
+use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw};
 use php_ext::request::{Request, Stream, Streams as _};
@@ -878,8 +878,9 @@ impl Phar {
         };
         let mut meta = std::mem::take(&mut a.metadata);
         let value = metadata_value(req, &mut meta, unserializeOptions, "Phar::getMetadata");
-        if let Some(a) = archives(req).get_mut(id) {
-            a.metadata = meta;
+        match archives(req).get_mut(id) {
+            Some(a) => a.metadata = meta,
+            None => meta.free(req),
         }
         value
     }
@@ -1206,9 +1207,12 @@ impl Phar {
         };
         let mut meta = std::mem::take(&mut a.metadata);
         let set = set_metadata(req, &mut meta, &metadata);
-        if let Some(a) = archives(req).get_mut(id) {
-            a.metadata = meta;
-            a.is_modified = true;
+        match archives(req).get_mut(id) {
+            Some(a) => {
+                a.metadata = meta;
+                a.is_modified = true;
+            }
+            None => meta.free(req),
         }
         set?;
         flushed(req, id)
@@ -1757,13 +1761,12 @@ pub(crate) fn metadata_value(
     };
     if meta.val.is_none() || options.is_some() {
         let data = meta.str.clone().unwrap_or_default();
-        // The fresh value's one owner, as an `Owner`.
-        let value = php_ext_standard::php_unserialize_with_options(req, &data, options, function)?;
-        let owner = Owner::take(req, value);
-        req.release(value);
-        return Ok(owner);
+        return php_ext_standard::php_unserialize_with_options(req, &data, options, function);
     }
-    Ok(Owner::take(req, meta.val.unwrap_or_default()))
+    Ok(Owner::take(
+        req,
+        meta.val.as_deref().copied().unwrap_or_default(),
+    ))
 }
 
 /// `serialize_metadata_or_throw`: the value serialised, then kept with
@@ -1779,9 +1782,7 @@ pub(crate) fn set_metadata(
     serializer.finish(req);
     written?;
     meta.free(req);
-    let value = value.deref();
-    req.addref(&value);
-    meta.val = Some(value);
+    meta.val = Some(Owner::take(req, value.deref()));
     meta.str = Some(out);
     Ok(())
 }
@@ -1806,10 +1807,7 @@ fn zpp_name_and_value(
     let name_bytes = match name.as_ref() {
         ValueRef::Str(s) => Some(s.as_bytes().to_vec()),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            let text = to_string(req, &name)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            Some(bytes)
+            Some(with_string(req, &name, <[u8]>::to_vec)?)
         }
         _ => None,
     };
@@ -1832,10 +1830,7 @@ fn zpp_name_and_value(
     let bytes = match value.as_ref() {
         ValueRef::Str(s) => s.as_bytes().to_vec(),
         ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
-            let text = to_string(req, &value)?;
-            let bytes = text.as_bytes().to_vec();
-            text.give_up(req);
-            bytes
+            with_string(req, &value, <[u8]>::to_vec)?
         }
         _ => {
             let given = value_name(req, &value);

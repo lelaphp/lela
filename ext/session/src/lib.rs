@@ -157,7 +157,7 @@ struct State {
     /// `EG(symbol_table)` is bound to, one owner of it the session's, so
     /// what the program assigns through `$_SESSION` is what the session
     /// writes, and what it unsets from the table the session still holds.
-    vars: Option<PhpRef>,
+    vars: Option<Owner<PhpRef>>,
     /// `PS(session_started_filename)` and its line.
     started_at: Option<(Vec<u8>, u32)>,
     /// `EG(exception)` as a user handler left it: php goes on after a
@@ -169,7 +169,7 @@ struct State {
     /// gave twice and overwrote with the second, which php's leaves held
     /// to the request's end (`memory_get_usage()` reads them), given up
     /// at `rshutdown` with the rest of the request's.
-    overwritten: Vec<PhpString>,
+    overwritten: Vec<Owner<PhpString>>,
 }
 
 /// The extension value (design §7.1): the natives `session.stub.php`
@@ -420,6 +420,7 @@ fn headers_sent(req: &Request) -> bool {
 fn session_array(req: &mut Request) -> Option<PhpArray> {
     req.state::<State>()
         .vars
+        .as_deref()
         .and_then(|vars| vars.get().as_array().copied())
 }
 
@@ -427,7 +428,7 @@ fn session_array(req: &mut Request) -> Option<PhpArray> {
 /// `Z_REFVAL(PS(http_session_vars))`, what `php_set_session_var` and
 /// `session_unset` write through.
 fn session_array_mut(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
-    match req.state::<State>().vars {
+    match req.state::<State>().vars.as_deref().copied() {
         Some(vars) => vars.separate_array(req),
         None => Ok(None),
     }
@@ -441,10 +442,10 @@ fn session_array_mut(req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
 /// data held.
 fn bind_vars(req: &mut Request, vars: Owner<Value>) -> Result<(), Thrown> {
     if let Some(old) = req.state::<State>().vars.take() {
-        req.release(old.as_value());
+        old.give_up(req);
     }
     let vars = PhpRef::new(req, vars)?;
-    let kept = Owner::take(req, *vars).hand_on_unmigrated();
+    let kept = Owner::take(req, *vars);
     req.state::<State>().vars = Some(kept);
     req.set_global(b"_SESSION", Some(vars.into_value()));
     Ok(())
@@ -454,7 +455,7 @@ fn bind_vars(req: &mut Request, vars: Owner<Value>) -> Result<(), Thrown> {
 /// `$_SESSION` in the table keeps what it holds.
 fn unbind(req: &mut Request) {
     if let Some(vars) = req.state::<State>().vars.take() {
-        req.release(vars.as_value());
+        vars.give_up(req);
     }
 }
 

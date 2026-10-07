@@ -541,19 +541,21 @@ fn shm_get_var(
     let mut reader = Unserializer::new(req, bytes.as_deref().unwrap_or_default())?;
     let read = reader.local(req);
     let finished = reader.finish(req);
-    let read = read?;
-    finished?;
-    match read {
-        // The unserializer's value is owned as a bare value: the one
-        // owner taken over from it.
-        Some(value) if bytes.is_some() => {
-            let owned = Owner::take(req, value);
-            req.release(value);
-            Ok(owned)
+    let read = match (read, finished) {
+        (Ok(read), Ok(())) => read,
+        (Ok(read), Err(thrown)) => {
+            if let Some(value) = read {
+                value.give_up(req);
+            }
+            return Err(thrown);
         }
+        (Err(thrown), _) => return Err(thrown),
+    };
+    match read {
+        Some(value) if bytes.is_some() => Ok(value),
         read => {
             if let Some(value) = read {
-                req.release(value);
+                value.give_up(req);
             }
             docref(
                 req,

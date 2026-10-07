@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
-use php_ext::coerce::{compare, to_double, to_long, to_string};
+use php_ext::coerce::{compare, to_double, to_long, to_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self as rows, Hold};
@@ -324,15 +324,17 @@ fn answer_sign(req: &mut Request, answer: Owner<Value>) -> Result<Ordering, Thro
 /// the argument slot is read by nobody.
 struct SortTarget {
     array: PhpArray,
-    copied: bool,
+    /// The copy's one owner, where the argument came by value: a copy
+    /// nobody else holds, which the sort writes in place.
+    copy: Option<Owner<PhpArray>>,
 }
 
 impl SortTarget {
     /// The copy given up; the caller's array left where the caller
     /// reads it.
     fn finish(self, req: &mut Request) {
-        if self.copied {
-            req.release(self.array.to_value());
+        if let Some(copy) = self.copy {
+            copy.give_up(req);
         }
     }
 }
@@ -345,18 +347,15 @@ impl SortTarget {
 /// argument but a temporary with one owner.
 fn array_by_reference(req: &mut Request, given: &Ref<PhpArray>) -> Result<SortTarget, Thrown> {
     if let Some(array) = given.separated(req)? {
-        return Ok(SortTarget {
-            array,
-            copied: false,
-        });
+        return Ok(SortTarget { array, copy: None });
     }
-    let array = match given.get() {
-        Some(array) => array.copy(req)?.hand_on_unmigrated(),
-        None => PhpArray::new(req)?.hand_on_unmigrated(),
+    let copy = match given.get() {
+        Some(array) => array.copy(req)?,
+        None => PhpArray::new(req)?,
     };
     Ok(SortTarget {
-        array,
-        copied: true,
+        array: *copy,
+        copy: Some(copy),
     })
 }
 
@@ -583,7 +582,7 @@ fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray
     // argument holds it while a value's `__toString` runs. A reference is
     // read as held by one owner as php reads its count.
     let walked = rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
-        let bytes = crate::string::string_bytes(req, row.value())?;
+        let bytes = with_string(req, row.value(), <[u8]>::to_vec)?;
         if !seen.insert(bytes) {
             return Ok(ControlFlow::Continue(()));
         }

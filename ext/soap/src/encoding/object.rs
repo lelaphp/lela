@@ -52,9 +52,9 @@ pub(super) fn get_zval_property(req: &mut Request, object: &Value, name: &[u8]) 
                 read.give_up(req);
                 return None;
             }
-            let read = read.hand_on_unmigrated();
+            let view = *read;
             req.state::<crate::State>().held.push(read);
-            Some(read)
+            Some(view)
         }
         ValueRef::Array(a) => a.find(name).map(|v| v.deref()),
         _ => None,
@@ -804,7 +804,7 @@ fn model_to_xml_object(
                     && arr.is_list()
                 {
                     let read = rows(req, arr);
-                    with_rows(req, read, |req, rows| {
+                    with_rows(req, &read, |req, rows| {
                         for (_, val) in rows {
                             let property = element_to_xml(req, cx, el, *val, style, node)?;
                             name_property(req, el, property, style);
@@ -863,7 +863,7 @@ fn model_to_xml_object(
                 && arr.is_list()
             {
                 let read = rows(req, arr);
-                with_rows(req, read, |req, rows| {
+                with_rows(req, &read, |req, rows| {
                     for (_, val) in rows {
                         master_to_xml(req, cx, Some(anyxml), *val, style, node)?;
                     }
@@ -1046,7 +1046,7 @@ pub(super) fn to_xml_object(
             && let Some(arr) = data.as_array().copied()
         {
             let read = rows(req, arr);
-            with_rows(req, read, |req, rows| {
+            with_rows(req, &read, |req, rows| {
                 for (_, val) in rows {
                     let property = if matches!(val.deref().as_ref(), ValueRef::Null) && el.nillable
                     {
@@ -1182,7 +1182,7 @@ fn plain_to_xml(
     }
     if has_prop {
         let rows = prop_rows(req, &data)?;
-        with_rows(req, rows, |req, rows| {
+        with_rows(req, &rows, |req, rows| {
             for (k, zprop) in rows {
                 let code = type_code(&zprop.deref());
                 let conv = get_conversion(code)?;

@@ -8,7 +8,7 @@
 use php_ext::abi::{OrFalse, Path};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpString};
 
 /// `PHP_MD5_CTX` in php's own layout, `lo, hi, a, b, c, d`, the block
@@ -312,7 +312,7 @@ pub(super) fn digest_file(
         update(&buf[..n]);
     }
     let complete = stream.eof(req);
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(complete)
 }
 

@@ -21,6 +21,10 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::{Countable, Iterator};
 
+/// One element, the heap's owners of its data and its priority, `null`
+/// for a heap's.
+type Elem = (Owner<Value>, Owner<Value>);
+
 /// `spl_heap_object` with its `spl_ptr_heap`: the elements, a value
 /// each for a heap and a data and priority pair for a queue, the
 /// queue's extract flags, and the heap's two state bits.
@@ -29,7 +33,7 @@ use crate::{Countable, Iterator};
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Default)]
 pub(crate) struct HeapState {
-    elements: Vec<(Value, Value)>,
+    elements: Vec<Elem>,
     queue: bool,
     min: bool,
     flags: i64,
@@ -130,14 +134,20 @@ impl SplHeap {
                 "Can't extract from an empty heap",
             ));
         };
-        let (queue, flags) = read(req, this, |h| (h.queue, h.flags))?;
+        let (queue, flags) = match read(req, this, |h| (h.queue, h.flags)) {
+            Ok(read) => read,
+            Err(thrown) => {
+                release(req, top);
+                return Err(thrown);
+            }
+        };
         if !queue {
-            // The element is the one owner the heap held of it.
-            let owner = Owner::take(req, top.0);
-            release(req, top);
-            return Ok(owner);
+            // The heap's owner of the element, the caller's now.
+            let (data, priority) = top;
+            priority.give_up(req);
+            return Ok(data);
         }
-        let out = extracted(req, top, flags);
+        let out = extracted(req, seen(&top), flags);
         release(req, top);
         out
     }
@@ -159,8 +169,11 @@ impl SplHeap {
     fn insert(req: &mut Request, this: This<Self>, value: Value) -> Result<True, Thrown> {
         let this = this.object();
         consistent(req, this, true)?;
-        let value = crate::copied(req, value);
-        heap_insert(req, this, (value, Value::null()))?;
+        let elem = (
+            Owner::take(req, value.deref()),
+            Owner::take(req, Value::null()),
+        );
+        heap_insert(req, this, elem)?;
         Ok(True)
     }
 
@@ -170,7 +183,7 @@ impl SplHeap {
         let this = this.object();
         consistent(req, this, false)?;
         let (queue, flags, top) = read(req, this, |h| {
-            (h.queue, h.flags, h.elements.first().copied())
+            (h.queue, h.flags, h.elements.first().map(seen))
         })?;
         let Some(top) = top else {
             return Err(throw(
@@ -219,7 +232,7 @@ impl SplHeap {
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let (queue, flags, top) = read(req, this.object(), |h| {
-            (h.queue, h.flags, h.elements.first().copied())
+            (h.queue, h.flags, h.elements.first().map(seen))
         })?;
         match top {
             None => Ok(Owner::take(req, Value::null())),
@@ -503,9 +516,11 @@ impl SplPriorityQueue {
     ) -> Result<True, Thrown> {
         let this = this.object();
         consistent(req, this, true)?;
-        let data = crate::copied(req, value);
-        let priority = crate::copied(req, priority);
-        heap_insert(req, this, (data, priority))?;
+        let elem = (
+            Owner::take(req, value.deref()),
+            Owner::take(req, priority.deref()),
+        );
+        heap_insert(req, this, elem)?;
         Ok(True)
     }
 
@@ -714,43 +729,67 @@ fn overridden_compare(req: &mut Request, object: PhpObject) -> bool {
         .is_some_and(|decl| !decl.file.0.is_empty())
 }
 
+/// The element at `at`, its views.
 fn element(req: &Request, object: PhpObject, at: usize) -> (Value, Value) {
     object
         .native::<Heap>(req)
-        .and_then(|h| h.elements.get(at).copied())
+        .and_then(|h| h.elements.get(at).map(seen))
         .unwrap_or_default()
 }
 
-fn put(
-    req: &mut Request,
-    object: PhpObject,
-    at: usize,
-    value: (Value, Value),
-) -> Result<(), Thrown> {
+/// An element's views.
+fn seen(elem: &Elem) -> (Value, Value) {
+    (*elem.0, *elem.1)
+}
+
+/// The slot an element is moved out of, or into, `null` and `null`:
+/// php's hole, which `spl_heap_elem_copy` fills.
+fn hole(req: &Request) -> Elem {
+    (
+        Owner::take(req, Value::null()),
+        Owner::take(req, Value::null()),
+    )
+}
+
+/// `spl_heap_elem_copy(heap, elem(to), elem(from))` where `to` is the
+/// hole: the element moved there, the hole to where it stood.
+fn shift(req: &mut Request, object: PhpObject, to: usize, from: usize) -> Result<(), Thrown> {
     with(req, object, |h| {
-        if let Some(slot) = h.elements.get_mut(at) {
-            *slot = value;
+        if to < h.elements.len() && from < h.elements.len() {
+            h.elements.swap(to, from);
         }
     })
+}
+
+/// `elem` written into the hole at `at`, the hole given up.
+fn fill(req: &mut Request, object: PhpObject, at: usize, elem: Elem) -> Result<(), Thrown> {
+    let left = with(req, object, |h| match h.elements.get_mut(at) {
+        Some(slot) => std::mem::replace(slot, elem),
+        None => elem,
+    })?;
+    release(req, left);
+    Ok(())
 }
 
 /// `spl_ptr_heap_insert`: the hole sifted up from the end while the
 /// parent compares below the new element, the element written where the
 /// hole stops; a comparison that threw marks the heap corrupted.
-fn heap_insert(req: &mut Request, object: PhpObject, elem: (Value, Value)) -> Result<(), Thrown> {
+fn heap_insert(req: &mut Request, object: PhpObject, elem: Elem) -> Result<(), Thrown> {
+    let hole = hole(req);
     let count = with(req, object, |h| {
         h.locked = true;
-        h.elements.push((Value::null(), Value::null()));
+        h.elements.push(hole);
         h.elements.len() - 1
     })?;
+    let view = seen(&elem);
     let mut pending = None;
     let mut pos = count;
     while pos > 0 {
         let parent = element(req, object, (pos - 1) / 2);
-        if cmp(req, object, &parent, &elem, &mut pending) >= 0 {
+        if cmp(req, object, &parent, &view, &mut pending) >= 0 {
             break;
         }
-        put(req, object, pos, parent)?;
+        shift(req, object, pos, (pos - 1) / 2)?;
         pos = (pos - 1) / 2;
     }
     let threw = pending.is_some();
@@ -760,20 +799,26 @@ fn heap_insert(req: &mut Request, object: PhpObject, elem: (Value, Value)) -> Re
             h.corrupted = true;
         }
     })?;
-    put(req, object, pos, elem)?;
+    fill(req, object, pos, elem)?;
     pending.map_or(Ok(()), Err)
 }
 
 /// `spl_ptr_heap_delete_top`: the top handed back, the last element
 /// sifted down from the root past each larger child.
-fn delete_top(req: &mut Request, object: PhpObject) -> Result<Option<(Value, Value)>, Thrown> {
+fn delete_top(req: &mut Request, object: PhpObject) -> Result<Option<Elem>, Thrown> {
     let count = read(req, object, |h| h.elements.len())?;
     if count == 0 {
         return Ok(None);
     }
     let limit = (count - 1) / 2;
-    with(req, object, |h| h.locked = true)?;
-    let top = element(req, object, 0);
+    let hole = hole(req);
+    let top = with(req, object, |h| {
+        h.locked = true;
+        match h.elements.first_mut() {
+            Some(slot) => std::mem::replace(slot, hole),
+            None => hole,
+        }
+    })?;
     let count = count - 1;
     let bottom = element(req, object, count);
     let mut pending = None;
@@ -789,25 +834,36 @@ fn delete_top(req: &mut Request, object: PhpObject) -> Result<Option<(Value, Val
         }
         let at_child = element(req, object, child);
         if cmp(req, object, &bottom, &at_child, &mut pending) < 0 {
-            put(req, object, parent, at_child)?;
+            if let Err(thrown) = shift(req, object, parent, child) {
+                release(req, top);
+                return Err(thrown);
+            }
         } else {
             break;
         }
         parent = child;
     }
     let threw = pending.is_some();
-    with(req, object, |h| {
+    let holes = with(req, object, |h| {
         h.locked = false;
         if threw {
             h.corrupted = true;
         }
-        if parent != count
-            && let Some(slot) = h.elements.get_mut(parent)
-        {
-            *slot = bottom;
+        if parent != count && parent < h.elements.len() && count < h.elements.len() {
+            h.elements.swap(parent, count);
         }
-        h.elements.truncate(count);
-    })?;
+        h.elements.split_off(count.min(h.elements.len()))
+    });
+    let holes = match holes {
+        Ok(holes) => holes,
+        Err(thrown) => {
+            release(req, top);
+            return Err(thrown);
+        }
+    };
+    for left in holes {
+        release(req, left);
+    }
     match pending {
         Some(thrown) => {
             release(req, top);
@@ -817,9 +873,10 @@ fn delete_top(req: &mut Request, object: PhpObject) -> Result<Option<(Value, Val
     }
 }
 
-fn release(req: &mut Request, elem: (Value, Value)) {
-    req.release(elem.0);
-    req.release(elem.1);
+/// An element's two owners given up, the data first.
+fn release(req: &mut Request, elem: Elem) {
+    elem.0.give_up(req);
+    elem.1.give_up(req);
 }
 
 /// `spl_pqueue_extract_helper`: the data, the priority or both, one
@@ -852,9 +909,9 @@ impl ObjectHandlers for Handlers {
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(h) = object.native::<Heap>(req) {
             for (a, b) in &h.elements {
-                visit(*a);
+                visit(**a);
                 if h.queue {
-                    visit(*b);
+                    visit(**b);
                 }
             }
         }
@@ -880,19 +937,25 @@ impl ObjectHandlers for Handlers {
 /// `spl_heap_object_clone`: the elements with one more owner each.
 fn clone_heap(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     state_ready(req, object)?;
-    let copy = read(req, object, |h| HeapState {
-        elements: h.elements.clone(),
-        queue: h.queue,
-        min: h.min,
-        flags: h.flags,
-        corrupted: h.corrupted,
-        locked: h.locked,
-        ready: true,
+    let (views, copy) = read(req, object, |h| {
+        (
+            h.elements.iter().map(seen).collect::<Vec<_>>(),
+            HeapState {
+                elements: Vec::new(),
+                queue: h.queue,
+                min: h.min,
+                flags: h.flags,
+                corrupted: h.corrupted,
+                locked: h.locked,
+                ready: true,
+            },
+        )
     })?;
-    for (a, b) in &copy.elements {
-        req.addref(a);
-        req.addref(b);
-    }
+    let mut copy = copy;
+    copy.elements = views
+        .into_iter()
+        .map(|(a, b)| (Owner::take(req, a), Owner::take(req, b)))
+        .collect();
     clone_with(req, &object, Box::new(copy))
 }
 
@@ -901,7 +964,12 @@ fn clone_heap(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, 
 /// `SplPriorityQueue`.
 fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let (queue, flags, corrupted, elements) = read(req, object, |h| {
-        (h.queue, h.flags, h.corrupted, h.elements.clone())
+        (
+            h.queue,
+            h.flags,
+            h.corrupted,
+            h.elements.iter().map(seen).collect::<Vec<_>>(),
+        )
     })?;
     let mut out = PhpArray::new(req)?;
     for (key, value) in crate::std_properties(req, object)? {
@@ -938,7 +1006,13 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
 /// The array `__serialize` answers for a heap or a queue.
 fn serialize(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     consistent(req, this, false)?;
-    let (queue, flags, elements) = read(req, this, |h| (h.queue, h.flags, h.elements.clone()))?;
+    let (queue, flags, elements) = read(req, this, |h| {
+        (
+            h.queue,
+            h.flags,
+            h.elements.iter().map(seen).collect::<Vec<_>>(),
+        )
+    })?;
     let mut out = PhpArray::new(req)?;
     let props = crate::members(req, this)?;
     out.append(req, props.into_value())?;
@@ -1014,9 +1088,9 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
             let (Some(d), Some(p)) = (pair.find(b"data"), pair.find(b"priority")) else {
                 return Err(invalid(req));
             };
-            (crate::copied(req, d), crate::copied(req, p))
+            (Owner::take(req, d.deref()), Owner::take(req, p.deref()))
         } else {
-            (crate::copied(req, value), Value::null())
+            (Owner::take(req, value), Owner::take(req, Value::null()))
         };
         heap_insert(req, this, elem)?;
         Ok(ControlFlow::Continue(()))

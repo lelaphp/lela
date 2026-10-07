@@ -45,8 +45,9 @@ pub(crate) enum Extra {
     Map(Box<Map>),
     /// `dom_xpath_object`'s own fields.
     XPath(Box<XPathState>),
-    /// `dom_object_namespace_node::parent_intern`, one owner held.
-    NamespaceParent(PhpObject),
+    /// `dom_object_namespace_node::parent_intern`, the object's owner of
+    /// its element's object.
+    NamespaceParent(Box<Owner<Value>>),
     /// `dom_token_list_object`'s own fields.
     TokenList(Box<crate::token_list::TokenSet>),
 }
@@ -203,7 +204,7 @@ impl ObjectHandlers for NodeHandlers {
         // `dom_object_namespace_node_free_storage`: the parent given up
         // first, then `dom_objects_free_storage`.
         if let Some(parent) = parent {
-            req.release(parent.as_value());
+            parent.give_up(req);
         }
         crate::release_libxml(req, object);
     }

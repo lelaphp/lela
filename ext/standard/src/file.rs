@@ -146,13 +146,14 @@
 use php_ext::abi::{OrFalse, Passed, Path, Ref, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
-use php_ext::coerce::to_string;
+use php_ext::coerce::{to_string, with_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
 };
 use php_ext::request::{
-    OptionAnswer, Request, Resolve, Stream, StreamOption, Streams as _, Whence, WrapperOp,
+    OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption, Streams as _, Whence,
+    WrapperOp,
 };
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -1537,7 +1538,7 @@ fn file_get_contents(
                 Level::Warning,
                 &format!("Failed to seek to position {offset} in the stream"),
             );
-            stream.hand_on_unmigrated().free(req);
+            stream.free(req);
             return Ok(OrFalse::False);
         }
     }
@@ -1548,7 +1549,7 @@ fn file_get_contents(
             return Err(thrown);
         }
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(OrFalse::Value(contents))
 }
 
@@ -1659,7 +1660,7 @@ fn file_put_contents(
         return Ok(OrFalse::False);
     };
     if flags & FLOCK_EX != 0 && !stream.flock(req, FLOCK_EX) {
-        stream.hand_on_unmigrated().free(req);
+        stream.free(req);
         docref(
             req,
             Level::Warning,
@@ -1674,7 +1675,7 @@ fn file_put_contents(
         return Err(thrown);
     }
     let written = write_data(req, *stream, source, &data, name);
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(match written? {
         Some(n) => OrFalse::Value(i64::try_from(n).unwrap_or(i64::MAX)),
         None => OrFalse::False,
@@ -2139,9 +2140,9 @@ fn copy_file(req: &mut Request, source: &[u8], target: &[u8]) -> Result<bool, Th
     };
     if let Some(to) = to {
         done = crate::streamsfuncs::copy_stream(req, *from, *to, None).is_some();
-        to.hand_on_unmigrated().free(req);
+        to.free(req);
     }
-    from.hand_on_unmigrated().free(req);
+    from.free(req);
     Ok(done)
 }
 
@@ -2359,7 +2360,7 @@ fn file(
             return Err(thrown);
         }
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     let buf = contents.as_bytes().to_vec();
     // `zend_string_free(target_buf)`: the lines are copies.
     contents.give_up(req);
@@ -2467,7 +2468,7 @@ enum MetaToken {
 /// `php_meta_tags_data`: the stream, the byte put back in place of
 /// `ungetc`, whether the tag is a `meta`, and the token's bytes.
 struct MetaData {
-    stream: Stream,
+    stream: Owner<Stream>,
     lc: Option<i32>,
     in_meta: bool,
     token: Option<Vec<u8>>,
@@ -2620,7 +2621,6 @@ impl MetaData {
 ///   string(8) "636166e9"
 /// }
 /// ```
-#[allow(clippy::too_many_lines)] // one C function, kept whole
 #[php_function]
 fn get_meta_tags(
     req: &mut Request,
@@ -2631,13 +2631,35 @@ fn get_meta_tags(
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", use_include_path)? else {
         return Ok(OrFalse::False);
     };
-    let mut array = PhpArray::new(req)?;
     let mut md = MetaData {
-        stream: stream.hand_on_unmigrated(),
+        stream,
         lc: None,
         in_meta: false,
         token: None,
     };
+    let tags = match PhpArray::new(req) {
+        Ok(mut array) => match meta_tags(req, &mut md, &mut array) {
+            Ok(()) => Ok(array),
+            Err(thrown) => {
+                array.give_up(req);
+                Err(thrown)
+            }
+        },
+        Err(thrown) => Err(thrown),
+    };
+    md.stream.free(req);
+    Ok(OrFalse::Value(tags?))
+}
+
+/// The scan of `PHP_FUNCTION(get_meta_tags)` (`Z/ext/standard/file.c:233`)
+/// over the stream `md` reads: each `<meta>`'s `name` and `content` set
+/// in `array`, up to `</head>`.
+#[allow(clippy::too_many_lines)] // one C function, kept whole
+fn meta_tags(
+    req: &mut Request,
+    md: &mut MetaData,
+    array: &mut Owner<PhpArray>,
+) -> Result<(), Thrown> {
     let (mut in_tag, mut looking_for_val) = (false, false);
     let (mut have_name, mut have_content) = (false, false);
     let (mut saw_name, mut saw_content) = (false, false);
@@ -2651,13 +2673,7 @@ fn get_meta_tags(
             .collect()
     };
     loop {
-        let tok = match md.next(req) {
-            Ok(tok) => tok,
-            Err(thrown) => {
-                array.give_up(req);
-                return Err(thrown);
-            }
-        };
+        let tok = md.next(req)?;
         if tok == MetaToken::Eof {
             break;
         }
@@ -2734,8 +2750,7 @@ fn get_meta_tags(
             break;
         }
     }
-    md.stream.free(req);
-    Ok(OrFalse::Value(array))
+    Ok(())
 }
 
 /// `_php_stream_passthru` (`Z/main/streams/streams.c`): what is left
@@ -2816,7 +2831,7 @@ fn readfile(
             return Err(thrown);
         }
     };
-    stream.hand_on_unmigrated().free(req);
+    stream.free(req);
     Ok(OrFalse::Value(size))
 }
 
@@ -3073,29 +3088,29 @@ pub fn php_fputcsv(
     let count = fields.len();
     let mut line = Vec::new();
     for (i, (_, field)) in fields.iter().enumerate() {
-        let field = crate::string::string_bytes(req, &field)?;
-        let bytes = field.as_slice();
-        let special = [delimiter, enclosure, b'\n', b'\r', b'\t', b' ']
-            .iter()
-            .chain(escape.iter())
-            .any(|c| bytes.contains(c));
-        if special {
-            line.push(enclosure);
-            let mut escaped = false;
-            for &ch in bytes {
-                if escape == Some(ch) {
-                    escaped = true;
-                } else if !escaped && ch == enclosure {
-                    line.push(enclosure);
-                } else {
-                    escaped = false;
+        with_string(req, &field, |bytes| {
+            let special = [delimiter, enclosure, b'\n', b'\r', b'\t', b' ']
+                .iter()
+                .chain(escape.iter())
+                .any(|c| bytes.contains(c));
+            if special {
+                line.push(enclosure);
+                let mut escaped = false;
+                for &ch in bytes {
+                    if escape == Some(ch) {
+                        escaped = true;
+                    } else if !escaped && ch == enclosure {
+                        line.push(enclosure);
+                    } else {
+                        escaped = false;
+                    }
+                    line.push(ch);
                 }
-                line.push(ch);
+                line.push(enclosure);
+            } else {
+                line.extend_from_slice(bytes);
             }
-            line.push(enclosure);
-        } else {
-            line.extend_from_slice(bytes);
-        }
+        })?;
         if i + 1 != count {
             line.push(delimiter);
         }

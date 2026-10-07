@@ -6,6 +6,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{Path, Ref, Union, Untyped};
 use php_ext::attr::php_function;
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -41,13 +42,13 @@ pub(crate) fn write_headers(
     // (`Z/ext/openssl/openssl.c:2729`), no owner of the table taken: the
     // argument holds it while `zval_try_get_string` runs `__toString`.
     let refused = walk::foreach(req, headers, Hold::None, |req, row| -> walk::Step {
-        let text = crate::xp_ssl::string_of(req, &row.value().deref())?;
+        let text = with_string(req, row.value(), c_string)?;
         let mut line = Vec::new();
         if let Key::Str(name) = row.key() {
             line.extend_from_slice(c_string(name.as_bytes()).as_bytes());
             line.extend_from_slice(b": ");
         }
-        line.extend_from_slice(c_string(&text).as_bytes());
+        line.extend_from_slice(text.as_bytes());
         line.push(b'\n');
         if !out.write(&line) {
             store_errors(req);

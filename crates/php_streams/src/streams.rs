@@ -36,8 +36,8 @@ use crate::api::values::{Emalloc, Owner, ResourceType};
 
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
-    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, FreeOwned, HostPath,
-    Notification, OptionAnswer, Request, Standard, Stream, StreamCtx, StreamOption, TemporaryGuard,
+    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notification,
+    OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx, StreamOption, TemporaryGuard,
     Whence,
 };
 use crate::api::values::{ClassId, FreshString, PhpArray, PhpString, Resource, Value};
@@ -104,8 +104,11 @@ pub(crate) trait Ops: Send {
     }
 
     /// `php_stream_encloses`: the stream this kind reads and writes
-    /// through, which only `php://temp` has.
-    fn enclose(&mut self, _inner: Stream) {}
+    /// through, which only `php://temp` has; a kind that encloses none
+    /// hands the owner back.
+    fn enclose(&mut self, inner: Owner<Stream>) -> Option<Owner<Stream>> {
+        Some(inner)
+    }
 
     /// `ops->seek`, or `None` where the kind has none: `position` is
     /// php's `*newoffs`, written as the kind writes it, which the
@@ -433,7 +436,7 @@ pub(crate) struct PhpStream {
 struct Wrapped {
     context: Option<StreamCtx>,
     closer: Option<Box<dyn Closer>>,
-    wrapperdata: Option<Value>,
+    wrapperdata: Option<Owner<Value>>,
     stat: Option<fn(&mut Request, Stream) -> Option<StatBuf>>,
 }
 
@@ -702,7 +705,7 @@ impl PhpStream {
 
     /// `stream->wrapperdata`: the value given in place, the one the
     /// stream held handed back.
-    pub(crate) fn set_wrapper_data(&mut self, value: Option<Value>) -> Option<Value> {
+    pub(crate) fn set_wrapper_data(&mut self, value: Option<Owner<Value>>) -> Option<Owner<Value>> {
         std::mem::replace(&mut self.wrapped_mut().wrapperdata, value)
     }
 
@@ -1595,7 +1598,7 @@ impl PhpStream {
                 filters::defer(req, thrown);
             }
             if let Some(data) = wrapperdata {
-                req.release(data);
+                data.give_up(req);
             }
         }
         // `pefree(stream->readbuf)` and `pefree(stream->orig_path)`.
@@ -2053,7 +2056,7 @@ const PHP_STREAM_MAX_MEM: usize = 2 * 1024 * 1024;
 /// does, `None` where php's `innerstream` is `NULL`; and `smax`, the
 /// bytes it keeps in memory before the spill.
 struct Temp {
-    inner: Option<Stream>,
+    inner: Option<Owner<Stream>>,
     /// The `php_stream_temp_data` php `ecalloc`s, [`TEMP_DATA_SIZE`]
     /// bytes on the request's heap from [`Ops::lay_down`] to the close.
     own: Option<Emalloc>,
@@ -2067,6 +2070,11 @@ struct Temp {
 }
 
 impl Temp {
+    /// The inner stream, a view of the owner the kind keeps.
+    fn inner(&self) -> Option<Stream> {
+        self.inner.as_deref().copied()
+    }
+
     /// The spill of `php_stream_temp_write` (`Z/main/streams/memory.c:350`):
     /// while the inner stream is the memory one and a write of `count`
     /// at its position would reach `smax`, a temporary file opened by
@@ -2111,11 +2119,12 @@ impl Temp {
             warning(req, &text);
             return Ok(false);
         };
-        let file = file.hand_on_unmigrated();
-        req.stream_op(file, |req, f| f.write(req, &membuf));
-        inner.free(req);
-        self.inner = Some(file);
-        req.stream_op(file, |req, f| f.seek(req, pos, Some(Whence::Set)));
+        let at = *file;
+        req.stream_op(at, |req, f| f.write(req, &membuf));
+        if let Some(memory) = self.inner.replace(file) {
+            memory.free(req);
+        }
+        req.stream_op(at, |req, f| f.seek(req, pos, Some(Whence::Set)));
         Ok(true)
     }
 }
@@ -2125,8 +2134,9 @@ impl Ops for Temp {
         self.label
     }
 
-    fn enclose(&mut self, inner: Stream) {
+    fn enclose(&mut self, inner: Owner<Stream>) -> Option<Owner<Stream>> {
         self.inner = Some(inner);
+        None
     }
 
     /// `_php_stream_temp_create_ex`'s `self = ecalloc(1, sizeof(*self))`,
@@ -2152,21 +2162,22 @@ impl Ops for Temp {
     /// where the write would reach `smax`, then the inner stream
     /// written; a spill that could not make its file writes nothing.
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        let inner = self.inner?;
+        let inner = self.inner()?;
         match self.spill(req, inner, buf.len()) {
             Ok(true) => {}
             Ok(false) => return Some(0),
             Err(_) => return None,
         }
-        req.stream_op(self.inner?, |req, inner| inner.write(req, buf))
+        req.stream_op(self.inner()?, |req, inner| inner.write(req, buf))
             .flatten()
     }
 
     /// `php_stream_temp_read` (`Z/main/streams/memory.c:381`): the inner
     /// stream read and its eof taken.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        let (got, inner_eof) =
-            req.stream_op(self.inner?, |req, inner| (inner.read(req, buf), inner.eof))?;
+        let (got, inner_eof) = req.stream_op(self.inner()?, |req, inner| {
+            (inner.read(req, buf), inner.eof)
+        })?;
         *eof = inner_eof;
         got
     }
@@ -2187,7 +2198,7 @@ impl Ops for Temp {
 
     /// `php_stream_temp_flush` (`Z/main/streams/memory.c:418`).
     fn flush(&mut self, req: &mut Request) -> bool {
-        self.inner
+        self.inner()
             .and_then(|inner| req.stream_op(inner, |req, inner| inner.flush(req)))
             .unwrap_or(false)
     }
@@ -2201,7 +2212,7 @@ impl Ops for Temp {
         whence: Option<Whence>,
         position: &mut i64,
     ) -> Option<bool> {
-        let Some(inner) = self.inner else {
+        let Some(inner) = self.inner() else {
             *position = -1;
             return Some(false);
         };
@@ -2219,19 +2230,19 @@ impl Ops for Temp {
     /// `php_stream_temp_stat` (`Z/main/streams/memory.c:510`): the inner
     /// stream's.
     fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
-        req.stream_op(self.inner?, |req, inner| inner.stat(req))
+        req.stream_op(self.inner()?, |req, inner| inner.stat(req))
             .flatten()
     }
 
     /// `php_stream_temp_set_option`'s default arm: the inner stream's.
     fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
-        req.stream_op(self.inner?, |req, inner| inner.truncate(req, size))
+        req.stream_op(self.inner()?, |req, inner| inner.truncate(req, size))
             .flatten()
     }
 
     /// `php_stream_temp_set_option`'s default arm: the inner stream's.
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
-        req.stream_op(self.inner?, |req, inner| inner.ops.flock(req, operation))
+        req.stream_op(self.inner()?, |req, inner| inner.ops.flock(req, operation))
             .flatten()
     }
 
@@ -2260,7 +2271,7 @@ impl Ops for Temp {
         _own: Option<Stream>,
         ret: Ret,
     ) -> CastTarget<'_> {
-        let Some(inner) = self.inner else {
+        let Some(inner) = self.inner() else {
             return CastTarget::Refused;
         };
         if ret == Ret::Null {
@@ -2276,13 +2287,13 @@ impl Ops for Temp {
         if !matches!(self.move_to_file(req, inner, None), Ok(true)) {
             return CastTarget::Refused;
         }
-        self.inner.map_or(CastTarget::Refused, CastTarget::Stream)
+        self.inner().map_or(CastTarget::Refused, CastTarget::Stream)
     }
 
     /// `php_stream_temp_set_option`'s default arm: the inner stream's,
     /// its generic layer included.
     fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
-        let Some(inner) = self.inner else {
+        let Some(inner) = self.inner() else {
             return OptionAnswer::NotImplemented;
         };
         req.stream_op(inner, |req, inner| inner.set_option(req, option))
@@ -3560,8 +3571,13 @@ fn temp_stream(
     let outer = req.stream_alloc(outer)?;
     let inner = req.stream_alloc(memory(mode));
     let (outer, inner) = freed_on_throw(req, outer, inner)?;
-    let inner = inner.hand_on_unmigrated();
-    req.stream_op(*outer, |_, stream| stream.ops.enclose(inner));
+    let mut inner = Some(inner);
+    req.stream_op(*outer, |_, s| {
+        inner = inner.take().and_then(|i| s.ops.enclose(i));
+    });
+    if let Some(inner) = inner {
+        inner.free(req);
+    }
     Ok(outer)
 }
 
@@ -3708,7 +3724,7 @@ pub(crate) trait StreamLayer {
     fn stream_meta_data(&mut self, stream: Stream) -> Result<Owner<PhpArray>, Thrown>;
     fn set_stream_context(&mut self, stream: Stream, context: Option<StreamCtx>);
     fn stream_context(&self, stream: Stream) -> Option<StreamCtx>;
-    fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Value>, Thrown>;
+    fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Owner<Value>>, Thrown>;
     fn kind_meta_data(&self, stream: Stream) -> Option<Vec<(Vec<u8>, MetaValue)>>;
     fn wrapper_errors_text(&self, logged: &[String]) -> String;
     fn display_wrapper_errors(&mut self, path: &[u8], caption: &str, message: &str);
@@ -4427,26 +4443,40 @@ impl StreamLayer for Request {
     #[cfg_attr(debug_assertions, track_caller)]
     fn stream_meta_data(&mut self, stream: Stream) -> Result<Owner<PhpArray>, Thrown> {
         let mut out = PhpArray::new(self)?;
-        let crypto = self.crypto_meta(stream)?;
+        // The meta-data row the array is written into takes an owner of
+        // its own; this one is given up once the rows are written.
+        let crypto = match self.crypto_meta(stream) {
+            Ok(crypto) => crypto,
+            Err(thrown) => {
+                out.give_up(self);
+                return Err(thrown);
+            }
+        };
         let head = if let Some(mut head) = self.kind_meta_data(stream) {
-            if let Some(crypto) = crypto {
-                head.insert(0, (b"crypto".to_vec(), MetaValue::Value(crypto)));
+            if let Some(crypto) = &crypto {
+                head.insert(0, (b"crypto".to_vec(), MetaValue::Value(**crypto)));
             }
             head
         } else {
             let Some(eof) = self.stream_op(stream, |req, s| s.eof(req)) else {
+                if let Some(crypto) = crypto {
+                    crypto.give_up(self);
+                }
                 return Ok(out);
             };
             meta_three(false, true, eof)
         };
         let Some(s) = self.stream_ref(stream) else {
+            if let Some(crypto) = crypto {
+                crypto.give_up(self);
+            }
             return Ok(out);
         };
         let wrapper = s.wrapper;
         let wrapper_data = s
             .wrapped
             .as_ref()
-            .and_then(|w| w.wrapperdata)
+            .and_then(|w| w.wrapperdata.as_deref().copied())
             .or_else(|| s.ops.wrapper_data());
         let stream_type = s.ops.label();
         let mode = s.mode.bytes().to_vec();
@@ -4473,26 +4503,17 @@ impl StreamLayer for Request {
         if let Some(uri) = uri {
             entries.push((b"uri".to_vec(), MetaValue::Str(uri)));
         }
-        for (key, value) in entries {
-            let key = PhpString::new(self, &key)?.into_key();
-            let value = match value {
-                MetaValue::Bool(b) => Owner::take(self, Value::bool(b)),
-                MetaValue::Int(n) => Owner::take(self, Value::int(n)),
-                MetaValue::Str(bytes) => match PhpString::new(self, &bytes) {
-                    Ok(bytes) => bytes.into_value(),
-                    Err(thrown) => {
-                        key.give_up(self);
-                        return Err(thrown);
-                    }
-                },
-                MetaValue::Value(value) => Owner::take(self, value),
-            };
-            out.set(self, key, value)?;
-        }
+        let written = meta_rows(self, &mut out, entries);
         if let Some(crypto) = crypto {
-            self.release(crypto);
+            crypto.give_up(self);
         }
-        Ok(out)
+        match written {
+            Ok(()) => Ok(out),
+            Err(thrown) => {
+                out.give_up(self);
+                Err(thrown)
+            }
+        }
     }
 
     /// `php_stream_context_set` (`Z/main/streams/streams.c:2385`): the
@@ -4526,7 +4547,7 @@ impl StreamLayer for Request {
 
     /// What a socket's active crypto layer shows under `crypto`, ahead of
     /// the three the socket shows.
-    fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Value>, Thrown> {
+    fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Owner<Value>>, Thrown> {
         let meta = self
             .stream_op(stream, |req, s| {
                 let socket = s.ops.as_socket()?;
@@ -4535,8 +4556,7 @@ impl StreamLayer for Request {
             })
             .flatten();
         match meta {
-            // The meta-data row the array is written into takes its owner.
-            Some(Ok(Some(array))) => Ok(Some(array.into_value().hand_on_unmigrated())),
+            Some(Ok(Some(array))) => Ok(Some(array.into_value())),
             Some(Err(thrown)) => Err(thrown),
             Some(Ok(None)) | None => Ok(None),
         }
@@ -4945,6 +4965,32 @@ fn meta_three(timed_out: bool, blocked: bool, eof: bool) -> Vec<(Vec<u8>, MetaVa
         (b"blocked".to_vec(), MetaValue::Bool(blocked)),
         (b"eof".to_vec(), MetaValue::Bool(eof)),
     ]
+}
+
+/// The rows of `stream_get_meta_data`'s array written in order, each key
+/// and value an owner the array takes.
+fn meta_rows(
+    req: &mut Request,
+    out: &mut Owner<PhpArray>,
+    entries: Vec<(Vec<u8>, MetaValue)>,
+) -> Result<(), Thrown> {
+    for (key, value) in entries {
+        let key = PhpString::new(req, &key)?.into_key();
+        let value = match value {
+            MetaValue::Bool(b) => Owner::take(req, Value::bool(b)),
+            MetaValue::Int(n) => Owner::take(req, Value::int(n)),
+            MetaValue::Str(bytes) => match PhpString::new(req, &bytes) {
+                Ok(bytes) => bytes.into_value(),
+                Err(thrown) => {
+                    key.give_up(req);
+                    return Err(thrown);
+                }
+            },
+            MetaValue::Value(value) => Owner::take(req, value),
+        };
+        out.set(req, key, value)?;
+    }
+    Ok(())
 }
 
 /// One entry of what [`Request::stream_meta_data`] puts in the array,

@@ -20,7 +20,8 @@ use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
 use php_ext::request::{
-    Cast, HostPath, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _,
+    Cast, HostPath, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper,
+    Streams as _,
 };
 use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
@@ -38,10 +39,11 @@ pub(crate) struct FileId(u64);
 
 /// `bzf->handle`: the file `BZ2_bzopen` opened on the path, with
 /// whether a read of it met its end (`feof`), or the php stream whose fd
-/// `BZ2_bzdopen` was handed, which the kind closes with its own.
+/// `BZ2_bzdopen` was handed, which the kind closes with its own, and the
+/// owner of it the kind holds.
 enum Handle {
     File { file: File, eof: bool },
-    Stream(Stream),
+    Stream(Owner<Stream>),
 }
 
 impl Handle {
@@ -93,13 +95,12 @@ impl Handle {
     }
 
     /// `fclose(handle)`, and `php_stream_free` of the stream under it:
-    /// php's `GC_ADDREF` on that stream (`php_stream_bz2open_from_BZFILE`)
-    /// is the owner its `zend_list_delete` gives up, and this one takes
-    /// none, so the stream is closed and whatever owner it had is left,
-    /// [`Stream::close`] and not [`Stream::free`].
+    /// closed, and the owner the kind holds, php's `GC_ADDREF` on that
+    /// stream (`php_stream_bz2open_from_BZFILE`), given up as its
+    /// `zend_list_delete` gives it up.
     fn close(self, req: &mut Request) {
         if let Handle::Stream(inner) = self {
-            inner.close(req);
+            inner.free(req);
         }
     }
 }
@@ -440,7 +441,7 @@ fn open(
             inner.give_up(req);
             return Ok(None);
         }
-        Handle::Stream(inner.hand_on_unmigrated())
+        Handle::Stream(inner)
     };
     let Some(direction) = parsed.direction() else {
         // `php_stream_close(stream)`: what this open opened, given up.
@@ -684,7 +685,8 @@ fn open_stream(
     let Some(direction) = Mode::parse(mode).direction() else {
         return Ok(None);
     };
-    from_file(req, Handle::Stream(stream), mode, direction).map(Some)
+    let held = Owner::take(req, stream);
+    from_file(req, Handle::Stream(held), mode, direction).map(Some)
 }
 
 /// `bzread($bz, int $length = 1024): string|false`: up to `$length`

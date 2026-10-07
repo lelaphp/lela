@@ -15,6 +15,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{
     autoload, call_array, internal_iterator, known_method, lookup_class, new_object,
 };
+use php_ext::coerce::with_string;
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, fatal, raise, throw_error, while_pending,
@@ -189,7 +190,7 @@ pub(crate) fn fetch_object(
     // `"O|Ch"`: the class by `try_convert_to_string`, whose refusal is the
     // conversion's `Error` and not a `TypeError` of the parameter, before
     // the arguments are held.
-    let class = crate::string_of(req, &class.value())?;
+    let class = with_string(req, &class.value(), <[u8]>::to_vec)?;
     let args = args.hold(req)?;
     let args = given.then_some(args);
     let Some(target) = autoload(req, &class)? else {
@@ -945,7 +946,7 @@ impl ObjectHandlers for ResultHandlers {
 
 /// `php_mysqli_result_iterator`: the row fetched last and its number.
 struct RowIter {
-    current: Option<Value>,
+    current: Option<Owner<Value>>,
     row_num: i64,
 }
 
@@ -953,13 +954,13 @@ impl RowIter {
     /// `php_mysqli_result_iterator_move_forward`.
     fn forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
         if let Some(old) = self.current.take() {
-            req.release(old);
+            old.give_up(req);
         }
         let row = with_rows(req, object, |req, set| fetch_row(req, set, ASSOC))?;
         if row.as_array().is_some() {
             self.row_num += 1;
         }
-        self.current = Some(row.hand_on_unmigrated());
+        self.current = Some(row);
         Ok(())
     }
 }
@@ -987,11 +988,14 @@ impl ClassIterator for RowIter {
     }
 
     fn valid(&mut self, _: &mut Request, _: PhpObject) -> Result<bool, Thrown> {
-        Ok(self.current.is_some_and(|row| row.as_array().is_some()))
+        Ok(self
+            .current
+            .as_deref()
+            .is_some_and(|row| row.as_array().is_some()))
     }
 
     fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
-        let row = self.current.unwrap_or_default();
+        let row = self.current.as_deref().copied().unwrap_or_default();
         Ok(Owner::take(req, row))
     }
 
@@ -1005,7 +1009,7 @@ impl ClassIterator for RowIter {
 
     fn release(&mut self, req: &mut Request, _: PhpObject) {
         if let Some(row) = self.current.take() {
-            req.release(row);
+            row.give_up(req);
         }
     }
 }

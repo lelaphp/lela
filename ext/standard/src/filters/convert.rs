@@ -12,7 +12,7 @@
 //! into. None of the four answers `PHP_CONV_ERR_MORE`, so the stub php
 //! keeps for a converter that does is never filled, and is not here.
 
-use php_ext::coerce::{to_long, to_string, truthy};
+use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter};
 use php_ext::values::{PhpArray, Value};
@@ -585,10 +585,7 @@ fn string_option(
     let Some(value) = option(options, name) else {
         return Ok(None);
     };
-    let text = to_string(req, &value)?;
-    let bytes = text.as_bytes().to_vec();
-    text.give_up(req);
-    Ok(Some(bytes))
+    with_string(req, &value, <[u8]>::to_vec).map(Some)
 }
 
 /// `GET_UINT_PROP`: the entry as a long, a negative one zero, cut to

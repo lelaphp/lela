@@ -202,13 +202,17 @@ impl Iter {
 
     /// The value at the position, `funcs->get_current_data`, one owner,
     /// the caller's.
-    pub fn value(self, req: &mut Request) -> Result<Value, Thrown> {
-        crate::interfaces::current(req, self.0)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn value(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        let made = crate::interfaces::current(req, self.0);
+        adopted(req, made)
     }
 
     /// `funcs->get_current_key`, one owner, the caller's.
-    pub fn key(self, req: &mut Request) -> Result<Value, Thrown> {
-        crate::interfaces::key(req, self.0)
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn key(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        let made = crate::interfaces::key(req, self.0);
+        adopted(req, made)
     }
 
     /// `funcs->move_forward`.

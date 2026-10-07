@@ -20,7 +20,7 @@ use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{ClassId, Key, PhpObject, RecursionGuard, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpObject, RecursionGuard, Value, ValueRef};
 
 use crate::constants::{
     JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN, JSON_ERROR_NON_BACKED_ENUM, JSON_ERROR_NONE,
@@ -135,9 +135,9 @@ fn held(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
-    req.addref(value);
+    let held = Owner::take(req, *value);
     let wrote = encode_array(req, buf, value, options, enc);
-    req.release(*value);
+    held.give_up(req);
     wrote
 }
 

@@ -931,21 +931,20 @@ fn filled(
 /// ```
 #[php_function]
 fn shuffle(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
-    let mut stack = Stack::of(req, array)?;
-    let array = stack.array;
-    // `php_array_data_shuffle` permutes the table's own rows with the
-    // default engine, which runs no code of the program: the rows read
-    // under the borrowed request, views the table keeps until the
-    // shuffled copy replaces it.
-    let mut values: Vec<Value> = walk::rows(req, array).map(|(_, v)| v).collect();
-    Rng::default_engine().shuffle(req, &mut values)?;
-    let mut shuffled = PhpArray::new(req)?;
-    for value in values {
-        shuffled.append(req, Owner::take(req, value))?;
-    }
-    stack.replace(req, shuffled)?;
-    stack.finish(req);
-    Ok(True)
+    Stack::over(req, array, |req, stack| {
+        // `php_array_data_shuffle` permutes the table's own rows with the
+        // default engine, which runs no code of the program: the rows read
+        // under the borrowed request, views the table keeps until the
+        // shuffled copy replaces it.
+        let mut values: Vec<Value> = walk::rows(req, stack.array).map(|(_, v)| v).collect();
+        Rng::default_engine().shuffle(req, &mut values)?;
+        let mut shuffled = PhpArray::new(req)?;
+        for value in values {
+            shuffled.append(req, Owner::take(req, value))?;
+        }
+        stack.replace(req, shuffled)?;
+        Ok(True)
+    })
 }
 
 /// `array_rand(array $array, int $num = 1): int|string|array`, php's

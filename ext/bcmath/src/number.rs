@@ -148,13 +148,22 @@ impl Storage {
 pub(crate) type Slot = Box<SlotState>;
 
 /// What a `BcMath\Number` keeps for the readers of its properties: the
-/// rendering (`intern->value`), with the one owner the object holds, and
-/// the two property names, php's `ZSTR_KNOWN` strings, interned.
-#[derive(Clone, Copy)]
+/// rendering (`intern->value`), the owner the object holds, and the two
+/// property names, php's `ZSTR_KNOWN` strings, interned and so owned by
+/// no count.
 struct Kept {
-    value: PhpString,
+    value: Owner<PhpString>,
     value_name: PhpString,
     scale_name: PhpString,
+}
+
+/// Views of what a [`Kept`] holds: the rendering, then the two names.
+type KeptViews = (PhpString, PhpString, PhpString);
+
+impl Kept {
+    fn views(&self) -> KeptViews {
+        (*self.value, self.value_name, self.scale_name)
+    }
 }
 
 /// The handlers of `BcMath\Number`, `bcmath_number_obj_handlers`.
@@ -725,9 +734,7 @@ fn set(req: &mut Request, object: PhpObject, decimal: Decimal) -> Result<(), Thr
 /// Give up what an object kept for its readers.
 fn release_kept(req: &mut Request, kept: Option<Kept>) {
     if let Some(kept) = kept {
-        for text in [kept.value, kept.value_name, kept.scale_name] {
-            req.release(Value::string(text));
-        }
+        kept.value.give_up(req);
     }
 }
 
@@ -752,31 +759,42 @@ fn made(req: &mut Request, decimal: Decimal) -> Result<Owner<Instance<Number>>, 
 /// ```expect
 /// 112
 /// ```
-fn kept(req: &mut Request, object: PhpObject) -> Result<Kept, Thrown> {
-    if let Some(kept) = object.native::<Slot>(req).and_then(|slot| slot.kept) {
-        return Ok(kept);
+fn kept(req: &mut Request, object: PhpObject) -> Result<KeptViews, Thrown> {
+    if let Some(views) = object
+        .native::<Slot>(req)
+        .and_then(|slot| slot.kept.as_ref().map(Kept::views))
+    {
+        return Ok(views);
     }
     let decimal = held(req, object)?;
+    let value_name = PhpString::interned(req, b"value")?;
+    let scale_name = PhpString::interned(req, b"scale")?;
     // `bc_num2str_ex` is `zend_string_alloc`, a string of its own even
     // of one digit.
     let rendered = decimal.render();
+    let value = PhpString::filled(req, rendered.len(), |bytes| {
+        bytes.copy_from_slice(&rendered);
+    })?;
     let kept = Kept {
-        value: PhpString::filled(req, rendered.len(), |bytes| {
-            bytes.copy_from_slice(&rendered);
-        })?
-        .hand_on_unmigrated(),
-        value_name: PhpString::interned(req, b"value")?,
-        scale_name: PhpString::interned(req, b"scale")?,
+        value,
+        value_name,
+        scale_name,
     };
-    if let Some(slot) = object.native_mut::<Slot>(req) {
-        slot.kept = Some(kept);
-    }
-    Ok(kept)
+    let views = kept.views();
+    let Some(slot) = object.native_mut::<Slot>(req) else {
+        kept.value.give_up(req);
+        return Err(fatal(
+            req,
+            "InternalError: a BcMath\\Number served before its value was set",
+        ));
+    };
+    slot.kept = Some(kept);
+    Ok(views)
 }
 
 /// The rendering the object keeps, a view.
 fn rendered(req: &mut Request, object: PhpObject) -> Result<PhpString, Thrown> {
-    kept(req, object).map(|kept| kept.value)
+    kept(req, object).map(|(value, _, _)| value)
 }
 
 /// `CHECK_SCALE_OVERFLOW` over an argument's scale.
@@ -1427,12 +1445,12 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         _: PropertyPurpose,
     ) -> Result<PropertiesFor, Thrown> {
-        let kept = kept(req, object)?;
+        let (value, value_name, scale_name) = kept(req, object)?;
         let scale = held(req, object)?.scale;
         let scale = Value::int(i64::try_from(scale).unwrap_or(i64::MAX));
         Ok(PropertiesFor::Rows(vec![
-            (Key::Str(kept.value_name), Value::string(kept.value)),
-            (Key::Str(kept.scale_name), scale),
+            (Key::Str(value_name), Value::string(value)),
+            (Key::Str(scale_name), scale),
         ]))
     }
 
@@ -1504,7 +1522,7 @@ fn clone_number(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
             let storage = std::mem::replace(&mut held.storage, Storage::Zero);
             (held.decimal.clone(), storage)
         });
-        (held, slot.kept)
+        (held, slot.kept.as_ref().map(Kept::views))
     });
     let Some((held, kept)) = taken else {
         return clone_with(req, &object, Slot::default());
@@ -1525,10 +1543,10 @@ fn clone_number(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
         }
     });
     // `zend_string_copy(original->value)`: the rendering shared.
-    if let Some(kept) = kept {
-        for text in [kept.value, kept.value_name, kept.scale_name] {
-            req.addref(&Value::string(text));
-        }
-    }
+    let kept = kept.map(|(value, value_name, scale_name)| Kept {
+        value: Owner::take(req, value),
+        value_name,
+        scale_name,
+    });
     clone_with(req, &object, Box::new(SlotState { held, kept }))
 }

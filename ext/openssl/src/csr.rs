@@ -9,6 +9,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Instance, OrFalse, Path, Ref, Refusals, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -24,7 +25,6 @@ use crate::ffi::{self, Bio, Certificate, PKey};
 use crate::key::{Half, OpenSSLAsymmetricKey, key_from, object_of as key_object};
 use crate::store_errors;
 use crate::x509::{OpenSSLCertificate, name_entries, object_of as cert_object};
-use crate::xp_ssl::string_of;
 
 /// A `php_openssl_request_object`: the request it holds.
 #[derive(Default)]
@@ -94,7 +94,7 @@ fn no_csr(req: &mut Request) {
 /// `php_openssl_csr_add_subj_entry`: one entry of the subject, its text
 /// read as C reads it.
 fn add_subject_entry(req: &mut Request, csr: &Csr, nid: i32, item: &Value) -> Result<bool, Thrown> {
-    let text = c_string(&string_of(req, item)?);
+    let text = with_string(req, item, c_string)?;
     if csr.subject().add_by_nid(nid, &text) {
         return Ok(true);
     }
@@ -228,7 +228,7 @@ fn attributes(
             docref(req, Level::Warning, &text);
             return Ok(ControlFlow::Continue(()));
         }
-        let text = string_of(req, &item)?;
+        let text = with_string(req, &item, <[u8]>::to_vec)?;
         if !csr.add_attribute(nid, &text) {
             store_errors(req);
             let message = format!(

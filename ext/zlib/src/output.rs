@@ -7,7 +7,7 @@
 
 use php_ext::abi::{IniStage, OrFalse};
 use php_ext::attr::php_function;
-use php_ext::coerce::to_string;
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::{
     BufferHandler, HandlerCall, HandlerOp, HandlerStatus, OutputOp, Request, StartHandler,
@@ -143,16 +143,16 @@ fn encoding(req: &mut Request) -> Result<Coding, Thrown> {
         .superglobal(b"_SERVER")
         .and_then(|server| server.find(b"HTTP_ACCEPT_ENCODING"));
     if let Some(value) = found {
-        let text = to_string(req, &value)?;
-        let has = |word: &[u8]| text.as_bytes().windows(word.len()).any(|w| w == word);
-        let coding = if has(b"gzip") {
-            Coding::Gzip
-        } else if has(b"deflate") {
-            Coding::Deflate
-        } else {
-            Coding::None
-        };
-        text.give_up(req);
+        let coding = with_string(req, &value, |text| {
+            let has = |word: &[u8]| text.windows(word.len()).any(|w| w == word);
+            if has(b"gzip") {
+                Coding::Gzip
+            } else if has(b"deflate") {
+                Coding::Deflate
+            } else {
+                Coding::None
+            }
+        })?;
         globals(req).coding = coding;
     }
     Ok(globals(req).coding)

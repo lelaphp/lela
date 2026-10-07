@@ -52,7 +52,7 @@ use constants::{
 };
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Union};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::coerce::{to_long, to_string, value_name};
+use php_ext::coerce::{to_long, value_name, with_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, call_stack_end, docref, new_throwable,
@@ -66,17 +66,17 @@ use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpString, Value, ValueRef,
 /// by where it came from; `None` where none came.
 #[derive(Default)]
 struct State {
-    post: Option<PhpArray>,
-    get: Option<PhpArray>,
-    cookie: Option<PhpArray>,
-    server: Option<PhpArray>,
+    post: Option<Owner<PhpArray>>,
+    get: Option<Owner<PhpArray>>,
+    cookie: Option<Owner<PhpArray>>,
+    server: Option<Owner<PhpArray>>,
 }
 
 impl State {
     /// The array a variable from `input` is kept in, `None` for
     /// `parse_str()`'s, which php keeps nowhere, and for the
     /// environment's, which `$_ENV` has.
-    fn slot(&mut self, input: Input) -> Option<&mut Option<PhpArray>> {
+    fn slot(&mut self, input: Input) -> Option<&mut Option<Owner<PhpArray>>> {
         match input {
             Input::Post => Some(&mut self.post),
             Input::Get => Some(&mut self.get),
@@ -130,17 +130,22 @@ fn sapi_filter(
     name: &[u8],
     value: &[u8],
 ) -> Result<Option<Owner<Value>>, Thrown> {
-    if req.state::<State>().slot(input).is_some() {
-        let kept = req.state::<State>().slot(input).and_then(|slot| *slot);
-        let array = if let Some(array) = kept {
-            array
-        } else {
-            let array = PhpArray::new(req)?.hand_on_unmigrated();
-            if let Some(slot) = req.state::<State>().slot(input) {
-                *slot = Some(array);
-            }
-            array
-        };
+    if req
+        .state::<State>()
+        .slot(input)
+        .is_some_and(|slot| slot.is_none())
+    {
+        let made = PhpArray::new(req)?;
+        match req.state::<State>().slot(input) {
+            Some(slot) => *slot = Some(made),
+            None => made.give_up(req),
+        }
+    }
+    let kept = req
+        .state::<State>()
+        .slot(input)
+        .and_then(|slot| slot.as_deref().copied());
+    if let Some(array) = kept {
         let raw = string_value(req, value)?;
         req.register_variable(array, name, raw)?;
     }
@@ -187,7 +192,7 @@ fn rshutdown(req: &mut Request) {
         .into_iter()
         .flatten()
     {
-        req.release(array.to_value());
+        array.give_up(req);
     }
 }
 
@@ -623,11 +628,9 @@ fn zval_filter(
         }
         Owner::take(req, failure(flags))
     } else {
-        let string = to_string(req, &(*value).deref());
+        let bytes = with_string(req, &value, <[u8]>::to_vec);
         value.give_up(req);
-        let string = string?;
-        let bytes = string.as_bytes().to_vec();
-        string.give_up(req);
+        let bytes = bytes?;
         match function(req, run, &bytes)? {
             Outcome::Value(value) => value,
             Outcome::Failed if flags & FILTER_THROW_ON_FAILURE != 0 => {
@@ -1001,12 +1004,12 @@ fn array_handler(
 /// ```
 fn storage(req: &mut Request, input: i64) -> Result<Option<Owner<PhpArray>>, Thrown> {
     let kept = match input {
-        INPUT_POST => req.state::<State>().post,
-        INPUT_GET => req.state::<State>().get,
-        INPUT_COOKIE => req.state::<State>().cookie,
+        INPUT_POST => req.state::<State>().post.as_deref().copied(),
+        INPUT_GET => req.state::<State>().get.as_deref().copied(),
+        INPUT_COOKIE => req.state::<State>().cookie.as_deref().copied(),
         INPUT_SERVER => {
             let _ = req.superglobal(b"_SERVER");
-            req.state::<State>().server
+            req.state::<State>().server.as_deref().copied()
         }
         INPUT_ENV => req.superglobal(b"_ENV"),
         _ => return Err(arg_value_error(req, 1, "be an INPUT_* constant")),

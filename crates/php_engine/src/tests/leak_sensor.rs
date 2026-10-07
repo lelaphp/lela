@@ -24,7 +24,7 @@ use crate::test::Capture;
 #[php_function]
 fn dropped_owner(req: &mut Request) {
     if let Ok(made) = PhpString::new(req, b"dropped") {
-        let _leaked = made.hand_on_unmigrated();
+        let _leaked = made.hand_on();
     }
 }
 
@@ -39,7 +39,7 @@ fn faulty() -> Extension {
 /// dropped.
 fn rshutdown_dropping_an_owner(req: &mut Request) {
     if let Ok(made) = PhpString::new(req, b"in hook") {
-        let _leaked = made.hand_on_unmigrated();
+        let _leaked = made.hand_on();
     }
 }
 

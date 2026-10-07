@@ -6,7 +6,7 @@
 use php_ext::abi::{Callable, Instance, Passed, Path, Raw, Refusals, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, to_string};
+use php_ext::coerce::{callable_checked, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_chained, throw_error,
 };
@@ -34,9 +34,30 @@ enum Mode {
     None,
     /// `registerPhpFunctions()` with no argument: any function by name.
     All,
-    /// The functions registered by name, each with the value it was read
-    /// off, one owner held.
-    Set(Vec<(Vec<u8>, Callable, Value)>),
+    /// The functions registered by name.
+    Set(Vec<Function>),
+}
+
+/// One function registered by name: the callable, and the value it was
+/// read off, the namespace's owner of it.
+type Function = (Vec<u8>, Callable, Owner<Value>);
+
+impl Mode {
+    /// `functions`, `None` left behind them.
+    fn take_functions(&mut self) -> Vec<Function> {
+        match std::mem::take(self) {
+            Mode::Set(functions) => functions,
+            Mode::All | Mode::None => Vec::new(),
+        }
+    }
+
+    /// `functions`, as they stand.
+    fn functions(&self) -> &[Function] {
+        match self {
+            Mode::Set(functions) => functions,
+            Mode::All | Mode::None => &[],
+        }
+    }
 }
 
 /// `dom_xpath_object`'s own fields.
@@ -59,38 +80,35 @@ pub struct XPathCallbacks {
     /// namespace in registration order.
     namespaces: Vec<(Vec<u8>, Mode)>,
     /// `node_list`: the values a call handed a function or had back, kept
-    /// alive as long as the evaluator, one owner each.
-    node_list: Vec<Value>,
+    /// alive as long as the evaluator, its owner of each.
+    node_list: Vec<Owner<Value>>,
 }
 
 impl XPathCallbacks {
     /// `php_dom_xpath_callbacks_dtor`: every registered function and kept
     /// value let go of.
     pub fn release(self, req: &mut Request) {
-        for mode in std::iter::once(self.php_ns).chain(self.namespaces.into_iter().map(|(_, m)| m))
+        for mut mode in
+            std::iter::once(self.php_ns).chain(self.namespaces.into_iter().map(|(_, m)| m))
         {
-            if let Mode::Set(functions) = mode {
-                for (_, _, value) in functions {
-                    req.release(value);
-                }
+            for (_, _, value) in mode.take_functions() {
+                value.give_up(req);
             }
         }
         for value in self.node_list {
-            req.release(value);
+            value.give_up(req);
         }
     }
 
     /// `php_dom_xpath_callbacks_get_gc`: every value the table holds.
     pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
         for mode in std::iter::once(&self.php_ns).chain(self.namespaces.iter().map(|(_, m)| m)) {
-            if let Mode::Set(functions) = mode {
-                for (_, _, value) in functions {
-                    visit(*value);
-                }
+            for (_, _, value) in mode.functions() {
+                visit(**value);
             }
         }
         for value in &self.node_list {
-            visit(*value);
+            visit(**value);
         }
     }
 
@@ -98,7 +116,7 @@ impl XPathCallbacks {
     /// one evaluation handed out let go of.
     pub fn clean_node_list(&mut self, req: &mut Request) {
         for value in std::mem::take(&mut self.node_list) {
-            req.release(value);
+            value.give_up(req);
         }
     }
 
@@ -134,14 +152,11 @@ impl XPathCallbacks {
             self.namespaces.push((ns.to_vec(), Mode::None));
             self.namespaces.len() - 1
         };
-        let mut functions = match std::mem::take(&mut self.namespaces[at].1) {
-            Mode::Set(f) => f,
-            _ => Vec::new(),
-        };
+        let mut functions = self.namespaces[at].1.take_functions();
         if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
             let old = std::mem::replace(&mut slot.2, value);
             slot.1 = callable;
-            req.release(old);
+            old.give_up(req);
         } else {
             functions.push((name.to_vec(), callable, value));
         }
@@ -294,9 +309,8 @@ fn item_object(
             if let Some(object) = value.as_object().copied()
                 && let Some(d) = dom_mut(req, object)
             {
-                d.extra = Extra::NamespaceParent(parent_obj);
                 // The parent's owner is the namespace node's from here.
-                let _parent = parent_value.hand_on_unmigrated();
+                d.extra = Extra::NamespaceParent(Box::new(parent_value));
             } else {
                 parent_value.give_up(req);
             }
@@ -335,14 +349,6 @@ fn operand_value(
             Ok(array.into_value())
         }
     }
-}
-
-/// The bytes of `value`'s string form, the string given up.
-fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let text = to_string(req, value)?;
-    let bytes = text.as_bytes().to_vec();
-    text.give_up(req);
-    Ok(bytes)
 }
 
 /// Each operand converted, those converted given up where one throws.
@@ -449,7 +455,7 @@ fn dispatch(
     let answered = call(req, &callable, &views);
     for a in args {
         if a.as_object().is_some() || a.as_array().is_some() {
-            state.node_list.push(a.hand_on_unmigrated());
+            state.node_list.push(a);
         } else {
             a.give_up(req);
         }
@@ -460,7 +466,7 @@ fn dispatch(
         ValueRef::Object(o) if crate::instance_of(req, *o, node_class) => {
             match crate::node_of(req, *o) {
                 Some(node) => {
-                    state.node_list.push(answer.hand_on_unmigrated());
+                    state.node_list.push(answer);
                     return Ok(Returned::Node(node));
                 }
                 None => Ok(Returned::Sentinel),
@@ -475,7 +481,7 @@ fn dispatch(
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
             ));
         }
-        _ => string_bytes(req, &answer).map(Returned::Str),
+        _ => with_string(req, &answer, <[u8]>::to_vec).map(Returned::Str),
     };
     answer.give_up(req);
     returned
@@ -629,12 +635,9 @@ fn callable_of(
     value: &Value,
     position: u32,
     is_array: bool,
-) -> Result<(Callable, Value), Thrown> {
+) -> Result<(Callable, Owner<Value>), Thrown> {
     match callable_checked(req, value) {
-        Ok(c) => {
-            req.addref(value);
-            Ok((c, *value))
-        }
+        Ok(c) => Ok((c, Owner::take(req, *value))),
         Err(why) => {
             let tail = if is_array {
                 format!("be an array with valid callbacks as values, {why}")
@@ -649,16 +652,12 @@ fn callable_of(
 /// The names and callbacks `restrict` registers, pushed onto `adding`
 /// one by one, each callback's value an owner [`callable_of`] took; on
 /// the `Err` those already pushed are the caller's to give up.
-fn collect(
-    req: &mut Request,
-    restrict: Value,
-    adding: &mut Vec<(Vec<u8>, (Callable, Value))>,
-) -> Result<(), Thrown> {
+fn collect(req: &mut Request, restrict: Value, adding: &mut Vec<Function>) -> Result<(), Thrown> {
     if let Some(array) = restrict.as_array().copied() {
         for (key, value) in &array {
             let name = match key {
                 Key::Str(s) => s.as_bytes().to_vec(),
-                Key::Int(_) => string_bytes(req, &value)?,
+                Key::Int(_) => with_string(req, &value, <[u8]>::to_vec)?,
             };
             if name.is_empty() || name.contains(&0) {
                 return Err(arg_value_error(
@@ -667,7 +666,8 @@ fn collect(
                     "be an array containing valid callback names",
                 ));
             }
-            adding.push((name, callable_of(req, &value, 1, true)?));
+            let (callable, value) = callable_of(req, &value, 1, true)?;
+            adding.push((name, callable, value));
         }
     } else {
         let name = restrict
@@ -677,7 +677,8 @@ fn collect(
         if name.is_empty() || name.contains(&0) {
             return Err(arg_value_error(req, 1, "be a valid callback name"));
         }
-        adding.push((name, callable_of(req, &restrict, 1, false)?));
+        let (callable, value) = callable_of(req, &restrict, 1, false)?;
+        adding.push((name, callable, value));
     }
     Ok(())
 }
@@ -694,29 +695,25 @@ fn register_into(
     let Some(restrict) = restrict else {
         // The set the mode held is let go of with the mode (#2128 is
         // php's table that outlives it).
-        if let Mode::Set(functions) = std::mem::replace(mode, Mode::All) {
-            for (_, _, value) in functions {
-                req.release(value);
-            }
+        for (_, _, value) in mode.take_functions() {
+            value.give_up(req);
         }
+        *mode = Mode::All;
         return Ok(());
     };
     let mut adding = Vec::new();
     if let Err(thrown) = collect(req, restrict, &mut adding) {
-        for (_, (_, value)) in adding {
-            req.release(value);
+        for (_, _, value) in adding {
+            value.give_up(req);
         }
         return Err(thrown);
     }
-    let mut functions = match std::mem::take(mode) {
-        Mode::Set(f) => f,
-        _ => Vec::new(),
-    };
-    for (name, (callable, value)) in adding {
+    let mut functions = mode.take_functions();
+    for (name, callable, value) in adding {
         if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
             let old = std::mem::replace(&mut slot.2, value);
             slot.1 = callable;
-            req.release(old);
+            old.give_up(req);
         } else {
             functions.push((name, callable, value));
         }

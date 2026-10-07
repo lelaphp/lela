@@ -9,7 +9,7 @@
 use std::hash::Hasher as _;
 use std::slice;
 
-use php_ext::coerce::to_string;
+use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
@@ -442,9 +442,7 @@ impl Xxh3 {
                 "Passing a secret of a type other than string is deprecated because it implicitly converts to a string, potentially hiding bugs",
             );
         }
-        let text = to_string(req, &secret)?;
-        let mut bytes = text.as_bytes().to_vec();
-        text.give_up(req);
+        let mut bytes = with_string(req, &secret, <[u8]>::to_vec)?;
         let given = bytes.len();
         if given > 256 {
             bytes.truncate(256);

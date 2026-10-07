@@ -13,7 +13,7 @@ use std::os::unix::ffi::OsStrExt as _;
 
 use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
-use php_ext::coerce::{to_string, truthy};
+use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, raise};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
@@ -483,9 +483,7 @@ fn phpdbg_get_executable(
     {
         let mut files = Vec::new();
         for (_, file) in named {
-            let text = to_string(req, &file)?;
-            files.push(text.as_bytes().to_vec());
-            text.give_up(req);
+            files.push(with_string(req, &file, <[u8]>::to_vec)?);
         }
         files
     } else {

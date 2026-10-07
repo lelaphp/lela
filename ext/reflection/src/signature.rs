@@ -14,7 +14,7 @@
 use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{autoload, eval_const_expr, eval_declared, lookup_class};
-use php_ext::coerce::{to_string, value_name};
+use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
@@ -256,15 +256,6 @@ fn scope_of(req: &mut Request, function: &FunctionRef) -> Option<ClassId> {
         FunctionRef::Closure(object) => object.closure(req)?.scope,
         FunctionRef::Invoke(_) => lookup_class(req, b"Closure").ok().flatten(),
     }
-}
-
-/// `zval_try_get_string` as bytes: the string a value casts to, the
-/// cast's own owner given back.
-fn string_bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let string = to_string(req, value)?;
-    let bytes = string.as_bytes().to_vec();
-    string.give_up(req);
-    Ok(bytes)
 }
 
 /// The one class a type names, `ZEND_TYPE_HAS_NAME`: a name alone,
@@ -513,10 +504,10 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
             let (class, object) = if let ValueRef::Object(object) = class.deref().as_ref() {
                 (object.class(), Some(*object))
             } else {
-                let name = string_bytes(req, &class)?;
+                let name = with_string(req, &class, <[u8]>::to_vec)?;
                 (class_named(req, &name)?, None)
             };
-            let method = string_bytes(req, &method)?;
+            let method = with_string(req, &method, <[u8]>::to_vec)?;
             // An object's class is looked up with the closure it is, so
             // `[$closure, '__invoke']` reaches the method php makes.
             let found = if let Some(object) = object {

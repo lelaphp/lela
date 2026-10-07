@@ -14,7 +14,8 @@ use php_ext::test::{Capture, Engine};
 use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
 
 /// The connector, `counted:<path>`: each connection appends `closed` to
-/// the file at `<path>` as PDO closes it.
+/// the file at `<path>` as PDO closes it, and one whose path ends in
+/// `dead` answers dead to every `check_liveness`.
 struct Counted;
 
 static COUNTED: Counted = Counted;
@@ -62,6 +63,11 @@ impl Connection for Link {
     ) -> Result<(), Failure> {
         let _ = (req, attr, value);
         Ok(())
+    }
+
+    fn check_liveness(&mut self, req: &mut Request) -> bool {
+        let _ = req;
+        !self.log.to_string_lossy().ends_with("dead")
     }
 
     fn close(&mut self, req: &mut Request) {
@@ -118,5 +124,37 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_reque
     let served = engine.serve_capture(&script, Capture::default());
     assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
     assert_eq!(closed(), "closed\nclosed\n");
+    std::fs::remove_file(&log).ok();
+}
+
+/// A persistent connection found dead is closed through the connector's
+/// `closer` before the one opened in its place replaces it, as
+/// `zend_list_close` closes it in php's constructor (#1957): the one the
+/// request holds, found dead by the second constructor, and the one the
+/// pool kept from the last request, found dead as it is taken out.
+#[test]
+fn a_persistent_connection_found_dead_is_closed() {
+    let log = std::env::temp_dir().join(format!("t1957-pdo-{}.dead", std::process::id()));
+    std::fs::remove_file(&log).ok();
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+            counted(),
+        ])
+        .build();
+    let script = format!(
+        "<?php $o = [PDO::ATTR_PERSISTENT => 'p']; $a = new PDO('counted:{0}', null, null, $o); \
+         $b = new PDO('counted:{0}', null, null, $o); echo 'done';",
+        log.display()
+    );
+    let closed = || std::fs::read_to_string(&log).unwrap_or_default();
+    let served = engine.serve_capture(&script, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(closed(), "closed\n");
+
+    let served = engine.serve_capture(&script, Capture::default());
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    assert_eq!(closed(), "closed\nclosed\nclosed\n");
     std::fs::remove_file(&log).ok();
 }

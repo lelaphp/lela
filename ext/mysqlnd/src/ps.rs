@@ -9,7 +9,7 @@
 //! the bound parameters and columns, are values with one owner each,
 //! given back on rebind, free and close.
 
-use php_ext::coerce::{to_double, to_long, to_string};
+use php_ext::coerce::{to_double, to_long, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, Value, ValueRef};
@@ -20,7 +20,7 @@ use crate::consts::{
     Com, ConnState, CursorType, FieldType, QueryType, ResType, StmtState, cr, status,
 };
 use crate::error::{ErrorInfo, OUT_OF_SYNC, Upsert};
-use crate::result::{Field, Res};
+use crate::result::{Field, Res, Row};
 use crate::stats::Stat;
 use crate::wire::{Prot, store_length};
 
@@ -74,7 +74,7 @@ pub struct StmtStatus {
 /// `MYSQLND_PARAM_BIND_BLOB_USED`.
 #[derive(Debug, Default)]
 struct ParamBind {
-    zv: Option<Value>,
+    zv: Option<Owner<Value>>,
     ty: Option<FieldType>,
     blob_used: bool,
 }
@@ -82,7 +82,7 @@ struct ParamBind {
 /// `MYSQLND_RESULT_BIND`: the value a fetch assigns, where bound.
 #[derive(Debug, Default)]
 struct ResultBind {
-    zv: Option<Value>,
+    zv: Option<Owner<Value>>,
     bound: bool,
 }
 
@@ -210,19 +210,19 @@ impl Stmt {
         &mut self,
         req: &mut Request,
         n: u32,
-        value: Value,
+        value: Owner<Value>,
         ty: FieldType,
     ) -> bool {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
             stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
-            req.release(value);
+            value.give_up(req);
             return false;
         }
         if n >= stmt.parameter_count {
             stmt.error
                 .client(cr::INVALID_PARAMETER_NO, "Invalid parameter number");
-            req.release(value);
+            value.give_up(req);
             return false;
         }
         stmt.error.reset();
@@ -231,11 +231,11 @@ impl Stmt {
             .param_bind
             .get_or_insert_with(|| (0..count).map(|_| ParamBind::default()).collect());
         let Some(bind) = binds.get_mut(n as usize) else {
-            req.release(value);
+            value.give_up(req);
             return false;
         };
         if let Some(old) = bind.zv.replace(value) {
-            req.release(old);
+            old.give_up(req);
         }
         if ty == FieldType::LongBlob {
             bind.blob_used = false;
@@ -252,25 +252,29 @@ impl Stmt {
 
     /// `mysqlnd_stmt_bind_param`: every parameter bound at once, each
     /// value's owner taken, the ones bound before given back.
-    pub fn bind_parameters(&mut self, req: &mut Request, params: Vec<(Value, FieldType)>) -> bool {
+    pub fn bind_parameters(
+        &mut self,
+        req: &mut Request,
+        params: Vec<(Owner<Value>, FieldType)>,
+    ) -> bool {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
             stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
             for (v, _) in params {
-                req.release(v);
+                v.give_up(req);
             }
             return false;
         }
         stmt.error.reset();
         if stmt.parameter_count == 0 {
             for (v, _) in params {
-                req.release(v);
+                v.give_up(req);
             }
             return true;
         }
         if let Some(old) = stmt.param_bind.take() {
             for v in old.into_iter().filter_map(|b| b.zv) {
-                req.release(v);
+                v.give_up(req);
             }
         }
         stmt.param_bind = Some(
@@ -330,8 +334,8 @@ impl Stmt {
             .result_bind
             .get_or_insert_with(|| (0..count).map(|_| ResultBind::default()).collect());
         if let Some(bind) = binds.get_mut(n as usize) {
-            if let Some(old) = bind.zv.replace(Value::null()) {
-                req.release(old);
+            if let Some(old) = bind.zv.replace(Owner::take(req, Value::null())) {
+                old.give_up(req);
             }
             bind.bound = true;
         }
@@ -340,19 +344,19 @@ impl Stmt {
 
     /// `mysqlnd_stmt_bind_result`: every column bound to the values given,
     /// a reference assigned through, each value's owner taken.
-    pub fn bind_columns(&mut self, req: &mut Request, values: Vec<Value>) -> bool {
+    pub fn bind_columns(&mut self, req: &mut Request, values: Vec<Owner<Value>>) -> bool {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
             stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
             for v in values {
-                req.release(v);
+                v.give_up(req);
             }
             return false;
         }
         stmt.error.reset();
         if stmt.field_count == 0 {
             for v in values {
-                req.release(v);
+                v.give_up(req);
             }
             return true;
         }
@@ -411,21 +415,15 @@ impl Stmt {
 
     /// `ZVAL_COPY` of column `n`'s bound value: one owner the caller's,
     /// `null` where the column is not bound.
-    pub fn column_value(&self, req: &mut Request, n: u32) -> Value {
+    pub fn column_value(&self, req: &mut Request, n: u32) -> Owner<Value> {
         let bound = self
             .data
             .result_bind
             .as_ref()
             .and_then(|b| b.get(n as usize))
-            .and_then(|b| b.zv);
-        match bound {
-            Some(value) => {
-                let value = value.deref();
-                req.addref(&value);
-                value
-            }
-            None => Value::null(),
-        }
+            .and_then(|b| b.zv.as_deref());
+        let value = bound.map_or_else(Value::null, Value::deref);
+        Owner::take(req, value)
     }
 
     /// The statement's facts.
@@ -769,7 +767,7 @@ fn parse_execute_response(
             let count = conn.field_count as usize;
             for bind in binds.drain(count.min(binds.len())..) {
                 if let Some(v) = bind.zv {
-                    req.release(v);
+                    v.give_up(req);
                 }
             }
             binds.resize_with(count, ResultBind::default);
@@ -826,14 +824,6 @@ enum Wire {
     Other,
 }
 
-/// `zval_get_string`'s bytes, its owner given back.
-fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let s = to_string(req, value)?;
-    let bytes = s.as_bytes().to_vec();
-    s.give_up(req);
-    Ok(bytes)
-}
-
 /// `mysqlnd_stmt_execute_prepare_param_types`: each integer parameter
 /// that is not an integer made one, or a string where its value does not
 /// fit, which asks for the types to be sent now and with the next
@@ -856,7 +846,7 @@ fn prepare_param_types(
                 let (max, min) = (i64::MAX as f64, i64::MIN as f64);
                 if d >= max || d < min {
                     resend = true;
-                    Some(Wire::Str(string_of(req, v)?))
+                    Some(Wire::Str(with_string(req, v, <[u8]>::to_vec)?))
                 } else {
                     Some(Wire::Long(to_long(req, v)?))
                 }
@@ -889,7 +879,7 @@ fn generate_request(req: &mut Request, stmt: &mut StmtData) -> Result<Vec<u8>, T
         .map(|b| {
             b.iter()
                 .map(|p| {
-                    let v = p.zv.map_or_else(Value::null, |v| v.deref());
+                    let v = p.zv.as_deref().map_or_else(Value::null, Value::deref);
                     (v, p.ty.unwrap_or(FieldType::Null), p.blob_used)
                 })
                 .collect()
@@ -933,7 +923,7 @@ fn generate_request(req: &mut Request, stmt: &mut StmtData) -> Result<Vec<u8>, T
             FieldType::LongBlob => Wire::Blob(*used),
             FieldType::VarString => match v.as_ref() {
                 ValueRef::Str(s) => Wire::Str(s.as_bytes().to_vec()),
-                _ => Wire::Str(string_of(req, v)?),
+                _ => Wire::Str(with_string(req, v, <[u8]>::to_vec)?),
             },
             _ => Wire::Other,
         });
@@ -1151,11 +1141,11 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
 fn assign_row(
     req: &mut Request,
     binds: Option<&mut Vec<ResultBind>>,
-    row: Vec<Value>,
+    row: Row,
 ) -> Result<(), Thrown> {
     let Some(binds) = binds else {
-        for v in row {
-            req.release(v);
+        for value in row {
+            value.give_up(req);
         }
         return Ok(());
     };
@@ -1163,36 +1153,29 @@ fn assign_row(
     for bind in binds.iter_mut() {
         let Some(value) = values.next() else { break };
         if !bind.bound {
-            req.release(value);
+            value.give_up(req);
             continue;
         }
-        match bind.zv {
-            Some(old) if matches!(old.as_ref(), ValueRef::Reference(_)) => {
-                if let ValueRef::Reference(r) = old.as_ref() {
-                    // The row's value, its one owner the row's, handed to
-                    // the cell as the owner it is.
-                    let owned = Owner::take(req, value);
-                    req.release(value);
-                    if let Err(thrown) = r.set(req, owned) {
-                        // A typed reference refused it: the values not
-                        // yet assigned are given back, as at the end.
-                        for v in values {
-                            req.release(v);
-                        }
-                        return Err(thrown);
-                    }
+        let cell = bind.zv.as_deref().and_then(|old| match old.as_ref() {
+            ValueRef::Reference(r) => Some(r),
+            _ => None,
+        });
+        if let Some(cell) = cell {
+            // The row's owner of the value handed to the cell.
+            if let Err(thrown) = cell.set(req, value) {
+                // A typed reference refused it: the values not yet
+                // assigned are given back, as at the end.
+                for value in values {
+                    value.give_up(req);
                 }
+                return Err(thrown);
             }
-            old => {
-                bind.zv = Some(value);
-                if let Some(old) = old {
-                    req.release(old);
-                }
-            }
+        } else if let Some(old) = bind.zv.replace(value) {
+            old.give_up(req);
         }
     }
-    for v in values {
-        req.release(v);
+    for value in values {
+        value.give_up(req);
     }
     Ok(())
 }
@@ -1335,8 +1318,8 @@ fn send_long_data(
 fn separate_result_bind(req: &mut Request, stmt: &mut StmtData) {
     if let Some(binds) = stmt.result_bind.take() {
         for bind in binds {
-            if let (true, Some(v)) = (bind.bound, bind.zv) {
-                req.release(v);
+            if let Some(v) = bind.zv {
+                v.give_up(req);
             }
         }
     }
@@ -1363,7 +1346,7 @@ fn free_stmt_result(
 fn free_stmt_content(req: &mut Request, stmt: &mut StmtData) {
     if let Some(binds) = stmt.param_bind.take() {
         for v in binds.into_iter().filter_map(|b| b.zv) {
-            req.release(v);
+            v.give_up(req);
         }
     }
     separate_result_bind(req, stmt);

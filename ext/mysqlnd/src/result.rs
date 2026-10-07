@@ -6,7 +6,7 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{PhpString, Value};
+use php_ext::values::{Owner, PhpString, Value};
 
 use crate::conn::ConnData;
 use crate::consts::{ConnState, FieldType, NULL_LENGTH, PhpType, ResType, column, cr, status};
@@ -78,8 +78,8 @@ pub struct Res {
     pub(crate) cursor_status: (u32, u32),
 }
 
-/// One row fetched: its values in column order.
-pub type Row = Vec<Value>;
+/// One row fetched: its values in column order, one owner of each.
+pub type Row = Vec<Owner<Value>>;
 
 impl Res {
     /// `mysqlnd_result_init`.
@@ -173,7 +173,15 @@ impl Res {
         conn.upsert.warning_count = last.0;
         conn.upsert.server_status = last.1;
         self.cursor_status = last;
-        Ok(if ok { Ok(row) } else { Err(()) })
+        if !ok {
+            if let Some(row) = row {
+                for value in row {
+                    value.give_up(req);
+                }
+            }
+            return Ok(Err(()));
+        }
+        Ok(Ok(row))
     }
 
     /// The columns' descriptions.
@@ -736,10 +744,8 @@ fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> RowPacket {
 }
 
 /// `php_mysqlnd_rowp_read_text_protocol`: each column's length-encoded
-/// text; under `MYSQLND_OPT_INT_AND_FLOAT_NATIVE` an integer column read
-/// as `atoll` (or `strtoull`, a string where it overflows) unless it is
-/// zero-filled, a float column as `zend_strtod`; a `BIT` column as its
-/// integer, written back as a string where native types are off.
+/// text, the value [`text_value`] makes of it under
+/// `MYSQLND_OPT_INT_AND_FLOAT_NATIVE` or without.
 fn decode_text(
     req: &mut Request,
     stats: &mut crate::stats::Stats,
@@ -752,7 +758,7 @@ fn decode_text(
     for field in fields {
         let len = p.field_length();
         if len == NULL_LENGTH {
-            row.push(Value::null());
+            row.push(Owner::take(req, Value::null()));
             continue;
         }
         let Ok(len) = usize::try_from(len) else {
@@ -765,37 +771,54 @@ fn decode_text(
         let ty = field.field_type();
         stats.inc(text_stat(ty));
         stats.add(Stat::BytesReceivedPureDataText, len as u64);
-        let (php_type, pack_len) = ty.fetch().unwrap_or((PhpType::String, 0));
-        let value = if ty == FieldType::Bit {
-            match crate::codec::bit_value(field, text) {
-                crate::codec::Bits::Long(n) if !native => Value::string(
-                    PhpString::new(req, n.cast_unsigned().to_string().as_bytes())?
-                        .hand_on_unmigrated(),
-                ),
-                crate::codec::Bits::Long(n) => Value::int(n),
-                crate::codec::Bits::Text(s) => {
-                    Value::string(PhpString::new(req, s.as_bytes())?.hand_on_unmigrated())
+        match text_value(req, field, text, native) {
+            Ok(value) => row.push(value),
+            Err(thrown) => {
+                for value in row {
+                    value.give_up(req);
                 }
+                return Err(thrown);
             }
-        } else if native && php_type == PhpType::Long && field.flags & column::ZEROFILL == 0 {
-            if pack_len < 8 {
-                Value::int(atoll(text))
-            } else {
-                let v = strtoull(text);
-                if field.flags & column::UNSIGNED != 0 && i64::try_from(v).is_err() {
-                    Value::string(PhpString::new(req, text)?.hand_on_unmigrated())
-                } else {
-                    Value::int(v.cast_signed())
-                }
-            }
-        } else if native && php_type == PhpType::Double {
-            Value::float(strtod(text))
-        } else {
-            Value::string(PhpString::new(req, text)?.hand_on_unmigrated())
-        };
-        row.push(value);
+        }
     }
     Ok(Ok(row))
+}
+
+/// One text column's value: a `BIT` column as its integer, written back
+/// as a string where native types are off; with native types an integer
+/// column as `atoll` (or `strtoull`, a string where it overflows) unless
+/// it is zero-filled, a float column as `zend_strtod`; the text else.
+fn text_value(
+    req: &mut Request,
+    field: &Field,
+    text: &[u8],
+    native: bool,
+) -> Result<Owner<Value>, Thrown> {
+    let ty = field.field_type();
+    let (php_type, pack_len) = ty.fetch().unwrap_or((PhpType::String, 0));
+    if ty == FieldType::Bit {
+        return match crate::codec::bit_value(field, text) {
+            crate::codec::Bits::Long(n) if !native => {
+                PhpString::new(req, n.cast_unsigned().to_string().as_bytes()).map(Owner::into_value)
+            }
+            crate::codec::Bits::Long(n) => Ok(Owner::take(req, Value::int(n))),
+            crate::codec::Bits::Text(s) => PhpString::new(req, s.as_bytes()).map(Owner::into_value),
+        };
+    }
+    if native && php_type == PhpType::Long && field.flags & column::ZEROFILL == 0 {
+        if pack_len < 8 {
+            return Ok(Owner::take(req, Value::int(atoll(text))));
+        }
+        let v = strtoull(text);
+        if field.flags & column::UNSIGNED != 0 && i64::try_from(v).is_err() {
+            return PhpString::new(req, text).map(Owner::into_value);
+        }
+        return Ok(Owner::take(req, Value::int(v.cast_signed())));
+    }
+    if native && php_type == PhpType::Double {
+        return Ok(Owner::take(req, Value::float(strtod(text))));
+    }
+    PhpString::new(req, text).map(Owner::into_value)
 }
 
 /// The warning of a field's length past the packet's end, the values
@@ -807,7 +830,7 @@ fn malformed(req: &mut Request, row: Row) -> Result<Row, ()> {
         "Malformed server packet. Field length pointing after end of packet",
     );
     for value in row {
-        req.release(value);
+        value.give_up(req);
     }
     Err(())
 }

@@ -5,7 +5,7 @@
 use std::os::fd::OwnedFd;
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{FdStream, Request, Stream, Streams as _};
+use php_ext::request::{FdStream, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::Owner;
 
 use crate::cdb::{Maker, Reader};
@@ -263,8 +263,8 @@ impl Mode {
 
 /// The handler's own state, `info->dbf`, with the database stream of a
 /// handler that has one opened for it, `info->fp`: a stream in a request,
-/// its fd while the engine's pool keeps a persistent link.
-pub(crate) enum Store<F = Stream> {
+/// its owner, or its fd while the engine's pool keeps a persistent link.
+pub(crate) enum Store<F = Owner<Stream>> {
     /// The library's open database; `None` where `dbm_open` refused, which
     /// `dba_open_ndbm` answers as success all the same.
     #[cfg(target_os = "macos")]
@@ -290,20 +290,31 @@ impl<F> Store<F> {
             Store::CdbMaker(maker, file) => Store::CdbMaker(maker, f(file)?),
         })
     }
+
+    /// The handler's state apart from the database's stream or fd.
+    fn split(self) -> (Store<()>, Option<F>) {
+        let mut file = None;
+        let Ok(store) = self.map(|f| {
+            file = Some(f);
+            Ok::<(), std::convert::Infallible>(())
+        });
+        (store, file)
+    }
 }
 
 impl Store {
     /// `hnd->open`: the handler's state over the database stream, or
     /// over `path` itself for ndbm, which opens it in the library with
-    /// `permission`; or the reason it refuses.
+    /// `permission`; or the reason it refuses, with the stream handed
+    /// back.
     pub(crate) fn open(
         req: &mut Request,
         handler: Handler,
         access: Access,
-        file: Option<Stream>,
+        file: Option<Owner<Stream>>,
         path: &[u8],
         permission: i64,
-    ) -> Result<Store, &'static str> {
+    ) -> Result<Store, (&'static str, Option<Owner<Stream>>)> {
         let _ = (path, permission);
         Ok(match (handler, file) {
             #[cfg(target_os = "macos")]
@@ -312,14 +323,14 @@ impl Store {
                 let mode = u16::try_from(permission & 0xffff).unwrap_or_default();
                 Store::Ndbm(crate::ffi::Ndbm::open(path, access.open_flags(), mode))
             }
-            (_, None) => return Err(""),
+            (_, None) => return Err(("", None)),
             (Handler::Flatfile, Some(file)) => Store::Flatfile(Flatfile::default(), file),
             (Handler::Inifile, Some(file)) => Store::Inifile(Inifile::default(), file),
             (Handler::Cdb | Handler::CdbMake, Some(file)) => match access {
                 Access::Read => Store::CdbReader(Reader::default(), file),
-                Access::Truncate => Store::CdbMaker(Some(Maker::start(req, file)), file),
+                Access::Truncate => Store::CdbMaker(Some(Maker::start(req, *file)), file),
                 Access::Create | Access::Write => {
-                    return Err("Update operations are not supported");
+                    return Err(("Update operations are not supported", Some(file)));
                 }
             },
         })
@@ -333,14 +344,14 @@ impl Store {
             reason = "every handler but ndbm has one, and ndbm is macOS's"
         )
     )]
-    pub(crate) const fn stream(&self) -> Option<Stream> {
+    pub(crate) fn stream(&self) -> Option<Stream> {
         match self {
             #[cfg(target_os = "macos")]
             Store::Ndbm(_) => None,
             Store::Flatfile(_, file)
             | Store::Inifile(_, file)
             | Store::CdbReader(_, file)
-            | Store::CdbMaker(_, file) => Some(*file),
+            | Store::CdbMaker(_, file) => Some(**file),
         }
     }
 }
@@ -356,7 +367,7 @@ pub(crate) struct Link {
     pub(crate) persistent: bool,
     pub(crate) lock: Held,
     /// `info->lock.fp` where it is a stream of its own, a `.lck` file.
-    pub(crate) lock_file: Option<Stream>,
+    pub(crate) lock_file: Option<Owner<Stream>>,
     pub(crate) store: Store,
 }
 
@@ -364,14 +375,14 @@ impl Link {
     /// `dba_close_info`: the handler closed, a cdb being made finished
     /// and an ndbm database closed, then the streams freed.
     pub(crate) fn close(self, req: &mut Request) {
-        let file = self.store.stream();
-        match self.store {
+        let (store, file) = self.store.split();
+        match (store, &file) {
             // `dba_close_cdb` ignores what `cdb_make_finish` answers.
-            Store::CdbMaker(Some(maker), file) => {
-                let _ = maker.finish(req, file);
+            (Store::CdbMaker(Some(maker), ()), Some(file)) => {
+                let _ = maker.finish(req, **file);
             }
             // `dba_close_ndbm`'s `dbm_close`, before the lock is let go.
-            store => drop(store),
+            (store, _) => drop(store),
         }
         if let Some(file) = file {
             file.free(req);
@@ -425,17 +436,17 @@ impl Link {
     /// fds duplicated, written out first, and the streams freed; `None`
     /// where a fd could not be had, the link closed.
     pub(crate) fn keep(self, req: &mut Request) -> Option<Kept> {
-        let file = self.store.stream();
-        let file_fd = file.map(|file| KeptFd::of(req, file));
-        let lock_fd = self.lock_file.map(|lock| KeptFd::of(req, lock));
+        let file_fd = self.store.stream().map(|file| KeptFd::of(req, file));
+        let lock_fd = self.lock_file.as_deref().map(|lock| KeptFd::of(req, *lock));
         if matches!(file_fd, Some(None)) || matches!(lock_fd, Some(None)) {
             self.close(req);
             return None;
         }
+        let (store, file) = self.store.split();
         for stream in file.into_iter().chain(self.lock_file) {
             stream.free(req);
         }
-        let store = self.store.map(|_| file_fd.flatten().ok_or(())).ok()?;
+        let store = store.map(|()| file_fd.flatten().ok_or(())).ok()?;
         Some(Kept {
             path: self.path,
             access: self.access,
@@ -458,11 +469,15 @@ impl Kept {
             test: false,
         }
         .file_mode();
-        let store = self
-            .store
-            .map(|fd| fd.reopen(req, mode).map(Owner::hand_on_unmigrated))?;
-        let lock_file = match self.lock_file {
-            Some(fd) => Some(fd.reopen(req, b"rb")?.hand_on_unmigrated()),
+        let store = self.store.map(|fd| fd.reopen(req, mode))?;
+        let lock_file = match self.lock_file.map(|fd| fd.reopen(req, b"rb")) {
+            Some(Ok(lock)) => Some(lock),
+            Some(Err(thrown)) => {
+                if let (_, Some(file)) = store.split() {
+                    file.free(req);
+                }
+                return Err(thrown);
+            }
             None => None,
         };
         Ok(Link {

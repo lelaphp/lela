@@ -39,7 +39,7 @@ use super::api::call::Function;
 use super::api::decl::{IniDecl, Name};
 use super::api::raising::{Level, Thrown};
 use super::api::request::{Allocation, AllocationObserverId, ObserveAllocations, Request};
-use super::api::values::{ClassId, PhpObject, Resource, Value};
+use super::api::values::{ClassId, Owner, PhpObject, Resource, Value};
 
 /// One thing the log was handed, in the order it was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,13 +347,15 @@ pub(crate) fn fiber_name(fiber: ObservedFiber) -> String {
 }
 
 /// Extension `N`'s request state: recorded where it is built and where
-/// it is dropped, and nothing else.
-pub(crate) struct RequestSlot<const N: u8>;
+/// it is dropped, and the owner of the resource its `rinit` opened.
+pub(crate) struct RequestSlot<const N: u8> {
+    listed: Option<Owner<Resource>>,
+}
 
 impl<const N: u8> Default for RequestSlot<N> {
     fn default() -> Self {
         record(N, Phase::RequestStateBuilt);
-        RequestSlot
+        RequestSlot { listed: None }
     }
 }
 
@@ -677,8 +679,10 @@ impl<const N: u8> TestExt<N> {
         let kind = req
             .resources()
             .register_type(b"test_ext", Some(Self::resource_closed));
-        // The owner stands with the request's list until its end closes it.
-        let _listed = Resource::new(req, kind, ())?.hand_on_unmigrated();
+        // The owner stands with the request until `post_deactivate`, after
+        // the list's close at the request's end has closed the resource.
+        let listed = Resource::new(req, kind, ())?;
+        req.state::<RequestSlot<N>>().listed = Some(listed);
         Ok(())
     }
 
@@ -690,7 +694,10 @@ impl<const N: u8> TestExt<N> {
         record(N, Phase::Deactivate);
     }
 
-    fn post_deactivate(_: &mut Request) {
+    fn post_deactivate(req: &mut Request) {
+        if let Some(listed) = req.state::<RequestSlot<N>>().listed.take() {
+            listed.give_up(req);
+        }
         record(N, Phase::PostDeactivate);
     }
 

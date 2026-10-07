@@ -38,7 +38,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, throw, throw_error,
 };
-use php_ext::request::{Request, Stream, Streams as _, Whence};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ftp::{Ftp, Kind, Progress, Verb, cstr};
@@ -267,7 +267,13 @@ fn lend<R>(
     match conn {
         Conn::Open(mut session) => {
             let answer = f(req, &mut session);
-            **ftp.payload_mut(req)? = Conn::Open(session);
+            match ftp.payload_mut(req) {
+                Ok(conn) => **conn = Conn::Open(session),
+                Err(thrown) => {
+                    session.close(req);
+                    return Err(thrown);
+                }
+            }
             answer.map(Some)
         }
         Conn::Closed => {
@@ -1053,19 +1059,22 @@ fn ftp_nb_fget(
     let kind = xtype(req, mode)?;
     let (autoseek, offset) = resume_at(req, ftp, offset)?;
     let offset = seek_out(req, stream, autoseek, offset);
-    req.addref(&stream.as_value());
+    let mut held = Some(Owner::take(req, stream));
     let progress = lend(req, ftp, |req, session| {
+        let Some(stream) = held.take() else {
+            return Ok(Progress::Failed);
+        };
         let progress =
             session.nb_get(req, stream, false, remote_filename.as_bytes(), kind, offset)?;
         if progress == Progress::Failed {
             warn_reply(req, session);
         }
         Ok(progress)
-    })?;
-    if progress.is_none() {
-        req.release(stream.as_value());
+    });
+    if let Some(stream) = held {
+        stream.give_up(req);
     }
-    Ok(progress.unwrap_or(Progress::Failed) as i64)
+    Ok(progress?.unwrap_or(Progress::Failed) as i64)
 }
 
 /// `ftp_pasv(FTP\Connection $ftp, bool $enable): bool`: passive transfers, the
@@ -1106,7 +1115,7 @@ fn local_out(
     kind: Kind,
     autoseek: bool,
     offset: i64,
-) -> Result<Option<(Stream, i64)>, Thrown> {
+) -> Result<Option<(Owner<Stream>, i64)>, Thrown> {
     let (update, write): (&[u8], &[u8]) = match kind {
         Kind::Ascii => (b"rt+", b"wt"),
         Kind::Image => (b"rb+", b"wb"),
@@ -1118,14 +1127,13 @@ fn local_out(
         }
     } else {
         req.open_stream(path, write, false)?
-    }
-    .map(Owner::hand_on_unmigrated);
+    };
     let Some(stream) = stream else {
         let text = format!("Error opening {}", String::from_utf8_lossy(cstr(path)));
         docref(req, Level::Warning, &text);
         return Ok(None);
     };
-    let offset = seek_out(req, stream, autoseek, offset);
+    let offset = seek_out(req, *stream, autoseek, offset);
     Ok(Some((stream, offset)))
 }
 
@@ -1174,19 +1182,24 @@ fn ftp_get(
     let Some((out, offset)) = local_out(req, local, kind, autoseek, offset)? else {
         return Ok(false);
     };
+    let mut held = Some(out);
     let got = lend(req, ftp, |req, session| {
-        let got = session.get(req, out, remote_filename.0.as_bytes(), kind, offset)?;
+        let Some(out) = held.take() else {
+            return Ok(false);
+        };
+        let got = session.get(req, *out, remote_filename.0.as_bytes(), kind, offset);
         out.free(req);
-        if !got {
+        if !got? {
             unlink(req, local);
             warn_reply(req, session);
+            return Ok(false);
         }
-        Ok(got)
-    })?;
-    if got.is_none() {
+        Ok(true)
+    });
+    if let Some(out) = held {
         out.free(req);
     }
-    Ok(got == Some(true))
+    Ok(got? == Some(true))
 }
 
 /// `ftp_nb_get(FTP\Connection $ftp, string $local_filename, string`
@@ -1232,16 +1245,22 @@ fn ftp_nb_get(
     let Some((out, offset)) = local_out(req, local, kind, autoseek, offset)? else {
         return Ok(OrFalse::False);
     };
+    let mut held = Some(out);
     let progress = lend(req, ftp, |req, session| {
+        let Some(out) = held.take() else {
+            return Ok(Progress::Failed);
+        };
         let progress = session.nb_get(req, out, true, remote_filename.as_bytes(), kind, offset)?;
         if progress == Progress::Failed {
             unlink(req, local);
             warn_reply(req, session);
         }
         Ok(progress)
-    })?;
-    let Some(progress) = progress else {
+    });
+    if let Some(out) = held {
         out.free(req);
+    }
+    let Some(progress) = progress? else {
         return Ok(OrFalse::False);
     };
     Ok(OrFalse::Value(progress as i64))
@@ -1388,29 +1407,30 @@ fn ftp_nb_fput(
     let kind = xtype(req, mode)?;
     let remote = remote_filename.as_bytes();
     let offset = seek_in(req, ftp, stream, remote, offset)?;
-    req.addref(&stream.as_value());
+    let mut held = Some(Owner::take(req, stream));
     let progress = lend(req, ftp, |req, session| {
+        let Some(stream) = held.take() else {
+            return Ok(Progress::Failed);
+        };
         let progress = session.nb_put(req, remote, stream, false, kind, offset)?;
         if progress == Progress::Failed {
             warn_reply(req, session);
         }
         Ok(progress)
-    })?;
-    if progress.is_none() {
-        req.release(stream.as_value());
+    });
+    if let Some(stream) = held {
+        stream.give_up(req);
     }
-    Ok(progress.unwrap_or(Progress::Failed) as i64)
+    Ok(progress?.unwrap_or(Progress::Failed) as i64)
 }
 
 /// The local file an upload reads, `rb` or `rt`.
-fn local_in(req: &mut Request, path: &[u8], kind: Kind) -> Result<Option<Stream>, Thrown> {
+fn local_in(req: &mut Request, path: &[u8], kind: Kind) -> Result<Option<Owner<Stream>>, Thrown> {
     let mode: &[u8] = match kind {
         Kind::Ascii => b"rt",
         Kind::Image => b"rb",
     };
-    Ok(req
-        .open_stream(path, mode, false)?
-        .map(Owner::hand_on_unmigrated))
+    req.open_stream(path, mode, false)
 }
 
 /// `ftp_put(FTP\Connection $ftp, string $remote_filename, string`
@@ -1449,9 +1469,10 @@ fn ftp_put(
         return Ok(false);
     };
     let remote = remote_filename.0.as_bytes();
-    let put = seek_in(req, ftp, input, remote, offset).and_then(|offset| {
+    let view = *input;
+    let put = seek_in(req, ftp, view, remote, offset).and_then(|offset| {
         simple(req, ftp, |req, session| {
-            session.put(req, b"STOR", remote, input, kind, offset)
+            session.put(req, b"STOR", remote, view, kind, offset)
         })
     });
     input.free(req);
@@ -1492,8 +1513,9 @@ fn ftp_append(
         return Ok(false);
     };
     let remote = remote_filename.0.as_bytes();
+    let view = *input;
     let put = simple(req, ftp, |req, session| {
-        session.put(req, b"APPE", remote, input, kind, 0)
+        session.put(req, b"APPE", remote, view, kind, 0)
     });
     input.free(req);
     put
@@ -1536,23 +1558,29 @@ fn ftp_nb_put(
         return Ok(OrFalse::False);
     };
     let remote = remote_filename.0.as_bytes();
-    let offset = match seek_in(req, ftp, input, remote, offset) {
+    let offset = match seek_in(req, ftp, *input, remote, offset) {
         Ok(offset) => offset,
         Err(thrown) => {
             input.free(req);
             return Err(thrown);
         }
     };
+    let mut held = Some(input);
     let progress = lend(req, ftp, |req, session| {
+        let Some(input) = held.take() else {
+            return Ok(Progress::Failed);
+        };
         let progress = session.nb_put(req, remote, input, true, kind, offset)?;
         if progress == Progress::Failed {
             let text = String::from_utf8_lossy(cstr(&session.inbuf)).into_owned();
             docref(req, Level::Warning, &text);
         }
         Ok(progress)
-    })?;
-    let Some(progress) = progress else {
+    });
+    if let Some(input) = held {
         input.free(req);
+    }
+    let Some(progress) = progress? else {
         return Ok(OrFalse::False);
     };
     Ok(OrFalse::Value(progress as i64))

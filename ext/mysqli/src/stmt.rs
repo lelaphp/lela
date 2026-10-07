@@ -161,13 +161,12 @@ fn bind_type(specifier: u8) -> Option<FieldType> {
 
 /// A by-reference argument as the statement holds it: the caller's
 /// reference with one more owner, the value where none was passed.
-fn held(req: &mut Request, var: &Ref<Value>) -> Value {
+fn held(req: &mut Request, var: &Ref<Value>) -> Owner<Value> {
     let value = match var.reference() {
         Some(cell) => Value::reference(cell),
         None => var.get().copied().unwrap_or_default(),
     };
-    req.addref(&value);
-    value
+    Owner::take(req, value)
 }
 
 /// `mysqli_stmt_bind_param`.
@@ -196,11 +195,11 @@ pub(crate) fn bind_param(
                 "The number of variables must match the number of parameters in the prepared statement",
             ));
         }
-        let mut params = Vec::with_capacity(vars.len());
+        let mut params: Vec<(Owner<Value>, FieldType)> = Vec::with_capacity(vars.len());
         for (specifier, var) in types.iter().zip(vars) {
             let Some(ty) = bind_type(*specifier) else {
                 for (value, _) in params {
-                    req.release(value);
+                    value.give_up(req);
                 }
                 return Err(arg_value_error(
                     req,
@@ -253,12 +252,8 @@ fn bind_list(
     // `ZEND_HASH_FOREACH_VAL(input_params, tmp)`
     // (`Z/ext/mysqli/mysqli_api.c:441`), read only: each value bound one
     // owner more, as `mysqlnd_stmt_bind_param` takes it.
-    let values: Vec<(Value, FieldType)> = walk::rows(req, params)
-        .map(|(_, value)| {
-            let value = value.deref();
-            req.addref(&value);
-            (value, FieldType::VarString)
-        })
+    let values: Vec<(Owner<Value>, FieldType)> = walk::rows(req, params)
+        .map(|(_, value)| (Owner::take(req, value.deref()), FieldType::VarString))
         .collect();
     Ok(Some(stmt.bind_parameters(req, values)))
 }

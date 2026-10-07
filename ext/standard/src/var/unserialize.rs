@@ -54,12 +54,25 @@ enum Slot {
 /// and `var_push_dtor_value`, or an object whose `__wakeup()` or
 /// `__unserialize()` is delayed until the whole string is read.
 enum Dtor {
-    Kept(Value),
-    Wakeup(PhpObject),
-    Unserialize(PhpObject, PhpArray),
+    Kept(Owner<Value>),
+    Wakeup(Owner<PhpObject>),
+    Unserialize(Owner<PhpObject>, Owner<PhpArray>),
 }
 
 impl Dtor {
+    /// The entry's owners given up, no delayed call made: an entry the
+    /// list could not take.
+    fn give_up(self, req: &mut Request) {
+        match self {
+            Dtor::Kept(value) => value.give_up(req),
+            Dtor::Wakeup(object) => object.give_up(req),
+            Dtor::Unserialize(object, array) => {
+                object.give_up(req);
+                array.give_up(req);
+            }
+        }
+    }
+
     /// The zvals the entry takes of its block, `tmp_var`'s `num`: the
     /// array an `__unserialize()` is handed sits in the zval after its
     /// object's.
@@ -123,9 +136,9 @@ pub(crate) struct VarHash {
     data: Option<Emalloc>,
     slots: Vec<Option<(Slot, Value)>>,
     entries: Vec<Emalloc>,
-    roots: Vec<Value>,
+    roots: Vec<Owner<Value>>,
     dtors: Vec<DtorBlock>,
-    keys: Vec<PhpString>,
+    keys: Vec<Owner<Key>>,
     allowed: Allowed,
     max_depth: i64,
     depth: i64,
@@ -139,16 +152,16 @@ pub(crate) struct VarHash {
 /// classes whose lowered names key `class_hash`, the table
 /// `php_unserialize_with_options` lays down on the request's heap for
 /// the call and frees before the var hash is destroyed.
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 enum Allowed {
     #[default]
     Every,
-    Only(PhpArray),
+    Only(Owner<PhpArray>),
 }
 
 impl Allowed {
     /// `unserialize_allowed_class` over a lowered name.
-    fn admits(self, lowered: &[u8]) -> bool {
+    fn admits(&self, lowered: &[u8]) -> bool {
         match self {
             Allowed::Every => true,
             Allowed::Only(names) => names.find(lowered).is_some(),
@@ -158,7 +171,7 @@ impl Allowed {
     /// `zend_hash_destroy(class_hash)` and `FREE_HASHTABLE`.
     fn free(self, req: &mut Request) {
         if let Allowed::Only(names) = self {
-            req.release(names.to_value());
+            names.give_up(req);
         }
     }
 }
@@ -251,8 +264,15 @@ impl VarHash {
             .last()
             .is_some_and(|last| last.used() + dtor.width() <= VAR_DTOR_ENTRIES_MAX);
         if !fits {
+            let block = match Emalloc::new(req, VAR_DTOR_ENTRIES_SIZE) {
+                Ok(block) => block,
+                Err(thrown) => {
+                    dtor.give_up(req);
+                    return Err(thrown);
+                }
+            };
             self.dtors.push(DtorBlock {
-                block: Emalloc::new(req, VAR_DTOR_ENTRIES_SIZE)?,
+                block,
                 entries: Vec::new(),
             });
         }
@@ -267,21 +287,25 @@ impl VarHash {
 
     /// The `var_tmp_var` taken at `at` holding `value`, whose owner the
     /// var hash keeps from here.
-    fn fill(&mut self, at: DtorAt, value: Value) {
-        if let Some(entry) = self
+    fn fill(&mut self, req: &mut Request, at: DtorAt, value: Owner<Value>) {
+        let entry = self
             .dtors
             .get_mut(at.block)
-            .and_then(|block| block.entries.get_mut(at.entry))
-        {
-            *entry = Dtor::Kept(value);
-        }
+            .and_then(|block| block.entries.get_mut(at.entry));
+        let left = match entry {
+            Some(entry) => std::mem::replace(entry, Dtor::Kept(value)),
+            None => Dtor::Kept(value),
+        };
+        left.give_up(req);
     }
 
     /// `var_push_dtor_value`: `value`'s owner the var hash's until it is
     /// destroyed, where it counts owners at all.
-    fn push_dtor_value(&mut self, req: &mut Request, value: Value) -> Result<(), Thrown> {
+    fn push_dtor_value(&mut self, req: &mut Request, value: Owner<Value>) -> Result<(), Thrown> {
         if value.is_refcounted() {
             self.tmp_var(req, Dtor::Kept(value))?;
+        } else {
+            value.give_up(req);
         }
         Ok(())
     }
@@ -337,17 +361,19 @@ impl VarHash {
             for dtor in entries {
                 let (object, argument) = match dtor {
                     Dtor::Kept(value) => {
-                        req.release(value);
+                        value.give_up(req);
                         continue;
                     }
                     Dtor::Wakeup(object) => (object, None),
                     Dtor::Unserialize(object, array) => (object, Some(array)),
                 };
                 if calling {
-                    let called = locked(req, |req| match argument {
-                        None => call_method(req, &object, b"__wakeup", &[]),
+                    let target = *object;
+                    let handed = argument.as_deref().copied();
+                    let called = locked(req, |req| match handed {
+                        None => call_method(req, &target, b"__wakeup", &[]),
                         Some(array) => {
-                            call_method(req, &object, b"__unserialize", &[array.to_value()])
+                            call_method(req, &target, b"__unserialize", &[array.to_value()])
                         }
                     });
                     match called {
@@ -361,18 +387,18 @@ impl VarHash {
                 if !calling {
                     object.mark_destructor_called();
                 }
-                req.release(object.as_value());
+                object.give_up(req);
                 if let Some(array) = argument {
-                    req.release(array.to_value());
+                    array.give_up(req);
                 }
             }
             block.free(req);
         }
         for key in self.keys {
-            req.release(Value::string(key));
+            key.give_up(req);
         }
         for root in self.roots {
-            req.release(root);
+            root.give_up(req);
         }
         if let Some(data) = self.data {
             data.free(req);
@@ -413,7 +439,7 @@ impl<'a> State<'a> {
             hash.lay_down(req)?;
         }
         let root = hash.roots.len();
-        hash.roots.push(Value::null());
+        hash.roots.push(Owner::take(req, Value::null()));
         Ok(State {
             buf,
             p: 0,
@@ -427,23 +453,25 @@ impl<'a> State<'a> {
     /// is read, which [`State::hand_on`] fills; the `Err` is the memory
     /// limit's fatal.
     fn tmp_var(&mut self, req: &mut Request) -> Result<DtorAt, Thrown> {
-        self.hash.tmp_var(req, Dtor::Kept(Value::null()))
+        let null = Owner::take(req, Value::null());
+        self.hash.tmp_var(req, Dtor::Kept(null))
     }
 
     /// The root handed on into the `var_tmp_var` taken for it at `at`:
     /// the slots that named it name the value the var hash holds from
     /// here, and the reader's next value is a root of its own. A view,
     /// which lives as long as the var hash.
-    fn hand_on(&mut self, at: DtorAt) -> Value {
-        let root = self.hand_over();
-        self.hash.fill(at, root);
-        root
+    fn hand_on(&mut self, req: &mut Request, at: DtorAt) -> Value {
+        let root = self.hand_over(req);
+        let view = *root;
+        self.hash.fill(req, at, root);
+        view
     }
 
     /// The root handed over to the caller with its owner: the slots that
     /// named it name the value as the caller keeps it.
-    fn hand_over(&mut self) -> Value {
-        let root = self.take_root();
+    fn hand_over(&mut self, req: &Request) -> Owner<Value> {
+        let root = self.take_root(req);
         let at = self.root;
         for (slot, _) in self.hash.slots.iter_mut().flatten() {
             if matches!(slot, Slot::Root(of) if *of == at) {
@@ -455,11 +483,12 @@ impl<'a> State<'a> {
 
     /// The root taken out as the value `unserialize()` returns, with the
     /// owner the var hash held of it.
-    fn take_root(&mut self) -> Value {
-        self.hash
-            .roots
-            .get_mut(self.root)
-            .map_or(Value::null(), |root| std::mem::replace(root, Value::null()))
+    fn take_root(&mut self, req: &Request) -> Owner<Value> {
+        let null = Owner::take(req, Value::null());
+        match self.hash.roots.get_mut(self.root) {
+            Some(root) => std::mem::replace(root, null),
+            None => null,
+        }
     }
 
     /// `php_var_unserialize`: one value into `slot`, and where it fails
@@ -504,7 +533,7 @@ impl<'a> State<'a> {
         } = self;
         if hash.roots.len() > root {
             for left in hash.roots.split_off(root) {
-                req.release(left);
+                left.give_up(req);
             }
         }
         match req
@@ -700,11 +729,7 @@ fn unserialize(
         Passed::Given(options) => Some(options),
         Passed::Omitted => None,
     };
-    let value = php_unserialize_with_options(req, &data, options, "unserialize")?;
-    // The unserializer's value comes with its one owner, the caller's.
-    let owner = Owner::take(req, value);
-    req.release(value);
-    Ok(owner)
+    php_unserialize_with_options(req, &data, options, "unserialize")
 }
 
 /// `php_unserialize_with_options`, `PHPAPI` in `php_var.h`: `data`
@@ -712,14 +737,15 @@ fn unserialize(
 /// the options' refusals naming `function`, as phar's `getMetadata()`
 /// reads its archive's serialised value (design §4.10, the `standard` →
 /// `phar` row); `false` for empty data, before the options are read.
+/// The value comes with its one owner, the caller's.
 pub fn php_unserialize_with_options(
     req: &mut Request,
     data: &[u8],
     options: Option<PhpArray>,
     function: &str,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     if data.is_empty() {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     let mut state = State::open(req, data)?;
     let given = match self::options(req, options, function) {
@@ -731,10 +757,10 @@ pub fn php_unserialize_with_options(
             return Err(thrown);
         }
     };
-    let previous = (state.hash.allowed, state.hash.max_depth, state.hash.depth);
-    if let Some(allowed) = given.allowed {
-        state.hash.allowed = allowed;
-    }
+    let previous = (state.hash.max_depth, state.hash.depth);
+    let previous_allowed = given
+        .allowed
+        .map(|allowed| std::mem::replace(&mut state.hash.allowed, allowed));
     if let Some(max_depth) = given.max_depth {
         state.hash.max_depth = max_depth;
         // A nested call with a depth of its own counts from zero, for
@@ -770,44 +796,41 @@ pub fn php_unserialize_with_options(
     // return value, and a failure frees it before the delayed calls.
     let answer = match (&parsed, tmp) {
         (Ok(true), Some(tmp)) => {
-            let root = state.hand_on(tmp);
-            req.addref(&root);
-            Some(root)
+            let root = state.hand_on(req, tmp);
+            Some(Owner::take(req, root))
         }
-        (Ok(true), None) => Some(state.take_root()),
+        (Ok(true), None) => Some(state.take_root(req)),
         _ => {
             if state.holder != Holder::Joined {
-                req.release(state.take_root());
+                state.take_root(req).give_up(req);
             }
             None
         }
     };
     // `cleanup`: this call's `class_hash` freed, the previous options
     // restored, and the var hash destroyed after them.
-    if let Some(allowed) = given.allowed {
-        allowed.free(req);
+    if let Some(allowed) = previous_allowed {
+        std::mem::replace(&mut state.hash.allowed, allowed).free(req);
     }
-    let (allowed, max_depth, depth) = previous;
-    state.hash.allowed = allowed;
+    let (max_depth, depth) = previous;
     state.hash.max_depth = max_depth;
     state.hash.depth = depth;
     let destroyed = state.close(req, parsed.as_ref().err());
     let thrown = parsed.err().or(destroyed.err());
     if let Some(thrown) = thrown {
         if let Some(answer) = answer {
-            req.release(answer);
+            answer.give_up(req);
         }
         return Err(thrown);
     }
     let Some(answer) = answer else {
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     };
     // A reference is unwrapped, per calling convention, after the delayed
     // calls, which may have changed what it holds.
-    if let Some(cell) = answer.as_php_ref() {
-        let inner = cell.get();
-        req.addref(&inner);
-        req.release(answer);
+    if let Some(cell) = answer.as_php_ref().copied() {
+        let inner = Owner::take(req, cell.get());
+        answer.give_up(req);
         return Ok(inner);
     }
     Ok(answer)
@@ -916,24 +939,24 @@ impl<'a> Unserializer<'a> {
         &mut self,
         req: &mut Request,
         array: PhpArray,
-        key: Key,
+        key: Owner<Key>,
     ) -> Result<bool, Thrown> {
-        let written = key.clone();
-        if let Key::Str(s) = &key {
-            self.state.hash.keys.push(*s);
-        }
-        let held = array.get(&written);
-        if let Some(old) = &held {
-            req.addref(old);
-        }
-        let tmp = self.state.tmp_var(req)?;
-        let read = self.state.read(req, Slot::Element(array, key));
-        if let Some(value) = array.get(&written) {
-            req.addref(&value);
-            self.state.hash.fill(tmp, value);
-        }
+        let written = Key::clone(&key);
+        self.state.hash.keys.push(key);
+        let held = array.get(&written).map(|old| Owner::take(req, old));
+        let read = match self.state.tmp_var(req) {
+            Ok(tmp) => {
+                let read = self.state.read(req, Slot::Element(array, written.clone()));
+                if let Some(value) = array.get(&written) {
+                    let value = Owner::take(req, value);
+                    self.state.hash.fill(req, tmp, value);
+                }
+                read
+            }
+            Err(thrown) => Err(thrown),
+        };
         if let Some(old) = held {
-            req.release(old);
+            old.give_up(req);
         }
         read
     }
@@ -946,7 +969,7 @@ impl<'a> Unserializer<'a> {
         let root = self.state.root;
         let tmp = self.state.tmp_var(req)?;
         let read = self.state.read(req, Slot::Root(root));
-        let value = self.state.hand_on(tmp);
+        let value = self.state.hand_on(req, tmp);
         if !read? {
             return Ok(None);
         }
@@ -959,20 +982,19 @@ impl<'a> Unserializer<'a> {
     /// long as the caller keeps it where it put it, php's `var_replace`
     /// pointing the var hash at that place. What `SplObjectStorage` reads
     /// its rows through, so a row a later one replaces is freed then.
-    pub fn local(&mut self, req: &mut Request) -> Result<Option<Value>, Thrown> {
+    pub fn local(&mut self, req: &mut Request) -> Result<Option<Owner<Value>>, Thrown> {
         let root = self.state.root;
         let read = self.state.read(req, Slot::Root(root));
-        let value = self.state.hand_over();
-        if !read? {
-            req.release(value);
-            return Ok(None);
+        let value = self.state.hand_over(req);
+        if !matches!(read, Ok(true)) {
+            value.give_up(req);
+            return read.map(|_| None);
         }
-        let Some(cell) = value.as_php_ref() else {
+        let Some(cell) = value.as_php_ref().copied() else {
             return Ok(Some(value));
         };
-        let inner = cell.get();
-        req.addref(&inner);
-        req.release(value);
+        let inner = Owner::take(req, cell.get());
+        value.give_up(req);
         Ok(Some(inner))
     }
 
@@ -1026,17 +1048,17 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             // `ALLOC_HASHTABLE` and `zend_hash_init` at the list's count,
             // or none for `false`, which no name is ever added to.
             ValueRef::Bool(false) => {
-                allowed = Allowed::Only(PhpArray::new(req)?.hand_on_unmigrated());
+                allowed = Allowed::Only(PhpArray::new(req)?);
             }
             ValueRef::Array(list) => {
                 let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
-                let names = PhpArray::init_size(req, count)?.hand_on_unmigrated();
-                allowed = Allowed::Only(names);
-                if let Err(thrown) = allowed_names(req, names, *list, function) {
+                let mut names = PhpArray::init_size(req, count)?;
+                if let Err(thrown) = allowed_names(req, &mut names, *list, function) {
                     // `goto cleanup`, which frees what was added so far.
-                    allowed.free(req);
+                    names.give_up(req);
                     return Err(thrown);
                 }
+                allowed = Allowed::Only(names);
             }
             _ => {
                 let name = value_name(req, &classes);
@@ -1054,6 +1076,8 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
     if let Some(max) = options.find(b"max_depth") {
         let max = max.deref();
         let Some(n) = max.as_int() else {
+            // `goto cleanup`: the `class_hash` made above freed.
+            allowed.free(req);
             let name = value_name(req, &max);
             return Err(throw_error(
                 req,
@@ -1062,6 +1086,7 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             ));
         };
         if n < 0 {
+            allowed.free(req);
             return Err(throw_error(
                 req,
                 "ValueError",
@@ -1083,7 +1108,7 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
 /// upper-case letter (`zend_string_tolower`).
 fn allowed_names(
     req: &mut Request,
-    mut names: PhpArray,
+    names: &mut Owner<PhpArray>,
     list: PhpArray,
     function: &str,
 ) -> Result<(), Thrown> {
@@ -1279,8 +1304,8 @@ impl State<'_> {
                     value.give_up(req);
                     return Ok(());
                 };
-                let previous = std::mem::replace(root, value.hand_on_unmigrated());
-                req.release(previous);
+                let previous = std::mem::replace(root, value);
+                previous.give_up(req);
             }
             // Nothing names a taken root's place any more; the `R:`
             // arm shares its value instead of writing here, and reads a
@@ -1776,19 +1801,20 @@ impl State<'_> {
                 // The var hash keeps a string key's owner, below.
                 Some(Scalar::Str(bytes)) => {
                     let made = PhpString::existing_interned(req, &bytes)?;
-                    Key::from_string(req, made).hand_on_unmigrated()
+                    // The key's own owner is the var hash's, whose slots
+                    // name it until it is destroyed; each write takes one
+                    // of its own.
+                    let owned = Key::from_string(req, made);
+                    let key = Key::clone(&owned);
+                    self.hash.keys.push(owned);
+                    key
                 }
                 _ => return Ok(false),
             };
-            // The key's own owner is the var hash's, whose slots name it
-            // until it is destroyed; each write takes one of its own.
-            if let Key::Str(s) = &key {
-                self.hash.keys.push(*s);
-            }
             // `var_push_dtor_value`: a key the string repeats leaves what
             // it held to the var hash, which frees it with the rest.
             if let Some(old) = array.get(&key) {
-                req.addref(&old);
+                let old = Owner::take(req, old);
                 self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Element(array, key.clone()));
             }
@@ -1972,15 +1998,21 @@ impl State<'_> {
             }
             // `array_init_size` and `zend_hash_real_init_mixed`, "Avoid
             // reallocation due to packed -> mixed conversion".
-            let array = PhpArray::sized(req, u32::try_from(elements).unwrap_or(0), Layout::Hash)?
-                .hand_on_unmigrated();
-            if !self.array_elements(req, array, elements)? {
-                object.mark_destructor_called();
-                req.release(array.to_value());
-                return Ok(false);
+            let array = PhpArray::sized(req, u32::try_from(elements).unwrap_or(0), Layout::Hash)?;
+            match self.array_elements(req, *array, elements) {
+                Ok(true) => {}
+                Ok(false) => {
+                    object.mark_destructor_called();
+                    array.give_up(req);
+                    return Ok(false);
+                }
+                Err(thrown) => {
+                    array.give_up(req);
+                    return Err(thrown);
+                }
             }
-            req.addref(&object.as_value());
-            self.hash.tmp_var(req, Dtor::Unserialize(object, array))?;
+            let held = Owner::take(req, object);
+            self.hash.tmp_var(req, Dtor::Unserialize(held, array))?;
             return Ok(self.finish());
         }
         let has_wakeup = !incomplete && has_method(req, class, b"__wakeup");
@@ -1999,8 +2031,8 @@ impl State<'_> {
             return Ok(false);
         }
         if has_wakeup {
-            req.addref(&object.as_value());
-            self.hash.tmp_var(req, Dtor::Wakeup(object))?;
+            let held = Owner::take(req, object);
+            self.hash.tmp_var(req, Dtor::Wakeup(held))?;
         }
         Ok(self.finish())
     }
@@ -2204,10 +2236,11 @@ impl State<'_> {
             };
             // A key is `zend_string_init_existing_interned`'s, so a name
             // a unit already holds costs nothing.
-            let name = PhpString::existing_interned(req, &key)?.hand_on_unmigrated();
-            self.hash.keys.push(name);
+            let owned = PhpString::existing_interned(req, &key)?;
+            let name = *owned;
+            self.hash.keys.push(owned.into_key());
             if let Some(old) = object.prop(req, &key) {
-                req.addref(&old);
+                let old = Owner::take(req, old);
                 self.hash.push_dtor_value(req, old)?;
                 self.repeat_place(&Slot::Property(object, name));
             }

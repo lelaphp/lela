@@ -760,31 +760,6 @@ impl Stream {
         true
     }
 
-    /// `php_stream_close`, `_php_stream_free` under
-    /// `PHP_STREAM_FREE_CLOSE`, what a native or a kind does to a stream
-    /// it opened: [`Stream::close`], then the owner the open handed the
-    /// caller given up, `zend_list_delete`, so `get_resources()` lists the
-    /// stream no longer once no value holds it.
-    pub fn free(self, req: &mut Request) {
-        self.close(req);
-        req.release(self.as_value());
-    }
-
-    /// The persistent stream's connection taken out of the request for
-    /// the extension that opened it to keep across requests, in the one
-    /// list it keeps its connection in, as php's mysqlnd deletes the
-    /// stream it opened from `EG(persistent_list)` and `EG(regular_list)`
-    /// (`mysqlnd_vio::open_tcp_or_unix`): the socket, its owed write
-    /// flushed, out of the engine's persistent list and out of the
-    /// resource, which is closed, and this owner given up. The request
-    /// that takes the connection up lends it again with
-    /// [`Streams::stream_lend`]. `None`, and the stream left as it is,
-    /// for a stream that is not a socket's.
-    #[must_use]
-    pub fn keep(self, req: &mut Request) -> Option<Persisted> {
-        crate::streams::persistent::keep(req, self).map(Persisted)
-    }
-
     /// `stream->wrapperthis`, with the wrapper's `stream_closer` the
     /// stream's free runs over it ([`Closer`]); where the stream is closed
     /// or inside a call, it is closed at once.
@@ -801,13 +776,13 @@ impl Stream {
     /// prints as `wrapper_data`, the headers the http wrapper read, one
     /// owner moving to the stream; where it is closed, the owner is
     /// given up.
-    pub fn set_wrapper_data(self, req: &mut Request, value: Value) {
+    pub fn set_wrapper_data(self, req: &mut Request, value: Owner<Value>) {
         let mut value = Some(value);
         let old = req
             .stream_op(self, |_, stream| stream.set_wrapper_data(value.take()))
             .flatten();
         for left in [old, value].into_iter().flatten() {
-            req.release(left);
+            left.give_up(req);
         }
     }
 
@@ -1561,7 +1536,7 @@ pub trait Streams {
         xport: Xport,
     ) -> Result<Result<Owner<Stream>, XportFailure>, Thrown>;
 
-    /// The connection [`Stream::keep`] took out lent to this request
+    /// The connection [`OwnedStream::keep`] took out lent to this request
     /// under `key`: a fresh resource of the `persistent stream` type over
     /// its socket, held under `key` in the request's persistent list as
     /// `php_stream_from_persistent_id` registers one, `r+` and seeking
@@ -1569,16 +1544,39 @@ pub trait Streams {
     fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Owner<Stream>, Thrown>;
 }
 
-/// [`Stream::free`] over the owner an open handed back: the stream
-/// closed and that owner given up, `php_stream_close`.
-pub(crate) trait FreeOwned {
+/// What a native does with the owner of a stream it opened, which it
+/// keeps as an [`Owner<Stream>`] for as long as it holds the stream: the
+/// stream's own exits, beside [`Owner::give_up`], which lets the owner go
+/// and leaves the stream open for its other owners.
+pub trait OwnedStream {
+    /// `php_stream_close`, `_php_stream_free` under
+    /// `PHP_STREAM_FREE_CLOSE`: [`Stream::close`], then the owner given
+    /// up, `zend_list_delete`, so `get_resources()` lists the stream no
+    /// longer once no value holds it.
     fn free(self, req: &mut Request);
+
+    /// The persistent stream's connection taken out of the request for
+    /// the extension that opened it to keep across requests, in the one
+    /// list it keeps its connection in, as php's mysqlnd deletes the
+    /// stream it opened from `EG(persistent_list)` and `EG(regular_list)`
+    /// (`mysqlnd_vio::open_tcp_or_unix`): the socket, its owed write
+    /// flushed, out of the engine's persistent list and out of the
+    /// resource, which is closed, and the owner given up. The request
+    /// that takes the connection up lends it again with
+    /// [`Streams::stream_lend`]. `None`, and the stream freed, for a
+    /// stream that is not a socket's.
+    #[must_use]
+    fn keep(self, req: &mut Request) -> Option<Persisted>;
 }
 
-impl FreeOwned for Owner<Stream> {
+impl OwnedStream for Owner<Stream> {
     fn free(self, req: &mut Request) {
         self.close(req);
         self.give_up(req);
+    }
+
+    fn keep(self, req: &mut Request) -> Option<Persisted> {
+        crate::streams::persistent::keep(req, self).map(Persisted)
     }
 }
 

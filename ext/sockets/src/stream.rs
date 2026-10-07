@@ -83,18 +83,20 @@ fn socket_import_stream(
             return Ok(OrFalse::False);
         }
     };
-    let resource = stream.resource();
-    req.addref(&Value::resource(resource));
-    if let Some(payload) = object.native_mut::<Sock>(req) {
-        *payload = Sock {
-            handle: Handle::Stream {
-                fd,
-                stream: resource,
-            },
-            family,
-            error: 0,
-            blocking: !ffi::is_nonblocking(flags),
-        };
+    let held = Owner::take(req, stream.resource());
+    match object.native_mut::<Sock>(req) {
+        Some(payload) => {
+            *payload = Sock {
+                handle: Handle::Stream {
+                    fd,
+                    stream: Box::new(held),
+                },
+                family,
+                error: 0,
+                blocking: !ffi::is_nonblocking(flags),
+            };
+        }
+        None => held.give_up(req),
     }
     stream.set_option(
         req,
@@ -187,7 +189,7 @@ fn socket_export_stream(
         Ok(payload) => {
             payload.handle = Handle::Stream {
                 fd: raw,
-                stream: stream.hand_on_unmigrated().resource(),
+                stream: Box::new(stream.into_resource()),
             }
         }
         Err(thrown) => {

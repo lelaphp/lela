@@ -26,14 +26,28 @@ pub(super) struct Stack {
     /// A cell of the native's own over a copy, where the call sent a
     /// value for the reference: php separates the argument slot, which
     /// nobody reads after.
-    owned: Option<PhpRef>,
+    owned: Option<Owner<PhpRef>>,
     given: Ref<PhpArray>,
 }
 
 impl Stack {
+    /// `body` over the array `given` holds ([`Stack::of`]), then the
+    /// stack finished, whichever way `body` ended, as php's frame frees
+    /// the argument slot once the call is done.
+    pub(super) fn over<T>(
+        req: &mut Request,
+        given: Ref<PhpArray>,
+        body: impl FnOnce(&mut Request, &mut Stack) -> Result<T, Thrown>,
+    ) -> Result<T, Thrown> {
+        let mut stack = Stack::of(req, given)?;
+        let answer = body(req, &mut stack);
+        stack.finish(req);
+        answer
+    }
+
     /// The array `given` holds, separated where the caller's reference
     /// holds it, a copy in a cell of its own where the call sent a value.
-    pub(super) fn of(req: &mut Request, given: Ref<PhpArray>) -> Result<Stack, Thrown> {
+    fn of(req: &mut Request, given: Ref<PhpArray>) -> Result<Stack, Thrown> {
         if let Some(array) = given.separated(req)? {
             return Ok(Stack {
                 array,
@@ -46,7 +60,7 @@ impl Stack {
             None => PhpArray::new(req)?,
         };
         let array = *made;
-        let cell = PhpRef::new(req, made.into_value())?.hand_on_unmigrated();
+        let cell = PhpRef::new(req, made.into_value())?;
         Ok(Stack {
             array,
             owned: Some(cell),
@@ -61,7 +75,7 @@ impl Stack {
         rebuilt: Owner<PhpArray>,
     ) -> Result<(), Thrown> {
         let view = *rebuilt;
-        match self.owned {
+        match self.owned.as_deref().copied() {
             Some(cell) => cell.set(req, rebuilt.into_value())?,
             None => self.given.set(req, rebuilt)?,
         }
@@ -70,9 +84,9 @@ impl Stack {
     }
 
     /// The cell of its own given up.
-    pub(super) fn finish(self, req: &mut Request) {
+    fn finish(self, req: &mut Request) {
         if let Some(cell) = self.owned {
-            req.release(cell.as_value());
+            cell.give_up(req);
         }
     }
 }
@@ -166,16 +180,12 @@ fn array_push(
     array: Ref<PhpArray>,
     values: Variadic<Value>,
 ) -> Result<i64, Thrown> {
-    let mut stack = Stack::of(req, array)?;
-    for value in values.0 {
-        if let Err(thrown) = stack.array.append(req, Owner::take(req, value)) {
-            stack.finish(req);
-            return Err(thrown);
+    Stack::over(req, array, |req, stack| {
+        for value in values.0 {
+            stack.array.append(req, Owner::take(req, value))?;
         }
-    }
-    let count = i64::try_from(stack.array.len()).unwrap_or(i64::MAX);
-    stack.finish(req);
-    Ok(count)
+        Ok(i64::try_from(stack.array.len()).unwrap_or(i64::MAX))
+    })
 }
 
 /// `array_pop(array &$array): mixed`, php's `PHP_FUNCTION(array_pop)`
@@ -216,30 +226,32 @@ fn array_push(
 /// ```
 #[php_function]
 fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Thrown> {
-    let mut stack = Stack::of(req, array)?;
-    // The last element as `ZEND_HASH_REVERSE_FOREACH` finds it, from
-    // `nNumUsed` back: the internal pointer set to it, and reset below as
-    // php resets it.
-    stack.array.cursor_end();
-    let (Some(key), Some(value)) = (stack.array.cursor_key(), stack.array.cursor_current()) else {
-        stack.finish(req);
-        return Ok(Owner::take(req, Value::null()));
-    };
-    req.addref(&value);
-    let popped = stack.array.unset(req, &key);
-    if let Key::Int(index) = key
-        && index == stack.array.next_free().wrapping_sub(1)
-    {
-        stack.array.set_next_free(req, index)?;
-    }
-    stack.array.cursor_reset();
-    stack.finish(req);
-    let value = unwrapped(req, value);
-    if let Err(thrown) = popped {
-        value.give_up(req);
-        return Err(thrown);
-    }
-    Ok(value)
+    Stack::over(req, array, |req, stack| {
+        // The last element as `ZEND_HASH_REVERSE_FOREACH` finds it, from
+        // `nNumUsed` back: the internal pointer set to it, and reset below as
+        // php resets it.
+        stack.array.cursor_end();
+        let (Some(key), Some(value)) = (stack.array.cursor_key(), stack.array.cursor_current())
+        else {
+            return Ok(Owner::take(req, Value::null()));
+        };
+        let taken = Owner::take(req, value);
+        let popped = stack.array.unset(req, &key);
+        if let Key::Int(index) = key
+            && index == stack.array.next_free().wrapping_sub(1)
+            && let Err(thrown) = stack.array.set_next_free(req, index)
+        {
+            taken.give_up(req);
+            return Err(thrown);
+        }
+        stack.array.cursor_reset();
+        let value = unwrapped(req, taken);
+        if let Err(thrown) = popped {
+            value.give_up(req);
+            return Err(thrown);
+        }
+        Ok(value)
+    })
 }
 
 /// `zend_unwrap_reference` over the element `RETVAL_COPY_VALUE` took out,
@@ -247,13 +259,13 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Th
 /// after, with one more owner, in place of the reference, so an element
 /// that referred to the array itself hands back the array as it is left.
 /// `taken` is the owner the native took of the element.
-fn unwrapped(req: &mut Request, taken: Value) -> Owner<Value> {
-    let value = taken
-        .as_php_ref()
-        .map_or(taken, |reference| reference.get().deref());
-    let owner = Owner::take(req, value);
-    req.release(taken);
-    owner
+fn unwrapped(req: &mut Request, taken: Owner<Value>) -> Owner<Value> {
+    let Some(reference) = taken.as_php_ref().copied() else {
+        return taken;
+    };
+    let value = Owner::take(req, reference.get().deref());
+    taken.give_up(req);
+    value
 }
 
 /// `array_shift(array &$array): mixed`, php's `PHP_FUNCTION(array_shift)`
@@ -322,35 +334,39 @@ fn unwrapped(req: &mut Request, taken: Value) -> Owner<Value> {
 /// ```
 #[php_function]
 fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Thrown> {
-    let mut stack = Stack::of(req, array)?;
-    // The rebuild runs no code of the program, as php's in-place one runs
-    // none: the rows are read under the borrowed request, views the table
-    // the stack holds keeps until it is replaced.
-    let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
-    let Some((_, first)) = rows.first().cloned() else {
-        stack.finish(req);
-        return Ok(Owner::take(req, Value::null()));
-    };
-    req.addref(&first);
-    let mut rebuilt = PhpArray::new(req)?;
-    for (key, element) in rows.into_iter().skip(1) {
-        let element = Owner::take(req, element);
-        match key {
-            Key::Str(_) => {
-                let key = Owner::take(req, key.clone());
-                rebuilt.set(req, key, element)?;
+    Stack::over(req, array, |req, stack| {
+        // The rebuild runs no code of the program, as php's in-place one runs
+        // none: the rows are read under the borrowed request, views the table
+        // the stack holds keeps until it is replaced.
+        let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
+        let Some((_, first)) = rows.first().cloned() else {
+            return Ok(Owner::take(req, Value::null()));
+        };
+        let mut rebuilt = PhpArray::new(req)?;
+        for (key, element) in rows.into_iter().skip(1) {
+            let element = Owner::take(req, element);
+            match key {
+                Key::Str(_) => {
+                    let key = Owner::take(req, key.clone());
+                    rebuilt.set(req, key, element)?;
+                }
+                Key::Int(_) => rebuilt.append(req, element)?,
             }
-            Key::Int(_) => rebuilt.append(req, element)?,
         }
-    }
-    if rebuilt.next_free() == i64::MIN {
-        rebuilt.set_next_free(req, 0)?;
-    }
-    shifted_iterators(req, stack.array);
-    stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt)?;
-    stack.finish(req);
-    Ok(unwrapped(req, first))
+        if rebuilt.next_free() == i64::MIN {
+            rebuilt.set_next_free(req, 0)?;
+        }
+        shifted_iterators(req, stack.array);
+        stack.array.iterators_carry(req, &rebuilt);
+        // The first element's owner, taken before the rebuilt table
+        // replaces the one that held it.
+        let first = Owner::take(req, first);
+        if let Err(thrown) = stack.replace(req, rebuilt) {
+            first.give_up(req);
+            return Err(thrown);
+        }
+        Ok(unwrapped(req, first))
+    })
 }
 
 /// The hash iterators on the table `array_shift` renumbers moved where
@@ -436,36 +452,36 @@ fn array_unshift(
     array: Ref<PhpArray>,
     values: Variadic<Value>,
 ) -> Result<i64, Thrown> {
-    let mut stack = Stack::of(req, array)?;
-    let mut rebuilt = PhpArray::new(req)?;
-    let argc = values.0.len();
-    for value in values.0 {
-        rebuilt.append(req, Owner::take(req, value))?;
-    }
-    // The rebuild runs no code of the program, as php's in-place one runs
-    // none: the rows are read under the borrowed request, views the table
-    // the stack holds keeps until it is replaced.
-    let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
-    for (key, element) in rows {
-        let element = Owner::take(req, element);
-        match key {
-            Key::Str(_) => {
-                let key = Owner::take(req, key.clone());
-                rebuilt.set(req, key, element)?;
-            }
-            Key::Int(_) => rebuilt.append(req, element)?,
+    Stack::over(req, array, |req, stack| {
+        let mut rebuilt = PhpArray::new(req)?;
+        let argc = values.0.len();
+        for value in values.0 {
+            rebuilt.append(req, Owner::take(req, value))?;
         }
-    }
-    let count = i64::try_from(rebuilt.len()).unwrap_or(i64::MAX);
-    // `zend_hash_iterators_advance(Z_ARRVAL_P(stack), argc)` and the
-    // swap: a `foreach` by reference over the array goes on past the
-    // values put before it.
-    let argc = u32::try_from(argc).unwrap_or(u32::MAX);
-    stack.array.iterators_advance(req, argc);
-    stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt)?;
-    stack.finish(req);
-    Ok(count)
+        // The rebuild runs no code of the program, as php's in-place one runs
+        // none: the rows are read under the borrowed request, views the table
+        // the stack holds keeps until it is replaced.
+        let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
+        for (key, element) in rows {
+            let element = Owner::take(req, element);
+            match key {
+                Key::Str(_) => {
+                    let key = Owner::take(req, key.clone());
+                    rebuilt.set(req, key, element)?;
+                }
+                Key::Int(_) => rebuilt.append(req, element)?,
+            }
+        }
+        let count = i64::try_from(rebuilt.len()).unwrap_or(i64::MAX);
+        // `zend_hash_iterators_advance(Z_ARRVAL_P(stack), argc)` and the
+        // swap: a `foreach` by reference over the array goes on past the
+        // values put before it.
+        let argc = u32::try_from(argc).unwrap_or(u32::MAX);
+        stack.array.iterators_advance(req, argc);
+        stack.array.iterators_carry(req, &rebuilt);
+        stack.replace(req, rebuilt)?;
+        Ok(count)
+    })
 }
 
 /// `array_splice(array &$array, int $offset, ?int $length = null, mixed
@@ -616,102 +632,101 @@ fn array_splice(
     #[php(default = null)] length: Option<i64>,
     #[php(default = [])] replacement: Passed<Value>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let mut stack = Stack::of(req, array)?;
-    let replacement = match replacement {
-        Passed::Given(given) => Some(match given.as_array() {
-            Some(array) => Owner::take(req, *array),
-            None => to_array(req, &given)?,
-        }),
-        Passed::Omitted => None,
-    };
-    let num_in = i64::try_from(stack.array.len()).unwrap_or(i64::MAX);
-    let length = length.unwrap_or(num_in);
-    let (start, taken) = clamp_splice(num_in, offset, length);
-    // `USED_RET()`: the removed elements are gathered only where the
-    // caller reads them; otherwise each is released as it is deleted.
-    let mut removed = if req.return_value_used() {
-        Some(PhpArray::new(req)?)
-    } else {
-        None
-    };
-    let mut rebuilt = PhpArray::new(req)?;
-    // php walks the table's buckets, `idx`, beside the position each
-    // kept element takes in the new one, `pos`, and moves the hash
-    // iterators a `foreach` by reference holds from the one to the other
-    // as it passes them (`zend_hash_iterators_update`), so the loop goes
-    // on in the rebuilt table at the element it stood before.
-    let packed = stack.array.is_packed();
-    let mut walk = Walk {
-        iter_pos: stack.array.iterators_lower_pos(req, 0),
-        idx: 0,
-        pos: 0,
-    };
-    while walk.pos < start {
-        let Some((at, key, element)) = stack.array.live_from(walk.idx) else {
-            break;
+    Stack::over(req, array, |req, stack| {
+        let replacement = match replacement {
+            Passed::Given(given) => Some(match given.as_array() {
+                Some(array) => Owner::take(req, *array),
+                None => to_array(req, &given)?,
+            }),
+            Passed::Omitted => None,
         };
-        walk.idx = at.saturating_add(1);
-        keep(req, &mut rebuilt, &key, element)?;
-        walk.moved(req, stack.array, at);
-    }
-    let (gone, alone) = remove_range(
-        req,
-        &mut stack,
-        &mut walk,
-        removed.as_mut(),
-        (start, taken),
-        packed,
-    )?;
-    // The removed arm counts `pos` over what it takes, and the other
-    // counts beside it; the hash arm looks for the lowest iterator again.
-    if removed.is_some() {
-        walk.pos += gone;
-    }
-    if !packed {
-        walk.iter_pos = stack.array.iterators_lower_pos(req, walk.iter_pos);
-    }
-    if let Some(replacement) = &replacement {
-        // The replacement's rows, which this native owns, appended; no code
-        // of the program runs between.
-        let values: Vec<Value> = walk::rows(req, **replacement).map(|(_, v)| v).collect();
-        for value in values {
-            rebuilt.append(req, Owner::take(req, value))?;
-            walk.pos += 1;
+        let num_in = i64::try_from(stack.array.len()).unwrap_or(i64::MAX);
+        let length = length.unwrap_or(num_in);
+        let (start, taken) = clamp_splice(num_in, offset, length);
+        // `USED_RET()`: the removed elements are gathered only where the
+        // caller reads them; otherwise each is released as it is deleted.
+        let mut removed = if req.return_value_used() {
+            Some(PhpArray::new(req)?)
+        } else {
+            None
+        };
+        let mut rebuilt = PhpArray::new(req)?;
+        // php walks the table's buckets, `idx`, beside the position each
+        // kept element takes in the new one, `pos`, and moves the hash
+        // iterators a `foreach` by reference holds from the one to the other
+        // as it passes them (`zend_hash_iterators_update`), so the loop goes
+        // on in the rebuilt table at the element it stood before.
+        let packed = stack.array.is_packed();
+        let mut walk = Walk {
+            iter_pos: stack.array.iterators_lower_pos(req, 0),
+            idx: 0,
+            pos: 0,
+        };
+        while walk.pos < start {
+            let Some((at, key, element)) = stack.array.live_from(walk.idx) else {
+                break;
+            };
+            walk.idx = at.saturating_add(1);
+            keep(req, &mut rebuilt, &key, element)?;
+            walk.moved(req, stack.array, at);
         }
-    }
-    while let Some((at, key, element)) = stack.array.live_from(walk.idx) {
-        walk.idx = at.saturating_add(1);
-        keep(req, &mut rebuilt, &key, element)?;
-        walk.moved(req, stack.array, at);
-    }
-    if let Some(replacement) = replacement {
-        replacement.give_up(req);
-    }
-    if let Some(last) = alone {
-        // `GC_DELREF(in_hash) == 0`: nothing but the splice holds the
-        // table any more, so what the reference holds now stands.
-        last.give_up(req);
-        rebuilt.give_up(req);
-        if let Some(removed) = removed {
-            removed.give_up(req);
-        }
-        stack.finish(req);
-        return Err(throw_error(
+        let (gone, alone) = remove_range(
             req,
-            "Error",
-            "Array was modified during array_splice operation",
-        ));
-    }
-    if rebuilt.next_free() == i64::MIN {
-        rebuilt.set_next_free(req, 0)?;
-    }
-    stack.array.iterators_carry(req, &rebuilt);
-    stack.replace(req, rebuilt)?;
-    stack.finish(req);
-    match removed {
-        Some(removed) => Ok(removed),
-        None => PhpArray::new(req),
-    }
+            stack,
+            &mut walk,
+            removed.as_mut(),
+            (start, taken),
+            packed,
+        )?;
+        // The removed arm counts `pos` over what it takes, and the other
+        // counts beside it; the hash arm looks for the lowest iterator again.
+        if removed.is_some() {
+            walk.pos += gone;
+        }
+        if !packed {
+            walk.iter_pos = stack.array.iterators_lower_pos(req, walk.iter_pos);
+        }
+        if let Some(replacement) = &replacement {
+            // The replacement's rows, which this native owns, appended; no code
+            // of the program runs between.
+            let values: Vec<Value> = walk::rows(req, **replacement).map(|(_, v)| v).collect();
+            for value in values {
+                rebuilt.append(req, Owner::take(req, value))?;
+                walk.pos += 1;
+            }
+        }
+        while let Some((at, key, element)) = stack.array.live_from(walk.idx) {
+            walk.idx = at.saturating_add(1);
+            keep(req, &mut rebuilt, &key, element)?;
+            walk.moved(req, stack.array, at);
+        }
+        if let Some(replacement) = replacement {
+            replacement.give_up(req);
+        }
+        if let Some(last) = alone {
+            // `GC_DELREF(in_hash) == 0`: nothing but the splice holds the
+            // table any more, so what the reference holds now stands.
+            last.give_up(req);
+            rebuilt.give_up(req);
+            if let Some(removed) = removed {
+                removed.give_up(req);
+            }
+            return Err(throw_error(
+                req,
+                "Error",
+                "Array was modified during array_splice operation",
+            ));
+        }
+        if rebuilt.next_free() == i64::MIN {
+            rebuilt.set_next_free(req, 0)?;
+        }
+        stack.array.iterators_carry(req, &rebuilt);
+        stack.replace(req, rebuilt)?;
+        match removed {
+            Some(removed) => Ok(removed),
+            None => PhpArray::new(req),
+        }
+    })
 }
 
 /// `php_splice`'s middle loop: `taken` elements from the walk's bucket

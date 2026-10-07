@@ -10,7 +10,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Callable, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, to_string};
+use php_ext::coerce::{callable_checked, to_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_type_error, docref, raise_while_pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -304,11 +304,9 @@ fn replace_one_func(
             let returned = call(req, callback, &[*argument]);
             argument.give_up(req);
             let returned = returned?;
-            let text = to_string(req, &returned);
+            let read = with_string(req, &returned, |text| out.extend_from_slice(text));
             returned.give_up(req);
-            let text = text?;
-            out.extend_from_slice(text.as_bytes());
-            text.give_up(req);
+            read?;
             Ok(true)
         },
     )?;

@@ -16,7 +16,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString};
 
-use crate::string::{next_utf8_char, str_copy};
+use crate::string::next_utf8_char;
 use tables::Row;
 
 /// `ENT_HTML_QUOTE_SINGLE` and the rest of `html.h`'s `$flags` bits.
@@ -627,7 +627,7 @@ fn unescape(
 ) -> Result<Owner<PhpString>, Thrown> {
     let s = string.as_bytes();
     if !s.contains(&b'&') {
-        return Ok(str_copy(req, string));
+        return Ok(Owner::take(req, string));
     }
     let charset = if all {
         determine_charset(req, hint, false)

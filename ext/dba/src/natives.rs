@@ -11,7 +11,7 @@ use php_ext::decl::{Name, Type};
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, arity, deprecated, docref, pending, throw,
 };
-use php_ext::request::{Cast, Request, Resolve, Stream, Streams as _};
+use php_ext::request::{Cast, OwnedStream as _, Request, Resolve, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -366,7 +366,7 @@ fn open_link(
             if mode.access == Access::Read {
                 // A reader tries the lock file that is there first, and
                 // says nothing where it is not.
-                lock_file = open_stream(req, &name, b"rb", false)?.map(Owner::hand_on_unmigrated);
+                lock_file = open_stream(req, &name, b"rb", false)?;
             }
             if lock_file.is_none() {
                 lock_mode = b"a+b";
@@ -374,7 +374,7 @@ fn open_link(
             name
         };
         if lock_file.is_none() {
-            lock_file = open_stream(req, &name, lock_mode, true)?.map(Owner::hand_on_unmigrated);
+            lock_file = open_stream(req, &name, lock_mode, true)?;
             if lock_file.is_some() && on_database {
                 match opened_path(req, &name) {
                     Some(opened) => path = opened,
@@ -382,7 +382,7 @@ fn open_link(
                 }
             }
         }
-        let Some(held) = lock_file else {
+        let Some(held) = lock_file.as_deref() else {
             // The stream's own warning was raised.
             return Ok(None);
         };
@@ -391,33 +391,32 @@ fn open_link(
             error = Some("Unable to establish lock");
         }
     }
-    let file = if error.is_some() || !handler.streams() {
-        None
-    } else if let (Some(held), true) = (lock_file, on_database) {
-        Some(held)
-    } else if let Some(file) = open_stream(req, &path, mode.file_mode(), true)? {
-        Some(file.hand_on_unmigrated())
+    // Locked on the database, the lock's stream is the database's own.
+    let (file, lock_file) = if error.is_some() || !handler.streams() {
+        (None, lock_file)
+    } else if on_database && lock_file.is_some() {
+        (lock_file, None)
     } else {
-        free_streams(req, None, lock_file);
-        return Ok(None);
+        match open_stream(req, &path, mode.file_mode(), true) {
+            Ok(Some(file)) => (Some(file), lock_file),
+            opened => {
+                free_streams(req, None, lock_file);
+                return opened.map(|_| None);
+            }
+        }
     };
-    let lock_file = if on_database {
-        lock_file.filter(|_| file.is_none())
-    } else {
-        lock_file
-    };
-    if let Some(file) = file
-        && file.cast(req, Cast::Fd, true).is_none()
+    if let Some(held) = file.as_deref()
+        && held.cast(req, Cast::Fd, true).is_none()
     {
         docref(req, Level::Warning, "Could not cast stream");
-        free_streams(req, Some(file), lock_file);
+        free_streams(req, file, lock_file);
         return Ok(None);
     }
     let at = library_path(req, &path);
-    let store = error.map_or_else(
-        || Store::open(req, handler, mode.access, file, &at, asked.permission),
-        Err,
-    );
+    let store = match error {
+        Some(why) => Err((why, file)),
+        None => Store::open(req, handler, mode.access, file, &at, asked.permission),
+    };
     match store {
         Ok(store) => Ok(Some(Link {
             path,
@@ -428,7 +427,7 @@ fn open_link(
             lock_file,
             store,
         })),
-        Err(why) => {
+        Err((why, file)) => {
             refuse(req, handler, Some(why), file, lock_file)?;
             Ok(None)
         }
@@ -453,8 +452,8 @@ fn refuse(
     req: &mut Request,
     handler: Handler,
     why: Option<&'static str>,
-    file: Option<Stream>,
-    lock_file: Option<Stream>,
+    file: Option<Owner<Stream>>,
+    lock_file: Option<Owner<Stream>>,
 ) -> Result<(), Thrown> {
     let raised = pending(req);
     if raised.is_ok() {
@@ -475,14 +474,9 @@ fn refuse(
 }
 
 /// `dba_close_info`'s frees for a link that never opened.
-fn free_streams(req: &mut Request, file: Option<Stream>, lock: Option<Stream>) {
-    if let Some(file) = file {
-        file.free(req);
-    }
-    if let Some(lock) = lock
-        && file.is_none_or(|file| file.resource() != lock.resource())
-    {
-        lock.free(req);
+fn free_streams(req: &mut Request, file: Option<Owner<Stream>>, lock: Option<Owner<Stream>>) {
+    for stream in file.into_iter().chain(lock) {
+        stream.free(req);
     }
 }
 
@@ -511,8 +505,9 @@ fn with_link<R>(
         ));
     };
     let answer = f(req, &mut link);
-    if let Some(slot) = req.state::<State>().slot(id) {
-        *slot = Some(link);
+    match req.state::<State>().slot(id) {
+        Some(slot) => *slot = Some(link),
+        None => link.close(req),
     }
     answer
 }
@@ -539,9 +534,11 @@ fn key_bytes(req: &mut Request, key: Union<PhpArray, PhpString>) -> Result<Vec<u
     // `__toString`. A table freed after the group ends the walk, and the
     // name is then empty.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-        let text = php_ext::coerce::to_string(req, &row.value().deref())?;
-        parts.push(text.as_bytes().to_vec());
-        text.give_up(req);
+        parts.push(php_ext::coerce::with_string(
+            req,
+            row.value(),
+            <[u8]>::to_vec,
+        )?);
         Ok(ControlFlow::Continue(()))
     })?;
     let mut parts = parts.into_iter();
@@ -619,9 +616,9 @@ pub(crate) fn dba_exists(
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
             Store::Ndbm(db) => db.as_mut().and_then(|db| db.fetch(&key)).is_some(),
-            Store::Flatfile(_, file) => Flatfile::fetch(req, *file, &key)?.is_some(),
-            Store::Inifile(ini, file) => ini.fetch(req, *file, &IniKey::split(&key), 0)?.is_some(),
-            Store::CdbReader(reader, file) => reader.exists(req, *file, &key),
+            Store::Flatfile(_, file) => Flatfile::fetch(req, **file, &key)?.is_some(),
+            Store::Inifile(ini, file) => ini.fetch(req, **file, &IniKey::split(&key), 0)?.is_some(),
+            Store::CdbReader(reader, file) => reader.exists(req, **file, &key),
             Store::CdbMaker(..) => false,
         })
     })
@@ -731,9 +728,9 @@ pub(crate) fn dba_fetch(
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
             Store::Ndbm(db) => db.as_mut().and_then(|db| db.fetch(&key)),
-            Store::Flatfile(_, file) => Flatfile::fetch(req, *file, &key)?,
-            Store::Inifile(ini, file) => ini.fetch(req, *file, &IniKey::split(&key), skip)?,
-            Store::CdbReader(reader, file) => reader.fetch(req, *file, &key, skip),
+            Store::Flatfile(_, file) => Flatfile::fetch(req, **file, &key)?,
+            Store::Inifile(ini, file) => ini.fetch(req, **file, &IniKey::split(&key), skip)?,
+            Store::CdbReader(reader, file) => reader.fetch(req, **file, &key, skip),
             Store::CdbMaker(..) => None,
         })
     })?;
@@ -861,9 +858,9 @@ pub(crate) fn dba_firstkey(
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
             Store::Ndbm(db) => db.as_mut().and_then(crate::ffi::Ndbm::first_key),
-            Store::Flatfile(walk, file) => walk.first_key(req, *file)?,
-            Store::Inifile(ini, file) => ini.first_key(req, *file)?,
-            Store::CdbReader(reader, file) => reader.first_key(req, *file),
+            Store::Flatfile(walk, file) => walk.first_key(req, **file)?,
+            Store::Inifile(ini, file) => ini.first_key(req, **file)?,
+            Store::CdbReader(reader, file) => reader.first_key(req, **file),
             Store::CdbMaker(..) => None,
         })
     })?;
@@ -897,10 +894,10 @@ pub(crate) fn dba_nextkey(
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
             Store::Ndbm(db) => db.as_mut().and_then(crate::ffi::Ndbm::next_key),
-            Store::Flatfile(walk, file) => walk.next_key(req, *file)?,
-            Store::Inifile(ini, file) if ini.walking() => ini.next_key(req, *file)?,
+            Store::Flatfile(walk, file) => walk.next_key(req, **file)?,
+            Store::Inifile(ini, file) if ini.walking() => ini.next_key(req, **file)?,
             Store::Inifile(..) | Store::CdbMaker(..) => None,
-            Store::CdbReader(reader, file) => reader.next_key(req, *file),
+            Store::CdbReader(reader, file) => reader.next_key(req, **file),
         })
     })?;
     or_false(req, key)
@@ -962,10 +959,10 @@ pub(crate) fn dba_delete(
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
             Store::Ndbm(db) => db.as_mut().is_some_and(|db| db.delete(&key)),
-            Store::Flatfile(_, file) => Flatfile::delete(req, *file, &key)?,
+            Store::Flatfile(_, file) => Flatfile::delete(req, **file, &key)?,
             Store::Inifile(ini, file) => {
                 let mut found = false;
-                let ok = ini.rewrite(req, *file, &IniKey::split(&key), None, false, &mut found)?;
+                let ok = ini.rewrite(req, **file, &IniKey::split(&key), None, false, &mut found)?;
                 ok && found
             }
             Store::CdbReader(..) | Store::CdbMaker(..) => false,
@@ -989,7 +986,7 @@ fn update(
         Ok(match &mut link.store {
             #[cfg(target_os = "macos")]
             Store::Ndbm(db) => db.as_mut().is_some_and(|db| db.store(&key, value, insert)),
-            Store::Flatfile(_, file) => match Flatfile::store(req, *file, &key, value, insert)? {
+            Store::Flatfile(_, file) => match Flatfile::store(req, **file, &key, value, insert)? {
                 Stored::Done => true,
                 Stored::Exists => false,
                 Stored::Short => {
@@ -1001,7 +998,7 @@ fn update(
                 let mut found = false;
                 let ok = ini.rewrite(
                     req,
-                    *file,
+                    **file,
                     &IniKey::split(&key),
                     Some(value),
                     insert,
@@ -1013,7 +1010,7 @@ fn update(
                 ok
             }
             Store::CdbMaker(Some(maker), file) if insert => {
-                maker.add(req, *file, &key, value).is_some()
+                maker.add(req, **file, &key, value).is_some()
             }
             Store::CdbMaker(..) | Store::CdbReader(..) => false,
         })

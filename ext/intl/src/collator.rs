@@ -437,9 +437,7 @@ fn operand(req: &mut Request, value: &Value) -> Result<Operand, Thrown> {
     if known_method(req, object.class(), &name, Some(*object)).is_none() {
         return Ok(Operand::Other(*value));
     }
-    let text = coerce::to_string(req, value)?;
-    let bytes = text.as_bytes().to_vec();
-    text.give_up(req);
+    let bytes = coerce::with_string(req, value, <[u8]>::to_vec)?;
     if to_utf16(&bytes).is_err() {
         warning(
             req,
@@ -500,9 +498,7 @@ fn string_of(req: &mut Request, value: &Value) -> Result<Vec<u16>, Thrown> {
     if let Some(bytes) = value.as_str_bytes() {
         return Ok(utf16(bytes));
     }
-    let text = coerce::to_string(req, value)?;
-    let converted = to_utf16(text.as_bytes());
-    text.give_up(req);
+    let converted = coerce::with_string(req, value, to_utf16)?;
     converted.or_else(|_| {
         warning(
             req,

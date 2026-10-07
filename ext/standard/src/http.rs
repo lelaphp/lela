@@ -41,7 +41,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{Raw, Union};
 use php_ext::attr::php_function;
-use php_ext::coerce::value_name;
+use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
 use php_ext::request::{BodyLimits, Request};
@@ -250,8 +250,7 @@ impl Query<'_> {
             ValueRef::Int(n) => self.out.extend_from_slice(n.to_string().as_bytes()),
             ValueRef::Bool(b) => self.out.push(if b { b'1' } else { b'0' }),
             _ => {
-                let s = crate::string::string_bytes(req, &value.deref())?;
-                url_encode(&s, self.raw, &mut self.out);
+                with_string(req, &value, |s| url_encode(s, self.raw, &mut self.out))?;
             }
         }
         Ok(())

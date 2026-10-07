@@ -221,7 +221,7 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
         };
         let name = PhpString::new(req, name)?;
         reader.set_offset(at);
-        match reader.element(req, array, Key::Str(name.hand_on_unmigrated())) {
+        match reader.element(req, array, name.into_key()) {
             Ok(true) => p = reader.offset(),
             Ok(false) => {
                 ok = false;

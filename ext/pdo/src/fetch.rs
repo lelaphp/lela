@@ -8,7 +8,7 @@
 
 use php_ext::abi::{Callable, ClassRef, OrFalse, Raw, True};
 use php_ext::call::{call, call_array, known_method, lookup_class, new_object};
-use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name};
+use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{
     Level, Thrown, arg_count_error, argument_error, docref, throw_error, while_pending,
@@ -245,6 +245,33 @@ struct With {
     func: Option<Callable>,
 }
 
+/// A row as `do_fetch` answers it, with its group key's bytes where it
+/// was asked for one; `None` where no row came or the fetch failed.
+type Fetched = Option<(Owner<Value>, Option<Vec<u8>>)>;
+
+/// The container a row is laid into: the array of the array styles,
+/// written through its owner, or the object, or nothing, of the others.
+enum Out {
+    Array(Owner<PhpArray>),
+    Value(Owner<Value>),
+}
+
+impl Out {
+    fn into_value(self) -> Owner<Value> {
+        match self {
+            Out::Array(array) => array.into_value(),
+            Out::Value(value) => value,
+        }
+    }
+
+    fn object(&self) -> Option<PhpObject> {
+        match self {
+            Out::Value(value) => value.as_object().copied(),
+            Out::Array(_) => None,
+        }
+    }
+}
+
 // ---- one value
 
 /// `fetch_value`: column `column` of the current row, one owner the
@@ -255,7 +282,7 @@ pub(super) fn value(
     object: PhpObject,
     column: i64,
     ty: Option<BindKind>,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
     let Ok(at) = usize::try_from(column) else {
         return Err(throw_error(
@@ -272,62 +299,75 @@ pub(super) fn value(
         Ok(value) => value,
         Err(failure) => {
             stmt::record(req, object, failure)?;
-            Value::null()
+            Owner::take(req, Value::null())
         }
     };
     let (nulls, stringify) = stmt::dbh_of(req, object)
         .and_then(|dbh| crate::dbh::state(req, dbh).map(|d| (d.nulls, d.stringify)))
         .unwrap_or((Nulls::Natural, false));
     if nulls == Nulls::EmptyString && value.as_str_bytes().is_some_and(<[u8]>::is_empty) {
-        req.release(value);
-        value = Value::null();
+        value.give_up(req);
+        value = Owner::take(req, Value::null());
     }
     let ty = if stringify { Some(BindKind::Str) } else { ty };
     if let Some(ty) = ty
         && !crate::is_null(&value)
     {
-        value = convert(req, value, ty)?;
+        // The value php converted given up, and where the conversion
+        // throws given up all the same.
+        match convert(req, *value, ty) {
+            Ok(None) => {}
+            Ok(Some(converted)) => {
+                value.give_up(req);
+                value = converted;
+            }
+            Err(thrown) => {
+                value.give_up(req);
+                return Err(thrown);
+            }
+        }
     }
     if nulls == Nulls::ToString && crate::is_null(&value) {
-        value = crate::string(req, b"")?.hand_on_unmigrated();
+        value.give_up(req);
+        value = crate::string(req, b"")?;
     }
     Ok(value)
 }
 
-/// The conversions `fetch_value` makes for a bound type.
-fn convert(req: &mut Request, value: Value, ty: BindKind) -> Result<Value, Thrown> {
-    let converted = match ty {
+/// The conversions `fetch_value` makes for a bound type: `None` where
+/// the value stands as it is.
+fn convert(req: &mut Request, value: Value, ty: BindKind) -> Result<Option<Owner<Value>>, Thrown> {
+    let scalar = match ty {
         BindKind::Int => Value::int(to_long(req, &value)?),
         BindKind::Bool => Value::bool(truthy(req, &value)),
-        BindKind::Str => match value.as_ref() {
-            ValueRef::Bool(false) => crate::string(req, b"0")?.hand_on_unmigrated(),
-            ValueRef::Str(_) => return Ok(value),
-            ValueRef::Resource(_) => match php_ext::request::Stream::from_value(req, &value) {
-                Some(stream) => Value::string(stream.copy_to_mem(req, None)?.hand_on_unmigrated()),
-                None => crate::string(req, b"")?.hand_on_unmigrated(),
-            },
-            _ => Value::string(to_string(req, &value)?.hand_on_unmigrated()),
-        },
         BindKind::Null => Value::null(),
-        BindKind::Lob => match value.as_str_bytes().map(<[u8]>::to_vec) {
-            Some(bytes) => memory_stream(req, &bytes)?,
-            None => return Ok(value),
+        BindKind::Str => match value.as_ref() {
+            ValueRef::Bool(false) => return crate::string(req, b"0").map(Some),
+            ValueRef::Str(_) => return Ok(None),
+            ValueRef::Resource(_) => match php_ext::request::Stream::from_value(req, &value) {
+                Some(stream) => return Ok(Some(stream.copy_to_mem(req, None)?.into_value())),
+                None => return crate::string(req, b"").map(Some),
+            },
+            _ => return Ok(Some(to_string(req, &value)?.into_value())),
         },
-        BindKind::Stmt | BindKind::Other(_) => return Ok(value),
+        BindKind::Lob => match value.as_str_bytes().map(<[u8]>::to_vec) {
+            Some(bytes) => return memory_stream(req, &bytes).map(Some),
+            None => return Ok(None),
+        },
+        BindKind::Stmt | BindKind::Other(_) => return Ok(None),
     };
-    req.release(value);
-    Ok(converted)
+    Ok(Some(Owner::take(req, scalar)))
 }
 
 /// `php_stream_memory_open(TEMP_STREAM_READONLY, str)`: a stream over
 /// the bytes, at its start.
-fn memory_stream(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
+fn memory_stream(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     let Some(stream) = req.open_stream(b"php://memory", b"w+b", false)? else {
-        return Ok(Value::null());
+        return Ok(Owner::take(req, Value::null()));
     };
     stream.write(req, bytes);
     stream.seek(req, 0, php_ext::request::Whence::Set);
-    Ok(stream.into_resource().into_value().hand_on_unmigrated())
+    Ok(stream.into_resource().into_value())
 }
 
 // ---- one row
@@ -370,7 +410,7 @@ fn common(
         s.columns_bound
             .iter()
             .filter(|b| b.position >= 0)
-            .map(|b| (b.position, b.value, b.ty.kind()))
+            .map(|b| (b.position, *b.value, b.ty.kind()))
             .collect()
     })
     .unwrap_or_default();
@@ -379,7 +419,6 @@ fn common(
             continue;
         };
         let fetched = value(req, object, position, Some(ty))?;
-        let fetched = crate::owned(req, fetched);
         cell.set(req, fetched)?;
     }
     Ok(true)
@@ -421,7 +460,7 @@ fn shaped(
     offset: i64,
     grouped: bool,
     with: &With,
-) -> Result<Option<(Value, Option<Value>)>, Thrown> {
+) -> Result<Fetched, Thrown> {
     let (default, target) =
         stmt::read(req, object, |s| (s.default_fetch, s.target)).unwrap_or((4, Target::None));
     let mode = Mode::resolve(how, default);
@@ -430,10 +469,10 @@ fn shaped(
         return Ok(None);
     }
     let Some(kind) = mode.kind else {
-        return Ok(Some((Value::null(), None)));
+        return Ok(Some((Owner::take(req, Value::null()), None)));
     };
     match kind {
-        Kind::Bound => return Ok(Some((Value::bool(true), None))),
+        Kind::Bound => return Ok(Some((Owner::take(req, Value::bool(true)), None))),
         Kind::Lazy => return crate::row::lazy(req, object).map(|v| Some((v, None))),
         Kind::Column => return column_row(req, object, flags, target.column(), grouped),
         _ => {}
@@ -460,54 +499,48 @@ fn made(
     target: Target,
     grouped: bool,
     with: &With,
-) -> Result<Option<(Value, Option<Value>)>, Thrown> {
-    let failed =
-        |req: &mut Request, supp: &str| -> Result<Option<(Value, Option<Value>)>, Thrown> {
-            error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(supp))?;
-            Ok(None)
-        };
+) -> Result<Fetched, Thrown> {
+    let failed = |req: &mut Request, supp: &str| -> Result<Fetched, Thrown> {
+        error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(supp))?;
+        Ok(None)
+    };
     let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
     let mut next = 0i64;
     let mut class_args = None;
     let mut class = None;
     let out = match kind {
         Kind::Default | Kind::Assoc | Kind::Both | Kind::Num | Kind::Named => {
-            PhpArray::new(req)?.into_value().hand_on_unmigrated()
+            Out::Array(PhpArray::new(req)?)
         }
         Kind::Obj => {
             let Some(std) = lookup_class(req, b"stdClass")? else {
                 return Ok(None);
             };
-            new_object(req, std)?.hand_on_unmigrated().as_value()
+            Out::Value(new_object(req, std)?.into_value())
         }
         Kind::Class => {
             let named = with.class.or(match target {
                 Target::Class { class, args } => Some((class, args)),
                 _ => None,
             });
-            let Some((instance, ce, args)) =
-                class_object(req, object, dbh, flags, named, &mut next)?
+            let Some((instance, ce)) = class_object(req, object, dbh, flags, named, &mut next)?
             else {
                 return Ok(None);
             };
             class = Some(ce);
-            class_args = args;
-            instance
+            class_args = named.and_then(|(_, args)| args);
+            Out::Value(instance)
         }
         Kind::Into => {
             let Target::Into(into) = target else {
                 return failed(req, "No fetch-into object specified.");
             };
-            req.addref(&into.as_value());
-            into.as_value()
+            Out::Value(Owner::take(req, into.as_value()))
         }
-        Kind::Func => {
-            if with.func.is_none() {
-                return failed(req, "No fetch function specified");
-            }
-            Value::null()
+        Kind::Func if with.func.is_none() => return failed(req, "No fetch function specified"),
+        Kind::Func | Kind::Lazy | Kind::Bound | Kind::Column | Kind::KeyPair => {
+            Out::Value(Owner::take(req, Value::null()))
         }
-        Kind::Lazy | Kind::Bound | Kind::Column | Kind::KeyPair => Value::null(),
     };
     fill(
         req, object, kind, flags, out, next, count, grouped, with, class, class_args,
@@ -517,8 +550,8 @@ fn made(
 /// `FETCH_CLASS`'s object: of the class the first column names under
 /// `FETCH_CLASSTYPE` or of the one the call or the default names, made
 /// without its constructor, which `FETCH_PROPS_LATE` serves now; with
-/// the class and its constructor arguments. `None` where php refuses
-/// the fetch, its error raised on the statement.
+/// the class. `None` where php refuses the fetch, its error raised on
+/// the statement.
 fn class_object(
     req: &mut Request,
     object: PhpObject,
@@ -526,7 +559,7 @@ fn class_object(
     flags: Flags,
     named: Option<(ClassId, Option<PhpArray>)>,
     next: &mut i64,
-) -> Result<Option<(Value, ClassId, Option<PhpArray>)>, Thrown> {
+) -> Result<Option<(Owner<Value>, ClassId)>, Thrown> {
     let refuse = |req: &mut Request, supp: &str| {
         error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(supp))
     };
@@ -535,11 +568,12 @@ fn class_object(
         *next += 1;
         // A column that is no string leaves the class the call or the
         // default named, as `do_fetch` only looks up a string.
-        let found = match name.as_str_bytes().map(<[u8]>::to_vec) {
+        let bytes = name.as_str_bytes().map(<[u8]>::to_vec);
+        name.give_up(req);
+        let found = match bytes {
             Some(name) => lookup_class(req, &name)?,
             None => named.map(|(class, _)| class),
         };
-        req.release(name);
         match found {
             Some(found) => found,
             None => match lookup_class(req, b"stdClass")? {
@@ -559,20 +593,16 @@ fn class_object(
             refuse(req, "cannot unserialize class")?;
             return Ok(None);
         }
-        return Ok(Some((
-            new_object(req, ce)?.into_value().hand_on_unmigrated(),
-            ce,
-            args,
-        )));
+        return Ok(Some((new_object(req, ce)?.into_value(), ce)));
     }
-    let instance = new_object(req, ce)?.hand_on_unmigrated();
+    let instance = new_object(req, ce)?;
     if flags.has(Flag::PropsLate)
-        && let Err(thrown) = construct(req, instance, args)
+        && let Err(thrown) = construct(req, *instance, args)
     {
-        req.release(instance.as_value());
+        instance.give_up(req);
         return Err(thrown);
     }
-    Ok(Some((instance.as_value(), ce, args)))
+    Ok(Some((instance.into_value(), ce)))
 }
 
 /// The body of `do_fetch` past the container's making: the group key,
@@ -638,71 +668,75 @@ fn fill(
     object: PhpObject,
     kind: Kind,
     flags: Flags,
-    out: Value,
-    mut next: i64,
+    mut out: Out,
+    next: i64,
     count: usize,
     grouped: bool,
     with: &With,
     class: Option<ClassId>,
     class_args: Option<PhpArray>,
-) -> Result<Option<(Value, Option<Value>)>, Thrown> {
-    let mut key = None;
-    if grouped {
-        let fetched = value(req, object, next, None)?;
-        let text = to_string(req, &fetched);
-        req.release(fetched);
-        key = Some(Value::string(text?.hand_on_unmigrated()));
-        next += 1;
+) -> Result<Fetched, Thrown> {
+    // `FETCH_FUNC`'s arguments, given up after the function is served.
+    let mut arguments = Vec::new();
+    let laid = columns(
+        req,
+        object,
+        (kind, flags),
+        &mut out,
+        (next, count, grouped),
+        with,
+        (class, class_args),
+        &mut arguments,
+    );
+    for argument in arguments {
+        argument.give_up(req);
     }
-    // The group key is given up where the row's columns throw, as the
-    // VM frees what the native made.
-    match columns(
-        req, object, kind, flags, out, next, count, with, class, class_args,
-    ) {
-        Ok(out) => Ok(Some((out, key))),
+    // The row is given up where its columns throw, as the VM frees what
+    // the native made.
+    match laid {
+        Ok(key) => Ok(Some((out.into_value(), key))),
         Err(thrown) => {
-            if let Some(key) = key {
-                req.release(key);
-            }
+            out.into_value().give_up(req);
             Err(thrown)
         }
     }
 }
 
-/// [`fill`]'s columns from `next` on, laid into `out` as `kind` asks,
-/// and the class's constructor or the fetch function served over them:
-/// the row.
+/// [`fill`]'s group key and columns from `next` on, laid into `out` as
+/// `kind` asks, and the class's constructor or the fetch function served
+/// over them; the throwable a column's write left pending is the row's
+/// answer.
 #[allow(clippy::too_many_arguments)]
 fn columns(
     req: &mut Request,
     object: PhpObject,
-    kind: Kind,
-    flags: Flags,
-    mut out: Value,
-    mut next: i64,
-    count: usize,
+    (kind, flags): (Kind, Flags),
+    out: &mut Out,
+    (mut next, count, grouped): (i64, usize, bool),
     with: &With,
-    class: Option<ClassId>,
-    class_args: Option<PhpArray>,
-) -> Result<Value, Thrown> {
+    (class, class_args): (Option<ClassId>, Option<PhpArray>),
+    arguments: &mut Vec<Owner<Value>>,
+) -> Result<Option<Vec<u8>>, Thrown> {
+    let mut key = None;
+    if grouped {
+        let fetched = value(req, object, next, None)?;
+        let text = with_string(req, &fetched, <[u8]>::to_vec);
+        fetched.give_up(req);
+        key = Some(text?);
+        next += 1;
+    }
     if kind == Kind::Class && flags.has(Flag::Serialize) {
         let payload = value(req, object, next, None)?;
         let bytes = payload
             .as_str_bytes()
             .map(<[u8]>::to_vec)
             .unwrap_or_default();
-        req.release(payload);
-        if let Some(made) = out.as_object().copied() {
+        payload.give_up(req);
+        if let Some(made) = out.object() {
             let text = crate::string(req, &bytes)?;
             let answered = php_ext::call::call_method(req, &made, b"unserialize", &[*text]);
             text.give_up(req);
-            match answered {
-                Ok(answered) => answered.give_up(req),
-                Err(thrown) => {
-                    req.release(out);
-                    return Err(thrown);
-                }
-            }
+            answered?.give_up(req);
         }
         next += 1;
     }
@@ -713,7 +747,6 @@ fn columns(
             .unwrap_or_default()
     })
     .unwrap_or_default();
-    let mut arguments = Vec::new();
     let mut pending: Option<Thrown> = None;
     let mut at = next;
     while usize::try_from(at).is_ok_and(|a| a < count) {
@@ -722,58 +755,42 @@ fn columns(
             .get(usize::try_from(at).unwrap_or(0))
             .cloned()
             .unwrap_or_default();
-        match kind {
-            Kind::Assoc => {
-                let key = symtable_key(req, &name)?;
-                let fetched = crate::owned(req, fetched);
-                set(req, &mut out, key, fetched)?;
+        match (kind, out.object()) {
+            (Kind::Assoc, _) => set(req, out, &name, fetched)?,
+            (Kind::Default | Kind::Both, _) => both(req, out, &name, at, fetched)?,
+            (Kind::Named, _) => named(req, out, &name, fetched)?,
+            (Kind::Num, _) => match out {
+                Out::Array(array) => array.append(req, fetched)?,
+                Out::Value(_) => fetched.give_up(req),
+            },
+            (Kind::Class | Kind::Obj | Kind::Into, Some(made)) => {
+                write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
             }
-            Kind::Default | Kind::Both => both(req, &mut out, &name, at, fetched)?,
-            Kind::Named => named(req, &mut out, &name, fetched)?,
-            Kind::Num => {
-                let fetched = crate::owned(req, fetched);
-                if let Some(mut array) = out.as_array().copied() {
-                    array.append(req, fetched)?;
-                    out = Value::array(array);
-                } else {
-                    fetched.give_up(req);
-                }
-            }
-            Kind::Class | Kind::Obj | Kind::Into => {
-                match out.as_object().copied() {
-                    Some(made) => {
-                        // The fetch engine's value is its one owner.
-                        let fetched = crate::owned(req, fetched);
-                        write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
-                    }
-                    None => req.release(fetched),
-                }
-            }
-            Kind::Func => arguments.push(fetched),
-            Kind::Lazy | Kind::Bound | Kind::Column | Kind::KeyPair => req.release(fetched),
+            (Kind::Func, _) => arguments.push(fetched),
+            _ => fetched.give_up(req),
         }
         at += 1;
     }
-    let mut out = settle(req, out, pending)?;
+    if let Some(thrown) = pending {
+        return Err(thrown);
+    }
     if kind == Kind::Class
         && !flags.has(Flag::PropsLate)
         && !flags.has(Flag::Serialize)
-        && let (Some(made), Some(_)) = (out.as_object().copied(), class)
-        && let Err(thrown) = construct(req, made, class_args)
+        && let (Some(made), Some(_)) = (out.object(), class)
     {
-        req.release(out);
-        return Err(thrown);
+        construct(req, made, class_args)?;
     }
     if kind == Kind::Func
         && let Some(func) = &with.func
     {
-        let answered = call(req, func, &arguments);
-        for argument in arguments {
-            req.release(argument);
-        }
-        out = answered?.hand_on_unmigrated();
+        let views: Vec<Value> = arguments.iter().map(|argument| **argument).collect();
+        let answered = call(req, func, &views)?;
+        std::mem::replace(out, Out::Value(answered))
+            .into_value()
+            .give_up(req);
     }
-    Ok(out)
+    Ok(key)
 }
 
 /// One column of an object's row, `zend_update_property_ex`: a write
@@ -815,18 +832,6 @@ fn write_column(
     Ok(())
 }
 
-/// The row past its columns: the throwable a column's write left
-/// pending is what the fetch returns, the row given up.
-fn settle(req: &mut Request, out: Value, pending: Option<Thrown>) -> Result<Value, Thrown> {
-    match pending {
-        Some(thrown) => {
-            req.release(out);
-            Err(thrown)
-        }
-        None => Ok(out),
-    }
-}
-
 /// The scope `do_fetch` writes an object's column in: the fetch class's
 /// for `FETCH_CLASS`, `NULL`'s for `FETCH_INTO` and `stdClass`'s for
 /// `FETCH_OBJ`, which declares nothing.
@@ -840,74 +845,98 @@ fn scope(kind: Kind, class: Option<ClassId>) -> PropertyScope {
 
 /// `FETCH_BOTH`'s column: the value under its name and, where the
 /// number names no column already, under its number
-/// (`zend_hash_index_add`), the fetch engine's owner handed to the row.
+/// (`zend_hash_index_add`).
 fn both(
     req: &mut Request,
-    out: &mut Value,
+    out: &mut Out,
     name: &[u8],
     at: i64,
-    fetched: Value,
+    fetched: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = symtable_key(req, name)?;
-    let held = Owner::take(req, fetched);
-    set(req, out, key, held)?;
-    let fetched = crate::owned(req, fetched);
-    let Some(mut array) = out.as_array().copied() else {
+    let held = Owner::take(req, *fetched);
+    if let Err(thrown) = set(req, out, name, held) {
         fetched.give_up(req);
-        return Ok(());
-    };
-    if array.contains(&Key::Int(at)) {
-        fetched.give_up(req);
-    } else {
-        array.set(req, Owner::take(req, Key::Int(at)), fetched)?;
-        *out = Value::array(array);
+        return Err(thrown);
     }
-    Ok(())
+    match out {
+        Out::Array(array) if !array.contains(&Key::Int(at)) => {
+            array.set(req, Owner::take(req, Key::Int(at)), fetched)
+        }
+        _ => {
+            fetched.give_up(req);
+            Ok(())
+        }
+    }
 }
 
-/// `zend_symtable_update` on the row's array; the key and the value
+/// `zend_symtable_update` on the row's array under `name`; the value
 /// given up where the row is no array.
-fn set(
-    req: &mut Request,
-    out: &mut Value,
-    key: Owner<Key>,
-    value: Owner<Value>,
-) -> Result<(), Thrown> {
-    let Some(mut array) = out.as_array().copied() else {
-        key.give_up(req);
+fn set(req: &mut Request, out: &mut Out, name: &[u8], value: Owner<Value>) -> Result<(), Thrown> {
+    let Out::Array(array) = out else {
         value.give_up(req);
         return Ok(());
     };
-    array.set(req, key, value)?;
-    *out = Value::array(array);
-    Ok(())
+    match symtable_key(req, name) {
+        Ok(key) => array.set(req, key, value),
+        Err(thrown) => {
+            value.give_up(req);
+            Err(thrown)
+        }
+    }
 }
 
 /// `FETCH_NAMED`'s column: a name seen before becomes a list of every
-/// value it had.
-fn named(req: &mut Request, out: &mut Value, name: &[u8], fetched: Value) -> Result<(), Thrown> {
-    let Some(mut array) = out.as_array().copied() else {
+/// value it had, appended to where it stands once it is one.
+fn named(
+    req: &mut Request,
+    out: &mut Out,
+    name: &[u8],
+    fetched: Owner<Value>,
+) -> Result<(), Thrown> {
+    let Out::Array(array) = out else {
+        fetched.give_up(req);
         return Ok(());
     };
-    let stored = if let Some(current) = array.find(name) {
-        let mut list = if let Some(list) = current.as_array().copied() {
-            list
-        } else {
-            let mut list = PhpArray::new(req)?.hand_on_unmigrated();
-            list.append(req, Owner::take(req, current))?;
-            list
-        };
-        let fetched = crate::owned(req, fetched);
-        list.append(req, fetched)?;
-        Value::array(list)
-    } else {
-        fetched
+    let current = array.find(name);
+    if let Some(mut list) = current.and_then(|current| current.as_array().copied()) {
+        return list.append(req, fetched);
+    }
+    let stored = match current {
+        Some(current) => listed(req, current, fetched)?,
+        None => fetched,
     };
-    let key = PhpString::new(req, name)?.into_key();
-    let stored = crate::owned(req, stored);
-    array.set(req, key, stored)?;
-    *out = Value::array(array);
-    Ok(())
+    match PhpString::new(req, name) {
+        Ok(key) => array.set(req, key.into_key(), stored),
+        Err(thrown) => {
+            stored.give_up(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// A new list of `first`, the value a name held, and `fetched`.
+fn listed(req: &mut Request, first: Value, fetched: Owner<Value>) -> Result<Owner<Value>, Thrown> {
+    let mut list = match PhpArray::new(req) {
+        Ok(list) => list,
+        Err(thrown) => {
+            fetched.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let appended = match list.append(req, Owner::take(req, first)) {
+        Ok(()) => list.append(req, fetched),
+        Err(thrown) => {
+            fetched.give_up(req);
+            Err(thrown)
+        }
+    };
+    match appended {
+        Ok(()) => Ok(list.into_value()),
+        Err(thrown) => {
+            list.give_up(req);
+            Err(thrown)
+        }
+    }
 }
 
 /// Whether `class` implements `Serializable`, php's `ce->unserialize`
@@ -957,7 +986,7 @@ fn column_row(
     flags: Flags,
     column: i64,
     grouped: bool,
-) -> Result<Option<(Value, Option<Value>)>, Thrown> {
+) -> Result<Fetched, Thrown> {
     let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
     let colno = if (flags.has(Flag::Group) || flags.has(Flag::Unique)) && column == -1 {
         1
@@ -982,24 +1011,34 @@ fn column_row(
         colno
     };
     let fetched = value(req, object, read_at, None)?;
-    let key = if grouped {
-        let key_at = if flags.is(Flag::Group) && column > 0 {
-            colno
-        } else {
-            0
-        };
-        let raw = value(req, object, key_at, None)?;
-        let key = Value::string(to_string(req, &raw)?.hand_on_unmigrated());
-        req.release(raw);
-        Some(key)
+    if !grouped {
+        return Ok(Some((fetched, None)));
+    }
+    let key_at = if flags.is(Flag::Group) && column > 0 {
+        colno
     } else {
-        None
+        0
     };
-    Ok(Some((fetched, key)))
+    let key = value(req, object, key_at, None).and_then(|raw| {
+        let key = with_string(req, &raw, <[u8]>::to_vec);
+        raw.give_up(req);
+        key
+    });
+    match key {
+        Ok(key) => Ok(Some((fetched, Some(key)))),
+        Err(thrown) => {
+            fetched.give_up(req);
+            Err(thrown)
+        }
+    }
 }
 
 /// One row as the default style shapes it, for the statement's iterator.
-pub(super) fn row(req: &mut Request, object: PhpObject, how: i64) -> Result<Option<Value>, Thrown> {
+pub(super) fn row(
+    req: &mut Request,
+    object: PhpObject,
+    how: i64,
+) -> Result<Option<Owner<Value>>, Thrown> {
     Ok(shaped(
         req,
         object,
@@ -1040,16 +1079,25 @@ fn key_pair(
         return Ok(false);
     }
     let key = value(req, object, 0, None)?;
-    let fetched = value(req, object, 1, None)?;
-    let key = if let Some(n) = key.as_int() {
-        Owner::take(req, Key::Int(n))
-    } else {
-        let text = to_string(req, &key)?;
-        req.release(key);
-        Key::from_string(req, text)
+    let fetched = match value(req, object, 1, None) {
+        Ok(fetched) => fetched,
+        Err(thrown) => {
+            key.give_up(req);
+            return Err(thrown);
+        }
     };
-    let fetched = crate::owned(req, fetched);
-    container.set(req, key, fetched)?;
+    let made = match key.as_int() {
+        Some(n) => Ok(Owner::take(req, Key::Int(n))),
+        None => to_string(req, &key).map(|text| Key::from_string(req, text)),
+    };
+    key.give_up(req);
+    match made {
+        Ok(key) => container.set(req, key, fetched)?,
+        Err(thrown) => {
+            fetched.give_up(req);
+            return Err(thrown);
+        }
+    }
     Ok(true)
 }
 
@@ -1265,7 +1313,7 @@ pub(super) fn fetch(
     this: PhpObject,
     how: i64,
     (orientation, offset): (i64, i64),
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let orientation = Orientation::of(orientation);
     let (object, _) = stmt::this_stmt(req, this)?;
     stmt::clear_error(req, object);
@@ -1275,12 +1323,12 @@ pub(super) fn fetch(
         let mut out = PhpArray::new(req)?;
         let paired = key_pair(req, object, orientation, offset, &mut out);
         if matches!(paired, Ok(true)) {
-            return Ok(out.into_value().hand_on_unmigrated());
+            return Ok(out.into_value());
         }
         out.give_up(req);
         paired?;
         stmt::handle_error(req, object, false)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     if let Some((value, _)) = shaped(
         req,
@@ -1294,7 +1342,7 @@ pub(super) fn fetch(
         Ok(value)
     } else {
         stmt::handle_error(req, object, false)?;
-        Ok(Value::bool(false))
+        Ok(Owner::take(req, Value::bool(false)))
     }
 }
 
@@ -1304,7 +1352,7 @@ pub(super) fn fetch_object(
     this: PhpObject,
     class: Option<PhpString>,
     args: Option<PhpArray>,
-) -> Result<OrFalse<PhpObject>, Thrown> {
+) -> Result<OrFalse<Owner<PhpObject>>, Thrown> {
     let named = class.map(|name| name.as_bytes().to_vec());
     let class = match named {
         Some(name) => {
@@ -1340,10 +1388,15 @@ pub(super) fn fetch_object(
         func: None,
     };
     if let Some((value, _)) = shaped(req, object, 8, Orientation::Forward, 0, false, &with)? {
-        if let Some(made) = value.as_object().copied() {
+        // The row's object, its owner taken as the object it is.
+        let made = value
+            .as_object()
+            .copied()
+            .map(|made| Owner::take(req, made));
+        value.give_up(req);
+        if let Some(made) = made {
             Ok(OrFalse::Value(made))
         } else {
-            req.release(value);
             Err(php_ext::raising::fatal(
                 req,
                 "InternalError: PDOStatement::fetchObject() made no object",
@@ -1360,12 +1413,12 @@ pub(super) fn fetch_column(
     req: &mut Request,
     this: PhpObject,
     column: i64,
-) -> Result<Value, Thrown> {
+) -> Result<Owner<Value>, Thrown> {
     let (object, _) = stmt::this_stmt(req, this)?;
     stmt::clear_error(req, object);
     if !common(req, object, Orientation::Forward, 0)? {
         stmt::handle_error(req, object, false)?;
-        return Ok(Value::bool(false));
+        return Ok(Owner::take(req, Value::bool(false)));
     }
     value(req, object, column, None)
 }
@@ -1586,7 +1639,6 @@ fn gather_all(
         grouped_rows(req, object, how | flags.0, flags, with, out)?;
     } else {
         while let Some((row, _)) = shaped(req, object, how, Orientation::Forward, 0, false, with)? {
-            let row = crate::owned(req, row);
             out.append(req, row)?;
         }
     }
@@ -1606,7 +1658,7 @@ fn grouped_rows(
 ) -> Result<(), Thrown> {
     // Each group key as it was first seen, what the table keeps under
     // it: the last row for `FETCH_UNIQUE`, every row for `FETCH_GROUP`.
-    let mut groups: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+    let mut groups: Vec<(Vec<u8>, Vec<Owner<Value>>)> = Vec::new();
     loop {
         let fetched = shaped(
             req,
@@ -1623,69 +1675,88 @@ fn grouped_rows(
             // What was grouped before the throw is given up with the
             // answer, as the VM frees it.
             Err(thrown) => {
-                for row in groups.into_iter().flat_map(|(_, rows)| rows) {
-                    req.release(row);
-                }
+                give_up_all(req, groups.into_iter().flat_map(|(_, rows)| rows));
                 return Err(thrown);
             }
         };
-        // The key's string, read once and given up.
-        let key = key.map_or_else(Vec::new, |k| {
-            let bytes = k.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
-            req.release(k);
-            bytes
-        });
+        let key = key.unwrap_or_default();
         match groups.iter_mut().find(|(seen, _)| *seen == key) {
             Some((_, rows)) if flags.has(Flag::Unique) => {
-                for old in std::mem::replace(rows, vec![row]) {
-                    req.release(old);
-                }
+                give_up_all(req, std::mem::replace(rows, vec![row]));
             }
             Some((_, rows)) => rows.push(row),
             None => groups.push((key, vec![row])),
         }
     }
-    for (key, rows) in groups {
-        let key = symtable_key(req, &key)?;
-        if flags.has(Flag::Unique) {
-            let mut written = Ok(());
-            for row in rows {
-                let row = crate::owned(req, row);
-                if written.is_err() {
-                    row.give_up(req);
-                    continue;
-                }
-                let at = Owner::take(req, (*key).clone());
-                written = out.set(req, at, row);
-            }
-            key.give_up(req);
-            written?;
-        } else {
-            let mut group = match PhpArray::new(req) {
-                Ok(group) => group,
-                Err(thrown) => {
-                    key.give_up(req);
-                    return Err(thrown);
-                }
-            };
-            let mut appended = Ok(());
-            for row in rows {
-                let row = crate::owned(req, row);
-                if appended.is_err() {
-                    row.give_up(req);
-                    continue;
-                }
-                appended = group.append(req, row);
-            }
-            if let Err(thrown) = appended {
-                group.give_up(req);
-                key.give_up(req);
-                return Err(thrown);
-            }
-            out.set(req, key, group.into_value())?;
+    let mut groups = groups.into_iter();
+    while let Some((key, rows)) = groups.next() {
+        if let Err(thrown) = group_into(req, out, flags, &key, rows) {
+            give_up_all(req, groups.flat_map(|(_, rows)| rows));
+            return Err(thrown);
         }
     }
     Ok(())
+}
+
+/// One group of [`grouped_rows`] written into `out` under `key`: its
+/// row for `FETCH_UNIQUE`, the list of them for `FETCH_GROUP`; every row
+/// given up where a write throws.
+fn group_into(
+    req: &mut Request,
+    out: &mut Owner<PhpArray>,
+    flags: Flags,
+    key: &[u8],
+    rows: Vec<Owner<Value>>,
+) -> Result<(), Thrown> {
+    let key = match symtable_key(req, key) {
+        Ok(key) => key,
+        Err(thrown) => {
+            give_up_all(req, rows);
+            return Err(thrown);
+        }
+    };
+    if flags.has(Flag::Unique) {
+        let mut written = Ok(());
+        for row in rows {
+            if written.is_err() {
+                row.give_up(req);
+                continue;
+            }
+            let at = Owner::take(req, (*key).clone());
+            written = out.set(req, at, row);
+        }
+        key.give_up(req);
+        return written;
+    }
+    let mut group = match PhpArray::new(req) {
+        Ok(group) => group,
+        Err(thrown) => {
+            key.give_up(req);
+            give_up_all(req, rows);
+            return Err(thrown);
+        }
+    };
+    let mut appended = Ok(());
+    for row in rows {
+        if appended.is_err() {
+            row.give_up(req);
+            continue;
+        }
+        appended = group.append(req, row);
+    }
+    if let Err(thrown) = appended {
+        group.give_up(req);
+        key.give_up(req);
+        return Err(thrown);
+    }
+    out.set(req, key, group.into_value())
+}
+
+/// Each owner given up.
+fn give_up_all(req: &mut Request, owners: impl IntoIterator<Item = Owner<Value>>) {
+    for owner in owners {
+        owner.give_up(req);
+    }
 }
 
 /// `PDOStatement::set_fetch_mode`'s body, its arguments held by the method.

@@ -705,7 +705,7 @@ impl Walk for Parts {
         req: &mut Request,
         _: PhpObject,
         index: &mut i64,
-    ) -> Answer<Option<Value>> {
+    ) -> Answer<Option<Owner<Value>>> {
         let Some(o) = self.object.native_mut::<BreakObject>(req) else {
             return Ok(None);
         };
@@ -734,9 +734,7 @@ impl Walk for Parts {
             usize::try_from(next).unwrap_or(0),
         );
         let part = text.get(from..to.max(from)).unwrap_or_default().to_vec();
-        Ok(Some(Value::string(
-            PhpString::new(req, &part)?.hand_on_unmigrated(),
-        )))
+        Ok(Some(PhpString::new(req, &part)?.into_value()))
     }
 
     /// `_breakiterator_parts_rewind`: back to the first boundary.

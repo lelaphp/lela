@@ -992,7 +992,7 @@ fn session_set_cookie_params(
             let key = key.as_bytes().to_ascii_lowercase();
             let made = match key.as_slice() {
                 b"lifetime" | b"path" | b"domain" | b"samesite" => match to_string(req, &value) {
-                    Ok(made) => Some(Cookie::Made(made.hand_on_unmigrated())),
+                    Ok(made) => Some(Cookie::Made(made)),
                     Err(thrown) => return Err(thrown),
                 },
                 _ => None,
@@ -1043,9 +1043,10 @@ fn session_set_cookie_params(
             return Err(arg_value_error(req, 1, "contain at least 1 valid key"));
         }
     } else {
-        lifetime = Some(Cookie::Made(
-            php_ext::coerce::int_to_string(req, lifetime_long)?.hand_on_unmigrated(),
-        ));
+        lifetime = Some(Cookie::Made(php_ext::coerce::int_to_string(
+            req,
+            lifetime_long,
+        )?));
     }
     let flag = |b: bool| Cookie::Chars(if b { b"1" } else { b"0" });
     let settings: [(&[u8], Option<Cookie>); 7] = [
@@ -1063,10 +1064,9 @@ fn session_set_cookie_params(
     for (entry, value) in settings {
         let Some(value) = value else { continue };
         if matches!(result, Ok(true)) {
-            result = match value {
-                Cookie::Held(string) | Cookie::Made(string) => {
-                    crate::ini::alter_string(req, entry, string)
-                }
+            result = match &value {
+                Cookie::Held(string) => crate::ini::alter_string(req, entry, *string),
+                Cookie::Made(string) => crate::ini::alter_string(req, entry, **string),
                 Cookie::Chars(bytes) => crate::ini::alter(req, entry, bytes),
             };
         }
@@ -1079,10 +1079,9 @@ fn session_set_cookie_params(
 /// an argument's string, which stays the caller's, one `zval_get_string`
 /// or `zend_long_to_str` made, released after, or the bytes
 /// `zend_alter_ini_entry_chars` makes a string of.
-#[derive(Clone, Copy)]
 enum Cookie {
     Held(PhpString),
-    Made(PhpString),
+    Made(Owner<PhpString>),
     Chars(&'static [u8]),
 }
 
@@ -1090,7 +1089,7 @@ impl Cookie {
     /// The string made for the call released; an argument's stays.
     fn release(self, req: &mut Request) {
         if let Cookie::Made(string) = self {
-            req.release(Value::string(string));
+            string.give_up(req);
         }
     }
 }
@@ -1234,21 +1233,12 @@ fn session_register_shutdown(req: &mut Request) -> Result<(), Thrown> {
     req.register_shutdown_function(callable, Vec::new())
 }
 
-/// The callable a native's name is.
+/// The callable a native's name is: the name the bundle declared,
+/// interned and owned by no count, as php's entry holds the function
+/// alone (`fci_cache.function_handler`).
 fn named(req: &mut Request, name: &[u8]) -> Result<Callable, Thrown> {
-    let value = string_value(req, name)?;
-    match callable_checked(req, &value) {
-        // The callable is a view of the name, and its owner goes with it
-        // to the shutdown table that takes the callable.
-        Ok(callable) => {
-            let _named = value.hand_on_unmigrated();
-            Ok(callable)
-        }
-        Err(message) => {
-            value.give_up(req);
-            Err(throw_error(req, "Error", &message))
-        }
-    }
+    let value = Value::string(PhpString::interned(req, name)?);
+    callable_checked(req, &value).map_err(|message| throw_error(req, "Error", &message))
 }
 
 /// `can_session_handler_be_changed`.
@@ -1432,16 +1422,14 @@ fn session_set_save_handler(
             (Slot::Gc, b"gc"),
         ] {
             let pair = method_of(req, first, name)?;
-            store(req, slot, Some(*pair));
-            pair.give_up(req);
+            store(req, slot, Some(pair));
         }
         let optional =
             |req: &mut Request, slot: Slot, interface: &[u8], name: &[u8]| -> Result<(), Thrown> {
                 store(req, slot, None);
                 if implements(req, object, interface)? || class_has(req, object, name) {
                     let pair = method_of(req, first, name)?;
-                    store(req, slot, Some(*pair));
-                    pair.give_up(req);
+                    store(req, slot, Some(pair));
                 }
                 Ok(())
             };
@@ -1529,6 +1517,7 @@ fn session_set_save_handler(
     ];
     for (at, (slot, value)) in slots.into_iter().zip(callables).enumerate() {
         if at < 6 || value.is_some() {
+            let value = value.map(|value| Owner::take(req, value));
             store(req, slot, value);
         }
     }

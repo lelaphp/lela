@@ -32,7 +32,7 @@ mod shell;
 use php_ext::abi::{Callable, Extension, ExtensionBuilder, OrFalse, Path, Shell, True, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::call;
-use php_ext::coerce::{to_long, to_string};
+use php_ext::coerce::{to_long, with_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -266,16 +266,11 @@ fn readline_info(
     match name.as_slice() {
         b"line_buffer" => {
             let old = string(req, &ffi::line_buffer())?;
-            if let Some(value) = value {
-                let value = match to_string(req, &value) {
-                    Ok(value) => value,
-                    Err(e) => {
-                        old.give_up(req);
-                        return Err(e);
-                    }
-                };
-                ffi::set_line_buffer(value.as_bytes());
-                value.give_up(req);
+            if let Some(value) = value
+                && let Err(e) = with_string(req, &value, ffi::set_line_buffer)
+            {
+                old.give_up(req);
+                return Err(e);
             }
             Ok(old)
         }
@@ -284,16 +279,11 @@ fn readline_info(
         b"library_version" => string(req, &ffi::library_version()),
         b"readline_name" => {
             let old = string(req, &ffi::readline_name())?;
-            if let Some(value) = value {
-                let value = match to_string(req, &value) {
-                    Ok(value) => value,
-                    Err(e) => {
-                        old.give_up(req);
-                        return Err(e);
-                    }
-                };
-                ffi::set_readline_name(value.as_bytes());
-                value.give_up(req);
+            if let Some(value) = value
+                && let Err(e) = with_string(req, &value, ffi::set_readline_name)
+            {
+                old.give_up(req);
+                return Err(e);
             }
             Ok(old)
         }
@@ -442,11 +432,11 @@ pub(crate) fn user_completion(req: &mut Request, text: &[u8], start: i64, end: i
     };
     let mut candidates = Vec::new();
     for (_, member) in array {
-        if let Ok(member) = to_string(req, &member) {
-            if member.as_bytes().starts_with(text) {
-                candidates.push(member.as_bytes().to_vec());
-            }
-            member.give_up(req);
+        let found = with_string(req, &member, |member| {
+            member.starts_with(text).then(|| member.to_vec())
+        });
+        if let Ok(Some(member)) = found {
+            candidates.push(member);
         }
     }
     let empty = array.is_empty();

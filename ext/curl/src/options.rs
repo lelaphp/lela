@@ -6,7 +6,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::Instance;
 use php_ext::attr::php_function;
-use php_ext::coerce::{callable_checked, to_long, to_string, truthy};
+use php_ext::coerce::{callable_checked, to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::{Cast, Request, Stream};
 use php_ext::values::walk::{self, Hold};
@@ -398,14 +398,6 @@ fn saved(req: &mut Request, object: PhpObject, code: i32) -> Set {
     Ok(code == 0)
 }
 
-/// `zval_get_tmp_string`, its bytes.
-fn bytes(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
-    let string = to_string(req, &value.deref())?;
-    let bytes = string.as_bytes().to_vec();
-    string.give_up(req);
-    Ok(bytes)
-}
-
 /// `php_curl_option_str`: php's `ValueError` for a NUL, then the string
 /// set, its code saved.
 fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -> Set {
@@ -644,7 +636,7 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
     // `__toString` runs.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let element = row.value().deref();
-        lines.push(bytes(req, &element)?);
+        lines.push(with_string(req, &element, <[u8]>::to_vec)?);
         Ok(ControlFlow::Continue(()))
     })?;
     let Ok(list) = Slist::of(&lines) else {
@@ -668,7 +660,7 @@ fn set_post_fields(req: &mut Request, object: PhpObject, value: &Value) -> Set {
         }
         return crate::file::build_mime(req, object, array);
     }
-    let body = bytes(req, &value)?;
+    let body = with_string(req, &value, <[u8]>::to_vec)?;
     let easy = easy_of(req, object)?;
     let code = easy.set_post_fields(&body);
     saved(req, object, code)
@@ -752,7 +744,7 @@ pub(crate) fn setopt(
             saved(req, object, 0)
         }
         Opt::Str | Opt::ProtocolsStr => {
-            let text = bytes(req, value)?;
+            let text = with_string(req, value, <[u8]>::to_vec)?;
             if kind == Opt::ProtocolsStr && basedir(req) {
                 let lower = text.to_ascii_lowercase();
                 let names = |word: &[u8]| lower.windows(word.len()).any(|w| w == word);
@@ -772,7 +764,7 @@ pub(crate) fn setopt(
                 let code = easy.set_str(option, None);
                 return saved(req, object, code);
             }
-            let text = bytes(req, value)?;
+            let text = with_string(req, value, <[u8]>::to_vec)?;
             option_str(req, object, option, &text)
         }
         Opt::Private => {
@@ -784,7 +776,7 @@ pub(crate) fn setopt(
             Ok(true)
         }
         Opt::Url => {
-            let url = bytes(req, value)?;
+            let url = with_string(req, value, <[u8]>::to_vec)?;
             set_url(req, object, &url)
         }
         Opt::Stream(which) => set_stream(req, object, which, value),
@@ -807,7 +799,7 @@ pub(crate) fn setopt(
             saved(req, object, code)
         }
         Opt::Path => {
-            let path = bytes(req, value)?;
+            let path = with_string(req, value, <[u8]>::to_vec)?;
             if !path.is_empty() && req.check_open_basedir(&path, true).is_err() {
                 return Ok(false);
             }
@@ -828,8 +820,7 @@ pub(crate) fn setopt(
         }
         Opt::Share => set_share(req, object, value),
         Opt::Blob => {
-            let blob = bytes(req, value)?;
-            let code = easy.set_blob(option, &blob);
+            let code = with_string(req, value, |blob| easy.set_blob(option, blob))?;
             saved(req, object, code)
         }
     }

@@ -13,7 +13,8 @@ use php_ext::call::{call, lookup_function, new_object};
 use php_ext::coerce::{numeric_string, to_callable};
 use php_ext::raising::{Thrown, arg_value_error, throw};
 use php_ext::request::{
-    Handshake, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx, Streams as _, Xport,
+    Handshake, OwnedStream as _, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx,
+    Streams as _, Xport,
 };
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_standard::md5::Md5;
@@ -705,12 +706,12 @@ fn http_connect(
         && match get_http_headers(req, *stream) {
             Ok(headers) => headers.is_some(),
             Err(thrown) => {
-                stream.hand_on_unmigrated().free(req);
+                stream.free(req);
                 return Err(thrown);
             }
         };
     if !connected {
-        stream.hand_on_unmigrated().free(req);
+        stream.free(req);
         return Ok(None);
     }
     // Enable the TLS layer: the method the `ssl_method` names, TLS for
@@ -727,7 +728,7 @@ fn http_connect(
             Handshake::Failed | Handshake::Unsupported
         )
     {
-        stream.hand_on_unmigrated().free(req);
+        stream.free(req);
         return Ok(None);
     }
     Ok(Some(stream))

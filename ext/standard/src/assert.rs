@@ -117,12 +117,21 @@ const DEPRECATED: [(&[u8], Deprecates); 5] = [
     (b"assert.exception", |v| !Request::ini_parse_bool(v)),
 ];
 
-/// Whether the entry being set is `assert_options`'s, php's
-/// `ZEND_INI_STAGE_ASSERT_OPTIONS`, which `php_must_emit_ini_deprecation`
-/// raises nothing under.
+/// The request's assertion state: whether the entry being set is
+/// `assert_options`'s, php's `ZEND_INI_STAGE_ASSERT_OPTIONS`, which
+/// `php_must_emit_ini_deprecation` raises nothing under, and
+/// `ASSERTG(callback)`, the callback's one owner.
 #[derive(Default)]
 pub(crate) struct Stage {
     assert_options: bool,
+    callback: Option<Owner<Value>>,
+}
+
+/// `ASSERTG(callback)` given up and cleared.
+fn drop_callback(req: &mut Request) {
+    if let Some(callback) = req.state::<crate::State>().assert.callback.take() {
+        callback.give_up(req);
+    }
 }
 
 /// One entry's handler, the `on_modify` of all five: the deprecation for
@@ -152,11 +161,8 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
     if req.ini_stage() == IniStage::Deactivate {
         return;
     }
-    if name == b"assert.callback"
-        && let Some(previous) = req.assert_callback().copied()
-    {
-        req.set_assert_callback(None);
-        req.release(previous);
+    if name == b"assert.callback" {
+        drop_callback(req);
     }
     let deprecates = DEPRECATED
         .iter()
@@ -174,10 +180,7 @@ fn on_modify(req: &mut Request, name: &[u8], value: &[u8]) {
 /// `ASSERTG(callback)` given up as the request ends, the string the
 /// entry was made into or the callable `assert_options` set.
 pub(crate) fn rshutdown(req: &mut Request) {
-    if let Some(callback) = req.assert_callback().copied() {
-        req.set_assert_callback(None);
-        req.release(callback);
-    }
+    drop_callback(req);
 }
 
 macro_rules! handler {
@@ -355,14 +358,19 @@ fn assert(
     let text = described.map(|text| text.as_bytes().to_vec());
     // `ZVAL_STRING(&ASSERTG(callback), ASSERTG(cb))`: the entry's string
     // made once and kept as the callback until the entry changes.
-    if req.assert_callback().is_none()
+    if req.state::<crate::State>().assert.callback.is_none()
         && let Some(cb) = req.ini_get(b"assert.callback").filter(|cb| !cb.is_empty())
     {
         let cb = cb.to_vec();
-        let cb = Value::string(PhpString::new(req, &cb)?.hand_on_unmigrated());
-        req.set_assert_callback(Some(cb));
+        let cb = PhpString::new(req, &cb)?.into_value();
+        req.state::<crate::State>().assert.callback = Some(cb);
     }
-    let callback = req.assert_callback().copied();
+    let callback = req
+        .state::<crate::State>()
+        .assert
+        .callback
+        .as_deref()
+        .copied();
     // `call_user_function`: what the callback, or its resolution,
     // throws stands pending while the assertion goes on, and an
     // `AssertionError` chains it as its `previous`.
@@ -499,7 +507,13 @@ fn assert_options(
         ASSERT_WARNING => b"assert.warning",
         ASSERT_EXCEPTION => b"assert.exception",
         ASSERT_CALLBACK => {
-            let old = match req.assert_callback().copied() {
+            let old = match req
+                .state::<crate::State>()
+                .assert
+                .callback
+                .as_deref()
+                .copied()
+            {
                 Some(callback) => Owner::take(req, callback),
                 None => match req.ini_get(b"assert.callback").map(<[u8]>::to_vec) {
                     Some(cb) if !cb.is_empty() => PhpString::new(req, &cb)?.into_value(),
@@ -507,14 +521,10 @@ fn assert_options(
                 },
             };
             if let Some(value) = value {
-                if let Some(previous) = req.assert_callback().copied() {
-                    req.release(previous);
-                }
-                if matches!(value.as_ref(), ValueRef::Null) {
-                    req.set_assert_callback(None);
-                } else {
-                    req.addref(&value);
-                    req.set_assert_callback(Some(value));
+                drop_callback(req);
+                if !matches!(value.as_ref(), ValueRef::Null) {
+                    let kept = Owner::take(req, value);
+                    req.state::<crate::State>().assert.callback = Some(kept);
                 }
             }
             return Ok(old);

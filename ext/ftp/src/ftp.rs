@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    Handshake, OptionAnswer, Request, SocketOptions, Stream, StreamCtx, StreamOption, Streams as _,
-    Xport, XportFailure,
+    Handshake, OptionAnswer, OwnedStream as _, Request, SocketOptions, Stream, StreamCtx,
+    StreamOption, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
@@ -140,10 +140,9 @@ enum Tls {
 
 /// A data connection, `databuf_t`: a socket listening for the server to
 /// connect (active), or one connected (passive, or accepted).
-#[derive(Clone, Copy)]
 pub(crate) enum Data {
-    Listening(Stream),
-    Connected(Stream),
+    Listening(Owner<Stream>),
+    Connected(Owner<Stream>),
 }
 
 /// Which way a non-blocking transfer runs, `direction`, with what a
@@ -156,10 +155,11 @@ pub(crate) enum Way {
 
 /// A non-blocking transfer in flight between `ftp_nb_*` and
 /// `ftp_nb_continue`: `ftp->data`, `ftp->stream`, `direction` and
-/// `closestream`, which php keeps as four fields beside `nb`.
+/// `closestream`, which php keeps as four fields beside `nb`; the
+/// transfer holds an owner of each stream.
 pub(crate) struct Nb {
-    pub(crate) data: Stream,
-    pub(crate) stream: Stream,
+    pub(crate) data: Owner<Stream>,
+    pub(crate) stream: Owner<Stream>,
     pub(crate) way: Way,
     pub(crate) close: bool,
 }
@@ -182,7 +182,7 @@ enum Recv {
 
 /// `ftpbuf_t`: one session.
 pub(crate) struct Ftp {
-    control: Stream,
+    control: Owner<Stream>,
     /// The control connection's local address, `localaddr`.
     local: String,
     /// `resp`, `None` for php's `0`.
@@ -203,7 +203,7 @@ pub(crate) struct Ftp {
     tls: Tls,
     /// The `context` holding `verify_peer` off, as php's `SSL_CTX` checks
     /// no peer ([`unverified`]); an owner the session keeps.
-    context: Option<StreamCtx>,
+    context: Option<Owner<StreamCtx>>,
     /// The transfer `ftp_nb_*` left in flight.
     pub(crate) nb: Option<Nb>,
 }
@@ -343,16 +343,26 @@ impl Ftp {
             socket: SocketOptions::default(),
             context: context.as_ref().map(|context| **context),
         };
-        let Ok(control) = req.xport_create(&name, xport)? else {
-            if let Some(context) = context {
-                context.give_up(req);
+        let control = match req.xport_create(&name, xport) {
+            Ok(Ok(control)) => control,
+            made => {
+                if let Some(context) = context {
+                    context.give_up(req);
+                }
+                return made.map(|_| None);
             }
-            return Ok(None);
         };
-        let control = control.hand_on_unmigrated();
-        let context = context.map(Owner::hand_on_unmigrated);
-        let local = control
-            .socket_name(req, false)?
+        let name = match control.socket_name(req, false) {
+            Ok(name) => name,
+            Err(thrown) => {
+                control.free(req);
+                if let Some(context) = context {
+                    context.give_up(req);
+                }
+                return Err(thrown);
+            }
+        };
+        let local = name
             .map(|s| {
                 let host = host_of(s.as_bytes());
                 s.give_up(req);
@@ -376,11 +386,13 @@ impl Ftp {
             context,
             nb: None,
         };
-        if !ftp.getresp(req)? || ftp.resp != Some(Code::Ready) {
-            ftp.close(req);
-            return Ok(None);
+        match ftp.getresp(req) {
+            Ok(true) if ftp.resp == Some(Code::Ready) => Ok(Some(ftp)),
+            answer => {
+                ftp.close(req);
+                answer.map(|_| None)
+            }
         }
-        Ok(Some(ftp))
     }
 
     /// `ftp_close`: the transfer in flight let go, the stream it was to
@@ -388,8 +400,8 @@ impl Ftp {
     pub(crate) fn close(mut self, req: &mut Request) {
         self.abort(req);
         self.control.free(req);
-        if let Some(context) = self.context.take() {
-            req.release(context.resource().as_value());
+        if let Some(context) = self.context {
+            context.give_up(req);
         }
     }
 
@@ -398,11 +410,7 @@ impl Ftp {
     pub(crate) fn abort(&mut self, req: &mut Request) {
         if let Some(nb) = self.nb.take() {
             nb.data.free(req);
-            if nb.close {
-                nb.stream.free(req);
-            } else {
-                req.release(nb.stream.as_value());
-            }
+            let_go(req, nb.stream, nb.close);
         }
     }
 
@@ -462,7 +470,7 @@ impl Ftp {
                 }
                 old = true;
             }
-            if !secure(req, self.control, None) {
+            if !secure(req, *self.control, None) {
                 docref(req, Level::Warning, "SSL/TLS handshake failed");
                 return Ok(false);
             }
@@ -736,7 +744,7 @@ impl Ftp {
         line.extend_from_slice(b"\r\n");
         self.inbuf.clear();
         self.extra.clear();
-        send(req, self.control, &line)
+        send(req, *self.control, &line)
     }
 
     /// `ftp_readline`: the next line into `inbuf`, ended by `\r`, `\n` or
@@ -760,7 +768,7 @@ impl Ftp {
                 return Ok(false);
             }
             let room = BUFSIZE - 1 - buf.len();
-            match recv(req, self.control, room, seconds(self.timeout))? {
+            match recv(req, *self.control, room, seconds(self.timeout))? {
                 Recv::Data(bytes) => buf.extend_from_slice(&bytes),
                 Recv::Eof | Recv::Failed => {
                     self.inbuf = buf;
@@ -798,7 +806,7 @@ impl Ftp {
         if self.pasv != Pasv::Off && !self.pasv(req, true)? {
             return Ok(None);
         }
-        let context = self.context;
+        let context = self.context.as_deref().copied();
         if let Pasv::Ready(target) = &self.pasv {
             let target = target.clone().into_bytes();
             self.pasv = Pasv::On;
@@ -810,7 +818,7 @@ impl Ftp {
                 context,
             };
             return Ok(match req.xport_create(&target, xport)? {
-                Ok(stream) => Some(Data::Connected(stream.hand_on_unmigrated())),
+                Ok(stream) => Some(Data::Connected(stream)),
                 Err(XportFailure { code, text }) => {
                     let text = format!("php_connect_nonb() failed: {text} ({code})");
                     docref(req, Level::Warning, &text);
@@ -833,7 +841,7 @@ impl Ftp {
             context,
         };
         let listener = match req.xport_create(any, xport)? {
-            Ok(stream) => stream.hand_on_unmigrated(),
+            Ok(stream) => stream,
             Err(XportFailure { code, text }) => {
                 docref(
                     req,
@@ -843,7 +851,14 @@ impl Ftp {
                 return Ok(None);
             }
         };
-        let port = listener.socket_name(req, false)?.map_or(0, |name| {
+        let name = match listener.socket_name(req, false) {
+            Ok(name) => name,
+            Err(thrown) => {
+                listener.free(req);
+                return Err(thrown);
+            }
+        };
+        let port = name.map_or(0, |name| {
             let bytes = name.as_bytes().to_vec();
             name.give_up(req);
             let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -853,39 +868,42 @@ impl Ftp {
         });
         let sent = if v6 {
             let arg = format!("|2|{}|{port}|", self.local);
-            self.command(req, b"EPRT", Some(arg.as_bytes()), |c| c == Code::Okay)?
+            self.command(req, b"EPRT", Some(arg.as_bytes()), |c| c == Code::Okay)
         } else {
             let ip = self.local.replace('.', ",");
             let arg = format!("{ip},{},{}", port >> 8, port & 0xff);
-            self.command(req, b"PORT", Some(arg.as_bytes()), |c| c == Code::Okay)?
+            self.command(req, b"PORT", Some(arg.as_bytes()), |c| c == Code::Okay)
         };
-        if !sent {
-            listener.free(req);
-            return Ok(None);
+        match sent {
+            Ok(true) => Ok(Some(Data::Listening(listener))),
+            sent => {
+                listener.free(req);
+                sent.map(|_| None)
+            }
         }
-        Ok(Some(Data::Listening(listener)))
     }
 
     /// `data_accept`: the connection the server makes to a listening
     /// socket within the timeout, then, for FTPS, its handshake over the
     /// control connection's session.
-    fn accept(&mut self, req: &mut Request, data: Data) -> Result<Option<Stream>, Thrown> {
+    fn accept(&mut self, req: &mut Request, data: Data) -> Result<Option<Owner<Stream>>, Thrown> {
         let stream = match data {
             Data::Connected(stream) => stream,
             Data::Listening(listener) => {
-                let accepted = listener.accept(req, Some(seconds(self.timeout)), false)?;
+                let accepted = listener.accept(req, Some(seconds(self.timeout)), false);
                 listener.free(req);
-                let Ok((stream, peer)) = accepted else {
+                let Ok((stream, peer)) = accepted? else {
                     timed_out(req);
                     return Ok(None);
                 };
                 if let Some(peer) = peer {
                     peer.give_up(req);
                 }
-                stream.hand_on_unmigrated()
+                stream
             }
         };
-        if matches!(self.tls, Tls::Up { data: true }) && !secure(req, stream, Some(self.control)) {
+        if matches!(self.tls, Tls::Up { data: true }) && !secure(req, *stream, Some(*self.control))
+        {
             docref(req, Level::Warning, "data_accept: SSL/TLS handshake failed");
             stream.free(req);
             return Ok(None);
@@ -903,19 +921,20 @@ impl Ftp {
         cmd: &[u8],
         path: &[u8],
         resume: i64,
-    ) -> Result<Option<Stream>, Thrown> {
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
         if !self.set_type(req, kind)? {
             return Ok(None);
         }
         let Some(data) = self.getdata(req)? else {
             return Ok(None);
         };
-        let opened = self.opened(req, cmd, path, resume)?;
-        if !opened {
-            close_data(req, data);
-            return Ok(None);
+        match self.opened(req, cmd, path, resume) {
+            Ok(true) => self.accept(req, data),
+            opened => {
+                close_data(req, data);
+                opened.map(|_| None)
+            }
         }
-        self.accept(req, data)
     }
 
     /// `REST` and the command of [`Self::open_transfer`].
@@ -959,27 +978,18 @@ impl Ftp {
         let Some(data) = self.open_transfer(req, kind, b"RETR", path, resume)? else {
             return Ok(false);
         };
-        loop {
-            match recv(req, data, BUFSIZE, seconds(self.timeout))? {
-                Recv::Data(bytes) => {
-                    let bytes: Vec<u8> = match kind {
-                        Kind::Ascii => bytes.into_iter().filter(|&b| b != b'\r').collect(),
-                        Kind::Image => bytes,
-                    };
-                    let written = out.write(req, &bytes);
-                    if kind == Kind::Image && written != Some(bytes.len()) {
-                        data.free(req);
-                        return Ok(false);
-                    }
-                }
-                Recv::Eof => break,
-                Recv::Failed => {
-                    data.free(req);
-                    return Ok(false);
-                }
-            }
-        }
+        let read = drain(req, *data, seconds(self.timeout), |req, bytes| {
+            let bytes: Vec<u8> = match kind {
+                Kind::Ascii => bytes.into_iter().filter(|&b| b != b'\r').collect(),
+                Kind::Image => bytes,
+            };
+            let written = out.write(req, &bytes);
+            kind != Kind::Image || written == Some(bytes.len())
+        });
         data.free(req);
+        if !read? {
+            return Ok(false);
+        }
         self.finished(req, false)
     }
 
@@ -996,9 +1006,9 @@ impl Ftp {
         let Some(data) = self.open_transfer(req, kind, cmd, path, start)? else {
             return Ok(false);
         };
-        let sent = send_stream(req, data, input, kind, false)?;
+        let sent = send_stream(req, *data, input, kind, false);
         data.free(req);
-        if !sent {
+        if !sent? {
             return Ok(false);
         }
         self.finished(req, true)
@@ -1020,30 +1030,23 @@ impl Ftp {
         };
         let answered = self.command(req, cmd, Some(path), |c| {
             matches!(c, Code::Opening | Code::AlreadyOpen | Code::Transferred)
-        })?;
-        if !answered {
+        });
+        if !matches!(answered, Ok(true)) || self.resp == Some(Code::Transferred) {
             close_data(req, data);
-            return Ok(None);
-        }
-        if self.resp == Some(Code::Transferred) {
-            close_data(req, data);
-            return Ok(Some(Vec::new()));
+            return Ok(answered?.then(Vec::new));
         }
         let Some(data) = self.accept(req, data)? else {
             return Ok(None);
         };
         let mut all = Vec::new();
-        loop {
-            match recv(req, data, BUFSIZE, seconds(self.timeout))? {
-                Recv::Data(bytes) => all.extend_from_slice(&bytes),
-                Recv::Eof => break,
-                Recv::Failed => {
-                    data.free(req);
-                    return Ok(None);
-                }
-            }
-        }
+        let read = drain(req, *data, seconds(self.timeout), |_, bytes| {
+            all.extend_from_slice(&bytes);
+            true
+        });
         data.free(req);
+        if !read? {
+            return Ok(None);
+        }
         let mut lines: Vec<Vec<u8>> = Vec::new();
         let mut line = Vec::new();
         let mut last = 0u8;
@@ -1068,20 +1071,28 @@ impl Ftp {
     pub(crate) fn nb_get(
         &mut self,
         req: &mut Request,
-        out: Stream,
+        out: Owner<Stream>,
         close: bool,
         path: &[u8],
         kind: Kind,
         resume: i64,
     ) -> Result<Progress, Thrown> {
-        if self.nb.is_some() {
+        let opened = if self.nb.is_some() {
             self.abort(req);
-            if !self.finished(req, false)? {
-                return Ok(Progress::Failed);
+            self.finished(req, false)
+        } else {
+            Ok(true)
+        };
+        let opened = match opened {
+            Ok(true) => self.open_transfer(req, kind, b"RETR", path, resume),
+            opened => opened.map(|_| None),
+        };
+        let data = match opened {
+            Ok(Some(data)) => data,
+            opened => {
+                let_go(req, out, close);
+                return opened.map(|_| Progress::Failed);
             }
-        }
-        let Some(data) = self.open_transfer(req, kind, b"RETR", path, resume)? else {
-            return Ok(Progress::Failed);
         };
         self.nb = Some(Nb {
             data,
@@ -1097,13 +1108,17 @@ impl Ftp {
         &mut self,
         req: &mut Request,
         path: &[u8],
-        input: Stream,
+        input: Owner<Stream>,
         close: bool,
         kind: Kind,
         start: i64,
     ) -> Result<Progress, Thrown> {
-        let Some(data) = self.open_transfer(req, kind, b"STOR", path, start)? else {
-            return Ok(Progress::Failed);
+        let data = match self.open_transfer(req, kind, b"STOR", path, start) {
+            Ok(Some(data)) => data,
+            opened => {
+                let_go(req, input, close);
+                return opened.map(|_| Progress::Failed);
+            }
         };
         self.nb = Some(Nb {
             data,
@@ -1121,7 +1136,7 @@ impl Ftp {
         let Some(nb) = self.nb.as_mut() else {
             return Ok(Progress::Failed);
         };
-        let (data, stream, way) = (nb.data, nb.stream, nb.way);
+        let (data, stream, way) = (*nb.data, *nb.stream, nb.way);
         match way {
             Way::Get { lastch } => match recv(req, data, BUFSIZE, Duration::from_secs(1))? {
                 Recv::Data(bytes) => {
@@ -1175,37 +1190,62 @@ impl Ftp {
 
     /// The end of a non-blocking transfer that ran out: its data
     /// connection closed and its reply read.
+    /// The transfer taken out of flight, php's `nb = 0`, its data
+    /// connection closed, then its reply read and its stream let go, closed
+    /// where the native opened it.
     fn nb_done(&mut self, req: &mut Request) -> Result<Progress, Thrown> {
-        if let Some(nb) = self.nb.as_mut() {
+        let nb = self.nb.take();
+        let stream = nb.map(|nb| {
             nb.data.free(req);
+            (nb.stream, nb.close)
+        });
+        let done = self.finished(req, false);
+        if let Some((stream, close)) = stream {
+            let_go(req, stream, close);
         }
-        let done = self.finished(req, false)?;
-        self.settle(req);
-        Ok(if done {
+        Ok(if done? {
             Progress::Finished
         } else {
             Progress::Failed
         })
     }
 
-    /// A non-blocking transfer that failed: its data connection closed.
+    /// A non-blocking transfer that failed, taken out of flight: its data
+    /// connection closed and its stream let go.
     fn nb_failed(&mut self, req: &mut Request) -> Progress {
-        if let Some(nb) = self.nb.as_mut() {
-            nb.data.free(req);
-        }
-        self.settle(req);
+        self.abort(req);
         Progress::Failed
     }
+}
 
-    /// The transfer taken out of flight, its stream left to the caller:
-    /// php's `nb = 0`, the stream closed by the native that opened it.
-    fn settle(&mut self, req: &mut Request) {
-        if let Some(nb) = self.nb.take() {
-            if nb.close {
-                nb.stream.free(req);
-            } else {
-                req.release(nb.stream.as_value());
+/// The owner of a transfer's stream let go: closed where the native opened
+/// it (`closestream`), else given up, the program's own name for it left.
+fn let_go(req: &mut Request, stream: Owner<Stream>, close: bool) {
+    if close {
+        stream.free(req);
+    } else {
+        stream.give_up(req);
+    }
+}
+
+/// A data connection read to its end, each read waiting up to `timeout`
+/// and its bytes handed to `take`: `false` where a read failed or `take`
+/// refused what it was handed.
+fn drain(
+    req: &mut Request,
+    data: Stream,
+    timeout: Duration,
+    mut take: impl FnMut(&mut Request, Vec<u8>) -> bool,
+) -> Result<bool, Thrown> {
+    loop {
+        match recv(req, data, BUFSIZE, timeout)? {
+            Recv::Data(bytes) => {
+                if !take(req, bytes) {
+                    return Ok(false);
+                }
             }
+            Recv::Eof => return Ok(true),
+            Recv::Failed => return Ok(false),
         }
     }
 }
