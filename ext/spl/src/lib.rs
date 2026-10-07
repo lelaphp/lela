@@ -46,12 +46,12 @@ use php_ext::attr::php_class;
 use php_ext::call::{Iter, call_method, iterate, lookup_class};
 use php_ext::coerce::{key_of, truthy};
 use php_ext::decl::{ClassKind, Name};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, View};
-use php_ext_standard::Serializer;
+use php_ext_standard::{Serializer, Unserializer};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -660,6 +660,65 @@ fn load_members(req: &mut Request, object: PhpObject, members: &Value) -> Result
         })?;
     }
     Ok(())
+}
+
+/// How the read of an SPL record, the data `SplObjectStorage`'s,
+/// `SplDoublyLinkedList`'s and `ArrayObject`'s `unserialize` take, ended
+/// short of its var hash's destruction. A read that threw is the
+/// `Err` beside it, which broke the record too.
+#[derive(Clone, Copy)]
+pub(crate) enum Record {
+    /// Read to its end, with the members `object_properties_load`
+    /// writes where the record carries them.
+    Read(Option<Value>),
+    /// php's `goto outexcept` (the list's `error`) with `p` at this
+    /// offset.
+    Broke(usize),
+}
+
+/// What a record's read hands `PHP_VAR_UNSERIALIZE_DESTROY`: the members
+/// written where it was read whole, and where it broke off, the offset
+/// php's `UnexpectedValueException` names. A read that threw broke it
+/// where the reader stands, as php's `p` stands after the failed
+/// `php_var_unserialize`, and goes to `outexcept` as any failed read
+/// does.
+pub(crate) fn record_read(
+    req: &mut Request,
+    object: PhpObject,
+    reader: &Unserializer<'_>,
+    read: Result<Record, Thrown>,
+) -> (Result<(), Thrown>, Option<usize>) {
+    match read {
+        Ok(Record::Read(None)) => (Ok(()), None),
+        Ok(Record::Read(Some(members))) => (load_members(req, object, &members), None),
+        Ok(Record::Broke(at)) => (Ok(()), Some(at)),
+        Err(thrown) => (Err(thrown), Some(reader.offset())),
+    }
+}
+
+/// php's `outexcept` after `PHP_VAR_UNSERIALIZE_DESTROY`, whose answer is
+/// `finished`: where the record broke off at `broke_at`, the
+/// `UnexpectedValueException` naming the offset of the `len` bytes,
+/// chained onto whatever throwable stands, as `zend_throw_exception_ex`
+/// chains onto `EG(exception)`.
+pub(crate) fn record_end(
+    req: &mut Request,
+    finished: Result<(), Thrown>,
+    broke_at: Option<usize>,
+    len: usize,
+) -> Result<(), Thrown> {
+    let Some(at) = broke_at else {
+        return finished;
+    };
+    let broke = throw(
+        req,
+        "UnexpectedValueException",
+        &format!("Error at offset {at} of {len} bytes"),
+    );
+    Err(match finished {
+        Ok(()) => broke,
+        Err(stands) => stands.chain(req, broke),
+    })
 }
 
 /// `object_properties_load`'s rule for an integer member key
