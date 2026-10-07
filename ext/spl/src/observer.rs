@@ -706,12 +706,11 @@ impl SplObjectStorage {
         let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let mut replaced = Vec::new();
         let read = read_storage(req, this, &mut reader, &data, &mut replaced);
-        let finished = reader.finish(req);
+        let read = reader.finish(req, read);
         for held in replaced {
             req.release(held);
         }
         let broke_at = read?;
-        finished?;
         match broke_at {
             Some(at) => Err(throw(
                 req,

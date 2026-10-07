@@ -539,10 +539,17 @@ fn shm_get_var(
         return Ok(Owner::take(req, Value::bool(false)));
     };
     let mut reader = Unserializer::new(req, bytes.as_deref().unwrap_or_default())?;
-    let read = reader.local(req);
-    let finished = reader.finish(req);
-    let read = read?;
-    finished?;
+    // The value read is the caller's, kept beside the read's outcome.
+    let (outcome, read) = match reader.local(req) {
+        Ok(read) => (Ok(()), read),
+        Err(thrown) => (Err(thrown), None),
+    };
+    if let Err(thrown) = reader.finish(req, outcome) {
+        if let Some(value) = read {
+            req.release(value);
+        }
+        return Err(thrown);
+    }
     match read {
         // The unserializer's value is owned as a bare value: the one
         // owner taken over from it.

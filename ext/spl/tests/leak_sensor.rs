@@ -126,3 +126,26 @@ try { var_dump(unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}')); } catch (
     );
     assert_eq!(stdout, "string(6) \"Failed\"\n");
 }
+
+/// A read that throws inside `SplObjectStorage::unserialize`,
+/// `SplDoublyLinkedList::unserialize` or `ArrayObject::unserialize`
+/// makes none of the `__wakeup()` calls queued before it, as php's
+/// `zend_call_function` refuses each at `EG(exception)`, so the
+/// throwing `__wakeup()` makes no second throwable to drop (#2235).
+#[test]
+fn a_read_that_throws_in_an_spl_unserialize_makes_no_delayed_call() {
+    let stdout = armed(
+        r#"<?php
+class A { function __wakeup() { echo "wakeup A\n"; throw new Exception("wake"); } }
+class T { public int $p; }
+$s = new SplObjectStorage;
+try { $s->unserialize('x:i:2;O:1:"A":0:{},N;;O:1:"T":1:{s:1:"p";s:1:"x";},N;;m:a:0:{}'); } catch (Throwable $e) {}
+$l = new SplDoublyLinkedList;
+try { $l->unserialize('i:0;:O:1:"A":0:{}:O:1:"T":1:{s:1:"p";s:1:"x";}'); } catch (Throwable $e) {}
+$o = new ArrayObject;
+try { $o->unserialize('x:i:0;a:2:{i:0;O:1:"A":0:{}i:1;O:1:"T":1:{s:1:"p";s:1:"x";}};m:a:0:{}'); } catch (Throwable $e) {}
+echo "end\n";
+"#,
+    );
+    assert_eq!(stdout, "end\n");
+}

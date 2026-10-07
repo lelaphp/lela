@@ -660,9 +660,7 @@ impl SplDoublyLinkedList {
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let read = read_list(req, this, &mut reader, &data);
-        let finished = reader.finish(req);
-        let broke_at = read?;
-        finished?;
+        let broke_at = reader.finish(req, read)?;
         match broke_at {
             Some(at) => Err(throw(
                 req,
