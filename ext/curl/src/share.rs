@@ -3,7 +3,7 @@
 
 use std::ops::ControlFlow;
 
-use php_ext::abi::{Instance, Refusals};
+use php_ext::abi::{Instance, Pool, Refusals};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::write_prop;
 use php_ext::coerce::{numeric_string, to_long, value_name};
@@ -234,6 +234,48 @@ fn try_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
     })
 }
 
+/// `CURL_G(persistent_curlsh)` as the engine keeps it (design §4.10,
+/// #1172): the persistent shares no request holds, each under the bits
+/// of the options it was made with, lent to one request at a time.
+pub(crate) struct Pooled(pub(crate) Pool<u8, Share>);
+
+/// The idle shares the pool keeps. php keeps one per set of options in
+/// each php-fpm worker and bounds them by nothing else; this is the
+/// bound the engine keeps for its own persistent streams.
+pub(crate) const POOLED: usize = 1024;
+
+/// The persistent share made with the options `id` names that the
+/// request holds already, or one the engine's pool kept from an earlier
+/// request, held by this one from here to its end.
+fn lend(req: &mut Request, id: u8) -> Option<Share> {
+    let held = &mut req.state::<State>().persistent;
+    if let Some(at) = held.find(&id) {
+        return held.get_mut(at).map(|share| share.clone());
+    }
+    let share = req.engine::<Pooled>()?.0.take(&id)?;
+    req.state::<State>().persistent.hold(id, share.clone());
+    Some(share)
+}
+
+/// What php's `CURL_G(persistent_curlsh)` keeps across requests, at
+/// `post_deactivate`, once the request's objects are freed: every
+/// persistent share the request held given back to the engine's pool for
+/// the next request asking the same options. A share past the pool's
+/// bound is cleaned up here, with the ending request, and one a `CURL *`
+/// or an object still holds is left to its holder, never lent to another
+/// request while anything of this one could reach it (ADR-0010's
+/// amendment of ADR-0005).
+pub(crate) fn give_back(req: &mut Request) {
+    let held = req.state::<State>().persistent.drain();
+    for (id, share) in held {
+        let past = match (share.alone(), req.engine::<Pooled>()) {
+            (Some(share), Some(Pooled(pool))) => pool.give_back(id, share),
+            (share, _) => share,
+        };
+        drop(past);
+    }
+}
+
 /// The data a persistent share holds, in the order its `options` lists
 /// them, each with its bit of the pool's key.
 const LOCKS: [(i64, u8); 4] = [
@@ -244,8 +286,9 @@ const LOCKS: [(i64, u8); 4] = [
 ];
 
 /// `curl_share_init_persistent(array $share_options): CurlSharePersistentHandle`:
-/// the share the same options made before, or a new one kept for the
-/// next ask.
+/// the share the request holds for the same options, or one the engine's
+/// pool kept from an earlier request, or a new one, held by the request
+/// for the next ask and given back to the pool as it ends.
 ///
 /// ```php
 /// $a = curl_share_init_persistent([CURL_LOCK_DATA_DNS]);
@@ -313,42 +356,34 @@ fn curl_share_init_persistent(
         object.give_up(req);
         return Err(thrown);
     }
-    let kept = req
-        .state::<State>()
-        .persistent
-        .iter()
-        .find(|(held, _)| *held == id)
-        .map(|(_, share)| share.clone());
-    let share = if let Some(share) = kept {
+    let share = if let Some(share) = lend(req, id) {
         share
     } else {
-        {
-            let Some(share) = Share::init() else {
-                object.give_up(req);
-                return Err(throw(
-                    req,
-                    "Exception",
-                    "Could not construct persistent cURL share handle: out of memory",
-                ));
+        let Some(share) = Share::init() else {
+            object.give_up(req);
+            return Err(throw(
+                req,
+                "Exception",
+                "Could not construct persistent cURL share handle: out of memory",
+            ));
+        };
+        for (lock, bit) in LOCKS {
+            let code = if id & bit != 0 {
+                share.set_long(c::CURLSHOPT_SHARE, lock)
+            } else {
+                0
             };
-            for (lock, bit) in LOCKS {
-                let code = if id & bit != 0 {
-                    share.set_long(c::CURLSHOPT_SHARE, lock)
-                } else {
-                    0
-                };
-                if code != 0 {
-                    object.give_up(req);
-                    let text = format!(
-                        "Could not construct persistent cURL share handle: {}",
-                        String::from_utf8_lossy(&share_strerror(code).unwrap_or_default())
-                    );
-                    return Err(throw(req, "Exception", &text));
-                }
+            if code != 0 {
+                object.give_up(req);
+                let text = format!(
+                    "Could not construct persistent cURL share handle: {}",
+                    String::from_utf8_lossy(&share_strerror(code).unwrap_or_default())
+                );
+                return Err(throw(req, "Exception", &text));
             }
-            req.state::<State>().persistent.push((id, share.clone()));
-            share
         }
+        req.state::<State>().persistent.hold(id, share.clone());
+        share
     };
     if let Some(sh) = object.native_mut::<Sh>(req) {
         sh.share = Some(share);

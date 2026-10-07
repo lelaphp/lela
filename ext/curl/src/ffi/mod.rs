@@ -13,7 +13,9 @@
 //! the pointer of. Nothing here is shared with another request: every
 //! owner belongs to one request, which is single-threaded and moves
 //! between threads only whole (ADR-0005), which is what the `Send` and
-//! `Sync` below rest on.
+//! `Sync` below rest on. A persistent share passes from one request to
+//! the next through the engine's pool, one request at a time, and only
+//! once nothing of the request that held it does ([`Share::alone`]).
 //!
 //! **Callbacks.** libcurl calls back from inside `curl_easy_perform`,
 //! `curl_multi_perform`, `curl_easy_pause` and the calls that free a MIME

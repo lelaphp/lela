@@ -33,20 +33,21 @@ mod options;
 mod share;
 mod version;
 
-use php_ext::abi::{Extension, ExtensionBuilder, Refusal};
+use php_ext::abi::{Extension, ExtensionBuilder, Lent, Pool, Refusal};
 use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or
 /// synchronised. The request's link to libcurl's callbacks, and the
-/// shares `curl_share_init_persistent` made in this request by the
-/// options they were made with, php's `CURL_G(persistent_curlsh)` held
-/// for the request until the engine lends extensions its pool.
+/// persistent shares the request holds, each under the options it was
+/// made with, taken out of the engine's pool or made by
+/// `curl_share_init_persistent` and given back at `post_deactivate`
+/// ([`share::give_back`]).
 #[derive(Default)]
 struct State {
     session: ffi::Session,
-    persistent: Vec<(u8, ffi::Share)>,
+    persistent: Lent<u8, ffi::Share>,
 }
 
 /// The constants `register_curl_symbols` registers, in the stub's order,
@@ -830,6 +831,8 @@ pub fn extension() -> Extension {
         }])
         .process_state(initialize)
         .request_state::<State>()
+        .engine_state(|_| Ok(share::Pooled(Pool::new(share::POOLED))))
+        .post_deactivate(share::give_back)
         .info(version::curl_info)
         .build("curl")
 }
