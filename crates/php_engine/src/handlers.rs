@@ -604,25 +604,11 @@ pub(crate) fn declare_const<T: Tier>(
     if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
         key[..slash].make_ascii_lowercase();
     }
-    match req.define_constant(&key, value) {
-        Ok(true) => Ok(advance(req, frame)),
-        Ok(false) => {
-            req.release(value);
-            crate::api::raising::warning(
-                req,
-                &format!(
-                    "Constant {} already defined, this will be an error in PHP 9",
-                    String::from_utf8_lossy(&key)
-                ),
-            );
-            Ok(advance(req, frame))
-        }
-        Err(thrown) => {
-            req.release(value);
-            req.leave_pending(&thrown);
-            Ok(Stepped::Threw(frame))
-        }
-    }
+    // The value's one owner is the sink's, which warns and gives it up
+    // where the name stands.
+    let value = crate::api::values::Owner::adopt(req, value);
+    req.define_constant(&key, value);
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_DECLARE_ATTRIBUTED_CONST` (`Z/Zend/zend_vm_def.h:8301`), the
@@ -720,16 +706,8 @@ pub(crate) fn declare_attributed_const<T: Tier>(
     if let Some(slash) = key.iter().rposition(|b| *b == b'\\') {
         key[..slash].make_ascii_lowercase();
     }
-    if !req.define_attributed_constant(&key, value, attributes) {
-        req.release(value);
-        crate::api::raising::warning(
-            req,
-            &format!(
-                "Constant {} already defined, this will be an error in PHP 9",
-                String::from_utf8_lossy(&key)
-            ),
-        );
-    }
+    let value = crate::api::values::Owner::adopt(req, value);
+    req.define_attributed_constant(&key, value, attributes);
     req.vm_mut().jump(frame, at.saturating_add(2));
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));

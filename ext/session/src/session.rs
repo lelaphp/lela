@@ -839,14 +839,11 @@ pub(super) fn reset_id(req: &mut Request) -> Result<bool, Thrown> {
         Vec::new()
     };
     let sid = crate::string_value(req, &sid)?;
-    let registered = match req.extension_named(b"session") {
-        Some(session) => req.register_constant(session, b"SID", *sid, sid_attributes()),
-        None => false,
-    };
-    if registered {
-        let _constant = sid.hand_on_unmigrated();
-    } else {
-        sid.give_up(req);
+    match req.extension_named(b"session") {
+        Some(session) => {
+            req.register_constant(session, b"SID", sid, sid_attributes());
+        }
+        None => sid.give_up(req),
     }
     // `APPLY_TRANS_SID`, where no cookie of the session's name came with
     // the request: the id added to the session context's URLs and forms,

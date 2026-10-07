@@ -191,25 +191,73 @@ impl Request {
         Ok(array)
     }
 
-    /// `define()`: `false` when the constant exists. The row keeps the
-    /// file executing when it was written, `zend_register_constant`'s
-    /// `filename`.
-    pub fn define_constant(&mut self, name: &[u8], value: Value) -> Result<bool, Thrown> {
-        Ok(self.define_attributed_constant(name, value, Vec::new()))
+    /// `zend_register_constant` for a constant the program defines,
+    /// `define()` and `const`: `name` is the key php writes, the
+    /// namespace lowered. A sink: the row takes the value's owner, and
+    /// keeps the file executing when it was written,
+    /// `zend_register_constant`'s `filename`. Where the name stands
+    /// already, or is `__COMPILER_HALT_OFFSET__`, `true`, `false` or
+    /// `null`, `false`: php's warning is raised and the value given up
+    /// after it, so a destructor that release serves runs after the
+    /// warning, as `zval_ptr_dtor_nogc` runs it there.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo "dtor {$this->n}\n"; } }
+    /// const A = new D(1);
+    /// const A = new D(2);
+    /// var_dump(define('B', new D(3)), define('B', new D(4)), define('TRUE', new D(5)));
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// Warning: Constant A already defined, this will be an error in PHP 9 in %s on line 4
+    /// dtor 2
+    ///
+    /// Warning: Constant B already defined, this will be an error in PHP 9 in %s on line 5
+    /// dtor 4
+    ///
+    /// Warning: Constant TRUE already defined, this will be an error in PHP 9 in %s on line 5
+    /// dtor 5
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// end
+    /// dtor 1
+    /// dtor 3
+    /// ```
+    pub fn define_constant(&mut self, name: &[u8], value: Owner<Value>) -> bool {
+        self.define_attributed_constant(name, value, Vec::new())
     }
 
     /// `ZEND_DECLARE_ATTRIBUTED_CONST`'s `zend_register_constant` and
     /// `zend_constant_add_attributes`: [`Request::define_constant`] with
     /// the attributes the declaration carries hung on the row, and
-    /// `CONST_DEPRECATED` raised from them. `false`, and nothing hung,
-    /// where the name stands already.
+    /// `CONST_DEPRECATED` raised from them. `false`, nothing hung, the
+    /// warning raised and the value given up, where the name stands
+    /// already.
     pub(crate) fn define_attributed_constant(
         &mut self,
         name: &[u8],
-        value: Value,
+        value: Owner<Value>,
         attributes: Vec<Attribute>,
     ) -> bool {
-        if self.constant_named(name).is_some() {
+        let special = name == HALT_OFFSET
+            || name.eq_ignore_ascii_case(b"true")
+            || name.eq_ignore_ascii_case(b"false")
+            || name.eq_ignore_ascii_case(b"null");
+        if special || self.constant_named(name).is_some() {
+            // `%s` over `ZSTR_VAL(name)`: the name up to a NUL in it.
+            let shown = name
+                .iter()
+                .position(|b| *b == 0)
+                .map_or(name, |nul| &name[..nul]);
+            crate::api::raising::warning(
+                self,
+                &format!(
+                    "Constant {} already defined, this will be an error in PHP 9",
+                    String::from_utf8_lossy(shown)
+                ),
+            );
+            value.give_up(self);
             return false;
         }
         // `zend_get_executed_filename_ex`: the innermost frame's file,
@@ -222,7 +270,7 @@ impl Request {
         self.constants.constants.push(ConstantRow {
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
-            value,
+            value: value.hand_on(),
             attributes,
             deprecated,
         });
@@ -258,12 +306,14 @@ impl Request {
     /// host registers under `Core`, as `do_cli` registers
     /// `PHP_CLI_PROCESS_TITLE` and `cli_register_file_handles` the three
     /// streams: after every extension's own, so it stands last in
-    /// `Core`'s group and before what the program defines. The value's
-    /// one owner is the table's.
-    pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Value) {
-        self.constants
-            .constants
-            .push(ConstantRow::new(ConstantOwner::Core, name.to_vec(), value));
+    /// `Core`'s group and before what the program defines. A sink: the
+    /// row takes the value's owner.
+    pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
+        self.constants.constants.push(ConstantRow::new(
+            ConstantOwner::Core,
+            name.to_vec(),
+            value.hand_on(),
+        ));
     }
 
     /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:
@@ -274,15 +324,16 @@ impl Request {
     /// already, by an extension or by `define()`, the row keeps its
     /// owner and attributes and takes `value`, the old value released,
     /// which is what an extension writes through the `zval` that
-    /// `zend_get_constant_str` finds. `value` is the row's from here;
-    /// `false`, and `value` still the caller's, for a name the engine or
-    /// an extension declared as it started, which no request writes.
-    /// The session's `SID` is the witness, in `ext/session`.
+    /// `zend_get_constant_str` finds. A sink: the row takes the value's
+    /// owner; `false`, and the owner given up, as `zend_register_constant`
+    /// gives up what it does not register, for a name the engine or an
+    /// extension declared as it started, which no request writes. The
+    /// session's `SID` is the witness, in `ext/session`.
     pub fn register_constant(
         &mut self,
         extension: ExtensionId,
         name: &[u8],
-        value: Value,
+        value: Owner<Value>,
         attributes: Vec<Attribute>,
     ) -> bool {
         if let Some(row) = self
@@ -291,18 +342,19 @@ impl Request {
             .iter_mut()
             .find(|row| row.name == name)
         {
-            let old = std::mem::replace(&mut row.value, value);
+            let old = std::mem::replace(&mut row.value, value.hand_on());
             self.release(old);
             return true;
         }
         if name == b"PHP_SAPI" || self.shared.constant(name).is_some() {
+            value.give_up(self);
             return false;
         }
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         self.constants.constants.push(ConstantRow {
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
-            value,
+            value: value.hand_on(),
             attributes,
             deprecated,
         });
@@ -361,7 +413,8 @@ impl Request {
             crate::engine::ProcessTitle::Saved => Some(true),
         };
         if let Some(titled) = titled {
-            self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Value::bool(titled));
+            let titled = Owner::take(self, Value::bool(titled));
+            self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", titled);
         }
         let Some(hooks) = self.stream_hooks() else {
             return Ok(());
@@ -369,9 +422,9 @@ impl Request {
         let Some([stdin, stdout, stderr]) = (hooks.standard_handles)(self, stdin_replaced)? else {
             return Ok(());
         };
-        self.register_host_constant(b"STDIN", stdin.hand_on());
-        self.register_host_constant(b"STDOUT", stdout.hand_on());
-        self.register_host_constant(b"STDERR", stderr.hand_on());
+        self.register_host_constant(b"STDIN", stdin);
+        self.register_host_constant(b"STDOUT", stdout);
+        self.register_host_constant(b"STDERR", stderr);
         Ok(())
     }
 
