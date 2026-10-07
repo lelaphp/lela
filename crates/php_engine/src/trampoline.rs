@@ -17,9 +17,9 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
-use php_unit::decl::{
-    FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
-};
+use php_unit::decl::{FunctionDecl, MethodDecl, Name, Parameter, Type, Visibility};
+
+use crate::api::__private::{native_function, parameter};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -95,24 +95,18 @@ impl CallTrampoline {
     /// function a closure holds: that signature, public, an instance
     /// method, named `__invoke`.
     pub(crate) fn invoke(function: Function, decl: &FunctionDecl) -> Self {
+        let function_decl = FunctionDecl {
+            name: Name(b"__invoke".as_slice().into()),
+            file: Name(Box::new([])),
+            line: 0,
+            end_line: 0,
+            doc_comment: None,
+            is_generator: false,
+            ..decl.clone()
+        };
         CallTrampoline {
             via: Via::Invoke(function),
-            decl: MethodDecl {
-                function: FunctionDecl {
-                    name: Name(b"__invoke".as_slice().into()),
-                    file: Name(Box::new([])),
-                    line: 0,
-                    end_line: 0,
-                    doc_comment: None,
-                    is_generator: false,
-                    ..decl.clone()
-                },
-                visibility: Visibility::Public,
-                is_instance: true,
-                is_abstract: false,
-                is_final: false,
-                tentative_return: false,
-            },
+            decl: public_method(function_decl, true),
         }
     }
 
@@ -130,37 +124,17 @@ impl CallTrampoline {
         // `strlen(ZSTR_VAL(method_name))`: "keep compatibility for "\0"
         // characters".
         let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
-        let arguments = Parameter {
-            name: Name(b"arguments".as_slice().into()),
-            ty: Some(Type::Mixed),
-            by_ref: false,
-            prefer_ref: false,
-            promoted: false,
-            variadic: true,
-            default: ParameterDefault::None,
-            attributes: Vec::new(),
+        let function = FunctionDecl {
+            parameters: vec![variadic(b"arguments", Some(Type::Mixed))],
+            returns_by_ref: of.function.returns_by_ref,
+            attributes: of.function.attributes.clone(),
+            ..native_function(name)
         };
         CallTrampoline {
             via: Via::Magic(magic),
             decl: MethodDecl {
-                function: FunctionDecl {
-                    name: Name(name.into()),
-                    parameters: vec![arguments],
-                    return_type: None,
-                    returns_by_ref: of.function.returns_by_ref,
-                    is_generator: false,
-                    attributes: of.function.attributes.clone(),
-                    doc_comment: None,
-                    file: Name(Box::new([])),
-                    line: 0,
-                    end_line: 0,
-                    frameless: Vec::new(),
-                },
-                visibility: Visibility::Public,
-                is_instance: !is_static,
                 is_abstract: of.is_abstract,
-                is_final: false,
-                tentative_return: false,
+                ..public_method(function, !is_static)
             },
         }
     }
@@ -169,38 +143,13 @@ impl CallTrampoline {
     /// `ZEND_ACC_CALL_VIA_TRAMPOLINE` with no scope and no `arg_info`,
     /// every argument passed by value, named as the call was.
     pub(crate) fn native(entry: crate::api::abi::Entry, name: &[u8]) -> Self {
-        let arguments = Parameter {
-            name: Name(b"arguments".as_slice().into()),
-            ty: None,
-            by_ref: false,
-            prefer_ref: false,
-            promoted: false,
-            variadic: true,
-            default: ParameterDefault::None,
-            attributes: Vec::new(),
+        let function = FunctionDecl {
+            parameters: vec![variadic(b"arguments", None)],
+            ..native_function(name)
         };
         CallTrampoline {
             via: Via::Native(entry),
-            decl: MethodDecl {
-                function: FunctionDecl {
-                    name: Name(name.into()),
-                    parameters: vec![arguments],
-                    return_type: None,
-                    returns_by_ref: false,
-                    is_generator: false,
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    file: Name(Box::new([])),
-                    line: 0,
-                    end_line: 0,
-                    frameless: Vec::new(),
-                },
-                visibility: Visibility::Public,
-                is_instance: true,
-                is_abstract: false,
-                is_final: false,
-                tentative_return: false,
-            },
+            decl: public_method(function, true),
         }
     }
 
@@ -217,6 +166,27 @@ impl CallTrampoline {
             Via::Magic(magic) => Some(magic),
             Via::Invoke(_) | Via::Native(_) => None,
         }
+    }
+}
+
+/// A public method over `function`, neither abstract nor final: the
+/// shape of every method the engine declares for itself.
+pub(crate) fn public_method(function: FunctionDecl, is_instance: bool) -> MethodDecl {
+    MethodDecl {
+        function,
+        visibility: Visibility::Public,
+        is_instance,
+        is_abstract: false,
+        is_final: false,
+        tentative_return: false,
+    }
+}
+
+/// `ty ...$name`.
+pub(crate) fn variadic(name: &[u8], ty: Option<Type>) -> Parameter {
+    Parameter {
+        variadic: true,
+        ..parameter(name, ty)
     }
 }
 

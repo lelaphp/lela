@@ -9,17 +9,17 @@
 //! written directly (`zend_should_call_hook`), and a virtual property,
 //! which has none, is refused.
 
-use php_unit::decl::{
-    ClassDecl, FunctionDecl, HookKind, MethodDecl, Name, Parameter, ParameterDefault, Visibility,
-};
+use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility};
 use php_unit::link::{Held, Resolved, ResolvedHook, resolve_property};
 
 use super::{Link, Member, MemberAt, Request};
+use crate::api::__private::{native_function, parameter};
 use crate::api::abi::{Entry, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Key, Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::engine::MethodAt;
+use crate::trampoline::public_method;
 
 /// A hooked property as an object's class holds it, what
 /// `zend_get_property_offset` answers `ZEND_HOOKED_PROPERTY_OFFSET` and
@@ -886,42 +886,16 @@ pub(crate) fn parent_hook_trampolines() -> Vec<(HookKind, MethodDecl, Entry)> {
                 HookKind::Get => parent_hook_get,
                 HookKind::Set => parent_hook_set,
             };
-            let method = MethodDecl {
-                function: FunctionDecl {
-                    name: Name(
-                        format!("$::{}", kind.name())
-                            .into_bytes()
-                            .into_boxed_slice(),
-                    ),
-                    parameters: match kind {
-                        HookKind::Get => Vec::new(),
-                        HookKind::Set => vec![Parameter {
-                            name: Name(b"value".as_slice().into()),
-                            ty: None,
-                            by_ref: false,
-                            prefer_ref: false,
-                            promoted: false,
-                            variadic: false,
-                            default: ParameterDefault::None,
-                            attributes: Vec::new(),
-                        }],
-                    },
-                    return_type: None,
-                    returns_by_ref: false,
-                    is_generator: false,
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    file: Name(Box::new([])),
-                    line: 0,
-                    end_line: 0,
-                    frameless: Vec::new(),
-                },
-                visibility: Visibility::Public,
-                is_instance: true,
-                is_abstract: false,
-                is_final: false,
-                tentative_return: false,
+            let parameters = match kind {
+                HookKind::Get => Vec::new(),
+                HookKind::Set => vec![parameter(b"value", None)],
             };
+            let name = format!("$::{}", kind.name());
+            let function = FunctionDecl {
+                parameters,
+                ..native_function(name.as_bytes())
+            };
+            let method = public_method(function, true);
             (kind, method, entry)
         })
         .collect()
