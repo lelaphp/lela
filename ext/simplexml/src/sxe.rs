@@ -12,6 +12,7 @@ use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_libxml::ffi::{Borrowed, Kind, Node, NodeObject, XPath};
 
@@ -1577,7 +1578,10 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Vec<(Key, Value)>, Thrown> {
-        Ok(properties(req, object)?.snapshot())
+        let table = properties(req, object)?;
+        Ok(walk::rows(req, table)
+            .map(|(key, value)| (key, value.deref()))
+            .collect())
     }
 
     fn get_properties_for(
@@ -1589,7 +1593,9 @@ impl ObjectHandlers for Handlers {
         if purpose == PropertyPurpose::Debug {
             return Ok(PropertiesFor::Standard);
         }
-        Ok(PropertiesFor::Rows(properties(req, object)?.snapshot()))
+        let table = properties(req, object)?;
+        let rows = walk::rows(req, table).map(|(key, value)| (key, value.deref()));
+        Ok(PropertiesFor::Rows(rows.collect()))
     }
 
     fn properties_overloaded(&self) -> bool {

@@ -4,6 +4,8 @@
 //! bound parameters and columns with the connector's binding callback, and
 //! the methods that start, bind and describe.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{
     ClassIterator, Instance, ObjectHandlers, OrFalse, Passed, PropertiesFor, PropertyPurpose, Raw,
     Ref, Refusals, Std, This, True, Union, Variadic,
@@ -13,6 +15,7 @@ use php_ext::call::internal_iterator;
 use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::connector::{
@@ -1337,7 +1340,12 @@ impl PDOStatement {
             for bound in old {
                 free_bound_through(req, stmt, bound)?;
             }
-            for (key, value) in input.snapshot() {
+            // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(input_params), …)`
+            // (`Z/ext/pdo/pdo_stmt.c:407`), no owner of the table taken:
+            // the argument holds it while a driver's hook converts a value.
+            let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step<bool> {
+                let key = row.key().clone();
+                let value = row.value().deref();
                 let (name, position) = match key {
                     Key::Str(name) => (Some(name.as_bytes().to_vec()), -1),
                     Key::Int(n) => (None, n),
@@ -1354,8 +1362,12 @@ impl PDOStatement {
                     is_parameter: true,
                 };
                 if !register(req, stmt, bound)? {
-                    return Ok(false);
+                    return Ok(ControlFlow::Break(false));
                 }
+                Ok(ControlFlow::Continue(()))
+            })?;
+            if let Some(answer) = walked {
+                return Ok(answer);
             }
         }
         let emulated = read(req, stmt, |s| {

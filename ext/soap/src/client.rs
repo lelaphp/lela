@@ -10,7 +10,7 @@ use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, argument_error, docref, fatal, throw_value};
 use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{
-    Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef,
+    Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef, walk,
 };
 use php_ext_libxml::ffi::{Library, Node, Save};
 
@@ -363,7 +363,10 @@ impl SoapClient {
         let soap_headers: Option<Vec<Value>> = match headers.as_ref() {
             ValueRef::Null | ValueRef::Undef => None,
             ValueRef::Array(a) => {
-                let list: Vec<Value> = a.snapshot().into_iter().map(|(_, v)| v).collect();
+                // `soap_headers = Z_ARRVAL_P(headers)` (`Z/ext/soap/soap.c:2694`):
+                // php keeps the table and reads its rows as views, as these
+                // are read under the borrowed request.
+                let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
                     let e = docref_error(req, "Invalid SOAP header");
                     return unwrapped(req, object, Err(e));
@@ -668,7 +671,9 @@ impl SoapClient {
                 set_client_slot(req, object, ClientSlot::DefaultHeaders, value)?;
             }
             ValueRef::Array(a) => {
-                let list: Vec<Value> = a.snapshot().into_iter().map(|(_, v)| v).collect();
+                // `verify_soap_headers_array(Z_ARRVAL_P(headers))`
+                // (`Z/ext/soap/soap.c:2906`) reads the rows only.
+                let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
                     let e = docref_error(req, "Invalid SOAP header");
                     return unwrapped(req, object, Err(e));
@@ -1064,7 +1069,9 @@ fn call_common(
 ) -> R<Value> {
     let mut headers = soap_headers;
     if let ValueRef::Array(defaults) = client_slot(this, ClientSlot::DefaultHeaders).as_ref() {
-        let defaults: Vec<Value> = defaults.snapshot().into_iter().map(|(_, v)| v).collect();
+        // `ZEND_HASH_FOREACH_VAL(default_headers, tmp)`
+        // (`Z/ext/soap/soap.c:2590`), read only, views of the rows.
+        let defaults: Vec<Value> = walk::rows(req, *defaults).map(|(_, v)| v.deref()).collect();
         match &mut headers {
             Some(list) => list.extend(
                 defaults
@@ -1074,11 +1081,10 @@ fn call_common(
             None => headers = Some(defaults),
         }
     }
-    let real_args: Vec<Value> = args
-        .snapshot()
-        .into_iter()
-        .map(|(_, v)| v.deref())
-        .collect();
+    // `ZEND_HASH_FOREACH_VAL(args, param)` with `ZVAL_COPY_VALUE`
+    // (`Z/ext/soap/soap.c:2609`), read only, views of the rows the argument
+    // holds.
+    let real_args: Vec<Value> = walk::rows(req, args).map(|(_, v)| v.deref()).collect();
     do_soap_call(
         req,
         this,

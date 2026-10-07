@@ -5,6 +5,7 @@
 //! class's three methods.
 
 use std::cmp::Ordering;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{ClassUnserialize, CloneObj, DebugInfo, Instance, ObjectHandlers, This, Union};
 use php_ext::attr::php_class;
@@ -12,6 +13,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{BinaryOp, numeric_string, to_long, type_name, value_name};
 use php_ext::raising::{Thrown, deprecated, fatal, throw, throw_chained, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_standard::Unserializer;
 
@@ -150,7 +152,12 @@ impl GMP {
         let Some(props) = props.as_array() else {
             return Err(throw(req, "Exception", "Could not unserialize properties"));
         };
-        for (key, value) in props.snapshot() {
+        // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
+        // (`Z/Zend/zend_API.c:1752`), no owner of the table taken: what
+        // unserializes it holds it while a deprecation reaches the program.
+        walk::foreach(req, *props, Hold::None, |req, row| -> walk::Step {
+            let key = row.key().clone();
+            let value = row.value().deref();
             let value = Owner::take(req, value);
             match key {
                 Key::Str(name) => {
@@ -167,7 +174,8 @@ impl GMP {
                     object.set_row(req, &Key::Int(n), value)?;
                 }
             }
-        }
+            Ok(ControlFlow::Continue(()))
+        })?;
         Ok(())
     }
 }
@@ -538,9 +546,15 @@ fn read_custom(
     else {
         return Err(throw(req, "Exception", "Could not unserialize properties"));
     };
-    for (key, value) in props.snapshot() {
+    // `object_properties_load`'s `ZEND_HASH_FOREACH_KEY_VAL(properties, …)`
+    // (`Z/Zend/zend_API.c:1752`), no owner of the table taken: what
+    // unserializes it holds it while a deprecation reaches the program.
+    walk::foreach(req, props, Hold::None, |req, row| -> walk::Step {
+        let key = row.key().clone();
+        let value = row.value().deref();
         let value = Owner::take(req, value);
         object.set_row(req, &key, value)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }

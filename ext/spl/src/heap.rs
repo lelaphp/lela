@@ -8,12 +8,15 @@
 //! body serves a heap and a queue where the two differ only by the
 //! payload's kind, so a queue's method is the heap's `implementation =`.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{CloneObj, ExtensionBuilder, ObjectHandlers, Std, This, True};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, to_long};
 use php_ext::raising::{Thrown, throw};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::{Countable, Iterator};
@@ -980,13 +983,13 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
     if !queue {
         consistent(req, this, true)?;
     }
-    let invalid = |req: &mut Request| {
+    let invalid = |req: &mut Request| -> Thrown {
         let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
-        Err(throw(
+        throw(
             req,
             "Exception",
             &format!("Invalid serialization data for {class} object"),
-        ))
+        )
     };
     let props = data.get(&Key::Int(0)).map(|v| v.deref());
     let state = data.get(&Key::Int(1)).map(|v| v.deref());
@@ -994,10 +997,10 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
         props.and_then(|p| p.as_array().copied()),
         state.and_then(|s| s.as_array().copied()),
     ) else {
-        return invalid(req);
+        return Err(invalid(req));
     };
     if data.len() != 2 {
-        return invalid(req);
+        return Err(invalid(req));
     }
     crate::load_members(req, this, &Value::array(props))?;
     let flags = state.find(b"flags").and_then(|f| f.deref().as_int());
@@ -1005,30 +1008,35 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
         .find(b"heap_elements")
         .and_then(|e| e.deref().as_array().copied());
     let (Some(mut flags), Some(elements)) = (flags, elements) else {
-        return invalid(req);
+        return Err(invalid(req));
     };
     if queue {
         flags &= SplPriorityQueue::EXTR_BOTH;
         if flags == 0 {
-            return invalid(req);
+            return Err(invalid(req));
         }
     } else if flags != 0 {
-        return invalid(req);
+        return Err(invalid(req));
     }
     with(req, this, |h| h.flags = flags)?;
-    for (_, value) in elements.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(heap_elements), val)`
+    // (`Z/ext/spl/spl_heap.c:1141`), no owner of the table taken: the
+    // argument holds it while an insert serves the class's `compare`.
+    walk::foreach(req, elements, Hold::None, |req, row| -> walk::Step {
+        let value = row.value().deref();
         let elem = if queue {
             let Some(pair) = value.as_array().copied().filter(|p| p.len() == 2) else {
-                return invalid(req);
+                return Err(invalid(req));
             };
             let (Some(d), Some(p)) = (pair.find(b"data"), pair.find(b"priority")) else {
-                return invalid(req);
+                return Err(invalid(req));
             };
             (crate::copied(req, d), crate::copied(req, p))
         } else {
             (crate::copied(req, value), Value::null())
         };
         heap_insert(req, this, elem)?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(())
 }

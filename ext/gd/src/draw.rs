@@ -2,11 +2,14 @@
 //! that hand one image and its numbers to libgd and answer `true`, the
 //! colour lookups, and the bitmap-font text.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::{False, Instance, OrFalse, True, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{ColorOp, Copy, Draw, Font, Point};
@@ -38,9 +41,14 @@ fn imagesetstyle(
         return Err(arg_value_error(req, 2, "not be empty"));
     }
     let mut styles = Vec::with_capacity(style.len());
-    for (_, item) in style.snapshot() {
+    // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(styles), item)`
+    // (`Z/ext/gd/gd.c:642`), no owner of the table taken: the argument
+    // holds it while `zval_get_long` reaches a diagnostic's handler.
+    walk::foreach(req, style, Hold::None, |req, row| -> walk::Step {
+        let item = row.value().deref();
         styles.push(int(to_long(req, &item)?));
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     im.set_style(&mut styles);
     Ok(true)
 }
