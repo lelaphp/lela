@@ -16254,11 +16254,10 @@ fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(),
         // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, key, val)`
         // (`Z/Zend/zend_vm_def.h:6369`), no owner of the table taken: the
         // operand holds it while an update releases what it overwrites. A
-        // reference's count is read as php reads it, less the walk's own
-        // owner of the row.
+        // reference's count is read as php reads it.
         walk::foreach(req, source, Hold::None, |req, row| -> walk::Step {
             let value = match row.value().as_php_ref() {
-                Some(cell) if row.refcount() == 1 => cell.get(),
+                Some(cell) if row.value().refcount() == 1 => cell.get(),
                 _ => *row.value(),
             };
             req.addref(&value);

@@ -175,32 +175,24 @@ fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> 
     let values = std::iter::once(value).chain(values.0);
     let mut out = Vec::new();
     for value in values {
-        dump(req, &mut out, &value, 0, 1)?;
+        dump(req, &mut out, &value, 1)?;
     }
     req.write(&out);
     Ok(())
 }
 
 /// `zval_object_property_dump`'s value: the row's value dumped, its
-/// count read less the walk's owner of it ([`walk_owners`]), or for a typed property
-/// nothing has written `uninitialized(T)` at the indent the value would
-/// take.
+/// count read as php reads it, or for a typed property nothing has
+/// written `uninitialized(T)` at the indent the value would take.
 fn dump_row(req: &mut Request, out: &mut Vec<u8>, row: &Row, level: usize) -> Result<(), Thrown> {
     match row.uninitialized() {
-        None => dump(req, out, row.value(), walk_owners(row), level),
+        None => dump(req, out, row.value(), level),
         Some(ty) => {
             pad(out, level);
             out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
             Ok(())
         }
     }
-}
-
-/// The owners of a row's value the walk lending it holds beyond what
-/// php's walk holds, which a count printed leaves out: the walk's own
-/// for the step ([`Row::refcount`]).
-fn walk_owners(row: &Row) -> u32 {
-    row.value().refcount().saturating_sub(row.refcount())
 }
 
 fn pad(out: &mut Vec<u8>, level: usize) {
@@ -210,9 +202,7 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 }
 
 /// `php_debug_zval_dump` (`Z/ext/standard/var.c:301`), one arm per
-/// type as php's switch has them, each count read as php reads it, less
-/// the `walked` owners of `value` a walk holds for its step where php's
-/// holds none. An array is held while its rows are walked, so an
+/// type as php's switch has them, each count read as php reads it. An array is held while its rows are walked, so an
 /// element's `__debugInfo` that frees it through another name
 /// (GH-19801) leaves it standing until the walk is done:
 ///
@@ -234,16 +224,10 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 /// }
 /// ```
 #[allow(clippy::too_many_lines)]
-fn dump(
-    req: &mut Request,
-    out: &mut Vec<u8>,
-    value: &Value,
-    walked: u32,
-    level: usize,
-) -> Result<(), Thrown> {
+fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
     call_stack_end(req)?;
-    let refcount = |value: &Value| value.refcount().saturating_sub(walked);
+    let refcount = |value: &Value| value.refcount();
     pad(out, level);
     match value.as_ref() {
         ValueRef::Bool(false) => out.extend_from_slice(b"bool(false)\n"),
@@ -300,7 +284,7 @@ fn dump(
                             out.extend_from_slice(b"\"]=>\n");
                         }
                     }
-                    dump(req, out, row.value(), walk_owners(row), level + 2)?;
+                    dump(req, out, row.value(), level + 2)?;
                     Ok(ControlFlow::Continue(()))
                 })?;
             if let Guarded::Recursive = walked {
@@ -415,7 +399,7 @@ fn dump(
         ValueRef::Reference(cell) => {
             let count = refcount(value);
             out.extend_from_slice(format!("reference refcount({count}) {{\n").as_bytes());
-            dump(req, out, &cell.get(), 0, level + 2)?;
+            dump(req, out, &cell.get(), level + 2)?;
             pad(out, level);
             out.extend_from_slice(b"}\n");
         }

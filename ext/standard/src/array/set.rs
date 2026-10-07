@@ -26,7 +26,7 @@ use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk, zend_sort};
 
 use super::sort::key_value;
-use super::{key_copy, row_copied, user_compare};
+use super::{copied, key_copy, user_compare};
 
 /// What a diff or an intersection compares values with.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -267,12 +267,11 @@ fn by_key(
     // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(args[0]), h, key, val)`
     // (`Z/ext/standard/array.c:5155`, `:5551`), no owner of the table taken: the
     // argument holds it while a comparison serves the callback or
-    // `__toString`. A reference read as held by one owner is php's count,
-    // less the walk's own owner of the row (`Row::refcount`).
+    // `__toString`. A reference read as held by one owner is php's count.
     let walked = walk::foreach(req, arrays[0], Hold::None, |req, row| -> walk::Step {
         let key = row.key();
         let value = match row.value().as_ref() {
-            ValueRef::Reference(reference) if row.refcount() == 1 => reference.get(),
+            ValueRef::Reference(reference) if row.value().refcount() == 1 => reference.get(),
             _ => *row.value(),
         };
         let mut keep = true;
@@ -733,7 +732,7 @@ fn array_diff(
         if exclude.contains(&crate::tmp_string_bytes(req, &row.value().deref())?) {
             return Ok(ControlFlow::Continue(()));
         }
-        let value = row_copied(req, row);
+        let value = copied(req, *row.value());
         let key = key_copy(req, row.key());
         out.set(req, key, value)?;
         Ok(ControlFlow::Continue(()))

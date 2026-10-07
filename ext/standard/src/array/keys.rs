@@ -23,7 +23,7 @@ use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 use super::sort::key_value;
-use super::{copied, key_copy, returned, row_copied};
+use super::{copied, key_copy, returned};
 
 /// The comparison a search makes: `fast_is_identical_function` under
 /// `$strict`, `fast_equal_check_function` otherwise, the element's
@@ -384,7 +384,7 @@ fn array_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, T
     // `zend_array_to_list`'s `ZEND_HASH_FOREACH_VAL` (`Z/Zend/zend_hash.c:2543`),
     // no owner of the table taken: the argument holds it.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-        let value = row_copied(req, row);
+        let value = copied(req, *row.value());
         out.append(req, value)?;
         Ok(ControlFlow::Continue(()))
     })?;
@@ -561,7 +561,7 @@ fn array_change_key_case(
                 Key::Str(PhpString::new(req, &folded)?.hand_on_unmigrated())
             }
         };
-        let value = row_copied(req, row);
+        let value = copied(req, *row.value());
         out.set(req, key, value)?;
         Ok(ControlFlow::Continue(()))
     })?;

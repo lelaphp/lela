@@ -1463,22 +1463,23 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
     dump_held(req, out, value, level, Held::Viewed);
 }
 
-/// Whether the walk printing a value holds an owner of it beside the
-/// names php's own table would count: a row the walk took an owner of
-/// to keep it alive across user code, where php held the table instead.
+/// Whether `var_dump` holds an owner of the value it prints beside the
+/// names php's own table would count: a member of an object it took an
+/// owner of to keep it alive across user code ([`MemberRow`]), where
+/// php's walk holds none.
 #[derive(Clone, Copy)]
 enum Held {
     Viewed,
     Owned,
 }
 
-/// [`dump`] over a value the walk may hold an owner of itself, which
+/// [`dump`] over a value `var_dump` may hold an owner of itself, which
 /// php's `COMMON` never sees and so does not count.
 fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, held: Held) {
     // `COMMON`: php's `&` stands before the value a shared cell holds and
     // before nothing else, so a cell one name holds prints as the value
-    // does; a cell is never in a cell, so this is read once, less the
-    // walk's own owner where it holds one.
+    // does; a cell is never in a cell, so this is read once, less
+    // `var_dump`'s own owner where it holds one.
     let walk = match held {
         Held::Viewed => 0,
         Held::Owned => 1,
@@ -1531,9 +1532,7 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
                     out.extend_from_slice(b"\"]=>\n");
                 }
             }
-            // The walk owns the row for the step, which `COMMON` does not
-            // count.
-            dump_held(req, out, row.value(), level + 2, Held::Owned);
+            dump(req, out, row.value(), level + 2);
             Ok(ControlFlow::Continue(()))
         });
         match walked {
@@ -2075,8 +2074,7 @@ fn dump_rows(
             return Ok(ControlFlow::Continue(()));
         }
         dump_row_key(req, out, level, row.key());
-        // The walk owns the row for the step, which `COMMON` does not count.
-        dump_held(req, out, row.value(), level + 2, Held::Owned);
+        dump(req, out, row.value(), level + 2);
         Ok(ControlFlow::Continue(()))
     });
     match walked {

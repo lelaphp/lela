@@ -269,6 +269,25 @@ fn extract(
 /// e,2,new
 /// ```
 ///
+/// A row made a reference is held by the array and by the variable, and
+/// by nothing of the walk's, so a destructor its binding serves reads
+/// php's count of it (#2159):
+///
+/// ```php
+/// class D { function __destruct() { debug_zval_dump($GLOBALS['arr']); } }
+/// $a = new D;
+/// $arr = ['a' => str_repeat('x', 2)];
+/// extract($arr, EXTR_REFS);
+/// ```
+/// ```expect
+/// array(1) refcount(2){
+///   ["a"]=>
+///   reference refcount(2) {
+///     string(2) "xx" refcount(1)
+///   }
+/// }
+/// ```
+///
 /// ```php
 /// class F { function __destruct() { $GLOBALS['keep'] = $GLOBALS['crr']; $GLOBALS['crr'] = 5; echo "f,"; } }
 /// $f = new F; $crr = ['f' => 1, 'g' => 2];

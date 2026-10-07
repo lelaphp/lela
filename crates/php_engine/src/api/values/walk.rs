@@ -56,7 +56,7 @@ use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{
     ArrayIter, Held, HeldProperties, Kept, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString,
-    Value,
+    Value, View,
 };
 
 /// What a walk's body answers for one row: `Continue` to go on to the
@@ -258,7 +258,7 @@ pub enum Unwritten {
 ///
 /// `hold` is php's native's choice ([`Hold`]). Under [`Hold::Owner`] the
 /// walk holds one owner of the table until it ends, given up as php's
-/// native gives it up ([`GiveUp`]), and lends each row as a view, which the
+/// `zval_ptr_dtor` gives it up, and lends each row as a view, which the
 /// table it holds keeps. Under [`Hold::None`] it holds none, as php's
 /// holds none, and pins each row it lends: where code the body runs
 /// gives up the row's last owner, its free, and an object's destructor
@@ -415,10 +415,12 @@ pub fn foreach_guarded<B>(
 /// `zend_std_get_properties_for`'s `GC_TRY_ADDREF` takes, so a write
 /// the body's code makes to a dynamic property separates the table and
 /// the walk reads the rows it began with, while a declared row is read
-/// in its slot as it stands and the object is pinned for the walk, as
-/// [`foreach`] pins it; the class's debug table by its owner; and rows
-/// the class answers by an owner of each, so a row the body's code
-/// gives up is still read. A typed property nothing has written is no
+/// in its slot as it stands, pinned for its step, and the object is
+/// pinned for the walk, as [`foreach`] pins them; the class's debug
+/// table by its owner; and rows the class answers by an owner of each.
+/// A dynamic row, a row of the debug table and a row the class answered
+/// are lent as views, which what the properties hold keeps, as php's
+/// walk takes no owner of them. A typed property nothing has written is no
 /// row, or under [`Unwritten::Shown`] a row whose
 /// [`Row::uninitialized`] names its type, as `unwritten` says. The walk
 /// takes nothing beyond each step's row and gives the
@@ -484,14 +486,14 @@ pub fn properties<B>(
                     (Kept::Uninitialized(_), Unwritten::Skipped) => continue,
                 };
                 let mut row = Row {
-                    key: Owner::take(req, (**key).clone()),
-                    value: Owner::take(req, value),
+                    key: Keep::View((**key).clone()),
+                    value: Keep::View(value),
                     at: At::Lent,
                     watch: Watch::Held,
                     uninitialized,
                 };
                 let step = body(req, &mut row);
-                row.give_up(req);
+                row.let_go(req);
                 if let ControlFlow::Break(broke) = step? {
                     return Ok(Some(broke));
                 }
@@ -616,7 +618,7 @@ pub struct ObjectTable {
 /// keeps, which its next `get_properties` gives up: read under the
 /// borrowed request ([`rows`]), or held one owner each by a [`foreach`]
 /// walk, whatever the hold, since no table of theirs is there to hold,
-/// watch or mark.
+/// watch or mark, and lent as views of what the walk holds.
 #[derive(Debug, Clone)]
 pub struct BuiltRows(Box<[(Key, Value)]>);
 
@@ -825,7 +827,7 @@ fn foreach_steps<B>(
         };
         pos = found.saturating_add(1);
         let step = body(req, &mut row);
-        row.give_up(req);
+        row.let_go(req);
         if let ControlFlow::Break(broke) = step? {
             return Ok(Some(broke));
         }
@@ -834,8 +836,8 @@ fn foreach_steps<B>(
 }
 
 /// The row a [`foreach`] walk lends next, at or after `pos` below `end`,
-/// with its position, each of its key and value one owner more for the
-/// step; `None` past the last.
+/// with its position, its key and value kept for the step as [`Lent::of`]
+/// says; `None` past the last.
 #[inline(never)]
 fn next_lent(
     req: &Request,
@@ -851,9 +853,10 @@ fn next_lent(
             .map(|(found, key, value, at)| (found, key, value, at, None)),
     };
     let (found, key, value, at, uninitialized) = found?;
+    let lent = Lent::of(watch, at);
     let row = Row {
-        key: Owner::take(req, key),
-        value: Owner::take(req, Value::of_zval(value)),
+        key: Keep::lent(req, key, lent),
+        value: Keep::lent(req, Value::of_zval(value), lent),
         at,
         watch,
         uninitialized,
@@ -861,15 +864,135 @@ fn next_lent(
     Some((found, row))
 }
 
+/// How a callback walk keeps the rows it lends for their step: php's
+/// native's choice where it takes an owner, and otherwise what the walk
+/// holds decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lent {
+    /// One owner of the key and of the value, given up as the step
+    /// ends: the live walk, since `php_array_walk` copies the row into
+    /// its call's arguments.
+    Owned,
+    /// A pin ([`Pin`]): nothing the walk holds keeps the row, and php's
+    /// native takes no owner of it.
+    Pinned,
+    /// A view: what the walk holds keeps the row, the table under
+    /// [`Hold::Owner`], an immutable table, or the rows a class built,
+    /// which the walk or the reader holds one owner of each.
+    Viewed,
+}
+
+impl Lent {
+    /// How a [`foreach`] walk keeps a row standing `at`, whose table it
+    /// knows stands by `watch`: a bucket of a table the walk holds or
+    /// that is immutable, and a row a class built, as views; a bucket of
+    /// a table the walk holds nothing of pinned, and so is a declared
+    /// slot always, since neither a hold nor an immutable table is of the
+    /// object's slots, which php's `IS_INDIRECT` reads as they stand.
+    fn of(watch: Watch, at: At) -> Lent {
+        match (at, watch) {
+            (At::Slot { .. }, _) | (At::Bucket(..), Watch::Iterator(_)) => Lent::Pinned,
+            (At::Bucket(..), Watch::Held | Watch::Immutable) | (At::Lent, _) => Lent::Viewed,
+        }
+    }
+}
+
+/// A walk's pin over a row's key or value, kept for its step where
+/// nothing else the walk holds keeps the row and php's native takes no
+/// owner of it (design §4.4, #2159): no count, so the count the program
+/// reads is php's, and where the row's last owner goes during the step
+/// its free, and an object's destructor with it, waits for the pin to be
+/// let go ([`php_heap::Heap::pin_block`]). Taken from a view and let go
+/// by the walk on every way out, never by a `Drop` (design §5.1). Never a
+/// way to own: nothing reads it as a count, and the body hands a sink an
+/// owner it takes of the value, never the pin.
+#[must_use = "a pin is let go with Pin::let_go"]
+#[derive(Debug)]
+struct Pin<T: View> {
+    view: T,
+    /// Whether this pin set the block's, which a pin taken over a block
+    /// pinned already did not: the pin that set it, let go after this
+    /// one, keeps the block.
+    set: bool,
+}
+
+impl<T: View> Pin<T> {
+    /// A pin over what `view` names.
+    fn take(view: T) -> Pin<T> {
+        let set = php_heap::Heap::pin_block(view.counted().to_zval());
+        Pin { view, set }
+    }
+
+    /// The pin let go: what names the view freed here where its last
+    /// owner went while the pin stood.
+    fn let_go(self, req: &mut Request) {
+        if self.set {
+            req.unpin_block(self.view.counted());
+        }
+    }
+}
+
+/// A row's key or value as the walk keeps it for the step ([`Lent`]).
+#[derive(Debug)]
+enum Keep<T: View> {
+    Owned(Owner<T>),
+    Pinned(Pin<T>),
+    View(T),
+}
+
+impl<T: View> Keep<T> {
+    /// `view` kept as `lent` says.
+    fn lent(req: &Request, view: T, lent: Lent) -> Keep<T> {
+        match lent {
+            Lent::Owned => Keep::Owned(Owner::take(req, view)),
+            Lent::Pinned => Keep::Pinned(Pin::take(view)),
+            Lent::Viewed => Keep::View(view),
+        }
+    }
+
+    /// How the row is kept.
+    fn lent_as(&self) -> Lent {
+        match self {
+            Keep::Owned(_) => Lent::Owned,
+            Keep::Pinned(_) => Lent::Pinned,
+            Keep::View(_) => Lent::Viewed,
+        }
+    }
+
+    /// The view.
+    fn get(&self) -> &T {
+        match self {
+            Keep::Owned(owner) => owner,
+            Keep::Pinned(pin) => &pin.view,
+            Keep::View(view) => view,
+        }
+    }
+
+    /// What the walk took for the step given back: an owner as
+    /// `zval_ptr_dtor_nogc` gives one up, since php's walk holds none
+    /// and so leaves no possible root of the cycle collector; a pin let
+    /// go.
+    fn let_go(self, req: &mut Request) {
+        match self {
+            Keep::Owned(owner) => owner.give_up_nogc(req),
+            Keep::Pinned(pin) => pin.let_go(req),
+            Keep::View(_) => {}
+        }
+    }
+}
+
 /// One row a callback walk lends its body ([`foreach`], [`live`]): the
 /// key and the value as the table held them when the walk stepped onto
-/// them, each owned by the walk for the step, so a body whose code
-/// unsets the row can still read it, and where the row stands, so the
-/// body can make it a reference in place ([`Row::make_ref`]).
+/// them, each kept alive for the step, owned, pinned or held by what the
+/// walk holds, so a body whose code unsets the row can still read it,
+/// and where the row stands, so the body can make it a reference in
+/// place ([`Row::make_ref`]). A body that keeps the key or the value past
+/// the step, or hands either to a sink, takes an owner of its own
+/// ([`Owner::take`]).
 #[derive(Debug)]
 pub struct Row {
-    key: Owner<Key>,
-    value: Owner<Value>,
+    key: Keep<Key>,
+    value: Keep<Value>,
     at: At,
     /// How the row knows the table it is in still stands.
     watch: Watch,
@@ -949,13 +1072,13 @@ impl Row {
     /// The row's key, as the table held it.
     #[must_use]
     pub fn key(&self) -> &Key {
-        &self.key
+        self.key.get()
     }
 
     /// The row's value, a reference where the table holds one.
     #[must_use]
     pub fn value(&self) -> &Value {
-        &self.value
+        self.value.get()
     }
 
     /// Where the row stands for a typed property nothing has written,
@@ -968,26 +1091,13 @@ impl Row {
         self.uninitialized.as_deref()
     }
 
-    /// The value's refcount as php's walk reads it, `Z_REFCOUNT_P` over
-    /// the bucket: the owners besides the walk's own for the step, which
-    /// php's walk does not take. One for what carries no count, as
-    /// [`Value::refcount`] answers.
-    #[must_use]
-    pub fn refcount(&self) -> u32 {
-        let count = self.value.refcount();
-        if self.value.is_refcounted() {
-            count.saturating_sub(1)
-        } else {
-            count
-        }
-    }
-
     /// The row made a reference in place, php's `ZVAL_MAKE_REF` over the
     /// bucket: the reference the table holds there already, or a new one
     /// holding the value, written into the table as it stands, shared or
     /// not, as php writes it, and into a typed property's slot with the
     /// property as its type source (`ZEND_REF_ADD_TYPE_SOURCE`). From
-    /// here the walk owns the reference for the step. Asked before the
+    /// here the walk keeps the reference for the step as it kept the
+    /// value. Asked before the
     /// body runs any code of the program, as php's walk makes it before
     /// its call; once that code has moved the row, the answer is the
     /// `InternalError` it is, never a write elsewhere. A row of a
@@ -995,7 +1105,7 @@ impl Row {
     /// as no php native's walk writes one, and is that `InternalError`
     /// too.
     pub fn make_ref(&mut self, req: &mut Request) -> Result<PhpRef, Thrown> {
-        if let Some(cell) = self.value.as_php_ref() {
+        if let Some(cell) = self.value().as_php_ref() {
             return Ok(*cell);
         }
         let moved = |req: &mut Request| {
@@ -1020,7 +1130,7 @@ impl Row {
                 && holder.is_none_or(|(holder, held)| holder.get().as_object() == Some(&held)) =>
             {
                 let at = owner.heap().slot_ref(slot);
-                if let Some(at) = at.filter(|at| at.read().is_same_value(self.value.to_zval()))
+                if let Some(at) = at.filter(|at| at.read().is_same_value(self.value().to_zval()))
                     && let Some((typed, name)) = req.slot_typed_property(owner.class(), slot)
                 {
                     req.fetch_typed_slot_ref(at, &typed, &name)?;
@@ -1033,32 +1143,33 @@ impl Row {
             }
             At::Bucket(..) | At::Slot { .. } | At::Lent => None,
         };
-        let Some(place) = place.filter(|place| place.read().is_same_value(self.value.to_zval()))
+        let Some(place) = place.filter(|place| place.read().is_same_value(self.value().to_zval()))
         else {
             return Err(moved(req));
         };
-        let cell = req.reference(*self.value)?;
+        let cell = req.reference(*self.value())?;
         place.write(cell.as_value().to_zval());
         Ok(self.lend(req, cell))
     }
 
     /// The reference `cell`, which the row's place holds from here, lent
-    /// in place of the value it holds: the walk's owner of the value
-    /// given up for one of the reference.
+    /// in place of the value it holds, kept as the value was: the
+    /// reference taken first, then the value let go, which the reference
+    /// holds.
     fn lend(&mut self, req: &mut Request, cell: PhpRef) -> PhpRef {
-        let owned = Owner::take(req, cell.as_value());
-        let value = std::mem::replace(&mut self.value, owned);
-        value.give_up_nogc(req);
+        let kept = Keep::lent(req, cell.as_value(), self.value.lent_as());
+        let value = std::mem::replace(&mut self.value, kept);
+        value.let_go(req);
         cell
     }
 
-    /// The walk's owners of the row given up as the step ends, as
-    /// `zval_ptr_dtor_nogc` gives one up: php's walk holds no owner of a
-    /// row, so giving the walk's up leaves no possible root of the cycle
-    /// collector where php leaves none.
-    fn give_up(self, req: &mut Request) {
-        self.value.give_up_nogc(req);
-        self.key.give_up_nogc(req);
+    /// What the walk kept of the row given back as the step ends
+    /// ([`Keep::let_go`]): the value first and then the key, so a key
+    /// and a value that are one string are kept by the pin that set it
+    /// until both are let go.
+    fn let_go(self, req: &mut Request) {
+        self.value.let_go(req);
+        self.key.let_go(req);
     }
 }
 
@@ -1153,7 +1264,7 @@ fn steps<B>(
             return Ok(None);
         };
         let step = body(req, &mut row);
-        row.give_up(req);
+        row.let_go(req);
         let thrown = match step {
             Ok(ControlFlow::Break(broke)) => return Ok(Some(broke)),
             Ok(ControlFlow::Continue(())) if !req.is_pending() => continue,
@@ -1194,8 +1305,8 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
         let next = table.live_from(next).map_or(next, |(next, _, _)| next);
         req.heap_mut().iterator_set_pos(at, next);
         return Ok(Some(Row {
-            key: Owner::take(req, Key::of(key)),
-            value: Owner::take(req, Value::of_zval(value)),
+            key: Keep::lent(req, Key::of(key), Lent::Owned),
+            value: Keep::lent(req, Value::of_zval(value), Lent::Owned),
             at: At::Bucket(table, found),
             watch: Watch::Iterator(at),
             uninitialized: None,
@@ -1263,8 +1374,8 @@ fn object_row(
         TableRow::Entry(key) => (Key::of(key), At::Bucket(table.table(), found - declared)),
     };
     Ok(Some(Row {
-        key: Owner::take(req, key),
-        value: Owner::take(req, Value::of_zval(value)),
+        key: Keep::lent(req, key, Lent::Owned),
+        value: Keep::lent(req, Value::of_zval(value), Lent::Owned),
         at,
         watch: Watch::Iterator(iterator),
         uninitialized: None,

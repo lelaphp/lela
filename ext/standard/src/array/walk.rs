@@ -20,7 +20,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
 use super::pointer::ArrayOrObject;
 use super::sort::key_value;
-use super::{key_copy, row_copied};
+use super::{copied, key_copy};
 
 /// `array_walk(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
 /// php's `php_array_walk` (`Z/ext/standard/array.c:1438`):
@@ -544,7 +544,7 @@ fn array_filter(
     // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(array), num_key, string_key,
     // operand)` (`Z/ext/standard/array.c:6620`), no owner of the table
     // taken: the argument holds it while the callback runs. A row kept is
-    // taken as `zval_add_ref` takes it, the walk's own owner not counted.
+    // taken as `zval_add_ref` takes it.
     let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let operand = *row.value();
         let keep = match &callback {
@@ -562,7 +562,7 @@ fn array_filter(
             None => truthy(req, &operand.deref()),
         };
         if keep {
-            let value = row_copied(req, row);
+            let value = copied(req, *row.value());
             let key = key_copy(req, row.key());
             out.set(req, key, value)?;
         }

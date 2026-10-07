@@ -3,7 +3,9 @@
 //! row the body broke at and at one it threw from through `?`, so the
 //! table is freed where the program lets it go, and a guarded walk
 //! leaves the table unmarked; a live walk's row stands for its step
-//! whatever the step's code does to the table.
+//! whatever the step's code does to the table, and so does a pinned
+//! row of a foreach walk holding nothing, whose free waits for the step's
+//! end.
 
 use std::ops::ControlFlow;
 
@@ -158,6 +160,32 @@ fn live_reads(
     PhpString::new(req, read.as_bytes())
 }
 
+/// `foreach_takes(array &$array, callable $f): void`: a foreach walk
+/// holding nothing that calls `$f` with each row's key, then takes an
+/// owner of the row's value, prints `read` and what it holds, an object
+/// as `object`, and gives the owner up.
+#[php_function]
+fn foreach_takes(req: &mut Request, array: Ref<PhpArray>, f: Callable) -> Result<(), Thrown> {
+    let table = table(req, &array)?;
+    walk::foreach(req, table, Hold::None, |req, row| -> walk::Step {
+        let key = match row.key() {
+            Key::Int(n) => Value::int(*n),
+            Key::Str(s) => Value::string(*s),
+        };
+        let answer = call(req, &f, &[key])?;
+        answer.give_up(req);
+        let value = Owner::take(req, *row.value());
+        let shown = match value.as_object() {
+            Some(_) => "object".to_owned(),
+            None => String::from_utf8_lossy(value.as_str_bytes().unwrap_or_default()).into_owned(),
+        };
+        req.write(format!("read {shown} ").as_bytes());
+        value.give_up(req);
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(())
+}
+
 /// `object_rows(object &$o, callable $f, bool $owner): string`: a
 /// foreach walk over the object's property table that calls `$f` with
 /// each row's key and then reads the row's value, which `$f` may have
@@ -228,6 +256,7 @@ fn walks() -> Extension {
             guarded_throws::declared(),
             guarded::declared(),
             foreach_calls::declared(),
+            foreach_takes::declared(),
             live_reads::declared(),
             object_rows::declared(),
             object_guarded::declared(),
@@ -280,8 +309,8 @@ fn a_foreach_walk_gives_back_what_it_took_on_every_way_out() {
 /// row the callback unsets ahead is not visited and one it rewrites in
 /// place is read as it now is, while under [`Hold::Owner`] the write
 /// separates the table and the walk reads the rows it began with. Each
-/// step's row is the walk's own, so the native reads the row it was
-/// lent after the callback unsets it.
+/// step's row is kept for the step, pinned or held with the table, so
+/// the native reads the row it was lent after the callback unsets it.
 #[test]
 fn a_foreach_walk_reads_the_rows_as_they_stand_where_it_holds_nothing() {
     let script = |owner: &str| {
@@ -441,4 +470,30 @@ fn a_guarded_walk_over_an_object_marks_its_table() {
     );
     assert_eq!(String::from_utf8_lossy(&served.stdout), "inside inside\n");
     assert_eq!(served.fatal, None);
+}
+
+/// A row a foreach walk holding nothing lends is pinned for its step, so
+/// one the callback frees by unsetting it, its last owner, is not freed
+/// then: the native takes an owner of it after the callback, which is
+/// the row's first owner again, and gives it up, and the free, with the
+/// object's destructor, waits for the step's end.
+/// The callback's string of the row's size takes no
+/// slot the row held, and no row's count shows the pin: the leak sensor
+/// is armed and nothing is left.
+#[test]
+fn a_row_freed_during_its_own_step_is_freed_as_the_step_ends() {
+    let served = armed().serve_capture(
+        "<?php class D { function __destruct() { echo 'gone '; } }\n\
+         function s($c) { return $c . PHP_INT_MAX; }\n\
+         $a = [new D, s('v')];\n\
+         foreach_takes($a, function ($k) { global $a; unset($a[$k]); echo 'unset '; $GLOBALS['y'] = s('z'); });\n\
+         echo $a === [] ? 'emptied' : 'not emptied', \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "unset read object gone unset read v9223372036854775807 emptied\n"
+    );
+    assert_eq!(served.fatal, None);
+    assert_eq!(served.exit_code, 0);
 }

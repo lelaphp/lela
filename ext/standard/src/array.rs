@@ -15,7 +15,7 @@ use php_ext::call::call;
 use php_ext::coerce::{compare, to_double, to_long, to_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref};
 use php_ext::request::Request;
-use php_ext::values::walk::{self as rows, Hold, Row};
+use php_ext::values::walk::{self as rows, Hold};
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, zend_sort};
 
 use constants::{
@@ -125,18 +125,6 @@ fn copied(req: &Request, value: Value) -> Value {
     let value = match value.as_ref() {
         ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
         _ => value,
-    };
-    req.addref(&value);
-    value
-}
-
-/// [`copied`] over a row a foreach walk lends: the reference followed
-/// where php's walk reads it held by one owner, the walk's own for the
-/// step not counted ([`Row::refcount`]).
-fn row_copied(req: &mut Request, row: &Row) -> Value {
-    let value = match row.value().as_ref() {
-        ValueRef::Reference(reference) if row.refcount() == 1 => reference.get(),
-        _ => *row.value(),
     };
     req.addref(&value);
     value
@@ -275,9 +263,8 @@ fn array_merge(
         // taken: the argument holds it while an update's release serves a
         // destructor.
         rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
-            // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`, the
-            // walk's own owner not counted.
-            let value = row_copied(req, row);
+            // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`.
+            let value = copied(req, *row.value());
             match row.key() {
                 Key::Str(name) => {
                     req.addref(&Value::string(*name));
@@ -596,13 +583,13 @@ fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray
     // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(array), num_key, str_key, val)`
     // (`Z/ext/standard/array.c:4993`), no owner of the table taken: the
     // argument holds it while a value's `__toString` runs. A reference is
-    // read as held by one owner less the walk's own (`Row::refcount`).
+    // read as held by one owner as php reads its count.
     let walked = rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
         let bytes = crate::string::string_bytes(req, row.value())?;
         if !seen.insert(bytes) {
             return Ok(ControlFlow::Continue(()));
         }
-        let value = row_copied(req, row);
+        let value = copied(req, *row.value());
         let key = row.key().clone();
         if let Key::Str(s) = &key {
             req.addref(&Value::string(*s));
