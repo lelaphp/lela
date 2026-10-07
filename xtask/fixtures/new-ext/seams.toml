@@ -52,7 +52,7 @@ text = "Extension state is request-scoped or immutable; no lock or cell in ext/*
 id = "unsafe.homes"
 allow = ["php_heap", "ext/*/src/ffi/", "php_jit::table::code", "php_jit::enter"]
 adr = "0006"
-text = "unsafe is permitted in four places; see design §4.1."
+text = "unsafe is permitted only in the homes this rule names; see design §4.1."
 
 [[rule]]
 id = "lints.no-panic"

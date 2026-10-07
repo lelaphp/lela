@@ -1,6 +1,17 @@
 # dax-php
 
-dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Twelve crates in `crates/`, one crate per extension in `ext/`, one per host in `sapi/`, and `xtask`, the harness that measures all of it. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
+dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Its crates are in `crates/`, one per extension in `ext/`, one per host in `sapi/`, and `xtask`, the harness that measures all of it, counted below from the manifest. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
+
+<!-- computed exec cmd="cargo xtask status --section crates" inputs=seams.toml name=crates | do not edit; run computed -->
+
+| directory | crates | behind a feature |
+|---|---|---|
+| crates/ | 14 | 1 |
+| ext/ | 59 | 31 |
+| sapi/ | 8 | 0 |
+| xtask | 1 | 0 |
+
+<!-- /computed in=c949ccfc6910323294f1a908f2b7fe1ac06a4fe085ef07d489c10a5deb5e9cb4 out=fb14eb14c01780ec07b30aea3b4259844e69b1668ee08442885d4e46ad22d38d -->
 
 ## What makes the third engine special?
 
@@ -74,7 +85,7 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 ## Taste
 
-- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in seven homes, one operation per block, each with a `SAFETY` comment. `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
+- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in the homes the `unsafe.homes` rule names, one operation per block, each with a `SAFETY` comment. `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
 - Copy php's algorithm where the behaviour is observable; drop the cleverness where it is not. The floor is php's interpreter by construction; the ceiling comes from threads and whole-program LTO, not a smarter IR. If a rule here fights the task in front of you, say so loudly and get a person's sign-off before breaking it.
 
 ## The facts, computed
@@ -87,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=b650599c789eda8003b09aef7a46d3f3fcc8f719b3f3013ee964425a0a858fdd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=fd80dd2f9aefe451712b7650471e4c65f678ba652d600f8bdd2fd05faca5d2bd out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine

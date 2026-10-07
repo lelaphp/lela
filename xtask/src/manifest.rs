@@ -525,8 +525,9 @@ impl Where {
     }
 }
 
-/// The predicates of harness-design.md §4.1, ten there and `require_argv`
-/// beside them (#33), each optional in the grammar so the file parses;
+/// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]
+/// and [`Self::orphaned_qualifier`] and counts neither (#2250), each
+/// optional in the grammar so the file parses;
 /// `Manifest::parse` then holds every rule to exactly one. `unless` and
 /// `unless_pattern` qualify `deny_pattern`; `with` qualifies `deny_argv` and
 /// `require_argv`, one phrase or a list of them, a word or a command and
