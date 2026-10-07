@@ -18,7 +18,7 @@ use crate::api::values::{
     ClassId, ClosureInfo, Owner, PhpObject, PhpString, Value, ValueRef, adopted,
 };
 use crate::engine::{MethodAt, NativeMethod};
-use crate::exec::{self, CallStage, CallState};
+use crate::exec::{self, CallState};
 use crate::observer::OnThrow;
 
 use super::{ExtensionId, Link, Request, UserFunction};
@@ -367,21 +367,11 @@ impl Request {
         // constant spelled it, so the call carries no name of its own
         // and interns none into the request's memory.
         let call = CallState {
-            function,
-            name: None,
-            count: sent.len(),
-            arguments: sent,
             receiver,
             called_scope,
             closure,
             extra_named: exec::ExtraNamed::laid(self, extra_named.to_vec())?,
-            stage: CallStage::Serving,
-            frameless: false,
-            return_value: exec::ReturnValue::Used,
-            dynamic: false,
-            coerced: Vec::new(),
-            beneath: 0,
-            send_arg_by_ref: false,
+            ..CallState::serving(function, sent)
         };
         self.vm.push_call(call);
         if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self) {

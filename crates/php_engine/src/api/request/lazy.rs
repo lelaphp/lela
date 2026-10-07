@@ -305,22 +305,17 @@ impl Request {
                 &format!("Cannot make instance of internal class lazy: {name} is internal"),
             ));
         }
-        let mut at = self.class_parent(class);
-        for _ in 0..64 {
-            let Some(parent) = at else { break };
-            if internal(self, parent) {
-                let parent = self.class_name(parent);
-                return Some(throw_error(
-                    self,
-                    "Error",
-                    &format!(
-                        "Cannot make instance of internal class lazy: {name} inherits internal class {parent}"
-                    ),
-                ));
-            }
-            at = self.class_parent(parent);
-        }
-        None
+        let parent = self
+            .ancestors(class)
+            .find(|&parent| internal(self, parent))?;
+        let parent = self.class_name(parent);
+        Some(throw_error(
+            self,
+            "Error",
+            &format!(
+                "Cannot make instance of internal class lazy: {name} inherits internal class {parent}"
+            ),
+        ))
     }
 
     /// `zend_object_make_lazy` (`Z/Zend/zend_lazy_objects.c:225`): a new
@@ -840,17 +835,12 @@ impl Request {
         }
         let names = |class: ClassId| {
             let mut names: Vec<Box<[u8]>> = Vec::new();
-            let mut at = Some(class);
-            for _ in 0..64 {
-                let Some(here) = at else { break };
-                if let Some(decl) = self.class_decl(here) {
-                    for p in &decl.properties {
-                        if !names.contains(&p.name.0) {
-                            names.push(p.name.0.clone());
-                        }
+            for decl in self.lineage(class).filter_map(|here| self.class_decl(here)) {
+                for p in &decl.properties {
+                    if !names.contains(&p.name.0) {
+                        names.push(p.name.0.clone());
                     }
                 }
-                at = self.class_parent(here);
             }
             names.len()
         };

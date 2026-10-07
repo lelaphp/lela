@@ -392,6 +392,19 @@ impl Request {
             .map_or(&[][..], |record| &record.interfaces)
     }
 
+    /// The class and its parents up from it, `ce` then `ce->parent` and
+    /// on, as php's walks up a chain go, held to 64 classes so a chain
+    /// that loops cannot hold the request.
+    pub(crate) fn lineage(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
+        std::iter::successors(Some(class), move |&at| self.class_parent(at)).take(64)
+    }
+
+    /// The parents of a class up from its own, `ce->parent` and on, held
+    /// to 64 as [`Request::lineage`] is.
+    pub(crate) fn ancestors(&self, class: ClassId) -> impl Iterator<Item = ClassId> + '_ {
+        std::iter::successors(self.class_parent(class), move |&at| self.class_parent(at)).take(64)
+    }
+
     /// `ce->parent`: the linked parent of a class, none at a root; an
     /// engine's class's as startup linked it, a declared class's as it
     /// bound ([`super::Bound`]), and by its name where it bound first.
@@ -428,17 +441,7 @@ impl Request {
         let Some(scope) = scope else {
             return false;
         };
-        let up = |from: ClassId, to: ClassId| {
-            let mut at = Some(from);
-            for _ in 0..64 {
-                match at {
-                    Some(here) if here == to => return true,
-                    Some(here) => at = self.class_parent(here),
-                    None => return false,
-                }
-            }
-            false
-        };
+        let up = |from: ClassId, to: ClassId| self.lineage(from).any(|here| here == to);
         up(class, scope) || up(scope, class)
     }
 
@@ -741,22 +744,13 @@ impl Request {
     /// MP
     /// ```
     fn changed(&self, function: Function, lowered: &[u8]) -> bool {
-        let mut at = self
-            .method_class(function)
-            .and_then(|class| self.class_parent(class));
-        for _ in 0..64 {
-            let Some(class) = at else {
-                return false;
-            };
-            if self
-                .own_method_named(class, lowered)
+        let Some(class) = self.method_class(function) else {
+            return false;
+        };
+        self.ancestors(class).any(|class| {
+            self.own_method_named(class, lowered)
                 .is_some_and(|own| self.method_visibility(own) == Visibility::Private)
-            {
-                return true;
-            }
-            at = self.class_parent(class);
-        }
-        false
+        })
     }
 
     /// `zend_check_method_accessible` (`Z/Zend/zend_execute.h:399`) with

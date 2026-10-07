@@ -19,12 +19,11 @@
 use std::cmp::Ordering;
 
 use php_unit::Level;
-use php_unit::decl::{
-    FunctionDecl, MethodDecl, Name, Parameter, ParameterDefault, Type, Visibility,
-};
+use php_unit::decl::{FunctionDecl, MethodDecl, Name, Type};
 
 use php_macros::php_class;
 
+use crate::api::__private::native_function;
 use crate::api::abi::{
     Callable, CloneObj, ConstArray, DebugInfo, Entry, FromArgument, Instance, NamedVariadic,
     ObjectHandlers, Passed, Raw, Static, This, Union, Untyped,
@@ -35,6 +34,7 @@ use crate::api::request::{Refusal, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted,
 };
+use crate::trampoline::{public_method, variadic};
 
 /// `default_exception_handlers`: `clone_obj` null, so every throwable
 /// is uncloneable (`zend_register_default_exception`), and the rest
@@ -1042,64 +1042,16 @@ const INVOKE: &[u8] = b"__invoke";
 /// arguments off the frame and the payload's own declaration is what a
 /// reflector and a diagnostic read.
 pub(crate) fn trampolines() -> Vec<(Name, MethodDecl, Entry)> {
+    let invoke = FunctionDecl {
+        parameters: vec![variadic(b"args", Some(Type::Mixed))],
+        return_type: Some(Type::Mixed),
+        ..native_function(INVOKE)
+    };
     vec![(
         Name(b"Closure".as_slice().into()),
-        closure_method(INVOKE, vec![variadic(b"args")], Some(Type::Mixed), true),
+        public_method(invoke, true),
         closure_invoke as Entry,
     )]
-}
-
-/// One method of `Closure` as the stub declares it: public, neither
-/// abstract nor final, with `parameters` and `returns`, an instance
-/// member or one on the class.
-fn closure_method(
-    name: &[u8],
-    parameters: Vec<Parameter>,
-    returns: Option<Type>,
-    is_instance: bool,
-) -> MethodDecl {
-    MethodDecl {
-        function: FunctionDecl {
-            name: Name(name.into()),
-            parameters,
-            return_type: returns,
-            returns_by_ref: false,
-            is_generator: false,
-            attributes: Vec::new(),
-            doc_comment: None,
-            file: Name(Box::new([])),
-            line: 0,
-            end_line: 0,
-            frameless: Vec::new(),
-        },
-        visibility: Visibility::Public,
-        is_instance,
-        is_abstract: false,
-        is_final: false,
-        tentative_return: false,
-    }
-}
-
-/// `type $name`: a required parameter, taken by value.
-fn parameter(name: &[u8], ty: Type) -> Parameter {
-    Parameter {
-        name: Name(name.into()),
-        ty: Some(ty),
-        by_ref: false,
-        prefer_ref: false,
-        promoted: false,
-        variadic: false,
-        default: ParameterDefault::None,
-        attributes: Vec::new(),
-    }
-}
-
-/// `mixed ...$name`.
-fn variadic(name: &[u8]) -> Parameter {
-    Parameter {
-        variadic: true,
-        ..parameter(name, Type::Mixed)
-    }
 }
 
 /// `zend_create_closure_from_callable` over what a callable resolved to:
