@@ -83,11 +83,11 @@ The set of extensions compiled into one binary, in module-startup order, chosen 
 _Avoid_: registry, plugin list, enabled extensions (the list, not the concept)
 
 **Request state**:
-One extension's per-request value, declared on its extension, built at request start and dropped after the shutdown hooks, in bundle order and its reverse. Reached through the request, never ambient; private to the extension that declared it.
+One extension's per-request value, declared on its extension, built at request start and dropped after the request-end phases (`rshutdown`, `deactivate`, `post_deactivate`), in startup order and its reverse. Reached through the request, never ambient; private to the extension that declared it.
 _Avoid_: tenant, ext state, globals (php's word for the per-thread struct this replaces half of), thread-local
 
 **Engine state**:
-One extension's per-engine value, built at module startup from the startup ini and immutable afterwards, shared by every request. What changes across requests lives in the engine's cache of immutable values inside it, never behind a lock the extension owns.
+One extension's per-engine value, built at engine start, in startup order, from what `Start` carries (the startup ini, the host's name and the process states), immutable afterwards, shared by every request, and dropped after the engine-end phase. Beside it, an extension's process state is built at most once per process, before its engine start, and never ended: process exit releases it (ADR-0010). What changes across requests lives in the engine's cache of immutable values inside it, never behind a lock the extension owns.
 _Avoid_: module globals, persistent state, static (php's `read_static_prop`, `write_static_prop`; `abi::Static`, php's `static` return type)
 
 ### Requests
@@ -133,7 +133,7 @@ The opaque two-atomic slot the engine allocates per safepoint of a function, and
 _Avoid_: feedback (the per-request `MapPtr<[Feedback]>` of `research/third-engine-design.r2.md` §5.14, which the next engine revision deletes), counter, flag
 
 **Interrupt**:
-The one flag on a request that the execution timer and signal delivery set and nothing else touches. The loop tests it at a back-edge, at a frame's activation, after every `Resume` and after an internal call returns; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal or dispatches the pending signals.
+The one flag on a request that the execution timer, signal delivery and an extension's periodic interrupt set and nothing else touches. The loop tests it at a back-edge, at a frame's activation, after every `Resume` and after an internal call returns; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal, or dispatches the pending signals and serves every extension's interrupt hook.
 _Avoid_: vm_interrupt (php's field), timeout flag, pending signal, tick (php's `register_tick_function`, `unregister_tick_function`)
 
 **Trace**:
@@ -187,7 +187,7 @@ The tickets that carry one `track:<name>` label, worked toward the destination o
 _Avoid_: workstream, experiment branch, a track's branch (ADR-0009)
 
 **Ticket**:
-One GitHub issue in this repository: what happened, what to build, its acceptance criteria and what blocks it, filed once and closed by the commit whose `Ticket:` trailer names it. A thing found and not done is a ticket of its own, filed before the turn ends; the only question it raises is whose, and that is a label, not a noun: `ready-for-agent` for an act an agent may take, `for-a-person` for one that is a person's alone (harness §11): a manifest row, a divergence reason, an oracle bump, the decision a design revision states. A branch records the ticket its work is for. The prose no sensor reads is the commit message and the ticket itself, where a person reads the word before anything closes, and the harness's own rustdoc until the manifest holds `xtask` to this section (#63); that is acceptable because the entry's words are two, and a person reads both places.
+One GitHub issue in this repository: what happened, what to build, its acceptance criteria and what blocks it, filed once and closed by the commit whose `Ticket:` trailer names it. A thing found and not done is a ticket of its own, filed before the turn ends; the only question it raises is whose, and that is a label, not a noun: `ready-for-agent` for an act an agent may take, `for-a-person` for one that is a person's alone (harness §11): a manifest row, a divergence reason, an oracle bump, the decision a design revision states. A branch records the ticket its work is for. The prose no sensor reads is the commit message and the ticket itself, where a person reads the word before anything closes, and the harness's own rustdoc until the manifest holds `xtask` to this section (#63); that is acceptable because the entry's words are two, and a person reads both places. A sentence the map borrows is read as its source wrote it, and the paragraph beside it says what its words are here: *follow-up* and *suggestion* are a ticket, *the user* is a person. At the end of a whole task a session may leave to a ticket: a defect it found outside the ticket's scope, a decision that is a person's alone, a blocker outside the work, and cleanup or refactoring it noticed and was not asked for. It may not leave to a ticket any box of the ticket it works, the witness or test its own change needs, a regression its own change caused, or the lock line, design sentence or region its change makes stale.
 _Avoid_: leftover (hides whether the thing was filed), follow-up (hides whose it is)
 
 **Map**:

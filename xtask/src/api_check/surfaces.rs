@@ -57,16 +57,6 @@ struct Waiting {
 /// here: a new export on no row fails.
 const WAITING: &[Waiting] = &[
     Waiting {
-        producer: "standard",
-        ticket: 1344,
-        names: &["php_getimagetype", "php_image_type_to_mime_type"],
-    },
-    Waiting {
-        producer: "standard",
-        ticket: 1347,
-        names: &["php_next_utf8_char"],
-    },
-    Waiting {
         producer: "random",
         ticket: 2021,
         names: &["Rng"],
@@ -561,8 +551,7 @@ mod tests {
                 "pub beyond extension(): Regex, Regex::compile, each on design §4.10's list of surfaces"
             ]
         );
-        let held =
-            Surfaces::parse(DOC).hold("standard", &lines(&["php_getimagetype", "php_basename"]));
+        let held = Surfaces::parse(DOC).hold("libxml", &lines(&["ffi::Sax", "php_basename"]));
         assert_eq!(
             held.problem.as_deref(),
             Some(
@@ -571,20 +560,20 @@ mod tests {
         );
         assert_eq!(
             held.notes,
-            ["pub beyond extension(), on no row and waiting on #1344: php_getimagetype"]
+            ["pub beyond extension(), on no row and waiting on #2020: ffi::Sax"]
         );
     }
 
     #[test]
     fn a_waiting_entry_the_design_lists_now_is_named_for_its_drop() {
-        let doc = "### 4.10 Extension crates\n\n| `standard` → `exif` | `php_getimagetype` | `php_image.h` |\n";
-        let held = Surfaces::parse(doc).hold("standard", &lines(&["php_getimagetype"]));
+        let doc = "### 4.10 Extension crates\n\n| `libxml` → `xml` | `ffi::Sax` | `compat.c` |\n";
+        let held = Surfaces::parse(doc).hold("libxml", &lines(&["ffi::Sax"]));
         assert_eq!(held.problem, None);
         assert_eq!(
             held.notes,
             [
-                "pub beyond extension(): php_getimagetype, each on design §4.10's list of surfaces",
-                "on design §4.10's list now, so its entry waiting on #1344 is dropped: php_getimagetype",
+                "pub beyond extension(): ffi::Sax, each on design §4.10's list of surfaces",
+                "on design §4.10's list now, so its entry waiting on #2020 is dropped: ffi::Sax",
             ]
         );
     }
