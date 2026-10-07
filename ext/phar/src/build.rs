@@ -625,7 +625,6 @@ pub(crate) fn from_directory(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let rdi = class_named(req, b"RecursiveDirectoryIterator")?;
     let dir_value = Value::string(dir);
-    req.addref(&dir_value);
     let iter = php_ext::call::new_object(req, rdi)?;
     let constructed = construct_as(
         req,
@@ -633,9 +632,6 @@ pub(crate) fn from_directory(
         *iter,
         &[dir_value, Value::int(4096 | 8192)],
     );
-    // `zval_ptr_dtor(&arg)` after the constructor: the iterator keeps
-    // what it read of the path, and the argument's owner is given up.
-    req.release(dir_value);
     if let Err(thrown) = constructed {
         iter.give_up(req);
         return Err(thrown);
