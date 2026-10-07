@@ -342,3 +342,21 @@ f();
     );
     assert_eq!(stdout, "t t\narray(1) {\n  [0]=>\n  int(3)\n}\n");
 }
+
+/// `serialize()`'s `__sleep` arm looks each name up in the object's
+/// properties as they stand when it reads the name, as
+/// `php_var_serialize_get_sleep_props` finds each in the table: a
+/// property the warning's handler overwrote is read as it is now, not
+/// through a view of the value the write freed (#2103).
+#[test]
+fn a_sleep_name_reads_the_property_as_it_stands() {
+    let stdout = armed(
+        r#"<?php
+set_error_handler(function() { global $o, $z; $o->b = null; $GLOBALS['y'] = $z . $z; return true; });
+class T { public $a = 1; public $b; function __sleep() { return [1, 'b']; } }
+$o = new T; $v = 'vvvvv'; $z = 'ZZZZZ'; $o->b = $v . $v;
+echo serialize($o), "\n";
+"#,
+    );
+    assert_eq!(stdout, "O:1:\"T\":1:{s:1:\"b\";N;}\n");
+}

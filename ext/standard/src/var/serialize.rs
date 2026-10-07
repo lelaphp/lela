@@ -782,13 +782,32 @@ fn custom(
 /// looked for as it is, then mangled private, then mangled protected,
 /// among the properties php serializes; php's warnings for a name that
 /// is no string, is not there, or comes twice.
+///
+/// php finds each name in the table as it stands when the name is read
+/// (`zend_hash_find`). A warning can reach the program's handler, and a
+/// name's conversion its `__toString()`, either of which can write the
+/// object's properties, so the rows read before one of them are read
+/// again before the next name is looked up, never named through a view
+/// of a value the write freed.
+///
+/// ```php
+/// set_error_handler(function () { global $o; $o->b = 'new'; return true; });
+/// class T { public $a = 1; public $b = 'old'; function __sleep() { return [1, 'b']; } }
+/// $o = new T;
+/// echo serialize($o), "\n";
+/// ```
+/// ```expect
+/// O:1:"T":1:{s:1:"b";s:3:"new";}
+/// ```
 fn sleep_props(
     req: &mut Request,
     object: PhpObject,
     class: &[u8],
     list: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let props = object.props_for(req, PropertyPurpose::Serialize)?;
+    // The rows as they stand, `None` once program code may have written
+    // them.
+    let mut rows: Option<Vec<(Key, Value)>> = None;
     let shown_class = String::from_utf8_lossy(class).into_owned();
     let mut out = PhpArray::new(req)?;
     // `ZEND_HASH_FOREACH_VAL_IND(sleep_retval, name_val)`
@@ -798,6 +817,7 @@ fn sleep_props(
         // A name the list holds by reference is what the reference holds.
         let name = row.value().deref();
         if name.as_php_string().is_none() {
+            rows = None;
             docref(
                 req,
                 Level::Warning,
@@ -816,12 +836,17 @@ fn sleep_props(
         let mut protected = b"\0*\0".to_vec();
         protected.extend_from_slice(&text);
         let candidates = [text.clone(), private, protected];
+        let props = match rows.take() {
+            Some(props) => props,
+            None => object.props_for(req, PropertyPurpose::Serialize)?,
+        };
         let found = candidates.iter().find_map(|candidate| {
             props.iter().find_map(|(key, value)| match key {
                 Key::Str(prop) if prop.as_bytes() == candidate.as_slice() => Some((*prop, *value)),
                 _ => None,
             })
         });
+        rows = Some(props);
         let shown = String::from_utf8_lossy(&text).into_owned();
         // A typed property nothing has written yet is left out quietly.
         if found.is_none()
@@ -832,6 +857,7 @@ fn sleep_props(
             return Ok(ControlFlow::Continue(()));
         }
         let Some((prop, value)) = found else {
+            rows = None;
             docref(
                 req,
                 Level::Warning,
@@ -843,6 +869,7 @@ fn sleep_props(
         };
         let key = Key::Str(prop);
         if out.contains(&key) {
+            rows = None;
             docref(
                 req,
                 Level::Warning,
