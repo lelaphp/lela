@@ -131,7 +131,8 @@ try { var_dump(unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}')); } catch (
 /// `SplDoublyLinkedList::unserialize` or `ArrayObject::unserialize`
 /// makes none of the `__wakeup()` calls queued before it, as php's
 /// `zend_call_function` refuses each at `EG(exception)`, so the
-/// throwing `__wakeup()` makes no second throwable to drop (#2235).
+/// throwing `__wakeup()` makes no second throwable to drop, whether the
+/// read throws on a typed property or in an autoloader (#2235).
 #[test]
 fn a_read_that_throws_in_an_spl_unserialize_makes_no_delayed_call() {
     let stdout = armed(
@@ -144,6 +145,8 @@ $l = new SplDoublyLinkedList;
 try { $l->unserialize('i:0;:O:1:"A":0:{}:O:1:"T":1:{s:1:"p";s:1:"x";}'); } catch (Throwable $e) {}
 $o = new ArrayObject;
 try { $o->unserialize('x:i:0;a:2:{i:0;O:1:"A":0:{}i:1;O:1:"T":1:{s:1:"p";s:1:"x";}};m:a:0:{}'); } catch (Throwable $e) {}
+spl_autoload_register(function ($class) { throw new Exception("no $class"); });
+try { $s->unserialize('x:i:2;O:1:"A":0:{},N;;O:1:"B":0:{},N;;m:a:0:{}'); } catch (Throwable $e) {}
 echo "end\n";
 "#,
     );

@@ -992,8 +992,8 @@ impl<'a> Unserializer<'a> {
     /// `read` failed on a throw no call is made, as php's
     /// `zend_call_function` refuses each at `EG(exception)`, so one
     /// throwable leaves. What a successful `read` carries is dropped
-    /// where a call throws, so a caller keeps an owner it read beside
-    /// `read`, never in it.
+    /// where a call throws, so it is `Copy`: a caller keeps an owner it
+    /// read beside `read`, never in it.
     ///
     /// ```php
     /// class A { function __wakeup() { echo "wakeup A\n"; throw new Exception("wake"); } }
@@ -1006,7 +1006,7 @@ impl<'a> Unserializer<'a> {
     /// wakeup A
     /// wake
     /// ```
-    pub fn finish<T>(self, req: &mut Request, read: Result<T, Thrown>) -> Result<T, Thrown> {
+    pub fn finish<T: Copy>(self, req: &mut Request, read: Result<T, Thrown>) -> Result<T, Thrown> {
         self.state.close(req, read)
     }
 }
