@@ -182,7 +182,7 @@ struct Target {
     #[serde(default)]
     doctest: bool,
     /// The features the target is built only with, which a run that
-    /// turns on none never builds: the hosts' `*-witness` binaries.
+    /// turns on none never builds: `sapi/cli`'s `php-linked`.
     #[serde(default, rename = "required-features")]
     required_features: Vec<String>,
 }

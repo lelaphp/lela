@@ -18,9 +18,6 @@ workspace = true
 # The test face (design §4.3 seam 4): `php_ext::test::{Capture, Engine}`,
 # enabled by an extension's dev-dependency alone.
 test = ["php_engine/test"]
-# The witness runner's trace of the natives a request enters (harness §4.5
-# condition 2, revision 58), enabled by xtask alone through php_bundle.
-witness-trace = ["test", "php_engine/witness-trace"]
 
 [dependencies]
 php_engine = { path = "../php_engine" }

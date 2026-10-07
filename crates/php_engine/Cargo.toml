@@ -19,11 +19,6 @@ workspace = true
 # `Engine::serve_capture`, enabled by an extension's dev-dependency on
 # php_ext with its `test` feature.
 test = []
-# The witness runner's trace (harness §4.5 condition 2, revision 58): the
-# natives a request enters, recorded by the entry a php_macros expansion
-# builds and handed back through the test face. Enabled by xtask alone, so
-# the host's binary and the bench carry none of it.
-witness-trace = ["test"]
 
 [dependencies]
 php_compile = { path = "../php_compile" }

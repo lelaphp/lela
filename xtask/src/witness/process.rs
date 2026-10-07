@@ -8,15 +8,13 @@
 //! serves one request on the one thread it has, as design revision 35
 //! requires of pcntl.
 //!
-//! The binary is `php-witness`, `sapi/cli`'s host built with
-//! `php_engine`'s `witness-trace`, which this module builds once per run
-//! with cargo where the run meets its first such fence, in the profile
-//! this harness was built in (`Profile::this_build`, #1994). A lane whose
-//! harness is the correctness lanes' build serves its `process` fences in
-//! that build too. The build shares the engine's compiled crates with
-//! this harness's, since both turn the same features on in one profile:
-//! it is the bundle, the host and a link. It
-//! runs under the recipe exactly as the oracle does
+//! The binary is `php`, `sapi/cli`'s host as it is built for every other
+//! lane (#2168), which this module builds once per run with cargo where
+//! the run meets its first such fence, in the profile this harness was
+//! built in (`Profile::this_build`, #1994). A lane whose harness is the
+//! correctness lanes' build serves its `process` fences in that build
+//! too, and a phpt run in the same profile has built it already. It runs
+//! under the recipe exactly as the oracle does
 //! ([`Oracle::run_under`]), and every request it serves appends the
 //! natives it entered to the file `PHP_WITNESS_TRACE` names, a forked
 //! child's request its own beside its parent's: so coverage is observed
@@ -24,11 +22,10 @@
 //! §4.5 condition 2, revision 58), what a fence entered and nothing it
 //! only spells.
 //!
-//! A fence with a `request` is served by `php-cgi-witness`, `sapi/cgi`'s
-//! host built the same way, through a link of the name php-cgi, beside
-//! php-cgi for the oracle ([`served_as_cgi`], #1197, ADR-0008); a fence
-//! with a `request fpm` by `php-fpm-witness`, `sapi/fpm`'s, beside php-fpm
-//! (`served_as_fpm`, #1291).
+//! A fence with a `request` is served by `sapi/cgi`'s php-cgi, through a
+//! link of that name, beside php-cgi for the oracle ([`served_as_cgi`],
+//! #1197, ADR-0008); a fence with a `request fpm` by `sapi/fpm`'s
+//! php-fpm, beside php-fpm (`served_as_fpm`, #1291).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,7 +41,7 @@ use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
 
-// The hosts a fence is served by, each its witness build: `sapi/cli`'s
+// The hosts a fence is served by, each its own binary: `sapi/cli`'s
 // serves a fence marked `process`, `sapi/cgi`'s one with a `request`,
 // `sapi/fpm`'s one with a `request fpm` (#1291) and `sapi/phpdbg`'s one
 // with a `request phpdbg` (#1348); `oracle::hosts` states each once.
@@ -77,7 +74,7 @@ impl Binary {
     }
 
     /// The binaries of the workspace at `root`, with `fpm` standing in for
-    /// its `php-fpm-witness`, so a test serves a `request fpm` fence by a
+    /// its `php-fpm`, so a test serves a `request fpm` fence by a
     /// host whose failure it chooses.
     #[cfg(test)]
     pub(crate) fn with_fpm(root: &Path, fpm: PathBuf) -> Binary {
@@ -254,8 +251,10 @@ fn built<'a>(
         .map_err(|why| anyhow!("{why}"))
 }
 
-/// The host's witness binary, `--features witness-trace`, built in this
-/// harness's profile ([`profile::build`]).
+/// The host's own binary, built in this harness's profile
+/// ([`profile::build`]): every request it serves records the natives it
+/// entered where `PHP_WITNESS_TRACE` names a file, with no build of its
+/// own for the lane (#2168).
 fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
-    profile::build(root, &host.package(), host.witness, "witness-trace")
+    profile::build(root, &host.package(), host.binary, None)
 }

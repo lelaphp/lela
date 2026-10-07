@@ -26,9 +26,8 @@
 //!
 //! **The one fence it does not serve: one marked `process`.** A snippet that forks,
 //! sends or takes a signal, or sets the process's ids, session or limits
-//! is served by the `php` binary in a process of its own, built with
-//! `witness-trace` as `php-witness` ([`process`]; harness §8, revision
-//! 61; #1062): pcntl's fences, posix's that change the process, and the
+//! is served by the `php` binary in a process of its own ([`process`];
+//! harness §8, revision 61; #1062): pcntl's fences, posix's that change the process, and the
 //! engine's that send one a signal. So no witness forks this process, and
 //! the linked engine does not carry pcntl at all, so a fence that would
 //! fork here and is not marked fails on the undefined function rather

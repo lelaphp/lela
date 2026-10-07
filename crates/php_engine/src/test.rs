@@ -52,7 +52,7 @@ impl OutputSink for Capture {
 }
 
 /// What one captured request came to: the sink's bytes and the
-/// observables, and under `witness-trace` the natives it entered, which
+/// observables, and the natives it entered, which
 /// [`Engine::serve_capture_traced_in`] alone records.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Served {
@@ -62,59 +62,10 @@ pub struct Served {
     pub log: Vec<u8>,
     pub exit_code: i32,
     pub fatal: Option<String>,
-    #[cfg(feature = "witness-trace")]
     pub entered: Vec<Entered>,
 }
 
-/// One native a traced request entered, named as the macro expansion
-/// that built its entry names it (harness §4.5 condition 2, revision
-/// 58): the crate it is declared in, `CARGO_CRATE_NAME`; the Rust type
-/// whose `#[php_class]` member impl declares it, `None` for a
-/// `#[php_function]`; and its Rust identifier, `r#` stripped. These are
-/// the names `xtask witness` reads off the source, so a subject and what
-/// a fence entered meet without a translation between them.
-#[cfg(feature = "witness-trace")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Entered {
-    pub krate: &'static str,
-    pub owner: Option<&'static str>,
-    pub name: &'static str,
-}
-
-#[cfg(feature = "witness-trace")]
-impl Entered {
-    /// The line a traced engine appends for it to the file a host named
-    /// ([`EngineBuilder::trace_natives_to`](crate::EngineBuilder::trace_natives_to)):
-    /// the crate, the owning type or nothing, and the identifier, a tab
-    /// between each and a newline after. The names are Rust identifiers,
-    /// so neither character is in one.
-    #[must_use]
-    pub(crate) fn line(&self) -> String {
-        format!(
-            "{}\t{}\t{}\n",
-            self.krate,
-            self.owner.unwrap_or_default(),
-            self.name
-        )
-    }
-}
-
-/// `trace` appended to `path` in one write, so a forked child's request
-/// and its parent's land whole beside each other. A file that cannot be
-/// written loses the lines, and the harness that reads it reports the
-/// natives as not entered.
-#[cfg(feature = "witness-trace")]
-pub(crate) fn append_trace(path: &Path, trace: &[Entered]) {
-    use std::io::Write;
-    let lines: String = trace.iter().map(Entered::line).collect();
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        file.write_all(lines.as_bytes()).ok();
-    }
-}
+pub use crate::trace::Entered;
 
 impl Engine {
     /// Serve `source` as a CLI request into `sink` and hand back what it
@@ -154,7 +105,6 @@ impl Engine {
     /// recorded in [`Served::entered`]: what the witness lane's linked
     /// adapter serves a fence through, so coverage is what the fence ran
     /// (harness §4.5 condition 2, revision 58).
-    #[cfg(feature = "witness-trace")]
     pub fn serve_capture_traced_in(
         &self,
         dir: &Path,
@@ -207,16 +157,10 @@ impl Engine {
         if let Some(arrays) = self.dump_before_optimizer(&description) {
             sink.write_stderr(arrays.as_bytes());
         }
-        #[cfg(feature = "witness-trace")]
         let (observables, entered) = if traced {
             self.serve_traced(description, &mut sink)
         } else {
             (self.serve(description, &mut sink), Vec::new())
-        };
-        #[cfg(not(feature = "witness-trace"))]
-        let observables = {
-            let _ = traced;
-            self.serve(description, &mut sink)
         };
         Served {
             stdout: sink.stdout,
@@ -225,7 +169,6 @@ impl Engine {
             log: sink.log,
             exit_code: observables.exit_code,
             fatal: observables.fatal,
-            #[cfg(feature = "witness-trace")]
             entered,
         }
     }

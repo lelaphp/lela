@@ -999,7 +999,7 @@ fn php_linked_is_the_cli_with_every_extension_feature_and_xtask_links_none() {
         .iter()
         .map(|f| f.as_str().unwrap())
         .collect();
-    assert_eq!(served, ["witness-trace", "php_bundle/linked"]);
+    assert_eq!(served, ["php_bundle/linked", "php_bundle/test"]);
     let xtask: toml::Value =
         toml::from_str(&fs::read_to_string(workspace().join("xtask/Cargo.toml")).unwrap()).unwrap();
     assert!(

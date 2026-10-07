@@ -44,10 +44,9 @@ pub(super) struct Calls {
     function_callables: Vec<(php_unit::UnitCell, u32, Function)>,
     /// The natives the request has entered, in order, where the witness
     /// runner asked for them (harness §4.5 condition 2, revision 58);
-    /// `None` records nothing. The field exists in a build with the
-    /// `witness-trace` feature alone, so the host's binary has none.
-    #[cfg(feature = "witness-trace")]
-    trace: Option<Vec<crate::test::Entered>>,
+    /// `None` records nothing, and is what a request holds unless its
+    /// engine or its test asked (#2168).
+    trace: Option<Vec<crate::trace::Entered>>,
 }
 
 impl Request {
@@ -1076,15 +1075,14 @@ impl Request {
 
     /// Record the natives this request enters from here on, for the
     /// witness runner (harness §4.5 condition 2, revision 58).
-    #[cfg(feature = "witness-trace")]
     pub(crate) fn trace_natives(&mut self) {
         self.calls.trace = Some(Vec::new());
     }
 
     /// One native entered, where the request records them; what the
     /// entry a macro expansion builds calls on its way in.
-    #[cfg(feature = "witness-trace")]
-    pub(crate) fn entered(&mut self, native: crate::test::Entered) {
+    #[inline]
+    pub(crate) fn entered(&mut self, native: crate::trace::Entered) {
         if let Some(trace) = &mut self.calls.trace {
             trace.push(native);
         }
@@ -1092,8 +1090,7 @@ impl Request {
 
     /// The natives recorded, given up at the request's end; none where
     /// nothing asked for them.
-    #[cfg(feature = "witness-trace")]
-    pub(crate) fn take_trace(&mut self) -> Vec<crate::test::Entered> {
+    pub(crate) fn take_trace(&mut self) -> Vec<crate::trace::Entered> {
         self.calls.trace.take().unwrap_or_default()
     }
 

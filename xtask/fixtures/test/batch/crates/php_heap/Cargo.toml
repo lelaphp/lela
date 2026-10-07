@@ -6,8 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
-# A target built only with a feature no run turns on, as the hosts'
-# `*-witness` binaries are: the crate is whole without it.
+# A target built only with a feature no run turns on, as `sapi/cli`'s
+# `php-linked` is: the crate is whole without it.
 [features]
 extra = []
 

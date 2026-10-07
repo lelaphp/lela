@@ -50,9 +50,9 @@ fn source(name: &str, text: &str) -> (Tree, PathBuf) {
     (dir, file)
 }
 
-/// The workspace's `php-witness`, for a fence marked `process`, and its
-/// `php-cgi-witness`, for one with a `request`; each built by the first
-/// test that serves one.
+/// The workspace's `php`, for a fence marked `process`, and its
+/// `php-cgi`, for one with a `request`; each built by the first test
+/// that serves one.
 fn binary() -> Binary {
     Binary::of(&workspace())
 }
@@ -844,7 +844,7 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
 /// fails is `Unserved`, as it is beside the oracle, so its native is no
 /// witness short, and the reading names the serve's failure (#1535). The
 /// fixture `request-empty`'s stand-in, which reads the request and closes
-/// it with no response, stands in for the engine's `php-fpm-witness`. The
+/// it with no response, stands in for the engine's `php-fpm`. The
 /// control: a fence whose serve failed recorded nothing, which read the
 /// fixture's one native as missing and named nothing.
 #[test]

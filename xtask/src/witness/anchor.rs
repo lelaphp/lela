@@ -10,7 +10,7 @@
 //! (revision 58): a fence of its own, or for a method a fence of its
 //! class on the header or on a member impl, whose run through the linked
 //! engine entered it. The entry a `php_macros` expansion builds records
-//! itself under `php_engine`'s `witness-trace` feature, named as this scan
+//! itself where the request was asked to record it, named as this scan
 //! names it: the crate's package, the `#[php_class]` type or none, the
 //! identifier. So `new C(`, `foreach`, `(string)`, `[]` and `count()`
 //! cover the methods php calls through them, and a fence that names a
@@ -44,8 +44,8 @@ use crate::cfg;
 use crate::rust;
 
 /// One native a fence's run entered, as the binary that served it wrote
-/// it, `php-linked` beside what the run printed and `php-witness` to the
-/// file the lane named (`Entered::line`, harness §8, revisions 61 and
+/// it, `php-linked` beside what the run printed and a host's binary to
+/// the file the lane named (`Entered::line`, harness §8, revisions 61 and
 /// 84): the crate's package, the `#[php_class]` type or none, the
 /// identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

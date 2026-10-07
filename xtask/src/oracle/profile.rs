@@ -84,12 +84,18 @@ impl Profile {
     }
 }
 
-/// `cargo build --profile <this build's> -p <package> --bin <binary>
-/// --features <features>` in `root`, and where cargo put the binary: the
+/// `cargo build --profile <this build's> -p <package> --bin <binary>`,
+/// with `--features <features>` where there are any, in `root`, and where
+/// cargo put the binary: the
 /// target directory cargo was told of, or `root`'s own. A lane whose
 /// harness is the correctness lanes' build builds what it serves through
 /// in that build too (#1994).
-pub(crate) fn build(root: &Path, package: &str, binary: &str, features: &str) -> Result<PathBuf> {
+pub(crate) fn build(
+    root: &Path,
+    package: &str,
+    binary: &str,
+    features: Option<&str>,
+) -> Result<PathBuf> {
     let profile = Profile::this_build().map_err(anyhow::Error::msg)?;
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
@@ -102,9 +108,8 @@ pub(crate) fn build(root: &Path, package: &str, binary: &str, features: &str) ->
             package,
             "--bin",
             binary,
-            "--features",
-            features,
         ])
+        .args(features.into_iter().flat_map(|names| ["--features", names]))
         .current_dir(root)
         .status()
         .with_context(|| format!("running cargo to build {binary}"))?;

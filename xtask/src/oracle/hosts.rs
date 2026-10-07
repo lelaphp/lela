@@ -2,24 +2,22 @@
 //! beside the pinned php's own (`oracle::Hosts`, `[sapi]` of the pin):
 //! the one statement of each host's crate, the binary the phpt lane runs
 //! or finds beside the binary under test, as upstream's runner finds
-//! php-cgi, php-fpm and phpdbg beside `TEST_PHP_EXECUTABLE`, and the
-//! witness lane's build of the same crate. The phpt lane's lookups
-//! (`phpt::{cgi,fpm,phpdbg}`), the cargo line that rebuilds a stale
-//! binary, the witness lane's builds and what `xtask status --section
+//! php-cgi, php-fpm and phpdbg beside `TEST_PHP_EXECUTABLE`, and which
+//! the witness lane serves a fence through as well (#2168). The phpt
+//! lane's lookups (`phpt::{cgi,fpm,phpdbg}`), the cargo line that
+//! rebuilds a stale binary, the witness lane's builds and what `xtask status --section
 //! corpus` hands CI to build all read [`HOSTS`], and none spells a host.
 
 use crate::layout;
 
-/// One host: the crate under `sapi/` that builds it, its binary, and the
-/// witness lane's build of it, the same binary with `witness-trace` on.
+/// One host: the crate under `sapi/` that builds it, and its binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EngineHost {
     /// The crate's manifest name, `sapi/cgi`.
     pub(crate) krate: &'static str,
-    /// The binary the phpt lane runs a test through.
+    /// The binary the phpt lane runs a test through and the witness lane
+    /// serves a fence through, with `PHP_WITNESS_TRACE` set (#2168).
     pub(crate) binary: &'static str,
-    /// The binary the witness lane serves a fence through.
-    pub(crate) witness: &'static str,
 }
 
 impl EngineHost {
@@ -33,28 +31,24 @@ impl EngineHost {
 pub(crate) const CLI: EngineHost = EngineHost {
     krate: crate::carried::BINARY,
     binary: "php",
-    witness: "php-witness",
 };
 
 /// The CGI host, which a CGI-shaped test is run through.
 pub(crate) const CGI: EngineHost = EngineHost {
     krate: "sapi/cgi",
     binary: "php-cgi",
-    witness: "php-cgi-witness",
 };
 
 /// The `FastCGI` process manager, which `sapi/fpm/tests` start.
 pub(crate) const FPM: EngineHost = EngineHost {
     krate: "sapi/fpm",
     binary: "php-fpm",
-    witness: "php-fpm-witness",
 };
 
 /// The debugger host, which a `--PHPDBG--` test is run through.
 pub(crate) const PHPDBG: EngineHost = EngineHost {
     krate: "sapi/phpdbg",
     binary: "phpdbg",
-    witness: "phpdbg-witness",
 };
 
 /// Every host the phpt lane hands a test to, the binary under test first.
@@ -66,8 +60,8 @@ mod tests {
 
     use super::*;
 
-    /// Each host is a crate of the workspace, and its package, its binary
-    /// and its witness build are what the crate's Cargo.toml declares. A
+    /// Each host is a crate of the workspace, and its package and its
+    /// binary are what the crate's Cargo.toml declares. A
     /// `sapi/*` crate the lane hands no test to is not asked to be one.
     #[test]
     fn every_host_is_a_sapi_crate_of_the_workspace_as_its_cargo_toml_declares_it() {
@@ -89,7 +83,6 @@ mod tests {
                 .filter_map(|bin| bin.get("name").and_then(toml::Value::as_str))
                 .collect();
             assert!(bins.contains(&host.binary), "{}: {bins:?}", host.krate);
-            assert!(bins.contains(&host.witness), "{}: {bins:?}", host.krate);
         }
     }
 }

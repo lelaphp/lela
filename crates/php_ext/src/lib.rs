@@ -40,7 +40,6 @@ pub mod test {
     pub use php_engine::LeakSensor;
     /// A native a traced request entered, for the witness runner
     /// (harness §4.5 condition 2, revision 58).
-    #[cfg(feature = "witness-trace")]
     pub use php_engine::test::Entered;
     pub use php_engine::test::{Capture, Engine};
 }

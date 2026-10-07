@@ -46,8 +46,8 @@ pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
 const BESIDE: &str = "sapi/cgi/php-cgi";
 
 /// `binary` under the name php-cgi: a link of that name to it at
-/// [`BESIDE`] under `root`, the witness lane's `php-cgi-witness` run
-/// under the name php-cgi builds it by.
+/// [`BESIDE`] under `root`, the witness lane's `php-cgi` run under the
+/// name php-cgi builds it by.
 pub(crate) fn linked(binary: &Path, root: &Path) -> Result<PathBuf> {
     let link = root.join(BESIDE);
     if let Some(dir) = link.parent() {

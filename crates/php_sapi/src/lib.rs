@@ -132,7 +132,6 @@ impl OutputSink for Starting {
 #[must_use]
 pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuilder {
     let mut builder = builder;
-    #[cfg(feature = "witness-trace")]
     if let Some(path) = std::env::var_os(TRACE) {
         builder = builder.trace_natives_to(path.into());
     }
@@ -153,10 +152,10 @@ pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuil
     builder
 }
 
-/// The variable naming the file a `witness-trace` build appends the
-/// natives each request entered to; the witness lane sets it for a fence
-/// it serves through a host's binary (harness §8, revision 61).
-#[cfg(feature = "witness-trace")]
+/// The variable naming the file every request appends the natives it
+/// entered to; the witness lane sets it for a fence it serves through a
+/// host's binary (harness §8, revision 61), and a host's own binary reads
+/// it, with no build of its own for the lane (#2168).
 const TRACE: &str = "PHP_WITNESS_TRACE";
 
 /// The variable that arms a debug build's request leak sensor (#1992,
