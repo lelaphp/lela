@@ -1141,6 +1141,7 @@ values::Owner::sort_by
 values::Owner::take
 values::Owner::try_append
 values::Owner::unset
+values::Owner::unset_in_place
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::contains
@@ -1181,7 +1182,6 @@ values::PhpArray::to_value
 values::PhpArray::try_append
 values::PhpArray::unprotect
 values::PhpArray::unset
-values::PhpArray::unset_in_place
 values::PhpObject
 values::PhpObject::append_row
 values::PhpObject::as_value
