@@ -290,8 +290,8 @@ impl VarHash {
     /// made with `BG(serialize_lock)` held until one of them throws, and
     /// the object of that call and of every call after it marked as
     /// destructed, so its destructor never runs; every owner given up
-    /// after its entry. The `Err` is what the call threw. Where a
-    /// throwable already `stands`, the reader's own, no call is made and
+    /// after its entry. The `Err` is what the call threw. Where the
+    /// reader's throwable `stands`, no call is made and
     /// every object is marked, as `zend_call_function` returns without
     /// calling while a throwable is pending and leaves the return
     /// undefined.
@@ -327,11 +327,11 @@ impl VarHash {
     /// ```expect
     /// no B
     /// ```
-    fn destroy(self, req: &mut Request, stands: bool) -> Result<(), Thrown> {
+    fn destroy(self, req: &mut Request, stands: Option<&Thrown>) -> Result<(), Thrown> {
         for block in self.entries {
             block.free(req);
         }
-        let mut calling = !stands;
+        let mut calling = stands.is_none();
         let mut failed: Option<Thrown> = None;
         for DtorBlock { block, entries } in self.dtors {
             for dtor in entries {
@@ -495,7 +495,7 @@ impl<'a> State<'a> {
     /// the var hash handed back to the reader it is shared with, or
     /// destroyed where this was its last holder, with no delayed call
     /// made where a throwable `stands` ([`VarHash::destroy`]).
-    fn close(self, req: &mut Request, stands: bool) -> Result<(), Thrown> {
+    fn close(self, req: &mut Request, stands: Option<&Thrown>) -> Result<(), Thrown> {
         let State {
             mut hash,
             holder,
@@ -727,7 +727,7 @@ pub fn php_unserialize_with_options(
         Err(thrown) => {
             // php's `goto cleanup`: the var hash it laid down first is
             // destroyed under the refusal.
-            state.close(req, true)?;
+            state.close(req, Some(&thrown))?;
             return Err(thrown);
         }
     };
@@ -791,7 +791,7 @@ pub fn php_unserialize_with_options(
     state.hash.allowed = allowed;
     state.hash.max_depth = max_depth;
     state.hash.depth = depth;
-    let destroyed = state.close(req, parsed.is_err());
+    let destroyed = state.close(req, parsed.as_ref().err());
     let thrown = parsed.err().or(destroyed.err());
     if let Some(thrown) = thrown {
         if let Some(answer) = answer {
@@ -980,7 +980,7 @@ impl<'a> Unserializer<'a> {
     /// hash's last, the delayed calls, in the order they were queued,
     /// until one of them throws, which is the `Err`.
     pub fn finish(self, req: &mut Request) -> Result<(), Thrown> {
-        self.state.close(req, false)
+        self.state.close(req, None)
     }
 }
 
