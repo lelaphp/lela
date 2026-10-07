@@ -10,8 +10,8 @@ use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 /// A string key of the request's.
-fn key(req: &mut Request, name: &[u8]) -> Result<Key, Thrown> {
-    Ok(Key::Str(PhpString::new(req, name)?.hand_on_unmigrated()))
+fn key(req: &mut Request, name: &[u8]) -> Result<Owner<Key>, Thrown> {
+    Ok(PhpString::new(req, name)?.into_key())
 }
 
 /// `net_get_interfaces(): array|false`, `PHP_FUNCTION(net_get_interfaces)`
@@ -71,10 +71,10 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
     for entry in found {
         let mut unicast_entry = PhpArray::new(req)?;
         let k = key(req, b"flags")?;
-        unicast_entry.set(req, k, Value::int(i64::from(entry.flags)))?;
+        unicast_entry.set(req, k, Owner::take(req, Value::int(i64::from(entry.flags))))?;
         if let Some(family) = entry.family {
             let k = key(req, b"family")?;
-            unicast_entry.set(req, k, Value::int(family))?;
+            unicast_entry.set(req, k, Owner::take(req, Value::int(family)))?;
         }
         let texts: [(&[u8], Option<Vec<u8>>); 4] = [
             (b"address", entry.address),
@@ -85,17 +85,16 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
         for (name, text) in texts {
             if let Some(text) = text {
                 let k = key(req, name)?;
-                let v = Value::string(PhpString::new(req, &text)?.hand_on_unmigrated());
+                let v = PhpString::new(req, &text)?.into_value();
                 unicast_entry.set(req, k, v)?;
             }
         }
         let up = entry.flags & IFF_UP != 0;
         if let Some(slot) = names.iter_mut().find(|(n, _, _)| *n == entry.name) {
-            slot.2
-                .append(req, Value::array(unicast_entry.hand_on_unmigrated()))?;
+            slot.2.append(req, unicast_entry.into_value())?;
         } else {
             let mut unicast = PhpArray::new(req)?;
-            unicast.append(req, Value::array(unicast_entry.hand_on_unmigrated()))?;
+            unicast.append(req, unicast_entry.into_value())?;
             names.push((entry.name, up, unicast));
         }
     }
@@ -103,11 +102,11 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
     for (name, up, unicast) in names {
         let mut iface = PhpArray::new(req)?;
         let k = key(req, b"unicast")?;
-        iface.set(req, k, Value::array(unicast.hand_on_unmigrated()))?;
+        iface.set(req, k, unicast.into_value())?;
         let k = key(req, b"up")?;
-        iface.set(req, k, Value::bool(up))?;
+        iface.set(req, k, Owner::take(req, Value::bool(up)))?;
         let k = key(req, &name)?;
-        array.set(req, k, Value::array(iface.hand_on_unmigrated()))?;
+        array.set(req, k, iface.into_value())?;
     }
     Ok(OrFalse::Value(array))
 }

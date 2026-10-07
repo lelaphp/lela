@@ -762,7 +762,12 @@ fn openssl_pkey_get_details(
         return Ok(OrFalse::False);
     };
     let mut out = PhpArray::new(req)?;
-    put(req, &mut out, b"bits", Value::int(pkey.bits()))?;
+    put(
+        req,
+        &mut out,
+        b"bits",
+        Owner::take(req, Value::int(pkey.bits())),
+    )?;
     put_bytes(req, &mut out, b"key", &pem)?;
     let kind = pkey.kind();
     if let Some((name, params)) = layout(kind) {
@@ -787,9 +792,14 @@ fn openssl_pkey_get_details(
                 put_bytes(req, &mut inner, entry, &bytes)?;
             }
         }
-        put(req, &mut out, name, inner.into_value().hand_on_unmigrated())?;
+        put(req, &mut out, name, inner.into_value())?;
     }
-    put(req, &mut out, b"type", Value::int(key_type(kind)))?;
+    put(
+        req,
+        &mut out,
+        b"type",
+        Owner::take(req, Value::int(key_type(kind))),
+    )?;
     Ok(OrFalse::Value(out))
 }
 
@@ -929,7 +939,7 @@ fn openssl_get_curve_names(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>
     let mut out = PhpArray::new(req)?;
     for name in names {
         let name = PhpString::new(req, &name)?;
-        out.append(req, Value::string(name.hand_on_unmigrated()))?;
+        out.append(req, name.into_value())?;
     }
     Ok(OrFalse::Value(out))
 }

@@ -91,7 +91,7 @@ fn fill_errors(
         if failure {
             reason = Some(kind.case_name());
         }
-        out.append(req, object.into_value().hand_on_unmigrated())?;
+        out.append(req, object.into_value())?;
     }
     Ok((out, reason))
 }

@@ -1040,8 +1040,8 @@ fn stream_socket_pair(
     let s1 = req.stream_from_fd(first, FdStream::Socket)?;
     let s2 = req.stream_from_fd(second, FdStream::Socket)?;
     let mut pair = PhpArray::new(req)?;
-    pair.append(req, s1.into_value().hand_on_unmigrated())?;
-    pair.append(req, s2.into_value().hand_on_unmigrated())?;
+    pair.append(req, s1.into_value())?;
+    pair.append(req, s2.into_value())?;
     Ok(OrFalse::Value(pair))
 }
 
@@ -1071,7 +1071,7 @@ fn stream_get_transports(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in req.transports() {
         let value = string_value(req, name.as_bytes())?;
-        out.append(req, value.hand_on_unmigrated())?;
+        out.append(req, value)?;
     }
     Ok(out)
 }

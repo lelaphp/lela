@@ -7,7 +7,7 @@ use php_ext::abi::{OrFalse, Raw};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::ffi;
 use crate::{ZSTR_MAX_LEN, bad_arg, fail, internal, made, parsed, random_key};
@@ -544,7 +544,7 @@ fn session_keys(
     let mut pair = PhpArray::new(req)?;
     for half in [rx, tx] {
         let string = made(req, half)?;
-        pair.append(req, Value::string(string.hand_on_unmigrated()))?;
+        pair.append(req, string.into_value())?;
     }
     keys.fill(0);
     Ok(pair)

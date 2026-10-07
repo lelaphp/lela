@@ -617,9 +617,8 @@ pub(super) fn method_of(
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
     let mut pair = PhpArray::new(req)?;
-    req.addref(&object);
-    pair.append(req, object)?;
+    pair.append(req, Owner::take(req, object))?;
     let name = string_value(req, name)?;
-    pair.append(req, name.hand_on_unmigrated())?;
+    pair.append(req, name)?;
     Ok(pair.into_value())
 }

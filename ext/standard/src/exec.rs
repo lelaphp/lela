@@ -192,7 +192,7 @@ fn php_exec(
             Mode::Gather => {
                 last = strip_trailing_whitespace(&line).to_vec();
                 if let Some(array) = array.as_deref_mut() {
-                    let value = Value::string(PhpString::new(req, &last)?.hand_on_unmigrated());
+                    let value = PhpString::new(req, &last)?.into_value();
                     array.append(req, value)?;
                 }
             }

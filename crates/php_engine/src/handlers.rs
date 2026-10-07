@@ -16353,7 +16353,7 @@ fn unpacked_key(req: &mut Request, key: Value, during: &str) -> Result<Option<Ph
     let key = owned_deref(req, key);
     if let Some(name) = key.as_php_string().copied() {
         if matches!(
-            crate::api::values::Key::from_string(name),
+            crate::api::values::Key::lookup(name),
             crate::api::values::Key::Int(_)
         ) {
             req.release(key);
@@ -18403,7 +18403,7 @@ pub(crate) fn rope_end<T: Tier>(
     let converted = crate::ops::to_string(req, &piece);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let appended = match converted {
-        Ok(text) => rope.append(req, Value::string(text)),
+        Ok(text) => rope.append(req, Owner::adopt(req, Value::string(text))),
         Err(thrown) => Err(thrown),
     };
     if let Err(thrown) = appended {
@@ -18477,7 +18477,7 @@ fn rope_piece(
     let converted = crate::ops::to_string(req, &piece);
     exec::free_operand(req, frame, code, op.op2_type, op.op2);
     let appended = match converted {
-        Ok(text) => rope.append(req, Value::string(text)),
+        Ok(text) => rope.append(req, Owner::adopt(req, Value::string(text))),
         Err(thrown) => Err(thrown),
     };
     match appended {
@@ -19379,10 +19379,9 @@ pub(crate) fn func_get_args<T: Tier>(
             let value = if value.tag() == TypeTag::Undef {
                 Value::null()
             } else {
-                req.addref(&value);
                 value
             };
-            array.append(req, value)?;
+            array.append(req, Owner::take(req, value))?;
         }
         Ok(array)
     })();

@@ -13,7 +13,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_long;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use constants::PASSWORD_BCRYPT_DEFAULT_COST as BCRYPT_COST;
 
@@ -431,22 +431,26 @@ fn password_get_info(req: &mut Request, hash: PhpString) -> Result<Owner<PhpArra
     let mut options = PhpArray::new(req)?;
     let ident = extract_ident(hash);
     let algo = ident.and_then(Algo::find).filter(|algo| algo.valid(hash));
-    let set = |req: &mut Request, array: &mut Owner<PhpArray>, name: &str, value: Value| {
-        let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
+    let set = |req: &mut Request, array: &mut Owner<PhpArray>, name: &str, value: Owner<Value>| {
+        let key = PhpString::new(req, name.as_bytes())?.into_key();
         array.set(req, key, value)
     };
     if let (Some(algo), Some(ident)) = (algo, ident) {
         {
-            let ident = Value::string(PhpString::new(req, ident)?.hand_on_unmigrated());
+            let ident = PhpString::new(req, ident)?.into_value();
             set(req, &mut array, "algo", ident)?;
-            let name =
-                Value::string(PhpString::new(req, algo.name().as_bytes())?.hand_on_unmigrated());
+            let name = PhpString::new(req, algo.name().as_bytes())?.into_value();
             set(req, &mut array, "algoName", name)?;
             match algo {
                 Algo::Bcrypt => {
                     let cost = argon2::sscanf_long(hash.get(4..).unwrap_or_default())
                         .unwrap_or(BCRYPT_COST);
-                    set(req, &mut options, "cost", Value::int(cost))?;
+                    set(
+                        req,
+                        &mut options,
+                        "cost",
+                        Owner::take(req, Value::int(cost)),
+                    )?;
                 }
                 Algo::Argon2(_) => {
                     let costs = argon2::get_info(hash);
@@ -454,24 +458,29 @@ fn password_get_info(req: &mut Request, hash: PhpString) -> Result<Owner<PhpArra
                         req,
                         &mut options,
                         "memory_cost",
-                        Value::int(costs.memory_cost),
+                        Owner::take(req, Value::int(costs.memory_cost)),
                     )?;
-                    set(req, &mut options, "time_cost", Value::int(costs.time_cost))?;
-                    set(req, &mut options, "threads", Value::int(costs.threads))?;
+                    set(
+                        req,
+                        &mut options,
+                        "time_cost",
+                        Owner::take(req, Value::int(costs.time_cost)),
+                    )?;
+                    set(
+                        req,
+                        &mut options,
+                        "threads",
+                        Owner::take(req, Value::int(costs.threads)),
+                    )?;
                 }
             }
         }
     } else {
-        set(req, &mut array, "algo", Value::null())?;
-        let unknown = Value::string(PhpString::new(req, b"unknown")?.hand_on_unmigrated());
+        set(req, &mut array, "algo", Owner::take(req, Value::null()))?;
+        let unknown = PhpString::new(req, b"unknown")?.into_value();
         set(req, &mut array, "algoName", unknown)?;
     }
-    set(
-        req,
-        &mut array,
-        "options",
-        Value::array(options.hand_on_unmigrated()),
-    )?;
+    set(req, &mut array, "options", options.into_value())?;
     Ok(array)
 }
 
@@ -549,7 +558,7 @@ fn password_needs_rehash(
 fn password_algos(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for ident in IDENTS {
-        let ident = Value::string(PhpString::new(req, ident.as_bytes())?.hand_on_unmigrated());
+        let ident = PhpString::new(req, ident.as_bytes())?.into_value();
         array.append(req, ident)?;
     }
     Ok(array)

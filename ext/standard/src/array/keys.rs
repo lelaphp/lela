@@ -23,7 +23,7 @@ use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
 use super::sort::key_value;
-use super::{copied, key_copy, returned};
+use super::{copied, give_up_rows, returned};
 
 /// The comparison a search makes: `fast_is_identical_function` under
 /// `$strict`, `fast_equal_check_function` otherwise, the element's
@@ -254,8 +254,7 @@ fn array_keys(
             continue;
         }
         let value = key_value(&key);
-        req.addref(&value);
-        out.append(req, value)?;
+        out.append(req, Owner::take(req, value))?;
     }
     Ok(out)
 }
@@ -424,10 +423,7 @@ fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArr
         let element = element.deref();
         let key = match element.as_ref() {
             ValueRef::Int(n) => Key::Int(n),
-            ValueRef::Str(s) => {
-                req.addref(&element);
-                Key::from_string(*s)
-            }
+            ValueRef::Str(s) => Key::lookup(*s),
             _ => {
                 docref(
                     req,
@@ -438,7 +434,11 @@ fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArr
             }
         };
         let count = out.get(&key).and_then(|v| v.as_int()).unwrap_or(0);
-        out.set(req, key, Value::int(count + 1))?;
+        let (key, count) = (
+            Owner::take(req, key),
+            Owner::take(req, Value::int(count + 1)),
+        );
+        out.set(req, key, count)?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(out)
@@ -447,17 +447,15 @@ fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArr
 /// The key a value makes where php writes it with
 /// `zend_symtable_update`: an int as itself, anything else as its
 /// string, a canonical decimal read back as an int.
-fn symtable_key(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
+fn symtable_key(req: &mut Request, value: &Value) -> Result<Owner<Key>, Thrown> {
     if let Some(n) = value.as_int() {
-        return Ok(Key::Int(n));
+        return Ok(Owner::take(req, Key::Int(n)));
     }
     if let Some(s) = value.as_php_string() {
-        req.addref(value);
-        return Ok(Key::from_string(*s));
+        return Ok(Owner::take(req, Key::lookup(*s)));
     }
-    Ok(Key::from_string(
-        to_string(req, value)?.hand_on_unmigrated(),
-    ))
+    let text = to_string(req, value)?;
+    Ok(Key::from_string(req, text))
 }
 
 /// `array_flip(array $array): array`, php's `PHP_FUNCTION(array_flip)`
@@ -497,9 +495,8 @@ fn array_flip(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thr
             );
             return Ok(ControlFlow::Continue(()));
         }
-        let data = key_value(&key);
-        req.addref(&data);
         let new_key = symtable_key(req, &element)?;
+        let data = Owner::take(req, key_value(&key));
         out.set(req, new_key, data)?;
         Ok(ControlFlow::Continue(()))
     })?;
@@ -545,7 +542,7 @@ fn array_change_key_case(
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let key = match key {
-            Key::Int(n) => Key::Int(n),
+            Key::Int(n) => Owner::take(req, Key::Int(n)),
             Key::Str(s) => {
                 let folded: Vec<u8> = s
                     .as_bytes()
@@ -558,7 +555,7 @@ fn array_change_key_case(
                         }
                     })
                     .collect();
-                Key::Str(PhpString::new(req, &folded)?.hand_on_unmigrated())
+                PhpString::new(req, &folded)?.into_key()
             }
         };
         let value = copied(req, *row.value());
@@ -643,8 +640,11 @@ fn array_fill(
     };
     let mut out = PhpArray::sized(req, u32::try_from(size).unwrap_or(u32::MAX), layout)?;
     for at in 0..count {
-        req.addref(&value);
-        out.set(req, Key::Int(start + at), value)?;
+        out.set(
+            req,
+            Owner::take(req, Key::Int(start + at)),
+            Owner::take(req, value),
+        )?;
     }
     Ok(out)
 }
@@ -685,8 +685,7 @@ fn array_fill_keys(
         let element = *row.value();
         let element = element.deref();
         let key = symtable_key(req, &element)?;
-        req.addref(&value);
-        out.set(req, key, value)?;
+        out.set(req, key, Owner::take(req, value))?;
         Ok(ControlFlow::Continue(()))
     })?;
     Ok(out)
@@ -754,8 +753,7 @@ fn array_pad(
     let mut out = PhpArray::new(req)?;
     let fill = |req: &mut Request, out: &mut Owner<PhpArray>| -> Result<(), Thrown> {
         for _ in 0..pads {
-            req.addref(&pad);
-            out.append(req, pad)?;
+            out.append(req, Owner::take(req, pad))?;
         }
         Ok(())
     };
@@ -768,10 +766,10 @@ fn array_pad(
     walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let element = *row.value();
-        req.addref(&element);
+        let element = Owner::take(req, element);
         match key {
             Key::Str(_) => {
-                let key = key_copy(req, &key);
+                let key = Owner::take(req, key.clone());
                 out.set(req, key, element)?;
             }
             Key::Int(_) => out.append(req, element)?,
@@ -825,16 +823,22 @@ fn array_reverse(
     // (`Z/ext/standard/array.c:4771`), which no code of the program
     // reaches: the rows read under the borrowed request, each taken as
     // `zval_add_ref` takes it, then written last to first.
-    let rows: Vec<(Key, Value)> = walk::rows(req, input)
+    let rows: Vec<(Key, Owner<Value>)> = walk::rows(req, input)
         .map(|(key, element)| (key, copied(req, element)))
         .collect();
-    for (key, value) in rows.into_iter().rev() {
-        match key {
-            Key::Int(_) if !preserve => out.append(req, value)?,
+    let mut rows = rows.into_iter().rev();
+    while let Some((key, value)) = rows.next() {
+        let written = match key {
+            Key::Int(_) if !preserve => out.append(req, value),
             _ => {
-                let key = key_copy(req, &key);
-                out.set(req, key, value)?;
+                let key = Owner::take(req, key);
+                out.set(req, key, value)
             }
+        };
+        if let Err(thrown) = written {
+            give_up_rows(req, rows);
+            out.give_up(req);
+            return Err(thrown);
         }
     }
     Ok(out)
@@ -899,23 +903,39 @@ fn array_chunk(
     // (`Z/ext/standard/array.c:7079`), which no code of the program
     // reaches: the rows read under the borrowed request, each taken as
     // `zval_add_ref` takes it, then written into their chunks.
-    let rows: Vec<(Key, Value)> = walk::rows(req, input)
+    let rows: Vec<(Key, Owner<Value>)> = walk::rows(req, input)
         .map(|(key, element)| (key, copied(req, element)))
         .collect();
-    for (key, value) in rows {
-        let mut open = match chunk {
-            Some(open) => open,
-            None => PhpArray::new(req)?,
+    let mut rows = rows.into_iter();
+    while let Some((key, value)) = rows.next() {
+        let opened = match chunk.take() {
+            Some(open) => Ok(open),
+            None => PhpArray::new(req),
         };
-        if preserve {
-            let key = key_copy(req, &key);
-            open.set(req, key, value)?;
+        let mut open = match opened {
+            Ok(open) => open,
+            Err(thrown) => {
+                value.give_up(req);
+                give_up_rows(req, rows);
+                out.give_up(req);
+                return Err(thrown);
+            }
+        };
+        let written = if preserve {
+            let key = Owner::take(req, key);
+            open.set(req, key, value)
         } else {
-            open.append(req, value)?;
+            open.append(req, value)
+        };
+        if let Err(thrown) = written {
+            give_up_rows(req, rows);
+            open.give_up(req);
+            out.give_up(req);
+            return Err(thrown);
         }
         current += 1;
         if current == size {
-            out.append(req, Value::array(open.hand_on_unmigrated()))?;
+            out.append(req, open.into_value())?;
             chunk = None;
             current = 0;
         } else {
@@ -923,7 +943,7 @@ fn array_chunk(
         }
     }
     if let Some(open) = chunk {
-        out.append(req, Value::array(open.hand_on_unmigrated()))?;
+        out.append(req, open.into_value())?;
     }
     Ok(out)
 }
@@ -1053,7 +1073,7 @@ fn key_exists(req: &mut Request, key: Untyped<Value>, array: PhpArray) -> Result
 
 fn key_exists_as(req: &mut Request, key: Value, array: PhpArray) -> Result<bool, Thrown> {
     let key = match key.as_ref() {
-        ValueRef::Str(s) => Key::from_string(*s),
+        ValueRef::Str(s) => Key::lookup(*s),
         ValueRef::Int(n) => Key::Int(n),
         ValueRef::Null | ValueRef::Undef => {
             deprecated(
@@ -1194,28 +1214,31 @@ fn array_column(
     let walked = walk::foreach(req, input, Hold::None, |req, row| -> walk::Step {
         let row = row.value().deref();
         let value = match &column {
-            None => {
-                req.addref(&row);
-                row
-            }
+            None => Owner::take(req, row),
             Some(name) => match fetch(req, &row, name)? {
                 Some(value) => value,
                 None => return Ok(ControlFlow::Continue(())),
             },
         };
         let key = match &index {
-            Some(name) => fetch(req, &row, name)?,
+            Some(name) => match fetch(req, &row, name) {
+                Ok(key) => key,
+                Err(thrown) => {
+                    value.give_up(req);
+                    return Err(thrown);
+                }
+            },
             None => None,
         };
         match key {
             Some(key) => {
                 // `array_set_zval_key`: the key as an array offset.
                 let key_of = php_ext::coerce::key_of(req, &key);
-                req.release(key);
+                key.give_up(req);
                 match key_of {
-                    Ok(key) => out.set(req, key.hand_on_unmigrated(), value)?,
+                    Ok(key) => out.set(req, key, value)?,
                     Err(thrown) => {
-                        req.release(value);
+                        value.give_up(req);
                         return Err(thrown);
                     }
                 }
@@ -1246,17 +1269,13 @@ fn column_of(key: Union<PhpString, i64>) -> Key {
 /// (`ZEND_PROPERTY_EXISTS`) or set (`ZEND_PROPERTY_ISSET`, which a
 /// `__isset` answers), in the scope that called, so a property it may not
 /// see is its `__get`'s; anything else nothing.
-fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Thrown> {
+fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Owner<Value>>, Thrown> {
     if let Some(array) = row.as_array() {
         let key = match name {
-            Key::Str(s) => Key::from_string(*s),
+            Key::Str(s) => Key::lookup(*s),
             Key::Int(n) => Key::Int(*n),
         };
-        return Ok(array.get(&key).map(|value| {
-            let value = value.deref();
-            req.addref(&value);
-            value
-        }));
+        return Ok(array.get(&key).map(|value| Owner::take(req, value.deref())));
     }
     if let Some(object) = row.as_object().copied() {
         let text = match name {
@@ -1268,7 +1287,7 @@ fn fetch(req: &mut Request, row: &Value, name: &Key) -> Result<Option<Value>, Th
             || handlers.has_property(req, object, &text, PropertyTest::Isset)?
         {
             let value = handlers.read_property(req, object, &text, PropertyRead::Warning)?;
-            return Ok(Some(value.hand_on_unmigrated()));
+            return Ok(Some(value));
         }
         return Ok(None);
     }

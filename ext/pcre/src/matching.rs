@@ -180,16 +180,19 @@ pub(super) fn offset_pair(
     let mut pair = PhpArray::new(req)?;
     if start == ffi::PCRE2_UNSET {
         let text = if unmatched_as_null {
-            Value::null()
+            Owner::take(req, Value::null())
         } else {
-            Value::string(PhpString::new(req, b"")?.hand_on_unmigrated())
+            PhpString::new(req, b"")?.into_value()
         };
         pair.append(req, text)?;
-        pair.append(req, Value::int(-1))?;
+        pair.append(req, Owner::take(req, Value::int(-1)))?;
     } else {
         let text = piece(req, subject, start, end)?;
-        pair.append(req, text.hand_on_unmigrated())?;
-        pair.append(req, Value::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
+        pair.append(req, text)?;
+        pair.append(
+            req,
+            Owner::take(req, Value::int(i64::try_from(start).unwrap_or(i64::MAX))),
+        )?;
     }
     Ok(pair.into_value())
 }
@@ -202,15 +205,24 @@ fn insert(
     req: &mut Request,
     into: &mut Owner<PhpArray>,
     name: Option<&[u8]>,
-    value: Value,
+    value: Owner<Value>,
     unmatched: bool,
 ) -> Result<(), Thrown> {
     if let Some(name) = name
         && (!unmatched || into.find(name).is_none())
     {
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-        req.addref(&value);
-        into.set(req, key, value)?;
+        let key = match PhpString::new(req, name) {
+            Ok(key) => key.into_key(),
+            Err(thrown) => {
+                value.give_up(req);
+                return Err(thrown);
+            }
+        };
+        let named = Owner::take(req, *value);
+        if let Err(thrown) = into.set(req, key, named) {
+            value.give_up(req);
+            return Err(thrown);
+        }
     }
     into.append(req, value)
 }
@@ -239,22 +251,22 @@ pub(super) fn populate(
             match_value(req, subject, at, as_null)?
         };
         let unset = at.0 == ffi::PCRE2_UNSET;
-        insert(req, into, name(group), value.hand_on_unmigrated(), unset)?;
+        insert(req, into, name(group), value, unset)?;
     }
     if as_null {
         for group in count..pattern.groups {
             let unset = (ffi::PCRE2_UNSET, ffi::PCRE2_UNSET);
             let value = if offsets {
-                offset_pair(req, subject, unset, true)?.hand_on_unmigrated()
+                offset_pair(req, subject, unset, true)?
             } else {
-                Value::null()
+                Owner::take(req, Value::null())
             };
             insert(req, into, name(group), value, true)?;
         }
     }
     if let Some(mark) = scratch.data.mark() {
-        let key = Key::Str(PhpString::new(req, b"MARK")?.hand_on_unmigrated());
-        let mark = Value::string(PhpString::new(req, &mark)?.hand_on_unmigrated());
+        let key = PhpString::new(req, b"MARK")?.into_key();
+        let mark = PhpString::new(req, &mark)?.into_value();
         into.set(req, key, mark)?;
     }
     Ok(())
@@ -855,7 +867,7 @@ fn matches_loop(
                             } else {
                                 match_value(req, bytes, at, as_null)?
                             };
-                            set.append(req, value.hand_on_unmigrated())?;
+                            set.append(req, value)?;
                         }
                         if let Some(mark) = scratch.data.mark() {
                             let marks = match marks.as_mut() {
@@ -863,7 +875,7 @@ fn matches_loop(
                                 None => marks.insert(PhpArray::new(req)?),
                             };
                             let mark = PhpString::new(req, &mark)?.into_value();
-                            marks.set(req, Key::Int(matched - 1), mark.hand_on_unmigrated())?;
+                            marks.set(req, Owner::take(req, Key::Int(matched - 1)), mark)?;
                         }
                         let unset = (ffi::PCRE2_UNSET, ffi::PCRE2_UNSET);
                         for set in sets.iter_mut().skip(n) {
@@ -872,12 +884,12 @@ fn matches_loop(
                             } else {
                                 match_value(req, bytes, unset, as_null)?
                             };
-                            set.append(req, value.hand_on_unmigrated())?;
+                            set.append(req, value)?;
                         }
                     } else {
                         let mut set = PhpArray::new(req)?;
                         populate(req, &mut set, pattern, scratch, bytes, n, flags)?;
-                        out.append(req, set.into_value().hand_on_unmigrated())?;
+                        out.append(req, set.into_value())?;
                     }
                 }
                 let (whole_start, whole_end) = scratch.group(0);
@@ -917,17 +929,16 @@ fn matches_loop(
         && !sets.is_empty()
     {
         for (group, set) in sets.into_iter().enumerate() {
-            let value = set.into_value().hand_on_unmigrated();
+            let value = set.into_value();
             if let Some(name) = pattern.names.get(group).and_then(|n| n.as_deref()) {
-                let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
-                req.addref(&value);
-                out.set(req, key, value)?;
+                let key = PhpString::new(req, name)?.into_key();
+                out.set(req, key, Owner::take(req, *value))?;
             }
             out.append(req, value)?;
         }
         if let Some(marks) = marks {
-            let key = Key::Str(PhpString::new(req, b"MARK")?.hand_on_unmigrated());
-            out.set(req, key, marks.into_value().hand_on_unmigrated())?;
+            let key = PhpString::new(req, b"MARK")?.into_key();
+            out.set(req, key, marks.into_value())?;
         }
     }
     Ok((Some(matched), out))

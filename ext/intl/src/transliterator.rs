@@ -8,7 +8,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object, write_prop};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::transliterator::{Trans, ids};
@@ -445,7 +445,7 @@ fn list_ids(req: &mut Request) -> Answer<OrFalse<Owner<PhpArray>>> {
     let mut status = Code::ZERO;
     while let Some(id) = all.next(&mut status) {
         let id = PhpString::new(req, &id)?;
-        array.append(req, Value::string(id.hand_on_unmigrated()))?;
+        array.append(req, id.into_value())?;
     }
     error::set_code(req, status);
     if status.is_failure() {

@@ -6,7 +6,7 @@ use php_ext::abi::{Path, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::decode::{
     Arg, CertParam, Origin, c_string, cert_from_param, cert_stack, check_path, finish, raised,
@@ -282,16 +282,15 @@ fn openssl_pkcs12_read(
             let mut list = PhpArray::new(req)?;
             for (i, pem) in extra.pems().into_iter().rev().enumerate() {
                 if let Some(pem) = pem {
-                    let pem = Value::string(PhpString::new(req, &pem)?.hand_on_unmigrated());
-                    list.set(req, Key::Int(i64::try_from(i).unwrap_or(0)), pem)?;
+                    let pem = PhpString::new(req, &pem)?.into_value();
+                    list.set(
+                        req,
+                        Owner::take(req, Key::Int(i64::try_from(i).unwrap_or(0))),
+                        pem,
+                    )?;
                 }
             }
-            put(
-                req,
-                &mut out,
-                b"extracerts",
-                list.into_value().hand_on_unmigrated(),
-            )?;
+            put(req, &mut out, b"extracerts", list.into_value())?;
         }
         certificates.set(req, Untyped(out.into_value()))?;
         Ok(true)

@@ -839,7 +839,7 @@ fn libxml_get_errors(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for error in &list {
         let object = error_object(req, error)?;
-        out.append(req, object.into_value().hand_on_unmigrated())?;
+        out.append(req, object.into_value())?;
     }
     Ok(out)
 }

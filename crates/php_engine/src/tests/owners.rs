@@ -58,7 +58,7 @@ fn fresh(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
 #[php_function]
 fn appended(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut owner = Owner::take(req, array);
-    owner.append(req, Value::int(1))?;
+    owner.append(req, Owner::take(req, Value::int(1)))?;
     Ok(owner)
 }
 

@@ -1560,7 +1560,7 @@ pub(crate) fn query_selector_all(
                 return Err(thrown);
             }
         };
-        array.append(req, v.hand_on_unmigrated())?;
+        array.append(req, v)?;
     }
     crate::node_set(req, "Dom\\NodeList", array)
 }

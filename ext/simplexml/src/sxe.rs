@@ -925,19 +925,19 @@ fn table(req: &mut Request, rows: Vec<Row>) -> Result<Owner<PhpArray>, Thrown> {
     for row in rows {
         match row {
             Row::Named(name, mut values) => {
-                let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
+                let key = PhpString::new(req, &name)?.into_key();
                 let value = if values.len() == 1 {
                     values.remove(0)
                 } else {
                     let mut list = PhpArray::new(req)?;
                     for v in values {
-                        list.append(req, v.hand_on_unmigrated())?;
+                        list.append(req, v)?;
                     }
                     list.into_value()
                 };
-                out.set(req, key, value.hand_on_unmigrated())?;
+                out.set(req, key, value)?;
             }
-            Row::Next(value) => out.append(req, value.hand_on_unmigrated())?,
+            Row::Next(value) => out.append(req, value)?,
         }
     }
     Ok(out)
@@ -995,9 +995,9 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
             if !attrs.is_empty() {
                 let mut list = PhpArray::new(req)?;
                 for (name, value) in attrs {
-                    let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
+                    let key = PhpString::new(req, &name)?.into_key();
                     let value = string(req, &value)?;
-                    list.set(req, key, value.hand_on_unmigrated())?;
+                    list.set(req, key, value)?;
                 }
                 add_row(&mut rows, b"@attributes", list.into_value());
             }

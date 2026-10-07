@@ -387,8 +387,8 @@ fn pair(
     second: Owner<Value>,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
-    array.set(req, Key::Int(0), first.hand_on_unmigrated())?;
-    array.set(req, Key::Int(1), second.hand_on_unmigrated())?;
+    array.set(req, Owner::take(req, Key::Int(0)), first)?;
+    array.set(req, Owner::take(req, Key::Int(1)), second)?;
     Ok(array)
 }
 

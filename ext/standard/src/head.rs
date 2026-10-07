@@ -247,7 +247,7 @@ fn headers_sent(
 fn headers_list(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for line in req.headers_list() {
-        let value = Value::string(PhpString::new(req, &line)?.hand_on_unmigrated());
+        let value = PhpString::new(req, &line)?.into_value();
         array.append(req, value)?;
     }
     Ok(array)

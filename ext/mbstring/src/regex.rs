@@ -439,7 +439,7 @@ fn groups(
             None => Owner::take(req, Value::bool(false)),
         };
         let at = Key::Int(i64::try_from(i).unwrap_or(0));
-        out.set(req, at, value.hand_on_unmigrated())?;
+        out.set(req, Owner::take(req, at), value)?;
     }
     for (name, group) in re.regex.names(region) {
         let (beg, end) = usize::try_from(group)
@@ -454,8 +454,9 @@ fn groups(
             Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
             None => Owner::take(req, Value::bool(false)),
         };
-        let key = Key::from_string(new_string(req, &name)?.hand_on_unmigrated());
-        out.set(req, key, value.hand_on_unmigrated())?;
+        let key = new_string(req, &name)?;
+        let key = Key::from_string(req, key);
+        out.set(req, key, value)?;
     }
     Ok(out)
 }
@@ -746,7 +747,7 @@ fn replace(
                         usize::try_from(end).unwrap_or(0),
                     );
                     let s = new_string(req, subject.get(b..e).unwrap_or_default())?;
-                    subpats.append(req, s.into_value().hand_on_unmigrated())?;
+                    subpats.append(req, s.into_value())?;
                 }
                 for (name, group) in re.regex.names(&region) {
                     let (beg, end) = usize::try_from(group)
@@ -761,8 +762,9 @@ fn replace(
                         Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
                         None => Owner::take(req, Value::bool(false)),
                     };
-                    let key = Key::from_string(new_string(req, &name)?.hand_on_unmigrated());
-                    subpats.set(req, key, value.hand_on_unmigrated())?;
+                    let key = new_string(req, &name)?;
+                    let key = Key::from_string(req, key);
+                    subpats.set(req, key, value)?;
                 }
                 let returned = php_ext::call::call(req, callback, &[Value::array(*subpats)]);
                 subpats.give_up(req);
@@ -950,7 +952,7 @@ pub(crate) fn mb_split(
         if pos < end {
             if beg < subject.len() && beg >= chunk {
                 let s = new_string(req, &subject[chunk..beg])?;
-                out.append(req, s.into_value().hand_on_unmigrated())?;
+                out.append(req, s.into_value())?;
                 count = count.wrapping_sub(1);
             } else {
                 failed = Some(-2);
@@ -973,7 +975,7 @@ pub(crate) fn mb_split(
         return Ok(OrFalse::False);
     }
     let tail = new_string(req, subject.get(chunk..).unwrap_or_default())?;
-    out.append(req, tail.into_value().hand_on_unmigrated())?;
+    out.append(req, tail.into_value())?;
     Ok(OrFalse::Value(out))
 }
 
@@ -1123,8 +1125,8 @@ pub(crate) fn mb_ereg_search_pos(
         .and_then(|region| region.groups().first().copied())
         .unwrap_or((0, 0));
     let mut out = PhpArray::new(req)?;
-    out.append(req, Value::int(i64::from(beg)))?;
-    out.append(req, Value::int(i64::from(end - beg)))?;
+    out.append(req, Owner::take(req, Value::int(i64::from(beg))))?;
+    out.append(req, Owner::take(req, Value::int(i64::from(end - beg))))?;
     Ok(OrFalse::Value(out))
 }
 

@@ -10,7 +10,7 @@ pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
 use php_heap::{Arr, Fatal, Heap, Intern, Ref, SortEntry, ZvalRef};
 
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, adopted};
+use crate::api::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, adopted};
 
 use super::{Hooks, Request};
 
@@ -583,8 +583,8 @@ impl Request {
             ),
             ("free_time", Value::float(seconds(status.free_time))),
         ] {
-            let key = Key::Str(self.string(name.as_bytes())?);
-            array.set(self, key, value)?;
+            let key = PhpString::new(self, name.as_bytes())?.into_key();
+            array.set(self, key, Owner::take(self, value))?;
         }
         Ok(array)
     }

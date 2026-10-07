@@ -330,7 +330,7 @@ fn operand_value(
                         return Err(thrown);
                     }
                 };
-                array.append(req, v.hand_on_unmigrated())?;
+                array.append(req, v)?;
             }
             Ok(array.into_value())
         }
@@ -612,7 +612,7 @@ fn node_list(
                 return Err(thrown);
             }
         };
-        array.append(req, v.hand_on_unmigrated())?;
+        array.append(req, v)?;
     }
     let class = if modern {
         "Dom\\NodeList"

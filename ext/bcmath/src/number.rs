@@ -621,14 +621,10 @@ impl Number {
     /// ```
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let value = rendered(req, this.object())?;
-        req.addref(&Value::string(value));
         let key = PhpString::new(req, b"value")?;
         let mut array = PhpArray::new(req)?;
-        array.set(
-            req,
-            Key::Str(key.hand_on_unmigrated()),
-            Value::string(value),
-        )?;
+        let value = Owner::take(req, Value::string(value));
+        array.set(req, key.into_key(), value)?;
         Ok(array)
     }
 
@@ -1465,11 +1461,7 @@ impl ObjectHandlers for Handlers {
         };
         let mut table = PhpArray::new(req)?;
         for (key, value) in rows {
-            if let Key::Str(name) = &key {
-                req.addref(&Value::string(*name));
-            }
-            req.addref(&value);
-            table.set(req, key, value)?;
+            table.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
         Ok(Some(table.into()))
     }

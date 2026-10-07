@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, argument_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// The JPEG markers `iptcembed` reads.
 const M_EOI: u32 = 0xd9;
@@ -363,11 +363,11 @@ fn iptcparse(req: &mut Request, iptc_block: PhpString) -> Result<OrFalse<Owner<P
     for (key, values) in tags {
         let mut list = PhpArray::new(req)?;
         for value in values {
-            let value = Value::string(PhpString::new(req, &value)?.hand_on_unmigrated());
+            let value = PhpString::new(req, &value)?.into_value();
             list.append(req, value)?;
         }
-        let key = Key::Str(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
-        array.set(req, key, Value::array(list.hand_on_unmigrated()))?;
+        let key = PhpString::new(req, key.as_bytes())?.into_key();
+        array.set(req, key, list.into_value())?;
     }
     Ok(OrFalse::Value(array))
 }

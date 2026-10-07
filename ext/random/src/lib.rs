@@ -385,8 +385,7 @@ fn class_name(req: &Request, object: PhpObject) -> String {
 fn members(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (key, value) in object.props(req)? {
-        req.addref(&value);
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     Ok(out)
 }
@@ -397,10 +396,8 @@ fn fields(req: &mut Request, fields: &[Field]) -> Result<Owner<PhpArray>, Thrown
     let mut out = PhpArray::new(req)?;
     for field in fields {
         let value = match field {
-            Field::Word(bytes) => {
-                Value::string(PhpString::new(req, &bin2hex(bytes))?.hand_on_unmigrated())
-            }
-            Field::Long(n) => Value::int(*n),
+            Field::Word(bytes) => PhpString::new(req, &bin2hex(bytes))?.into_value(),
+            Field::Long(n) => Owner::take(req, Value::int(*n)),
         };
         out.append(req, value)?;
     }

@@ -16,7 +16,7 @@ use php_ext_random::Rng;
 
 use super::sort::key_value;
 use super::stack::Stack;
-use super::{HT_MAX_SIZE, copied, key_copy, returned};
+use super::{HT_MAX_SIZE, copied, give_up_rows, returned};
 use crate::math::math_round;
 
 /// `string|int|float`, a bound of `range`.
@@ -140,16 +140,22 @@ fn array_merge_recursive(
     // `Z/ext/standard/array.c:4364`), which no code of the program reaches:
     // the rows read under the borrowed request, each taken as php takes
     // it, a reference with one owner followed, then written.
-    let rows: Vec<(Key, Value)> = walk::rows(req, *first)
+    let rows: Vec<(Key, Owner<Value>)> = walk::rows(req, *first)
         .map(|(key, value)| (key, copied(req, value)))
         .collect();
-    for (key, value) in rows {
-        match key {
+    let mut rows = rows.into_iter();
+    while let Some((key, value)) = rows.next() {
+        let written = match key {
             Key::Str(_) => {
-                let key = key_copy(req, &key);
-                dest.set(req, key, value)?;
+                let key = Owner::take(req, key);
+                dest.set(req, key, value)
             }
-            Key::Int(_) => dest.append(req, value)?,
+            Key::Int(_) => dest.append(req, value),
+        };
+        if let Err(thrown) = written {
+            give_up_rows(req, rows);
+            dest.give_up(req);
+            return Err(thrown);
         }
     }
     for src in rest {
@@ -183,7 +189,7 @@ fn merge_recursive(
         };
         let Some(dest_entry) = dest.get(&key) else {
             let value = copied(req, *row.value());
-            let key = key_copy(req, &key);
+            let key = Owner::take(req, key.clone());
             dest.set(req, key, value)?;
             return Ok(ControlFlow::Continue(()));
         };
@@ -203,7 +209,7 @@ fn merge_recursive(
             ValueRef::Array(array) => array.copy(req)?,
             ValueRef::Null => {
                 let mut array = PhpArray::new(req)?;
-                array.append(req, Value::null())?;
+                array.append(req, Owner::take(req, Value::null()))?;
                 array
             }
             _ => to_array(req, &dest_value)?,
@@ -232,11 +238,10 @@ fn merge_recursive(
             }
             merged
         } else {
-            req.addref(&src_value);
-            nested.append(req, src_value)
+            nested.append(req, Owner::take(req, src_value))
         };
-        let written = key_copy(req, &key);
-        dest.set(req, written, Value::array(nested.hand_on_unmigrated()))?;
+        let written = Owner::take(req, key.clone());
+        dest.set(req, written, nested.into_value())?;
         merged?;
         Ok(ControlFlow::Continue(()))
     })?;
@@ -349,7 +354,7 @@ fn replace_flat(
     walk::foreach(req, src, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let value = copied(req, *row.value());
-        let key = key_copy(req, &key);
+        let key = Owner::take(req, key.clone());
         dest.set(req, key, value)?;
         Ok(ControlFlow::Continue(()))
     })?;
@@ -376,7 +381,7 @@ fn replace_recursive(
         let (Some(src_array), Some(dest_array)) = (src_value.as_array().copied(), dest_array)
         else {
             let value = copied(req, *row.value());
-            let key = key_copy(req, &key);
+            let key = Owner::take(req, key.clone());
             dest.set(req, key, value)?;
             return Ok(ControlFlow::Continue(()));
         };
@@ -389,8 +394,8 @@ fn replace_recursive(
         let replaced = replace_recursive(req, &mut nested, src_array);
         dest_array.unprotect();
         src_array.unprotect();
-        let written = key_copy(req, &key);
-        dest.set(req, written, Value::array(nested.hand_on_unmigrated()))?;
+        let written = Owner::take(req, key.clone());
+        dest.set(req, written, nested.into_value())?;
         replaced?;
         Ok(ControlFlow::Continue(()))
     })?;
@@ -735,7 +740,7 @@ fn character_range(
         while at >= i64::from(high) {
             let byte = u8::try_from(at).unwrap_or(0);
             let text = PhpString::new(req, &[byte])?;
-            out.append(req, Value::string(text.hand_on_unmigrated()))?;
+            out.append(req, text.into_value())?;
             if at - step < 0 {
                 break;
             }
@@ -746,7 +751,7 @@ fn character_range(
         while at <= i64::from(high) {
             let byte = u8::try_from(at).unwrap_or(0);
             let text = PhpString::new(req, &[byte])?;
-            out.append(req, Value::string(text.hand_on_unmigrated()))?;
+            out.append(req, text.into_value())?;
             if at + step_wide > 255 {
                 break;
             }
@@ -754,7 +759,7 @@ fn character_range(
         }
     } else {
         let text = PhpString::new(req, &[low])?;
-        out.append(req, Value::string(text.hand_on_unmigrated()))?;
+        out.append(req, text.into_value())?;
     }
     Ok(out)
 }
@@ -807,7 +812,7 @@ fn double_range(
         let mut i = 0u32;
         let mut element = start;
         while i < size && if down { element >= end } else { element <= end } {
-            out.append(req, Value::float(element))?;
+            out.append(req, Owner::take(req, Value::float(element)))?;
             i += 1;
             let distance = f64::from(i) * step;
             element = if down {
@@ -869,7 +874,7 @@ fn long_range(
             } else {
                 start.wrapping_add(distance)
             };
-            out.append(req, Value::int(element))?;
+            out.append(req, Owner::take(req, Value::int(element)))?;
         }
         Ok(())
     })
@@ -936,8 +941,7 @@ fn shuffle(req: &mut Request, array: Ref<PhpArray>) -> Result<True, Thrown> {
     Rng::default_engine().shuffle(req, &mut values)?;
     let mut shuffled = PhpArray::new(req)?;
     for value in values {
-        req.addref(&value);
-        shuffled.append(req, value)?;
+        shuffled.append(req, Owner::take(req, value))?;
     }
     stack.replace(req, shuffled)?;
     stack.finish(req);
@@ -986,8 +990,7 @@ fn array_rand(
     let mut out = PhpArray::new(req)?;
     for key in &keys {
         let value = key_value(key);
-        req.addref(&value);
-        out.append(req, value)?;
+        out.append(req, Owner::take(req, value))?;
     }
     Ok(returned(out.into_value()))
 }

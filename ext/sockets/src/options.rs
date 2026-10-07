@@ -100,8 +100,18 @@ fn get_option(
                 return failed(req, errno, "Unable to retrieve socket option");
             }
             let mut out = PhpArray::new(req)?;
-            put(req, &mut out, "l_onoff", Value::int(word(&buf, 0)))?;
-            put(req, &mut out, "l_linger", Value::int(word(&buf, 4)))?;
+            put(
+                req,
+                &mut out,
+                "l_onoff",
+                Owner::take(req, Value::int(word(&buf, 0))),
+            )?;
+            put(
+                req,
+                &mut out,
+                "l_linger",
+                Owner::take(req, Value::int(word(&buf, 4))),
+            )?;
             return Ok(OrFalse::Value(Union::A(out)));
         }
         if option == i64::from(libc::SO_RCVTIMEO) || option == i64::from(libc::SO_SNDTIMEO) {
@@ -112,12 +122,17 @@ fn get_option(
             let sec_width = std::mem::size_of::<libc::time_t>();
             let usec_width = std::mem::size_of::<libc::suseconds_t>();
             let mut out = PhpArray::new(req)?;
-            put(req, &mut out, "sec", Value::int(wide(&buf, 0, sec_width)))?;
+            put(
+                req,
+                &mut out,
+                "sec",
+                Owner::take(req, Value::int(wide(&buf, 0, sec_width))),
+            )?;
             put(
                 req,
                 &mut out,
                 "usec",
-                Value::int(wide(&buf, sec_width, usec_width)),
+                Owner::take(req, Value::int(wide(&buf, sec_width, usec_width))),
             )?;
             return Ok(OrFalse::Value(Union::A(out)));
         }
@@ -213,11 +228,7 @@ fn table(req: &mut Request, value: &Value, option: &str) -> Result<Owner<PhpArra
             let entries: Vec<_> = walk::rows(req, table).collect();
             let mut out = PhpArray::new(req)?;
             for (key, element) in entries {
-                req.addref(&element);
-                if let php_ext::values::Key::Str(s) = &key {
-                    req.addref(&Value::string(*s));
-                }
-                out.set(req, key, element)?;
+                out.set(req, Owner::take(req, key), Owner::take(req, element))?;
             }
             Ok(out)
         }

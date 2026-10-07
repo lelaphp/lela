@@ -270,7 +270,7 @@ impl PhpToken {
                 rows.give_up(req);
                 return Err(thrown);
             }
-            rows.append(req, object.into_value().hand_on_unmigrated())?;
+            rows.append(req, object.into_value())?;
         }
         Ok(rows)
     }
@@ -1028,12 +1028,12 @@ fn token_get_all(
         match token.name.and_then(names::id_of) {
             Some(id) => {
                 let mut row = PhpArray::new(req)?;
-                row.append(req, Value::int(id))?;
-                row.append(req, text.hand_on_unmigrated())?;
-                row.append(req, Value::int(i64::from(token.line)))?;
-                rows.append(req, row.into_value().hand_on_unmigrated())?;
+                row.append(req, Owner::take(req, Value::int(id)))?;
+                row.append(req, text)?;
+                row.append(req, Owner::take(req, Value::int(i64::from(token.line))))?;
+                rows.append(req, row.into_value())?;
             }
-            None => rows.append(req, text.hand_on_unmigrated())?,
+            None => rows.append(req, text)?,
         }
     }
     Ok(rows)

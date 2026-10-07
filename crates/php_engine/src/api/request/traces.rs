@@ -353,14 +353,14 @@ impl Request {
                 // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
                 // name, one more owner of the interned string.
                 let file = Value::string(self.interned(&file)?);
-                self.set_string_key(&mut row, b"file", file)?;
-                self.set_string_key(&mut row, b"line", Value::int(line))?;
+                self.set_string_key(&mut row, b"file", Owner::adopt(self, file))?;
+                self.set_string_key(&mut row, b"line", Owner::adopt(self, Value::int(line)))?;
             }
             match traced {
                 Traced::Function(function) => {
                     let name = self.declared_name(function);
                     let name = Value::string(self.interned(name.as_bytes())?);
-                    self.set_string_key(&mut row, b"function", name)?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
                     // `ce->name` whole: an anonymous class's with its NUL
                     // and site; a receiver's class name for a function of
                     // no scope it is passed to, `zend_ffi_get_func`'s.
@@ -371,18 +371,22 @@ impl Request {
                     };
                     if let Some(class) = class {
                         let class = Value::string(self.interned(&class)?);
-                        self.set_string_key(&mut row, b"class", class)?;
+                        self.set_string_key(&mut row, b"class", Owner::adopt(self, class))?;
                         if provide_object && let Some(this) = this {
-                            self.addref(&this.as_value());
-                            self.set_string_key(&mut row, b"object", this.as_value())?;
+                            let this = Owner::take(self, this.as_value());
+                            self.set_string_key(&mut row, b"object", this)?;
                         }
                         let join: &[u8] = if this.is_some() { b"->" } else { b"::" };
                         let join = Value::string(self.interned(join)?);
-                        self.set_string_key(&mut row, b"type", join)?;
+                        self.set_string_key(&mut row, b"type", Owner::adopt(self, join))?;
                     }
                     if !ignore_arguments {
                         let args = self.trace_row_arguments(function, arguments, named)?;
-                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                        self.set_string_key(
+                            &mut row,
+                            b"args",
+                            Owner::adopt(self, Value::array(args)),
+                        )?;
                     }
                 }
                 Traced::Include { kind, file } => {
@@ -391,17 +395,21 @@ impl Request {
                     // `DEBUG_BACKTRACE_IGNORE_ARGS` as without it, made
                     // here with the row as its one owner.
                     if let Some(file) = file {
-                        let file = Value::string(self.string(&file)?);
+                        let file = PhpString::new(self, &file)?;
                         let mut args = self.array()?;
-                        args.append(self, file)?;
-                        self.set_string_key(&mut row, b"args", Value::array(args))?;
+                        args.append(self, file.into_value())?;
+                        self.set_string_key(
+                            &mut row,
+                            b"args",
+                            Owner::adopt(self, Value::array(args)),
+                        )?;
                     }
                     let name = Value::string(self.interned(kind.name().as_bytes())?);
-                    self.set_string_key(&mut row, b"function", name)?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
                 }
                 Traced::Unknown => {
                     let name = Value::string(self.string(b"unknown")?);
-                    self.set_string_key(&mut row, b"function", name)?;
+                    self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
                 }
                 Traced::Dropped => {
                     // `zend_array_destroy(stack_frame)`.
@@ -409,7 +417,7 @@ impl Request {
                     continue;
                 }
             }
-            trace.append(self, Value::array(row))?;
+            trace.append(self, Owner::adopt(self, Value::array(row)))?;
         }
         Ok(trace)
     }
@@ -437,23 +445,23 @@ impl Request {
         for (at, argument) in arguments.into_iter().enumerate() {
             let argument = argument.deref();
             let argument = if sensitive.at(at) {
-                self.sensitive_value(argument)?
+                let redacted = self.sensitive_value(argument)?;
+                Owner::adopt(self, redacted)
             } else {
-                self.addref(&argument);
-                argument
+                Owner::take(self, argument)
             };
             args.append(self, argument)?;
         }
         for (name, argument) in named {
             let argument = argument.deref();
             let argument = if sensitive.variadic {
-                self.sensitive_value(argument)?
+                let redacted = self.sensitive_value(argument)?;
+                Owner::adopt(self, redacted)
             } else {
-                self.addref(&argument);
-                argument
+                Owner::take(self, argument)
             };
-            self.addref(&Value::string(name));
-            args.set(self, Key::Str(name), argument)?;
+            let name = Owner::take(self, Key::Str(name));
+            args.set(self, name, argument)?;
         }
         Ok(args)
     }
@@ -482,11 +490,15 @@ impl Request {
         }
         let mut row = self.array()?;
         let file = Value::string(self.string(&executing)?);
-        self.set_string_key(&mut row, b"file", file)?;
-        self.set_string_key(&mut row, b"line", Value::int(i64::from(at)))?;
+        self.set_string_key(&mut row, b"file", Owner::adopt(self, file))?;
+        self.set_string_key(
+            &mut row,
+            b"line",
+            Owner::adopt(self, Value::int(i64::from(at))),
+        )?;
         let name = Value::string(self.string(b"[constant expression]")?);
-        self.set_string_key(&mut row, b"function", name)?;
-        trace.append(self, Value::array(row))
+        self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
+        trace.append(self, Owner::adopt(self, Value::array(row)))
     }
 
     /// Which arguments of a call to `function` a trace shows redacted,
@@ -1167,10 +1179,16 @@ impl Request {
         &mut self,
         row: &mut PhpArray,
         name: &[u8],
-        value: Value,
+        value: Owner<Value>,
     ) -> Result<(), Thrown> {
         // `ZSTR_KNOWN(ZEND_STR_FILE)` and its kin.
-        let key = Key::Str(self.interned(name)?);
+        let key = match self.interned(name) {
+            Ok(name) => Owner::take(self, Key::Str(name)),
+            Err(thrown) => {
+                value.give_up(self);
+                return Err(thrown);
+            }
+        };
         row.set(self, key, value)
     }
 }

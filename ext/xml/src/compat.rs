@@ -224,7 +224,12 @@ impl Compat {
         let mut entry = PhpArray::new(req)?;
         set_str(req, &mut entry, b"tag", &stripped)?;
         set_str(req, &mut entry, b"type", b"open")?;
-        set(req, &mut entry, b"level", Value::int(i64::from(level)))?;
+        set(
+            req,
+            &mut entry,
+            b"level",
+            Owner::take(req, Value::int(i64::from(level))),
+        )?;
         if let Some(p) = self.parser(req) {
             if let Some(slot) = usize::try_from(level - 1)
                 .ok()
@@ -236,20 +241,13 @@ impl Compat {
         }
         if !attributes.is_empty() {
             let attrs = self.attributes(req, attributes)?;
-            set(
-                req,
-                &mut entry,
-                b"attributes",
-                attrs.into_value().hand_on_unmigrated(),
-            )?;
+            set(req, &mut entry, b"attributes", attrs.into_value())?;
         }
         let Some(mut data) = self.data(req)? else {
             entry.give_up(req);
             return Ok(());
         };
-        if data
-            .append(req, entry.into_value().hand_on_unmigrated())
-            .is_ok()
+        if data.append(req, entry.into_value()).is_ok()
             && let Some(p) = self.parser(req)
         {
             p.ctag_index = data.next_free() - 1;
@@ -268,9 +266,10 @@ impl Compat {
         for (name, value) in attributes {
             let key = self.decode_tag(req, name);
             let decoded = self.decode(req, value);
-            let key = Key::from_string(PhpString::new(req, &key)?.hand_on_unmigrated());
+            let key = PhpString::new(req, &key)?;
+            let key = Key::from_string(req, key);
             let value = PhpString::new(req, &decoded)?;
-            array.set(req, key, Value::string(value.hand_on_unmigrated()))?;
+            array.set(req, key, value.into_value())?;
         }
         Ok(array)
     }
@@ -300,8 +299,13 @@ impl Compat {
                     let mut entry = PhpArray::new(req)?;
                     set_str(req, &mut entry, b"tag", &stripped)?;
                     set_str(req, &mut entry, b"type", b"close")?;
-                    set(req, &mut entry, b"level", Value::int(i64::from(level)))?;
-                    data.append(req, entry.into_value().hand_on_unmigrated())?;
+                    set(
+                        req,
+                        &mut entry,
+                        b"level",
+                        Owner::take(req, Value::int(i64::from(level))),
+                    )?;
+                    data.append(req, entry.into_value())?;
                 }
             }
             if let Some(p) = self.parser(req) {
@@ -367,7 +371,7 @@ impl Compat {
             joined.extend_from_slice(&decoded);
             let mut entry = separate_owned(req, entry)?;
             set_str(req, &mut entry, b"value", &joined)?;
-            return data.set(req, key, entry.into_value().hand_on_unmigrated());
+            return data.set(req, Owner::take(req, key), entry.into_value());
         }
         if level > 0 && level <= MAX_LEVEL && keep {
             let tag = self
@@ -381,8 +385,13 @@ impl Compat {
             set_str(req, &mut entry, b"tag", &stripped)?;
             set_str(req, &mut entry, b"value", &decoded)?;
             set_str(req, &mut entry, b"type", b"cdata")?;
-            set(req, &mut entry, b"level", Value::int(i64::from(level)))?;
-            data.append(req, entry.into_value().hand_on_unmigrated())?;
+            set(
+                req,
+                &mut entry,
+                b"level",
+                Owner::take(req, Value::int(i64::from(level))),
+            )?;
+            data.append(req, entry.into_value())?;
         } else if level == MAX_LEVEL + 1 {
             docref(
                 req,
@@ -464,13 +473,13 @@ impl Compat {
         let Some(mut index) = info.separate_array(req)? else {
             return Ok(());
         };
-        let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+        let key = PhpString::new(req, name)?.into_key();
         let mut list = match index.get(&key).and_then(|v| v.deref().as_array().copied()) {
             Some(list) => separate_owned(req, list)?,
             None => PhpArray::new(req)?,
         };
-        list.append(req, Value::int(i64::from(curtag)))?;
-        index.set(req, key, list.into_value().hand_on_unmigrated())?;
+        list.append(req, Owner::take(req, Value::int(i64::from(curtag))))?;
+        index.set(req, key, list.into_value())?;
         if let Some(p) = self.parser(req) {
             p.curtag += 1;
         }
@@ -503,7 +512,7 @@ impl Compat {
         };
         let mut entry = separate_owned(req, entry)?;
         f(req, &mut entry)?;
-        data.set(req, key, entry.into_value().hand_on_unmigrated())
+        data.set(req, Owner::take(req, key), entry.into_value())
     }
 }
 
@@ -546,16 +555,22 @@ fn set_str(
     text: &[u8],
 ) -> Result<(), Thrown> {
     let value = PhpString::new(req, text)?;
-    set(req, array, name, Value::string(value.hand_on_unmigrated()))
+    set(req, array, name, value.into_value())
 }
 
 fn set(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     name: &[u8],
-    value: Value,
+    value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = Key::Str(PhpString::new(req, name)?.hand_on_unmigrated());
+    let key = match PhpString::new(req, name) {
+        Ok(key) => key.into_key(),
+        Err(thrown) => {
+            value.give_up(req);
+            return Err(thrown);
+        }
+    };
     array.set(req, key, value)
 }
 

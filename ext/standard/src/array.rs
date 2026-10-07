@@ -121,22 +121,20 @@ fn returned<T: FromArgument>(value: Owner<Value>) -> Owner<Raw<T>> {
 /// `zval_add_ref` on an element being copied into a new array: a
 /// reference with no other owner is followed to its value, which is
 /// what the copy holds, and anything else is one more owner.
-fn copied(req: &Request, value: Value) -> Value {
+fn copied(req: &Request, value: Value) -> Owner<Value> {
     let value = match value.as_ref() {
         ValueRef::Reference(reference) if value.refcount() == 1 => reference.get(),
         _ => value,
     };
-    req.addref(&value);
-    value
+    Owner::take(req, value)
 }
 
-/// A key written into another array: a string key one more owner, as
-/// `zend_hash_add_new` takes it.
-fn key_copy(req: &Request, key: &Key) -> Key {
-    if let Key::Str(s) = key {
-        req.addref(&Value::string(*s));
+/// Rows taken with [`copied`] that no write took, given up: the way out
+/// of a write that failed while they were held.
+fn give_up_rows(req: &mut Request, rows: impl Iterator<Item = (Key, Owner<Value>)>) {
+    for (_, value) in rows {
+        value.give_up(req);
     }
-    key.clone()
 }
 
 /// `array_merge(array ...$arrays): array`, php's `PHP_FUNCTION(array_merge)`
@@ -266,9 +264,9 @@ fn array_merge(
             // `Z_ISREF_P(src_entry) && Z_REFCOUNT_P(src_entry) == 1`.
             let value = copied(req, *row.value());
             match row.key() {
-                Key::Str(name) => {
-                    req.addref(&Value::string(*name));
-                    merged.set(req, Key::Str(*name), value)?;
+                Key::Str(_) => {
+                    let key = Owner::take(req, row.key().clone());
+                    merged.set(req, key, value)?;
                 }
                 Key::Int(_) => merged.append(req, value)?,
             }
@@ -591,10 +589,7 @@ fn unique_by_string(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray
         }
         let value = copied(req, *row.value());
         let key = row.key().clone();
-        if let Key::Str(s) = &key {
-            req.addref(&Value::string(*s));
-        }
-        out.set(req, key, value)?;
+        out.set(req, Owner::take(req, key), value)?;
         Ok(ControlFlow::Continue(()))
     });
     if let Err(thrown) = walked {

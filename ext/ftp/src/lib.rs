@@ -571,7 +571,7 @@ fn lines_array(req: &mut Request, lines: Vec<Vec<u8>>) -> Result<Owner<PhpArray>
     let mut array = PhpArray::new(req)?;
     for line in lines {
         let line = PhpString::new(req, &line)?;
-        array.append(req, Value::string(line.hand_on_unmigrated()))?;
+        array.append(req, line.into_value())?;
     }
     Ok(array)
 }
@@ -893,7 +893,7 @@ fn ftp_mlsd(
             }
         };
         if let Some(entry) = entry {
-            array.append(req, entry.into_value().hand_on_unmigrated())?;
+            array.append(req, entry.into_value())?;
         }
     }
     Ok(OrFalse::Value(array))

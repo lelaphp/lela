@@ -90,8 +90,7 @@ fn call(req: &mut Request, object: PhpObject, name: &[u8], args: &[Value]) -> Ca
             return Called::Threw;
         };
         for arg in args {
-            req.addref(arg);
-            if list.append(req, *arg).is_err() {
+            if list.append(req, Owner::take(req, *arg)).is_err() {
                 return Called::Threw;
             }
         }
@@ -1073,8 +1072,8 @@ pub(crate) fn path_op(
         WrapperOp::Touch(times) => {
             let mut array = PhpArray::new(req)?.hand_on_unmigrated();
             if let Some((mtime, atime)) = times {
-                array.append(req, Value::int(mtime))?;
-                array.append(req, Value::int(atime))?;
+                array.append(req, Owner::take(req, Value::int(mtime)))?;
+                array.append(req, Owner::take(req, Value::int(atime)))?;
             }
             (
                 b"stream_metadata",

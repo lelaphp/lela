@@ -8,7 +8,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
-use php_ext::values::Value;
+use php_ext::values::{Owner, Value};
 
 use crate::archive::{
     self, API_MIN_DIR, API_MIN_READ, API_VER_MASK, Archive, ArchiveId, ENT_COMPRESSED_BZ2,
@@ -215,10 +215,8 @@ pub(crate) fn window_params(
     bits: i64,
 ) -> Result<php_ext::values::Owner<Value>, Thrown> {
     let mut params = php_ext::values::PhpArray::new(req)?;
-    let key = php_ext::values::Key::Str(
-        php_ext::values::PhpString::new(req, b"window")?.hand_on_unmigrated(),
-    );
-    params.set(req, key, Value::int(bits))?;
+    let key = php_ext::values::PhpString::new(req, b"window")?.into_key();
+    params.set(req, key, Owner::take(req, Value::int(bits)))?;
     Ok(params.into_value())
 }
 

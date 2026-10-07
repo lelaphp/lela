@@ -174,10 +174,9 @@ fn func_get_args(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let value = if value.tag() == TypeTag::Undef {
             Value::null()
         } else {
-            req.addref(&value);
             value
         };
-        array.append(req, value)?;
+        array.append(req, Owner::take(req, value))?;
     }
     Ok(array)
 }
@@ -386,9 +385,7 @@ fn function_exists(req: &mut Request, function: PhpString) -> bool {
 fn get_included_files(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for path in req.included_files() {
-        let path = PhpString::new(req, &path)?
-            .into_value()
-            .hand_on_unmigrated();
+        let path = PhpString::new(req, &path)?.into_value();
         array.append(req, path)?;
     }
     Ok(array)
@@ -571,8 +568,11 @@ fn get_resources(
             continue;
         }
         let value = resource.as_value();
-        req.addref(&value);
-        array.set(req, Key::Int(resource.id()), value)?;
+        array.set(
+            req,
+            Owner::take(req, Key::Int(resource.id())),
+            Owner::take(req, value),
+        )?;
     }
     Ok(array)
 }
@@ -614,9 +614,7 @@ fn get_loaded_extensions(
     };
     let mut array = PhpArray::new(req)?;
     for name in names {
-        let name = PhpString::new(req, name.as_bytes())?
-            .into_value()
-            .hand_on_unmigrated();
+        let name = PhpString::new(req, name.as_bytes())?.into_value();
         array.append(req, name)?;
     }
     Ok(array)
@@ -663,9 +661,8 @@ fn get_defined_constants(
     let mut array = PhpArray::new(req)?;
     if !categorize {
         for (_, name, value) in rows {
-            req.addref(&value);
-            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
-            array.set(req, key, value)?;
+            let key = PhpString::new(req, &name)?.into_key();
+            array.set(req, key, Owner::take(req, value))?;
         }
         return Ok(array);
     }
@@ -680,12 +677,11 @@ fn get_defined_constants(
     for (module, members) in groups {
         let mut group = PhpArray::new(req)?;
         for (name, value) in members {
-            req.addref(&value);
-            let key = Key::Str(PhpString::new(req, &name)?.hand_on_unmigrated());
-            group.set(req, key, value)?;
+            let key = PhpString::new(req, &name)?.into_key();
+            group.set(req, key, Owner::take(req, value))?;
         }
-        let key = Key::Str(PhpString::new(req, module.as_bytes())?.hand_on_unmigrated());
-        array.set(req, key, group.into_value().hand_on_unmigrated())?;
+        let key = PhpString::new(req, module.as_bytes())?.into_key();
+        array.set(req, key, group.into_value())?;
     }
     Ok(array)
 }
@@ -738,9 +734,7 @@ fn get_extension_funcs(
     }
     let mut array = PhpArray::new(req)?;
     for name in names {
-        let name = PhpString::new(req, &name)?
-            .into_value()
-            .hand_on_unmigrated();
+        let name = PhpString::new(req, &name)?.into_value();
         array.append(req, name)?;
     }
     Ok(OrFalse::Value(array))

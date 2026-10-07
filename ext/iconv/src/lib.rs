@@ -36,7 +36,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::{
     BufferHandler, ContentType, HandlerCall, HandlerStatus, Request, Streams as _,
 };
-use php_ext::values::{Key, Owner, PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -849,11 +849,7 @@ fn iconv_get_encoding(
             let key = PhpString::new(req, kind.name().as_bytes())?;
             let charset = encoding(req, kind);
             let value = PhpString::new(req, &charset)?;
-            out.set(
-                req,
-                Key::Str(key.hand_on_unmigrated()),
-                value.into_value().hand_on_unmigrated(),
-            )?;
+            out.set(req, key.into_key(), value.into_value())?;
         }
         return Ok(OrFalse::Value(Union::A(out)));
     }

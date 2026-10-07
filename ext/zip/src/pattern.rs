@@ -324,7 +324,7 @@ pub(crate) fn add_from_pattern(
             return Ok(OrFalse::False);
         }
         let v = PhpString::new(req, file)?.into_value();
-        out.append(req, v.hand_on_unmigrated())?;
+        out.append(req, v)?;
     }
     Ok(OrFalse::Value(out))
 }

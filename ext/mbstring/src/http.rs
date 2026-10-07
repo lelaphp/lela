@@ -233,7 +233,7 @@ fn mb_parse_str(
     for (name, value) in variables {
         // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`.
         let value = crate::text::cut_string(req, &value)?;
-        req.register_variable(into, &name, value.into_value().hand_on_unmigrated())?;
+        req.register_variable(into, &name, value.into_value())?;
     }
     req.state::<State>().identified = detected;
     Ok(detected.is_some())
@@ -275,7 +275,7 @@ fn mb_http_input(
                 let mut out = PhpArray::new(req)?;
                 for enc in list {
                     let name = new_string(req, enc.name())?;
-                    out.append(req, name.into_value().hand_on_unmigrated())?;
+                    out.append(req, name.into_value())?;
                 }
                 return Ok(OrFalse::Value(Union::A(out)));
             }

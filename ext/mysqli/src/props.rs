@@ -14,7 +14,7 @@ use php_ext::abi::{
 use php_ext::coerce::truthy;
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::class_name;
 
@@ -168,8 +168,13 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         for name in P::NAMES {
             if let Some(value) = P::read(req, object, name, true)? {
                 // The table's row takes the value's owner.
-                let value = value.hand_on_unmigrated();
-                let key = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
+                let key = match PhpString::new(req, name.as_bytes()) {
+                    Ok(key) => key.into_key(),
+                    Err(thrown) => {
+                        value.give_up(req);
+                        return Err(thrown);
+                    }
+                };
                 table.set(req, key, value)?;
             }
         }
@@ -213,17 +218,14 @@ pub(crate) fn error_list(
         let mut row = PhpArray::new(req)?;
         let state_end = sqlstate.iter().position(|b| *b == 0).unwrap_or(5);
         for (key, value) in [
-            ("errno", Value::int(i64::from(*errno))),
-            (
-                "sqlstate",
-                crate::string(req, &sqlstate[..state_end])?.hand_on_unmigrated(),
-            ),
-            ("error", crate::string(req, error)?.hand_on_unmigrated()),
+            ("errno", Owner::take(req, Value::int(i64::from(*errno)))),
+            ("sqlstate", crate::string(req, &sqlstate[..state_end])?),
+            ("error", crate::string(req, error)?),
         ] {
-            let key = Key::Str(PhpString::new(req, key.as_bytes())?.hand_on_unmigrated());
+            let key = PhpString::new(req, key.as_bytes())?.into_key();
             row.set(req, key, value)?;
         }
-        out.append(req, row.into_value().hand_on_unmigrated())?;
+        out.append(req, row.into_value())?;
     }
     Ok(out)
 }

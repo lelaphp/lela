@@ -30,6 +30,16 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> R<Owner<Value>> {
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
+/// A value held as its one owner in prose (an iterator's element, the
+/// object a `SoapServer` session keeps), as the owner it is: one taken for
+/// the caller and the prose one given up. What the array sinks are
+/// handed until those producers answer owners (#2185, #2102).
+pub(crate) fn owner_of(req: &mut Request, value: Value) -> Owner<Value> {
+    let owner = Owner::take(req, value);
+    req.release(value);
+    owner
+}
+
 // ---- SoapParam
 
 /// `SoapParam`: a value sent under a name of its own.

@@ -63,13 +63,19 @@ fn class_names(req: &mut Request, classes: &[ClassId]) -> Result<OrFalse<Owner<P
     for class in classes {
         let name = crate::class_name(req, *class);
         let key = PhpString::new(req, &name)?;
-        if out.contains(&Key::from_string(*key)) {
+        if out.contains(&Key::lookup(*key)) {
             key.give_up(req);
             continue;
         }
-        let value = crate::string_value(req, &name)?;
-        let key = Key::from_string(key.hand_on_unmigrated());
-        out.set(req, key, value.hand_on_unmigrated())?;
+        let key = Key::from_string(req, key);
+        let value = match crate::string_value(req, &name) {
+            Ok(value) => value,
+            Err(thrown) => {
+                key.give_up(req);
+                return Err(thrown);
+            }
+        };
+        out.set(req, key, value)?;
     }
     Ok(OrFalse::Value(out))
 }
@@ -346,7 +352,7 @@ fn spl_autoload_functions(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
     let loaders = req.autoload_functions()?;
     let mut out = PhpArray::new(req)?;
     for loader in loaders {
-        out.append(req, loader.hand_on_unmigrated())?;
+        out.append(req, loader)?;
     }
     Ok(out)
 }
@@ -569,10 +575,15 @@ pub(crate) const SPL_CLASSES: &[&str] = &[
 fn spl_classes(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for name in SPL_CLASSES {
-        let key = PhpString::new(req, name.as_bytes())?;
         let value = crate::string_value(req, name.as_bytes())?;
-        let key = Key::from_string(key.hand_on_unmigrated());
-        out.set(req, key, value.hand_on_unmigrated())?;
+        let key = match PhpString::new(req, name.as_bytes()) {
+            Ok(key) => Key::from_string(req, key),
+            Err(thrown) => {
+                value.give_up(req);
+                return Err(thrown);
+            }
+        };
+        out.set(req, key, value)?;
     }
     Ok(out)
 }
@@ -745,12 +756,19 @@ fn iterator_to_array(
             // `zend_array_to_list`, which no code of the program reaches: the
             // rows read under the borrowed request, each taken as
             // `zval_add_ref` takes it, then appended.
-            let values: Vec<Value> = walk::rows(req, array)
-                .map(|(_, value)| crate::copied(req, value.deref()))
-                .collect();
             let mut out = PhpArray::new(req)?;
-            for value in values {
-                out.append(req, value)?;
+            let values: Vec<Owner<Value>> = walk::rows(req, array)
+                .map(|(_, value)| Owner::take(req, value.deref()))
+                .collect();
+            let mut values = values.into_iter();
+            while let Some(value) = values.next() {
+                if let Err(thrown) = out.append(req, value) {
+                    for value in values {
+                        value.give_up(req);
+                    }
+                    out.give_up(req);
+                    return Err(thrown);
+                }
             }
             return Ok(out);
         }
@@ -772,6 +790,7 @@ fn iterator_to_array(
             set?;
         } else {
             let current = crate::owned(req, current);
+            let current = crate::owner_of(req, current);
             out.append(req, current)?;
         }
         Ok(true)

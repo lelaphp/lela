@@ -167,7 +167,7 @@ fn cases(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let mut out = req.array()?;
     for name in case_names(req, class) {
         let case = req.enum_case(class, &name)?;
-        out.append(req, case.as_value())?;
+        out.append(req, Owner::adopt(req, case.as_value()))?;
     }
     Ok(Owner::adopt(req, Value::array(out)))
 }

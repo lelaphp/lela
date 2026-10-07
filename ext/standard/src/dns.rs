@@ -56,7 +56,7 @@ use php_ext::abi::{OrFalse, Passed, Path, Ref, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::{arg_value_error, ffi};
 
@@ -142,10 +142,8 @@ fn warn(req: &mut Request, warning: &Warning) {
 }
 
 /// A string value of the request's.
-fn text(req: &mut Request, bytes: &[u8]) -> Result<Value, Thrown> {
-    Ok(Value::string(
-        PhpString::new(req, bytes)?.hand_on_unmigrated(),
-    ))
+fn text(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::new(req, bytes)?.into_value())
 }
 
 /// `Z_PARAM_PATH` as a C string: the check has refused a NUL.
@@ -300,11 +298,11 @@ fn dns_check_record(
 }
 
 /// One record as php's array of it.
-fn record_array(req: &mut Request, record: Record) -> Result<Value, Thrown> {
+fn record_array(req: &mut Request, record: Record) -> Result<Owner<Value>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, field) in record {
         let value = match field {
-            Field::Int(n) => Value::int(n),
+            Field::Int(n) => Owner::take(req, Value::int(n)),
             Field::Str(s) => text(req, &s)?,
             Field::List(entries) => {
                 let mut list = PhpArray::new(req)?;
@@ -312,13 +310,13 @@ fn record_array(req: &mut Request, record: Record) -> Result<Value, Thrown> {
                     let v = text(req, &entry)?;
                     list.append(req, v)?;
                 }
-                Value::array(list.hand_on_unmigrated())
+                list.into_value()
             }
         };
-        let k = Key::Str(PhpString::new(req, name.as_bytes())?.hand_on_unmigrated());
+        let k = PhpString::new(req, name.as_bytes())?.into_key();
         array.set(req, k, value)?;
     }
-    Ok(Value::array(array.hand_on_unmigrated()))
+    Ok(array.into_value())
 }
 
 /// A list of records as php's array of them.
@@ -433,7 +431,7 @@ fn dns_get_mx(
     if with_weights {
         let mut list = PhpArray::new(req)?;
         for weight in found.weights {
-            list.append(req, Value::int(weight))?;
+            list.append(req, Owner::take(req, Value::int(weight)))?;
         }
         weights.set(req, Untyped(list.into_value()))?;
     }

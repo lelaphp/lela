@@ -259,7 +259,7 @@ impl ReflectionEnum {
         let mut out = PhpArray::new(req)?;
         for name in case_names(req, class) {
             let object = case_factory(req, class, &name)?;
-            out.append(req, object.into_value().hand_on_unmigrated())?;
+            out.append(req, object.into_value())?;
         }
         Ok(out)
     }

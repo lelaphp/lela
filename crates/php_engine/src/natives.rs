@@ -1039,16 +1039,11 @@ fn copy_constant_array(req: &mut Request, array: PhpArray) -> Result<Owner<PhpAr
         let value = if let Some(nested) = value.as_array()
             && value.is_refcounted()
         {
-            copy_constant_array(req, *nested)?
-                .into_value()
-                .hand_on_unmigrated()
+            copy_constant_array(req, *nested)?.into_value()
         } else {
-            req.addref(&value);
-            value
+            Owner::take(req, value)
         };
-        if let Key::Str(s) = &key {
-            req.addref(&Value::string(*s));
-        }
+        let key = Owner::take(req, key);
         copy.set(req, key, value)?;
     }
     Ok(copy)
