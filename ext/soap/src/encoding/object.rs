@@ -136,6 +136,12 @@ fn append_to_prop(
     let mut a = arr;
     a.append(req, val)?;
     if !a.is_same(arr) {
+        // `SEPARATE_ARRAY(prop)` in the property's slot: the separation
+        // gave up one owner of the shared table, which was the
+        // property's, the view naming none. The property's is taken back
+        // so the write below gives it up once, leaving the class's
+        // default table, or whoever else shares it, its own.
+        req.addref(&Value::array(arr));
         // The copy the append separated has one owner, this caller's,
         // which a view's separation cannot name as an owner: it is taken
         // again for the property and the separation's own given back.

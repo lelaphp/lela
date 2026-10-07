@@ -13,7 +13,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::exec;
 
-use super::{Deprecations, Link, Request, Slots, Symbol};
+use super::{Deprecations, Link, Overwrite, Request, Slots, Symbol};
 
 /// What called the native being served ([`Request::native_caller`]):
 /// a user function's frame and its arguments, a code frame, or another
@@ -115,24 +115,26 @@ impl Request {
     /// The variable `name` of the innermost user frame written with
     /// `value`: a CV's slot where the table points the name at one, the
     /// bucket otherwise, a name the table has not added to it; what stood
-    /// there before is released after the write, as `zend_hash_update`
-    /// and `ZVAL_COPY_VALUE` into an `IS_INDIRECT` slot leave it. What
-    /// `extract` writes; a write through a reference the variable holds
-    /// is the native's to make. A sink: the variable takes the value's
-    /// owner, given up where no user frame is running.
-    pub fn set_caller_var(&mut self, name: &[u8], value: Owner<Value>) {
+    /// there before is given up in `order`, the order of the php function
+    /// the native copies: `extract` writes a value as
+    /// `ZEND_TRY_ASSIGN_COPY_EX` does, [`Overwrite::Nulled`], and a
+    /// reference as `php_extract_ref_overwrite` does,
+    /// [`Overwrite::After`]. A write through a reference the variable
+    /// holds is the native's to make. A sink: the variable takes the
+    /// value's owner, given up where no user frame is running.
+    pub fn set_caller_var(&mut self, name: &[u8], value: Owner<Value>, order: Overwrite) {
         let Some(frame) = self.caller_frame() else {
             value.give_up(self);
             return;
         };
-        self.set_table_var(frame, name, value.hand_on());
+        self.set_table_var(frame, name, value.hand_on(), order);
     }
 
     /// [`Request::set_caller_var`]'s write into `frame`'s table, rebuilt
     /// first where the frame has none.
-    fn set_table_var(&mut self, frame: FrameRef, name: &[u8], value: Value) {
+    fn set_table_var(&mut self, frame: FrameRef, name: &[u8], value: Value, order: Overwrite) {
         let table = self.rebuild_symbol_table(frame);
-        self.symbol_update_ind(table, name, value);
+        self.symbol_update_ind(table, name, value, order);
     }
 
     /// `zend_set_local_var_str(name, value, 0)`
@@ -158,8 +160,12 @@ impl Request {
     /// table where it has one, else the CV of that name, else, with
     /// `force`, the table `zend_rebuild_symbol_table` builds for it; what
     /// stood there released, which php's CV arm leaves to its callers,
-    /// whose variable is undefined. `false`, and the value given up,
-    /// where none of them takes it.
+    /// whose variable is undefined. The release is in place, before the
+    /// write ([`Overwrite::InPlace`]): `zend_hash_update` and
+    /// `zend_hash_update_ind` release so, and so does the CV arm of
+    /// `zend_set_local_var_str`, `$http_response_header`'s, where
+    /// `zend_set_local_var`'s writes without a release. `false`, and the
+    /// value given up, where none of them takes it.
     pub(super) fn set_local_var_in(
         &mut self,
         frame: FrameRef,
@@ -172,7 +178,7 @@ impl Request {
             .at(frame)
             .is_some_and(|state| state.symbol_table.is_some())
         {
-            self.set_table_var(frame, name, value.hand_on());
+            self.set_table_var(frame, name, value.hand_on(), Overwrite::InPlace);
             return true;
         }
         let at = self
@@ -180,18 +186,17 @@ impl Request {
             .iter()
             .position(|var| var == name)
             .and_then(|at| u32::try_from(at).ok());
-        let place = at.and_then(|at| self.stack.frame_mut(frame)?.slot_ptr(Slot(at)));
-        let Some(place) = place else {
+        let slot = |req: &mut Request| req.stack.frame_mut(frame)?.slot_ptr(Slot(at?));
+        if slot(self).is_none() {
             if force {
-                self.set_table_var(frame, name, value.hand_on());
+                self.set_table_var(frame, name, value.hand_on(), Overwrite::InPlace);
                 return true;
             }
             value.give_up(self);
             return false;
-        };
-        let held = Value::of_zval(place.read());
-        place.write(value.hand_on().to_zval());
-        self.release(held);
+        }
+        // php's CV arm: `zval_ptr_dtor(var)` and then `ZVAL_COPY_VALUE`.
+        self.overwrite_place(slot, value.hand_on(), Overwrite::InPlace);
         true
     }
 

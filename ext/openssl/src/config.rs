@@ -341,10 +341,20 @@ fn load_oids(req: &mut Request, conf: &Conf) -> bool {
     };
     for (name, value) in lines {
         let (name_c, value_c) = (c_string(&name), c_string(&value));
-        if ffi::short_name_nid(&name_c) == 0
-            && ffi::long_name_nid(&name_c) == 0
-            && ffi::create_object(&value_c, &name_c, &name_c) == 0
-        {
+        let named = |name: &CStr| ffi::short_name_nid(name) != 0 || ffi::long_name_nid(name) != 0;
+        if named(&name_c) {
+            continue;
+        }
+        if ffi::create_object(&value_c, &name_c, &name_c) == 0 {
+            // The object table is the process's: a request on another
+            // thread can create the name between the look-up and the
+            // create, which then refuses it as `OBJ_R_OID_EXISTS`. The
+            // name stands, so nothing failed; the refusal is the only
+            // thing on this thread's queue, and it is dropped.
+            if named(&name_c) {
+                ffi::clear_errors();
+                continue;
+            }
             store_errors(req);
             let text = format!(
                 "Problem creating object {}={}",

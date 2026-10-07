@@ -46,3 +46,32 @@ unlink($p);
     ));
     assert_eq!(stdout, "3 3 true\n");
 }
+
+/// `buildFromDirectory` hands the directory to the
+/// `RecursiveDirectoryIterator` it constructs and keeps no owner of it
+/// after, as php's `zval_ptr_dtor(&arg)` gives up the one it made
+/// (#2210, `ext/phar/tests/bug54289.phpt`,
+/// `cache_list/copyonwrite5.phar.phpt` and `copyonwrite6.phar.phpt`).
+#[test]
+fn the_directory_a_build_iterates_is_given_up() {
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_standard::extension(),
+            php_ext_hash::extension(),
+            php_ext_spl::extension(),
+            php_ext_phar::extension(),
+        ])
+        .ini("phar.readonly", "0")
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    let served = engine.serve_capture(
+        r#"<?php
+$d = sys_get_temp_dir() . '/leak-build-' . getmypid(); @mkdir($d); file_put_contents("$d/f", 'x');
+$p = "$d.phar"; @unlink($p);
+echo count((new Phar($p))->buildFromDirectory($d)), "\n";
+unlink("$d/f"); rmdir($d); unlink($p);
+"#,
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "1\n");
+}

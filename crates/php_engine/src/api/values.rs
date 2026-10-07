@@ -745,6 +745,12 @@ impl PhpArray {
         Ok(req.array_del(self.0, key.heap()))
     }
 
+    /// [`Owner::unset_in_place`]'s delete, `zend_hash_del` without
+    /// `SEPARATE_ARRAY`; an immutable table is left as it is.
+    pub(super) fn del_in_place(self, req: &mut Request, key: &Key) -> bool {
+        !self.0.is_immutable() && self.contains(key) && req.array_del(self.0, key.heap())
+    }
+
     /// `nNextFreeElement`: the index `$a[] = ...` writes at, one past the
     /// greatest integer key the array has held, `ZEND_LONG_MIN` for an
     /// array that never held one.

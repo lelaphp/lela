@@ -20,6 +20,7 @@
 //! the request (ADR-0005).
 
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf};
+use crate::api::decl::ClassKind;
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::Streams;
 use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};
@@ -155,20 +156,42 @@ fn truthy(req: &mut Request, value: &Value) -> bool {
 }
 
 /// `user_stream_create_object` (`Z/main/streams/userspace.c:242`): an
-/// instance of the class, `None` for one that cannot be instantiated;
-/// its `$context` set to the `php_stream_context` the operation was
-/// handed, one owner more of it, or to `null` for none, and its
-/// constructor called with nothing.
+/// instance of the class, `None` for an interface, a trait or an
+/// abstract class, which php's test of the class's kind refuses before
+/// it makes anything and without a throwable; `object_init_ex`'s `Error` for
+/// another class that cannot be instantiated, an enum; its `$context`
+/// set to the `php_stream_context` the operation was handed, one owner
+/// more of it, or to `null` for none, and its constructor called with
+/// nothing.
+///
+/// ```php
+/// abstract class A {} interface I {} trait T {} enum E { case X; }
+/// foreach (['A', 'I', 'T', 'E'] as $c) {
+///     stream_wrapper_register("w$c", $c);
+///     try { var_dump(@fopen("w$c://x", 'r')); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// Cannot instantiate enum E
+/// ```
 fn create_object(
     req: &mut Request,
     user: &UserWrapper,
 ) -> Result<Option<Owner<PhpObject>>, Thrown> {
-    if req.instantiable(user.class).is_err() {
-        if let Some(pending) = req.take_pending() {
-            req.release(pending.as_value());
-        }
+    let refused = req
+        .class_decl(user.class)
+        .is_some_and(|decl| match decl.kind {
+            ClassKind::Interface | ClassKind::Trait => true,
+            ClassKind::Class => decl.flags.is_abstract,
+            ClassKind::Enum => false,
+        });
+    if refused {
         return Ok(None);
     }
+    req.instantiable(user.class)?;
     let object = crate::api::call::new_object(req, user.class)?;
     let context = match req.streams().stream_ctx {
         Some(context) => context.resource().as_value(),

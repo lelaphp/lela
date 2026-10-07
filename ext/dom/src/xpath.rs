@@ -26,17 +26,14 @@ use crate::props::Prop;
 use crate::{Read, dom, dom_mut, fetch, object_for, string};
 
 /// `PHP_DOM_REG_FUNC_MODE_*`: which php functions one namespace lets an
-/// expression call, and `functions`, the ones registered by name, which
-/// the namespace keeps whatever it allows until it is destroyed.
+/// expression call.
 #[derive(Default)]
 enum Mode {
     /// Nothing registered: a call is php's `Error`.
     #[default]
     None,
     /// `registerPhpFunctions()` with no argument: any function by name.
-    /// A boxed slice, so this is no wider than a `Vec` and the
-    /// evaluator fits the struct php allocates for `XSLTProcessor`.
-    All(Box<[Function]>),
+    All,
     /// The functions registered by name.
     Set(Vec<Function>),
 }
@@ -49,18 +46,16 @@ impl Mode {
     /// `functions`, `None` left behind them.
     fn take_functions(&mut self) -> Vec<Function> {
         match std::mem::take(self) {
-            Mode::All(functions) => functions.into_vec(),
             Mode::Set(functions) => functions,
-            Mode::None => Vec::new(),
+            Mode::All | Mode::None => Vec::new(),
         }
     }
 
     /// `functions`, as they stand.
     fn functions(&self) -> &[Function] {
         match self {
-            Mode::All(functions) => functions,
             Mode::Set(functions) => functions,
-            Mode::None => &[],
+            Mode::All | Mode::None => &[],
         }
     }
 }
@@ -419,7 +414,7 @@ fn dispatch(
     };
     let callable = match mode {
         None | Some(Mode::None) => Err(throw_error(req, "Error", "No callbacks were registered")),
-        Some(Mode::All(_)) => {
+        Some(Mode::All) => {
             let name_value = string(req, &name)?;
             let found = callable_checked(req, &name_value);
             name_value.give_up(req);
@@ -698,7 +693,12 @@ fn register_into(
         .map(|v| v.deref())
         .filter(|v| !matches!(v.as_ref(), ValueRef::Null));
     let Some(restrict) = restrict else {
-        *mode = Mode::All(mode.take_functions().into_boxed_slice());
+        // The set the mode held is let go of with the mode (#2128 is
+        // php's table that outlives it).
+        for (_, _, value) in mode.take_functions() {
+            value.give_up(req);
+        }
+        *mode = Mode::All;
         return Ok(());
     };
     let mut adding = Vec::new();

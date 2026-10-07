@@ -670,7 +670,7 @@ fn array_splice(
             keep(req, &mut rebuilt, &key, element)?;
             walk.moved(req, stack.array, at);
         }
-        let (gone, holder) = remove_range(
+        let (gone, alone) = remove_range(
             req,
             stack,
             &mut walk,
@@ -703,10 +703,10 @@ fn array_splice(
         if let Some(replacement) = replacement {
             replacement.give_up(req);
         }
-        if holder == Holder::Alone {
+        if let Some(last) = alone {
             // `GC_DELREF(in_hash) == 0`: nothing but the splice holds the
             // table any more, so what the reference holds now stands.
-            req.release(stack.array.to_value());
+            last.give_up(req);
             rebuilt.give_up(req);
             if let Some(removed) = removed {
                 removed.give_up(req);
@@ -732,17 +732,73 @@ fn array_splice(
 /// `php_splice`'s middle loop: `taken` elements from the walk's bucket
 /// deleted from the table, gathered into `removed` where the call's value
 /// is read, and the iterators the packed arm bumps moved. Answers how
-/// many it took and who held the table after (`GC_ADDREF(in_hash)`).
+/// many it took, and the splice's owner of the table where it is the
+/// last one, the program having written the reference over or
+/// separated it while a destructor ran.
+///
+/// php holds one owner of the table across the loop (`GC_ADDREF(in_hash)`)
+/// and deletes from it in place whatever its owners
+/// (`HT_ALLOW_COW_VIOLATION`): a destructor the removal serves may take
+/// a copy of the table, as a throwable's trace takes the call's
+/// arguments, and that copy is the same table, not a reason to separate
+/// it from under the reference that names it. The owner is let go after
+/// the loop, `GC_DELREF(in_hash) == 0` read as nothing else holding it,
+/// and is then handed back for the caller to give up.
+///
+/// ```php
+/// class T { function __destruct() { throw new Exception("t"); } }
+/// function f() {
+///     $arr = [new T, new T, 3];
+///     try { array_splice($arr, 0, 2); } catch (Exception $e) { echo $e->getMessage(), " ", $e->getPrevious()->getMessage(), "\n"; }
+///     var_dump($arr);
+/// }
+/// f();
+/// ```
+/// ```expect
+/// t t
+/// array(1) {
+///   [0]=>
+///   int(3)
+/// }
+/// ```
 fn remove_range(
     req: &mut Request,
     stack: &mut Stack,
     walk: &mut Walk,
+    removed: Option<&mut Owner<PhpArray>>,
+    range: (i64, i64),
+    packed: bool,
+) -> Result<(i64, Option<Owner<PhpArray>>), Thrown> {
+    let held = Owner::take(req, stack.array);
+    let gone = remove_held(req, stack, walk, &held, removed, range, packed);
+    let alone = if Value::array(*held).refcount() == 1 {
+        Some(held)
+    } else {
+        held.give_up(req);
+        None
+    };
+    match gone {
+        Ok(gone) => Ok((gone, alone)),
+        Err(thrown) => {
+            if let Some(last) = alone {
+                last.give_up(req);
+            }
+            Err(thrown)
+        }
+    }
+}
+
+/// [`remove_range`]'s loop, under the owner it holds.
+fn remove_held(
+    req: &mut Request,
+    stack: &mut Stack,
+    walk: &mut Walk,
+    held: &Owner<PhpArray>,
     mut removed: Option<&mut Owner<PhpArray>>,
     range: (i64, i64),
     packed: bool,
-) -> Result<(i64, Holder), Thrown> {
+) -> Result<i64, Thrown> {
     let (start, taken) = range;
-    let mut holder = Holder::Shared;
     let mut gone = 0;
     while gone < taken {
         let Some((at, key, element)) = stack.array.live_from(walk.idx) else {
@@ -751,8 +807,8 @@ fn remove_range(
         walk.idx = at.saturating_add(1);
         gone += 1;
         // `zend_hash_packed_del_val` and `zend_hash_del_bucket` with
-        // `ZVAL_PTR_DTOR`, under the owner `GC_ADDREF(in_hash)` took:
-        // a destructor served here that writes the array separates it.
+        // `ZVAL_PTR_DTOR`: a destructor served here runs after the
+        // element left the table.
         // `zend_hash_add_new(removed, p->key, entry)`: a string key is
         // kept, copied before the delete gives the bucket's up.
         let kept = match (&removed, &key) {
@@ -760,22 +816,11 @@ fn remove_range(
             _ => None,
         };
         let element = Owner::take(req, element);
-        stack.array.unset(req, &key)?;
-        let table = stack.array.to_value();
-        if holder == Holder::Shared {
-            req.addref(&table);
-        }
+        held.unset_in_place(req, &key);
         match (removed.as_deref_mut(), kept) {
             (Some(removed), Some(key)) => removed.set(req, key, element)?,
             (Some(removed), None) => removed.append(req, element)?,
             (None, _) => element.give_up(req),
-        }
-        if holder == Holder::Shared {
-            if table.refcount() == 1 {
-                holder = Holder::Alone;
-            } else {
-                req.release(table);
-            }
         }
         // The packed arm bumps an iterator on a removed element to the
         // element after the replacement.
@@ -787,7 +832,7 @@ fn remove_range(
                 .iterators_lower_pos(req, walk.iter_pos.saturating_add(1));
         }
     }
-    Ok((gone, holder))
+    Ok(gone)
 }
 
 /// Where `php_splice` stands in the table it rebuilds: the bucket it
@@ -831,16 +876,6 @@ fn keep(
         }
         Key::Int(_) => rebuilt.append(req, element),
     }
-}
-
-/// Who holds the table `php_splice` deletes from while it serves a
-/// destructor: the reference and the splice, or, once the program
-/// wrote the reference over or separated it, the splice alone
-/// (`GC_DELREF(in_hash) == 0`).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Holder {
-    Shared,
-    Alone,
 }
 
 /// `php_splice`'s clamps: the offset into `0..=num_in`, from the end

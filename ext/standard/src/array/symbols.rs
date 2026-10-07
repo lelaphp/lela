@@ -13,7 +13,7 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
-use php_ext::request::Request;
+use php_ext::request::{Overwrite, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -41,7 +41,18 @@ fn prefixed(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 
 /// `ZEND_TRY_ASSIGN_COPY_EX` into the variable, or a new one: through a
 /// reference the variable holds, held to the types it is typed by, else
-/// in its place.
+/// in its place, the variable `null` while what it held is released
+/// (`zval_ptr_safe_dtor`).
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor sees: "; var_dump($GLOBALS['x']); } }
+/// $x = new D; extract(['x' => 5]);
+/// var_dump($x);
+/// ```
+/// ```expect
+/// dtor sees: NULL
+/// int(5)
+/// ```
 fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
     let value = Owner::take(req, value.deref());
     if let Some(cell) = req
@@ -50,7 +61,7 @@ fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
     {
         return cell.set(req, value);
     }
-    req.set_caller_var(name, value);
+    req.set_caller_var(name, value, Overwrite::Nulled);
     Ok(())
 }
 
@@ -299,6 +310,23 @@ fn extract(
 /// f,2,2
 /// thrown,2
 /// ```
+///
+/// `EXTR_OVERWRITE` binds the reference before it releases what the
+/// variable held, and the other flags release it first, so the
+/// destructor reads the new binding under the one and itself under the
+/// others:
+///
+/// ```php
+/// class S { function __construct(public $n) {} function __destruct() { echo $this->n, ' sees ', get_debug_type($GLOBALS[$this->n]), "\n"; } }
+/// $y = new S('y'); $a = ['y' => 9]; extract($a, EXTR_REFS);
+/// $z = new S('z'); $b = ['z' => 9]; extract($b, EXTR_REFS | EXTR_IF_EXISTS);
+/// $w = new S('p_w'); $p_w = $w; unset($w); $c = ['w' => 9]; extract($c, EXTR_REFS | EXTR_PREFIX_ALL, 'p');
+/// ```
+/// ```expect
+/// y sees int
+/// z sees S
+/// p_w sees S
+/// ```
 fn extracted_refs(
     req: &mut Request,
     separated: Separated,
@@ -307,6 +335,14 @@ fn extracted_refs(
 ) -> Result<i64, Thrown> {
     let table = separated.table;
     let mut count = 0i64;
+    // `php_extract_ref_overwrite` writes the reference and releases its
+    // `garbage` after; the other `php_extract_ref_*` helpers
+    // `zval_ptr_dtor(orig_var)` before `ZVAL_REF`.
+    let order = if kind == EXTR_OVERWRITE {
+        Overwrite::After
+    } else {
+        Overwrite::InPlace
+    };
     // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(arr, ...)` in each of the
     // `php_extract_ref_*` helpers (`php_extract_ref_overwrite`,
     // `Z/ext/standard/array.c:1936`), which holds nothing: the
@@ -315,7 +351,7 @@ fn extracted_refs(
         if let Some(target) = target(req, kind, prefix, row.key())? {
             let cell = row.make_ref(req)?;
             let cell = Owner::take(req, cell.as_value());
-            req.set_caller_var(&target, cell);
+            req.set_caller_var(&target, cell, order);
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))

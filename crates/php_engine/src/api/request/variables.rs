@@ -17,7 +17,7 @@
 
 use php_unit::AutoGlobal;
 
-use super::Request;
+use super::{Overwrite, Request};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 use crate::exec::TableId;
@@ -191,7 +191,7 @@ impl Request {
     pub fn set_global(&mut self, name: &[u8], value: Option<Owner<Value>>) {
         let table = self.global_table();
         match value {
-            Some(value) => self.symbol_update_ind(table, name, value.hand_on()),
+            Some(value) => self.symbol_update_ind(table, name, value.hand_on(), Overwrite::InPlace),
             None => self.symbol_unset(table, name),
         }
     }

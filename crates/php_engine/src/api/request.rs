@@ -123,6 +123,7 @@ mod state;
 mod static_props;
 mod static_vars;
 mod symbol_tables;
+pub use symbol_tables::Overwrite;
 mod table;
 #[cfg(debug_assertions)]
 mod teardown;

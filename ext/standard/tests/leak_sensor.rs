@@ -281,3 +281,96 @@ echo implode(',', array_keys($o)), ' ', $o['arr'][0], $o[123][0], $o['a']['b']['
     );
     assert_eq!(stdout, "arr,123,a,7 foox12x\n");
 }
+
+/// A user wrapper whose class is an interface, a trait or an abstract
+/// class opens nothing and makes no throwable, as php's test of the
+/// class's kind in `user_stream_create_object` returns before
+/// `object_init_ex`; an enum's `Error` is thrown to the program (#2179,
+/// `ext/standard/tests/streams/bug74951.phpt`).
+#[test]
+fn a_wrapper_class_that_cannot_be_instantiated_keeps_no_error() {
+    let stdout = armed(
+        r#"<?php
+abstract class A {} interface I {} trait T {} enum E { case X; }
+foreach (['A', 'I', 'T', 'E'] as $c) {
+    stream_wrapper_register("w$c", $c);
+    try { var_dump(@fopen("w$c://x", 'r')); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+}
+"#,
+    );
+    assert_eq!(
+        stdout,
+        "bool(false)\nbool(false)\nbool(false)\nCannot instantiate enum E\n"
+    );
+}
+
+/// A read that fails on a throw, here `unserialize_callback_func`'s,
+/// makes none of the `__wakeup()` calls it queued, as
+/// `zend_call_function` returns at `EG(exception)` without calling, so
+/// the throwable a queued call would make is never made and none is
+/// dropped (#2231, `ext/standard/tests/serialize/bug64354_2.phpt`).
+#[test]
+fn a_read_failed_on_a_throw_makes_no_delayed_call() {
+    let stdout = armed(
+        r#"<?php
+class A { function __wakeup() { throw new Exception("wakeup A"); } }
+function cb($class) { throw new Exception("no $class"); }
+ini_set('unserialize_callback_func', 'cb');
+try { unserialize('a:2:{i:0;O:1:"A":0:{}i:1;O:1:"B":0:{}}'); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert_eq!(stdout, "no B\n");
+}
+
+/// `array_splice` holds its table across the removal and deletes from
+/// it in place, as `php_splice` does under `GC_ADDREF(in_hash)` and
+/// `HT_ALLOW_COW_VIOLATION`, so a copy of the table a throwing
+/// destructor's trace takes while the removal runs is no second name
+/// for it (#2089, `ext/standard/tests/array/gh19926.phpt`).
+#[test]
+fn a_splice_whose_destructors_throw_releases_no_freed_table() {
+    let stdout = armed(
+        r#"<?php
+class T { function __destruct() { throw new Exception("t"); } }
+function f() {
+    $arr = [new T, new T, 3];
+    try { array_splice($arr, 0, 2); } catch (Exception $e) { echo $e->getMessage(), " ", $e->getPrevious()->getMessage(), "\n"; }
+    var_dump($arr);
+}
+f();
+"#,
+    );
+    assert_eq!(stdout, "t t\narray(1) {\n  [0]=>\n  int(3)\n}\n");
+}
+
+/// `serialize()`'s `__sleep` arm looks each name up in the object's
+/// properties as they stand when it reads the name, as
+/// `php_var_serialize_get_sleep_props` finds each in the table: a
+/// property the warning's handler overwrote is read as it is now, not
+/// through a view of the value the write freed (#2103).
+#[test]
+fn a_sleep_name_reads_the_property_as_it_stands() {
+    let stdout = armed(
+        r#"<?php
+set_error_handler(function() { global $o, $z; $o->b = null; $GLOBALS['y'] = $z . $z; return true; });
+class T { public $a = 1; public $b; function __sleep() { return [1, 'b']; } }
+$o = new T; $v = 'vvvvv'; $z = 'ZZZZZ'; $o->b = $v . $v;
+echo serialize($o), "\n";
+"#,
+    );
+    assert_eq!(stdout, "O:1:\"T\":1:{s:1:\"b\";N;}\n");
+}
+
+/// A `__sleep` name whose conversion throws ends the walk, and the
+/// array the arm was gathering is given up (#2103).
+#[test]
+fn a_sleep_name_that_throws_keeps_no_array() {
+    let stdout = armed(
+        r#"<?php
+class N { function __toString(): string { throw new Exception("n"); } }
+class T { public $a = 1; function __sleep() { return ['a', new N]; } }
+try { echo serialize(new T), "\n"; } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+"#,
+    );
+    assert!(stdout.ends_with("n\n"), "{stdout}");
+}
