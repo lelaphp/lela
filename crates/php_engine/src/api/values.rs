@@ -745,6 +745,49 @@ impl PhpArray {
         Ok(req.array_del(self.0, key.heap()))
     }
 
+    /// `SEPARATE_ARRAY` and `zend_hash_clean` (`Z/Zend/zend_hash.c:1875`):
+    /// every row's value destroyed in place, in order, its destructor
+    /// served as it goes, with every key standing until the last value
+    /// is destroyed; then the table emptied, its keys given up, and
+    /// `nNextFreeElement` back to `ZEND_LONG_MIN`. A destroyed row reads
+    /// as `null` where php's reads the freed value. The walk stops at
+    /// the rows the table held as it began, as php's `end` does, and
+    /// ends where a destructor destroys the table, which php's loop reads
+    /// freed; a hash iterator registered at the table says so, and
+    /// carries the walk's position past a rehash a destructor's write
+    /// sets off. Rows a destructor wrote are given up as the table is
+    /// emptied, where php drops them unreleased. `session_unset` is
+    /// php's caller.
+    pub fn clean(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        self.separate(req)?;
+        let table = self.0;
+        let watch = req.heap_mut().iterator_add(table, 0);
+        let end = table.num_used();
+        while req.heap_mut().iterator_on(watch, table) {
+            let pos = req.heap_mut().iterator_pos(watch, table);
+            if pos >= end {
+                break;
+            }
+            req.heap_mut().iterator_set_pos(watch, pos + 1);
+            if let Some(place) = table.value_ref_at(pos) {
+                let old = place.read();
+                if !old.is_undef() {
+                    place.write(Zval::null());
+                    req.release(Value::of_zval(old));
+                }
+            }
+        }
+        while req.heap_mut().iterator_on(watch, table) {
+            let Some((_, key, _)) = table.live_from(0) else {
+                table.set_next_free(i64::MIN);
+                break;
+            };
+            req.array_del(table, key);
+        }
+        req.heap_mut().iterator_del(watch);
+        Ok(())
+    }
+
     /// [`Owner::unset_in_place`]'s delete, `zend_hash_del` without
     /// `SEPARATE_ARRAY`; an immutable table is left as it is.
     pub(super) fn del_in_place(self, req: &mut Request, key: &Key) -> bool {
