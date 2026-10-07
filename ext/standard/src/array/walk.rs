@@ -14,6 +14,7 @@ use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
 
 use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
@@ -458,18 +459,35 @@ fn array_reduce(
     callback: Callable,
     #[php(default = null)] initial: Value,
 ) -> Result<Owner<Value>, Thrown> {
-    let mut carry = Owner::take(req, initial);
-    for (_, operand) in array.snapshot_refs() {
-        let answer = call(req, &callback, &[*carry, operand]);
-        carry.give_up(req);
-        carry = answer?;
-        if let Some(reference) = carry.as_php_ref().copied() {
+    let mut carry = Some(Owner::take(req, initial));
+    // `ZEND_HASH_FOREACH_VAL(htbl, operand)` (`Z/ext/standard/array.c:6546`),
+    // no owner of the table taken: the argument holds it while the
+    // callback runs. The carry is the body's to take and give back.
+    let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+        let Some(held) = carry.take() else {
+            return Ok(ControlFlow::Break(()));
+        };
+        let answer = call(req, &callback, &[*held, *row.value()]);
+        held.give_up(req);
+        let mut next = answer?;
+        if let Some(reference) = next.as_php_ref().copied() {
             let inner = Owner::take(req, reference.get());
-            carry.give_up(req);
-            carry = inner;
+            next.give_up(req);
+            next = inner;
+        }
+        carry = Some(next);
+        Ok(ControlFlow::Continue(()))
+    });
+    match (walked, carry) {
+        (Ok(_), Some(carry)) => Ok(carry),
+        (Ok(_), None) => Ok(Owner::take(req, Value::null())),
+        (Err(thrown), carry) => {
+            if let Some(carry) = carry {
+                carry.give_up(req);
+            }
+            Err(thrown)
         }
     }
-    Ok(carry)
 }
 
 /// `array_filter(array $array, ?callable $callback = null, int $mode = 0):
@@ -553,6 +571,19 @@ fn array_filter(
     Ok(out)
 }
 
+/// The row [`find`] found: an owner of its key and of its value.
+type Found = (Owner<Key>, Owner<Value>);
+
+/// Whether [`find`] found a row, its owners given up.
+fn given_up(req: &mut Request, found: Option<Found>) -> bool {
+    let Some((key, value)) = found else {
+        return false;
+    };
+    value.give_up(req);
+    key.give_up(req);
+    true
+}
+
 /// What `php_array_find` found: the value and the key of the first
 /// element the callback answered truthy for (falsy, under `negate`).
 fn find(
@@ -560,16 +591,25 @@ fn find(
     array: PhpArray,
     callback: &Callable,
     negate: bool,
-) -> Result<Option<(Key, Value)>, Thrown> {
-    for (key, operand) in array.snapshot_refs() {
-        let answer = call(req, callback, &[operand, key_value(&key)])?;
+) -> Result<Option<Found>, Thrown> {
+    // `ZEND_HASH_FOREACH_KEY_VAL(array, num_key, str_key, operand)`
+    // (`Z/ext/standard/array.c:6684`), no owner of the table taken: the
+    // argument holds it while the callback runs. The row found is taken an
+    // owner of before the walk gives its own back, as php copies it out
+    // inside its loop.
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<Found> {
+        let answer = call(req, callback, &[*row.value(), key_value(row.key())])?;
         let truth = truthy(req, &answer);
         answer.give_up(req);
-        if truth != negate {
-            return Ok(Some((key, operand)));
+        if truth == negate {
+            return Ok(ControlFlow::Continue(()));
         }
-    }
-    Ok(None)
+        let found = (
+            Owner::take(req, row.key().clone()),
+            Owner::take(req, *row.value()),
+        );
+        Ok(ControlFlow::Break(found))
+    })
 }
 
 /// `array_find(array $array, callable $callback): mixed`, php's
@@ -586,10 +626,19 @@ fn find(
 /// NULL
 /// ```
 #[php_function]
-fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
+fn array_find(
+    req: &mut Request,
+    array: PhpArray,
+    callback: Callable,
+) -> Result<Owner<Value>, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((_, value)) => Ok(value.deref()),
-        None => Ok(Value::null()),
+        Some((key, value)) => {
+            key.give_up(req);
+            let inner = Owner::take(req, value.deref());
+            value.give_up(req);
+            Ok(inner)
+        }
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -606,10 +655,19 @@ fn array_find(req: &mut Request, array: PhpArray, callback: Callable) -> Result<
 /// NULL
 /// ```
 #[php_function]
-fn array_find_key(req: &mut Request, array: PhpArray, callback: Callable) -> Result<Value, Thrown> {
+fn array_find_key(
+    req: &mut Request,
+    array: PhpArray,
+    callback: Callable,
+) -> Result<Owner<Value>, Thrown> {
     match find(req, array, &callback, false)? {
-        Some((key, _)) => Ok(key_value(&key)),
-        None => Ok(Value::null()),
+        Some((key, value)) => {
+            value.give_up(req);
+            let shown = Owner::take(req, key_value(&key));
+            key.give_up(req);
+            Ok(shown)
+        }
+        None => Ok(Owner::take(req, Value::null())),
     }
 }
 
@@ -626,7 +684,8 @@ fn array_find_key(req: &mut Request, array: PhpArray, callback: Callable) -> Res
 /// ```
 #[php_function]
 fn array_any(req: &mut Request, array: PhpArray, callback: Callable) -> Result<bool, Thrown> {
-    Ok(find(req, array, &callback, false)?.is_some())
+    let found = find(req, array, &callback, false)?;
+    Ok(given_up(req, found))
 }
 
 /// `array_all(array $array, callable $callback): bool`, php's
@@ -644,7 +703,8 @@ fn array_any(req: &mut Request, array: PhpArray, callback: Callable) -> Result<b
 /// ```
 #[php_function]
 fn array_all(req: &mut Request, array: PhpArray, callback: Callable) -> Result<bool, Thrown> {
-    Ok(find(req, array, &callback, true)?.is_none())
+    let found = find(req, array, &callback, true)?;
+    Ok(!given_up(req, found))
 }
 
 /// `array_map(?callable $callback, array $array, array ...$arrays):
