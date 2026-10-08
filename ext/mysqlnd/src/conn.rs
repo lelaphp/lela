@@ -612,7 +612,7 @@ impl ConnData {
             }
             loop {
                 if self.last_query_type == QueryType::Select
-                    && let Some(mut result) = self.use_unbuffered(req)
+                    && let Some(result) = self.use_unbuffered(req)?
                 {
                     result.free(req, self, true)?;
                 }
@@ -723,7 +723,7 @@ impl ConnData {
                 self.stats.inc(Stat::NonRsetQuery);
                 Ok(true)
             }
-            RsetHeader::Fields(count) => Ok(self.read_fields_header(req, count, stmt)),
+            RsetHeader::Fields(count) => self.read_fields_header(req, count, stmt),
         }
     }
 
@@ -735,7 +735,7 @@ impl ConnData {
         req: &mut Request,
         count: u64,
         mut stmt: Option<&mut Option<Box<Res>>>,
-    ) -> bool {
+    ) -> Result<bool, Thrown> {
         self.error.errno = 0;
         self.last_message = None;
         self.stats.inc(Stat::RsetQuery);
@@ -745,24 +745,28 @@ impl ConnData {
         self.state = ConnState::FetchingData;
         let count = u32::try_from(count).unwrap_or(u32::MAX);
         self.field_count = count;
-        let mut result = match stmt.as_deref_mut() {
-            None => Box::new(Res::new(count)),
-            Some(held) => match held.take() {
-                Some(res) if res.field_count == count => res,
-                _ => Box::new(Res::new(count)),
-            },
-        };
-        if !result.read_metadata(req, self) {
-            if let Some(held) = stmt {
-                *held = Some(result);
+        let held = stmt.as_deref_mut().and_then(Option::take);
+        let mut result = match held {
+            Some(res) if res.field_count == count => res,
+            Some(res) => {
+                res.free(req, self, true)?;
+                Box::new(Res::new(req, count)?)
             }
-            return false;
+            None => Box::new(Res::new(req, count)?),
+        };
+        if !result.read_metadata(req, self)? {
+            match stmt {
+                Some(held) => *held = Some(result),
+                None => result.free(req, self, true)?,
+            }
+            return Ok(false);
         }
         let Some(eof) = self.read_eof(req) else {
+            result.release(req);
             if let Some(held) = stmt {
                 *held = None;
             }
-            return false;
+            return Ok(false);
         };
         self.upsert.warning_count = eof.warning_count;
         self.upsert.server_status = eof.server_status;
@@ -782,7 +786,7 @@ impl ConnData {
             Some(held) => *held = Some(result),
             None => self.current_result = Some(result),
         }
-        true
+        Ok(true)
     }
 
     /// `mysqlnd_conn_data::more_results`.
@@ -817,32 +821,41 @@ impl ConnData {
     }
 
     /// `mysqlnd_conn_data::use_result`.
-    pub(crate) fn use_unbuffered(&mut self, req: &mut Request) -> Option<Box<Res>> {
-        let _ = req;
-        self.current_result.as_ref()?;
+    pub(crate) fn use_unbuffered(&mut self, req: &mut Request) -> Result<Option<Box<Res>>, Thrown> {
+        if self.current_result.is_none() {
+            return Ok(None);
+        }
         if self.last_query_type != QueryType::Select || self.state != ConnState::FetchingData {
             self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
-            return None;
+            return Ok(None);
         }
         self.stats.inc(Stat::UnbufferedSets);
-        let mut result = self.current_result.take()?;
-        result.use_unbuffered(false);
-        Some(result)
+        let Some(mut result) = self.current_result.take() else {
+            return Ok(None);
+        };
+        result.use_unbuffered(req, false)?;
+        Ok(Some(result))
     }
 
-    /// `mysqlnd_conn_data::store_result`.
-    pub(crate) fn store(&mut self, req: &mut Request) -> Option<Box<Res>> {
-        self.current_result.as_ref()?;
+    /// `mysqlnd_conn_data::store_result`: a store that fails frees the
+    /// rows, as php's caller does.
+    pub(crate) fn store(&mut self, req: &mut Request) -> Result<Option<Box<Res>>, Thrown> {
+        if self.current_result.is_none() {
+            return Ok(None);
+        }
         if self.last_query_type != QueryType::Select || self.state != ConnState::FetchingData {
             self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
-            return None;
+            return Ok(None);
         }
         self.stats.inc(Stat::BufferedSets);
-        let mut result = self.current_result.take()?;
-        if !result.store(req, self, false) {
-            return None;
+        let Some(mut result) = self.current_result.take() else {
+            return Ok(None);
+        };
+        if !result.store(req, self, false)? {
+            result.free(req, self, true)?;
+            return Ok(None);
         }
-        Some(result)
+        Ok(Some(result))
     }
 
     // ---- the other commands
@@ -1142,7 +1155,7 @@ impl ConnData {
 
     /// `mysqlnd_conn_data::free_contents`.
     pub(crate) fn free_contents(&mut self, req: &mut Request) {
-        if let Some(mut result) = self.current_result.take() {
+        if let Some(result) = self.current_result.take() {
             result.free(req, self, true).ok();
         }
         self.net.close(req);

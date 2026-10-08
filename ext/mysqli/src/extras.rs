@@ -236,7 +236,7 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
     if !conn.query(req, b"SHOW WARNINGS")? {
         return Ok(Vec::new());
     }
-    let Some(mut set) = conn.use_unbuffered(req) else {
+    let Some(mut set) = conn.use_unbuffered(req)? else {
         return Ok(Vec::new());
     };
     let mut list = Vec::new();

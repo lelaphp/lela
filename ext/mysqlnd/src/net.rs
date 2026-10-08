@@ -256,30 +256,37 @@ impl Net {
         self.uncompressed.clear();
     }
 
-    /// `mysqlnd_vio::network_read`: exactly `count` bytes, or none where
-    /// the stream ends or fails first. Each `php_stream_read` reads into
-    /// the buffer the packet is parsed from, as php's reads into its
-    /// caller's, so no string of the request's holds the bytes.
-    fn network_read(
+    /// `mysqlnd_vio::network_read`: `out` filled, or `false` where the
+    /// stream ends or fails first. Each `php_stream_read` reads into the
+    /// caller's buffer, the packet's own, as php's does, so no string of
+    /// the request's holds the bytes.
+    fn network_read(&mut self, req: &mut Request, out: &mut [u8], stats: &mut Stats) -> bool {
+        let Some(stream) = self.stream() else {
+            return false;
+        };
+        let mut had = 0;
+        while had < out.len() {
+            match stream.read_into(req, &mut out[had..]) {
+                Some(read) if read > 0 => had += read,
+                _ => {
+                    stats.add(Stat::BytesReceived, had as u64);
+                    return false;
+                }
+            }
+        }
+        stats.add(Stat::BytesReceived, out.len() as u64);
+        true
+    }
+
+    /// [`Net::network_read`] of `count` bytes into a buffer of their own.
+    fn network_read_owned(
         &mut self,
         req: &mut Request,
         count: usize,
         stats: &mut Stats,
     ) -> Option<Vec<u8>> {
-        let stream = self.stream()?;
         let mut out = vec![0; count];
-        let mut had = 0;
-        while had < count {
-            match stream.read_into(req, &mut out[had..]) {
-                Some(read) if read > 0 => had += read,
-                _ => {
-                    stats.add(Stat::BytesReceived, had as u64);
-                    return None;
-                }
-            }
-        }
-        stats.add(Stat::BytesReceived, count as u64);
-        Some(out)
+        self.network_read(req, &mut out, stats).then_some(out)
     }
 
     /// `mysqlnd_vio::network_write`: how many bytes the stream took.
@@ -290,26 +297,41 @@ impl Net {
         }
     }
 
-    /// `mysqlnd_pfc::receive`: `count` bytes of the packet stream, out of
-    /// the compressed envelopes where the protocol is compressed.
+    /// `mysqlnd_pfc::receive`: `out` filled from the packet stream, out of
+    /// the compressed envelopes where the protocol is compressed; `false`
+    /// where the stream ended first.
+    pub(crate) fn receive_into(
+        &mut self,
+        req: &mut Request,
+        out: &mut [u8],
+        stats: &mut Stats,
+    ) -> bool {
+        if !self.compressed {
+            return self.network_read(req, out, stats);
+        }
+        let mut had = 0;
+        while had < out.len() {
+            if self.uncompressed.is_empty() && !self.fill_envelope(req, stats) {
+                return false;
+            }
+            let take = (out.len() - had).min(self.uncompressed.len());
+            out[had..had + take].copy_from_slice(&self.uncompressed[..take]);
+            self.uncompressed.drain(..take);
+            had += take;
+        }
+        true
+    }
+
+    /// [`Net::receive_into`] of `count` bytes into a buffer of their own,
+    /// what php's `cmd_buffer` holds of a packet that is not a row.
     pub(crate) fn receive(
         &mut self,
         req: &mut Request,
         count: usize,
         stats: &mut Stats,
     ) -> Option<Vec<u8>> {
-        if !self.compressed {
-            return self.network_read(req, count, stats);
-        }
-        let mut out = Vec::with_capacity(count);
-        while out.len() < count {
-            if self.uncompressed.is_empty() && !self.fill_envelope(req, stats) {
-                return None;
-            }
-            let take = (count - out.len()).min(self.uncompressed.len());
-            out.extend(self.uncompressed.drain(..take));
-        }
-        Some(out)
+        let mut out = vec![0; count];
+        self.receive_into(req, &mut out, stats).then_some(out)
     }
 
     /// The compressed half of `mysqlnd_pfc::receive` and
@@ -317,9 +339,10 @@ impl Net {
     /// envelope read, its number checked as php checks it, its payload
     /// inflated where its header says it was deflated.
     fn fill_envelope(&mut self, req: &mut Request, stats: &mut Stats) -> bool {
-        let Some(header) = self.network_read(req, HEADER_SIZE, stats) else {
+        let mut header = [0; HEADER_SIZE];
+        if !self.network_read(req, &mut header, stats) {
             return false;
-        };
+        }
         let size = uint3(&header);
         let number = header.get(3).copied().unwrap_or(0);
         if self.envelope_no != number {
@@ -333,11 +356,12 @@ impl Net {
             );
         }
         self.envelope_no = self.envelope_no.wrapping_add(1);
-        let Some(comp_header) = self.network_read(req, COMPRESSED_HEADER_SIZE, stats) else {
+        let mut comp_header = [0; COMPRESSED_HEADER_SIZE];
+        if !self.network_read(req, &mut comp_header, stats) {
             return false;
-        };
+        }
         let decompressed = uint3(&comp_header);
-        let Some(payload) = self.network_read(req, size, stats) else {
+        let Some(payload) = self.network_read_owned(req, size, stats) else {
             return false;
         };
         if decompressed == 0 {
@@ -442,7 +466,10 @@ impl Net {
         stats: &mut Stats,
         error: &mut ErrorInfo,
     ) -> Option<usize> {
-        let header = self.receive(req, HEADER_SIZE, stats)?;
+        let mut header = [0; HEADER_SIZE];
+        if !self.receive_into(req, &mut header, stats) {
+            return None;
+        }
         let size = uint3(&header);
         let number = header.get(3).copied().unwrap_or(0);
         stats.add(Stat::ProtocolOverheadIn, HEADER_SIZE as u64);

@@ -317,7 +317,7 @@ impl Mysqlnd {
 
     /// `mysqlnd_store_result`.
     pub fn store(self, req: &mut Request) -> Result<Option<ResultSet>, Thrown> {
-        let stored = self.call(req, |req, conn| Ok(conn.store(req)))?.flatten();
+        let stored = self.call(req, |req, conn| conn.store(req))?.flatten();
         Ok(stored.map(|res| ResultSet {
             res,
             conn: self.acquire(req),
@@ -325,15 +325,14 @@ impl Mysqlnd {
     }
 
     /// `mysqlnd_use_result`.
-    pub fn use_unbuffered(self, req: &mut Request) -> Option<ResultSet> {
-        let res = self
-            .0
-            .with(req, |req, conn| conn.use_unbuffered(req))
-            .flatten()?;
-        Some(ResultSet {
+    pub fn use_unbuffered(self, req: &mut Request) -> Result<Option<ResultSet>, Thrown> {
+        let used = self
+            .call(req, |req, conn| conn.use_unbuffered(req))?
+            .flatten();
+        Ok(used.map(|res| ResultSet {
             res,
             conn: self.acquire(req),
-        })
+        }))
     }
 
     /// `mysqlnd_next_result`.
@@ -436,7 +435,7 @@ impl Mysqlnd {
     /// message, dropped.
     pub fn end_psession(self, req: &mut Request) -> Result<(), Thrown> {
         self.call(req, |req, conn| {
-            if let Some(mut result) = conn.current_result.take() {
+            if let Some(result) = conn.current_result.take() {
                 result.free(req, conn, true)?;
             }
             conn.last_message = None;
@@ -744,14 +743,21 @@ impl ResultSet {
     }
 
     /// `mysqlnd_free_result`: what is left of unbuffered rows read off the
-    /// line, the connection's owner released.
-    pub fn free(mut self, req: &mut Request, implicit: bool) -> Result<(), Thrown> {
-        let res = &mut self.res;
-        self.conn
+    /// line, the rows and their pool given back to the request's heap
+    /// (where the connection is gone too), the connection's owner
+    /// released.
+    pub fn free(self, req: &mut Request, implicit: bool) -> Result<(), Thrown> {
+        let ResultSet { res, conn } = self;
+        let mut res = Some(res);
+        let freed = conn
             .0
-            .with(req, |req, conn| res.free(req, conn, implicit))
-            .transpose()?;
-        self.conn.release(req);
-        Ok(())
+            .with(req, |req, c| res.take().map(|r| r.free(req, c, implicit)))
+            .flatten()
+            .transpose();
+        if let Some(res) = res {
+            res.release(req);
+        }
+        conn.release(req);
+        freed.map(|_| ())
     }
 }
