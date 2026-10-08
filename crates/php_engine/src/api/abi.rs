@@ -1043,10 +1043,35 @@ impl ExtensionBuilder {
     /// what makes a forgotten member impl a build error on this line.
     #[must_use]
     pub fn class<C: Header + Members>(self) -> ExtensionBuilder {
+        self.class_reshaped::<C>(|_| {})
+    }
+
+    /// [`ExtensionBuilder::class`], the declaration then reshaped by
+    /// what the attributes cannot say and php's `MINIT` writes by hand
+    /// after `register_class_*`: a property whose type is an
+    /// intersection or in disjunctive normal form
+    /// (`zend_declare_typed_property` with a type list), the doc comment
+    /// `@genstubs-expose-comment-block` keeps, a trait's kind, an
+    /// instance method whose body reads no receiver. `reshape` sees the
+    /// methods in `methods` and reshapes them in place: one it adds or
+    /// takes away is not registered, since each keeps its entry. What it
+    /// leaves is registered as `class` registers it.
+    #[must_use]
+    pub fn class_reshaped<C: Header + Members>(
+        self,
+        reshape: impl FnOnce(&mut ClassDecl),
+    ) -> ExtensionBuilder {
         let mut class = C::header();
-        let (constants, properties, methods) = C::members();
+        let (constants, properties, mut methods) = C::members();
         class.constants.extend(constants);
         class.properties.extend(properties);
+        let seen = methods.iter().map(|(method, _)| method.clone()).collect();
+        let header = std::mem::replace(&mut class.methods, seen);
+        reshape(&mut class);
+        let reshaped = std::mem::replace(&mut class.methods, header);
+        for ((method, _), reshaped) in methods.iter_mut().zip(reshaped) {
+            *method = reshaped;
+        }
         class.properties = class
             .properties
             .into_iter()

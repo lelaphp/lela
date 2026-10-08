@@ -79,6 +79,7 @@ abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_linked_observer
 abi::ExtensionBuilder::class_payload
+abi::ExtensionBuilder::class_reshaped
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
 abi::ExtensionBuilder::compile_file
