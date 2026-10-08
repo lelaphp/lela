@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "grep -c AskUserQuestion ~/.claude/projects/p/s.jsonl > /tmp/count", "description": "Count the questions into a scratch file"}}

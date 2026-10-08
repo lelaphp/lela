@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cp ~/.claude/projects/p/s.jsonl /tmp/copy.jsonl", "description": "Copy the transcript out to read it"}}

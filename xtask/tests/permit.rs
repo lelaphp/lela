@@ -509,6 +509,85 @@ fn harness_self_lets_a_skill_through_and_still_denies_the_settings() {
     }
 }
 
+/// The widening #2283 rules in: the function-hook modules,
+/// `harness-plugins/hooks/*.ts`, join `harness.self`'s scope and each of
+/// `harness.self-shell`'s five alternations, since the module hands
+/// `permit` the evidence of the person's approval. A widened scope is a
+/// changed value `steer` refuses, so a person lands it, or approves it in
+/// the session; until then the two rows are widened here by the same two
+/// substitutions as the diff put to the person, and once the tracked
+/// manifest carries them the substitutions find nothing and the tracked
+/// rows are held.
+const HOOK_MODULES: [(&str, &str); 2] = [
+    (
+        r#""harness-plugins/hooks/hooks.json", "#,
+        r#""harness-plugins/hooks/hooks.json", "harness-plugins/hooks/*.ts", "#,
+    ),
+    (
+        r"harness-plugins/hooks/hooks\.json|",
+        r#"harness-plugins/hooks/hooks\.json|harness-plugins/hooks/[^/\s'"|;&)<>]*\.ts|"#,
+    ),
+];
+
+/// The tracked manifest with [`HOOK_MODULES`] applied, where it is not.
+fn with_the_hook_modules() -> Manifest {
+    let mut text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
+    if !text.contains("harness-plugins/hooks/*.ts") {
+        let [(scope_was, scope), (shell_was, shell)] = HOOK_MODULES;
+        assert_eq!(text.matches(scope_was).count(), 1, "harness.self's scope");
+        assert_eq!(text.matches(shell_was).count(), 5, "harness.self-shell");
+        text = text.replace(scope_was, scope).replace(shell_was, shell);
+    }
+    Manifest::parse(&text).unwrap()
+}
+
+/// Under the widened rows an `Edit`, a `Write` and the shell's writes of
+/// a hook module are denied, each by its rule, and reading one, copying
+/// it out and editing a file beside the modules are let through.
+#[test]
+fn the_hook_modules_are_a_persons_files_under_the_widened_rows() {
+    let manifest = with_the_hook_modules();
+    let dir = fixtures().join("rules/harness.self/hook-modules");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    for named in ["deny-edit.json", "deny-sed.json", "allow-cat.json"] {
+        assert!(names.iter().any(|n| n == named), "{named}: {names:?}");
+    }
+    for name in &names {
+        let call = call(&dir.join(name));
+        let rule = if call.tool_name == "Bash" {
+            "harness.self-shell"
+        } else {
+            "harness.self"
+        };
+        let judged = judge(&manifest, workspace(), &call).unwrap();
+        if name.starts_with("deny") {
+            assert_eq!(
+                judged.denial().map(|f| f.rule.as_str()),
+                Some(rule),
+                "{name}: {judged:?}"
+            );
+        } else {
+            assert!(judged.denial().is_none(), "{name}: {judged:?}");
+        }
+    }
+    // The rows as tracked, before the widening lands, deny none of them:
+    // what the fixtures prove is the widening and nothing beside it.
+    let tracked = Manifest::load(workspace()).unwrap();
+    if !std::fs::read_to_string(workspace().join("seams.toml"))
+        .unwrap()
+        .contains("harness-plugins/hooks/*.ts")
+    {
+        for name in names.iter().filter(|n| n.starts_with("deny")) {
+            let judged = judge(&tracked, workspace(), &call(&dir.join(name))).unwrap();
+            assert!(judged.denial().is_none(), "{name}: {judged:?}");
+        }
+    }
+}
+
 /// A worktree carries the tracked manifest, so it is a workspace of its
 /// own by the one rule (`Call::workspace`, #57); it also has a `.git`, so
 /// it is the checkout its readings go to. This one is gitignored.

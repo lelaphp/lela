@@ -1,0 +1,1 @@
+{"tool_name": "Edit", "tool_input": {"file_path": "harness-plugins/tsconfig.json", "old_string": "\"strict\": true", "new_string": "\"strict\": true "}}

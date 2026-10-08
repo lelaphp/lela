@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "cat ~/.claude/projects/p/s.jsonl", "description": "Read the session transcript"}}

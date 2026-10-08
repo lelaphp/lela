@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "echo x >> ~/.claude/projects/p/s.jsonl", "description": "Append a record to the session transcript"}}

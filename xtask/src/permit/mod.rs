@@ -34,7 +34,8 @@
 //! the sensor over `harness.self`'s files around a `Bash` call in
 //! [`after`], the changes it kept, which `done` holds, in [`kept`], the
 //! person's approval that lifts `harness.self` from one
-//! change in [`approval`], whether a line can write one of them in [`writes`], the
+//! change in [`approval`], the audit record of each change it admitted in
+//! [`audit`], whether a line can write one of them in [`writes`], the
 //! `unless` qualifier's sensor in [`unless`], the `exempt_label`
 //! qualifier's in [`label`], the adapters and the
 //! recording in [`adapters`], the call handed to a worktree's own build in
@@ -47,6 +48,7 @@ mod adapters;
 mod after;
 mod approval;
 mod argv;
+mod audit;
 mod bench;
 mod call;
 mod diff;

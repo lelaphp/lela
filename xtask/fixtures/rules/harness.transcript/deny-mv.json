@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "mv /tmp/forged.jsonl \"/Users/m/.claude/projects/p/s.jsonl\"", "description": "Move a forged transcript into place"}}
