@@ -33,11 +33,12 @@
 //! keeps it: the function table is the class's linked record, its rows
 //! read through `api` (`Request::method_rows`, `Request::method_row`)
 //! and held as a `MethodRow`, and the interface list and the constants
-//! table in their order are the record's (`Request::interfaces`,
-//! `Request::constants_in_order`). Each method's prototype and the
-//! properties with their shadows are computed here by the same rules
-//! over the declarations (`row_prototype`, `linked_properties`), so the
-//! words `inherits`, `overwrites`, `prototype` and `ctor` are php's.
+//! table in their order and each method's prototype are the record's
+//! (`Request::interfaces`, `Request::constants_in_order`,
+//! `Request::row_prototype`). The properties with their shadows are
+//! computed here by the same rules over the declarations
+//! (`linked_properties`), so the words `inherits`, `overwrites`,
+//! `prototype` and `ctor` are php's.
 //! Reflection's own twenty-six classes are declared by `#[php_class]`
 //! beside the bodies that serve them, every method the stub has, so
 //! `php --re reflection` renders whole.
@@ -6701,9 +6702,9 @@ fn escaped(bytes: &[u8]) -> String {
 /// One method of a linked class's function table, `zend_function` as
 /// `zend_do_inheritance` left it: the declaration, `common.scope`, the
 /// class that declared it, and the row of the engine's table it was
-/// found at, which `common.prototype` is read off ([`row_prototype`]),
-/// or the `__invoke` php makes for a `Closure`, which no table holds;
-/// nothing held for a property's hook.
+/// found at, which `common.prototype` is read off
+/// ([`Request::row_prototype`]), or the `__invoke` php makes for a
+/// `Closure`, which no table holds; nothing held for a property's hook.
 #[derive(Clone)]
 struct LinkedMethod {
     decl: MethodDecl,
@@ -6906,131 +6907,6 @@ fn closure_invoke(req: &mut Request, closure: Option<Function>) -> Option<Linked
 /// `ZEND_ACC_CTOR`: the method named `__construct`.
 fn is_constructor(method: &MethodDecl) -> bool {
     method.function.name.0.eq_ignore_ascii_case(b"__construct")
-}
-
-/// `common.prototype`'s scope for the method a row of a function table
-/// is, as `do_inheritance_check_on_method` set it while the row's class
-/// linked: a method the class declares over its parent's takes the
-/// parent method's prototype, or the parent method itself, unless the
-/// parent's is private and not abstract, or a constructor with no
-/// abstract prototype; an inherited one keeps the prototype it has in
-/// the parent's table, or in the table of the interface it came from;
-/// and each interface the class implements that its parent does not
-/// sets it again where it declares a method of the name, a method it
-/// shares with the row aside (`do_inherit_method`, `SEPARATE_METHOD`).
-/// None where nothing set one.
-///
-/// ```php
-/// interface I { function m(); function __construct(); }
-/// abstract class P { abstract function a(); private function p() {} function __construct() {} function q() {} }
-/// class C extends P implements I { function m() {} function a() {} function p() {} function __construct() {} }
-/// foreach (['m', 'a', 'p', '__construct', 'q'] as $n) { $r = new ReflectionMethod('C', $n); var_dump($r->hasPrototype() ? $r->getPrototype()->class : null); }
-/// trait T { abstract function t(); function u() {} }
-/// class B { function t() {} }
-/// class D extends B { use T; }
-/// var_dump(array_map(fn ($m) => $m->class . "::" . $m->name, (new ReflectionClass('D'))->getMethods()));
-/// interface J { function q(); }
-/// class E extends P implements J { function a() {} }
-/// var_dump((new ReflectionMethod('E', 'q'))->getPrototype()->class, (new ReflectionMethod('P', 'q'))->hasPrototype());
-/// ```
-/// ```expect
-/// string(1) "I"
-/// string(1) "P"
-/// NULL
-/// string(1) "I"
-/// NULL
-/// array(2) {
-///   [0]=>
-///   string(4) "D::u"
-///   [1]=>
-///   string(4) "B::t"
-/// }
-/// string(1) "J"
-/// bool(false)
-/// ```
-fn row_prototype(req: &mut Request, row: MethodRow) -> Option<ClassId> {
-    prototype_at(req, row, 0)
-}
-
-/// [`row_prototype`] at `depth` of the walk up the parents and
-/// interfaces, cut at a depth no declaration can make.
-fn prototype_at(req: &mut Request, row: MethodRow, depth: u32) -> Option<ClassId> {
-    if depth > 64 {
-        return None;
-    }
-    let (class, scope) = (row.class(), row.scope());
-    let name = req.row_method(row)?.function.name.0.clone();
-    let parent = req
-        .class_decl(class)?
-        .parent
-        .clone()
-        .and_then(|parent| lookup_class(req, &parent.0).ok().flatten());
-    let above = parent.and_then(|parent| req.method_row(parent, &name));
-    let mut prototype = None;
-    // A row inherited from no parent was appended from the first of the
-    // class's interfaces declaring it, and keeps that one's prototype.
-    let mut appended = false;
-    match above {
-        Some(above) if scope != class => prototype = prototype_at(req, above, depth + 1),
-        Some(above) => prototype = prototype_over(req, above, depth),
-        None => appended = scope != class,
-    }
-    for interface in new_interfaces(req, class, parent) {
-        let Some(declared) = req.method_row(interface, &name) else {
-            continue;
-        };
-        if declared.scope() == scope {
-            // The same method in an interface may be inherited a few times.
-            if appended {
-                prototype = prototype_at(req, declared, depth + 1);
-                appended = false;
-            }
-            continue;
-        }
-        if let Some(set) = prototype_over(req, declared, depth) {
-            prototype = Some(set);
-        }
-    }
-    prototype
-}
-
-/// The interfaces `class` implements that `parent` does not, in
-/// `ce->interfaces`' order ([`Request::interfaces`]): none, with nothing walked, for a
-/// class that names no interface and declares no `__toString`, which
-/// is what adds `Stringable`.
-fn new_interfaces(req: &mut Request, class: ClassId, parent: Option<ClassId>) -> Vec<ClassId> {
-    let names_one = req.class_decl(class).is_some_and(|decl| {
-        !decl.interfaces.is_empty()
-            || decl
-                .methods
-                .iter()
-                .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__toString"))
-    });
-    if !names_one {
-        return Vec::new();
-    }
-    let inherited = parent.map_or_else(Vec::new, |p| req.interfaces(p).to_vec());
-    let mut own = req.interfaces(class).to_vec();
-    own.retain(|interface| !inherited.contains(interface));
-    own
-}
-
-/// The prototype `do_inheritance_check_on_method` gives a method over
-/// `above`, the parent's or an interface's method of its name: the
-/// prototype `above` has, or `above`'s own scope; none where it gives
-/// none, `above` private and not abstract, or a constructor whose
-/// prototype is not abstract.
-fn prototype_over(req: &mut Request, above: MethodRow, depth: u32) -> Option<ClassId> {
-    let decl = req.row_method(above)?;
-    let (is_abstract, is_ctor) = (decl.is_abstract, is_constructor(decl));
-    if decl.visibility == Visibility::Private && !is_abstract && !is_ctor {
-        return None;
-    }
-    let inherited = prototype_at(req, above, depth + 1);
-    if is_ctor && inherited.is_none() && !is_abstract {
-        return None;
-    }
-    Some(inherited.unwrap_or(above.scope()))
 }
 
 /// `CE_CONSTANTS_TABLE(ce)`: the rows of the engine's linked record in
@@ -7273,7 +7149,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
             words.push(format!("overwrites {}", String::from_utf8_lossy(&scope)));
         }
     }
-    if let Some(prototype) = method.row().and_then(|row| row_prototype(req, row)) {
+    if let Some(prototype) = method.row().and_then(|row| req.row_prototype(row)) {
         let scope = class_name_of(req, prototype);
         words.push(format!("prototype {}", String::from_utf8_lossy(&scope)));
     }

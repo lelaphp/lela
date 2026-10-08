@@ -27,8 +27,8 @@ use super::{
     HeldMethod, at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
     function_string, is_constructor, keep, keep_closure, keep_method, kept_class, kept_closure,
     kept_method, kept_object, method_or_invoke, method_string, namespace_end, new_object,
-    reflection_class_factory, required_parameters, row_prototype, set_name, set_string_prop,
-    signature, string_value, this_name,
+    reflection_class_factory, required_parameters, set_name, set_string_prop, signature,
+    string_value, this_name,
 };
 
 /// `ZEND_ACC_PUBLIC`, `ZEND_ACC_PROTECTED` and `ZEND_ACC_PRIVATE`, the
@@ -178,7 +178,7 @@ fn prototype_of(
     name: &[u8],
 ) -> Result<Option<ClassId>, Thrown> {
     match kept_method(req, this) {
-        Some(HeldMethod::Row(held)) => return Ok(row_prototype(req, held)),
+        Some(HeldMethod::Row(held)) => return Ok(req.row_prototype(held)),
         // The trampoline php makes for a closure's `__invoke` has none.
         Some(HeldMethod::Invoke(_)) => return Ok(None),
         None => {}
@@ -191,7 +191,7 @@ fn prototype_of(
     };
     Ok(req
         .method_row(class, name)
-        .and_then(|row| row_prototype(req, row)))
+        .and_then(|row| req.row_prototype(row)))
 }
 
 /// `ZEND_PARSE_PARAMETERS_START(n, -1)`'s count check: php's
