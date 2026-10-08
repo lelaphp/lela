@@ -19,7 +19,7 @@ use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, fatal, pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{Guarded, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
 
 /// `mb_fast_convert` under a substitute, with the errors met.
 pub(crate) fn convert(
@@ -813,28 +813,32 @@ fn find_strings(req: &mut Request, value: &Value, out: &mut Vec<Vec<u8>>) -> Res
             }
         }
         ValueRef::Object(object) => {
+            // `Z_PROTECT_RECURSION_P(var)` and `ZEND_HASH_FOREACH_VAL_IND`
+            // over `HASH_OF(var)` (`Z/ext/mbstring/mbstring.c:3771`), the
+            // object's `Z_OBJPROP`: a walk holding nothing, the argument
+            // holding the object.
             let object = *object;
             if object.is_recursive() {
                 return Ok(true);
             }
             object.protect();
-            for (_, v) in object_rows(req, object)? {
-                if find_strings(req, &v, out)? {
-                    object.unprotect();
-                    return Ok(true);
-                }
-            }
+            let walked = object.property_table(req).and_then(|table| {
+                walk::foreach(req, table, Hold::None, |req, row| -> walk::Step {
+                    Ok(if find_strings(req, row.value(), out)? {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    })
+                })
+            });
             object.unprotect();
+            if walked?.is_some() {
+                return Ok(true);
+            }
         }
         _ => {}
     }
     Ok(false)
-}
-
-/// `HASH_OF(var)` over an object, its `Z_OBJPROP`: the rows, views.
-fn object_rows(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-    let table = object.property_table(req)?;
-    Ok(walk::rows(req, table).collect())
 }
 
 /// What converting one slot's value leaves, `mb_recursive_convert_variable`.
@@ -908,23 +912,25 @@ fn convert_value(
             Ok(Walk::Replace(separated.into_value()))
         }
         ValueRef::Object(object) => {
+            // `GC_TRY_PROTECT_RECURSION(ht)` and `ZEND_HASH_FOREACH_VAL`
+            // over `HASH_OF(var)` (`Z/ext/mbstring/mbstring.c:3808`), the
+            // object's `Z_OBJPROP`, no owner of it taken: the argument
+            // holds the object, and each row is written where it stands,
+            // a declared one in its slot.
             let object = *object;
-            if object.is_recursive() {
-                return Ok(Walk::Stopped);
-            }
-            object.protect();
-            for (key, v) in object_rows(req, object)? {
-                match convert_value(req, &v, from, to)? {
-                    Walk::Stopped => {
-                        object.unprotect();
-                        return Ok(Walk::Stopped);
-                    }
+            let table = object.property_table(req)?;
+            let walked = walk::foreach_guarded(req, table, Hold::None, |req, row| {
+                match convert_value(req, row.value(), from, to)? {
+                    Walk::Stopped => return Ok(ControlFlow::Break(())),
                     Walk::Kept => {}
-                    Walk::Replace(new) => object.set_row(req, &key, new)?,
+                    Walk::Replace(new) => object.set_row(req, row.key(), new)?,
                 }
-            }
-            object.unprotect();
-            Ok(Walk::Kept)
+                Ok(ControlFlow::Continue(()))
+            })?;
+            Ok(match walked {
+                Guarded::Recursive | Guarded::Walked(Some(())) => Walk::Stopped,
+                Guarded::Walked(None) => Walk::Kept,
+            })
         }
         _ => Ok(Walk::Kept),
     }
@@ -1011,6 +1017,20 @@ fn convert_array_in(
 ///     [0]=>
 ///     string(2) "í"
 ///   }
+/// }
+/// ```
+///
+/// An object is read through `HASH_OF`, its class's `get_properties`
+/// (`Z/ext/mbstring/mbstring.c:3771`, `:3808`), so a class whose
+/// readers see rows of its own making converts the table it holds:
+///
+/// ```php
+/// $dt = new DateTime('2020-01-01 UTC');
+/// mb_convert_variables('UTF-8', 'ISO-8859-1', $dt);
+/// var_dump(get_object_vars($dt));
+/// ```
+/// ```expect
+/// array(0) {
 /// }
 /// ```
 ///
