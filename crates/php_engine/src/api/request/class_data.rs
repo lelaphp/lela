@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use php_unit::decl::ClassKind;
 
-use super::Request;
+use super::{PropertyInfo, Request};
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, Value};
 
@@ -328,15 +328,18 @@ impl Request {
                 self.release(value);
             }
         }
-        let statics: Vec<Box<[u8]>> = self.class_decl(class).map_or_else(Vec::new, |decl| {
-            decl.properties
-                .iter()
-                .filter(|property| !property.is_instance)
-                .map(|property| property.name.0.clone())
+        let statics: Vec<PropertyInfo> = self.class_decl(class).map_or_else(Vec::new, |decl| {
+            (0u32..)
+                .zip(&decl.properties)
+                .filter(|(_, property)| !property.is_instance)
+                .map(|(at, _)| PropertyInfo {
+                    declaring: class,
+                    at,
+                })
                 .collect()
         });
-        for name in statics {
-            self.lay_down_static(class, &name)?;
+        for info in statics {
+            self.lay_down_static(info)?;
         }
         self.evaluate_defaults(class)?;
         self.class_data.rows.entry(class).or_default().updated = true;
@@ -367,9 +370,8 @@ impl Request {
             .iter()
             .all(|(_, constant)| written(&constant.value));
         let defaults = self
-            .placed_properties(class)
-            .iter()
-            .all(|(_, property)| property.default.as_ref().is_none_or(written));
+            .placed(class)
+            .all(|(_, _, property)| property.default.as_ref().is_none_or(written));
         let statics = self.lineage(class).all(|here| {
             self.class_decl(here).is_none_or(|decl| {
                 decl.properties
@@ -658,8 +660,10 @@ impl Request {
             .rows
             .get(&class)
             .filter(|data| data.updated)?;
-        let placed = self.placed_properties(class);
-        let at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
+        let (at, _, _) = self
+            .placed(class)
+            .rev()
+            .find(|(_, _, p)| &*p.name.0 == name)?;
         data.defaults.get(at).copied().flatten()
     }
 
@@ -671,19 +675,25 @@ impl Request {
             .map_or(0, |data| data.defaults.len());
         // The rows not yet evaluated, which is none once the class's
         // defaults stood.
-        let rows: Vec<(ClassId, php_unit::decl::PropertyDecl)> = self
+        let rows: Vec<PropertyInfo> = self
             .placed_properties(class)
             .iter()
             .skip(done)
-            .cloned()
+            .copied()
             .collect();
-        for (declaring, property) in &rows {
-            let value = match &property.default {
+        for info in rows {
+            // The default expression alone is handed on past what writes
+            // the request, so it is what is cloned.
+            let (default, typed) = self
+                .property_decl(info)
+                .map_or((None, false), |p| (p.default.clone(), p.ty.is_some()));
+            let value = match default {
                 Some(expr) => {
-                    let value = crate::api::call::eval_declared_made(self, expr, Some(*declaring))?;
-                    Some(self.strictly_held(value, property, *declaring)?)
+                    let declaring = Some(info.declaring);
+                    let value = crate::api::call::eval_declared_made(self, &expr, declaring)?;
+                    Some(self.strictly_held(value, info)?)
                 }
-                None if property.ty.is_some() => None,
+                None if typed => None,
                 None => Some(Value::null()),
             };
             self.class_data
@@ -703,14 +713,15 @@ impl Request {
     pub(super) fn strictly_held(
         &mut self,
         value: Value,
-        property: &php_unit::decl::PropertyDecl,
-        declaring: ClassId,
+        info: PropertyInfo,
     ) -> Result<Value, Thrown> {
-        let Some(ty) = &property.ty else {
+        let Some((ty, name)) = self
+            .property_decl(info)
+            .and_then(|p| Some((p.ty.clone()?, p.name.0.clone())))
+        else {
             return Ok(value);
         };
-        match crate::ops::verify_property_type(self, &value, ty, declaring, &property.name.0, true)
-        {
+        match crate::ops::verify_property_type(self, &value, &ty, info.declaring, &name, true) {
             Ok(None) => Ok(value),
             Ok(Some(coerced)) => {
                 self.release(value);

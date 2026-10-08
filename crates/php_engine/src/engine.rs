@@ -27,7 +27,6 @@ use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
 use php_link::LinkedClass;
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
-    PropertyDecl,
 };
 use php_unit::{FramelessEntry, Unit, frameless_table};
 
@@ -38,7 +37,7 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, Placed, Request, Sink, ini_truth, placed_of,
+    BuildDefs, Ending, ExtensionId, Placed, PropertyInfo, Request, Sink, ini_truth, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -1075,10 +1074,16 @@ fn native_placed(
     parents: &[Option<ClassId>],
 ) -> Vec<Placed> {
     let mut placed: Vec<Option<Placed>> = vec![None; classes.len()];
-    let place = |at: usize, parent: &[(ClassId, PropertyDecl)]| {
+    let decl_of = |info: PropertyInfo| {
+        classes
+            .get(usize::try_from(info.declaring.0).ok()?)?
+            .properties
+            .get(usize::try_from(info.at).ok()?)
+    };
+    let place = |at: usize, parent: &[PropertyInfo]| {
         let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
         let decl = classes.get(at)?;
-        Some(placed_of(class, decl, records.get(at), parent))
+        Some(placed_of(class, decl, records.get(at), parent, decl_of))
     };
     let mut progress = true;
     while progress {

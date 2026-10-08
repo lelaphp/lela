@@ -453,10 +453,13 @@ impl Request {
             .class_decl(object.class())
             .is_some_and(|decl| decl.flags.is_final);
         let mut lazy = vec![false; o.slots() as usize];
-        for (i, (_, decl)) in placed.iter().enumerate().take(reset) {
+        for (i, &info) in placed.iter().enumerate().take(reset) {
             let slot = u32::try_from(i).unwrap_or(u32::MAX);
             if !o.slot(slot).is_undef() {
-                if decl.is_readonly && (final_class || decl.is_final) {
+                let kept = self
+                    .property_decl(info)
+                    .is_some_and(|decl| decl.is_readonly && (final_class || decl.is_final));
+                if kept {
                     continue;
                 }
                 self.dtor_property(object, slot);

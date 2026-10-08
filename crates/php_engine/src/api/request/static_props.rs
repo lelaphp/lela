@@ -5,13 +5,13 @@
 //! type, and bound by reference. The slots are [`StaticProps`]'s, whose
 //! field no file but this one reads.
 
-use php_unit::decl::{ClassKind, PropertyDecl, Visibility};
+use php_unit::decl::{ClassKind, Visibility};
 
 use crate::api::abi::PropertyRead;
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpRef, TypeTag, Value, ValueRef};
 
-use super::Request;
+use super::{PropertyInfo, Request};
 
 /// The static properties' slots, whose field no file but this one
 /// reads.
@@ -98,26 +98,26 @@ impl Request {
         name: &[u8],
         scope: Option<ClassId>,
         read: PropertyRead,
-    ) -> Result<Option<(ClassId, PropertyDecl)>, Thrown> {
+    ) -> Result<Option<PropertyInfo>, Thrown> {
         let silent = read == PropertyRead::Silent;
-        // The declaration is handed on past what writes the request
-        // (the constants' update, the slot laid down), so it is cloned.
-        let found = self
-            .property_info_of(class, name)
-            .map(|(declaring, property)| (declaring, property.clone()));
-        if let Some((declaring, property)) = found.as_ref()
-            && property.visibility != Visibility::Public
-            && Some(*declaring) != scope
-            && (property.visibility == Visibility::Private
-                || !self.check_protected(*declaring, scope))
+        // The row is handed on past what writes the request (the
+        // constants' update, the slot laid down), and the declaration
+        // read again through it where it is needed.
+        let found = self.property_info(class, name).and_then(|info| {
+            let property = self.property_decl(info)?;
+            Some((info, property.visibility, property.is_instance))
+        });
+        if let Some((info, visibility, _)) = found
+            && visibility != Visibility::Public
+            && Some(info.declaring) != scope
+            && (visibility == Visibility::Private || !self.check_protected(info.declaring, scope))
         {
             if silent {
                 return Ok(None);
             }
-            let visibility = property.visibility;
             return Err(self.inaccessible_property(class, visibility, name));
         }
-        let Some((declaring, property)) = found.filter(|(_, p)| !p.is_instance) else {
+        let Some((info, _, _)) = found.filter(|(_, _, instance)| !instance) else {
             if silent {
                 return Ok(None);
             }
@@ -132,14 +132,14 @@ impl Request {
             ));
         };
         self.update_class_constants(class)?;
-        self.lay_down_static(declaring, name)?;
+        self.lay_down_static(info)?;
         if self
             .class_decl(class)
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
         {
             let shown = format!(
                 "{}::${}",
-                self.class_name(declaring),
+                self.class_name(info.declaring),
                 String::from_utf8_lossy(name)
             );
             crate::api::raising::deprecated(
@@ -149,44 +149,44 @@ impl Request {
                 ),
             );
         }
-        Ok(Some((declaring, property)))
+        Ok(Some(info))
     }
 
     /// `zend_class_init_statics` and `zend_update_class_constants` over
-    /// the `static` property `name` that `declaring` declares: its slot
-    /// laid down where it has none, from its default evaluated in the
-    /// declaring scope and held to its type under the strict rule, and
-    /// `IS_UNDEF` for a typed one with no default.
-    pub(super) fn lay_down_static(
-        &mut self,
-        declaring: ClassId,
-        name: &[u8],
-    ) -> Result<(), Thrown> {
+    /// the `static` property `info` names: its slot, on the class that
+    /// declared it, laid down where it has none, from its default
+    /// evaluated in the declaring scope and held to its type under the
+    /// strict rule, and `IS_UNDEF` for a typed one with no default.
+    pub(super) fn lay_down_static(&mut self, info: PropertyInfo) -> Result<(), Thrown> {
+        let declaring = info.declaring;
+        let Some(property) = self.property_decl(info) else {
+            return Ok(());
+        };
+        let name = &property.name.0;
         if self
             .static_props
             .slots
             .iter()
-            .any(|((held, under), _)| *held == declaring && under == name)
+            .any(|((held, under), _)| *held == declaring && **under == **name)
         {
             return Ok(());
         }
-        let Some(property) = self
-            .class_decl(declaring)
-            .and_then(|decl| decl.properties.iter().find(|p| *p.name.0 == *name).cloned())
-        else {
-            return Ok(());
-        };
-        let value = match property.default.as_ref() {
+        // The default expression alone is handed on past what writes the
+        // request, so it is what is cloned.
+        let (name, default, typed) = (
+            name.to_vec(),
+            property.default.clone(),
+            property.ty.is_some(),
+        );
+        let value = match default {
             Some(expr) => {
-                let value = crate::api::call::eval_declared_made(self, expr, Some(declaring))?;
-                self.strictly_held(value, &property, declaring)?
+                let value = crate::api::call::eval_declared_made(self, &expr, Some(declaring))?;
+                self.strictly_held(value, info)?
             }
-            None if property.ty.is_some() => Value::undef(),
+            None if typed => Value::undef(),
             None => Value::null(),
         };
-        self.static_props
-            .slots
-            .push(((declaring, name.to_vec()), value));
+        self.static_props.slots.push(((declaring, name), value));
         Ok(())
     }
 
@@ -222,13 +222,13 @@ impl Request {
         scope: Option<ClassId>,
         read: PropertyRead,
     ) -> Result<Value, Thrown> {
-        let Some((declaring, property)) = self.static_slot(class, name, scope, read)? else {
+        let Some(info) = self.static_slot(class, name, scope, read)? else {
             return Ok(Value::null());
         };
-        let held = self.held_static(declaring, name);
+        let held = self.held_static(info.declaring, name);
         if held.tag() == TypeTag::Undef {
-            if property.ty.is_some() && read == PropertyRead::Warning {
-                let declaring = self.class_name(declaring);
+            if self.property_typed(info) && read == PropertyRead::Warning {
+                let declaring = self.class_name(info.declaring);
                 return Err(crate::api::raising::throw_error(
                     self,
                     "Error",
@@ -266,14 +266,12 @@ impl Request {
         name: &[u8],
         scope: Option<ClassId>,
     ) -> Result<Option<Value>, Thrown> {
-        let Some((declaring, property)) =
-            self.static_slot(class, name, scope, PropertyRead::Silent)?
-        else {
+        let Some(info) = self.static_slot(class, name, scope, PropertyRead::Silent)? else {
             return Ok(None);
         };
-        let held = self.held_static(declaring, name);
+        let held = self.held_static(info.declaring, name);
         if held.tag() == TypeTag::Undef {
-            return Ok(Some(if property.ty.is_some() {
+            return Ok(Some(if self.property_typed(info) {
                 Value::undef()
             } else {
                 Value::null()
@@ -305,28 +303,27 @@ impl Request {
         value: Value,
         strict: bool,
     ) -> Result<(), Thrown> {
-        let (declaring, property) =
-            match self.static_slot(class, name, scope, PropertyRead::Warning) {
-                Ok(Some(slot)) => slot,
-                // A write is never `BP_VAR_IS`, so the silent miss cannot
-                // stand here; the value is given up as a raising one is.
-                Ok(None) => {
-                    self.release(value);
-                    return Ok(());
-                }
-                Err(thrown) => {
-                    self.release(value);
-                    return Err(thrown);
-                }
-            };
-        self.set_static_slot(declaring, &property, name, value, strict)
+        let info = match self.static_slot(class, name, scope, PropertyRead::Warning) {
+            Ok(Some(info)) => info,
+            // A write is never `BP_VAR_IS`, so the silent miss cannot
+            // stand here; the value is given up as a raising one is.
+            Ok(None) => {
+                self.release(value);
+                return Ok(());
+            }
+            Err(thrown) => {
+                self.release(value);
+                return Err(thrown);
+            }
+        };
+        self.set_static_slot(info, name, value, strict)
             .map(|(_, garbage)| self.release(garbage))
     }
 
     /// [`Request::set_static_property`] over a slot already addressed,
     /// as `ZEND_ASSIGN_STATIC_PROP` addresses it before it reads its
-    /// value and writes it after: `declaring` is the class the slot is
-    /// in and `property` its declaration. What the slot holds after the
+    /// value and writes it after: `info` is the property, whose declaring
+    /// class is the one the slot is in. What the slot holds after the
     /// write comes back, a view: the value `zend_assign_to_typed_prop`
     /// answers, coerced where the weak rule coerced it, which is what
     /// `RETURN_VALUE_USED` copies. Beside it comes what the slot held,
@@ -345,17 +342,18 @@ impl Request {
     /// ```
     pub(crate) fn set_static_slot(
         &mut self,
-        declaring: ClassId,
-        property: &PropertyDecl,
+        info: PropertyInfo,
         name: &[u8],
         mut value: Value,
         strict: bool,
     ) -> Result<(Value, Value), Thrown> {
+        let declaring = info.declaring;
         // `zend_verify_property_type`: the value held to the declared
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies
         // nor coerces, the value given up as php gives it up.
-        if let Some(ty) = property.ty.clone() {
+        let ty = self.property_decl(info).and_then(|p| p.ty.clone());
+        if let Some(ty) = ty {
             match crate::ops::verify_property_type(self, &value, &ty, declaring, name, strict) {
                 Ok(None) => {}
                 Ok(Some(coerced)) => {
@@ -521,8 +519,8 @@ impl Request {
         scope: Option<ClassId>,
         bound: Value,
     ) -> Result<(), Thrown> {
-        let (declaring, _) = match self.static_slot(class, name, scope, PropertyRead::Warning) {
-            Ok(Some(slot)) => slot,
+        let declaring = match self.static_slot(class, name, scope, PropertyRead::Warning) {
+            Ok(Some(info)) => info.declaring,
             Ok(None) => {
                 self.release(bound);
                 return Ok(());

@@ -917,9 +917,9 @@ mod tests {
     use std::sync::mpsc;
 
     use super::{Request, Row};
+    use crate::api::request::PropertyInfo;
     use crate::api::values::ClassId;
     use crate::engine::{Engine, RequestDescription};
-    use php_unit::decl::PropertyDecl;
 
     /// How many rounds each side runs.
     const ROUNDS: usize = 40;
@@ -1067,8 +1067,9 @@ mod tests {
         // naming the published classes.
         let placed = |class: ClassId| -> Vec<(ClassId, String)> {
             req.arena.class(class).map_or_else(Vec::new, |row| {
-                let shown = |(holder, p): &(ClassId, PropertyDecl)| {
-                    (*holder, String::from_utf8_lossy(&p.name.0).into_owned())
+                let shown = |info: &PropertyInfo| {
+                    let name = req.property_decl(*info).map_or(&[][..], |p| &p.name.0);
+                    (info.declaring, String::from_utf8_lossy(name).into_owned())
                 };
                 row.bound.placed.iter().map(shown).collect()
             })

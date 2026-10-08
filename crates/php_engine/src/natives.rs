@@ -1727,9 +1727,8 @@ fn dump_members(
     let declared: Vec<(Vec<u8>, ClassId, Visibility, Option<Type>)> =
         match object.heap().declared_rows() {
             php_heap::DeclaredRows::Slots => req
-                .placed_properties(class)
-                .iter()
-                .map(|(declaring, p)| (p.name.0.to_vec(), *declaring, p.visibility, p.ty.clone()))
+                .placed(class)
+                .map(|(_, declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty.clone()))
                 .collect(),
             php_heap::DeclaredRows::Copied => Vec::new(),
         };

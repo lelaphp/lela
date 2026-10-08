@@ -965,11 +965,12 @@ fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
         return Vec::new();
     }
     let eager = o.laziness() == php_heap::Laziness::Eager;
-    req.placed_properties(object.class())
-        .iter()
-        .zip(0u32..)
-        .filter(|(_, i)| !eager || *i >= o.slots() || !o.slot(*i).is_undef())
-        .map(|((declaring, p), _)| {
+    req.placed(object.class())
+        .filter(|(slot, _, _)| {
+            let i = u32::try_from(*slot).unwrap_or(u32::MAX);
+            !eager || i >= o.slots() || !o.slot(i).is_undef()
+        })
+        .map(|(_, declaring, p)| {
             let prefix = match p.visibility {
                 Visibility::Public => None,
                 Visibility::Protected => Some(b"\0*\0".to_vec()),
@@ -977,7 +978,7 @@ fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
                 // mangled with the class that declared it, which for an
                 // inherited one is a class above.
                 Visibility::Private => req
-                    .class_decl(*declaring)
+                    .class_decl(declaring)
                     .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
             };
             MangledName {
@@ -1787,18 +1788,24 @@ pub(crate) fn debug_rows(
     };
     let mut out = Vec::with_capacity(rows.len());
     let mut rest = rows.into_iter().peekable();
-    for ((declaring, p), at) in placed.iter().zip(0u32..) {
-        let key = {
-            let prefix = match p.visibility {
-                Visibility::Public => None,
-                Visibility::Protected => Some(b"\0*\0".to_vec()),
-                Visibility::Private => req
-                    .class_decl(*declaring)
-                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
-            };
-            let bytes = [prefix.unwrap_or_default().as_slice(), &p.name.0].concat();
-            req.interned(&bytes)?
+    for (&info, at) in placed.iter().zip(0u32..) {
+        let Some(p) = req.property_decl(info) else {
+            continue;
         };
+        let prefix = match p.visibility {
+            Visibility::Public => None,
+            Visibility::Protected => Some(b"\0*\0".to_vec()),
+            Visibility::Private => req
+                .class_decl(info.declaring)
+                .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
+        };
+        let bytes = [prefix.unwrap_or_default().as_slice(), &p.name.0].concat();
+        let uninitialized = o
+            .slot(at)
+            .is_undef()
+            .then(|| p.ty.as_ref().map(crate::natives::type_text))
+            .flatten();
+        let key = req.interned(&bytes)?;
         if !o.slot(at).is_undef() {
             let Some((k, value)) = rest
                 .next_if(|(k, _)| matches!(k, Key::Str(name) if name.as_bytes() == key.as_bytes()))
@@ -1808,11 +1815,8 @@ pub(crate) fn debug_rows(
                 return Ok((out, count));
             };
             out.push((k, HeldRow::Value(value)));
-        } else if let Some(ty) = &p.ty {
-            out.push((
-                Key::Str(key),
-                HeldRow::Uninitialized(crate::natives::type_text(ty)),
-            ));
+        } else if let Some(shown) = uninitialized {
+            out.push((Key::Str(key), HeldRow::Uninitialized(shown)));
         }
     }
     out.extend(rest.map(|(k, value)| (k, HeldRow::Value(value))));

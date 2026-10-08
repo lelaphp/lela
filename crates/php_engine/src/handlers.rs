@@ -6992,8 +6992,8 @@ fn static_prop_place(
     // `zend_handle_fetch_obj_flags`'s refusals over the slot as it stands,
     // before the binding lays `null` in a slot nothing has written; then
     // the place.
-    let (declaring, property) = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
-        Ok(Some(slot)) => slot,
+    let info = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
+        Ok(Some(info)) => info,
         Ok(None) => {
             return Err(Fatal::Error(format!(
                 "InternalError: ZEND_FETCH_STATIC_PROP_W placed ${} and the table holds no slot for it",
@@ -7008,13 +7008,14 @@ fn static_prop_place(
         FetchFlag::of(op.extended_value)
     };
     let typed = flag.and_then(|_| req.declared_typed_static(class, &name));
+    let declaring = info.declaring;
     if let (Some(flag), Some(typed)) = (flag, &typed) {
         let held = req.held_static(declaring, &name);
         if let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag) {
             return threw(req, frame, &thrown);
         }
     }
-    if req.lacks_set_access(declaring, &property) {
+    if req.lacks_set_access(info) {
         let held = req.held_static(declaring, &name).deref();
         let unwritten = matches!(held.as_ref(), ValueRef::Undef);
         if held.as_object().is_some() || (mode == StaticFetch::Unset && unwritten) {
@@ -7024,7 +7025,7 @@ fn static_prop_place(
             req.release(previous);
             return Ok(advance(req, frame));
         }
-        if let Some(thrown) = req.set_refused(declaring, &property, "indirectly modify") {
+        if let Some(thrown) = req.set_refused(info, "indirectly modify") {
             return threw(req, frame, &thrown);
         }
     }
@@ -12163,7 +12164,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let Some((declaring, property)) = placed else {
+    let Some(info) = placed else {
         exec::free_operand(req, frame, code, data_type, data_at);
         req.vm_mut().jump(frame, at.saturating_add(2));
         return Ok(Stepped::Same(frame));
@@ -12171,7 +12172,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     // `zend_assign_to_typed_prop`'s set-visibility arm, after the value
     // is read.
-    if let Some(thrown) = req.set_refused(declaring, &property, "modify") {
+    if let Some(thrown) = req.set_refused(info, "modify") {
         req.release(value);
         return threw(req, frame, &thrown);
     }
@@ -12182,7 +12183,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     // is not strict, and php's `TypeError` where it neither satisfies
     // nor coerces. `RETURN_VALUE_USED` copies what landed, after it.
     let strict = req.frame_strict_types(frame);
-    match req.set_static_slot(declaring, &property, &name, value, strict) {
+    match req.set_static_slot(info, &name, value, strict) {
         Ok(pair) => landed_out(req, frame, code, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
@@ -12207,16 +12208,16 @@ fn static_place(
     let (class, name) = static_member(req, frame, code, op)?;
     let scope = req.executed_scope();
     match req.static_slot(class, &name, scope, PropertyRead::Warning)? {
-        Some((declaring, property)) => {
-            if let Some(thrown) = req.set_refused(declaring, &property, "indirectly modify") {
+        Some(info) => {
+            if let Some(thrown) = req.set_refused(info, "indirectly modify") {
                 return Err(thrown);
             }
             Ok(Some(Placed {
                 class,
-                declaring,
+                declaring: info.declaring,
                 name,
                 scope,
-                ty: property.ty.clone(),
+                ty: req.property_decl(info).and_then(|p| p.ty.clone()),
             }))
         }
         None => Ok(None),

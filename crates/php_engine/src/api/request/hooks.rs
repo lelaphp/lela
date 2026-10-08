@@ -1054,7 +1054,6 @@ impl Request {
     ) -> Result<Option<(PhpString, super::Walked)>, Thrown> {
         let class = object.class();
         let keys = self.hooked_object_keys(class);
-        let placed = self.placed_properties(class);
         while let Some((name, declaring, _)) = keys.get(*lead).cloned() {
             *lead += 1;
             if !self.property_row_visible(class, &name, Some(declaring)) {
@@ -1091,11 +1090,7 @@ impl Request {
                 let key = self.interned(&name)?;
                 return Ok(Some((key, super::Walked::Hooked(value))));
             }
-            let Some(slot) = placed
-                .iter()
-                .position(|(held, p)| *held == declaring && p.name.0 == name)
-                .and_then(|at| u32::try_from(at).ok())
-            else {
+            let Some(slot) = self.slot_declared_by(class, declaring, &name) else {
                 continue;
             };
             if object.heap().slot(slot).is_undef() {
@@ -1211,7 +1206,6 @@ impl Request {
         }
         let object = self.lazy_init(object)?;
         let keys = self.hooked_object_keys(class);
-        let placed = self.placed_properties(class).to_vec();
         let mut rows = Vec::with_capacity(keys.len());
         for (name, declaring, visibility) in keys {
             let interned = Key::Str(self.interned(&name)?);
@@ -1231,13 +1225,10 @@ impl Request {
                 rows.push((interned, value, Some((declaring, visibility))));
                 continue;
             }
-            let Some(slot) = placed
-                .iter()
-                .position(|(held, p)| *held == declaring && p.name.0 == name)
-            else {
+            let Some(slot) = self.slot_declared_by(class, declaring, &name) else {
                 continue;
             };
-            let z = object.heap().slot(u32::try_from(slot).unwrap_or(u32::MAX));
+            let z = object.heap().slot(slot);
             if z.is_undef() {
                 continue;
             }
