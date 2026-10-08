@@ -66,7 +66,7 @@ impl Profile {
 /// cargo put the binary: the target directory cargo was told of, or
 /// `root`'s own. Every binary the harness builds, `php-linked` and the
 /// hosts' own, is built in the lanes' profile, whatever profile the
-/// harness itself was built in (harness revision 86, #2217): a reading's
+/// harness itself was built in (harness revision 90, #2217): a reading's
 /// key covers the source and not the profile, so one key is read off one
 /// build, and the `php` the witness lane builds is the one the phpt lane
 /// looks for first.
@@ -206,7 +206,7 @@ mod tests {
     }
 
     /// What the harness builds is built in the lanes' profile whatever
-    /// profile the harness was built in (revision 86, #2217): this test
+    /// profile the harness was built in (revision 90, #2217): this test
     /// runs in a dev build, and a binary it builds lands under the lanes'
     /// directory and not under `debug/`.
     #[test]
