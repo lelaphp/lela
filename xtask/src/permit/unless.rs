@@ -102,7 +102,7 @@ pub(super) fn captured(
         Store::of_workspace(root).read(instrument, &krate.name),
         Snapshot::disk_over(root, &krate.path()).and_then(|now| now.key(&krate.path())),
     ) {
-        (Ok(Some(reading)), Ok(tree)) => !reading.tree().is_empty() && reading.tree() == tree,
+        (Ok(Some(reading)), Ok(tree)) => !reading.key().is_empty() && reading.key() == tree,
         _ => false,
     };
     fresh

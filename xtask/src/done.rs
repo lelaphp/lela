@@ -19,8 +19,9 @@
 //!    is the only scope that instrument writes a reading at (#148), and
 //!    with `crosscheck` for an `ext/*` crate the binary carries, the
 //!    rendering diff the per-commit lane writes per extension (#269). Fresh
-//!    means the reading's `tree` is the content hash over the crate's
-//!    sources now (§13 D.18), the hash every instrument stamps; an
+//!    means the reading's `key` is the crate's key now, the hash over its
+//!    sources and its declared dependency closure's (§4.2, §13 D.18), the
+//!    one every instrument stamps; an
 //!    instrument that does not exist yet has written no reading, so its
 //!    condition is unmet and the list is honest from day one. Two `phpt`
 //!    skips are met without passing, each held to its cause and nothing
@@ -556,7 +557,7 @@ fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bo
 /// crates whose change moves the key, `a or b` where there are several
 /// (#1318).
 struct KeyNow {
-    tree: String,
+    key: String,
     changed: String,
 }
 
@@ -575,7 +576,7 @@ impl KeyNow {
             _ => krate.name.clone(),
         };
         Ok(KeyNow {
-            tree: snapshot.key(&krate.path())?,
+            key: snapshot.key(&krate.path())?,
             changed,
         })
     }
@@ -592,11 +593,11 @@ fn fresh_readings(
     pin: &str,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
-    let tree = &now.tree;
+    let key = &now.key;
     let name = &krate.name;
     // The scope's file holds the last reading written, which a refused
-    // commit's can be, taken over another tree; where it is, the latest
-    // one over the tree now stands before it, found in the log (#1312).
+    // commit's can be, taken over another key; where it is, the latest
+    // one over the key now stands before it, found in the index (#1312).
     // A scope with no file has no reading, whatever the log holds.
     let mut read = BTreeMap::new();
     for instrument in instruments_of(krate, lock_home, carried) {
@@ -608,8 +609,8 @@ fn fresh_readings(
     }
     let stale: Vec<(String, String, String)> = read
         .iter()
-        .filter(|(_, reading)| !reading.fresh_for(tree, pin))
-        .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), tree.clone()))
+        .filter(|(_, reading)| !reading.fresh_for(key, pin))
+        .map(|((instrument, scope), _)| (instrument.clone(), scope.clone(), key.clone()))
         .collect();
     read.extend(store.latest_over_each(&stale, pin)?);
     for instrument in instruments_of(krate, lock_home, carried) {
@@ -618,9 +619,9 @@ fn fresh_readings(
                 unmet.push(format!("{instrument}: no reading for {scope}"));
                 continue;
             };
-            if !reading.fresh_for(tree, pin) {
-                // Over the tree now, a reading is stale for its recipe alone.
-                let changed = if reading.tree() == tree {
+            if !reading.fresh_for(key, pin) {
+                // Over the key now, a reading is stale for its recipe alone.
+                let changed = if reading.key() == key {
                     "oracle.toml".to_owned()
                 } else {
                     now.changed.clone()

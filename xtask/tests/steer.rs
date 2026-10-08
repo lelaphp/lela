@@ -71,7 +71,7 @@ fn a_proposal_that_only_adds_is_written() {
     // #2163).
     let now = xtask::key::Snapshot::disk(&root).expect("the tree");
     assert_eq!(
-        reading.tree(),
+        reading.key(),
         now.key(std::path::Path::new("oracle.toml"))
             .expect("the key")
     );

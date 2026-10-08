@@ -244,10 +244,10 @@ reading::Reading::for_scope
 reading::Reading::fresh_for
 reading::Reading::from_json
 reading::Reading::group
+reading::Reading::key
 reading::Reading::new
 reading::Reading::stamped_over
 reading::Reading::to_json
-reading::Reading::tree
 reading::Reading::under
 reading::Status
 reading::Status::as_str
@@ -266,6 +266,7 @@ reading::Store::record_measurement
 reading::Store::root
 reading::UNDER_RECIPE
 reading::UNREAD
+reading::V
 reading::epoch_seconds
 reading::now
 run

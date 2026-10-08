@@ -322,7 +322,7 @@ impl Snapshot {
     /// the snapshot was taken at.
     pub(crate) fn stamp(&self, path: &Path) -> Result<Stamp> {
         Ok(Stamp {
-            tree: self.key(path)?,
+            key: self.key(path)?,
             commit: self.commit.clone(),
         })
     }
