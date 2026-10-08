@@ -434,10 +434,12 @@ fn under_registration() -> Manifest {
 }
 
 /// `order = "registration"`: each extension's feature switches on the
-/// features of every extension it links (#1882). standard's feature
-/// omits random, which ext/standard requires, and fails; session's
-/// switches on standard and passes; standard's dev-dependency on session
-/// requires nothing; and standard listed before random is no failure.
+/// features of every extension it declares `Required` (#1915). standard's
+/// feature omits random, which ext/standard declares Required in rows a
+/// function returns, and fails; session's switches on standard, declared
+/// Required through a function of its own, and passes; random, which ext/session links
+/// and declares nowhere, and apc, which it declares Optional, require
+/// nothing; and standard listed before random is no failure.
 #[test]
 fn a_bundle_feature_that_does_not_switch_on_what_its_extension_requires_fails() {
     let readings = api_check::hold(&under_registration(), &fixture("registration"), false).unwrap();
@@ -452,7 +454,7 @@ fn a_bundle_feature_that_does_not_switch_on_what_its_extension_requires_fails() 
     );
     assert!(
         !bundle.message.contains("ext/session"),
-        "session's feature switches on standard, and a dev-dependency requires nothing: {}",
+        "session's feature switches on standard, and a link or an Optional row requires nothing: {}",
         bundle.message
     );
     assert!(
@@ -479,6 +481,12 @@ fn the_registration_order_does_not_hold_the_order_written() {
 /// the variants of the fixture's one rule that each need a bundle of
 /// their own.
 fn bundle_reading(scratch: &str, enabled: &str) -> Reading {
+    bundle_reading_with(scratch, enabled, &[])
+}
+
+/// [`bundle_reading`] with the files `replaced` written over the
+/// fixture's, each a path in the workspace and its new text.
+fn bundle_reading_with(scratch: &str, enabled: &str, replaced: &[(&str, &str)]) -> Reading {
     let root = Tree::new(scratch).unwrap();
     scratch_workspace(workspace(), &root).unwrap();
     let from = fixture("registration");
@@ -496,6 +504,9 @@ fn bundle_reading(scratch: &str, enabled: &str) -> Reading {
     }
     fs::create_dir_all(root.join("crates/php_bundle/src")).unwrap();
     fs::write(root.join("crates/php_bundle/src/lib.rs"), enabled).unwrap();
+    for (file, text) in replaced {
+        fs::write(root.join(file), text).unwrap();
+    }
     let readings = api_check::hold(&under_registration(), &root, false).unwrap();
     of(&readings, "php_bundle").clone()
 }
@@ -535,6 +546,41 @@ fn a_registration_behind_a_cfg_api_check_does_not_read_fails() {
         "{}",
         bundle.message
     );
+}
+
+/// A declaration the instrument does not read fails closed: rows handed
+/// to `.dependencies(...)` from a constant are named, never taken for
+/// "requires nothing".
+#[test]
+fn a_declaration_api_check_does_not_read_fails() {
+    let bundle = bundle_reading_with(
+        "api-check-unread-declaration",
+        "pub fn enabled() -> &'static [fn()] {\n    &[\n        #[cfg(feature = \"random\")]\n        php_ext_random::extension,\n        #[cfg(feature = \"standard\")]\n        php_ext_standard::extension,\n    ]\n}\n",
+        &[(
+            "ext/standard/src/lib.rs",
+            "pub fn extension() -> Extension {\n    ExtensionBuilder::default().dependencies(DEPENDENCIES.to_vec()).build(\"standard\")\n}\n",
+        )],
+    );
+    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+    assert!(
+        bundle.message.contains(
+            "ext/standard declares a dependency in src/lib.rs that api-check does not read"
+        ),
+        "{}",
+        bundle.message
+    );
+}
+
+/// A crate's link to an extension it declares nowhere requires nothing,
+/// as `ext/sqlite3`'s to `ext/pdo_sqlite` (#1915): session registered behind
+/// a feature that switches standard on and random off passes.
+#[test]
+fn a_link_with_no_declaration_requires_nothing() {
+    let bundle = bundle_reading(
+        "api-check-link-alone",
+        "pub fn enabled() -> &'static [fn()] {\n    &[\n        #[cfg(feature = \"standard\")]\n        php_ext_standard::extension,\n        #[cfg(feature = \"standard\")]\n        php_ext_random::extension,\n        #[cfg(feature = \"session\")]\n        php_ext_session::extension,\n    ]\n}\n",
+    );
+    assert_eq!(bundle.status, Status::Pass, "{}", bundle.message);
 }
 
 /// Every registration is read, a second one of the same extension

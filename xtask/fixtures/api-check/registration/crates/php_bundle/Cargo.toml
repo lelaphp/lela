@@ -3,8 +3,9 @@ name = "php_bundle"
 version = "0.0.0"
 edition = "2024"
 
-# standard's feature omits random, which ext/standard requires; session's
-# switches on standard, which ext/session requires.
+# standard's feature omits random, which ext/standard declares Required;
+# session's switches on standard, which ext/session declares Required, and
+# not random, which ext/session links and does not declare (#1915).
 [features]
 default = ["standard", "random", "session"]
 random = ["dep:php_ext_random"]
