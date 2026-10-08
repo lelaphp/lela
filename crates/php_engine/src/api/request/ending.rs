@@ -157,7 +157,12 @@ impl Request {
     /// fatal's after the site, whatever `fatal_error_backtraces` says. A
     /// `ParseError` or a `CompileError` is rendered at its own level and
     /// the rest as `E_ERROR`, under php's `E_DONT_BAIL`, so the store is
-    /// not marked destructed, and the request ends.
+    /// not marked destructed, and the request ends. No `_zend_bailout` is
+    /// served: the request leaves what it was serving, and the collector
+    /// and `CG(unclean_shutdown)` stand as they were, so a debug build's
+    /// shutdown collects and its leak sensor reads the request as a debug
+    /// php does (#2058). Where no frame stands, php bails out after the
+    /// rendering ([`Request::thrown_without_frame`]).
     pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         if self.bailout {
             return;
@@ -172,7 +177,7 @@ impl Request {
             self.zend_error_cb(level, Bail::DontBail, string, message, file, line);
             self.release(Value::string(string));
         }
-        self.bail_out();
+        self.leave();
     }
 
     /// `zend_bailout` (`Z/Zend/zend.c:1256-1270`) out of a level
@@ -184,7 +189,8 @@ impl Request {
     /// its own ([`Request::cannot_recover`]), so a fatal a link of
     /// `zend_error_cb` served without it leaves by this alone, as soap's
     /// `soap_real_error_handler` throws a client's fault and bails out.
-    /// What `trigger_error()` reaches with `E_USER_ERROR`: every object
+    /// `CG(unclean_shutdown)` is set here, where php's `_zend_bailout`
+    /// sets it, and only here. What `trigger_error()` reaches with `E_USER_ERROR`: every object
     /// standing then is marked destructed, and one a shutdown function
     /// makes is not.
     ///
@@ -203,7 +209,11 @@ impl Request {
     /// ```
     pub(crate) fn bail_out(&mut self) {
         self.heap.gc_protect(true);
-        self.leave_by_zend_bailout();
+        #[cfg(debug_assertions)]
+        {
+            self.progress.unclean = true;
+        }
+        self.leave();
     }
 
     /// `CG(unclean_shutdown)`: whether a fatal's `zend_bailout` was
@@ -213,16 +223,13 @@ impl Request {
         self.progress.unclean
     }
 
-    /// `zend_bailout` under way, the fatal already rendered: every frame
-    /// still open to an observer ended with no value while the frames
-    /// still stand ([`crate::observer::end_all`]), since the serving that
-    /// catches the fatal pops them on its way out.
-    pub(super) fn leave_by_zend_bailout(&mut self) {
+    /// The request leaving what it serves for the `zend_try` that
+    /// catches it, the fatal or the uncaught throwable already rendered:
+    /// every frame still open to an observer ended with no value while the
+    /// frames still stand ([`crate::observer::end_all`]), since the
+    /// serving that catches it pops them on its way out.
+    fn leave(&mut self) {
         self.set_bailing_out(true);
-        #[cfg(debug_assertions)]
-        {
-            self.progress.unclean = true;
-        }
         crate::observer::end_all(self);
     }
 
