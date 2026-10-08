@@ -31,9 +31,9 @@
 //! workspace by the module whose `pub use` writes it. A type whose
 //! methods are spread over one file per area is counted per file.
 //!
-//! A module that `include!`s a file, generated into `OUT_DIR` and so not
-//! read, is taken to define every name a path asks of it that nothing
-//! else there defines or imports: `pub use opcode::Opcode` beside
+//! A module that `include!`s a file generated into `OUT_DIR`, and so not
+//! read, is taken to define every name a path asks of it by name that
+//! nothing there defines or may import, never one a glob through it asks: `pub use opcode::Opcode` beside
 //! `mod opcode { include!(...) }` names a type of that module, and the
 //! inherent impls written on `Opcode` elsewhere in the crate list under
 //! it (#2025).
@@ -390,7 +390,7 @@ impl<'a> Inventory<'a> {
                 if let Target::Module(m) = self.resolve(id, &path.segs, 0)?
                     && m != *id
                 {
-                    target = self.lookup(&m, first, 0)?;
+                    target = self.find(&m, first, 0)?;
                     if !matches!(target, Target::Opaque) {
                         break;
                     }
@@ -466,9 +466,29 @@ impl<'a> Inventory<'a> {
         }))
     }
 
-    /// What `name` is in module `id`: a child module, an item defined
-    /// there, or what a `pub use` there brings in under that name.
+    /// What `name` is in module `id`, asked of that module by path: what
+    /// [`Inventory::find`] answers, else, in a module that `include!`s a
+    /// file generated into `OUT_DIR`, an item that file defines, the code
+    /// compiling (#2025). A name a `use` there may bring in, a glob's
+    /// included, is never taken for the file's, and a glob through the
+    /// module asks [`Inventory::find`] alone, so the module does not
+    /// answer for names it does not define.
     fn lookup(&mut self, id: &ModId, name: &str, depth: usize) -> Result<Target> {
+        let found = self.find(id, name, depth)?;
+        if matches!(found, Target::Opaque) && self.module(id)?.is_some_and(|m| generates(&m, name))
+        {
+            return Ok(Target::Item {
+                module: id.clone(),
+                name: name.to_owned(),
+            });
+        }
+        Ok(found)
+    }
+
+    /// What `name` is in module `id` as its sources write it: a child
+    /// module, an item defined there, or what a `pub use` there brings in
+    /// under that name.
+    fn find(&mut self, id: &ModId, name: &str, depth: usize) -> Result<Target> {
         if depth > 32 {
             return Ok(Target::Opaque);
         }
@@ -506,7 +526,7 @@ impl<'a> Inventory<'a> {
                     if let Target::Module(m) = self.resolve(id, &path.segs, depth + 1)?
                         && m != *id
                     {
-                        let found = self.lookup(&m, name, depth + 1)?;
+                        let found = self.find(&m, name, depth + 1)?;
                         if !matches!(found, Target::Opaque) {
                             return Ok(found);
                         }
@@ -514,20 +534,6 @@ impl<'a> Inventory<'a> {
                 }
                 Leaf::Name(_) => {}
             }
-        }
-        // A name nothing above defines, in a module that `include!`s a
-        // file the instrument cannot read (`OUT_DIR`), is taken for one
-        // the included file defines, unless a `use` there brings it in:
-        // the code compiles, so the name is there (#2025).
-        let imported = module.items.iter().any(|i| {
-            matches!(i, Item::Use(u)
-                if flatten(&u.tree).iter().any(|p| p.leaf == Leaf::Name(name.to_owned())))
-        });
-        if includes(&module) && !imported {
-            return Ok(Target::Item {
-                module: id.clone(),
-                name: name.to_owned(),
-            });
         }
         Ok(Target::Opaque)
     }
@@ -589,14 +595,24 @@ fn list_first(out: &mut Lines, line: String, module: &ModId) {
     out.entry(line).or_insert_with(|| module.clone());
 }
 
-/// Whether `module` writes an `include!` at item level: items the
-/// instrument does not read, since nothing is built and the file is
-/// generated into `OUT_DIR`.
-fn includes(module: &Module) -> bool {
-    module
-        .items
-        .iter()
-        .any(|item| matches!(item, Item::Macro(m) if m.mac.path.is_ident("include")))
+/// Whether `name`, which nothing `module` writes defines, is taken for
+/// an item of the file it `include!`s from `OUT_DIR`, which the
+/// instrument does not read since nothing is built: the module writes
+/// such an `include!` at item level, and no `use` there names `name` or
+/// is a glob that may bring it in.
+fn generates(module: &Module, name: &str) -> bool {
+    let includes = module.items.iter().any(|item| {
+        matches!(item, Item::Macro(m)
+            if m.mac.path.segments.last().is_some_and(|s| s.ident == "include")
+                && m.mac.tokens.to_string().contains("OUT_DIR"))
+    });
+    includes
+        && !module.items.iter().any(|item| {
+            matches!(item, Item::Use(u) if flatten(&u.tree).iter().any(|p| match &p.leaf {
+                Leaf::Glob => true,
+                Leaf::Name(alias) => alias == name,
+            }))
+        })
 }
 
 fn parse(file: &Path) -> Result<Vec<Item>> {
@@ -816,6 +832,34 @@ mod tests {
                 "work::Outcome::exit",
                 "work::Outcome::status",
                 "work::Outcome::worked",
+            ]
+        );
+    }
+
+    /// The `include` fixture (#2025): `Kind`, `include!`d from `OUT_DIR`,
+    /// lists the methods `kind.rs` writes on it, and `Plain`, reached
+    /// through a glob after a glob of the including module, lists its
+    /// own; the including module answers for no name a glob asks.
+    #[test]
+    fn a_type_included_from_out_dir_lists_its_impls_and_a_glob_through_it_answers_nothing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/api-check/include");
+        let manifest = Manifest::named("php_heap");
+        let crates = Crates::scan(&manifest, &root).unwrap();
+        let mut inventory = Inventory::new(&crates);
+        let krate = crates.named("php_heap").unwrap();
+        let modules = inventory.defining_modules(krate).unwrap();
+        let lines: Vec<(&str, &str)> = modules
+            .iter()
+            .map(|(line, module)| (line.as_str(), module.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("Kind", "php_heap::generated"),
+                ("Kind::COUNT", "php_heap::kind"),
+                ("Kind::name", "php_heap::kind"),
+                ("Plain", "php_heap::plain"),
+                ("Plain::new", "php_heap::kind"),
             ]
         );
     }

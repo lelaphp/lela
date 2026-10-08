@@ -1,4 +1,4 @@
-use crate::Kind;
+use crate::{Kind, Plain};
 
 impl Kind {
     pub const COUNT: usize = 2;
@@ -8,4 +8,10 @@ impl Kind {
     }
 
     fn private(self) {}
+}
+
+impl Plain {
+    pub fn new() -> Plain {
+        Plain
+    }
 }

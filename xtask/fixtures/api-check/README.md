@@ -12,7 +12,7 @@ built; the instrument reads manifests and sources.
 | `lock-line` | a public item with no line in the seam's lock   | fail |
 | `lock-order` | a lock whose every item has its line, in an order `--write` would rewrite (#403) | fail |
 | `ceiling`   | `api.lock` over `[budget] api_items`, and its `__private` lines over `api_private_items`; the crate's `Cargo.toml` alone, its items laid down by the test at one past the ceiling the manifest carries, one cap at a time (#338, #953) | fail |
-| `include`   | a type defined in a module that `include!`s its file from `OUT_DIR`, which the instrument cannot read, with a `pub fn` in an `impl` of another file and no line for it in the lock (#2025): the impl is joined to the type by name | fail |
+| `include`   | a type defined in a module that `include!`s its file from `OUT_DIR`, which the instrument cannot read, with a `pub fn` in an `impl` of another file and no line for it in the lock (#2025): the impl is joined to the type by name; beside it a glob through the including module, which answers for no name, before a glob that defines `Plain` | fail |
 | `edge`      | a crate dependency outside its `[[edge]]` rows  | fail |
 | `harness-edge` | a crate no `[[edge]]` row names depending on a workspace crate: the harness linking `php_bundle`, which the tracked manifest forbids since #2213 | fail |
 | `host-edge` | a host under `sapi/` depending on `php_engine` past its facade (ADR-0008), beside one within its edges | fail |
