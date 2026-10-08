@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=27f40fe2c48d046bceac83520bb495e230da0e76b7337e3b8dfc611d8f411ace out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=69f35c9bba5afaac6c40bacb00867b2b9c28d5fe798505cc1d9e428dd695376c out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -128,9 +128,10 @@ third-engine-design.md
 | api | api.lock | 1354 | 1500 | pass |
 | sapi | sapi.lock | 43 |  | pass |
 | tier | tier.lock | 67 |  | pass |
-| harness | xtask.lock | 377 |  | pass |
+| layer | layer.lock | 0 |  | pass |
+| harness | xtask.lock | 378 |  | pass |
 
-<!-- /computed in=be0cfe594f963121c5f8dba6ee50a73aea3c096f46c3030ff43cf5fd85e0c0a1 out=19c1bd35d7a4b0fb977b3bb00dea12e55a2ef4573225d25918cd598626bfae4d -->
+<!-- /computed in=41f9ffb8c4da301a9c573e5a79606c203eb43faa1ae496815a6cd846ef32d595 out=296ce0371ef1b5ad8796349862bc546b007343d6fefe7b83196da56d410216d2 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -147,25 +148,25 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass |
 | ext.pub-beyond-extension |  | on | pass |
 | witness.exit-authored |  | deny_pattern | no reading |
-| witness.coverage |  | check | pass |
+| witness.coverage |  | check | no reading |
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | fail |
-| ticket.close |  | deny_argv | fail |
-| ticket.close-api |  | deny_pattern | fail |
+| git.no-verify |  | deny_argv | no reading |
+| ticket.close |  | deny_argv | no reading |
+| ticket.close-api |  | deny_pattern | no reading |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | fail |
+| lanes.nightly |  | deny_pattern | no reading |
 | lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | fail |
+| lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
 | harness.self |  | deny | fail |
-| harness.self-shell |  | deny_pattern | fail |
+| harness.self-shell |  | deny_pattern | no reading |
 | harness.transcript |  | deny_pattern | no reading |
-| divergence.reason |  | check | pass |
+| divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=3db45df6dd597c017466fc053673e7d321ccdc3fc9301473eecdd4b6495e1653 out=47444399d029cf7085b79987f3be236d8131f5378a1ee473a0d1e8b51eee8f36 -->
+<!-- /computed in=af6247a3ce1bf8af998c1bc2dfc090d651e8160953d4103b9ae165424f354dcd out=bb29e56629c3e34411e2efeface059deb9c0446083c2f2d8a00d1c85c80937fa -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

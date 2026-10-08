@@ -537,6 +537,12 @@ allowlist = true
 sections = ["face", { name = "kernels", consumers = ["php_jit"] }]
 adr = "0006"
 [[seam]]
+name = "layer"                            # the stream layer's face of php_engine, sealed from extensions: a trait implemented for Request and free items, which php_ext re-exports neither of (#1959, ruled 2026-10-07)
+producer = "php_engine"
+module = "layer"
+consumers = ["php_streams"]
+lock = "layer.lock"
+[[seam]]
 name = "harness"                          # revision 16: xtask's public items are the instruments and the data; nothing in the workspace imports it
 producer = "xtask"
 consumers = []
