@@ -791,7 +791,7 @@ fn convert(req: &mut Request, bound: &mut Bound) -> Result<(), Thrown> {
         _ => None,
     };
     if let Some(converted) = converted {
-        crate::connector::replace(req, &mut bound.value, converted);
+        bound.value.convert(req, converted);
     }
     Ok(())
 }

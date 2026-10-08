@@ -363,6 +363,47 @@ impl Owner<Value> {
         let raw = Raw::returned(self.view);
         self.recast(raw)
     }
+
+    /// `ZVAL_DEREF` and then `convert_to_*` (`Z/Zend/zend_operators.c`):
+    /// the value this owner holds replaced by `value`, its conversion,
+    /// through the reference where the owner holds one
+    /// ([`PhpRef::convert`]), so a variable bound by reference reads the
+    /// conversion, and in place otherwise. What the slot held is given up
+    /// after the write. What binding a parameter of PDO's or `SQLite3`'s
+    /// does to it.
+    ///
+    /// ```php
+    /// $db = new SQLite3(':memory:');
+    /// $s = $db->prepare('SELECT ?, ?');
+    /// $n = '42'; $f = '1.5';
+    /// $s->bindParam(1, $n, SQLITE3_INTEGER);
+    /// $s->bindParam(2, $f, SQLITE3_FLOAT);
+    /// $s->execute();
+    /// var_dump($n, $f);
+    /// $pdo = new PDO('sqlite::memory:');
+    /// $q = $pdo->prepare('SELECT ?, ?');
+    /// $i = '7'; $t = 2.5;
+    /// $q->bindParam(1, $i, PDO::PARAM_INT);
+    /// $q->bindParam(2, $t, PDO::PARAM_STR);
+    /// $q->execute();
+    /// var_dump($i, $t);
+    /// $b = true;
+    /// $q->bindParam(1, $b, PDO::PARAM_INT);
+    /// var_dump($b);
+    /// ```
+    /// ```expect
+    /// int(42)
+    /// float(1.5)
+    /// int(7)
+    /// string(3) "2.5"
+    /// int(1)
+    /// ```
+    pub fn convert(&mut self, req: &mut Request, value: Owner<Value>) {
+        match self.view.as_php_ref().copied() {
+            Some(cell) => cell.convert(req, value),
+            None => std::mem::replace(self, value).give_up(req),
+        }
+    }
 }
 
 impl Owner<PhpObject> {

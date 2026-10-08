@@ -608,7 +608,7 @@ impl Statement for Stmt {
                 } else {
                     let n = to_long(req, &value)?;
                     let converted = Owner::take(req, Value::int(n));
-                    replace(req, param.value, converted);
+                    param.value.convert(req, converted);
                     self.handle.bind_int(at, n)
                 }
             }
@@ -623,7 +623,7 @@ impl Statement for Stmt {
                         };
                         let text = stream.copy_to_mem(req, None)?;
                         let bytes = text.as_bytes().to_vec();
-                        replace(req, param.value, text.into_value());
+                        param.value.convert(req, text.into_value());
                         bytes
                     }
                     ValueRef::Null => {
@@ -637,7 +637,7 @@ impl Statement for Stmt {
                     _ => {
                         let text = to_string(req, &value)?;
                         let bytes = text.as_bytes().to_vec();
-                        replace(req, param.value, text.into_value());
+                        param.value.convert(req, text.into_value());
                         bytes
                     }
                 };
@@ -658,7 +658,7 @@ impl Statement for Stmt {
                     // destructor, and no view is read past it.
                     let text = to_string(req, &value)?;
                     let rc = self.handle.bind_text(at, text.as_bytes());
-                    replace(req, param.value, text.into_value());
+                    param.value.convert(req, text.into_value());
                     rc
                 }
             }
@@ -836,14 +836,4 @@ pub(super) fn register_collation(
             }
         }
     })
-}
-
-/// `zval_ptr_dtor(parameter)` and `new` in its place: a bound value
-/// replaced, through its reference for `bindParam()`, as php's
-/// `convert_to_*` writes in place.
-fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
-    match value.as_php_ref().copied() {
-        Some(cell) => cell.convert(req, new),
-        None => std::mem::replace(value, new).give_up(req),
-    }
 }

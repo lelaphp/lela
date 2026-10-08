@@ -1157,6 +1157,7 @@ values::Layout
 values::Laziness
 values::Owner
 values::Owner::append
+values::Owner::convert
 values::Owner::cursor_end
 values::Owner::cursor_next
 values::Owner::cursor_prev
