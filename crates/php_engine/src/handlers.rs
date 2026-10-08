@@ -3289,7 +3289,45 @@ pub(crate) fn include_or_eval<T: Tier>(
 
 /// `zend_include_or_eval` over the path or the code `written`, and the
 /// handler's arms after it: the value answered without a frame, or the
-/// code frame pushed with the op array php holds for it.
+/// code frame pushed with the op array php holds for it. A unit whose
+/// code is its one `RETURN` of a constant answers that constant with no
+/// frame only while the tier the engine binds hooks no user op array
+/// (`Hooked::user`), php's `zend_execute_ex == execute_ex`
+/// (`Z/Zend/zend_vm_def.h:6569-6572`): where it hooks them, the
+/// debugger's loop steps that opline as any other, so a breakpoint on an
+/// included file of declarations alone stops there. The binding is the
+/// engine's and not the handler's `T`, which a tier stepping one handler
+/// at a time instantiates as `Nop`.
+///
+/// ```php
+/// file_put_contents(__DIR__ . '/decls.php', "<?php\nfunction bar() {\n  return 3;\n}\n");
+/// include __DIR__ . '/decls.php';
+/// echo bar(), "\n";
+/// unlink(__DIR__ . '/decls.php');
+/// ```
+/// ```request phpdbg
+/// b ZEND_RETURN
+/// r
+/// c
+/// c
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at ZEND_RETURN]
+/// prompt> [Breakpoint #0 in ZEND_RETURN at %SCRATCH%/decls.php:5, hits: 1]
+/// >00005:%s
+/// prompt> [Breakpoint #0 in ZEND_RETURN at %SCRATCH%/decls.php:3, hits: 2]
+/// >00003:   return 3;
+///  00004: }
+///  00005:%s
+/// prompt> 3
+/// [Breakpoint #0 in ZEND_RETURN at %SCRATCH%/witness.php:5, hits: 3]
+/// >00005: unlink(__DIR__ . '/decls.php');
+/// prompt> [Script ended normally]
+/// prompt>
+/// ```
 fn included(
     req: &mut Request,
     frame: FrameRef,
@@ -3324,7 +3362,8 @@ fn included(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let main = exec::code_of(&unit);
-    if let [only] = &main.oplines[..]
+    if !req.shared.declared().hooked.user
+        && let [only] = &main.oplines[..]
         && only.opcode == Opcode::Return
         && only.op1_type == OperandKind::Const
     {
