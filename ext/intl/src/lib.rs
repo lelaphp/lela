@@ -49,6 +49,7 @@ mod listformatter;
 mod locale;
 mod msgformat;
 mod normalizer;
+mod resourcebundle;
 mod timezone;
 mod transliterator;
 mod uchar;
@@ -330,6 +331,7 @@ pub fn extension() -> Extension {
     let builder = locale::functions(builder);
     let builder = msgformat::functions(builder);
     let builder = normalizer::functions(builder);
+    let builder = resourcebundle::functions(builder);
     let builder = timezone::functions(builder);
     let builder = transliterator::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
@@ -348,6 +350,7 @@ pub fn extension() -> Extension {
         .class::<msgformat::MessageFormatter>()
         .class::<dateformat::IntlDateFormatter>()
         .class::<datepatterngenerator::IntlDatePatternGenerator>()
+        .class::<resourcebundle::ResourceBundle>()
         .class::<transliterator::Transliterator>()
         .class::<timezone::IntlTimeZone>()
         .class::<calendar::IntlCalendar>()

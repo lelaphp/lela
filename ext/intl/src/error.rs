@@ -213,9 +213,10 @@ pub(crate) fn errors_set_code<P: Carrier>(req: &mut Request, object: PhpObject, 
 pub(crate) fn errors_set_custom_msg<P: Carrier>(
     req: &mut Request,
     object: PhpObject,
-    message: &str,
+    message: impl AsRef<[u8]>,
 ) -> Result<(), Thrown> {
-    let text = prefixed(req, message.as_bytes());
+    let message = message.as_ref();
+    let text = prefixed(req, message);
     if let Some(error) = carried::<P>(req, object) {
         error.message = Some(Box::new(text));
     }
