@@ -46,7 +46,7 @@ use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Value, ValueRef};
 
-pub(crate) use globals::{Error, Res, TypemapEntry, soap_error};
+pub(crate) use globals::{Error, Res, TypemapEntry, raised, soap_error};
 pub(crate) use globals::{State, Typemap};
 
 /// Core's `Exception`, which `SoapFault` extends.
@@ -234,6 +234,7 @@ pub fn extension() -> Extension {
             dependency("session", DependencyKind::Optional),
         ])
         .request_state::<State>()
+        .error(server::soap_error_handler)
         .info(soap_info)
         .build("soap")
 }

@@ -6,12 +6,13 @@
 
 use std::sync::Arc;
 
+use php_ext::abi::ErrorBeneath;
 use php_ext::abi::{Instance, ObjectHandlers, Refusals, Std, This, Untyped, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, value_name, with_string};
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error,
+    Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error, throw_value,
 };
 use php_ext::request::{OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
@@ -28,10 +29,10 @@ use crate::model::{
     SOAP_1_2_ACTOR_NEXT, SOAP_1_2_ACTOR_UNLIMATERECEIVER, SOAP_1_2_ENC_NAMESPACE,
     SOAP_1_2_ENV_NAMESPACE, Sdl, Style,
 };
-use crate::shared::{add_soap_fault_ex, instance_of, new_fault};
+use crate::shared::{ClientSlot, add_soap_fault_ex, client_slot, instance_of, new_fault};
 use crate::table::Table;
 use crate::xml::{attr_content, get_attribute, get_node, node_is_equal};
-use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap};
+use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap, raised};
 
 type R<T> = Result<T, Thrown>;
 
@@ -157,9 +158,6 @@ impl ObjectHandlers for Handlers {
 
 /// `SOAP_SERVER_BEGIN_CODE`'s saved state.
 struct Saved {
-    /// `display_errors` as it stood: `soap_real_error_handler` shows no
-    /// diagnostic a server raises, `PG(display_errors) = 0` around each.
-    display: u8,
     use_handler: bool,
     error_code: Option<&'static str>,
     error_object: Option<PhpObject>,
@@ -168,10 +166,8 @@ struct Saved {
 
 /// `SOAP_SERVER_BEGIN_CODE`.
 fn begin(req: &mut Request, this: PhpObject) -> Saved {
-    let display = req.set_display_errors(0);
     let state = req.state::<State>();
     let saved = Saved {
-        display,
         use_handler: state.use_soap_error_handler,
         error_code: state.error_code,
         error_object: state.error_object,
@@ -185,7 +181,6 @@ fn begin(req: &mut Request, this: PhpObject) -> Saved {
 
 /// `SOAP_SERVER_END_CODE`.
 fn end(req: &mut Request, saved: &Saved) {
-    req.set_display_errors(saved.display);
     let state = req.state::<State>();
     state.use_soap_error_handler = saved.use_handler;
     state.error_code = saved.error_code;
@@ -196,20 +191,25 @@ fn end(req: &mut Request, saved: &Saved) {
 /// `php_error_docref(NULL, E_ERROR, ...)` under the soap handler: the
 /// message as php words it, the running native before `(): `.
 pub(crate) fn docref_error(req: &Request, message: &str) -> Error {
-    Error::Fatal(format!("{}(): {message}", req.active_function_name()))
+    Error::fatal(format!("{}(): {message}", req.active_function_name()))
 }
 
-/// What `soap_real_error_handler` makes of an `E_ERROR` a server raised:
-/// a fault whose string is the message (or `Internal Error` where errors
-/// are not sent), whose detail is what the top buffer held, then
-/// that buffer discarded, the fault written and the request ended.
-fn fatal_to_fault(req: &mut Request, this: Option<PhpObject>, code: &str, message: &str) -> Thrown {
+/// The fault `soap_real_error_handler` makes of a server's fatal: its
+/// string the message, or `Internal Error` where the server does not
+/// send errors, and its detail what the top buffer held, that buffer
+/// discarded; one owner, the caller's.
+fn fatal_fault(
+    req: &mut Request,
+    this: Option<PhpObject>,
+    code: &str,
+    message: &[u8],
+) -> R<Owner<PhpObject>> {
     let send_errors = this
         .and_then(|o| o.native::<Server>(req))
         .and_then(|s| s.service.as_ref())
         .is_none_or(|s| s.send_errors != 0);
     let mut detail: Option<Owner<Value>> = None;
-    let string: Vec<u8> = if send_errors {
+    let string: &[u8] = if send_errors {
         let level = match req.output_buffer_op(&OutputOp::GetLevel) {
             Ok(v) => {
                 let level = v.as_int().unwrap_or(0);
@@ -230,16 +230,16 @@ fn fatal_to_fault(req: &mut Request, this: Option<PhpObject>, code: &str, messag
                 v.give_up(req);
             }
         }
-        message.as_bytes().to_vec()
+        message
     } else {
-        b"Internal Error".to_vec()
+        b"Internal Error"
     };
     let made = new_fault(
         req,
         &FaultArgs {
             code_ns: None,
             code: Some(code.as_bytes()),
-            string: Some(&string),
+            string: Some(string),
             actor: None,
             detail: detail.as_ref().map(|d| **d),
             name: None,
@@ -249,35 +249,131 @@ fn fatal_to_fault(req: &mut Request, this: Option<PhpObject>, code: &str, messag
     if let Some(d) = detail {
         d.give_up(req);
     }
-    match made {
-        Ok(fault) => {
-            let value = fault.as_value();
-            let written = soap_server_fault_ex(req, None, None, value, &[]);
-            fault.give_up(req);
-            // `php_error_cb` has run under the fatal, so the request ends
-            // with its status, 255.
-            match written {
-                Ok(()) => exit(req, &Value::int(255)),
-                Err(t) => t,
-            }
-        }
-        Err(t) => t,
-    }
+    made
 }
 
-/// An [`Error`] leaving a server method: a fatal turned into a fault and
-/// the request ended, a throwable handed on.
-fn settle(req: &mut Request, this: PhpObject, r: Res<()>) -> R<()> {
-    match r {
-        Ok(()) => Ok(()),
-        Err(Error::Thrown(t)) => Err(t),
-        Err(Error::Fatal(message)) => {
-            let code = req.state::<State>().error_code.unwrap_or("Server");
-            Err(fatal_to_fault(req, Some(this), code, &message))
+/// `soap_error_handler` and `soap_real_error_handler`
+/// (`Z/ext/soap/soap.c:1875-1977`), soap's link of `zend_error_cb`: the
+/// one beneath serves every diagnostic until `use_soap_error_handler`
+/// is on, as a client or a server turns it on for the span of its call.
+/// Then, under a client, a fatal level is the `SoapFault` a throwing
+/// client throws before the request bails out, for the call's
+/// `zend_catch` to catch ([`crate::client`]); a client that does not
+/// throw hands every diagnostic on, and a throwing one every one but
+/// what the `WSDL` code raises, which is dropped unstored. Under a
+/// server, or none, every diagnostic is handed on with `display_errors`
+/// off around it, so it is stored and logged but not shown, and a fatal
+/// level is first made a fault whose detail is what the top buffer held,
+/// written as the response once the one beneath has served it.
+///
+/// A function a server serves that raises an engine fatal answers with
+/// the fault, its detail what the function printed, and the request ends
+/// in the fatal, which `error_get_last()` answers after; the warning
+/// before it is not shown:
+///
+/// ```php
+/// function f($a) { echo $undefined, "partial"; trigger_error("boom", E_USER_ERROR); }
+/// $s = new SoapServer(null, ['uri' => 'http://test-uri/']);
+/// $s->addFunction('f');
+/// register_shutdown_function(function () { echo "\n", error_get_last()['message'], "\n"; });
+/// $s->handle();
+/// echo "not reached\n";
+/// ```
+/// ```request
+/// --POST_RAW--
+/// Content-Type: text/xml
+/// <?xml version="1.0"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://test-uri/"><SOAP-ENV:Body><ns1:f><a>1</a></ns1:f></SOAP-ENV:Body></SOAP-ENV:Envelope>
+/// ```
+/// ```expect exit=255
+/// Status: 500 Internal Server Error
+/// X-Powered-By: PHP/8.5.9
+/// Content-Length: 295
+/// Content-Type: text/xml; charset=utf-8
+///
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>boom</faultstring><detail>partial</detail></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+///
+/// boom
+/// ```
+///
+/// Turned on outside any call, the handler takes every diagnostic of the
+/// request as a server's, with nothing running:
+///
+/// ```php
+/// use_soap_error_handler(true);
+/// echo $undefined, "next\n";
+/// ob_start(); echo "buffered";
+/// trigger_error("fatal", E_USER_ERROR);
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+/// next
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>fatal</faultstring><detail>buffered</detail></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+/// ```
+pub(crate) fn soap_error_handler(req: &mut Request, beneath: ErrorBeneath<'_>) {
+    let state = req.state::<State>();
+    if !state.use_soap_error_handler {
+        beneath.serve(req);
+        return;
+    }
+    let (error_code, error_object) = (state.error_code, state.error_object);
+    // `E_FATAL_ERRORS`.
+    let fatal = matches!(
+        beneath.level(),
+        Level::Error
+            | Level::CoreError
+            | Level::CompileError
+            | Level::UserError
+            | Level::RecoverableError
+            | Level::Parse
+    );
+    if let Some(client) = error_object.filter(|o| instance_of(req, *o, "SoapClient")) {
+        let exceptions = !matches!(
+            client_slot(client, ClientSlot::Exceptions).as_ref(),
+            ValueRef::Bool(false)
+        );
+        if fatal && exceptions {
+            // `add_soap_fault_ex_en` and `zend_throw_exception_object`,
+            // then `zend_bailout()`, which the engine makes once this
+            // returns; a fault the memory limit refuses has bailed out.
+            let code = error_code.unwrap_or("Client");
+            if let Ok(fault) = add_soap_fault_ex(
+                req,
+                client,
+                code.as_bytes(),
+                beneath.message(),
+                None,
+                None,
+                b"en",
+            ) {
+                let thrown = throw_value(req, &fault.as_value());
+                req.leave_pending(&thrown);
+                fault.give_up(req);
+            }
+        } else if !exceptions || error_code != Some("WSDL") {
+            // libxml's warnings while a throwing client parses its WSDL
+            // are ignored.
+            beneath.serve(req);
         }
-        Err(Error::FatalCoded(code, message)) => {
-            Err(fatal_to_fault(req, Some(this), code, &message))
+        return;
+    }
+    let fault = if fatal {
+        let code = error_code.unwrap_or("Server");
+        fatal_fault(req, error_object, code, beneath.message()).ok()
+    } else {
+        None
+    };
+    let display = req.set_display_errors(0);
+    beneath.serve(req);
+    req.set_display_errors(display);
+    if let Some(fault) = fault {
+        // What the writing threw stays in `EG(exception)` as the
+        // request bails out.
+        if let Err(thrown) = soap_server_fault_ex(req, None, None, fault.as_value(), &[]) {
+            req.leave_pending(&thrown);
         }
+        fault.give_up(req);
     }
 }
 
@@ -294,7 +390,7 @@ fn soap_server_fault_ex(
     let doc = match serialize_response_call(req, sdl, function, None, None, fault, hdr, version) {
         Ok(doc) => doc,
         Err(Error::Thrown(t)) => return Err(t),
-        Err(Error::Fatal(_) | Error::FatalCoded(..)) => None,
+        Err(Error::Fatal { .. }) => None,
     };
     let buf = doc
         .and_then(|d| {
@@ -495,7 +591,7 @@ impl SoapServer {
         let object = this.object();
         let saved = begin(req, object);
         let r = construct(req, object, wsdl, options);
-        let r = settle(req, object, r);
+        let r = raised(req, r);
         end(req, &saved);
         r
     }
@@ -545,7 +641,7 @@ impl SoapServer {
             req.state::<State>().encoding = old;
             Err(e)
         })();
-        let r = settle(req, object, r);
+        let r = raised(req, r);
         end(req, &saved);
         r
     }
@@ -906,9 +1002,10 @@ impl SoapServer {
     /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Client</faultcode><faultstring>Bad Request</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
     /// ```
     ///
-    /// Diagnostics are off around the call as `PG(display_errors) = 0`
-    /// turns them off, past the ini table: once the request has changed
-    /// an entry, the call costs only its response buffer's growth, no
+    /// Diagnostics raised meanwhile are shown nowhere, as soap's handler
+    /// turns `PG(display_errors)` off around each past the ini table
+    /// ([`soap_error_handler`]): once the request has changed an entry,
+    /// the call costs only its response buffer's growth, no
     /// `display_errors` row and no string:
     ///
     /// ```php
@@ -933,7 +1030,7 @@ impl SoapServer {
         let object = this.object();
         let saved = begin(req, object);
         let r = handle(req, object, request);
-        let r = settle(req, object, r);
+        let r = raised(req, r);
         end(req, &saved);
         r
     }
@@ -1302,7 +1399,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
     );
     // php's handler meets an `E_ERROR` where it is raised, under the
     // version the request named, before `handle` puts the globals back.
-    let r = settle(req, this, r).map_err(Error::Thrown);
+    let r = raised(req, r).map_err(Error::Thrown);
     restore_globals(req, old);
     r
 }
@@ -1637,7 +1734,7 @@ fn serve(
         } else {
             release_made(req, &mut made);
             let shown = String::from_utf8_lossy(&name).into_owned();
-            return Err(Error::Fatal(format!("Function '{shown}' doesn't exist")));
+            return Err(Error::fatal(format!("Function '{shown}' doesn't exist")));
         }
         // php's `addSoapHeader()` additions, after the request's own.
         let added = service_mut(req, this)
@@ -2178,7 +2275,7 @@ fn deserialize_function_call_in<'a>(
                     ));
                 }
                 let shown = String::from_utf8_lossy(&fnode.name()).into_owned();
-                return Err(Error::Fatal(format!("Procedure '{shown}' not present")));
+                return Err(Error::fatal(format!("Procedure '{shown}' not present")));
             }
         }
     }

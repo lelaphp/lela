@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, fatal, fatal_while_pending};
+use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, Value};
 
 use crate::SOAP_1_1;
@@ -88,27 +89,45 @@ pub(crate) struct TypemapEntry {
 pub(crate) type Typemap = Table<TypemapEntry>;
 
 /// What a layer of this crate raises: a program's throwable, or php's
-/// `soap_error` at `E_ERROR`, a fatal whose message the running client
-/// or server turns into a fault (`soap_real_error_handler`).
+/// `soap_error` at `E_ERROR`, carried to the native's boundary and raised
+/// there ([`Error::raise`]) through soap's error handler, which makes a
+/// running client's or server's fatal its fault
+/// ([`crate::server::soap_error_handler`]).
 #[derive(Debug)]
 pub(crate) enum Error {
     Thrown(Thrown),
-    /// The message, `SOAP-ERROR: ` and what php formats after it.
-    Fatal(String),
-    /// A fatal raised under an `error_code` of its own, which the fault
-    /// takes ([`Error::coded`]).
-    FatalCoded(&'static str, String),
+    /// The message, `SOAP-ERROR: ` and what php formats after it, and
+    /// the throwable php had pending when it raised it, which a stream
+    /// wrapper threw while a WSDL or a schema was read.
+    Fatal {
+        message: String,
+        pending: Option<Thrown>,
+    },
 }
 
 impl Error {
-    /// The fatal as raised while `error_code` named `code`, which the
-    /// running client's fault takes as its code (`soap_real_error_handler`
-    /// reads `SOAP_GLOBAL(error_code)` at the raise): what a WSDL load
-    /// wraps its errors in before it puts `error_code` back.
-    pub(crate) fn coded(self, code: &'static str) -> Error {
+    /// A fatal with nothing pending.
+    pub(crate) fn fatal(message: String) -> Error {
+        Error::Fatal {
+            message,
+            pending: None,
+        }
+    }
+
+    /// The error raised at the native's boundary: a throwable handed on,
+    /// a fatal raised at `E_ERROR` after what was pending, which soap's
+    /// handler sees under the `error_code` and `error_object` standing.
+    pub(crate) fn raise(self, req: &mut Request) -> Thrown {
         match self {
-            Error::Fatal(message) => Error::FatalCoded(code, message),
-            other => other,
+            Error::Thrown(t) => t,
+            Error::Fatal {
+                message,
+                pending: Some(pending),
+            } => fatal_while_pending(req, pending, &message),
+            Error::Fatal {
+                message,
+                pending: None,
+            } => fatal(req, &message),
         }
     }
 }
@@ -123,5 +142,10 @@ pub(crate) type Res<T> = Result<T, Error>;
 
 /// `soap_error0(E_ERROR, ...)` and its kin: `SOAP-ERROR: ` and the text.
 pub(crate) fn soap_error(text: impl std::fmt::Display) -> Error {
-    Error::Fatal(format!("SOAP-ERROR: {text}"))
+    Error::fatal(format!("SOAP-ERROR: {text}"))
+}
+
+/// A native's [`Res`] at its boundary, its fatal raised ([`Error::raise`]).
+pub(crate) fn raised<T>(req: &mut Request, r: Res<T>) -> Result<T, Thrown> {
+    r.map_err(|e| e.raise(req))
 }
