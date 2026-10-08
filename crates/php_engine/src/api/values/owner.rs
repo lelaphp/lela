@@ -295,13 +295,21 @@ impl<T: View> Owner<T> {
         self.recast(value)
     }
 
-    /// The same owner over another view of its value.
-    fn recast<U: View>(mut self, view: U) -> Owner<U> {
+    /// The same owner over another view of its value; a debug build's
+    /// record of where it was made moves to it, and this one is
+    /// consumed.
+    fn recast<U: View>(self, view: U) -> Owner<U> {
+        let counted = self.counted;
+        #[cfg(debug_assertions)]
+        let made = {
+            let mut recast = self;
+            recast.made.take()
+        };
         Owner {
             view,
-            counted: self.counted,
+            counted,
             #[cfg(debug_assertions)]
-            made: self.made.take(),
+            made,
         }
     }
 

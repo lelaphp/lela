@@ -1375,7 +1375,15 @@ impl Mm {
     }
 
     /// `chunk` laid down as one of this heap's ([`chunk_init`]), its
-    /// header naming this heap's sensed record in a debug build.
+    /// header naming this heap's sensed record in a debug build; a
+    /// release build's header names nothing of the heap.
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(
+            clippy::unused_self,
+            reason = "only a debug build's chunk header names its heap's sensed record"
+        )
+    )]
     fn chunk_init(&self, chunk: NonNull<Chunk>, num: u32) {
         #[cfg(debug_assertions)]
         chunk_init(chunk, num, self.sensed.record_at(), origins::table());
