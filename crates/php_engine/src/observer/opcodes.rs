@@ -1,7 +1,8 @@
 //! Observation of a declared set of opcodes (design §7.1, revisions 83
-//! and 107, as #1780 and #2032 ruled): php's `zend_set_user_opcode_handler` with a handler
-//! that answers `ZEND_USER_OPCODE_DISPATCH`, and nothing else of it. An
-//! extension declares, as the engine starts, which opcodes it observes
+//! and 107, as #1780 and #2032 ruled): php's
+//! `zend_set_user_opcode_handler` with a handler that answers
+//! `ZEND_USER_OPCODE_DISPATCH`, and nothing else of it. An extension
+//! declares, as the engine starts, which opcodes it observes
 //! ([`ExtensionBuilder::opcodes`]); the loop tells it of each opline of
 //! one of them before the opcode's handler runs, and the handler always
 //! runs. No extension replaces a handler: every semantic lives in one
@@ -156,9 +157,9 @@ impl ObservedOpcodes {
         ObservedOpcodes { any, observers }
     }
 
-    /// Whether any extension observes an opcode: which loop the engine
-    /// binds ([`crate::tier::Loops::bound`]).
-    pub(crate) fn told(&self) -> bool {
+    /// Whether any extension declared an opcode, which chooses the loop
+    /// the engine binds ([`crate::tier::Loops::bound`]).
+    pub(crate) fn declares_any(&self) -> bool {
         !self.any.is_empty()
     }
 }
@@ -197,6 +198,8 @@ impl Telling for Untold {
 
 /// The loop of an engine where an extension declared an opcode: the
 /// engine's set, read once per serving, and one test of it per opline.
+/// [`tell_before`] reads it too, for an opline served outside the loop,
+/// whichever loop the engine bound.
 #[derive(Clone, Copy)]
 pub(crate) struct Declared(Opcodes);
 

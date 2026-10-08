@@ -15,7 +15,8 @@ use super::stepped::Stepper;
 use super::test_ext::observed_name;
 use crate::api::abi::{Extension, ExtensionBuilder, Observed, Opcodes, Start};
 use crate::engine::{Engine, EngineBuilder};
-use crate::tier::Opcode;
+use crate::observer::{Declared, Untold};
+use crate::tier::{Loop, Nop, Opcode, execute};
 
 /// An extension that observes the opcodes its own system ini entry,
 /// `t.opcodes_N`, names, separated by spaces or commas as `zend_test`
@@ -268,24 +269,30 @@ fn a_stepping_host_is_told_as_the_loop_is() {
 
 /// With nothing declared, by no extension or by one whose ini names no
 /// opcode, as `zend_test` sets no handler while its entry is empty, the
-/// engine's set tells no one, so it binds the loop with no test for it
-/// ([`crate::tier::Loops::bound`]; design §5.8, revision 107); one
-/// opcode declared binds the loop that tells.
+/// engine binds the loop with no test for declared opcodes, `Untold`'s
+/// instantiation, and one opcode declared binds `Declared`'s (design
+/// §5.8, revision 107). The entries are compared as the functions they
+/// are: each instantiation is one function of this crate.
 #[test]
-fn with_none_declared_the_engine_tells_no_one() {
+fn with_none_declared_the_engine_binds_the_loop_that_tells_no_one() {
+    let untold: Loop = execute::<Nop, Untold>;
+    let telling: Loop = execute::<Nop, Declared>;
     for engine in [
         Engine::cli_builder().build(),
         Engine::cli_builder()
             .extensions(&[Shows::<0>::extension()])
             .build(),
     ] {
-        assert!(!engine.shared.opcodes.told());
+        assert!(!engine.shared.opcodes.declares_any());
+        assert!(std::ptr::fn_addr_eq(engine.shared.loops.entry, untold));
+        assert!(!std::ptr::fn_addr_eq(engine.shared.loops.entry, telling));
     }
     let declared = Engine::cli_builder()
         .extensions(&[Shows::<0>::extension()])
         .ini("t.opcodes_0", "ZEND_ECHO")
         .build();
-    assert!(declared.shared.opcodes.told());
+    assert!(declared.shared.opcodes.declares_any());
+    assert!(std::ptr::fn_addr_eq(declared.shared.loops.entry, telling));
 }
 
 /// php's `zend_get_opcode_id`: the opcode of the lowest number whose name

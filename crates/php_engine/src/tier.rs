@@ -227,6 +227,10 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
 /// One entry of the loop, as the engine binds it.
 pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
+/// How an engine binds its tier's loop once its declared opcodes are
+/// fixed: [`Loops::bound`] for the tier.
+pub(crate) type BindLoops = fn(&ObservedOpcodes) -> Loops;
+
 /// The loop's three entries, [`execute`], [`reenter`] and [`resume`],
 /// bound to one tier and to one choice of whether declared opcodes are
 /// told: the engine binds them as it starts, once the declared set is
@@ -248,7 +252,7 @@ impl Loops {
     /// instantiation that tells the set's observers where an extension
     /// declared an opcode, and the one with no test where none did.
     pub(crate) fn bound<T: Tier>(opcodes: &ObservedOpcodes) -> Loops {
-        if opcodes.told() {
+        if opcodes.declares_any() {
             Loops::of::<T, Declared>()
         } else {
             Loops::of::<T, Untold>()

@@ -45,7 +45,7 @@ use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
 use crate::supplied::{Keyed, Last, Phase, Resolved};
-use crate::tier::{Loop, Loops, Nop, Tier};
+use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
 
@@ -726,13 +726,9 @@ pub(crate) struct Shared {
     /// it traces allocations ([`EngineBuilder::sense_leaks`]).
     #[cfg(debug_assertions)]
     pub(crate) sense_leaks: LeakSensor,
-    /// The loop, bound to the engine's tier and, once its declared
-    /// opcodes are fixed as it starts, to whether it tells their
-    /// observers ([`Loops::bound`]): `entry` for a serving, `reenter` for
-    /// a serving inside a serving, which [`Request::serve_user`] enters a
-    /// destructor's or a callback's frame through, and `resume` for a
-    /// generator's frame the resumption put back (design §5.11,
-    /// [`crate::tier::resume`]).
+    /// The loop's entries, bound to the engine's tier and, once its
+    /// declared opcodes are fixed as it starts, to whether it tells
+    /// their observers ([`Shared::observe_opcodes`]).
     pub(crate) loops: Loops,
     /// The observer word (design §4.3 seam 9): how many observers the
     /// bundle declared ([`crate::supplied::Resolved::observers`]), fixed
@@ -740,8 +736,9 @@ pub(crate) struct Shared {
     /// ([`crate::observer`]); zero while none is declared.
     pub(crate) observers: u32,
     /// The opcodes the bundle observes (design §7.1, #1780), declared as
-    /// the engine starts and fixed after it, which chooses the loop the
-    /// engine binds ([`Loops::bound`]); empty while none is declared.
+    /// the engine starts and fixed after it, which choose the loop the
+    /// engine binds ([`Shared::observe_opcodes`]); empty while none is
+    /// declared.
     pub(crate) opcodes: crate::observer::ObservedOpcodes,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
@@ -1263,6 +1260,16 @@ pub(crate) struct Declared<'a> {
 }
 
 impl Shared {
+    /// The opcodes the bundle observes, asked of each extension once its
+    /// engine start is over, and the loop bound to them: the one that
+    /// tells their observers where any is declared and the one with no
+    /// test where none is, as php resolves an opline's handler when it
+    /// compiles it (design §5.8, §7.1).
+    fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
+        self.opcodes = crate::observer::ObservedOpcodes::start(&self.supplied.opcodes, start);
+        self.loops = bind_loops(&self.opcodes);
+    }
+
     /// The tables the compiler reads, as [`Declared`].
     pub(crate) fn declared(&self) -> Declared<'_> {
         Declared {
@@ -2624,7 +2631,7 @@ pub struct EngineBuilder {
     ini_entries: Vec<u8>,
     /// The tier's loop, bound as the engine starts to the opcodes its
     /// bundle declared ([`Loops::bound`] for the tier).
-    loops: fn(&crate::observer::ObservedOpcodes) -> Loops,
+    bind_loops: BindLoops,
     tier_extension: Option<Extension>,
     hooked: php_compile::Hooked,
     extended_info: bool,
@@ -2865,7 +2872,7 @@ impl EngineBuilder {
     /// under seam 3 (design §4.3 seam 8).
     #[must_use]
     pub fn tier<T: Tier>(mut self) -> EngineBuilder {
-        self.loops = Loops::bound::<T>;
+        self.bind_loops = Loops::bound::<T>;
         self.tier_extension = T::extension();
         self.hooked = T::HOOKED;
         self
@@ -3068,7 +3075,8 @@ impl EngineBuilder {
                 trace_to: self.trace_to,
                 #[cfg(debug_assertions)]
                 sense_leaks: self.sense_leaks,
-                loops: (self.loops)(&crate::observer::ObservedOpcodes::default()),
+                // No opcode is declared until the extensions have started.
+                loops: (self.bind_loops)(&crate::observer::ObservedOpcodes::default()),
                 locked,
                 script_encodings: Vec::new(),
                 units,
@@ -3082,12 +3090,13 @@ impl EngineBuilder {
             }),
             end: Arc::default(),
         };
-        engine.register_ini(held, startup, &configuration.loads, self.sapi_name);
-        // The loop, chosen once the declared opcodes are fixed, as php
-        // resolves an opline's handler when it compiles it (design §5.8).
-        if let Some(shared) = Arc::get_mut(&mut engine.shared) {
-            shared.loops = (self.loops)(&shared.opcodes);
-        }
+        engine.register_ini(
+            held,
+            startup,
+            &configuration.loads,
+            self.sapi_name,
+            self.bind_loops,
+        );
         engine.end.arm(&engine.shared, self.sapi_name);
         engine
     }
@@ -3502,7 +3511,7 @@ impl Engine {
             ini_defaults: Vec::new(),
             ini_files: crate::api::request::IniFiles::default(),
             ini_entries: Vec::new(),
-            loops: Loops::bound::<Nop>,
+            bind_loops: Loops::bound::<Nop>,
             tier_extension: Nop::extension(),
             hooked: Nop::HOOKED,
             extended_info: false,
@@ -3567,6 +3576,7 @@ impl Engine {
         mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
         loads: &Loads,
         sapi_name: &'static str,
+        bind_loops: BindLoops,
     ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
         // handler or engine state runs: the process's, so the first engine
@@ -3687,8 +3697,7 @@ impl Engine {
             break;
         }
         if shared.refused.is_none() {
-            shared.opcodes =
-                crate::observer::ObservedOpcodes::start(&shared.supplied.opcodes, &start);
+            shared.observe_opcodes(&start, bind_loops);
         }
         shared.startup_raised = raised;
     }
