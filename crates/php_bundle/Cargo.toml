@@ -20,9 +20,13 @@
 # removes a non-default extension from `default` when porting it.
 # `enabled()` lists php's registration order, which a witness holds to the
 # oracle (#1778). Each extension's feature switches on the features of
-# every `ext/*` crate its library links, so a build that registers an
-# extension registers what it requires (#1882), which `api-check` holds
-# under the row's `order = "registration"` in `seams.toml`.
+# every extension it declares `Required` (php's `ZEND_MOD_REQUIRED`), so a
+# build that registers an extension registers what php requires loaded
+# beside it, which `api-check` holds under the row's
+# `order = "registration"` in `seams.toml` (#1915). A feature may switch
+# on more, an extension whose state its crate reads (#1882); a crate's
+# link alone requires nothing, as sqlite3's of the libsqlite3 binding in
+# pdo_sqlite.
 [package]
 name = "php_bundle"
 version = "0.0.0"
@@ -113,7 +117,7 @@ bz2 = ["dep:php_ext_bz2", "standard"] # the `php` binary and the phpt lane, as p
 uri = ["dep:php_ext_uri", "lexbor"] # php_uri.c: ZEND_MOD_REQUIRED("lexbor")
 opcache = ["dep:php_ext_opcache"]
 bcmath = ["dep:php_ext_bcmath"] # the `php` binary and the phpt lane, as php builds it with --enable-bcmath (#1163)
-simplexml = ["dep:php_ext_simplexml", "libxml"]
+simplexml = ["dep:php_ext_simplexml", "libxml", "spl"] # simplexml.c: ZEND_MOD_REQUIRED("libxml") and ("spl"), which the extension declares (#1915)
 calendar = ["dep:php_ext_calendar"] # the `php` binary and the phpt lane, as php builds it with --enable-calendar (#1163)
 exif = ["dep:php_ext_exif", "mbstring", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-exif; exif.c decodes its multibyte tags through the functions mbstring hands zend_multibyte (#1323); standard, which the crate links (#1882)
 shmop = ["dep:php_ext_shmop"] # the `php` binary and the phpt lane, as php builds it with --enable-shmop (#1323)
@@ -126,7 +130,7 @@ xmlreader = ["dep:php_ext_xmlreader", "dom", "libxml"]
 xmlwriter = ["dep:php_ext_xmlwriter", "libxml"]
 mysqlnd = ["dep:php_ext_mysqlnd", "standard"] # turned on by pdo_mysql and mysqli, as php builds mysqlnd only for them; its config9.m4 gives no default (#1345, #1366); php_mysqlnd.c: ZEND_MOD_REQUIRED("standard"), which the extension declares (#1914)
 mysqli = ["dep:php_ext_mysqli", "spl", "mysqlnd"] # the `php` binary and the phpt lane, as php builds it with --with-mysqli; mysqli.c ZEND_MOD_REQUIRED("spl") and ZEND_MOD_REQUIRED("mysqlnd") (#1367)
-sqlite3 = ["dep:php_ext_sqlite3", "pdo_sqlite"] # sqlite3.c over the libsqlite3 ext/pdo_sqlite binds (#1501); php requires no module of it, but the crate links pdo_sqlite, so the feature switches it on (#1882)
+sqlite3 = ["dep:php_ext_sqlite3"] # sqlite3.c over the libsqlite3 ext/pdo_sqlite binds (#1501); php requires no module of it, so pdo_sqlite is the crate's link and not this feature's, and a build with sqlite3 alone registers no PDO (#1915)
 fileinfo = ["dep:php_ext_fileinfo"] # php's default ./configure builds it (#1166, #1451)
 dba = ["dep:php_ext_dba"] # the `php` binary and the phpt lane, as php builds it with --enable-dba (#1166, #1451)
 zip = ["dep:php_ext_zip", "pcre", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-zip; php_zip.c ZEND_MOD_REQUIRED("pcre"), and php_glob and the stream context through standard (design §7.2, revision 70; #1515)
