@@ -21,8 +21,8 @@ use crate::message::{
 };
 use crate::model::{BindingType, Sdl};
 use crate::shared::{
-    ClientSlot, add_soap_fault, add_soap_fault_ex, client_slot, instance_of, is_null,
-    new_sdl_object, sdl_of, set_client_slot,
+    ClientSlot, add_soap_fault, add_soap_fault_ex, client_slot, client_throws, instance_of,
+    is_null, new_sdl_object, sdl_of, set_client_slot,
 };
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, raised};
 
@@ -1428,10 +1428,7 @@ fn soap_call_body(
     };
     if let ValueRef::Object(o) = return_value.as_ref()
         && instance_of(req, *o, "SoapFault")
-        && !matches!(
-            client_slot(this, ClientSlot::Exceptions).as_ref(),
-            ValueRef::Bool(false)
-        )
+        && client_throws(this)
     {
         let thrown = throw_value(req, &return_value);
         return_value.give_up(req);

@@ -85,7 +85,7 @@ pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<No
 /// [`parse_file`] where the caller's `NULL` is an `E_ERROR`, a WSDL's or
 /// an imported schema's: what a stream wrapper threw stays pending in
 /// php, so the parse answers none and the throwable is handed back
-/// beside it for the fatal to be raised after ([`crate::Error::after`]),
+/// beside it for the fatal to be raised after ([`crate::Error::soap_after`]),
 /// which renders it "Uncaught ..." at `E_WARNING`, gives it up and
 /// fetches no trace (`Z/Zend/zend.c:1503-1526`). Under a client that
 /// throws, the warning is one the soap handler drops while a WSDL is

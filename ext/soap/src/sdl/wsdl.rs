@@ -5,7 +5,7 @@
 //! header faults and faults (`wsdl_soap_binding_body`,
 //! `wsdl_soap_binding_header`, `wsdl_message`).
 
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, leave_pending};
 use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{Owner, Value, ValueRef};
 use php_ext_libxml::ffi::{Node, Raised};
@@ -148,11 +148,7 @@ fn default_port_dropped(uri: &[u8], mut l: usize) -> usize {
 /// WSDL, the `Authorization: Basic` line taken out of the `http.header`
 /// of the stream libxml loads with, until
 /// [`sdl_restore_uri_credentials`].
-pub(crate) fn sdl_set_uri_credentials(
-    req: &mut Request,
-    ctx: &mut Ctx,
-    uri: &[u8],
-) -> Result<(), Thrown> {
+fn sdl_set_uri_credentials(req: &mut Request, ctx: &mut Ctx, uri: &[u8]) -> Result<(), Thrown> {
     let source = ctx.sdl.source.clone().unwrap_or_default();
     let Some(mut l1) = authority_len(&source) else {
         return Ok(());
@@ -226,7 +222,7 @@ pub(crate) fn sdl_set_uri_credentials(
 }
 
 /// `sdl_restore_uri_credentials`: the `http.header` put back.
-pub(crate) fn sdl_restore_uri_credentials(req: &mut Request, ctx: &mut Ctx) -> Result<(), Thrown> {
+fn sdl_restore_uri_credentials(req: &mut Request, ctx: &mut Ctx) -> Result<(), Thrown> {
     let context = ctx.context.take();
     if let Some(old) = ctx.old_header.take() {
         let set = match context {
@@ -237,6 +233,33 @@ pub(crate) fn sdl_restore_uri_credentials(req: &mut Request, ctx: &mut Ctx) -> R
         set?;
     }
     Ok(())
+}
+
+/// The document at `uri` parsed under the client's credentials, as
+/// `load_wsdl_ex` and `load_schema` bracket `soap_xmlParseFile` with
+/// `sdl_set_uri_credentials` and `sdl_restore_uri_credentials`: none
+/// where it was not well formed, beside what a stream wrapper threw
+/// meanwhile ([`parse_file_before_fatal`]). Where the restore fails, the
+/// parse is given back first, the throwable left pending.
+pub(crate) fn parse_with_credentials(
+    req: &mut Request,
+    ctx: &mut Ctx,
+    uri: &[u8],
+) -> Res<(Option<Node>, Option<Thrown>)> {
+    sdl_set_uri_credentials(req, ctx, uri)?;
+    let parsed = parse_file_before_fatal(req, uri);
+    let restored = sdl_restore_uri_credentials(req, ctx);
+    let (doc, pending) = parsed?;
+    if let Err(thrown) = restored {
+        if let Some(d) = doc {
+            d.free_document();
+        }
+        if let Some(pending) = pending {
+            leave_pending(req, pending);
+        }
+        return Err(Error::Thrown(thrown));
+    }
+    Ok((doc, pending))
 }
 
 /// The `name` attribute of a WSDL declaration, by which it is added to
@@ -262,20 +285,17 @@ fn load_wsdl_ex(req: &mut Request, struri: &[u8], ctx: &mut Ctx, include: bool) 
     if ctx.docs.contains(&Key::Str(struri.to_vec())) {
         return Ok(());
     }
-    sdl_set_uri_credentials(req, ctx, struri)?;
-    let parsed = parse_file_before_fatal(req, struri);
-    sdl_restore_uri_credentials(req, ctx)?;
-    let (doc, pending) = parsed?;
+    let (doc, pending) = parse_with_credentials(req, ctx, struri)?;
     let Some(wsdl) = doc else {
-        let error = match Raised::last() {
-            Some(e) => wsdl_error(&format!(
-                "Couldn't load from '{}' : {}",
+        let cause = Raised::last().map(|e| format!(" : {}", lossy(&e.message)));
+        return Err(Error::soap_after(
+            format_args!(
+                "Parsing WSDL: Couldn't load from '{}'{}",
                 lossy(struri),
-                lossy(&e.message)
-            )),
-            None => wsdl_error(&format!("Couldn't load from '{}'", lossy(struri))),
-        };
-        return Err(error.after(pending));
+                cause.unwrap_or_default()
+            ),
+            pending,
+        ));
     };
     ctx.docs.add(Key::Str(struri.to_vec()), wsdl);
 

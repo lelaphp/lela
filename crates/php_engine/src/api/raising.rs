@@ -699,6 +699,22 @@ pub fn fatal_while_pending(req: &mut Request, pending: Thrown, message: &str) ->
     fatal(req, message)
 }
 
+/// What a hook that answers nothing threw, left in php's
+/// `EG(exception)` for the engine to find where the hook returns: the
+/// `Thrown`'s owner is the slot's from here, or, while something stands
+/// pending already or a fatal is leaving, given up, as
+/// `zend_throw_exception_internal` keeps one throwable. soap's link of
+/// `zend_error_cb` leaves a throwing client's fault here before the
+/// request bails out, for the client's `zend_catch` ([`catch_fatal`]);
+/// its witness is in `ext/soap`.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "a sink: the caller's owner moves into the slot, and the type says so"
+)]
+pub fn leave_pending(req: &mut Request, thrown: Thrown) {
+    req.leave_pending(&thrown);
+}
+
 /// `zend_catch` for the native that stands in a `zend_try`, as
 /// `SOAP_CLIENT_END_CODE` stands around a client's call
 /// (`Z/ext/soap/soap.c:105-128`): where a fatal is leaving by

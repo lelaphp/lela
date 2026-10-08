@@ -12,7 +12,8 @@ use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, value_name, with_string};
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, clear, docref, exit, throw_error, throw_value,
+    Level, Thrown, arg_value_error, argument_error, clear, docref, exit, leave_pending,
+    throw_error, throw_value,
 };
 use php_ext::request::{OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
@@ -29,7 +30,7 @@ use crate::model::{
     SOAP_1_2_ACTOR_NEXT, SOAP_1_2_ACTOR_UNLIMATERECEIVER, SOAP_1_2_ENC_NAMESPACE,
     SOAP_1_2_ENV_NAMESPACE, Sdl, Style,
 };
-use crate::shared::{ClientSlot, add_soap_fault_ex, client_slot, instance_of, new_fault};
+use crate::shared::{add_soap_fault_ex, client_throws, instance_of, new_fault};
 use crate::table::Table;
 use crate::xml::{attr_content, get_attribute, get_node, node_is_equal};
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap, raised};
@@ -329,16 +330,13 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: ErrorBeneath<'_>) {
             | Level::Parse
     );
     if let Some(client) = error_object.filter(|o| instance_of(req, *o, "SoapClient")) {
-        let exceptions = !matches!(
-            client_slot(client, ClientSlot::Exceptions).as_ref(),
-            ValueRef::Bool(false)
-        );
+        let exceptions = client_throws(client);
         if fatal && exceptions {
             // `add_soap_fault_ex_en` and `zend_throw_exception_object`,
             // then `zend_bailout()`, which the engine makes once this
             // returns; a fault the memory limit refuses has bailed out.
             let code = error_code.unwrap_or("Client");
-            if let Ok(fault) = add_soap_fault_ex(
+            let made = add_soap_fault_ex(
                 req,
                 client,
                 code.as_bytes(),
@@ -346,11 +344,16 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: ErrorBeneath<'_>) {
                 None,
                 None,
                 b"en",
-            ) {
-                let thrown = throw_value(req, &fault.as_value());
-                req.leave_pending(&thrown);
-                fault.give_up(req);
-            }
+            );
+            let thrown = match made {
+                Ok(fault) => {
+                    let thrown = throw_value(req, &fault.as_value());
+                    fault.give_up(req);
+                    thrown
+                }
+                Err(thrown) => thrown,
+            };
+            leave_pending(req, thrown);
         } else if !exceptions || error_code != Some("WSDL") {
             // libxml's warnings while a throwing client parses its WSDL
             // are ignored.
@@ -360,7 +363,13 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: ErrorBeneath<'_>) {
     }
     let fault = if fatal {
         let code = error_code.unwrap_or("Server");
-        fatal_fault(req, error_object, code, beneath.message()).ok()
+        match fatal_fault(req, error_object, code, beneath.message()) {
+            Ok(fault) => Some(fault),
+            Err(thrown) => {
+                leave_pending(req, thrown);
+                None
+            }
+        }
     } else {
         None
     };
@@ -371,7 +380,7 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: ErrorBeneath<'_>) {
         // What the writing threw stays in `EG(exception)` as the
         // request bails out.
         if let Err(thrown) = soap_server_fault_ex(req, None, None, fault.as_value(), &[]) {
-            req.leave_pending(&thrown);
+            leave_pending(req, thrown);
         }
         fault.give_up(req);
     }
@@ -390,7 +399,12 @@ fn soap_server_fault_ex(
     let doc = match serialize_response_call(req, sdl, function, None, None, fault, hdr, version) {
         Ok(doc) => doc,
         Err(Error::Thrown(t)) => return Err(t),
-        Err(Error::Fatal { .. }) => None,
+        Err(Error::Fatal { pending, .. }) => {
+            if let Some(pending) = pending {
+                leave_pending(req, pending);
+            }
+            None
+        }
     };
     let buf = doc
         .and_then(|d| {

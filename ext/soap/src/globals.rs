@@ -98,7 +98,7 @@ pub(crate) enum Error {
     Thrown(Thrown),
     /// The message, `SOAP-ERROR: ` and what php formats after it, and
     /// the throwable php had pending when it raised it, which a stream
-    /// wrapper threw while a WSDL or a schema was read ([`Error::after`]).
+    /// wrapper threw while a WSDL or a schema was read ([`Error::soap_after`]).
     Fatal {
         message: String,
         pending: Option<Thrown>,
@@ -114,11 +114,11 @@ impl Error {
         }
     }
 
-    /// The fatal as raised while `pending` stood in `EG(exception)`.
-    pub(crate) fn after(self, pending: Option<Thrown>) -> Error {
-        match self {
-            Error::Fatal { message, .. } => Error::Fatal { message, pending },
-            thrown @ Error::Thrown(_) => thrown,
+    /// `soap_error` raised while `pending` stood in `EG(exception)`.
+    pub(crate) fn soap_after(text: impl std::fmt::Display, pending: Option<Thrown>) -> Error {
+        Error::Fatal {
+            message: format!("SOAP-ERROR: {text}"),
+            pending,
         }
     }
 
@@ -150,7 +150,7 @@ pub(crate) type Res<T> = Result<T, Error>;
 
 /// `soap_error0(E_ERROR, ...)` and its kin: `SOAP-ERROR: ` and the text.
 pub(crate) fn soap_error(text: impl std::fmt::Display) -> Error {
-    Error::fatal(format!("SOAP-ERROR: {text}"))
+    Error::soap_after(text, None)
 }
 
 /// A native's [`Res`] at its boundary, its fatal raised ([`Error::raise`]).
