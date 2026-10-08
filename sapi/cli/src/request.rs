@@ -379,46 +379,6 @@ pub fn info(engine: &Engine) -> i32 {
     i32::from(in_request(engine, unnamed(), code).start_failed)
 }
 
-/// `php_module_startup` as `main` runs it before `-v` and `-S`
-/// (`php_cli.c:1341`), which php answers with no request
-/// ([`Engine::start_up`]): what the startup raised displayed on `stdout`
-/// under the host's `name`, no extension's `rinit` run, and the status
-/// where the startup failed, 0 where it started. The built-in server's
-/// responses carry none of it, since php wrote it to the process's
-/// `stdout` before any client connected; a startup that failed leaves no
-/// server.
-///
-/// ```php
-/// $dir = sys_get_temp_dir() . '/srv' . bin2hex(random_bytes(8));
-/// mkdir($dir);
-/// file_put_contents("$dir/index.php", '<?php echo "body\n";');
-/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-d', 'disable_functions=exit', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
-/// $ready = [$pipes[2]]; $none = null;
-/// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
-/// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
-/// echo file_get_contents("http://127.0.0.1:$port/"), file_get_contents("http://127.0.0.1:$port/");
-/// proc_terminate($p); proc_close($p);
-/// $p = proc_open([PHP_BINARY, '-n', '-d', 'magic_quotes_gpc=1', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
-/// unlink("$dir/index.php"); rmdir($dir);
-/// ```
-/// ```expect process
-/// body
-/// body
-/// <br />
-/// <b>Fatal error</b>:  Directive 'magic_quotes_gpc' is no longer available in PHP in <b>Unknown</b> on line <b>0</b><br />
-/// Stack trace:
-/// #0 {main}
-/// 1
-/// ```
-pub(crate) fn start_up(engine: &Engine, name: &str) -> i32 {
-    let host = RequestDescription {
-        sapi_name: String::from(name),
-        ..unnamed()
-    };
-    engine.start_up(&host, &mut Process).unwrap_or(0)
-}
-
 /// `-m`'s `php_request_startup` (`php_cli.c:643-655`): an empty request,
 /// which displays what the startup raised at its first moment, every
 /// extension's `rinit` and `rshutdown` served as php serves them around

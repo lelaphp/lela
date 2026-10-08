@@ -138,18 +138,13 @@ pub fn main() -> ExitCode {
     let startup = &options.startup;
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
-        Ask::Version => answered(cli(startup), |e| request::start_up(e, NAME), version),
+        Ask::Version => print(&version(cli(startup))),
         Ask::Info => request::info(cli(startup)),
-        Ask::Extensions => answered(cli(startup), request::started, php_sapi::modules),
+        Ask::Extensions => listed(cli(startup)),
         Ask::Server(server) => {
             let engine = server_engine(startup);
-            match request::start_up(&engine, server::NAME) {
-                0 => {
-                    let color = php_sapi::ini::enabled(&engine, "cli_server.color");
-                    server::run(engine, server, color)
-                }
-                failed => failed,
-            }
+            let color = php_sapi::ini::enabled(&engine, "cli_server.color");
+            server::run(engine, server, color)
         }
         ask => {
             if options.interactive {
@@ -211,10 +206,10 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
     }
 }
 
-/// `-v` and `-m` (`php_cli.c:638-655`), which print once
-/// `php_module_startup` has run: `-v` with no request and `-m` in one of
-/// its own (`start`, [`request::start_up`] and [`request::started`]), what
-/// the startup raised displayed first either way, and where it failed
+/// `-m` (`php_cli.c:643-655`), which prints in a request of its own
+/// ([`request::started`]) once `php_module_startup` has run, as `-v`
+/// prints with none: what the startup raised displayed first either way,
+/// as [`php_sapi::start`] finishes the startup, and where it failed
 /// nothing printed and its status the answer.
 ///
 /// ```php
@@ -248,9 +243,9 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 /// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
 /// [PHP Modules]
 /// ```
-fn answered(engine: &Engine, start: impl Fn(&Engine) -> i32, text: fn(&Engine) -> String) -> i32 {
-    match start(engine) {
-        0 => print(&text(engine)),
+fn listed(engine: &Engine) -> i32 {
+    match request::started(engine) {
+        0 => print(&php_sapi::modules(engine)),
         failed => failed,
     }
 }
@@ -302,6 +297,37 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 /// CLI's module (`php_cli.c:1336`), and the `cli_server` module and its
 /// natives after the bundle; with extended info where the line carried
 /// `-e`.
+///
+/// [`php_sapi::start`] finishes its startup as `main` runs
+/// `php_module_startup` before `-S` (`php_cli.c:1341`): what the startup
+/// raised displayed on the process's `stdout` under the server's name, no
+/// extension's `rinit` run, and a startup that failed leaves no server.
+/// The server's responses carry none of it, since php wrote it before any
+/// client connected.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/srv' . bin2hex(random_bytes(8));
+/// mkdir($dir);
+/// file_put_contents("$dir/index.php", '<?php echo "body\n";');
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-d', 'disable_functions=exit', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// $ready = [$pipes[2]]; $none = null;
+/// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+/// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+/// echo file_get_contents("http://127.0.0.1:$port/"), file_get_contents("http://127.0.0.1:$port/");
+/// proc_terminate($p); proc_close($p);
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'magic_quotes_gpc=1', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]), stream_get_contents($pipes[2]), proc_close($p), "\n";
+/// unlink("$dir/index.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// body
+/// body
+/// <br />
+/// <b>Fatal error</b>:  Directive 'magic_quotes_gpc' is no longer available in PHP in <b>Unknown</b> on line <b>0</b><br />
+/// Stack trace:
+/// #0 {main}
+/// 1
+/// ```
 fn server_engine(startup: &Startup) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())

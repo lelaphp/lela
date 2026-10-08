@@ -75,6 +75,16 @@ pub mod tier {
 /// stderr under `display_errors=stderr`, and what it logs handed to
 /// `log_message`, the host's `sapi_module.log_message` as it stands
 /// while php starts ([`Engine::refused`]).
+///
+/// Then the startup is finished here too, as `php_module_startup` runs
+/// `zend_post_startup` before it returns ([`Engine::start_up`]): what the
+/// extensions' starts raised displayed and logged once, and the
+/// post-startup chain asked on the process's environment and working
+/// directory, opcache's among it, with the `opcache.preload` request. A
+/// refusal there, opcache's `opcache.file_cache_only` with no
+/// `opcache.file_cache` or a preload that fails, ends the process with
+/// php's status before the host opens its file, answers `-i` or binds a
+/// socket.
 #[must_use]
 pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn(&[u8])) -> Engine {
     let engine = prepare(builder, ini).build();
@@ -82,7 +92,14 @@ pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn
         .lock()
         .write_all(engine.startup_errors())
         .ok();
-    if let Some(status) = engine.refused(&mut Starting(log_message)) {
+    let mut starting = Starting(log_message);
+    let env = std::env::vars_os()
+        .map(|(n, v)| (n.into_encoded_bytes(), v.into_encoded_bytes()))
+        .collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(status) =
+        (engine.refused(&mut starting)).or_else(|| engine.start_up(env, cwd, &mut starting))
+    {
         std::io::stdout().lock().flush().ok();
         std::process::exit(status);
     }
