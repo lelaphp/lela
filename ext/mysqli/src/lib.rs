@@ -18,7 +18,7 @@
 //! **What a request holds.** `MyG(...)` is the request's [`State`]: the
 //! `report_mode`, the last connect error, the link
 //! counts, and the `p:` links it took out of the engine's pool or opened,
-//! held under php's `hash_key` until `deactivate` gives them back. php
+//! held under php's `hash_key` until `post_deactivate` gives them back. php
 //! keeps them in `EG(persistent_list)`, one list per php-fpm process; here
 //! the list is a pool of the engine's (design §4.10, revision 55), lent to
 //! one request at a time, and the inactive links php counts per process
@@ -109,9 +109,6 @@ pub(crate) struct State {
     /// `hash_key`: each persistent connection it took out of the pool or
     /// opened, open on a link or free for the next connect.
     pub(crate) plinks: Lent<Vec<u8>, link::Plinks>,
-    /// The links `mysqli_init` made that connected without `p:`: their
-    /// stream is persistent as php opens it, so `deactivate` frees them.
-    pub(crate) unkeyed: Vec<PhpObject>,
 }
 
 /// `EG(persistent_list)`'s `mysqli_plist_entry`s: the engine's pool of
@@ -144,7 +141,6 @@ impl Default for State {
             num_active_persistent: 0,
             num_free_persistent: 0,
             plinks: Lent::default(),
-            unkeyed: Vec::new(),
         }
     }
 }
@@ -337,7 +333,7 @@ pub fn extension() -> Extension {
         })
         .request_state::<State>()
         .engine_state(|_| Ok(Pooled(Pool::new(POOLED))))
-        .deactivate(link::deactivate)
+        .post_deactivate(link::post_deactivate)
         .engine_end(link::engine_end)
         .info(mysqli_info)
         .build("mysqli")
