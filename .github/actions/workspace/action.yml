@@ -3,17 +3,23 @@
 # and runs this before its first cargo step: everything git does not track is
 # removed except target/, which stays as the warm build a hosted runner had
 # to restore from a cache; the reading store under it is emptied, so a run's
-# readings are its own (harness §4.2); and the toolchain rust-toolchain.toml
-# names is installed where rustup has not yet (rustup 1.28 or later, as
-# scripts/ci/runner.sh lays it down).
+# readings are its own (harness §4.2); and, unless a job builds no Rust, the
+# toolchain rust-toolchain.toml names is installed where rustup has not yet
+# (rustup 1.28 or later, as scripts/ci/runner.sh lays it down).
 name: workspace
 description: Clean the checkout but target/, empty the store, install the pinned toolchain
+inputs:
+  toolchain:
+    description: Whether the job builds Rust, and so installs the pinned toolchain
+    default: "true"
 runs:
   using: composite
   steps:
     - name: the checkout clean but target/, a fresh store, the pinned toolchain
       shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
       run: |
         git clean -ffdxq -e /target/
         rm -rf target/harness
-        rustup toolchain install
+        [ "$TOOLCHAIN" != true ] || rustup toolchain install

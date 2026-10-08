@@ -695,7 +695,11 @@ fn no_workflow_holds_a_directory_of_the_corpus() {
 /// harness would never read.
 #[test]
 fn ci_reads_the_variables_off_the_oracle_section_and_spells_neither() {
-    let text: String = ci_files().into_iter().map(|(_, text)| text).collect();
+    let text = ci_files()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut env = false;
     let mut section = false;
     let mut reads = Vec::new();

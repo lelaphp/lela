@@ -31,16 +31,16 @@ runs:
       run: |
         brew install mysql@8.4
         bin="$(brew --prefix mysql@8.4)/bin"
-        ping() { "$bin/mysqladmin" ping --protocol=tcp -h 127.0.0.1 -uroot --silent 2>/dev/null; }
-        if ping; then "$bin/mysqladmin" shutdown --protocol=tcp -h 127.0.0.1 -uroot; fi
+        answers() { "$bin/mysqladmin" ping --protocol=tcp -h 127.0.0.1 -uroot --silent 2>/dev/null; }
+        if answers; then "$bin/mysqladmin" shutdown --protocol=tcp -h 127.0.0.1 -uroot; fi
         data="$RUNNER_TEMP/mysql"
         rm -rf "$data"
         "$bin/mysqld" --no-defaults --initialize-insecure --datadir="$data"
         nohup "$bin/mysqld" --no-defaults --datadir="$data" --bind-address=127.0.0.1 --port=3306 \
           --socket="$RUNNER_TEMP/mysql.sock" --mysqlx=OFF > "$RUNNER_TEMP/mysqld.log" 2>&1 &
         # compose.yaml's healthcheck: a TCP ping, every 2 s, 60 times.
-        for _ in $(seq 60); do ping && break; sleep 2; done
-        ping || { cat "$RUNNER_TEMP/mysqld.log"; echo "::error::the MySQL server did not answer"; exit 1; }
+        for _ in $(seq 60); do answers && break; sleep 2; done
+        answers || { cat "$RUNNER_TEMP/mysqld.log"; echo "::error::the MySQL server did not answer"; exit 1; }
         "$bin/mysql" --socket="$RUNNER_TEMP/mysql.sock" -uroot -e "
           CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '';
           GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;

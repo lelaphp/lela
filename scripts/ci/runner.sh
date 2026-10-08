@@ -8,7 +8,7 @@
 #       On the Hetzner server, as root, Ubuntu 26.04 (the release packages.txt
 #       names, #1724). The packages the jobs need beyond packages.txt, Docker
 #       for ci/mysql/compose.yaml, a `runner` user in the `docker` group who
-#       may run apt-get, locale-gen and localedef as root and nothing else,
+#       may run apt-get, locale-gen and localedef as root with no password,
 #       rustup for that user, and the runner, labelled `dax-build`, as a
 #       systemd service.
 #   runner.sh mac --url <repository URL> --token <registration token> --pin <oracle.json> [--name <name>]
@@ -85,7 +85,10 @@ linux() {
     systemctl enable --now docker
     id runner >/dev/null 2>&1 || useradd --create-home --shell /bin/bash runner
     usermod -aG docker runner
-    say "the runner's user may run what harness.yml runs as root, and nothing else"
+    say "the runner's user may run what harness.yml runs as root"
+    # apt-get as root and the docker group are each root in effect, so the
+    # runner is trusted as the repository's collaborators are: the list
+    # names what the jobs run and is no sandbox.
     cat > /etc/sudoers.d/dax-runner <<'EOF'
 # harness.yml's steps that need root (#2253): the platform libraries of
 # .github/actions/platform-libraries, and the named locales.

@@ -24,8 +24,9 @@ on:
     branches: [main] # a ticket's branch reaches CI as a pull request (ADR-0009)
   pull_request:
 # A push to a pull request supersedes the run of the push before it, which
-# is cancelled: a run nobody reads holds a runner for nothing. `main`'s runs
-# queue and finish.
+# is cancelled: a run nobody reads holds a runner for nothing. A run of
+# `main` is never cancelled once it runs; of the runs waiting behind it,
+# GitHub keeps the newest and cancels the rest.
 concurrency:
   group: harness-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -143,6 +144,10 @@ jobs:
   oracle:
     name: the witnesses, the crosscheck and the oracle's tests
     runs-on: [self-hosted, macos, dax-oracle]
+    # The dashboard's oracle job runs every lane in 150; this one runs the
+    # witnesses, the crosscheck and xtask's tests. Its wall time from a run
+    # is #2200's to state.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
