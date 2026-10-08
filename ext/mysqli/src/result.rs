@@ -734,7 +734,7 @@ impl mysqli_result {
         let conn = link::conn(req, mysql.object(), Need::Open)?;
         let set = match result_mode {
             link::STORE => conn.store(req)?,
-            link::USE => conn.use_unbuffered(req),
+            link::USE => conn.use_unbuffered(req)?,
             _ => {
                 return Err(arg_value_error(
                     req,

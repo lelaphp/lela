@@ -20,6 +20,7 @@ use crate::consts::{
     Com, ConnState, CursorType, FieldType, QueryType, ResType, StmtState, cr, status,
 };
 use crate::error::{ErrorInfo, OUT_OF_SYNC, Upsert};
+use crate::pool::Pool;
 use crate::result::{Field, Res, Row};
 use crate::stats::Stat;
 use crate::wire::{Prot, store_length};
@@ -394,9 +395,7 @@ impl Stmt {
     /// `mysqlnd_stmt_use_result`: rows to be read one fetch at a time,
     /// through the cursor where the server opened one.
     pub fn use_unbuffered(&mut self, req: &mut Request) -> Result<bool, Thrown> {
-        Ok(self
-            .call(req, |_, stmt, conn| Ok(use_result(stmt, conn)))?
-            .unwrap_or(false))
+        Ok(self.call(req, use_result)?.unwrap_or(false))
     }
 
     /// `mysqlnd_stmt_get_result`: the rows read and held in a `MYSQLND_RES`
@@ -539,12 +538,12 @@ impl Stmt {
     /// `mysqlnd_stmt_result_metadata`: a set of rows with the statement's
     /// columns and no rows, read to its end, over the statement's
     /// connection; `None` where the statement has no columns.
-    pub fn described(&self, req: &mut Request) -> Option<ResultSet> {
-        let fields = self.fields()?;
-        let mut res = Box::new(Res::new(self.data.field_count));
-        res.fields = fields;
-        res.metadata_only();
-        Some(ResultSet::of(res, self.conn.acquire(req)))
+    pub fn described(&self, req: &mut Request) -> Result<Option<ResultSet>, Thrown> {
+        let Some(fields) = self.fields() else {
+            return Ok(None);
+        };
+        let res = Box::new(Res::metadata_only(req, self.data.field_count, fields)?);
+        Ok(Some(ResultSet::of(res, self.conn.acquire(req))))
     }
 
     /// mysqli's `close_stmt_and_copy_errors`: the statement closed, and
@@ -588,19 +587,13 @@ impl Stmt {
             );
             close_on_server(req, stmt, conn, implicit)
         });
-        let closed = match closed {
-            Ok(closed) => closed.unwrap_or(false),
-            Err(thrown) => {
-                free_stmt_content(req, &mut self.data);
-                self.data.result = None;
-                self.conn.release(req);
-                return Err(thrown);
-            }
-        };
+        let closed = closed.map(|closed| closed.unwrap_or(false));
         free_stmt_content(req, &mut self.data);
-        self.data.result = None;
+        if let Some(result) = self.data.result.take() {
+            result.release(req);
+        }
         self.conn.release(req);
-        Ok(closed)
+        closed
     }
 }
 
@@ -637,21 +630,23 @@ fn prepare(
     stmt.parameter_count = response.param_count;
     if stmt.parameter_count > 0 {
         // `mysqlnd_stmt_skip_metadata`: the parameters' columns read and
-        // dropped, as libmysql does.
-        for _ in 0..stmt.parameter_count {
-            if conn.read_packet(req, Prot::RsetField).is_none() {
-                return Ok(false);
-            }
-        }
-        if !prepare_read_eof(req, stmt, conn) {
+        // dropped, as libmysql does, over a pool of their own that none
+        // of them is carved from.
+        let pool = Pool::create(req)?;
+        let skipped =
+            (0..stmt.parameter_count).all(|_| conn.read_packet(req, Prot::RsetField).is_some());
+        pool.destroy(req);
+        if !skipped || !prepare_read_eof(req, stmt, conn) {
             return Ok(false);
         }
     }
     if stmt.field_count > 0 {
-        let mut result = Box::new(Res::new(stmt.field_count));
+        let mut result = Box::new(Res::new(req, stmt.field_count)?);
         result.kind = ResType::PsBuffered;
-        let read = result.read_metadata(req, conn);
-        stmt.result = Some(result);
+        let read = result.read_metadata(req, conn)?;
+        if let Some(old) = stmt.result.replace(result) {
+            old.release(req);
+        }
         if !read || !prepare_read_eof(req, stmt, conn) {
             return Ok(false);
         }
@@ -664,7 +659,8 @@ fn prepare(
 /// status the statement's; a failed read leaves the statement as new.
 fn prepare_read_eof(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> bool {
     let Some(eof) = conn.read_eof(req) else {
-        if stmt.result.take().is_some() {
+        if let Some(result) = stmt.result.take() {
+            result.release(req);
             *stmt = StmtData::new();
         }
         return false;
@@ -689,7 +685,7 @@ fn send_execute(
     if stmt.result.is_some() && stmt.state >= StmtState::Prepared && stmt.field_count > 0 {
         flush(req, stmt, conn)?;
         if let Some(result) = stmt.result.as_mut() {
-            result.free_buffers();
+            result.free_buffers(req);
         }
         stmt.state = StmtState::Prepared;
     } else if stmt.state < StmtState::Prepared {
@@ -1018,42 +1014,44 @@ fn store_result(
     let Some(result) = stmt.result.as_mut() else {
         return Ok(false);
     };
-    if result.store(req, conn, true) {
+    if result.store(req, conn, true)? {
         stmt.upsert.affected_rows = result.num_rows();
         stmt.state = StmtState::UseOrStoreCalled;
         return Ok(true);
     }
     stmt.error.copy_from(&conn.error);
-    stmt.result = None;
+    if let Some(result) = stmt.result.take() {
+        result.release(req);
+    }
     stmt.state = StmtState::Prepared;
     Ok(false)
 }
 
 /// `mysqlnd_stmt::use_result`.
-fn use_result(stmt: &mut StmtData, conn: &mut ConnData) -> bool {
+fn use_result(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<bool, Thrown> {
     if stmt.result.is_none() {
-        return false;
+        return Ok(false);
     }
     if stmt.field_count == 0 || !check_state(stmt, conn) {
         conn.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
-        return false;
+        return Ok(false);
     }
     stmt.error.reset();
     conn.stats.inc(Stat::PsUnbufferedSets);
     let cursor = stmt.cursor_exists.then_some(stmt.stmt_id);
     if let Some(result) = stmt.result.as_mut() {
-        result.use_unbuffered(true);
+        result.use_unbuffered(req, true)?;
         result.cursor = cursor;
     }
     stmt.state = StmtState::UseOrStoreCalled;
-    true
+    Ok(true)
 }
 
 /// `stmt->default_rset_handler(s)`, whose answer php does not read.
 fn run_handler(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<(), Thrown> {
     match stmt.handler {
         Handler::Use => {
-            use_result(stmt, conn);
+            use_result(req, stmt, conn)?;
         }
         Handler::Store => {
             store_result(req, stmt, conn)?;
@@ -1083,9 +1081,8 @@ fn get_result(
     if stmt.cursor_exists && !cursor_fetch(req, stmt, conn, u32::MAX)? {
         return Ok(None);
     }
-    let mut result = Box::new(Res::new(stmt.field_count));
-    result.fields = fields;
-    let stored = result.store(req, conn, true);
+    let mut result = Box::new(Res::with_fields(req, stmt.field_count, fields)?);
+    let stored = result.store(req, conn, true)?;
     stmt.state = StmtState::Prepared;
     if !stored {
         stmt.error.copy_from(&conn.error);
@@ -1227,7 +1224,7 @@ fn free_result(
     }
     if stmt.state == StmtState::WaitingUseOrStore {
         stmt.handler = Handler::Use;
-        use_result(stmt, conn);
+        use_result(req, stmt, conn)?;
     }
     if stmt.state > StmtState::WaitingUseOrStore {
         if let Some(result) = stmt.result.as_mut() {
@@ -1235,7 +1232,7 @@ fn free_result(
         }
         separate_result_bind(req, stmt);
         if let Some(result) = stmt.result.as_mut() {
-            result.free_buffers();
+            result.free_buffers(req);
         }
     }
     if stmt.state > StmtState::Prepared {
@@ -1332,7 +1329,7 @@ fn free_stmt_result(
     conn: &mut ConnData,
 ) -> Result<(), Thrown> {
     separate_result_bind(req, stmt);
-    if let Some(mut result) = stmt.result.take() {
+    if let Some(result) = stmt.result.take() {
         result.free(req, conn, true)?;
     }
     stmt.error.list.clear();
@@ -1395,7 +1392,7 @@ fn close_on_server(
         1 => conn.stats.inc(Stat::PsPreparedOnceUsed),
         _ => {}
     }
-    if let Some(mut result) = stmt.result.take() {
+    if let Some(result) = stmt.result.take() {
         result.free(req, conn, true)?;
     }
     Ok(true)

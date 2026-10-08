@@ -7,6 +7,8 @@ use crate::consts::{ERRMSG_SIZE, UNKNOWN_SQLSTATE};
 
 /// `mysqlnd_server_gone`.
 pub(crate) const SERVER_GONE: &str = "MySQL server has gone away";
+/// `mysqlnd_out_of_memory`.
+pub(crate) const OUT_OF_MEMORY: &str = "Out of memory";
 /// `mysqlnd_out_of_sync`.
 pub(crate) const OUT_OF_SYNC: &str = "Commands out of sync; you can't run this command now";
 /// `mysqlnd_old_passwd`.

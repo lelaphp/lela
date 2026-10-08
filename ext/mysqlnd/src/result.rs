@@ -2,17 +2,61 @@
 //! columns' descriptions, and its rows, held whole (`store_result`) or read
 //! one at a time off the connection (`use_result`), each row kept as the
 //! bytes the server sent and decoded into values when it is fetched, as
-//! php's row buffers are.
+//! php's row buffers are. The set's structures, its column definitions
+//! and its rows' packets are carved from its memory pool, on the request's
+//! heap, at the sizes php's `get_chunk` asks for, and the stored rows'
+//! `MYSQLND_ROW_BUFFER`s are one `emalloc` beside it, so
+//! `memory_get_usage()` and `memory_limit` see a set of rows as php's do.
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpString, Value};
+use php_ext::values::{Emalloc, Owner, PhpString, Value};
 
 use crate::conn::ConnData;
-use crate::consts::{ConnState, FieldType, NULL_LENGTH, PhpType, ResType, column, cr, status};
-use crate::error::{ErrorInfo, OUT_OF_SYNC};
+use crate::consts::{
+    ConnState, FieldType, MAX_PACKET_SIZE, NULL_LENGTH, PhpType, ResType, column, cr, status,
+};
+use crate::error::{ErrorInfo, OUT_OF_MEMORY, OUT_OF_SYNC};
+use crate::pool::{Chunk, Pool};
 use crate::stats::Stat;
 use crate::wire::{Body, EODATA_MARKER, ERROR_MARKER, PacketError, Prot};
+
+/// `mysqlnd_plugin_count()`: the plugins `php --ri mysqlnd` lists, each
+/// of which gives a set of rows' structures a pointer of room.
+const PLUGIN_ROOM: usize = 8 * listed(crate::auth::Plugin::LOADED);
+/// `sizeof(MYSQLND_RES)`.
+const RES: usize = 272;
+/// `sizeof(MYSQLND_RES_BUFFERED)`.
+const RES_BUFFERED: usize = 736;
+/// `sizeof(MYSQLND_RES_UNBUFFERED)`.
+const RES_UNBUFFERED: usize = 104;
+/// `sizeof(MYSQLND_RES_METADATA)`.
+const RES_METADATA: usize = 24;
+/// `sizeof(MYSQLND_FIELD)`.
+const FIELD: usize = 152;
+/// `sizeof(zval)`, of `row_data`'s.
+const ZVAL: usize = 16;
+/// `sizeof(size_t)`, of `lengths`'.
+const LENGTH: usize = 8;
+/// `sizeof(MYSQLND_ROW_BUFFER)`.
+const ROW_BUFFER: usize = 16;
+/// `sizeof(struct st_mysqlnd_packet_row)`, the packet `use_result`
+/// allocates.
+const PACKET_ROW: usize = 680;
+
+/// How many names a comma-separated list holds.
+const fn listed(names: &str) -> usize {
+    let bytes = names.as_bytes();
+    let mut n = 1;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b',' {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
 
 /// `MYSQLND_FIELD`: one column as the server described it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -42,6 +86,98 @@ impl Field {
     pub fn field_type(&self) -> FieldType {
         FieldType::of(self.type_byte)
     }
+
+    /// `root_len`: what `READ_RSET_FIELD` counts of the six names, each
+    /// that is not empty with its terminator.
+    fn root_len(&self) -> usize {
+        [
+            &self.catalog,
+            &self.db,
+            &self.table,
+            &self.org_table,
+            &self.name,
+            &self.org_name,
+        ]
+        .iter()
+        .filter(|part| !part.is_empty())
+        .map(|part| part.len() + 1)
+        .sum()
+    }
+}
+
+/// `MYSQLND_RES_BUFFERED::row_buffers`: one `MYSQLND_ROW_BUFFER` per row
+/// held, the place of its packet in the pool, in one `emalloc` grown as
+/// `store_result_fetch_data` grows it, doubling to 1024 rows and by 1024
+/// past them, and cut to the rows read at their end.
+#[derive(Debug, Default)]
+struct RowBuffers {
+    block: Option<Emalloc>,
+    /// `row_count`.
+    count: usize,
+    /// `free_rows`.
+    room: usize,
+}
+
+impl RowBuffers {
+    /// One row's chunk held; `Ok(false)` where its place does not fit the
+    /// record, php's out of memory.
+    fn push(&mut self, req: &mut Request, chunk: Chunk) -> Result<bool, Thrown> {
+        let Some(record) = chunk.record() else {
+            return Ok(false);
+        };
+        if self.room == 0 {
+            let total = self.block.as_ref().map_or(0, |b| b.len() / ROW_BUFFER);
+            let (room, total) = match total {
+                0 => (1, 1),
+                n if n < 1024 => (n, n * 2),
+                n => (1024, n + 1024),
+            };
+            let size = total * ROW_BUFFER;
+            self.block = Some(match self.block.take() {
+                Some(block) => block.resize(req, size)?,
+                None => Emalloc::new(req, size)?,
+            });
+            self.room = room;
+        }
+        self.room -= 1;
+        if let Some(block) = &mut self.block {
+            let at = self.count * ROW_BUFFER;
+            block.bytes_mut()[at..at + ROW_BUFFER].copy_from_slice(&record);
+        }
+        self.count += 1;
+        Ok(true)
+    }
+
+    /// "save some memory": the allocation cut to the rows held.
+    fn shrink(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        if self.room > 0
+            && let Some(block) = self.block.take()
+        {
+            self.block = Some(block.resize(req, self.count * ROW_BUFFER)?);
+            self.room = 0;
+        }
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Row `at`'s chunk.
+    fn get(&self, at: usize) -> Option<Chunk> {
+        if at >= self.count {
+            return None;
+        }
+        let bytes = self.block.as_ref()?.bytes();
+        Chunk::from_record(bytes.get(at * ROW_BUFFER..(at + 1) * ROW_BUFFER)?)
+    }
+
+    /// `mnd_efree(set->row_buffers)`.
+    fn free(self, req: &mut Request) {
+        if let Some(block) = self.block {
+            block.free(req);
+        }
+    }
 }
 
 /// How a `MYSQLND_RES`'s rows are held.
@@ -50,9 +186,14 @@ enum Rows {
     /// Column definitions read, no rows asked for yet.
     None,
     /// `MYSQLND_RES_BUFFERED`.
-    Buffered { rows: Vec<Vec<u8>>, current: usize },
-    /// `MYSQLND_RES_UNBUFFERED`.
-    Unbuffered { eof: bool, row_count: u64 },
+    Buffered { rows: RowBuffers, current: usize },
+    /// `MYSQLND_RES_UNBUFFERED`, with the `row_packet` `use_result`
+    /// allocates; none for the rows that are only column definitions.
+    Unbuffered {
+        eof: bool,
+        row_count: u64,
+        packet: Option<Emalloc>,
+    },
 }
 
 /// `MYSQLND_RES`.
@@ -76,15 +217,23 @@ pub struct Res {
     /// The warnings and status the last cursor fetch read, which the
     /// statement takes into its own.
     pub(crate) cursor_status: (u32, u32),
+    /// `memory_pool`.
+    pool: Pool,
 }
 
 /// One row fetched: its values in column order, one owner of each.
 pub type Row = Vec<Owner<Value>>;
 
 impl Res {
-    /// `mysqlnd_result_init`.
-    pub(crate) fn new(field_count: u32) -> Res {
-        Res {
+    /// `mysqlnd_result_init`: the pool, the `MYSQLND_RES` and its `row_data`
+    /// carved from it, the checkpoint a free goes back to saved; the
+    /// `Err` is the memory limit's fatal.
+    pub(crate) fn new(req: &mut Request, field_count: u32) -> Result<Res, Thrown> {
+        let mut pool = Pool::create(req)?;
+        pool.get_chunk(req, RES + PLUGIN_ROOM)?;
+        pool.get_chunk(req, field_count as usize * ZVAL)?;
+        pool.save();
+        Ok(Res {
             field_count,
             fields: Vec::new(),
             current_field: 0,
@@ -94,32 +243,94 @@ impl Res {
             lengths: Vec::new(),
             cursor: None,
             cursor_status: (0, 0),
-        }
+            pool,
+        })
     }
 
-    /// `result->unbuf` made with `eof_reached` set: rows that are only
-    /// column definitions, as `mysqlnd_stmt_result_metadata` makes them.
-    pub(crate) fn metadata_only(&mut self) {
-        self.rows = Rows::Unbuffered {
+    /// `mysqlnd_stmt_result_metadata`'s and `mysqlnd_stmt_get_result`'s
+    /// `MYSQLND_RES`: a new one with a copy of `fields`, as
+    /// `clone_metadata` carves it.
+    pub(crate) fn with_fields(
+        req: &mut Request,
+        field_count: u32,
+        fields: Vec<Field>,
+    ) -> Result<Res, Thrown> {
+        let mut res = Res::new(req, field_count)?;
+        res.pool.get_chunk(req, RES_METADATA)?;
+        res.pool.get_chunk(req, (fields.len() + 1) * FIELD)?;
+        for field in &fields {
+            res.pool.get_chunk(req, field.root_len())?;
+        }
+        res.fields = fields;
+        Ok(res)
+    }
+
+    /// `result->unbuf` made with `eof_reached` set, before the column
+    /// definitions: rows that are only those, as
+    /// `mysqlnd_stmt_result_metadata` makes them.
+    pub(crate) fn metadata_only(
+        req: &mut Request,
+        field_count: u32,
+        fields: Vec<Field>,
+    ) -> Result<Res, Thrown> {
+        let mut res = Res::new(req, field_count)?;
+        res.unbuffered_init(req, true)?;
+        res.rows = Rows::Unbuffered {
             eof: true,
             row_count: 0,
+            packet: None,
         };
-        self.binary = true;
+        res.binary = true;
+        res.pool.get_chunk(req, RES_METADATA)?;
+        res.pool.get_chunk(req, (fields.len() + 1) * FIELD)?;
+        for field in &fields {
+            res.pool.get_chunk(req, field.root_len())?;
+        }
+        res.fields = fields;
+        Ok(res)
     }
 
-    /// `mysqlnd_res::free_result_buffers`: the rows and the column definitions
-    /// dropped, the column count kept.
-    pub(crate) fn free_buffers(&mut self) {
-        self.rows = Rows::None;
+    /// `mysqlnd_result_unbuffered_init`'s carving: the structure, and the
+    /// lengths of text rows.
+    fn unbuffered_init(&mut self, req: &mut Request, ps: bool) -> Result<(), Thrown> {
+        self.pool.get_chunk(req, RES_UNBUFFERED + PLUGIN_ROOM)?;
+        if !ps {
+            self.pool
+                .get_chunk(req, self.field_count as usize * LENGTH)?;
+        }
+        Ok(())
+    }
+
+    /// `mysqlnd_res::free_result_buffers`: the rows and the column
+    /// definitions dropped, the pool back to the checkpoint `result_init`
+    /// saved, the column count kept.
+    pub(crate) fn free_buffers(&mut self, req: &mut Request) {
+        match std::mem::replace(&mut self.rows, Rows::None) {
+            Rows::Buffered { rows, .. } => rows.free(req),
+            Rows::Unbuffered {
+                packet: Some(packet),
+                ..
+            } => packet.free(req),
+            _ => {}
+        }
         self.fields.clear();
         self.current_field = 0;
         self.cursor = None;
+        self.pool.restore(req);
+        self.pool.save();
+    }
+
+    /// `mysqlnd_res::free_result_contents_internal`: the rows dropped and
+    /// the pool destroyed.
+    pub(crate) fn release(mut self, req: &mut Request) {
+        self.free_buffers(req);
+        self.pool.destroy(req);
     }
 
     /// `mysqlnd_fetch_stmt_row_cursor`: one row asked of the statement's
-    /// cursor and read, with the EOF that follows it; the warnings and
-    /// status of the last packet kept on the connection and for the
-    /// statement.
+    /// cursor and read, with the EOF that follows it, both out of the pool
+    /// past a checkpoint the fetch goes back to; the warnings and status
+    /// of the last packet kept on the connection and for the statement.
     fn fetch_cursor(
         &mut self,
         req: &mut Request,
@@ -133,17 +344,46 @@ impl Res {
         if !conn.send_command(req, crate::consts::Com::StmtFetch, &payload, false)? {
             return Ok(Err(()));
         }
+        let saved = self.pool.enter();
+        let fetched = self.cursor_row(req, conn, decode);
+        self.pool.leave(req, saved);
+        let (row, ok, last) = fetched?;
+        conn.upsert.warning_count = last.0;
+        conn.upsert.server_status = last.1;
+        self.cursor_status = last;
+        if !ok {
+            if let Some(row) = row {
+                for value in row {
+                    value.give_up(req);
+                }
+            }
+            return Ok(Err(()));
+        }
+        Ok(Ok(row))
+    }
+
+    /// The reads of [`Res::fetch_cursor`]: the row, whether every read
+    /// passed, the last packet's warnings and status.
+    #[allow(clippy::type_complexity)] // php's three out-parameters
+    fn cursor_row(
+        &mut self,
+        req: &mut Request,
+        conn: &mut ConnData,
+        decode: bool,
+    ) -> Result<(Option<Row>, bool, (u32, u32)), Thrown> {
         let native = conn.options.int_and_float_native;
         let (mut row, mut ok, mut last) = (None, true, (0, 0));
-        match read_row(req, conn, true) {
-            RowPacket::Row(bytes) => {
+        match read_row(req, conn, &mut self.pool, true)? {
+            RowPacket::Row(chunk) => {
                 if decode {
-                    match self.decode(req, conn, &bytes, native)? {
+                    let bytes = self.pool.bytes(chunk);
+                    let decoded = decode_row(req, conn, self.binary, &self.fields, bytes, native)?;
+                    match decoded {
                         Ok(values) => row = Some(values),
-                        Err(()) => return Ok(Err(())),
+                        Err(()) => return Ok((None, false, last)),
                     }
                 }
-                match read_row(req, conn, true) {
+                match read_row(req, conn, &mut self.pool, true)? {
                     RowPacket::Eof {
                         warning_count,
                         server_status,
@@ -170,18 +410,7 @@ impl Res {
             }
             RowPacket::Error(_) | RowPacket::Fail => ok = false,
         }
-        conn.upsert.warning_count = last.0;
-        conn.upsert.server_status = last.1;
-        self.cursor_status = last;
-        if !ok {
-            if let Some(row) = row {
-                for value in row {
-                    value.give_up(req);
-                }
-            }
-            return Ok(Err(()));
-        }
-        Ok(Ok(row))
+        Ok((row, ok, last))
     }
 
     /// The columns' descriptions.
@@ -197,17 +426,26 @@ impl Res {
     }
 
     /// `mysqlnd_res::read_result_metadata` and `mysqlnd_res_meta::read_metadata`:
-    /// one field packet per column.
-    pub(crate) fn read_metadata(&mut self, req: &mut Request, conn: &mut ConnData) -> bool {
+    /// the column definitions' structures carved from the pool, then one field
+    /// packet per column, its names' root carved beside them.
+    pub(crate) fn read_metadata(
+        &mut self,
+        req: &mut Request,
+        conn: &mut ConnData,
+    ) -> Result<bool, Thrown> {
         self.fields.clear();
         self.current_field = 0;
+        self.pool.get_chunk(req, RES_METADATA + PLUGIN_ROOM)?;
+        self.pool
+            .get_chunk(req, (self.field_count as usize + 1) * FIELD)?;
         for _ in 0..self.field_count {
             let Some(body) = conn.read_packet(req, Prot::RsetField) else {
                 self.fields.clear();
-                return false;
+                return Ok(false);
             };
             match read_field(req, &body) {
                 FieldPacket::Field(field) => {
+                    self.pool.get_chunk(req, field.root_len())?;
                     if field.field_type().fetch().is_none() {
                         docref(
                             req,
@@ -218,44 +456,91 @@ impl Res {
                             ),
                         );
                         self.fields.clear();
-                        return false;
+                        return Ok(false);
                     }
                     self.fields.push(field);
                 }
                 FieldPacket::Error(e) => {
                     e.set_on(&mut conn.error);
                     self.fields.clear();
-                    return false;
+                    return Ok(false);
                 }
                 FieldPacket::Fail => {
                     self.fields.clear();
-                    return false;
+                    return Ok(false);
                 }
             }
         }
-        true
+        Ok(true)
     }
 
-    /// `mysqlnd_res::use_result`: rows to be read one at a time; a
+    /// `mysqlnd_res::use_result`: rows to be read one at a time, the
+    /// unbuffered structure carved and its `row_packet` allocated; a
     /// statement's are the binary protocol's.
-    pub(crate) fn use_unbuffered(&mut self, ps: bool) {
+    pub(crate) fn use_unbuffered(&mut self, req: &mut Request, ps: bool) -> Result<(), Thrown> {
         self.kind = if ps {
             ResType::PsUnbuffered
         } else {
             ResType::Normal
         };
         self.binary = ps;
+        self.unbuffered_init(req, ps)?;
+        let packet = Emalloc::new(req, PACKET_ROW)?;
         self.rows = Rows::Unbuffered {
             eof: false,
             row_count: 0,
+            packet: Some(packet),
         };
         self.lengths = Vec::new();
+        Ok(())
     }
 
-    /// `mysqlnd_res::store_result` with `store_result_fetch_data`: every
-    /// row read and held; the status of the last EOF taken; the affected
-    /// rows the row count, as libmysql documents.
-    pub(crate) fn store(&mut self, req: &mut Request, conn: &mut ConnData, ps: bool) -> bool {
+    /// `mysqlnd_res::store_result` with `store_result_fetch_data`: the
+    /// buffered structure carved, every row read into the pool and held;
+    /// the status of the last EOF taken; the affected rows the row count,
+    /// as libmysql documents. The `Err` is the memory limit's fatal.
+    ///
+    /// What one set of rows holds past another is its packets, each in
+    /// the block it was cut from, and its row buffers:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $held = function (string $sql) use ($l) {
+    ///     $m = memory_get_usage();
+    ///     $r = mysqli_query($l, $sql);
+    ///     $held = memory_get_usage() - $m;
+    ///     mysqli_free_result($r);
+    ///     return $held;
+    /// };
+    /// $one = $held("SELECT 'x' AS a");
+    /// echo $held("SELECT REPEAT('x', 1000000) AS a, REPEAT('y', 1000000) AS b") - $one, "\n";
+    /// echo $held("SELECT 'x' AS a FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT n FROM s) t") - $one, "\n";
+    /// ```
+    /// ```expect mysql
+    /// 4005888
+    /// 16368
+    /// ```
+    ///
+    /// Rows larger than `memory_limit` allows end the request in the
+    /// limit's fatal, at the block the arena asks for:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '4M');
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $r = mysqli_query($l, "SELECT REPEAT('x', 3000000) AS a");
+    /// echo "not reached\n";
+    /// ```
+    /// ```expect mysql exit=255
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3000032 bytes) in %s on line 5
+    /// ```
+    pub(crate) fn store(
+        &mut self,
+        req: &mut Request,
+        conn: &mut ConnData,
+        ps: bool,
+    ) -> Result<bool, Thrown> {
         self.kind = if ps {
             ResType::PsBuffered
         } else {
@@ -263,34 +548,19 @@ impl Res {
         };
         self.binary = ps;
         conn.state = ConnState::FetchingData;
-        let mut rows = Vec::new();
-        let mut error = ErrorInfo::default();
-        let mut failed = false;
-        loop {
-            match read_row(req, conn, ps) {
-                RowPacket::Row(row) => rows.push(row),
-                RowPacket::Eof {
-                    warning_count,
-                    server_status,
-                } => {
-                    conn.upsert.reset();
-                    conn.upsert.warning_count = warning_count;
-                    conn.upsert.server_status = server_status;
-                    break;
-                }
-                RowPacket::Error(e) => {
-                    e.set_on(&mut error);
-                    failed = true;
-                    break;
-                }
-                RowPacket::Fail => {
-                    error.copy_from(&conn.error);
-                    failed = true;
-                    break;
-                }
-            }
+        self.pool.get_chunk(req, RES_BUFFERED + PLUGIN_ROOM)?;
+        if !ps {
+            self.pool
+                .get_chunk(req, self.field_count as usize * LENGTH)?;
         }
-        let count = rows.len() as u64;
+        let mut rows = RowBuffers::default();
+        let read = self.store_rows(req, conn, ps, &mut rows);
+        self.rows = Rows::Buffered { rows, current: 0 };
+        let (failed, error) = read?;
+        let count = match &self.rows {
+            Rows::Buffered { rows, .. } => rows.len() as u64,
+            _ => 0,
+        };
         conn.stats.add(
             if ps {
                 Stat::RowsBufferedFromClientPs
@@ -302,6 +572,9 @@ impl Res {
         if failed {
             conn.upsert.server_status &= !status::MORE_RESULTS_EXISTS;
         }
+        if let Rows::Buffered { rows, .. } = &mut self.rows {
+            rows.shrink(req)?;
+        }
         conn.state = if conn.upsert.server_status & status::MORE_RESULTS_EXISTS != 0 {
             ConnState::NextResultPending
         } else {
@@ -309,12 +582,49 @@ impl Res {
         };
         if failed {
             conn.error.copy_from(&error);
-            self.rows = Rows::Buffered { rows, current: 0 };
-            return false;
+            return Ok(false);
         }
         conn.upsert.affected_rows = count;
-        self.rows = Rows::Buffered { rows, current: 0 };
-        true
+        Ok(true)
+    }
+
+    /// The loop of `store_result_fetch_data`: rows read until the EOF,
+    /// whose status is taken, or until a failure, whose error is answered.
+    fn store_rows(
+        &mut self,
+        req: &mut Request,
+        conn: &mut ConnData,
+        ps: bool,
+        rows: &mut RowBuffers,
+    ) -> Result<(bool, ErrorInfo), Thrown> {
+        let mut error = ErrorInfo::default();
+        loop {
+            match read_row(req, conn, &mut self.pool, ps)? {
+                RowPacket::Row(chunk) => {
+                    if !rows.push(req, chunk)? {
+                        error.client(cr::OUT_OF_MEMORY, OUT_OF_MEMORY);
+                        return Ok((true, error));
+                    }
+                }
+                RowPacket::Eof {
+                    warning_count,
+                    server_status,
+                } => {
+                    conn.upsert.reset();
+                    conn.upsert.warning_count = warning_count;
+                    conn.upsert.server_status = server_status;
+                    return Ok((false, error));
+                }
+                RowPacket::Error(e) => {
+                    e.set_on(&mut error);
+                    return Ok((true, error));
+                }
+                RowPacket::Fail => {
+                    error.copy_from(&conn.error);
+                    return Ok((true, error));
+                }
+            }
+        }
     }
 
     /// Whether the rows are held whole.
@@ -332,6 +642,7 @@ impl Res {
             Rows::Unbuffered {
                 eof: true,
                 row_count,
+                ..
             } => *row_count,
             _ => 0,
         }
@@ -374,7 +685,7 @@ impl Res {
 
     /// `mysqlnd_res::fetch_row`: the next row's values, `Ok(None)` past
     /// the last, `Err(())` for php's `FAIL`. Unbuffered rows are read off
-    /// `conn`.
+    /// `conn` into the pool past a checkpoint the fetch goes back to.
     pub(crate) fn fetch_row(
         &mut self,
         req: &mut Request,
@@ -385,8 +696,8 @@ impl Res {
         if let (Some(id), Rows::Unbuffered { eof: false, .. }) = (self.cursor, &self.rows) {
             return self.fetch_cursor(req, conn, id, decode);
         }
-        match &mut self.rows {
-            Rows::None => Ok(Ok(None)),
+        let at = match &mut self.rows {
+            Rows::None => return Ok(Ok(None)),
             Rows::Buffered { rows, current, .. } => {
                 if *current >= rows.len() {
                     if *current == rows.len() {
@@ -396,22 +707,9 @@ impl Res {
                 }
                 let at = *current;
                 *current += 1;
-                conn.stats.global(
-                    if self.binary {
-                        Stat::RowsFetchedFromClientPsBuf
-                    } else {
-                        Stat::RowsFetchedFromClientNormalBuf
-                    },
-                    1,
-                );
-                if !decode {
-                    return Ok(Ok(Some(Vec::new())));
-                }
-                let bytes = rows.get(at).cloned().unwrap_or_default();
-                let decoded = self.decode(req, conn, &bytes, native)?;
-                Ok(decoded.map(Some))
+                rows.get(at)
             }
-            Rows::Unbuffered { eof, row_count } => {
+            Rows::Unbuffered { eof, .. } => {
                 if *eof {
                     return Ok(Ok(None));
                 }
@@ -419,70 +717,96 @@ impl Res {
                     conn.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
                     return Ok(Err(()));
                 }
-                let binary = self.binary;
-                match read_row(req, conn, binary) {
-                    RowPacket::Row(bytes) => {
-                        *row_count += 1;
-                        conn.stats.inc(if binary {
-                            Stat::RowsFetchedFromClientPsUnbuf
-                        } else {
-                            Stat::RowsFetchedFromClientNormalUnbuf
-                        });
-                        if !decode {
-                            return Ok(Ok(Some(Vec::new())));
-                        }
-                        let decoded = self.decode(req, conn, &bytes, native)?;
-                        Ok(decoded.map(Some))
-                    }
-                    RowPacket::Eof {
-                        warning_count,
-                        server_status,
-                    } => {
-                        *eof = true;
-                        conn.upsert.reset();
-                        conn.upsert.warning_count = warning_count;
-                        conn.upsert.server_status = server_status;
-                        conn.state = if server_status & status::MORE_RESULTS_EXISTS != 0 {
-                            ConnState::NextResultPending
-                        } else {
-                            ConnState::Ready
-                        };
-                        Ok(Ok(None))
-                    }
-                    RowPacket::Error(e) => {
-                        e.set_on(&mut conn.error);
-                        if conn.state != ConnState::QuitSent {
-                            conn.state = ConnState::Ready;
-                        }
-                        *eof = true;
-                        Ok(Err(()))
-                    }
-                    RowPacket::Fail => {
-                        if conn.state != ConnState::QuitSent {
-                            conn.state = ConnState::Ready;
-                        }
-                        *eof = true;
-                        Ok(Err(()))
-                    }
+                let saved = self.pool.enter();
+                let fetched = self.fetch_unbuffered(req, conn, decode);
+                self.pool.leave(req, saved);
+                return fetched;
+            }
+        };
+        conn.stats.global(
+            if self.binary {
+                Stat::RowsFetchedFromClientPsBuf
+            } else {
+                Stat::RowsFetchedFromClientNormalBuf
+            },
+            1,
+        );
+        if !decode {
+            return Ok(Ok(Some(Vec::new())));
+        }
+        let bytes = at.map_or(&[][..], |chunk| self.pool.bytes(chunk));
+        let decoded = decode_row(req, conn, self.binary, &self.fields, bytes, native)?;
+        self.keep_lengths(&decoded);
+        Ok(decoded.map(Some))
+    }
+
+    /// `mysqlnd_result_unbuffered::fetch_row`'s read: one row off the
+    /// line into the pool and decoded, or the EOF or the error in its
+    /// place.
+    fn fetch_unbuffered(
+        &mut self,
+        req: &mut Request,
+        conn: &mut ConnData,
+        decode: bool,
+    ) -> Result<Result<Option<Row>, ()>, Thrown> {
+        let native = conn.options.int_and_float_native;
+        let binary = self.binary;
+        let packet = read_row(req, conn, &mut self.pool, binary)?;
+        let Rows::Unbuffered { eof, row_count, .. } = &mut self.rows else {
+            return Ok(Ok(None));
+        };
+        match packet {
+            RowPacket::Row(chunk) => {
+                *row_count += 1;
+                conn.stats.inc(if binary {
+                    Stat::RowsFetchedFromClientPsUnbuf
+                } else {
+                    Stat::RowsFetchedFromClientNormalUnbuf
+                });
+                if !decode {
+                    return Ok(Ok(Some(Vec::new())));
                 }
+                let bytes = self.pool.bytes(chunk);
+                let decoded = decode_row(req, conn, binary, &self.fields, bytes, native)?;
+                self.keep_lengths(&decoded);
+                Ok(decoded.map(Some))
+            }
+            RowPacket::Eof {
+                warning_count,
+                server_status,
+            } => {
+                *eof = true;
+                conn.upsert.reset();
+                conn.upsert.warning_count = warning_count;
+                conn.upsert.server_status = server_status;
+                conn.state = if server_status & status::MORE_RESULTS_EXISTS != 0 {
+                    ConnState::NextResultPending
+                } else {
+                    ConnState::Ready
+                };
+                Ok(Ok(None))
+            }
+            RowPacket::Error(e) => {
+                e.set_on(&mut conn.error);
+                if conn.state != ConnState::QuitSent {
+                    conn.state = ConnState::Ready;
+                }
+                *eof = true;
+                Ok(Err(()))
+            }
+            RowPacket::Fail => {
+                if conn.state != ConnState::QuitSent {
+                    conn.state = ConnState::Ready;
+                }
+                *eof = true;
+                Ok(Err(()))
             }
         }
     }
 
-    /// The row decoder of the protocol, the lengths of a text row kept.
-    fn decode(
-        &mut self,
-        req: &mut Request,
-        conn: &mut ConnData,
-        bytes: &[u8],
-        native: bool,
-    ) -> Result<Result<Row, ()>, Thrown> {
-        let decoded = if self.binary {
-            crate::codec::decode_binary(req, &mut conn.stats, bytes, &self.fields)?
-        } else {
-            decode_text(req, &mut conn.stats, bytes, &self.fields, native)?
-        };
-        if let Ok(row) = &decoded
+    /// The lengths of a text row decoded, kept for `fetch_lengths`.
+    fn keep_lengths(&mut self, decoded: &Result<Row, ()>) {
+        if let Ok(row) = decoded
             && !self.binary
         {
             self.lengths = row
@@ -493,7 +817,6 @@ impl Res {
                 })
                 .collect();
         }
-        Ok(decoded)
     }
 
     /// `mysqlnd_res::skip_result`: unbuffered rows read to their end,
@@ -518,9 +841,10 @@ impl Res {
     }
 
     /// `mysqlnd_res::free_result`: counted by how it was freed, what is
-    /// left of unbuffered rows read off the line.
+    /// left of unbuffered rows read off the line, the rows and the pool
+    /// freed whatever the reading came to.
     pub(crate) fn free(
-        &mut self,
+        mut self,
         req: &mut Request,
         conn: &mut ConnData,
         implicit: bool,
@@ -530,9 +854,9 @@ impl Res {
         } else {
             Stat::FreeResultExplicit
         });
-        self.skip(req, conn)?;
-        self.rows = Rows::None;
-        Ok(())
+        let skipped = self.skip(req, conn);
+        self.release(req);
+        skipped
     }
 
     /// `mysqlnd_res::fetch_field`: the next column's description.
@@ -552,6 +876,22 @@ impl Res {
     #[must_use]
     pub fn field_tell(&self) -> usize {
         self.current_field
+    }
+}
+
+/// The row decoder of the protocol.
+fn decode_row(
+    req: &mut Request,
+    conn: &mut ConnData,
+    binary: bool,
+    fields: &[Field],
+    bytes: &[u8],
+    native: bool,
+) -> Result<Result<Row, ()>, Thrown> {
+    if binary {
+        crate::codec::decode_binary(req, &mut conn.stats, bytes, fields)
+    } else {
+        decode_text(req, &mut conn.stats, bytes, fields, native)
     }
 }
 
@@ -676,7 +1016,8 @@ fn numeric_key(name: &[u8]) -> Option<i64> {
 
 /// What reading one row came to.
 pub(crate) enum RowPacket {
-    Row(Vec<u8>),
+    /// The row's packet, in the pool.
+    Row(Chunk),
     Eof {
         warning_count: u32,
         server_status: u32,
@@ -686,37 +1027,69 @@ pub(crate) enum RowPacket {
     Fail,
 }
 
+/// The connection gone under a read, as php marks it.
+fn gone(conn: &mut ConnData) -> RowPacket {
+    conn.state = ConnState::QuitSent;
+    conn.error
+        .client(cr::SERVER_GONE_ERROR, crate::error::SERVER_GONE);
+    RowPacket::Fail
+}
+
 /// `php_mysqlnd_rowp_read` with `php_mysqlnd_read_row_ex`: a row's
-/// bytes, a payload over several frames joined; an error or an EOF in
-/// their place.
-fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> RowPacket {
-    let mut data = Vec::new();
-    let mut header_size;
-    loop {
-        let Some(size) = conn.net.read_header(req, &mut conn.stats, &mut conn.error) else {
-            conn.state = ConnState::QuitSent;
-            conn.error
-                .client(cr::SERVER_GONE_ERROR, crate::error::SERVER_GONE);
-            return RowPacket::Fail;
+/// packet read into a chunk of `pool` one byte longer than it, frames of
+/// `MYSQLND_MAX_PACKET_SIZE` joined in an `erealloc`'d buffer first and
+/// copied in; an error or an EOF in its place. The `Err` is the memory
+/// limit's fatal.
+fn read_row(
+    req: &mut Request,
+    conn: &mut ConnData,
+    pool: &mut Pool,
+    binary: bool,
+) -> Result<RowPacket, Thrown> {
+    let Some(mut size) = conn.net.read_header(req, &mut conn.stats, &mut conn.error) else {
+        return Ok(gone(conn));
+    };
+    let mut joined: Option<Emalloc> = None;
+    let mut data_size = 0;
+    while size >= MAX_PACKET_SIZE {
+        let grown = match joined.take() {
+            Some(buf) => buf.resize(req, data_size + size)?,
+            None => Emalloc::new(req, data_size + size)?,
         };
-        header_size = size;
-        let Some(chunk) = conn.net.receive(req, size, &mut conn.stats) else {
-            conn.state = ConnState::QuitSent;
-            conn.error
-                .client(cr::SERVER_GONE_ERROR, crate::error::SERVER_GONE);
-            return RowPacket::Fail;
+        let buf = joined.insert(grown);
+        let into = &mut buf.bytes_mut()[data_size..data_size + size];
+        let read = conn.net.receive_into(req, into, &mut conn.stats);
+        data_size += size;
+        let next = if read {
+            conn.net.read_header(req, &mut conn.stats, &mut conn.error)
+        } else {
+            None
         };
-        data.extend_from_slice(&chunk);
-        if size < crate::consts::MAX_PACKET_SIZE {
-            break;
-        }
+        let Some(next) = next else {
+            if let Some(buf) = joined {
+                buf.free(req);
+            }
+            return Ok(gone(conn));
+        };
+        size = next;
     }
+    let chunk = pool.get_chunk(req, data_size + size + 1)?;
+    if let Some(buf) = joined {
+        pool.bytes_mut(chunk)[..data_size].copy_from_slice(&buf.bytes()[..data_size]);
+        buf.free(req);
+    }
+    let into = &mut pool.bytes_mut(chunk)[data_size..data_size + size];
+    if !conn.net.receive_into(req, into, &mut conn.stats) {
+        return Ok(gone(conn));
+    }
+    let row = chunk.prefix(data_size + size);
     conn.stats.add(
         Stat::BytesReceivedRsetRow,
-        (crate::net::HEADER_SIZE + header_size) as u64,
+        (crate::net::HEADER_SIZE + size) as u64,
     );
     conn.stats.inc(Stat::PacketsReceivedRsetRow);
-    match data.first() {
+    let data = pool.bytes(row);
+    Ok(match data.first() {
         Some(&ERROR_MARKER) => {
             RowPacket::Error(PacketError::read_from(data.get(1..).unwrap_or_default()))
         }
@@ -738,9 +1111,9 @@ fn read_row(req: &mut Request, conn: &mut ConnData, binary: bool) -> RowPacket {
             } else {
                 Stat::RowsFetchedFromServerNormal
             });
-            RowPacket::Row(data)
+            RowPacket::Row(row)
         }
-    }
+    })
 }
 
 /// `php_mysqlnd_rowp_read_text_protocol`: each column's length-encoded

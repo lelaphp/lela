@@ -100,7 +100,7 @@ impl Stmt {
         let result = if h.buffered {
             h.server.store(req)?
         } else {
-            h.server.use_unbuffered(req)
+            h.server.use_unbuffered(req)?
         };
         let Some(result) = result else {
             return Err(self.error(req));

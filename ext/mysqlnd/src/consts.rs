@@ -70,6 +70,7 @@ pub(crate) mod cr {
     pub(crate) const UNKNOWN_ERROR: u32 = 2000;
     pub(crate) const CONNECTION_ERROR: u32 = 2002;
     pub(crate) const SERVER_GONE_ERROR: u32 = 2006;
+    pub(crate) const OUT_OF_MEMORY: u32 = 2008;
     pub(crate) const SERVER_LOST: u32 = 2013;
     pub(crate) const COMMANDS_OUT_OF_SYNC: u32 = 2014;
     pub(crate) const CANT_FIND_CHARSET: u32 = 2019;
