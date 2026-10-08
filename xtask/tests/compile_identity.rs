@@ -775,3 +775,34 @@ fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_j
         reading.message
     );
 }
+
+/// The reading names the binary that dumped the corpus, its path and the
+/// md5 of its bytes, as `phpt`'s does (#506, `Runner::stamp`), so two
+/// readings over one tree under two binaries are told apart; where no
+/// binary dumped, the engine's absent, the reading names none.
+#[test]
+fn the_reading_names_the_binary_that_dumped_it_and_none_where_none_did() {
+    if oracle().is_none() {
+        return;
+    }
+    let scratch = Scratch::new("stamp");
+    let engine = scratch.same_as_php();
+    let reading = scratch.run(&registry(""), &engine);
+    let md5 = format!("{:x}", md5::compute(fs::read(&engine).unwrap()));
+    assert!(
+        reading
+            .message
+            .ends_with(&format!("; dumped by {} md5 {md5}", engine.display())),
+        "{}",
+        reading.message
+    );
+
+    let absent = scratch.ask(
+        &registry(""),
+        &Ask {
+            corpus: Some(scratch.corpus.clone()),
+            ..Ask::default()
+        },
+    );
+    assert!(!absent.message.contains("dumped by"), "{}", absent.message);
+}

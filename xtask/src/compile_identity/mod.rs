@@ -297,6 +297,13 @@ pub(crate) fn reading(
             corpus.root.display()
         )
     };
+    // Which binary dumped it, as `phpt`'s reading names the one that ran
+    // (#475, #506): two readings over one tree under two binaries are
+    // told apart by it. A rung with no binary of the engine's names none.
+    let message = match runner.stamp() {
+        Some(engine) => format!("{message}; dumped by {engine}"),
+        None => message,
+    };
     // The corpus has no sources of its own in the workspace: what the
     // dump under measurement is a function of is the whole engine, so the
     // reading is stamped over the workspace.
