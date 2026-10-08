@@ -55,7 +55,7 @@ budget = 500                               # fork, the signal pool and LC_CTYPE:
 lock = "process.lock"
 [[crate]]
 name = "php_unit"
-budget = 6000
+budget = 2500
 lock = "unit.lock"
 [[crate]]
 name = "php_link"
