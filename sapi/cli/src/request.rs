@@ -526,7 +526,7 @@ mod tests {
             .extensions(&extensions)
             .configure(php_bundle::CONFIGURE)
             .tier::<php_bundle::Tier>();
-        for (name, value) in &options.ini {
+        for (name, value) in &options.startup.ini {
             builder = builder.ini(name, value);
         }
         let engine = builder.build();

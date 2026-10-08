@@ -125,14 +125,16 @@ pub struct Server {
     pub quiet: u8,
 }
 
-/// Whether the engine the line's ini entries build has a shell, as
-/// `do_cli` asks `cli_shell_callbacks.cli_shell_run` once php's modules
-/// have started.
-pub type HasShell = dyn Fn(&[(Vec<u8>, Vec<u8>)]) -> bool;
+/// php's modules started for the CLI under the line's [`Startup`], as
+/// `main` starts them between its own pass and `do_cli`'s
+/// (`Z/sapi/cli/php_cli.c:1341`), answering whether the start filled
+/// `cli_shell_callbacks.cli_shell_run`, which `do_cli` asks of `-a`.
+pub type Start<'a> = dyn Fn(&Startup) -> bool + 'a;
 
-/// The command line, read: the engine's switches and what is asked of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Options {
+/// What `main`'s pass reads off the line for php's modules to start
+/// under, before `do_cli` reads the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Startup {
     /// `-c` and `-n`, which steer the search for php.ini.
     pub ini_search: Search,
     /// Each `-d name=value` split at its first `=`, in the order given;
@@ -142,15 +144,22 @@ pub struct Options {
     /// `UTC;` stands here and is `UTC` once read; both are the
     /// argument's bytes, as php's argv is.
     pub ini: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `-e` taken, `main`'s `use_extended_info`: the engine compiles
+    /// with extended info (`Z/sapi/cli/php_cli.c:1317`, `:1366`).
+    pub extended_info: bool,
+}
+
+/// The command line, read: what the engine starts under and what is
+/// asked of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Options {
+    pub startup: Startup,
     /// `--repeat <count>`: the request served this many times, php's
     /// `num_repeats`, `atoi` of the value.
     pub repeat: i64,
     /// `-a` taken, which `do_cli` answers with `Interactive shell` and
     /// a blank line on stdout before it serves whatever the mode is.
     pub interactive: bool,
-    /// `-e` taken, `main`'s `use_extended_info`: the engine compiles
-    /// with extended info (`Z/sapi/cli/php_cli.c:1317`, `:1366`).
-    pub extended_info: bool,
     pub ask: Ask,
 }
 
@@ -249,20 +258,19 @@ impl Options {
     /// for itself; `do_cli`'s second loop settles what is being done
     /// with the line, then the program, then what is left as its
     /// arguments. `--` ends the switches; a word after it is the program
-    /// unless one was named already. `-a` asks `shell` of the line's ini
-    /// entries, the engine's answer to whether the bundle filled php's
-    /// shell callbacks, which php has started its modules to know.
-    pub fn parse(argv: &[OsString], shell: &HasShell) -> Result<Options, Refused> {
+    /// unless one was named already. Where `do_cli` reads the line, php's
+    /// modules have started: `start` starts them under the line's
+    /// [`Startup`] before the second loop, once, and its answer is what
+    /// `-a` asks.
+    pub fn parse(argv: &[OsString], start: &Start<'_>) -> Result<Options, Refused> {
         let argv: Vec<Vec<u8>> = argv
             .iter()
             .map(|word| word.as_encoded_bytes().to_vec())
             .collect();
         let mut options = Options {
-            ini_search: Search::default(),
-            ini: Vec::new(),
+            startup: Startup::default(),
             repeat: 1,
             interactive: false,
-            extended_info: false,
             ask: Ask::Serve(Program::Stdin, Vec::new()),
         };
         match options.main_pass(&argv)? {
@@ -276,9 +284,7 @@ impl Options {
             }
             Host::Cli => {}
         }
-        let mut has_shell = None;
-        let ini = options.ini.clone();
-        let settled = mode_pass(&argv, &mut || *has_shell.get_or_insert_with(|| shell(&ini)));
+        let settled = mode_pass(&argv, start(&options.startup));
         if settled.usage {
             return Err(usage(1));
         }
@@ -378,15 +384,16 @@ impl Options {
                 }
                 Ok(Taken::Switch(code, value)) => match code {
                     b'n' => {
-                        self.ini_search.ignore = true;
+                        self.startup.ini_search.ignore = true;
                         continue;
                     }
                     b'c' => {
-                        self.ini_search.path = value;
+                        self.startup.ini_search.path = value;
                         continue;
                     }
                     b'd' => {
-                        self.ini.push(define(&value.unwrap_or_default()));
+                        let define = define(&value.unwrap_or_default());
+                        self.startup.ini.push(define);
                         continue;
                     }
                     b'S' => {
@@ -394,7 +401,7 @@ impl Options {
                         continue;
                     }
                     b'e' => {
-                        self.extended_info = true;
+                        self.startup.extended_info = true;
                         continue;
                     }
                     b'h' | b'?' => Ask::Usage,
@@ -444,9 +451,10 @@ impl Settled {
 
 /// `do_cli`'s second loop (`php_cli.c:666-832`): the mode, the program
 /// and the rest of what the switches name, each switch read as php reads
-/// it. A `param_error` does not end the loop: the last one set is the one
+/// it, `-a` under whether the started modules have a `shell`. A
+/// `param_error` does not end the loop: the last one set is the one
 /// `do_cli` puts.
-fn mode_pass(argv: &[Vec<u8>], shell: &mut dyn FnMut() -> bool) -> Settled {
+fn mode_pass(argv: &[Vec<u8>], shell: bool) -> Settled {
     let mut settled = Settled {
         mode: Mode::Standard,
         script_file: None,
@@ -466,7 +474,7 @@ fn mode_pass(argv: &[Vec<u8>], shell: &mut dyn FnMut() -> bool) -> Settled {
         let interactive = settled.interactive;
         let error = &mut settled.param_error;
         match code {
-            b'a' if !shell() => *error = Some(NO_SHELL),
+            b'a' if !shell => *error = Some(NO_SHELL),
             b'a' if !interactive => {
                 if mode == Mode::Standard {
                     settled.interactive = true;
@@ -738,17 +746,19 @@ mod tests {
         assert_eq!(
             options,
             Ok(Options {
-                ini_search: Search {
-                    path: None,
-                    ignore: true,
+                startup: Startup {
+                    ini_search: Search {
+                        path: None,
+                        ignore: true,
+                    },
+                    ini: vec![
+                        (b"precision".to_vec(), b"10".to_vec()),
+                        (b"foo".to_vec(), b"1".to_vec())
+                    ],
+                    extended_info: false,
                 },
                 repeat: 1,
                 interactive: false,
-                extended_info: false,
-                ini: vec![
-                    (b"precision".to_vec(), b"10".to_vec()),
-                    (b"foo".to_vec(), b"1".to_vec())
-                ],
                 ask: Ask::Serve(
                     file("a.php"),
                     vec![OsString::from("-x"), OsString::from("y")]
@@ -884,7 +894,7 @@ mod tests {
     /// the program is served as it would be without it.
     #[test]
     fn extended_info_is_read_and_serves_what_the_line_asks() {
-        let read = |words: &[&str]| parse(words).map(|o| (o.extended_info, o.ask));
+        let read = |words: &[&str]| parse(words).map(|o| (o.startup.extended_info, o.ask));
         assert_eq!(
             read(&["-n", "-e", "-r", "echo 1;"]),
             Ok((true, Ask::Serve(direct("echo 1;"), Vec::new())))
