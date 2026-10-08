@@ -21,9 +21,11 @@
 //!   change the line does not account for is as likely theirs as the
 //!   call's. The sensor cannot tell whose it is, so it keeps it as it
 //!   stands and says so: a passing reading and the hook's context name the
-//!   file and the blob it was before. What that misses, a binary that
-//!   hides the path, is `done`'s condition 6 to hold at the push; a
-//!   person's lost edit is held by nothing.
+//!   file and the blob it was before, and the change is recorded
+//!   ([`super::kept`]). Until a person commits it or restores it to
+//!   `HEAD`, it is one of `done`'s unmet conditions, which is where a
+//!   binary that hides the path is held; a person's lost edit would be
+//!   held by nothing.
 //! - A call with no record of its own: no tool-use id, a record a build
 //!   older than this one never wrote, a record already taken. Nothing is
 //!   put back without the blob it was before, and stderr says so.
@@ -58,6 +60,7 @@ use serde::{Deserialize, Serialize};
 use super::INSTRUMENT;
 use super::argv;
 use super::call::Call;
+use super::kept;
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
@@ -98,6 +101,8 @@ struct Guarded {
 struct Moved {
     checkout: PathBuf,
     path: String,
+    /// Its blob before the call; `None` where it was not on disk.
+    was: Option<String>,
     said: String,
     verdict: Verdict,
 }
@@ -261,6 +266,7 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
             moved.push(Moved {
                 checkout: guarded.checkout.clone(),
                 path: path.clone(),
+                was: was.clone(),
                 said,
                 verdict,
             });
@@ -304,13 +310,11 @@ fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Opti
 /// What a file the line cannot write says when it moved: kept, why, and
 /// where what it was before stands.
 fn kept_words(was: Option<&str>) -> String {
-    let before = match was {
-        Some(id) => format!("it was blob {id} before the call (`git cat-file -p {id}`)"),
-        None => "it was not on disk before the call".to_owned(),
-    };
+    let before = kept::before_the_call(was);
     format!(
         "changed while the call ran, and its line cannot write it, so it is kept as it stands: \
-         a person's edit, or a write the line does not show; {before}"
+         a person's edit, or a write the line does not show; {before}; until a person commits \
+         it or restores it to HEAD, `done` lists it as unmet"
     )
 }
 
@@ -381,8 +385,10 @@ fn resolved(path: &Path) -> PathBuf {
 
 /// One reading per moved file, in the store of the checkout the file is
 /// in, stamped over the file as it stands: a failure for one put back, a
-/// note that passes for one kept.
+/// note that passes for one kept or approved; and a kept one's record,
+/// which `done` reads ([`kept::keep`]).
 fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
+    let words = format!("{} {}", call.tool_name, call.subject(root));
     for one in moved {
         // After the file was put back or kept: the stamp is over it as it
         // stands now.
@@ -390,9 +396,12 @@ fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
         let mut reading = Reading::stamped_over(INSTRUMENT, RULE, &now, Path::new(&one.path))?;
         RULE.clone_into(&mut reading.rule);
         reading.status = one.verdict.status();
-        reading.message = format!("{} {}: {}", call.tool_name, call.subject(root), one.said);
+        reading.message = format!("{words}: {}", one.said);
         reading.session.clone_from(&call.session_id);
         Store::of_workspace(&one.checkout).record(&[reading])?;
+        if one.verdict == Verdict::Kept {
+            kept::keep(&one.checkout, &one.path, one.was.as_deref(), &words)?;
+        }
     }
     Ok(())
 }
@@ -613,7 +622,7 @@ fn rule_of(checkout: &Path) -> Result<Option<Reach>> {
 
 /// The blob id of the file at `path` as it is on disk, `None` where there
 /// is no file.
-fn on_disk(path: &Path) -> Option<String> {
+pub(super) fn on_disk(path: &Path) -> Option<String> {
     fs::read(path).ok().map(|bytes| git::blob_id(&bytes))
 }
 
