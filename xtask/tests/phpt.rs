@@ -652,6 +652,71 @@ fn the_variable_names_the_tree_to_a_run_of_the_binary() {
     );
 }
 
+/// A relative `--root` reaches the verdicts an absolute one does (#942):
+/// the engine is found under the root and run in each test's own
+/// directory, so the root is made absolute where the command line is
+/// read. Before, `--root .` handed every test `./target/debug/php`, its
+/// `-m` listed no extension, and a test naming one skipped.
+#[test]
+fn a_relative_root_reaches_the_verdicts_an_absolute_one_does() {
+    let Some(oracle) = oracle() else { return };
+    let root = Tree::new("phpt-relative-root").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    fs::create_dir_all(root.join("ext/ctype")).unwrap();
+    fs::write(
+        root.join("ext/ctype/Cargo.toml"),
+        "[package]\nname = \"php_ext_ctype\"\n",
+    )
+    .unwrap();
+    let corpus = root.join("corpus");
+    fs::create_dir_all(corpus.join("ext/ctype/tests")).unwrap();
+    fs::write(
+        corpus.join("ext/ctype/tests/named.phpt"),
+        "--TEST--\nnamed\n--EXTENSIONS--\nctype\n--FILE--\n<?php var_dump(ctype_digit('1'));\n--EXPECT--\nbool(true)\n",
+    )
+    .unwrap();
+    let engine = root.join("target/debug/php");
+    fs::create_dir_all(engine.parent().unwrap()).unwrap();
+    fs::write(
+        &engine,
+        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", oracle.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let run = |given: &Path| {
+        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(given)
+            .args(["phpt", "--subset", "ext/ctype", "--jobs", "1"])
+            .current_dir(&root)
+            .env(xtask::oracle::TREE_VARIABLE, &corpus)
+            .output()
+            .unwrap();
+        // The verdicts, the reading's line up to what it was run by.
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let verdicts = stdout
+            .lines()
+            .find(|line| line.contains(" phpt ext/ctype: "))
+            .and_then(|line| line.split(';').next())
+            .map(str::to_owned);
+        (verdicts, stdout.into_owned())
+    };
+    let (absolute, said) = run(root.path());
+    assert_eq!(
+        absolute.as_deref(),
+        Some(
+            "pass phpt ext/ctype: ext/ctype: 1 passed, 0 skipped, 0 unread by the compiler of 1 tests"
+        ),
+        "{said}"
+    );
+    let (relative, said) = run(Path::new("."));
+    assert_eq!(relative, absolute, "{said}");
+}
+
 #[test]
 fn the_full_corpus_is_a_flag_the_manifest_denies_at_the_tool_call() {
     // The rule's fixture is the negative control; this asserts the flag the
