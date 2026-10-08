@@ -97,9 +97,10 @@ impl Expectation {
         };
         oracle.asserted()?;
         let files = Tree::new("expectregex")?;
-        let (pattern, output) = (files.join("pattern"), files.join("output"));
-        std::fs::write(&pattern, body).context("writing the pattern")?;
-        std::fs::write(&output, actual).context("writing the output")?;
+        let (pattern, output) = (
+            files.write("pattern", body)?,
+            files.write("output", actual)?,
+        );
         let args = [
             pattern.to_string_lossy().into_owned(),
             output.to_string_lossy().into_owned(),
