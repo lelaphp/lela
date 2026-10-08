@@ -6,7 +6,9 @@
 //! - A seam's lock is regenerated and diffed against the committed file. An
 //!   item lock (`heap.lock`, `unit.lock`, `api.lock`, and `xtask.lock`, the
 //!   harness's own, #55) is the public items of the crate the lock lives
-//!   with, `lock_from` deciding which for the facade; an import lock
+//!   with, `lock_from` deciding which for the facade, or of one module of
+//!   its producer for a seam with `module` (`layer.lock`, #1959), whose
+//!   `use` by a crate outside the seam's consumers fails; an import lock
 //!   (`sapi.lock`, `tier.lock`, the ones an `[[edge]]` cites by `lock` or
 //!   `allowlist`, or a seam with `allowlist = true`) is what the consumers
 //!   `use` from the producer; a rendered lock (`ops.lock`, the seam whose
@@ -205,6 +207,9 @@ fn lock_kind(manifest: &Manifest, seam: &Seam) -> LockKind {
     if seam.generated {
         return LockKind::Rendered;
     }
+    if seam.module.is_some() {
+        return LockKind::Items;
+    }
     let cited = manifest.edges.iter().any(|e| {
         e.lock.as_deref() == Some(seam.lock.as_str())
             || e.allowlist.as_deref() == Some(seam.lock.as_str())
@@ -269,7 +274,9 @@ fn seam_reading(
     let committed = path.is_file().then(|| Lock::read(&path)).transpose()?;
     let (blocks, mut problems) = if seam.sections.is_empty() {
         let lines = match kind {
-            LockKind::Items => lines_counted_by_module(inventory, krate, &mut reading)?,
+            LockKind::Items => {
+                lines_counted_by_module(inventory, krate, seam.module.as_deref(), &mut reading)?
+            }
             LockKind::Imports => imports(manifest, crates, seam)?
                 .into_values()
                 .flatten()
@@ -289,6 +296,7 @@ fn seam_reading(
     problems.extend(hold_lock(
         seam, kind, &path, &shown, &subject, committed, &blocks, write,
     )?);
+    problems.extend(strangers(crates, seam)?);
     if write {
         let mut rewritten = stamped(&Snapshot::disk(crates.root())?)?;
         rewritten.numbers = std::mem::take(&mut reading.numbers);
@@ -468,6 +476,40 @@ fn imports(
                 }
                 if !held.contains(&line) {
                     lines.insert(line);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The `use` paths into a seam's `module` of its producer written by a
+/// crate outside the seam's consumers (#1959): `php_ext` re-exporting
+/// `php_engine::layer`, or an extension reaching past its facade for it,
+/// each a face the seam keeps for its consumers alone. None for a seam
+/// that is no module.
+fn strangers(crates: &Crates, seam: &Seam) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let (Some(module), Some(producer)) = (&seam.module, crates.named(&seam.producer)) else {
+        return Ok(out);
+    };
+    for krate in crates.iter() {
+        if krate.name == producer.name || seam.consumers.iter().any(|c| matches(c, &krate.name)) {
+            continue;
+        }
+        let Some(dep) = krate.deps.iter().find(|d| d.name == producer.name) else {
+            continue;
+        };
+        for file in krate.sources()? {
+            for path in uses(&file)? {
+                if path.segs.first() == Some(&dep.alias) && path.segs.get(1) == Some(module) {
+                    out.push(format!(
+                        "{} uses {}; {}::{module} is {}'s alone",
+                        crates.relative(&file).display(),
+                        path.segs.join("::"),
+                        producer.ident(),
+                        seam.consumers.join(", "),
+                    ));
                 }
             }
         }
@@ -759,14 +801,22 @@ fn private(line: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
 }
 
-/// The public items of `krate` as lock lines; on the way, `reading` gains
-/// one group per module that defines any, its count of them (#1795).
+/// The public items of `krate` as lock lines, or of its one `module` alone
+/// (#1959); on the way, `reading` gains one group per module that defines
+/// any, its count of them (#1795).
 fn lines_counted_by_module(
     inventory: &mut Inventory<'_>,
     krate: &Present,
+    module: Option<&str>,
     reading: &mut Reading,
 ) -> Result<BTreeSet<String>> {
-    let modules = inventory.defining_modules(krate)?;
+    let mut modules = inventory.defining_modules(krate)?;
+    if let Some(module) = module {
+        modules.retain(|line, _| {
+            line.strip_prefix(module)
+                .is_some_and(|rest| rest.starts_with("::"))
+        });
+    }
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
     for module in modules.values() {
         *counts.entry(module).or_default() += 1;

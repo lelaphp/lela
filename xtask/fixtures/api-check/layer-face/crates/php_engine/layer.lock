@@ -1,0 +1,3 @@
+# layer.lock: the fixture's stream layer face
+layer::StreamLayer
+layer::StreamLayer::host_fd
