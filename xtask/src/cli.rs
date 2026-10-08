@@ -225,6 +225,12 @@ pub(crate) enum Command {
     /// missing `computed` and an untrusted checkout, whose `computed trust`
     /// line is printed as a person's.
     Regions {
+        /// For pre-commit: refuse, before rendering, a region the commit
+        /// would carry, one it would write or one of a file the commit
+        /// stages, that reads a path whose working copy is not what the
+        /// commit stages, since its render carries that change (#2236).
+        #[arg(long)]
+        staged: bool,
         /// The files, relative to the root.
         #[arg(required = true, value_name = "FILE")]
         files: Vec<String>,

@@ -22,11 +22,16 @@
 //! its three arms say what this module's variants say, in the hook's own
 //! words.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+
+use crate::git::git;
 
 /// What `computed run` did, interpreted once.
 #[derive(Debug, PartialEq, Eq)]
@@ -171,8 +176,20 @@ impl Answer {
 
 /// `xtask regions <files>`: the files rendered from `root`, each on its
 /// own line on stdout, `computed`'s lines on stderr, and an error for
-/// what is not a rendering.
-pub fn command(root: &Path, files: &[String]) -> Result<()> {
+/// what is not a rendering. With `staged`, a region it would write that
+/// reads an unstaged path is refused first, and nothing is rendered.
+pub fn command(root: &Path, files: &[String], staged: bool) -> Result<()> {
+    if staged {
+        let refused = unstaged_reads(root, files)?;
+        if !refused.is_empty() {
+            bail!(
+                "a region this commit would carry reads a path whose working copy it does not stage, \
+                 so its render would carry that change (#2236); stage the path with it, or leave the \
+                 path as it is staged:\n{}",
+                refused.join("\n")
+            );
+        }
+    }
     let answer = render(root, files)?;
     eprint!("{}", answer.said());
     print!("{}", answer.lines());
@@ -180,6 +197,157 @@ pub fn command(root: &Path, files: &[String]) -> Result<()> {
         Some(refusal) => bail!("{refusal}"),
         None => Ok(()),
     }
+}
+
+/// The regions of `files` the commit would carry, those `computed` would
+/// write and those of a file it stages, that read a path whose working
+/// copy is not what is staged, one line each with the paths: `git diff` against the index the commit is written from, and
+/// what is untracked and not ignored, a new directory as itself, which is
+/// what a `tree` region lists and an input glob takes in. `computed`
+/// renders from the working tree, so such a region's render would carry a
+/// change the commit does not (#2236).
+fn unstaged_reads(root: &Path, files: &[String]) -> Result<Vec<String>> {
+    let mut unstaged: Vec<String> = Vec::new();
+    for args in [
+        &["diff", "--name-only", "-z"][..],
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--directory",
+        ],
+    ] {
+        let listed = git(root, args, None)?;
+        unstaged.extend(
+            listed
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    if unstaged.is_empty() {
+        return Ok(Vec::new());
+    }
+    let states: States = asked(root, "check", files)?;
+    let unfresh: BTreeSet<(String, u64)> = states
+        .files
+        .into_iter()
+        .flat_map(|file| {
+            file.regions
+                .into_iter()
+                .filter(|region| region.state != State::Fresh)
+                .map(move |region| (file.path.clone(), region.line))
+        })
+        .collect();
+    // A file the commit stages carries its regions as they stand, a render
+    // made earlier from the working tree among them.
+    let staged = git(root, &["diff", "--cached", "--name-only", "-z"], None)?;
+    let staged: BTreeSet<&str> = staged.split('\0').collect();
+    let carried = |paths: &[String]| -> Result<Vec<Region>> {
+        let affected: Affected = asked(root, "affected", paths)?;
+        Ok(affected
+            .regions
+            .into_iter()
+            .filter(|r| {
+                unfresh.contains(&(r.path.clone(), r.line)) || staged.contains(r.path.as_str())
+            })
+            .collect())
+    };
+    if carried(&unstaged)?.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The refusal names each region's paths: one question per path, asked
+    // only once there is a refusal to name them in.
+    let mut reads: BTreeMap<Region, Vec<&str>> = BTreeMap::new();
+    for path in &unstaged {
+        for region in carried(std::slice::from_ref(path))? {
+            reads.entry(region).or_default().push(path);
+        }
+    }
+    Ok(reads
+        .into_iter()
+        .map(|(r, paths)| {
+            format!(
+                "{}:{} {} reads {}",
+                r.path,
+                r.line,
+                r.name,
+                paths.join(", ")
+            )
+        })
+        .collect())
+}
+
+/// What `computed check --format json` says of each file's regions.
+#[derive(Deserialize)]
+struct States {
+    files: Vec<FileStates>,
+}
+
+#[derive(Deserialize)]
+struct FileStates {
+    path: String,
+    regions: Vec<RegionState>,
+}
+
+#[derive(Deserialize)]
+struct RegionState {
+    line: u64,
+    state: State,
+}
+
+/// A region's state: fresh, or one `computed run` acts on (stale,
+/// unrendered, hand-edited, volatile), which the refusal does not tell
+/// apart.
+#[derive(Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum State {
+    Fresh,
+    #[serde(other)]
+    Acted,
+}
+
+/// What `computed affected --format json` says: the regions that read a
+/// path it was handed.
+#[derive(Deserialize)]
+struct Affected {
+    regions: Vec<Region>,
+}
+
+/// One region, by its file and the line of its opener.
+#[derive(Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct Region {
+    path: String,
+    line: u64,
+    name: String,
+}
+
+/// `computed <command> <args> --format json` from `root`, its one JSON
+/// document; exit 0, and 1 for a region not fresh, are answers, and any
+/// other exit is `computed`'s refusal, its stderr carried.
+fn asked<T: DeserializeOwned>(root: &Path, command: &str, args: &[String]) -> Result<T> {
+    let out = Command::new("computed")
+        .arg(command)
+        .args(args)
+        .args(["--format", "json"])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("running computed {command}"))?;
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        bail!(
+            "computed {command} exited {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    serde_json::from_slice(&out.stdout).with_context(|| {
+        format!(
+            "computed {command} --format json: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })
 }
 
 #[cfg(test)]

@@ -496,7 +496,7 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             ..
         } => Some(track_work::command(root, run, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
-        Command::Regions { files } => Some(computed::command(root, files)),
+        Command::Regions { staged, files } => Some(computed::command(root, files, *staged)),
         Command::Steer {
             file,
             from,

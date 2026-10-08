@@ -295,9 +295,9 @@ impl Scratch {
 
 /// The instruments that only read the tree first, `fmt` and then at once
 /// `api-check`, `budget`, `unsafe-audit`, `vocab` and `permit --diff`;
-/// then `xtask regions` over the five region files and not the gitignored
-/// local one, which reaches `computed run`, and `computed check` over the
-/// five; then `clippy` and `test`, then `witness` and `crosscheck` at once
+/// then `xtask regions --staged` over the five region files and not the
+/// gitignored local one, which reaches `computed run`, and `computed
+/// check` over the five; then `clippy` and `test`, then `witness` and `crosscheck` at once
 /// (#1252), crosscheck on the staged extensions alone (#1312). The region
 /// file `computed` rewrote is re-staged before `test` runs, so the map
 /// tests read the map the commit carries from the index (#1416): a hook
@@ -326,7 +326,7 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     let mut calls = scratch.calls("cargo");
     calls[1..6].sort_unstable();
     calls[9..11].sort_unstable();
-    let rendering = format!("xtask regions {regions}");
+    let rendering = format!("xtask regions --staged {regions}");
     let mut expected: Vec<String> = ["fmt --check"]
         .into_iter()
         .chain(reading)

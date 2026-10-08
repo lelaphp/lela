@@ -188,11 +188,13 @@ fi
 # them runs (#1416): xtask's map tests read the map from the index, `git
 # show :AGENTS.md`, so a commit that changes a region's inputs (a crate
 # under ext/, a lock line, a rule) is tested against the map it will
-# carry and not the one before the render. After the group above, whose
-# readings the seams and rules regions render.
+# carry and not the one before the render. computed renders from the
+# working tree, so `--staged` refuses, before anything is written, a
+# region it would write that reads a path whose working copy the commit
+# does not stage: rendered, it would carry that change (#2236).
 regions='AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md'
 # shellcheck disable=SC2086
-if rendered=$($X regions $regions); then
+if rendered=$($X regions --staged $regions); then
     echo "$rendered" | grep -E ' written$' | cut -d: -f1 | sort -u | while read -r file; do
         case " $regions " in *" $file "*) stage "$file" ;; esac
     done
