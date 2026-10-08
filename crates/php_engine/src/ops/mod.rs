@@ -12,8 +12,6 @@ use std::cmp::Ordering;
 
 use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
-use php_unit::decl::Visibility;
-
 use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
@@ -972,21 +970,9 @@ fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
             let i = u32::try_from(*slot).unwrap_or(u32::MAX);
             !eager || i >= o.slots() || !o.slot(i).is_undef()
         })
-        .map(|(_, declaring, p)| {
-            let prefix = match p.visibility {
-                Visibility::Public => None,
-                Visibility::Protected => Some(b"\0*\0".to_vec()),
-                // `property_info->ce->name`: a private property is
-                // mangled with the class that declared it, which for an
-                // inherited one is a class above.
-                Visibility::Private => req
-                    .class_decl(declaring)
-                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
-            };
-            MangledName {
-                name: p.name.0.clone(),
-                prefix,
-            }
+        .map(|(_, declaring, p)| MangledName {
+            name: p.name.0.clone(),
+            prefix: req.property_prefix(declaring, p.visibility),
         })
         .collect()
 }
@@ -1829,13 +1815,7 @@ pub(crate) fn debug_rows(
         let Some(p) = req.property_decl(info) else {
             continue;
         };
-        let prefix = match p.visibility {
-            Visibility::Public => None,
-            Visibility::Protected => Some(b"\0*\0".to_vec()),
-            Visibility::Private => req
-                .class_decl(info.declaring)
-                .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
-        };
+        let prefix = req.property_prefix(info.declaring, p.visibility);
         let bytes = [prefix.unwrap_or_default().as_slice(), &p.name.0].concat();
         let uninitialized = o
             .slot(at)
@@ -3688,33 +3668,11 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Object(&o) => {
-            // `increment_function`'s object arm: `do_operation(ZEND_ADD)` with one,
-            // where the class answers it, then `cast_object` to
-            // `_IS_NUMBER` and the step over the number.
-            let table = req.object_handlers(o.heap());
-            if let Some(stepped) =
-                table.do_operation(req, BinaryOp::Add, value, Some(&Value::int(1)))?
-            {
-                return Ok(stepped.hand_on());
-            }
-            if let Some(number) = object_number(req, o)? {
-                return increment(req, &number);
-            }
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot increment {name}"),
-            ))
-        }
-        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot increment {name}"),
-            ))
+        ValueRef::Object(_)
+        | ValueRef::Array(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => {
+            stepped_other(req, value, BinaryOp::Add, "increment", increment)
         }
     }
 }
@@ -3830,35 +3788,42 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             req.addref(value);
             Ok(*value)
         }
-        ValueRef::Object(&o) => {
-            // `decrement_function`'s object arm: `do_operation(ZEND_SUB)` with one,
-            // where the class answers it, then `cast_object` to
-            // `_IS_NUMBER` and the step over the number.
-            let table = req.object_handlers(o.heap());
-            if let Some(stepped) =
-                table.do_operation(req, BinaryOp::Sub, value, Some(&Value::int(1)))?
-            {
-                return Ok(stepped.hand_on());
-            }
-            if let Some(number) = object_number(req, o)? {
-                return decrement(req, &number);
-            }
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot decrement {name}"),
-            ))
-        }
-        ValueRef::Array(_) | ValueRef::Resource(_) | ValueRef::Reference(_) => {
-            let name = value_name(req, value);
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot decrement {name}"),
-            ))
+        ValueRef::Object(_)
+        | ValueRef::Array(_)
+        | ValueRef::Resource(_)
+        | ValueRef::Reference(_) => {
+            stepped_other(req, value, BinaryOp::Sub, "decrement", decrement)
         }
     }
+}
+
+/// The arms `increment_function` and `decrement_function` share past
+/// the scalars: an object's `do_operation` with one where the class
+/// answers it, then `cast_object` to `_IS_NUMBER` and `step` over the
+/// number; an object that answers neither, an array and a resource are
+/// the `TypeError` naming what could not be stepped.
+fn stepped_other(
+    req: &mut Request,
+    value: &Value,
+    op: BinaryOp,
+    verb: &str,
+    step: fn(&mut Request, &Value) -> Result<Value, Thrown>,
+) -> Result<Value, Thrown> {
+    if let ValueRef::Object(&o) = value.as_ref() {
+        let table = req.object_handlers(o.heap());
+        if let Some(stepped) = table.do_operation(req, op, value, Some(&Value::int(1)))? {
+            return Ok(stepped.hand_on());
+        }
+        if let Some(number) = object_number(req, o)? {
+            return step(req, &number);
+        }
+    }
+    let name = value_name(req, value);
+    Err(throw_error(
+        req,
+        "TypeError",
+        &format!("Cannot {verb} {name}"),
+    ))
 }
 
 /// `increment_string` (`Z/Zend/zend_operators.c:2613`), "Perl style
@@ -4477,16 +4442,6 @@ pub(crate) fn string_dim_offset(
     mode: DimRead,
 ) -> Result<Option<i64>, Thrown> {
     let dim = dim.deref();
-    let illegal = |req: &mut Request, dim: &Value| {
-        throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Cannot access offset of type {} on string",
-                zval_type_name(req, dim)
-            ),
-        )
-    };
     match dim.as_ref() {
         ValueRef::Int(n) => Ok(Some(n)),
         ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
@@ -4505,7 +4460,7 @@ pub(crate) fn string_dim_offset(
             // `if (type == BP_VAR_IS) { ZVAL_NULL(result); return; }`,
             // the one arm that stands before `zend_illegal_string_offset`.
             _ if mode == DimRead::Silent => Ok(None),
-            _ => Err(illegal(req, &dim)),
+            _ => Err(illegal_offset(req, "access", &dim, "on string")),
         },
         ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => {
             if mode == DimRead::Warning {
@@ -4520,7 +4475,7 @@ pub(crate) fn string_dim_offset(
         ValueRef::Array(_)
         | ValueRef::Object(_)
         | ValueRef::Resource(_)
-        | ValueRef::Reference(_) => Err(illegal(req, &dim)),
+        | ValueRef::Reference(_) => Err(illegal_offset(req, "access", &dim, "on string")),
     }
 }
 
@@ -4654,18 +4609,8 @@ pub(crate) fn array_offset(
             Ok(php_heap::Key::Long(id))
         }
         ValueRef::Undef => empty(req),
-        ValueRef::Array(_) => Err(throw_error(
-            req,
-            "TypeError",
-            "Cannot access offset of type array on array",
-        )),
-        ValueRef::Object(o) => {
-            let class = req.class_name(o.class());
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot access offset of type {class} on array"),
-            ))
+        ValueRef::Array(_) | ValueRef::Object(_) => {
+            Err(illegal_offset(req, "access", offset, "on array"))
         }
     }
 }
@@ -4888,18 +4833,8 @@ pub(crate) fn isset_offset(
     // and the type's for everything else.
     let held = offset.deref();
     match held.as_ref() {
-        ValueRef::Array(_) => Err(throw_error(
-            req,
-            "TypeError",
-            "Cannot access offset of type array in isset or empty",
-        )),
-        ValueRef::Object(object) => {
-            let class = req.class_name(object.class());
-            Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot access offset of type {class} in isset or empty"),
-            ))
+        ValueRef::Array(_) | ValueRef::Object(_) => {
+            Err(illegal_offset(req, "access", &held, "in isset or empty"))
         }
         _ => array_offset(req, &held, constant),
     }
@@ -5010,20 +4945,8 @@ pub(crate) fn unset_dim(
             req.release(Value::string(empty));
             return Ok(());
         }
-        ValueRef::Array(_) => {
-            return Err(throw_error(
-                req,
-                "TypeError",
-                "Cannot unset offset of type array on array",
-            ));
-        }
-        ValueRef::Object(o) => {
-            let class = req.class_name(o.class());
-            return Err(throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot unset offset of type {class} on array"),
-            ));
+        ValueRef::Array(_) | ValueRef::Object(_) => {
+            return Err(illegal_offset(req, "unset", &offset.deref(), "on array"));
         }
         // `deref` followed the reference already.
         ValueRef::Reference(_) => return Ok(()),
@@ -5096,12 +5019,22 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
 /// ```
 fn zval_type_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
-        ValueRef::Object(o) => req.class_decl(o.class()).map_or_else(
-            || String::from("object"),
-            |decl| php_unit::decl::shown(&decl.name.0).into_owned(),
-        ),
+        ValueRef::Object(o) => req.class_name(o.class()),
         _ => String::from(value.type_name()),
     }
+}
+
+/// `zend_illegal_container_offset` (`Z/Zend/zend.c:1846`):
+/// php's `TypeError` over an offset no container takes, an array or an
+/// object, named as `zend_zval_type_name` names it, `verb` the access
+/// and `container` what it was taken against.
+fn illegal_offset(req: &mut Request, verb: &str, offset: &Value, container: &str) -> Thrown {
+    let name = zval_type_name(req, offset);
+    throw_error(
+        req,
+        "TypeError",
+        &format!("Cannot {verb} offset of type {name} {container}"),
+    )
 }
 
 /// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:108`): `SIZE_MAX` less the
@@ -5208,25 +5141,7 @@ fn numbers(
     left: &Value,
     right: &Value,
 ) -> Result<(Number, Number), Thrown> {
-    let (left, right) = (&left.deref(), &right.deref());
-    let unsupported = |req: &mut Request| {
-        throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Unsupported operand types: {} {operator} {}",
-                zval_type_name(req, left),
-                zval_type_name(req, right)
-            ),
-        )
-    };
-    let Some(a) = to_number(req, left)? else {
-        return Err(unsupported(req));
-    };
-    let Some(b) = to_number(req, right)? else {
-        return Err(unsupported(req));
-    };
-    Ok((a, b))
+    operands(req, operator, left, right, to_number)
 }
 
 /// Both operands as `convert_op1_op2_long` converts them, which is
@@ -5239,25 +5154,31 @@ fn longs(
     left: &Value,
     right: &Value,
 ) -> Result<(i64, i64), Thrown> {
+    operands(req, operator, left, right, to_long)
+}
+
+/// Both operands as `convert` converts them, the left first, or
+/// `zend_binop_error`'s `TypeError` for the first that fails, naming
+/// php's types around the operator as written.
+fn operands<T>(
+    req: &mut Request,
+    operator: &str,
+    left: &Value,
+    right: &Value,
+    convert: fn(&mut Request, &Value) -> Result<Option<T>, Thrown>,
+) -> Result<(T, T), Thrown> {
     let (left, right) = (&left.deref(), &right.deref());
-    let unsupported = |req: &mut Request| {
-        throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Unsupported operand types: {} {operator} {}",
-                zval_type_name(req, left),
-                zval_type_name(req, right)
-            ),
-        )
-    };
-    let Some(a) = to_long(req, left)? else {
-        return Err(unsupported(req));
-    };
-    let Some(b) = to_long(req, right)? else {
-        return Err(unsupported(req));
-    };
-    Ok((a, b))
+    if let Some(a) = convert(req, left)?
+        && let Some(b) = convert(req, right)?
+    {
+        return Ok((a, b));
+    }
+    let message = format!(
+        "Unsupported operand types: {} {operator} {}",
+        zval_type_name(req, left),
+        zval_type_name(req, right)
+    );
+    Err(throw_error(req, "TypeError", &message))
 }
 
 /// `zendi_try_get_long`: the long php works in, or nothing for an array,
@@ -5492,22 +5413,14 @@ pub(crate) fn double_to_long_strict(req: &mut Request, d: f64) -> i64 {
 /// for one past the range. What `(int)` reads a float as, and the first
 /// half of [`double_to_long`].
 fn dval_to_lval(req: &mut Request, d: f64) -> i64 {
-    let oob = |req: &mut Request| {
+    if !d.is_finite() || !fits_long(d) {
         let text = rendered(d);
         warning(
             req,
             &format!("The float {text} is not representable as an int, cast occurred"),
         );
-    };
-    if !d.is_finite() {
-        oob(req);
-        0
-    } else if !fits_long(d) {
-        oob(req);
-        modular(d)
-    } else {
-        truncated(d)
     }
+    dval_to_lval_silent(d)
 }
 
 /// `zend_dval_to_lval_silent` (`Z/Zend/zend_operators.h:138`):

@@ -155,6 +155,15 @@ impl Request {
         Heap::release(&mut Hooks(self), value.to_zval());
     }
 
+    /// `GC_DELREF` and `gc_check_possible_root` over a value the caller
+    /// holds that another owner of stands ([`Heap::release_held`]):
+    /// whether an owner was given up, which is never the last.
+    #[allow(clippy::needless_pass_by_value)]
+    #[must_use = "the last owner kept is the caller's InternalError"]
+    pub(crate) fn release_held(&mut self, value: Value) -> bool {
+        Heap::release_held(&mut Hooks(self), value.to_zval())
+    }
+
     /// One owner fewer as `zval_ptr_dtor_nogc` gives it up: what
     /// [`Request::release`] does, and never a possible root of the cycle
     /// collector (design §5.12). What `FREE_OP` does to a temporary
@@ -164,14 +173,6 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn release_nogc(&mut self, value: Value) {
         Heap::release_nogc(&mut Hooks(self), value.to_zval());
-    }
-
-    /// The pin [`Heap::pin_block`] set over `value` let go, and what holds the
-    /// value freed now where its last owner went while the pin stood, an
-    /// object's destructor served through seam 1.
-    #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn unpin_block(&mut self, value: Value) {
-        Heap::unpin_block(&mut Hooks(self), value.to_zval());
     }
 
     /// `ZVAL_NEW_REF`, what [`PhpRef::new`] is: a cell of the request's

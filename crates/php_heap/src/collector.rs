@@ -43,7 +43,7 @@ use crate::hooks::HeapHooks;
 use crate::object::Obj;
 use crate::reference::Ref;
 use crate::zval::WeakMarks;
-use crate::{Heap, Zval, ZvalRef};
+use crate::{Heap, Zval, ZvalRef, ZvalType};
 
 /// `GC_FIRST_ROOT`: the first index of the root buffer, zero being
 /// the address a value in no entry reads.
@@ -746,11 +746,6 @@ impl Heap {
             };
             hooks.heap().gc.adjust_threshold(count);
             if node.gc().delref() == 0 {
-                // A pinned value's free waits for its pin
-                // ([`Heap::unpin_block`]).
-                if node.gc().pinned() {
-                    return;
-                }
                 match node {
                     Node::Arr(a) => Heap::array_destroy(hooks, a),
                     Node::Obj(o) => Heap::store_del(hooks, o),
@@ -980,12 +975,12 @@ impl Heap {
         let mut node = root;
         loop {
             let g = node.gc();
-            // A pinned value is reached from outside the graph, by the
-            // walk that pinned it ([`Heap::pin_block`]), so it is no
-            // garbage, and neither is what it holds.
+            // A pin is no owner: a pinned value nothing else reaches is
+            // garbage as php's is, and its pin keeps only its bytes
+            // ([`Heap::give_back`]).
             let next = if g.colour() != Colour::White {
                 None
-            } else if g.refcount() > 0 || g.pinned() {
+            } else if g.refcount() > 0 {
                 g.set_colour(Colour::Black);
                 Heap::gc_scan_black(hooks, node, kids);
                 None
@@ -1255,9 +1250,9 @@ impl Heap {
     /// out of the store, turned to `IS_NULL` and its members freed once,
     /// every garbage table turned to `IS_NULL` and its contents
     /// destroyed; then, in a second pass, what is still garbage off the
-    /// buffer and its bytes back to the heap, but for an object a
-    /// running frame pins, whose bytes and id wait for the last pin
-    /// ([`Heap::unpin`]).
+    /// buffer and its bytes back to the heap, but for a value a pin
+    /// stands over, whose bytes alone wait for the last pin
+    /// ([`Heap::give_back`]).
     fn gc_free_garbage(hooks: &mut dyn HeapHooks, end: u32) {
         for idx in FIRST_ROOT..end {
             let Some(Entry::Garbage(node)) = hooks.heap().gc.entry(idx) else {
@@ -1267,21 +1262,17 @@ impl Heap {
                 Node::Obj(o) => {
                     let handle = o.id().0;
                     hooks.heap().store.invalidate(handle);
-                    o.gc().set_kind_null();
+                    o.gc().set_kind(ZvalType::Null);
                     if !o.has_flag(gc::OBJ_FREE_CALLED) {
                         o.add_flag(gc::OBJ_FREE_CALLED);
                         o.addref();
                         Heap::object_free(hooks, o);
                         o.delref();
                     }
-                    // A pinned object's id waits with its bytes for
-                    // the last pin ([`Heap::unpin`]).
-                    if o.pins() == 0 {
-                        hooks.heap().store.add_to_free_list(handle);
-                    }
+                    hooks.heap().store.add_to_free_list(handle);
                 }
                 Node::Arr(a) => {
-                    a.gc().set_kind_null();
+                    a.gc().set_kind(ZvalType::Null);
                     Heap::array_free_contents(hooks, a);
                 }
                 Node::Ref(_) => {}
@@ -1293,15 +1284,34 @@ impl Heap {
                 continue;
             };
             heap.gc.remove_from_roots(idx);
-            let at = match node {
-                Node::Obj(o) if o.pins() > 0 => continue,
-                Node::Obj(o) => o.address(),
-                Node::Arr(a) => a.address(),
+            // Where a pin keeps the bytes, the value stands destroyed and
+            // of its own type, so what the pin names reads it so and an
+            // owner taken of it since gives it up as any value; the
+            // counts its garbage held of it went with that garbage.
+            let (at, pinned) = match node {
+                Node::Obj(o) => {
+                    let pinned = o.pins() > 0;
+                    if pinned {
+                        o.gc().set_kind(ZvalType::Object);
+                    }
+                    (o.address(), pinned)
+                }
+                Node::Arr(a) => {
+                    let pinned = a.gc().pinned();
+                    if pinned {
+                        a.emptied();
+                    }
+                    (a.address(), pinned)
+                }
                 Node::Ref(_) => continue,
             };
+            if pinned {
+                node.gc().set_refcount(0);
+            }
             // SAFETY: the value was garbage, freed of its contents above,
-            // out of the store and off the buffer, so nothing names it.
-            unsafe { heap.mm.free(at) };
+            // out of the store and off the buffer, so only a pin names
+            // it.
+            unsafe { heap.give_back(at, pinned) };
         }
     }
 
@@ -1612,45 +1622,80 @@ mod tests {
         assert_eq!(b.refcount(), 1);
     }
 
-    /// A pinned object whose last owner goes is neither destroyed nor
-    /// freed then: its destructor and its free wait for the pin, and the
-    /// count reads zero beneath it. A second pin over a pinned block sets
-    /// nothing, so only the pin that set it lets it go.
+    /// An owner given up where another is held, php's `GC_DELREF` and
+    /// `gc_check_possible_root`, leaves the value a possible root and
+    /// never destroys it; asked of the last owner, it gives nothing up.
     #[test]
-    fn a_pinned_object_s_destructor_and_free_wait_for_its_pin() {
+    fn a_held_release_is_a_possible_root_and_never_the_last() {
         let _alone = alone();
         let mut r = Recorder::new();
-        let start = r.heap.memory_usage(false);
         let Ok(o) = r.heap.object(1, 0, 0) else {
             return;
         };
         let z = Zval::object(o);
         o.addref();
-        assert!(Heap::pin_block(z));
-        assert!(!Heap::pin_block(z), "a pinned block is pinned once");
-        assert_eq!(o.refcount(), 2, "the pin is no count");
+        assert!(Heap::release_held(&mut r, z));
+        assert_eq!(o.refcount(), 1);
+        assert_eq!(r.heap.gc_status().roots, 1, "a possible root");
+        assert!(!Heap::release_held(&mut r, z), "the last owner is kept");
+        assert_eq!(o.refcount(), 1);
+        assert!(r.served.is_empty(), "nothing is destroyed");
         Heap::release(&mut r, z);
-        Heap::release(&mut r, z);
-        assert_eq!(o.refcount(), 0);
-        assert!(r.served.is_empty(), "the destructor waits for the pin");
-        assert_eq!(r.heap.objects(), 1);
-        assert_eq!(
-            Heap::gc_collect_cycles(&mut r),
-            0,
-            "a pinned block is no garbage"
-        );
-        assert!(r.served.is_empty());
-        Heap::unpin_block(&mut r, z);
         assert_eq!(r.served, vec![1]);
-        assert_eq!(r.heap.objects(), 0);
-        assert_eq!(r.heap.memory_usage(false), start);
     }
 
-    /// A pinned block an owner is taken of again before the pin goes is
-    /// not freed when it goes: a table and the string it holds stand, and
-    /// are freed at their next last release as any table is.
+    /// A pinned block whose last owner goes is destroyed then, as php
+    /// destroys it, and its bytes are counted off then: an object's
+    /// destructor is served and a table's rows released, and only the
+    /// bytes wait for the pin. A second pin over a pinned table sets
+    /// nothing, so only the pin that set it lets it go.
     #[test]
-    fn a_pinned_table_owned_again_is_not_freed_with_the_pin() {
+    fn a_pinned_block_is_destroyed_at_its_last_release_and_only_its_bytes_wait() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let start = r.heap.memory_usage(false);
+        let (Ok(o), Ok(a), Ok(s)) = (
+            r.heap.object(1, 0, 0),
+            r.heap.array(),
+            r.heap.string(b"held"),
+        ) else {
+            return;
+        };
+        assert_eq!(r.heap.array_append(a, Zval::string(s)), Ok(true));
+        let (object, table) = (Zval::object(o), Zval::array(a));
+        o.addref();
+        assert!(Heap::pin_block(object));
+        assert!(Heap::pin_block(table));
+        assert!(!Heap::pin_block(table), "a pinned table is pinned once");
+        assert_eq!(o.refcount(), 2, "the pin is no count");
+        Heap::release(&mut r, object);
+        Heap::release(&mut r, object);
+        Heap::release(&mut r, table);
+        assert_eq!(r.served, vec![1], "the destructor is served at the release");
+        assert_eq!(r.heap.objects(), 0);
+        assert_eq!(a.len(), 0, "the table stands empty");
+        assert_eq!(
+            r.heap.memory_usage(false),
+            start,
+            "and its memory is counted off"
+        );
+        assert!(r.heap.mm.is_retired(a.address()));
+        r.heap.unpin_block(object);
+        r.heap.unpin_block(table);
+        assert!(
+            !r.heap.mm.is_retired(o.address()),
+            "the bytes go back with the pin"
+        );
+        assert!(!r.heap.mm.is_retired(a.address()));
+        assert_eq!(r.heap.memory_usage(false), start, "counted once");
+    }
+
+    /// A pinned table an owner is taken of after its destruction, by
+    /// what the pin let name it, is an empty table, not freed when the
+    /// pin goes and freed at its next last release as any table is, with
+    /// nothing counted twice.
+    #[test]
+    fn a_pinned_table_owned_again_is_an_empty_table_given_up_as_any() {
         let _alone = alone();
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
@@ -1658,49 +1703,42 @@ mod tests {
             return;
         };
         assert_eq!(r.heap.array_append(a, Zval::string(s)), Ok(true));
-        let (table, string) = (Zval::array(a), Zval::string(s));
+        let table = Zval::array(a);
         assert!(Heap::pin_block(table));
-        assert!(Heap::pin_block(string));
         Heap::release(&mut r, table);
-        let held = r.heap.memory_usage(false);
-        assert_eq!(a.refcount(), 0);
+        assert_eq!(r.heap.memory_usage(false), start);
         r.heap.addref(table);
-        Heap::unpin_block(&mut r, table);
-        Heap::unpin_block(&mut r, string);
-        assert_eq!(
-            r.heap.memory_usage(false),
-            held,
+        r.heap.unpin_block(table);
+        assert!(
+            r.heap.mm.is_retired(a.address()),
             "owned again, nothing is freed"
         );
         assert_eq!(a.refcount(), 1);
+        assert_eq!(r.heap.array_append(a, Zval::long(1)), Ok(true));
         Heap::release(&mut r, table);
+        assert!(!r.heap.mm.is_retired(a.address()));
         assert_eq!(r.heap.memory_usage(false), start);
     }
 
-    /// A pinned value in a cycle nothing else holds is no garbage: the
-    /// collection leaves it and what it holds, and finds both once the
-    /// pin is let go.
+    /// A pinned value in a cycle nothing else holds is garbage, as php's
+    /// is: the collection serves the destructors and frees the members,
+    /// and the pin keeps only the bytes.
     #[test]
-    fn a_pinned_cycle_is_not_collected_until_the_pin_goes() {
+    fn a_pinned_cycle_is_collected_and_the_pin_keeps_its_bytes() {
         let _alone = alone();
         let mut r = Recorder::new();
+        let start = r.heap.memory_usage(false);
         let Some((a, b)) = pair(&mut r) else { return };
         assert!(Heap::pin_block(Zval::object(a)));
         Heap::release(&mut r, Zval::object(a));
         Heap::release(&mut r, Zval::object(b));
-        assert_eq!(Heap::gc_collect_cycles(&mut r), 0);
-        assert!(r.served.is_empty());
-        assert_eq!((a.refcount(), b.refcount()), (1, 1));
-        Heap::unpin_block(&mut r, Zval::object(a));
-        assert_eq!(
-            r.heap.objects(),
-            2,
-            "held by the cycle, the pin frees nothing"
-        );
-        a.addref();
-        Heap::release(&mut r, Zval::object(a));
         assert_eq!(Heap::gc_collect_cycles(&mut r), 2);
         assert_eq!(r.served, vec![1, 2]);
         assert_eq!(r.heap.objects(), 0);
+        assert_eq!(r.heap.memory_usage(false), start);
+        assert!(r.heap.mm.is_retired(a.address()));
+        r.heap.unpin_block(Zval::object(a));
+        assert!(!r.heap.mm.is_retired(a.address()));
+        assert_eq!(r.heap.memory_usage(false), start);
     }
 }

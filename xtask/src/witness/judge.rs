@@ -36,7 +36,8 @@ use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
-use anyhow::Result;
+use crate::scratch::Full;
+use anyhow::{Context, Result};
 
 /// A verdict on one witness, placed where it stands and at the item it
 /// documents, which is what the printed line says after the id.
@@ -67,8 +68,10 @@ pub(super) struct Kept {
 /// the linked engine the ini it carries and neither is passed another's.
 /// What the run leaves beside its verdict goes onto `kept`. Every way
 /// this can go wrong is a judgement the witness carries, the oracle's
-/// trouble and the linked engine's included, so there is nothing here for
-/// an `Err` to say.
+/// trouble and the linked engine's included, but one: a scratch tree the
+/// volume had no room for ([`Full`]), which is no verdict on the witness
+/// but the run not measured, and the `Err` the crate's reading says as a
+/// skip naming the volume (#644).
 pub(super) fn one(
     oracle: &Oracle<'_>,
     registry: &Registry,
@@ -77,24 +80,24 @@ pub(super) fn one(
     regime: Option<&Regime>,
     binary: &Binary,
     kept: &mut Kept,
-) -> Judged {
+) -> Result<Judged> {
     match lacking(oracle, witness) {
         Ok(None) => {}
         Ok(Some(name)) => {
             // Not run, so what it would have entered is not known: its
             // natives are no witness short for a locale this host lacks.
             kept.entered = Record::Unserved;
-            return judged(
+            return Ok(judged(
                 witness,
                 Judgement::Skipped,
                 format!(
                     "neither the oracle nor the linked engine can setlocale(LC_ALL, \"{name}\") on this host, which the fence's `locale={name}` needs"
                 ),
-            );
+            ));
         }
         Err(trouble) => {
             kept.entered = Record::Unserved;
-            return judged(witness, Judgement::Bork, trouble);
+            return borked(witness, trouble);
         }
     }
     let oracle_run = match &witness.request {
@@ -125,20 +128,16 @@ pub(super) fn one(
         Ok(out) => out,
         Err(trouble) => {
             kept.entered = Record::Unserved;
-            return judged(
-                witness,
-                Judgement::Bork,
-                format!("the oracle did not run it: {trouble:#}"),
-            );
+            return borked(witness, trouble.context("the oracle did not run it"));
         }
     };
     let Some(status) = oracle_out.exit else {
         kept.entered = Record::Unserved;
-        return judged(
+        return Ok(judged(
             witness,
             Judgement::Bork,
             "the oracle ended on a signal, so there is no status to pin",
-        );
+        ));
     };
 
     // The bare `exit` is the opt-in, and the only thing `--accept` writes:
@@ -156,13 +155,13 @@ pub(super) fn one(
         exit = Exit::Pinned(status);
     }
     if exit == Exit::Bare {
-        return judged(
+        return Ok(judged(
             witness,
             Judgement::Unpinned,
             format!(
                 "the fence's `exit` is bare and the oracle exits {status}; `xtask witness --accept` writes it, and nothing else does"
             ),
-        );
+        ));
     }
 
     let ran = match serve(oracle, binary, witness, regime) {
@@ -172,16 +171,25 @@ pub(super) fn one(
         }
         Err(trouble) => {
             kept.entered = Record::Unserved;
-            return judged(witness, Judgement::Bork, trouble);
+            return borked(witness, trouble);
         }
     };
-    held(
+    Ok(held(
         oracle.pin(),
         registry,
         witness,
         exit,
         [(Run::Oracle, &oracle_out), (Run::Engine, &ran)],
-    )
+    ))
+}
+
+/// A witness borked on `trouble`, or the `Err` [`one`] returns where the
+/// trouble is a full volume ([`Full`]).
+pub(super) fn borked(witness: &Witness, trouble: anyhow::Error) -> Result<Judged> {
+    if Full::of(&trouble).is_some() {
+        return Err(trouble);
+    }
+    Ok(judged(witness, Judgement::Bork, format!("{trouble:#}")))
 }
 
 /// The snippet that asks a host whether it knows a locale: `bool(true)`
@@ -200,22 +208,18 @@ fn knows(ran: &Observation) -> bool {
 /// engine can move `LC_ALL` to; nothing where each name is known to one of
 /// them, and then the witness runs and the verdict says whether the two
 /// agree. The engine is asked only where the oracle does not know it.
-fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w str>, String> {
+fn lacking<'w>(oracle: &Oracle<'_>, witness: &'w Witness) -> Result<Option<&'w str>> {
     for name in &witness.locales {
         let snippet = probe(name);
         let oracle_ran = oracle
             .run(Program::Snippet(&snippet), None)
-            .map_err(|trouble| {
-                format!("the oracle did not run the probe for `locale={name}`: {trouble:#}")
-            })?;
+            .with_context(|| format!("the oracle did not run the probe for `locale={name}`"))?;
         if knows(&oracle_ran) {
             continue;
         }
         let engine_ran =
-            linked::serve(&oracle.pin().recipe, None, &snippet).map_err(|trouble| {
-                format!(
-                    "the linked engine did not serve the probe for `locale={name}`: {trouble:#}"
-                )
+            linked::serve(&oracle.pin().recipe, None, &snippet).with_context(|| {
+                format!("the linked engine did not serve the probe for `locale={name}`")
             })?;
         if !knows(&engine_ran) {
             return Ok(Some(name));
@@ -235,35 +239,35 @@ pub(super) fn serve(
     binary: &Binary,
     witness: &Witness,
     regime: Option<&Regime>,
-) -> Result<(Observation, Vec<Entry>), String> {
+) -> Result<(Observation, Vec<Entry>)> {
     match witness.served {
         Served::Linked => linked::serve_traced(&oracle.pin().recipe, regime, &witness.snippet)
             .map(|(out, entered)| (out, entered.lines().filter_map(Entry::parse).collect()))
-            .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}")),
+            .context("the linked engine did not serve it"),
         Served::Binary => binary
             .serve(oracle, &witness.snippet, witness.regime.as_deref())
-            .map_err(|trouble| format!("the php binary did not serve it: {trouble:#}")),
+            .context("the php binary did not serve it"),
         Served::Cgi => binary
             .serve_cgi(
                 oracle,
                 &witness.snippet,
                 witness.request.as_deref().unwrap_or_default(),
             )
-            .map_err(|trouble| format!("the php-cgi binary did not serve it: {trouble:#}")),
+            .context("the php-cgi binary did not serve it"),
         Served::Fpm => binary
             .serve_fpm(
                 oracle,
                 &witness.snippet,
                 witness.request.as_deref().unwrap_or_default(),
             )
-            .map_err(|trouble| format!("the php-fpm binary did not serve it: {trouble:#}")),
+            .context("the php-fpm binary did not serve it"),
         Served::Phpdbg => binary
             .serve_phpdbg(
                 oracle,
                 &witness.snippet,
                 witness.request.as_deref().unwrap_or_default(),
             )
-            .map_err(|trouble| format!("the phpdbg binary did not serve it: {trouble:#}")),
+            .context("the phpdbg binary did not serve it"),
     }
 }
 

@@ -17,7 +17,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use php_heap::{FrameRef, MapPtr, MapTable, Zval};
+use php_heap::{Fatal, FrameRef, MapPtr, MapTable, Zval};
 use php_unit::decl::HookKind;
 use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 
@@ -174,9 +174,9 @@ impl Caller {
 /// A lent receiver is a name with no owner, so it pins the object
 /// ([`Receiver::lent`], [`php_heap::Obj::pin`]): php frees the
 /// object under the running frame when its last owner lets it go, and
-/// here its destructor and its members' release are served at that
-/// moment while its bytes and its id stand until the last pin is
-/// let go ([`Request::give_up_receiver`]); and a frame that leaves the
+/// here its destructor, its members' release and its id are served at
+/// that moment while its bytes stand until the last pin is let go
+/// ([`Request::give_up_receiver`]); and a frame that leaves the
 /// running chain, a generator's or a suspended fiber's, owns what it was
 /// lent.
 #[derive(Clone, Copy)]
@@ -1231,6 +1231,42 @@ impl Vm {
     pub(crate) fn calls(&self) -> &[CallState] {
         &self.calls
     }
+}
+
+/// What `frame` is serving, held by its own share of the unit so the
+/// oplines can be read while the request is borrowed.
+pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal> {
+    req.vm().serving(frame).ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: frame {} is serving no op array",
+            frame.0
+        ))
+    })
+}
+
+/// The op array `frame` is serving, out of its unit.
+pub(crate) fn serving_code(serving: &Serving, frame: FrameRef) -> Result<&OpArray, Fatal> {
+    serving.code().ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: frame {} names a body its unit has not",
+            frame.0
+        ))
+    })
+}
+
+/// The innermost `try` element `op_num` stands in, the one
+/// `ZEND_HANDLE_EXCEPTION` and a generator's forced close unwind from.
+pub(crate) fn innermost_try(code: &OpArray, op_num: u32) -> Option<u32> {
+    let mut current = None;
+    for (at, element) in code.try_catch.iter().enumerate() {
+        if op_num < element.try_op.0 {
+            break;
+        }
+        if op_num < element.catch_op.0 || op_num < element.finally_end.0 {
+            current = u32::try_from(at).ok();
+        }
+    }
+    current
 }
 
 /// The main op array of `unit`, what the frame `serve` pushes serves.

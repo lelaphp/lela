@@ -563,6 +563,26 @@ impl Arr {
         Arr(header)
     }
 
+    /// A table destroyed under a pin left as an empty one of its kind,
+    /// what `zend_array_destroy` leaves behind once its data is freed:
+    /// no data, no rows and no recursion mark, the type `IS_ARRAY` again and the
+    /// count and the pin kept. So what names it through its pin reads an
+    /// empty table and never freed memory, and an owner taken of it
+    /// since gives it up as any table (design §4.4, #2230).
+    pub(crate) fn emptied(self) {
+        let header = self.header();
+        header.gc.set_kind(ZvalType::Array);
+        header.gc.del_flags(gc::PROTECTED);
+        header.flags.set(UNINITIALIZED);
+        header.table_mask.set(MIN_MASK);
+        header.data.set(std::ptr::null_mut());
+        header.num_used.set(0);
+        header.num_elements.set(0);
+        header.internal_pointer.set(0);
+        header.next_free.set(i64::MIN);
+        header.lead.set(0);
+    }
+
     /// `ZVAL_EMPTY_ARRAY`: the process's one immutable empty array,
     /// php's `zend_empty_array`, which costs a request nothing and is
     /// what php answers wherever an array has nothing in it
@@ -2243,7 +2263,7 @@ impl crate::Heap {
                         .heap()
                         .gc
                         .remove_from_buffer(crate::collector::Node::Arr(a));
-                    a.gc().set_kind_null();
+                    a.gc().set_kind(ZvalType::Null);
                     walk.push(Emptying::Table {
                         a,
                         at: 0,
@@ -2272,8 +2292,8 @@ impl crate::Heap {
                     walk.pop();
                     // SAFETY: the reference came from `reference`, its
                     // last owner has given it up and what it held is
-                    // released, so nothing names it.
-                    unsafe { hooks.heap().mm.free(r.address()) };
+                    // released, so only a pin names it.
+                    unsafe { hooks.heap().give_back(r.address(), r.gc().pinned()) };
                 }
                 Emptying::Table { a, at, key } => {
                     if let Some(k) = key.take() {
@@ -2283,10 +2303,14 @@ impl crate::Heap {
                     let Some((val, k)) = a.element_from(at) else {
                         walk.pop();
                         Heap::array_free_data(hooks.heap(), a);
+                        let pinned = a.gc().pinned();
+                        if pinned {
+                            a.emptied();
+                        }
                         // SAFETY: the header came from `array_sized`, its
                         // last owner has given it up and its contents are
-                        // freed.
-                        unsafe { hooks.heap().mm.free(a.address()) };
+                        // freed, so only a pin names it.
+                        unsafe { hooks.heap().give_back(a.address(), pinned) };
                         continue;
                     };
                     next = Heap::release_within(hooks, val);
@@ -2308,7 +2332,7 @@ impl crate::Heap {
                 Heap::gc_check_possible_root(hooks, z);
                 None
             }
-            GivenUp::Freed | GivenUp::Pinned => None,
+            GivenUp::Freed => None,
             GivenUp::Last(last) => Some(last),
         }
     }

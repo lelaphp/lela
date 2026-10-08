@@ -182,16 +182,7 @@ pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Resu
         .map(|decl| decl.attributes.clone())
         .unwrap_or_default();
     let scope = req.method_class(function);
-    let suffix = match internal_strings(
-        req,
-        &attributes,
-        b"Deprecated",
-        &[b"message", b"since"],
-        scope,
-    )? {
-        Some(read) => joined_suffix(&read[0], &read[1]),
-        None => String::new(),
-    };
+    let suffix = deprecation_suffix(req, &attributes, scope)?;
     let level = if req.user_function(function).is_some() {
         Level::UserDeprecated
     } else {
@@ -294,16 +285,7 @@ pub(crate) fn deprecated_class_constant(
     constant: &php_unit::decl::ClassConstDecl,
     native: bool,
 ) -> Result<(), Thrown> {
-    let suffix = match internal_strings(
-        req,
-        &constant.attributes,
-        b"Deprecated",
-        &[b"message", b"since"],
-        Some(declaring),
-    )? {
-        Some(read) => joined_suffix(&read[0], &read[1]),
-        None => String::new(),
-    };
+    let suffix = deprecation_suffix(req, &constant.attributes, Some(declaring))?;
     let level = if native {
         Level::Deprecated
     } else {

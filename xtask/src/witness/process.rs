@@ -30,7 +30,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 
 use super::anchor::Entry;
 use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
@@ -215,9 +215,7 @@ pub(crate) fn served_as_cgi(
 ) -> Result<Observation> {
     let recipe = &oracle.pin().recipe;
     let own = Tree::new("witness-request")?;
-    let program = own.join(&recipe.script_name);
-    fs::write(&program, format!("{}{snippet}", recipe.preamble))
-        .with_context(|| format!("writing {}", program.display()))?;
+    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
     let path = own.join("witness.phpt");
     let phpt = Phpt::parse(&path, test.as_bytes())

@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 
 use crate::git::git;
+use crate::reading::{Reading, Status};
 
 /// Set to anything non-empty and a scratch tree is made, named on stderr
 /// and left standing: what a session debugging a failure sets, so the tree
@@ -125,7 +126,7 @@ impl Tree {
 
         std::fs::remove_dir_all(&named).ok();
         std::fs::create_dir_all(&named)
-            .with_context(|| format!("creating the scratch tree {}", named.display()))?;
+            .map_err(|err| made(err, &named, "creating the scratch tree"))?;
         let path = std::fs::canonicalize(&named)
             .with_context(|| format!("resolving the scratch tree {}", named.display()))?;
         if keep {
@@ -138,6 +139,114 @@ impl Tree {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// `contents` written to `name` in this tree, and the path it stands
+    /// at: a [`Full`] where the volume had no room for it ([`made`]).
+    pub(crate) fn write(
+        &self,
+        name: impl AsRef<Path>,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<PathBuf> {
+        let path = self.path.join(name);
+        std::fs::write(&path, contents).map_err(|err| made(err, &path, "writing"))?;
+        Ok(path)
+    }
+}
+
+/// A scratch tree, its lock, or a file a lane writes into one, that could
+/// not be made for want of space (#644). The volume it would stand on is
+/// full, so the run it was for was not measured: a lane reads this off the
+/// error ([`Full::of`]) and says so as a skip naming the volume, where it
+/// would otherwise be a witness that borked or a subset refused, a red line
+/// a session reads as its own diff.
+#[derive(Debug)]
+pub(crate) struct Full {
+    /// What could not be made.
+    pub(crate) path: PathBuf,
+    /// The mount point of the volume `path` stands on, as `df` names it,
+    /// or the nearest directory of `path` that stands where `df` says
+    /// nothing.
+    pub(crate) volume: PathBuf,
+}
+
+impl Full {
+    /// The number [`Full::skipped`] counts, one, on the reading of a run
+    /// this kept from being measured.
+    pub(crate) const NUMBER: &str = "full";
+
+    /// The `Full` somewhere in `err`, under whatever context was added.
+    pub(crate) fn of(err: &anyhow::Error) -> Option<&Full> {
+        err.downcast_ref::<Full>()
+    }
+
+    /// `reading`, of the run of `name` that `why` ended, made the skip
+    /// that says the volume was full and names it: no witness borked and
+    /// no subset was refused, the run was not measured.
+    pub(crate) fn skipped(
+        mut reading: Reading,
+        name: &str,
+        why: &anyhow::Error,
+    ) -> Result<Reading> {
+        reading.status = Status::Skip;
+        reading.message = format!("{name}: not measured for want of space: {why:#}");
+        reading.count(Full::NUMBER, 1)?;
+        Ok(reading)
+    }
+}
+
+impl std::fmt::Display for Full {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no space left on {} for {}",
+            self.volume.display(),
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for Full {}
+
+/// `err`, met making `path` in a scratch tree, under the context `<doing>
+/// <path>`: a [`Full`] where the volume had no room for it, so a lane can
+/// tell the disk from its own trouble, and the error as it came otherwise.
+pub(crate) fn made(err: std::io::Error, path: &Path, doing: &str) -> anyhow::Error {
+    use std::io::ErrorKind::{QuotaExceeded, StorageFull};
+    let context = format!("{doing} {}", path.display());
+    if matches!(err.kind(), StorageFull | QuotaExceeded) {
+        let volume = volume(path);
+        let path = path.to_path_buf();
+        anyhow::Error::new(Full { path, volume }).context(context)
+    } else {
+        anyhow::Error::new(err).context(context)
+    }
+}
+
+/// The mount point of the volume `path` stands on: `df -P`'s last column
+/// for the nearest directory of `path` that stands, which reading needs no
+/// room on the volume; that directory itself where `df` says nothing.
+fn volume(path: &Path) -> PathBuf {
+    let standing = path
+        .ancestors()
+        .find(|dir| dir.is_dir())
+        .unwrap_or(Path::new("/"));
+    std::process::Command::new("df")
+        .arg("-P")
+        .arg(standing)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let line = text.lines().last()?.to_owned();
+            let mounted = line
+                .split_whitespace()
+                .skip(5)
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!mounted.is_empty()).then(|| PathBuf::from(mounted))
+        })
+        .unwrap_or_else(|| standing.to_path_buf())
 }
 
 /// `cargo` stood in at `dir/cargo`, and the `PATH` that finds it first.
@@ -198,35 +307,45 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
 }
 
 /// A scratch repository at `to` holding `workspace`'s files, tracked or
-/// not yet but not ignored, as the one commit on `main`, with the hooks
+/// not yet but not ignored and standing in the working tree
+/// ([`crate::git::files`]), as the one commit on `main`, with the hooks
 /// path the clone's own is set to and that commit made unsigned and
 /// unhooked: a person's `commit.gpgsign` is not the scratch repository's,
 /// and the real pre-commit measuring the scratch's files is not what a
 /// test holds. The harness a build there compiles is this working tree's,
 /// uncommitted changes and all, so a test that builds `xtask` in a
 /// worktree of it builds the harness under test.
+///
+/// The files are copied, which on APFS is a clone sharing the workspace's
+/// blocks (`std::fs::copy` is `fclonefileat` there), and the objects are
+/// borrowed: the scratch's object store names the workspace's as its
+/// alternate, so `git add` writes only the blobs of what the workspace has
+/// not committed, and the trees and the commit above them. Written out,
+/// they were a scratch's real cost on disk, 36 MB of loose objects each,
+/// and a suite lays a dozen at once (#644). What it borrows is reachable
+/// in the workspace, or a loose object `git add` found there and freshened,
+/// which `gc` keeps for two weeks from then; a scratch lives for one test,
+/// so only a `git gc --prune=now` in the workspace during it can take a
+/// borrowed object away.
 pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
-    let listed = git(
-        workspace,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ],
-        None,
-    )?;
-    for file in listed.split('\0').filter(|f| !f.is_empty()) {
-        let target = to.join(file);
+    for file in crate::git::files(workspace, Path::new("."))? {
+        let target = to.join(&file);
         if let Some(dir) = target.parent() {
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
-        std::fs::copy(workspace.join(file), &target)
+        std::fs::copy(workspace.join(&file), &target)
             .with_context(|| format!("copying {file} into {}", to.display()))?;
     }
     git(to, &["init", "-q", "-b", "main"], None)?;
+    if let Some(common) = crate::git::common_dir(workspace) {
+        let alternates = to.join(".git/objects/info/alternates");
+        std::fs::write(
+            &alternates,
+            format!("{}\n", common.join("objects").display()),
+        )
+        .with_context(|| format!("writing {}", alternates.display()))?;
+    }
     git(to, &["config", "core.hooksPath", "scripts/hooks"], None)?;
     git(to, &["add", "-A"], None)?;
     git(
@@ -297,15 +416,14 @@ fn hold(tree: &Path) -> Result<(PathBuf, File)> {
         .create(true)
         .truncate(false)
         .open(&taking)
-        .with_context(|| format!("opening the scratch lock {}", taking.display()))?;
+        .map_err(|err| made(err, &taking, "opening the scratch lock"))?;
     if file.try_lock().is_err() {
         anyhow::bail!(
             "the scratch lock {} is held: another run is working there",
             taking.display()
         );
     }
-    std::fs::rename(&taking, &lock)
-        .with_context(|| format!("naming the scratch lock {}", lock.display()))?;
+    std::fs::rename(&taking, &lock).map_err(|err| made(err, &lock, "naming the scratch lock"))?;
     Ok((lock, file))
 }
 
@@ -404,7 +522,10 @@ impl Drop for Tree {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{Tree, hold, reap};
+    use std::os::unix::fs::MetadataExt;
+
+    use super::{Full, Tree, hold, made, reap};
+    use crate::reading::{Reading, Status};
 
     /// A sweep never meets a lock before it is held (#1252): one thread
     /// takes lock after lock in a directory of its own while another sweeps
@@ -437,5 +558,54 @@ mod tests {
             failed
         });
         assert_eq!(failed, None);
+    }
+
+    /// A scratch tree the volume has no room for is [`Full`], naming the
+    /// volume `df` says it stands on, under whatever context is added
+    /// above it; any other trouble making it is not (#644). And the reading
+    /// of the run it ended is the skip that says so, never a fail.
+    #[test]
+    fn a_scratch_the_volume_has_no_room_for_is_full_and_its_run_a_skip_naming_the_volume() {
+        let tree = Tree::new("full").unwrap();
+        let path = tree.join("lock-taking");
+        let enospc = std::io::Error::from_raw_os_error(nix::errno::Errno::ENOSPC as i32);
+        let err = made(enospc, &path, "opening the scratch lock")
+            .context("running ext/fixture/tests/one.phpt");
+        let full = Full::of(&err).expect("ENOSPC is the volume's");
+        assert_eq!(full.path, path);
+        // The volume `df` names, not the directory the fallback would: the
+        // tree's own device, at a path that is not the tree's.
+        let dev = |path: &std::path::Path| std::fs::metadata(path).unwrap().dev();
+        assert_eq!(
+            dev(&full.volume),
+            dev(tree.path()),
+            "{}",
+            full.volume.display()
+        );
+        assert_ne!(full.volume, tree.path());
+
+        let mut reading = Reading::new("phpt", "ext/fixture");
+        reading.status = Status::Fail;
+        let reading = Full::skipped(reading, "ext/fixture", &err).unwrap();
+        assert_eq!(reading.status, Status::Skip);
+        assert!(
+            reading
+                .message
+                .starts_with("ext/fixture: not measured for want of space: ")
+                && reading.message.contains(&format!(
+                    "no space left on {} for {}",
+                    full.volume.display(),
+                    path.display()
+                )),
+            "{}",
+            reading.message
+        );
+        assert_eq!(
+            reading.numbers.get(Full::NUMBER),
+            Some(&crate::reading::Number::Int(1))
+        );
+
+        let denied = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
+        assert!(Full::of(&made(denied, &path, "opening")).is_none());
     }
 }
