@@ -715,6 +715,14 @@ pub(super) fn this_function(
     {
         return Ok((FunctionRef::Closure(closure), decl));
     }
+    // `intern->ptr`, the method a `ReflectionMethod`'s constructor or
+    // factory found, read as php reads it: no lookup by name again.
+    if let Some(row) = super::kept_method(req, this)
+        && let Some(method) = req.row_method(row)
+    {
+        let decl = method.function.clone();
+        return Ok((FunctionRef::Method(row.scope(), decl.name.0.to_vec()), decl));
+    }
     let function = if let Some(scope) = scope {
         {
             let class = class_named(req, &scope)?;
