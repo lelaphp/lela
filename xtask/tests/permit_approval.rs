@@ -88,6 +88,7 @@ fn the_persons_answer_admits_the_change_and_no_forged_answer_does() {
         "deny-subagent",
         "deny-filled-by-the-model",
         "deny-away",
+        "deny-mislabelled",
     ] {
         assert!(names.iter().any(|n| n == forged), "{forged}: {names:?}");
     }
@@ -184,4 +185,32 @@ fn each_adapter_reads_its_own_evidence_and_the_function_hook_is_told_what_admitt
     let before = std::fs::read(root.join("docs/divergence.toml")).unwrap();
     assert_eq!(admitted["before"], hash_object(&before));
     assert_eq!(admitted["options"][1]["label"], "Leave it");
+}
+
+/// The first live use (2026-10-07): the person's answer to a question whose
+/// preview ends at its last context line with no newline, as the dialog's
+/// text is cut, admits the two-line Edit it carries. The records are the
+/// session's own, under `xtask/fixtures/approval-live/`.
+#[test]
+fn a_live_answer_whose_preview_is_cut_at_its_last_line_admits_its_edit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/approval-live");
+    let manifest = Manifest::load(&root).unwrap();
+    let mut call: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("call.json")).unwrap()).unwrap();
+    let session = call["session_id"].as_str().unwrap().to_owned();
+    call["transcript_path"] = root
+        .join(format!("{session}.jsonl"))
+        .to_str()
+        .unwrap()
+        .into();
+    let call = Call::parse(&call.to_string()).unwrap();
+    let judgement = judge(&manifest, &root, &call).unwrap();
+    assert!(judgement.denial().is_none(), "{judgement:?}");
+    let note = judgement.findings.iter().find(|f| f.rule == RULE).unwrap();
+    assert_eq!(note.kind, Kind::Note);
+    assert!(
+        note.text.contains("toolu_01FixtureLiveQuestion001"),
+        "{}",
+        note.text
+    );
 }

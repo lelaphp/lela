@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "ln -sf /tmp/oracle.toml ./oracle.toml"}}

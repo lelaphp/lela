@@ -508,13 +508,27 @@ fn a_file_is_put_back_to_its_unstaged_edit_and_an_untracked_one_is_left() {
 /// #2247: a `Bash` write the person approved in the session, the change
 /// their `AskUserQuestion` answer carries as a diff (the `admit` case of
 /// `xtask/fixtures/approval/`), stands; one that writes anything else is
-/// put back as before. `--after` reads the transcript the hook names.
+/// put back as before. `--after` reads the transcript the hook names. The
+/// same line with no approval is denied before it runs (#625).
 #[test]
 fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
     let approval = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/approval");
     let transcript = approval.join("admit").join(format!("{SESSION}.jsonl"));
     let approved = "# The divergence registry of the approval fixture (#2247).\n[[divergence]]\n\
                     id = \"fixture-1\"\nstatus = \"accepted\"\nreason = \"Ruled by a person in the session.\"\n";
+    let root = scratch("unapproved");
+    let line = stdin(
+        "PreToolUse",
+        SESSION,
+        "toolu_unapproved",
+        &root,
+        "echo x >> docs/divergence.toml",
+    );
+    let (_, out, _) = permit(&root, &line, &[]);
+    assert!(
+        out.contains("\"deny\"") && out.contains("harness.self-shell"),
+        "{out}"
+    );
     for (id, written, stands) in [
         ("toolu_approved", approved.to_owned(), true),
         (
@@ -538,7 +552,17 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
             call["transcript_path"] = transcript.to_str().unwrap().into();
             call.to_string()
         };
-        assert_eq!(permit(&root, &hook("PreToolUse"), &[]).0, 0);
+        // Before the line runs, what it will write is unknown: the
+        // approval's diff applies to the file as it stands, so
+        // harness.self-shell's denial is lifted for both, and the write
+        // is held to the diff after it.
+        let (code, before, err) = permit(&root, &hook("PreToolUse"), &[]);
+        assert_eq!(code, 0, "{err}");
+        assert!(!before.contains("\"deny\""), "{before}");
+        assert!(
+            before.contains("toolu_01AskFixtureApproval0001"),
+            "{before}"
+        );
         shell(&root, &command);
         let (code, out, err) = permit(&root, &hook("PostToolUse"), &["--after"]);
         assert_eq!(code, 0, "{err}");

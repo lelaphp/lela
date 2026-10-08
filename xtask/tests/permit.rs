@@ -52,42 +52,68 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
             Where::Anywhere => workspace(),
             Where::Ticketed => ticketed.path(),
         };
-        let fires = dir.join(match kind {
-            Kind::Deny => "deny.json",
-            Kind::Note => "note.json",
+        // Every control of the rule's directory: each `deny*.json` (or
+        // `note*.json`) must fire, each `allow*.json` must not (#625).
+        let named = |prefix: &str| -> Vec<PathBuf> {
+            let mut all: Vec<PathBuf> = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+                .map(|entry| entry.unwrap().path())
+                .filter(|p| {
+                    let name = p.file_name().unwrap().to_str().unwrap();
+                    name.starts_with(prefix) && p.extension().is_some_and(|e| e == "json")
+                })
+                .collect();
+            all.sort();
+            assert!(!all.is_empty(), "{}: no {prefix}*.json", dir.display());
+            all
+        };
+        let firing = named(match kind {
+            Kind::Deny => "deny",
+            Kind::Note => "note",
         });
-        let judgement = judge(&manifest, workspace(), &call(&fires)).unwrap();
-        let finding = judgement
-            .findings
-            .iter()
-            .find(|f| f.rule == rule.id)
-            .unwrap_or_else(|| {
-                panic!(
-                    "{}: {} fired nothing: {judgement:?}",
-                    rule.id,
+        for fires in &firing {
+            let judgement = judge(&manifest, workspace(), &call(fires)).unwrap();
+            let finding = judgement
+                .findings
+                .iter()
+                .find(|f| f.rule == rule.id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: {} fired nothing: {judgement:?}",
+                        rule.id,
+                        fires.display()
+                    )
+                });
+            assert_eq!(finding.kind, kind, "{}", rule.id);
+            let reason = finding.reason();
+            assert!(reason.contains(&rule.id), "{reason}");
+            assert!(reason.contains(&rule.text), "{reason}");
+            for adr in rule.adr.iter() {
+                assert!(reason.contains(&format!("ADR-{adr}")), "{reason}");
+            }
+            if kind == Kind::Deny {
+                assert_eq!(
+                    judgement.denial().map(|f| f.rule.as_str()),
+                    Some(rule.id.as_str()),
+                    "{}",
                     fires.display()
-                )
-            });
-        assert_eq!(finding.kind, kind, "{}", rule.id);
-        let reason = finding.reason();
-        assert!(reason.contains(&rule.id), "{reason}");
-        assert!(reason.contains(&rule.text), "{reason}");
-        for adr in rule.adr.iter() {
-            assert!(reason.contains(&format!("ADR-{adr}")), "{reason}");
+                );
+            }
         }
-        if kind == Kind::Deny {
-            assert_eq!(
-                judgement.denial().map(|f| f.rule.as_str()),
-                Some(rule.id.as_str())
+        // `allow-main.json` is a neighbour in main's checkout, where a
+        // ticketed rule does not judge, and its own test holds it there.
+        let neighbours = named("allow")
+            .into_iter()
+            .filter(|p| rule.within == Where::Anywhere || !p.ends_with("allow-main.json"));
+        for neighbour in neighbours {
+            let judgement = judge(&manifest, workspace(), &call(&neighbour)).unwrap();
+            assert!(
+                judgement.findings.iter().all(|f| f.rule != rule.id),
+                "{}: the neighbour {} fired: {judgement:?}",
+                rule.id,
+                neighbour.display()
             );
         }
-
-        let judgement = judge(&manifest, workspace(), &call(&dir.join("allow.json"))).unwrap();
-        assert!(
-            judgement.findings.iter().all(|f| f.rule != rule.id),
-            "{}: the neighbour fired: {judgement:?}",
-            rule.id
-        );
     }
 }
 

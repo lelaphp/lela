@@ -3,8 +3,9 @@
 //! theirs; once they have approved a change in the session, typing it is
 //! the agent's. The approval is their answer to an `AskUserQuestion` call:
 //! a question that names the file, whose chosen option's `preview` carries
-//! the change as a unified diff. It admits a call that realizes exactly
-//! that diff from the file as it stands, and nothing else.
+//! the change as a unified diff and whose label says it applies it. It
+//! admits a call that realizes exactly that diff from the file as it
+//! stands, and nothing else.
 //!
 //! The answer is read where the model cannot write it. Claude Code writes
 //! a tool's record, `toolUseResult` beside the `tool_result` block, in the
@@ -130,6 +131,11 @@ impl Approvals {
         Approvals(asked.iter().flat_map(Approval::all).collect())
     }
 
+    /// Whether the call carries no approval at all.
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// The approval whose diff, applied to `before`, leaves exactly
     /// `after` at `path`; `None` stands for no file on either side.
     pub(super) fn admits(
@@ -137,6 +143,23 @@ impl Approvals {
         path: &Path,
         before: Option<&str>,
         after: Option<&str>,
+    ) -> Option<Admission> {
+        self.admission(path, before, |left| left.text() == after)
+    }
+
+    /// The approval whose diff applies to `path` as it stands: what a
+    /// `Bash` line that can write the file needs before it runs, since
+    /// its write is not known until it has run; `permit --after` then
+    /// holds what it wrote to [`Approvals::admits`].
+    pub(super) fn pending(&self, path: &Path, before: Option<&str>) -> Option<Admission> {
+        self.admission(path, before, |_| true)
+    }
+
+    fn admission(
+        &self,
+        path: &Path,
+        before: Option<&str>,
+        fits: impl Fn(&Left) -> bool,
     ) -> Option<Admission> {
         let name = path.to_str()?;
         let blob = |text: Option<&str>| text.map(|text| git::blob_id(text.as_bytes()));
@@ -147,7 +170,8 @@ impl Approvals {
                 let file = FileDiff::all(&approval.preview)
                     .into_iter()
                     .find(|file| file.path == name)?;
-                (file.apply(before)?.text() == after).then(|| Admission {
+                let left = file.apply(before).filter(|left| fits(left))?;
+                Some(Admission {
                     file: name.to_owned(),
                     ask: approval.ask.clone(),
                     question: approval.question.clone(),
@@ -157,7 +181,7 @@ impl Approvals {
                     diff_hash: git::blob_id(file.text.as_bytes()),
                     diff: file.text,
                     before: blob(before),
-                    after: blob(after),
+                    after: blob(left.text()),
                 })
             })
     }
@@ -165,7 +189,8 @@ impl Approvals {
 
 impl Approval {
     /// Each question of one answered call that the person answered by
-    /// choosing an option with a preview. None where the model filled the
+    /// choosing an option with a preview whose label says it applies the
+    /// change ([`says_apply`]). None where the model filled the
     /// answers in its own input, where the dialog answered for an absent
     /// person, or where the person asked for another round.
     fn all(asked: &Asked) -> Vec<Approval> {
@@ -195,6 +220,9 @@ impl Approval {
                 let chosen = options
                     .iter()
                     .find(|o| text(o.get("label")) == Some(answer.clone()))?;
+                if !says_apply(&answer) {
+                    return None;
+                }
                 let preview = text(chosen.get("preview")).filter(|p| !p.is_empty())?;
                 let notes = text(
                     result
@@ -219,6 +247,18 @@ impl Approval {
             })
             .collect()
     }
+}
+
+/// Whether a chosen option's label says it applies the change: it begins
+/// "Apply" or "Approve". The person reads the label as much as the
+/// preview, so an option that carries the diff under "Leave it" approves
+/// nothing.
+fn says_apply(label: &str) -> bool {
+    let word = label.split_whitespace().next().unwrap_or_default();
+    let word = word
+        .trim_matches(|c: char| !c.is_alphabetic())
+        .to_lowercase();
+    ["apply", "approve"].contains(&word.as_str())
 }
 
 /// The answered `AskUserQuestion` calls of the transcript at `path`, which
@@ -310,7 +350,9 @@ impl FileDiff {
     /// Every file of the diff `text` carries, in `--- `/`+++ ` headers
     /// as git and `diff -u` write them. A line a hunk does not count is
     /// not the hunk's; an empty line inside one is an empty context line,
-    /// whose leading space an editor drops.
+    /// whose leading space an editor drops; a last line without its
+    /// newline has one, since a preview is text cut at its end, and only
+    /// `\ No newline at end of file` says the file ends without one.
     fn all(text: &str) -> Vec<FileDiff> {
         let lines: Vec<&str> = text.split_inclusive('\n').collect();
         let mut files: Vec<FileDiff> = Vec::new();
@@ -372,7 +414,13 @@ impl FileDiff {
                 '-' => left.0 = left.0.saturating_sub(1),
                 _ => left.1 = left.1.saturating_sub(1),
             }
-            hunk.lines.push((tag, body.to_owned()));
+            // A preview cut at its last line, as the dialog's text is,
+            // still ends that line: only the marker says a file does not.
+            let mut body = body.to_owned();
+            if !body.ends_with('\n') {
+                body.push('\n');
+            }
+            hunk.lines.push((tag, body));
             file.text.push_str(line);
         }
         files

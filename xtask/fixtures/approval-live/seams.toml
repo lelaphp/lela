@@ -1,0 +1,62 @@
+# The workspace of the live approval fixture (#2247): the first real use
+# of the approval, 2026-10-07, whose AskUserQuestion preview ends at its
+# last context line with no newline. The records beside this file are that
+# session's question and answer, verbatim less the classifier's context,
+# and call.json is the Edit's PreToolUse stdin. This manifest carries the
+# lines the preview's hunk names at the lines it names them (55 to 60).
+[oracle]
+pin = "../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[rule]]
+id = "harness.self"
+tool = ["Edit", "Write"]
+scope = ["seams.toml", "oracle.toml", "docs/divergence.toml"]
+deny = true
+text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+#
+[[crate]]
+name = "php_process"
+budget = 500
+lock = "process.lock"
+[[crate]]
+name = "php_unit"
+budget = 6000
+lock = "unit.lock"
+[[crate]]
+name = "php_link"
+budget = 5500
