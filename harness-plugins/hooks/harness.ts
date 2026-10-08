@@ -32,8 +32,9 @@
 // open by construction (§13 item 8): a permit that does not run lets the
 // call through to the command hook, which on an Edit or a Write denies
 // when no candidate of its own judged, and on Bash hands the call on so a
-// broken harness can be repaired (#16 items 2 and 5). hooks.json is a
-// person's file under harness.self; this module is not.
+// broken harness can be repaired (#16 items 2 and 5). hooks.json and
+// this module are a person's files under harness.self (#2283), since it
+// hands permit the evidence of the person's approval.
 //
 // `functionHook`: when the manifest declares it under `userConfig` and a
 // person sets it false, the module registers nothing and the command

@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=855fc027420e2000cc51b3520c17f5b86f7d40c047fdc674c2c6ec836944cb01 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=b06518ef2608536274d439870cf5d8248d00a83bda68a0e362068d9c454d6a27 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=32ff41de811d2740ece5113c3055a47a288ba7e2d9639f71517a94a1d10e5b24 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=2d7cc7c6f0f442201b64527477cc1f0f18e84614d0a1073ce5326ab3e1b914e3 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -124,12 +124,12 @@ third-engine-design.md
 | unit | unit.lock | 86 |  | pass |
 | link | link.lock | 36 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1321 | 1500 | pass |
-| sapi | sapi.lock | 37 |  | pass |
+| api | api.lock | 1328 | 1500 | pass |
+| sapi | sapi.lock | 43 |  | pass |
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 373 |  | pass |
 
-<!-- /computed in=a3afaae8e278169bb6c64f6bce2efc01a4a0daec612fe2a7e64fe5f7d5955121 out=bfcc1f1a55f2bd9043d18a3046d4ab315500871c13e569ef1e57373ac8359950 -->
+<!-- /computed in=62873f7f7ff52d3117ca06b90b645735f34a91d59ac07e7e98673bee2a073db4 out=3a8f512c8c2e370b6f869f7520ef94c3558e8c2b8b08016b22aa1287a49337db -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -146,24 +146,25 @@ third-engine-design.md
 | xtask.lock-line |  | on | pass |
 | ext.pub-beyond-extension |  | on | pass |
 | witness.exit-authored |  | deny_pattern | no reading |
-| witness.coverage |  | check | pass |
+| witness.coverage |  | check | no reading |
 | vocab.avoid |  | avoid_from | pass |
 | vocab.harness |  | avoid_from | pass |
 | generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | fail |
-| ticket.close |  | deny_argv | fail |
-| ticket.close-api |  | deny_pattern | fail |
+| git.no-verify |  | deny_argv | no reading |
+| ticket.close |  | deny_argv | no reading |
+| ticket.close-api |  | deny_pattern | no reading |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | fail |
+| lanes.nightly |  | deny_pattern | no reading |
 | lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | fail |
+| lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
-| harness.self-shell |  | deny_pattern | fail |
-| divergence.reason |  | check | pass |
+| harness.self |  | deny | no reading |
+| harness.self-shell |  | deny_pattern | no reading |
+| harness.transcript |  | deny_pattern | no reading |
+| divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=95dcd692ebcb3b9f514aec618bef5d25fce195a09739d9b1efc09522fc9052e1 out=d82fb2c6d8609b2b355a499a854d1b95a01051b4b9956870b40fca7d8aab48ca -->
+<!-- /computed in=eae44249eb10db35c420bc799aa108aa80ab35243ff83431d19776822115f4de out=06fc635b867d9b202e04380a7ae12b187e2fc224128a039afd60452c4a43d641 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
