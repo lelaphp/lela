@@ -11,17 +11,16 @@ description = "The date extension, php-src/ext/date"
 [lints]
 workspace = true
 
-# The one dependency: the facade. The engine is out of reach (`[[edge]]` ext/*).
+# The facade, and timelib's binding. The engine is out of reach
+# (`[[edge]]` ext/*).
 [dependencies]
 php_ext = { path = "../../crates/php_ext" }
+# timelib, vendored and compiled in its own crate (design §7.2, #711), and
+# wrapped here in `src/ffi/`.
+timelib_sys = { path = "../../crates/timelib_sys" }
 # `strftime(3)`, under the request's locale, in `src/ffi/` alone
 # (`unsafe.homes`).
 libc = { workspace = true }
-
-# timelib, compiled from `lib/`, the sources vendored from php-src's
-# `ext/date/lib` at the pinned tag (design §7.2, §12); no system library.
-[build-dependencies]
-cc = { workspace = true }
 
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]

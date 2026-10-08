@@ -1,5 +1,5 @@
 //! timelib, compiled from the sources vendored at `lib/` (design §7.2,
-//! §12's row on vendored C): `php-src/ext/date/lib` at the tag
+//! §12's row on vendored C, #711): `php-src/ext/date/lib` at the tag
 //! `oracle.toml` pins, byte for byte, with its bundled timezone database
 //! (`timezonedb.h`). The file list and the flags are `config0.m4`'s
 //! `timelib_sources` and `PHP_TIMELIB_CFLAGS`; nothing is discovered on

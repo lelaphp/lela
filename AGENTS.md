@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=301e7d35f1c15a46e0d1064893767cb32cf5f203d0731fba8806eaa23ef7a79d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=b34f8ec2e0d52cbb3981fbddce2fb8d6b582bf24c60a7d7696c05047b5cbd7bc out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -217,9 +217,10 @@ Options:
 ├── php_sapi
 ├── php_streams
 ├── php_syntax
-└── php_unit
+├── php_unit
+└── timelib_sys
 ```
-<!-- /computed in=a6ae36102f3fb2438f430e76078d6bc209005a653df755e1364367643b4e3fd2 out=2aea06da2e5135b2c82210bff019bf591f30d1a7eb6d65c5346cbb72921b7485 -->
+<!-- /computed in=129a4d8e5520714a7cc6807e8d7dd8caaa431f1baf4d52f57918ea3246412329 out=856944cd342d0768a3ccd8ae41a3590292f0392fadf6f3b507505951bfc8917e -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

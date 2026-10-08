@@ -1,7 +1,7 @@
 //! The binding to timelib (design §7.2, `unsafe.homes`' `ext/*/src/ffi/`):
-//! the C library compiled by `build.rs` from the sources vendored at
-//! `ext/date/lib`, the one home of this crate's `unsafe`. What it hands
-//! the rest of the crate is owned values that free themselves:
+//! the C library `timelib_sys` vendors, compiles and declares, wrapped
+//! here, the one home of this crate's `unsafe`. What it hands the rest of
+//! the crate is owned values that free themselves:
 //!
 //! - [`Zone`], a parsed `timelib_tzinfo`, immutable once parsed and so
 //!   shared by `Arc` between the request's zone cache, every date that
@@ -28,11 +28,11 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
-mod sys;
-
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
+
+use timelib_sys as sys;
 
 pub(crate) use sys::{RelTime, TimeFields};
 
@@ -495,7 +495,7 @@ impl Time {
     /// it is still ours, one of `known` where it names one of theirs, and
     /// a zone adopted where timelib's parser made it.
     fn sync(&mut self, known: &[&Arc<Zone>]) {
-        let now = self.tz_info;
+        let now = self.tz_info();
         if now.is_null() {
             self.zone = None;
             return;
@@ -517,7 +517,7 @@ impl Time {
 
     /// `t->tz_abbr`.
     pub(crate) fn tz_abbr(&self) -> &[u8] {
-        bytes_of(self.tz_abbr)
+        bytes_of(TimeFields::tz_abbr(self))
     }
 
     /// `timelib_unixtime2gmt`.
@@ -537,7 +537,9 @@ impl Time {
     /// `t->tz_info = tzi; t->zone_type = TIMELIB_ZONETYPE_ID;`, what php
     /// writes before `timelib_unixtime2local`.
     pub(crate) fn set_zone_id(&mut self, zone: Arc<Zone>) {
-        self.tz_info = zone.ptr();
+        // SAFETY: a zone timelib parsed, which the `Arc` stored beside the
+        // pointer keeps alive as long as the time points at it.
+        unsafe { self.set_tz_info(zone.ptr()) };
         self.zone = Some(zone);
         self.zone_type = ZONETYPE_ID;
     }
@@ -576,13 +578,15 @@ impl Time {
     pub(crate) fn set_abbr(&mut self, abbr: &[u8]) {
         let (z, dst, zone_type, have_zone) = (self.z, self.dst, self.zone_type, self.have_zone);
         let zone = self.zone.clone();
-        let info = self.tz_info;
+        let info = self.tz_info();
         self.set_timezone_from_abbr(i64::from(z), abbr, dst);
         self.z = z;
         self.dst = dst;
         self.zone_type = zone_type;
         self.have_zone = have_zone;
-        self.tz_info = info;
+        // SAFETY: the pointer the time held before the call, and the `Arc`
+        // restored beside it keeps that zone alive.
+        unsafe { self.set_tz_info(info) };
         self.zone = zone;
     }
 

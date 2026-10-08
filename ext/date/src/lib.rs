@@ -1,12 +1,12 @@
 //! The `date` extension: `php-src/ext/date` as one crate under `ext/`
-//! (ADR-0004). One dependency, the facade; one entry, `extension()`; its
-//! state on the value (ADR-0005). The phpt subset is
-//! `php-src/ext/date/tests`, through `xtask phpt --subset`.
+//! (ADR-0004). Two dependencies, the facade and timelib's binding; one
+//! entry, `extension()`; its state on the value (ADR-0005). The phpt
+//! subset is `php-src/ext/date/tests`, through `xtask phpt --subset`.
 //!
-//! timelib is the library (design §7.2): compiled by `build.rs` from the
-//! sources vendored at `lib/`, php-src's `ext/date/lib` at the pinned tag
-//! with its bundled timezone database, and bound in [`ffi`], the crate's
-//! one home of `unsafe`. Over it, `php_date.c`'s natives, declared as
+//! timelib is the library (design §7.2): `timelib_sys` vendors php-src's
+//! `ext/date/lib` at the pinned tag with its bundled timezone database,
+//! compiles it and declares it, and [`ffi`], the crate's one home of
+//! `unsafe`, wraps it. Over it, `php_date.c`'s natives, declared as
 //! `php_date.stub.php` declares them.
 //!
 //! What php keeps in `DATEG` is the request state: the zone
