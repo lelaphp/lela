@@ -28,7 +28,7 @@
 
 use php_heap::{Fatal, FrameRef};
 use php_macros::php_class;
-use php_unit::{OpArray, Opcode};
+use php_unit::Opcode;
 
 use crate::api::abi::{CloneObj, Instance, ObjectHandlers, This};
 use crate::api::call::Function;
@@ -125,6 +125,17 @@ pub(crate) struct ZendGenerator {
     /// delegation to this one a backtrace expands between this frame
     /// and the resumer's ([`placeholder_frames`]); no owner.
     resumed_through: Option<PhpObject>,
+}
+
+impl ZendGenerator {
+    /// The value and the key it stands at replaced, the old pair handed
+    /// back for the caller to give up.
+    fn replace_current(&mut self, value: Value, key: Value) -> (Value, Value) {
+        (
+            std::mem::replace(&mut self.value, value),
+            std::mem::replace(&mut self.key, key),
+        )
+    }
 }
 
 impl Default for ZendGenerator {
@@ -817,6 +828,15 @@ pub(crate) fn running(req: &Request, frame: FrameRef) -> Result<PhpObject, Fatal
         })
 }
 
+/// The value and the key a generator stood at, given up value first as
+/// php's `zval_ptr_dtor`s over them go; nothing for no generator.
+fn release_current(req: &mut Request, old: Option<(Value, Value)>) {
+    if let Some((value, key)) = old {
+        req.release(value);
+        req.release(key);
+    }
+}
+
 /// Whether `generator` is in `ZEND_GENERATOR_FORCED_CLOSE`.
 pub(crate) fn forced_close(req: &Request, generator: PhpObject) -> bool {
     read(req, generator, |g| g.forced_close).unwrap_or(false)
@@ -826,15 +846,9 @@ pub(crate) fn forced_close(req: &Request, generator: PhpObject) -> bool {
 /// first as the handler's `zval_ptr_dtor`s give them up.
 pub(crate) fn drop_current(req: &mut Request, generator: PhpObject) {
     let old = with(req, generator, |g| {
-        (
-            std::mem::replace(&mut g.value, Value::undef()),
-            std::mem::replace(&mut g.key, Value::undef()),
-        )
+        g.replace_current(Value::undef(), Value::undef())
     });
-    if let Some((value, key)) = old {
-        req.release(value);
-        req.release(key);
-    }
+    release_current(req, old);
 }
 
 /// What `YIELD` hands out: the value and the key, the previous ones
@@ -860,15 +874,9 @@ pub(crate) fn yielded(
             Value::int(g.largest_used_integer_key)
         };
         g.send_target = send_target;
-        (
-            std::mem::replace(&mut g.value, value),
-            std::mem::replace(&mut g.key, key),
-        )
+        g.replace_current(value, key)
     });
-    if let Some((value, key)) = old {
-        req.release(value);
-        req.release(key);
-    }
+    release_current(req, old);
 }
 
 /// `GENERATOR_RETURN`'s half that is the generator's: what the body
@@ -997,15 +1005,9 @@ fn next_delegated(req: &mut Request, generator: PhpObject) -> bool {
                     array,
                     pos: at.saturating_add(1),
                 };
-                (
-                    std::mem::replace(&mut g.value, value),
-                    std::mem::replace(&mut g.key, key),
-                )
+                g.replace_current(value, key)
             });
-            if let Some((value, key)) = old {
-                req.release(value);
-                req.release(key);
-            }
+            release_current(req, old);
             true
         }
         Delegated::Iterator(iterator) => {
@@ -1023,15 +1025,9 @@ fn next_delegated(req: &mut Request, generator: PhpObject) -> bool {
             };
             let old = with(req, generator, |g| {
                 g.values = Delegated::Iterator(iterator);
-                (
-                    std::mem::replace(&mut g.value, value),
-                    std::mem::replace(&mut g.key, key),
-                )
+                g.replace_current(value, key)
             });
-            if let Some((value, key)) = old {
-                req.release(value);
-                req.release(key);
-            }
+            release_current(req, old);
             true
         }
     }
@@ -1529,7 +1525,7 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
         return;
     };
     let op_num = req.vm().opline(frame);
-    let mut at = innermost_try(code, op_num);
+    let mut at = exec::innermost_try(code, op_num);
     let mut finally = None;
     while let Some(offset) = at {
         let Some(element) = code.try_catch.get(offset as usize).copied() else {
@@ -1588,20 +1584,6 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
         req.raise_under(old);
     }
     close(req, object, false);
-}
-
-/// The innermost `try` element `op_num` stands in.
-fn innermost_try(code: &OpArray, op_num: u32) -> Option<u32> {
-    let mut current = None;
-    for (at, element) in code.try_catch.iter().enumerate() {
-        if op_num < element.try_op.0 {
-            break;
-        }
-        if op_num < element.catch_op.0 || op_num < element.finally_end.0 {
-            current = u32::try_from(at).ok();
-        }
-    }
-    current
 }
 
 // ----- the iterator `get_iterator` hands out (`zend_generator_iterator_*`) -----
@@ -1811,10 +1793,7 @@ impl Generator {
 
     /// `Generator::valid()`: whether the generator has not finished.
     fn valid(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
-        let this = this.object();
-        ensure_initialized(req, this)?;
-        let _ = current(req, this);
-        Ok(has_frame(req, this))
+        iterator_valid(req, this.object())
     }
 
     /// `Generator::current()`: the value the innermost generator it
@@ -1844,9 +1823,7 @@ impl Generator {
 
     /// `Generator::next()`.
     fn next(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
-        let this = this.object();
-        ensure_initialized(req, this)?;
-        resumed(req, this)
+        iterator_move_forward(req, this.object())
     }
 
     /// `Generator::send()`: a generator never resumed runs to its first

@@ -20676,15 +20676,7 @@ pub(crate) fn handle_exception<T: Tier>(
         cleanup_live_vars(req, frame, code, op_num, moved);
         op_num = moved;
     }
-    let mut current = None;
-    for (at, element) in code.try_catch.iter().enumerate() {
-        if element.try_op.0 > op_num {
-            break;
-        }
-        if op_num < element.catch_op.0 || op_num < element.finally_end.0 {
-            current = u32::try_from(at).ok();
-        }
-    }
+    let current = exec::innermost_try(code, op_num);
     cleanup_unfinished_calls(req, frame);
     free_throwing_result(req, frame, code, op);
     unwind_from::<T>(req, frame, code, current, op_num)
