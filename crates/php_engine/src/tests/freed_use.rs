@@ -312,3 +312,36 @@ fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
         assert_eq!(served.exit_code, 255, "{evict}");
     }
 }
+
+/// A write into a freed block its bin still holds back when the request
+/// ends is found there: the request leak sensor's sweep drains the
+/// quarantine through the same check before it walks, and the write is
+/// raised where the request ends, with nothing executing (#2053). A
+/// clean request, its sensor armed as it is, reports nothing.
+#[test]
+fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
+    let engine = Engine::cli_builder().extensions(&[faulty()]).build();
+    let served = engine.serve_capture(
+        "<?php freed_protected(); echo 'went on';\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
+    assert!(
+        before.starts_with("went on\nFatal error: InternalError: a write into the "),
+        "{stdout}"
+    );
+    assert!(
+        after.contains(
+            " after the heap freed it, found as it left the quarantine in Unknown on line 0\n"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(served.exit_code, 255);
+    let clean = engine.serve_capture(
+        "<?php $a = [1]; unset($a); echo 'clean';\n",
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&clean.stdout), "clean");
+    assert_eq!(clean.exit_code, 0);
+}
