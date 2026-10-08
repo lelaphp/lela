@@ -22,4 +22,5 @@ built; the instrument reads manifests and sources.
 | `ops-lock`  | a hand-edited line of `ops.lock`, the lock rendered from `ops.toml` | fail |
 | `tier-face` | a sectioned lock (#1369): php_sapi importing a `tier::*` item `tier.lock`'s `[face]` does not list, which `sapi.lock` does not hold either | fail |
 | `same-name` | two `pub` types of one name in two modules, each listing its own methods alone (#79); read by the unit test beside `Inventory::assoc`, not by `hold` | pass |
+| `lints`     | a crate whose `Cargo.toml` lacks `[lints] workspace = true`, so the root manifest's `[workspace.lints]` do not reach it (#2111), beside one that carries it; every other fixture's crates carry the line | fail |
 | `surfaces` | an `ext/*` export on no row of the fixture's own design §4.10 list of surfaces (#1781, #1826): a member a `` `Regex`, with `compile` `` row does not write, and a function no row writes; `clean` carries a design listing its one export | fail |

@@ -22,6 +22,9 @@ pub struct Present {
     /// The cargo package name; `php_ext_random` for `ext/random`.
     pub package: String,
     pub deps: Vec<Dep>,
+    /// Whether its `Cargo.toml` carries `[lints] workspace = true`, the one
+    /// way the root manifest's `[workspace.lints]` reaches a member (#2111).
+    pub inherits_lints: bool,
 }
 
 /// One dependency on another workspace crate, of any kind (normal, dev,
@@ -112,9 +115,15 @@ impl Crates {
                 .and_then(Value::as_str)
                 .with_context(|| format!("{} has no package name", cargo.display()))?
                 .to_owned();
+            let inherits_lints = table
+                .get("lints")
+                .and_then(|lints| lints.get("workspace"))
+                .and_then(Value::as_bool)
+                == Some(true);
             present.push(Present {
                 name: row.name.clone(),
                 deps: deps(&table, &dir, root),
+                inherits_lints,
                 dir,
                 package,
             });

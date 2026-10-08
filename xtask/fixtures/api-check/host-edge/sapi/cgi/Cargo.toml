@@ -7,3 +7,6 @@ edition = "2024"
 php_bundle = { path = "../../crates/php_bundle" }
 php_proto = { path = "../../crates/php_proto" }
 php_sapi = { path = "../../crates/php_sapi" }
+
+[lints]
+workspace = true

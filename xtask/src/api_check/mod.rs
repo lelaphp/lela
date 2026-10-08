@@ -17,6 +17,8 @@
 //!   `api.lock` is held under `[budget] api_items`, and its
 //!   `__private` lines, where a person has written the row, under
 //!   `api_private_items` instead.
+//! - A crate's `Cargo.toml` carries `[lints] workspace = true`, the one
+//!   way the root manifest's `[workspace.lints]` reaches it (#2111).
 //! - A crate's workspace dependencies are held to the `[[edge]]` rows whose
 //!   `from` matches it: every row is exclusive, so `only = true` restates
 //!   what the instrument does for each crate. A `use` path across a `deny = true`
@@ -567,6 +569,15 @@ fn crate_reading(
                 permitted.join(", ")
             )
         });
+    }
+
+    // The workspace's lints reach a member only through its own
+    // `[lints] workspace = true` (#1998, #2111).
+    if !krate.inherits_lints {
+        problems.push(format!(
+            "{}'s Cargo.toml lacks `[lints] workspace = true`, so the root manifest's [workspace.lints] do not reach it (#2111)",
+            krate.name
+        ));
     }
 
     // `use` paths across a denied module edge.

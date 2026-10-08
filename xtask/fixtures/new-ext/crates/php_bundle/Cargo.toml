@@ -15,3 +15,6 @@ jit = []
 # The facade, and the extensions as `new-ext` adds them.
 [dependencies]
 php_ext = { path = "../php_ext" }
+
+[lints]
+workspace = true

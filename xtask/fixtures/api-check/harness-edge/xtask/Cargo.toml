@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 php_bundle = { path = "../crates/php_bundle" }
+
+[lints]
+workspace = true

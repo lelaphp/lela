@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 php_ext_standard = { path = "../standard" }
+
+[lints]
+workspace = true

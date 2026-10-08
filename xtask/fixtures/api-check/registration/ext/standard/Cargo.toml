@@ -10,3 +10,6 @@ php_ext_random = { path = "../random" }
 # standard feature need not switch session on.
 [dev-dependencies]
 php_ext_session = { path = "../session" }
+
+[lints]
+workspace = true

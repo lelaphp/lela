@@ -15,3 +15,6 @@ session = ["dep:php_ext_session", "standard"]
 php_ext_random = { path = "../../ext/random", optional = true }
 php_ext_standard = { path = "../../ext/standard", optional = true }
 php_ext_session = { path = "../../ext/session", optional = true }
+
+[lints]
+workspace = true

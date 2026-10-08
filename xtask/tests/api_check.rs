@@ -363,6 +363,26 @@ fn a_crate_with_no_edge_row_depending_on_a_workspace_crate_fails() {
     assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
+/// The workspace's lints reach a member only through its own
+/// `[lints] workspace = true` (#1998, #2111): ext/json, without the line,
+/// fails naming itself, and ext/ctype, with it, passes. The tracked
+/// workspace, every member carrying the line, is held by
+/// `the_workspace_today_has_no_failing_reading`.
+#[test]
+fn a_crate_that_does_not_inherit_the_workspace_lints_fails_naming_it() {
+    let readings = readings("lints");
+    let json = of(&readings, "ext/json");
+    assert_eq!(json.status, Status::Fail, "{}", json.message);
+    assert!(
+        json.message
+            .contains("ext/json's Cargo.toml lacks `[lints] workspace = true`"),
+        "{}",
+        json.message
+    );
+    assert_eq!(of(&readings, "ext/ctype").status, Status::Pass);
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
 /// A host reaches the engine through its facade and never past it
 /// (ADR-0008): `sapi/cli` naming `php_engine` fails with the ADR, and
 /// `sapi/cgi` on the facade, the codecs and the bundle is within its

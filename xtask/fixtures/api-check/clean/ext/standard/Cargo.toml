@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 random = { package = "php_ext_random", path = "../random" }
+
+[lints]
+workspace = true
