@@ -216,7 +216,7 @@ impl Request {
     /// The loop over a generator's frame, bound to the engine's tier
     /// ([`crate::tier::resume`]).
     pub(crate) fn resume_loop(&self) -> fn(&mut Request, FrameRef) -> Result<(), Fatal> {
-        self.shared.resume
+        self.shared.loops.resume
     }
 
     /// Push a frame for `unit`'s op array: its shape on the VM stack and

@@ -268,22 +268,24 @@ fn a_stepping_host_is_told_as_the_loop_is() {
 
 /// With nothing declared, by no extension or by one whose ini names no
 /// opcode, as `zend_test` sets no handler while its entry is empty, the
-/// engine keeps no observer and a serving reads an empty set.
+/// engine's set tells no one, so it binds the loop with no test for it
+/// ([`crate::tier::Loops::bound`]; design §5.8, revision 107); one
+/// opcode declared binds the loop that tells.
 #[test]
-fn with_none_declared_the_engine_keeps_an_empty_set() {
+fn with_none_declared_the_engine_tells_no_one() {
     for engine in [
         Engine::cli_builder().build(),
         Engine::cli_builder()
             .extensions(&[Shows::<0>::extension()])
             .build(),
     ] {
-        assert!(engine.shared.opcodes.is_empty());
+        assert!(!engine.shared.opcodes.told());
     }
     let declared = Engine::cli_builder()
         .extensions(&[Shows::<0>::extension()])
         .ini("t.opcodes_0", "ZEND_ECHO")
         .build();
-    assert!(!declared.shared.opcodes.is_empty());
+    assert!(declared.shared.opcodes.told());
 }
 
 /// php's `zend_get_opcode_id`: the opcode of the lowest number whose name

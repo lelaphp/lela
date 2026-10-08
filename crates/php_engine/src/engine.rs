@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
-use php_heap::{Fatal, FrameRef, Intern, Strings, Zval};
+use php_heap::{Intern, Strings, Zval};
 use php_link::LinkedClass;
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
@@ -45,7 +45,7 @@ use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
 use crate::supplied::{Keyed, Last, Phase, Resolved};
-use crate::tier::{Nop, Tier, execute, reenter, resume};
+use crate::tier::{Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
 
@@ -571,9 +571,6 @@ enum Begun {
     Refused(Observables),
 }
 
-/// The loop bound to the engine's tier, `execute::<T>` for one `T`.
-type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
-
 /// php's `opcache.max_accelerated_files` default: the units one engine
 /// keeps before it drops half of them.
 const MAX_ACCELERATED_FILES: usize = 10_000;
@@ -729,26 +726,23 @@ pub(crate) struct Shared {
     /// it traces allocations ([`EngineBuilder::sense_leaks`]).
     #[cfg(debug_assertions)]
     pub(crate) sense_leaks: LeakSensor,
-    pub(crate) entry: Loop,
+    /// The loop, bound to the engine's tier and, once its declared
+    /// opcodes are fixed as it starts, to whether it tells their
+    /// observers ([`Loops::bound`]): `entry` for a serving, `reenter` for
+    /// a serving inside a serving, which [`Request::serve_user`] enters a
+    /// destructor's or a callback's frame through, and `resume` for a
+    /// generator's frame the resumption put back (design §5.11,
+    /// [`crate::tier::resume`]).
+    pub(crate) loops: Loops,
     /// The observer word (design §4.3 seam 9): how many observers the
     /// bundle declared ([`crate::supplied::Resolved::observers`]), fixed
     /// at the engine's build and read at every call and return home
     /// ([`crate::observer`]); zero while none is declared.
     pub(crate) observers: u32,
     /// The opcodes the bundle observes (design §7.1, #1780), declared as
-    /// the engine starts and fixed after it, which a serving reads once
-    /// as its loop is entered ([`crate::observer::Declared`]); empty
-    /// while none is declared.
+    /// the engine starts and fixed after it, which chooses the loop the
+    /// engine binds ([`Loops::bound`]); empty while none is declared.
     pub(crate) opcodes: crate::observer::ObservedOpcodes,
-    /// The same loop for a serving inside a serving, `zend_call_function`
-    /// over a user function: what [`Request::serve_user`] enters a
-    /// destructor's or a callback's frame through, bound to the same
-    /// tier as `entry`.
-    pub(crate) reenter: Loop,
-    /// The same loop over a generator's frame the resumption put back on
-    /// the stack, `zend_generator_resume`'s `zend_execute_ex`, bound to
-    /// the same tier (design §5.11, [`crate::tier::resume`]).
-    pub(crate) resume: Loop,
     /// The unit cache (design §6.3): what a file compiled to, held for
     /// every request that asks for the same file unchanged. A source the
     /// host handed over is not in it, because php caches neither `-r`
@@ -2628,9 +2622,9 @@ pub struct EngineBuilder {
     ini_defaults: Vec<(Vec<u8>, Vec<u8>)>,
     ini_files: crate::api::request::IniFiles,
     ini_entries: Vec<u8>,
-    entry: Loop,
-    reenter: Loop,
-    resume: Loop,
+    /// The tier's loop, bound as the engine starts to the opcodes its
+    /// bundle declared ([`Loops::bound`] for the tier).
+    loops: fn(&crate::observer::ObservedOpcodes) -> Loops,
     tier_extension: Option<Extension>,
     hooked: php_compile::Hooked,
     extended_info: bool,
@@ -2865,13 +2859,13 @@ impl EngineBuilder {
         self
     }
 
-    /// Bind the tier: `execute::<T>` becomes the loop, and the tier's
-    /// state is declared under seam 3 (design §4.3 seam 8).
+    /// Bind the tier: `execute::<T>` becomes the loop, its instantiation
+    /// chosen as the engine starts by whether the bundle declares an
+    /// opcode (design §5.8, §7.1), and the tier's state is declared
+    /// under seam 3 (design §4.3 seam 8).
     #[must_use]
     pub fn tier<T: Tier>(mut self) -> EngineBuilder {
-        self.entry = execute::<T>;
-        self.reenter = reenter::<T>;
-        self.resume = resume::<T>;
+        self.loops = Loops::bound::<T>;
         self.tier_extension = T::extension();
         self.hooked = T::HOOKED;
         self
@@ -3074,9 +3068,7 @@ impl EngineBuilder {
                 trace_to: self.trace_to,
                 #[cfg(debug_assertions)]
                 sense_leaks: self.sense_leaks,
-                entry: self.entry,
-                reenter: self.reenter,
-                resume: self.resume,
+                loops: (self.loops)(&crate::observer::ObservedOpcodes::default()),
                 locked,
                 script_encodings: Vec::new(),
                 units,
@@ -3091,6 +3083,11 @@ impl EngineBuilder {
             end: Arc::default(),
         };
         engine.register_ini(held, startup, &configuration.loads, self.sapi_name);
+        // The loop, chosen once the declared opcodes are fixed, as php
+        // resolves an opline's handler when it compiles it (design §5.8).
+        if let Some(shared) = Arc::get_mut(&mut engine.shared) {
+            shared.loops = (self.loops)(&shared.opcodes);
+        }
         engine.end.arm(&engine.shared, self.sapi_name);
         engine
     }
@@ -3505,9 +3502,7 @@ impl Engine {
             ini_defaults: Vec::new(),
             ini_files: crate::api::request::IniFiles::default(),
             ini_entries: Vec::new(),
-            entry: execute::<Nop>,
-            reenter: reenter::<Nop>,
-            resume: resume::<Nop>,
+            loops: Loops::bound::<Nop>,
             tier_extension: Nop::extension(),
             hooked: Nop::HOOKED,
             extended_info: false,
@@ -4321,11 +4316,11 @@ impl Engine {
         if script {
             req.expand_primary_file(source.is_some());
         }
-        if script && !auto_file(req, b"auto_prepend_file", self.shared.entry) {
+        if script && !auto_file(req, b"auto_prepend_file", self.shared.loops.entry) {
             return false;
         }
         let ran = match self.primary(req, source) {
-            Some(Ok(unit)) => serve_unit(req, &unit, self.shared.entry),
+            Some(Ok(unit)) => serve_unit(req, &unit, self.shared.loops.entry),
             // `php_error_cb` renders it where it renders every
             // diagnostic, at the level the compiler refused at, and the
             // request ends before a frame is pushed.
@@ -4336,7 +4331,7 @@ impl Engine {
             }
             None => false,
         };
-        ran && (!script || auto_file(req, b"auto_append_file", self.shared.entry))
+        ran && (!script || auto_file(req, b"auto_append_file", self.shared.loops.entry))
     }
 
     /// The program compiled: the source the host handed over under the
@@ -4455,7 +4450,7 @@ impl Engine {
     /// `php_cli_server_dispatch_router`: `router` served as
     /// `php_execute_script_ex` serves a program, and whether it declined.
     fn execute_router(&self, req: &mut Request, router: &[u8]) -> Routed {
-        let entry = self.shared.entry;
+        let entry = self.shared.loops.entry;
         if !auto_file(req, b"auto_prepend_file", entry) {
             return Routed::Taken;
         }
@@ -5045,6 +5040,9 @@ fn serve_rinits(req: &mut Request, extensions: &[Extension]) -> Result<(), Throw
 #[cfg(test)]
 mod tests {
     use super::*;
+    use php_heap::{Fatal, FrameRef};
+
+    use crate::observer::Untold;
     use crate::probe::{Asked, Probe};
     use crate::tier::Site;
 
@@ -6924,7 +6922,7 @@ mod tests {
         };
         let frame = req.pushed(unit.published());
         assert_eq!(
-            crate::tier::execute::<Nop>(&mut req, frame),
+            crate::tier::execute::<Nop, Untold>(&mut req, frame),
             Err(Fatal::Error(String::from(
                 "InternalError: ZEND_USER_OPCODE has no handler in this engine yet"
             )))
@@ -6943,7 +6941,10 @@ mod tests {
             .unwrap_or_default();
         let unit = Unit::clone(&unit);
         let frame = req.pushed(unit.published());
-        assert_eq!(crate::tier::execute::<Probe>(&mut req, frame), Ok(()));
+        assert_eq!(
+            crate::tier::execute::<Probe, Untold>(&mut req, frame),
+            Ok(())
+        );
         assert_eq!(
             req.state::<Asked>().sites,
             vec![(Site::Entry, frame)],
@@ -6968,7 +6969,7 @@ mod tests {
             .unwrap_or_default();
         req.declare_functions(&unit);
         let frame = req.pushed(unit);
-        let outcome = crate::tier::execute::<Probe>(&mut req, frame);
+        let outcome = crate::tier::execute::<Probe, Untold>(&mut req, frame);
         assert!(
             outcome.is_ok() && req.is_pending(),
             "the third call's RECV throws and nothing catches it: it stays pending for the caller"

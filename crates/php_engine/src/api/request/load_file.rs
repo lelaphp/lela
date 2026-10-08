@@ -105,7 +105,7 @@ impl Request {
         }
         self.attach_symbol_table(frame);
         crate::observer::call(self, frame);
-        let reenter = self.shared.reenter;
+        let reenter = self.shared.loops.reenter;
         let served = reenter(self, frame);
         let served = self.fatal_of(served);
         while self.vm.frames().len() > standing + 1 {

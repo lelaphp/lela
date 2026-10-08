@@ -79,7 +79,11 @@ impl Engine {
             }
             CommandLine::Shell => {
                 if let Some(shell) = self.shared.supplied.shell.get() {
-                    crate::engine::auto_file(&mut req, b"auto_prepend_file", self.shared.entry);
+                    crate::engine::auto_file(
+                        &mut req,
+                        b"auto_prepend_file",
+                        self.shared.loops.entry,
+                    );
                     if !req.bailing_out() {
                         req.end_in_exit(0);
                         let status = (shell.serve)(&mut req);
@@ -206,7 +210,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
                 return false;
             }
         };
-        let served = req.serve_host_string(|req| (shared.entry)(req, frame));
+        let served = req.serve_host_string(|req| (shared.loops.entry)(req, frame));
         // What a fatal left standing above the main frame, as
         // `serve_unit` pops it.
         while req.vm().frames().len() > standing + 1 {
