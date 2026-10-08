@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Result, bail};
 
 use super::Subset;
-use crate::oracle::{Oracle, Pin, Program};
+use crate::oracle::{Ended, Oracle, Pin, Program};
 
 /// The corpus directories whose tests need the server: the extensions'
 /// subsets as the design derives them (#1590), and any directory inside.
@@ -74,7 +74,7 @@ pub(crate) fn served(oracle: &Oracle<'_>, subset: &Subset, runs: bool) -> Result
 pub(crate) fn version(oracle: &Oracle<'_>, scope: &str) -> Result<String> {
     let seen = oracle.run(Program::Snippet(ASK), None)?;
     let said = String::from_utf8_lossy(&seen.stdout).trim().to_owned();
-    if seen.exit != Some(0) || said.is_empty() {
+    if seen.exit != Ended::Status(0) || said.is_empty() {
         bail!(
             "{scope}: refused, not skipped: the subset needs the MySQL server the recipe's PDO_MYSQL_TEST_DSN names, and it did not answer ({said}); {START}"
         );
@@ -178,7 +178,7 @@ fn said(oracle: &Oracle<'_>, statements: &str) -> std::result::Result<String, St
         .run(Program::Snippet(&code), None)
         .map_err(|e| format!("{e:#}"))?;
     let said = String::from_utf8_lossy(&seen.stdout).trim().to_owned();
-    if seen.exit == Some(0) {
+    if seen.exit == Ended::Status(0) {
         Ok(said)
     } else {
         Err(said)

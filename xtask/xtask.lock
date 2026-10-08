@@ -134,6 +134,7 @@ oracle::Binary::file
 oracle::Binary::variant
 oracle::Build
 oracle::ENGINE
+oracle::Ended
 oracle::Host
 oracle::Invocation
 oracle::Invocation::new

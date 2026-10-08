@@ -431,7 +431,7 @@ fn held_over(
     let observed = |(stdout, exit): (&str, i32)| Observation {
         stdout: stdout.as_bytes().to_vec(),
         stderr: Vec::new(),
-        exit: Some(exit),
+        exit: crate::oracle::Ended::Status(exit),
         wall: Duration::ZERO,
     };
     let (oracle, engine) = (observed(oracle), observed(engine));

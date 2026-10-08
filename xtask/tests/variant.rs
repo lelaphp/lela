@@ -470,6 +470,7 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
     let ask = crosscheck::Ask {
         ext: vec!["ctype".to_owned()],
         renderings: Some(renderings),
+        ..crosscheck::Ask::default()
     };
     let mut manifest = Manifest::load(workspace()).unwrap();
     manifest.pin = pin;

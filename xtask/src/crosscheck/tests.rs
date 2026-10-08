@@ -532,3 +532,45 @@ fn a_staged_change_beyond_the_key_renders_again_though_the_reading_stands() {
         ["ctype"]
     );
 }
+
+/// A staged `docs/divergence.toml` with nothing else staged renders every
+/// carried extension again, though both pass over what is staged: an
+/// accepted `crosscheck:` row turns a rendering's fail into a pass, and
+/// the file is under no crate's key ([`sources::Outside::Every`], #1738).
+#[test]
+fn a_staged_file_every_reading_reads_renders_every_extension_again() {
+    let tree = crate::key::fixture("crosscheck-every");
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let store = Store::at(tree.join("target/harness"));
+    let carried = ["ctype".to_owned(), "reflection".to_owned()];
+    rendered(&tree, &manifest, &store, &["ctype", "reflection"]);
+    let again = || staged(&tree, &manifest, &store, &carried).unwrap();
+    assert!(again().is_empty(), "{:?}", again());
+
+    staging(&tree, crate::divergence::FILE, "");
+    assert_eq!(again(), carried);
+}
+
+/// A staged `Cargo.lock` that bumps a dependency only `ext/ctype`'s
+/// closure reaches renders ctype again and leaves reflection, whose
+/// closure the lock pins as `HEAD` does, unrendered (#1738).
+#[test]
+fn a_staged_lock_renders_again_only_the_extensions_whose_closure_it_moves() {
+    let tree = crate::key::fixture("crosscheck-lock");
+    let manifest = Manifest::load(&crate::built_root()).unwrap();
+    let store = Store::at(tree.join("target/harness"));
+    let carried = ["ctype".to_owned(), "reflection".to_owned()];
+    let lock = "version = 4\n\n\
+        [[package]]\nname = \"php_ext_ctype\"\nversion = \"0.0.0\"\ndependencies = [\n \"serde\",\n]\n\n\
+        [[package]]\nname = \"php_ext_reflection\"\nversion = \"0.0.0\"\n\n\
+        [[package]]\nname = \"serde\"\nversion = \"1.0.0\"\nsource = \"registry+x\"\nchecksum = \"aa\"\n";
+    staging(&tree, crate::lock::FILE, lock);
+    crate::scratch::committing(&tree, &["commit", "-q", "-m", "lock"]);
+    rendered(&tree, &manifest, &store, &["ctype", "reflection"]);
+    let again = || staged(&tree, &manifest, &store, &carried).unwrap();
+    assert!(again().is_empty(), "{:?}", again());
+
+    let bumped = lock.replace("checksum = \"aa\"", "checksum = \"bb\"");
+    staging(&tree, crate::lock::FILE, &bumped);
+    assert_eq!(again(), ["ctype"]);
+}

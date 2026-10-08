@@ -116,9 +116,29 @@ pub(crate) fn staged_crates(root: &Path, manifest: &Manifest) -> Result<Vec<Stri
 /// from the index there is over content the commit does not take, and
 /// stands for nothing. A staged file outside every crate is stamped into
 /// no reading, so each voids the readings it can change, as [`Reach`]
-/// sorts them (#1312).
+/// sorts them (#1312), and what they void is kept beside the readings
+/// ([`Outside`]), for an instrument that measures what nothing stands for
+/// rather than what is staged under a crate (#1738).
 #[derive(Debug, Default)]
-pub(crate) struct Standing(BTreeMap<String, Reading>);
+pub(crate) struct Standing {
+    readings: BTreeMap<String, Reading>,
+    outside: Outside,
+}
+
+/// What the files staged outside every crate void, as [`Reach`] sorts
+/// them. A file only the harness reads voids xtask's reading alone, which
+/// [`Standing`] drops itself, so it is not among these.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum Outside {
+    /// No reading but, at most, xtask's.
+    #[default]
+    Nothing,
+    /// Every reading, for this file.
+    Every(String),
+    /// The readings of the crates whose closure the staged lock moves
+    /// ([`lock_moved`]).
+    Lock,
+}
 
 /// What a staged file outside every crate can change of a reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +229,7 @@ impl Standing {
             .iter()
             .filter_map(|r| r.predicate.avoid_from.as_ref().map(AvoidFrom::file))
             .collect();
-        let mut lock_staged = false;
+        let mut outside = Outside::Nothing;
         let mut harness = None;
         for change in git::staged(root)? {
             if !manifest.crates_of(&[change.path.as_str()]).is_empty() {
@@ -222,9 +242,12 @@ impl Standing {
                         "{instrument}: {} is staged outside every crate, so no reading stands for the commit",
                         change.path
                     );
-                    return Ok(Standing::default());
+                    return Ok(Standing {
+                        readings: BTreeMap::new(),
+                        outside: Outside::Every(change.path),
+                    });
                 }
-                Reach::Lock => lock_staged = true,
+                Reach::Lock => outside = Outside::Lock,
                 Reach::Harness => harness = harness.or(Some(change.path)),
             }
         }
@@ -243,8 +266,12 @@ impl Standing {
                 "{instrument}: {path} is staged outside every crate and xtask's tests read the tree, so xtask's reading does not stand"
             );
         }
-        if lock_staged {
-            let moved = lock_moved(root, manifest, &standing)?;
+        if outside == Outside::Lock {
+            let taken = standing.iter().filter_map(|(scope, reading)| {
+                let path = scopes.iter().find(|(s, _)| s == scope)?.1.as_path();
+                Some((scope.as_str(), path, reading.commit.as_str()))
+            });
+            let moved = lock_moved(root, manifest, taken)?;
             if !moved.is_empty() {
                 let names: Vec<&str> = moved.iter().map(String::as_str).collect();
                 println!(
@@ -255,7 +282,10 @@ impl Standing {
             }
             standing.retain(|scope, _| !moved.contains(scope));
         }
-        let standing = Standing(standing);
+        let standing = Standing {
+            readings: standing,
+            outside,
+        };
         if let Some(line) = standing.said(instrument) {
             println!("{line}");
         }
@@ -265,15 +295,15 @@ impl Standing {
     /// The one line a run prints for what it relies on: the reading when
     /// one stands, the scopes and the oldest reading when several do.
     fn said(&self, instrument: &str) -> Option<String> {
-        let oldest = self.0.values().min_by_key(|r| r.at.to_string())?;
+        let oldest = self.readings.values().min_by_key(|r| r.at.to_string())?;
         let taken = format!("{} at {}", oldest.at, oldest.commit);
-        Some(match self.0.len() {
+        Some(match self.readings.len() {
             1 => format!(
                 "{instrument}: {} stands on its pass of {taken}, taken over what is staged; not run again",
                 oldest.scope
             ),
             n => {
-                let names: Vec<&str> = self.0.keys().map(String::as_str).collect();
+                let names: Vec<&str> = self.readings.keys().map(String::as_str).collect();
                 format!(
                     "{instrument}: {n} scopes stand on passes taken over what is staged, the oldest of {taken}; not run again: {}",
                     listed(&names)
@@ -305,7 +335,12 @@ impl Standing {
 
     /// The standing reading over `scope`, if one stands.
     pub(crate) fn get(&self, scope: &str) -> Option<&Reading> {
-        self.0.get(scope)
+        self.readings.get(scope)
+    }
+
+    /// What the files staged outside every crate void.
+    pub(crate) fn outside(&self) -> &Outside {
+        &self.outside
     }
 
     /// Of `names`, the ones no standing reading covers: what the run
@@ -313,41 +348,41 @@ impl Standing {
     pub(crate) fn unmeasured(&self, names: &[String]) -> Vec<String> {
         names
             .iter()
-            .filter(|n| !self.0.contains_key(n.as_str()))
+            .filter(|n| !self.readings.contains_key(n.as_str()))
             .cloned()
             .collect()
     }
 }
 
-/// Of the standing readings, the scopes whose crate's dependency closure
-/// the staged lock pins otherwise than the lock at the commit the reading
-/// was taken at (#1312). A reading at no commit git can show, or over no
-/// crate the lock names, is counted moved. The reading's own staged lock,
-/// when the commit it was taken for staged one, is not kept; the lock at
-/// its commit stands for it.
-fn lock_moved(
+/// Of `taken`, each a scope, the path its reading is keyed over and the
+/// commit it was taken at, the scopes whose crate's dependency closure the
+/// staged lock pins otherwise than the lock at that commit (#1312): the
+/// standing readings' commits, or `HEAD` for what the commit itself moves
+/// (#1738). A scope at no commit git can show, or over no crate the lock
+/// names, is counted moved. A reading's own staged lock, when the commit
+/// it was taken for staged one, is not kept; the lock at its commit stands
+/// for it.
+pub(crate) fn lock_moved<'a>(
     root: &Path,
     manifest: &Manifest,
-    standing: &BTreeMap<String, Reading>,
+    taken: impl IntoIterator<Item = (&'a str, &'a Path, &'a str)>,
 ) -> Result<Vec<String>> {
-    let Some(staged) = git::staged_content(root, lock::FILE)? else {
-        return Ok(standing.keys().cloned().collect());
-    };
+    let staged = git::staged_content(root, lock::FILE)?;
     let mut at: BTreeMap<&str, Option<String>> = BTreeMap::new();
     let mut moved = Vec::new();
-    for (scope, reading) in standing {
-        let then = at.entry(&reading.commit).or_insert_with(|| {
-            (!reading.commit.is_empty())
-                .then(|| git::show(root, &reading.commit, lock::FILE).ok().flatten())
+    for (scope, path, commit) in taken {
+        let then = at.entry(commit).or_insert_with(|| {
+            (!commit.is_empty())
+                .then(|| git::show(root, commit, lock::FILE).ok().flatten())
                 .flatten()
         });
-        let same = manifest.crate_named(scope).is_some_and(|krate| {
+        let same = manifest.crate_of(path).is_some_and(|krate| {
             let package = krate.package();
-            let now = lock::closure(&staged, &package);
+            let now = staged.as_deref().and_then(|s| lock::closure(s, &package));
             now.is_some() && then.as_deref().and_then(|t| lock::closure(t, &package)) == now
         });
         if !same {
-            moved.push(scope.clone());
+            moved.push(scope.to_owned());
         }
     }
     Ok(moved)
