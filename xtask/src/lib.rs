@@ -455,7 +455,7 @@ fn crosscheck_command(
     };
     let ask = crosscheck::Ask {
         ext,
-        renderings: None,
+        ..crosscheck::Ask::default()
     };
     record(
         store,

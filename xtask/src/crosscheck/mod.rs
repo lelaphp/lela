@@ -176,6 +176,11 @@ pub struct Ask {
     /// control; a column whose file is absent rendered nothing;
     /// without it the engine's side is the linked engine's own rendering.
     pub renderings: Option<PathBuf>,
+    /// A binary standing for `php-linked`, which serves the linked
+    /// engine's side: what a test hands the lane to hold a rendering
+    /// served through one that dies (#1069); without it, the one built
+    /// from the workspace.
+    pub linked: Option<PathBuf>,
 }
 
 /// The engine's side of one extension.
@@ -372,6 +377,7 @@ pub fn run(
     let engines = Engines {
         linked: Carried::linked(root)?,
         binary: Binary::of(root),
+        server: ask.linked.clone(),
     };
     // The tree before anything renders: what each reading is stamped with.
     let snapshot = Snapshot::disk(root)?;
@@ -484,6 +490,8 @@ struct Engines {
     linked: Carried,
     /// The binary, built at the first extension that asks for it.
     binary: Binary,
+    /// What stands for `php-linked`, where the run was handed one.
+    server: Option<PathBuf>,
 }
 
 /// The engine's side for `name` in `column`: the file a test handed the
@@ -515,8 +523,13 @@ fn rendering(
                 )
             })
         } else if linked {
-            linked::serve(&manifest.pin.recipe, None, &program)
-                .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
+            linked::serve_by(
+                engines.server.as_deref(),
+                &manifest.pin.recipe,
+                None,
+                &program,
+            )
+            .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
         } else {
             engines
                 .binary
