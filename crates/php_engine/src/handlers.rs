@@ -19307,19 +19307,7 @@ pub(crate) fn jmpnz<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let taken = crate::ops::is_true(req, &value);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    if !taken {
-        return Ok(advance(req, frame));
-    }
-    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
-    // test served may have thrown.
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, at, op.op2, op.out)
+    branched::<T, true, false>(req, frame, code, op)
 }
 
 /// `ZEND_JMPZ`: `ZEND_JMPNZ` with the test the other way round, the jump
@@ -19341,19 +19329,7 @@ pub(crate) fn jmpz<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let taken = !crate::ops::is_true(req, &value);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    if !taken {
-        return Ok(advance(req, frame));
-    }
-    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
-    // test served may have thrown.
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, at, op.op2, op.out)
+    branched::<T, false, false>(req, frame, code, op)
 }
 
 /// `ZEND_JMPZ_EX` (`Z/Zend/zend_vm_def.h:3180`), the jump
@@ -19388,17 +19364,7 @@ pub(crate) fn jmpz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let held = crate::ops::is_true(req, &value);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    write_out(req, frame, code, op, &Value::bool(held));
-    if held {
-        return Ok(advance(req, frame));
-    }
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    jump_to(req, frame, op.op2)
+    branched::<T, false, true>(req, frame, code, op)
 }
 
 /// `ZEND_JMPNZ_EX` (`Z/Zend/zend_vm_def.h:3216`): [`jmpz_ex`] with the
@@ -19422,17 +19388,39 @@ pub(crate) fn jmpnz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    branched::<T, true, true>(req, frame, code, op)
+}
+
+/// The body the four conditional jumps share: the operand read as
+/// [`crate::ops::is_true`] reads it and freed, the bool written into the
+/// temporary for an `_EX` (`EX`) whichever way the test went, and the
+/// jump to `op2` taken where the truth is `ON`, after `ZEND_VM_JMP`'s
+/// read of `EG(exception)`, since a conversion the test served may have
+/// thrown. The plain pair's jump is [`jumped`], a back-edge's loop
+/// safepoint among it; an `_EX`'s is [`jump_to`], which no loop closes.
+fn branched<T: Tier, const ON: bool, const EX: bool>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
     let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let held = crate::ops::is_true(req, &value);
+    let truth = crate::ops::is_true(req, &value);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    write_out(req, frame, code, op, &Value::bool(held));
-    if !held {
+    if EX {
+        write_out(req, frame, code, op, &Value::bool(truth));
+    }
+    if truth != ON {
         return Ok(advance(req, frame));
     }
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
-    jump_to(req, frame, op.op2)
+    if EX {
+        return jump_to(req, frame, op.op2);
+    }
+    let at = req.vm().opline(frame);
+    jumped::<T>(req, frame, at, op.op2, op.out)
 }
 
 /// `ZEND_JMP_SET`: the left operand of `a ?: c`
