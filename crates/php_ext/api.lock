@@ -819,6 +819,7 @@ request::Request::scope
 request::Request::script_name
 request::Request::serialize_precision
 request::Request::serve_method
+request::Request::serve_string
 request::Request::set_caller_var
 request::Request::set_ctype_locale
 request::Request::set_cwd
@@ -1046,6 +1047,7 @@ syntax::Opt
 syntax::Options
 syntax::Parsed
 syntax::Parsed::dump
+syntax::Position
 syntax::ScannedToken
 syntax::Scanning
 syntax::SyntaxKind

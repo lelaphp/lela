@@ -202,7 +202,7 @@ impl Request {
 
     /// The innermost user frame, the one a native's variable access
     /// reads: `EG(current_execute_data)`'s caller.
-    fn caller_frame(&self) -> Option<FrameRef> {
+    pub(super) fn caller_frame(&self) -> Option<FrameRef> {
         let count = self.vm.frames().len();
         let at = count.checked_sub(1)?;
         Some(FrameRef(u32::try_from(at).ok()?))

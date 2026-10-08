@@ -438,7 +438,7 @@ impl Request {
     /// `zend_include_or_eval`'s `ZEND_EVAL` arm
     /// (`Z/Zend/zend_execute.c:5354`): the string compiled as
     /// `compile_string` compiles it, from after an open tag and ending in
-    /// `RETURN null` ([`SourceKind::Eval`]), under the name
+    /// `RETURN null` ([`SourceKind::EVAL`]), under the name
     /// `zend_make_compiled_string_description` gives it, the file and
     /// line the `eval` stands at and `: eval()'d code`, which is what
     /// `__FILE__` folds to inside it and what a diagnostic raised in it
@@ -508,15 +508,17 @@ impl Request {
     /// compiles it: the links the bundle supplied
     /// ([`ExtensionBuilder::compile_string`]) from the top, each serving
     /// the one beneath where it will, and php's own `compile_string`
-    /// beneath them all, from after an open tag ([`SourceKind::Eval`]).
-    /// The `Err` is what a link threw; the unit, or the compiler's
-    /// refusal for the caller to raise, is the `Ok`.
+    /// beneath them all, its scanner begun where `position` says, after
+    /// an open tag for an `eval` ([`SourceKind::EVAL`]). The `Err` is
+    /// what a link threw; the unit, or the compiler's refusal for the
+    /// caller to raise, is the `Ok`.
     ///
     /// [`ExtensionBuilder::compile_string`]: crate::api::abi::ExtensionBuilder::compile_string
     pub(crate) fn compile_string(
         &mut self,
         code: &[u8],
         name: &[u8],
+        position: php_compile::syntax::Position,
     ) -> Result<Result<Arc<Unit>, CompileError>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let links = shared.supplied.compile_string.links();
@@ -524,8 +526,56 @@ impl Request {
             links,
             source: code,
             name,
+            position,
         };
         Ok(top.compile(self, code)?.0)
+    }
+
+    /// `compile_string(source, name, position)` and `zend_execute` of
+    /// the op array it made: the string compiled through the
+    /// `zend_compile_string` links ([`Request::compile_string`]) from
+    /// where `position` begins the scanner, under `name`, which
+    /// `__FILE__` folds to and a diagnostic raised in it names; then
+    /// served as code at the top of a frame of its own over the
+    /// variables of the native's caller, where `zend_execute` serves it
+    /// with `EG(current_execute_data)` at the native. A parse error is
+    /// the `ParseError` `zendparse` throws at `name`, a refusal after
+    /// the parse the `E_COMPILE_ERROR` that ends the request, and what
+    /// the code left uncaught or ended in is the `Err`. What the test
+    /// extension's `zend_test_compile_string` serves, the witness there.
+    pub fn serve_string(
+        &mut self,
+        source: &[u8],
+        name: &[u8],
+        position: php_compile::syntax::Position,
+    ) -> Result<(), Thrown> {
+        let kind = SourceKind::Eval(position);
+        let unit = match self.compile_string(source, name, position)? {
+            Ok(unit) => unit,
+            Err(refused) => return Err(self.refused_include(&refused, name, kind)),
+        };
+        if !crate::engine::note_compiled(self, &unit, kind) || self.bailing_out() {
+            return Err(Thrown::of(self.take_pending_view()));
+        }
+        let standing = self.vm.frames().len();
+        let callee = match self.caller_frame() {
+            Some(frame) => self.push_code_frame(unit, frame, None),
+            None => self.push_frame(unit),
+        };
+        let callee = self.fatal_of(callee)?;
+        let reenter = self.shared.loops.reenter;
+        let served = reenter(self, callee);
+        while self.vm.frames().len() > standing {
+            let top = self.stack.current();
+            self.leave_frame(top);
+        }
+        self.fatal_of(served)?;
+        let returned = std::mem::replace(&mut self.returned, crate::api::values::Value::null());
+        self.release(returned);
+        if self.is_pending() {
+            return Err(Thrown::of(self.take_pending_view()));
+        }
+        Ok(())
     }
 
     /// `f` over a string the host evaluates of its own, `-r`'s code, the
@@ -563,20 +613,22 @@ impl Request {
     }
 
     /// php's own `compile_string`, beneath every link of the pointer:
-    /// `source` compiled under `name` as the request's own unit.
+    /// `source` compiled from `position` under `name` as the request's
+    /// own unit.
     pub(crate) fn compile_string_own(
         &mut self,
         source: &[u8],
         name: &[u8],
+        position: php_compile::syntax::Position,
     ) -> Result<Arc<Unit>, CompileError> {
-        Arc::clone(&self.shared).compile_for(self, source, name, SourceKind::Eval)
+        Arc::clone(&self.shared).compile_for(self, source, name, SourceKind::Eval(position))
     }
 
     /// [`Request::compile_string`] with the compiler's refusal raised as
     /// an included file's is, at `name`.
     pub(crate) fn compile_eval(&mut self, code: &[u8], name: &[u8]) -> Result<Arc<Unit>, Thrown> {
-        self.compile_string(code, name)?
-            .map_err(|refused| self.refused_include(&refused, name, SourceKind::Eval))
+        self.compile_string(code, name, php_compile::syntax::Position::AfterOpenTag)?
+            .map_err(|refused| self.refused_include(&refused, name, SourceKind::EVAL))
     }
 
     /// `zend_resolve_path`: each extension's override asked first, in
@@ -740,7 +792,7 @@ impl Request {
             return Thrown::of(None);
         }
         let raised = refused.raised.iter();
-        if kind == SourceKind::Eval {
+        if matches!(kind, SourceKind::Eval(_)) {
             for raised in raised.clone() {
                 self.note_error_in(raised.level, &raised.message, path, raised.line);
             }

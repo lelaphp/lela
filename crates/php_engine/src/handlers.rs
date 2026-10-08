@@ -3311,7 +3311,7 @@ fn included(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let source = match kind {
-        exec::IncludeKind::Eval => php_compile::SourceKind::Eval,
+        exec::IncludeKind::Eval => php_compile::SourceKind::EVAL,
         _ => php_compile::SourceKind::File,
     };
     if !crate::engine::note_compiled(req, &unit, source) {
