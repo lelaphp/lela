@@ -1693,6 +1693,27 @@ mod tests {
         );
     }
 
+    /// A subject said to stay as it is asks for no write (#2391), and a
+    /// word of staying past the two after the subject is about something
+    /// else the clause names, so the write stands.
+    #[test]
+    fn a_criterion_whose_denied_subject_stays_as_it_is_asks_for_no_write() {
+        for kept in [
+            "`.claude/harness.local.md` still renders this machine's live numbers",
+            "`seams.toml` keeps its ceilings",
+            "`oracle.toml` stays as it is",
+            "`seams.toml` is unchanged",
+        ] {
+            assert!(read("ready-for-agent", kept).is_empty(), "{kept}");
+        }
+        for written in [
+            "`oracle.toml` carries a `[regime.dump]` the lane still reads",
+            "`.claude/settings.json` still gains a hook",
+        ] {
+            assert_eq!(read("ready-for-agent", written).len(), 1, "{written}");
+        }
+    }
+
     /// The label says whose the act is, and the rule's `exempt` says which
     /// paths under its scope it does not deny.
     #[test]
