@@ -343,6 +343,20 @@ impl Outside<'_> {
         set(req, code, message)
     }
 
+    /// [`Outside::set`] with `pending` already thrown: the
+    /// `IntlException` chained to it, or it handed on; `Err` always.
+    pub(crate) fn set_over(
+        &mut self,
+        req: &mut Request,
+        pending: Thrown,
+        code: Code,
+        message: impl AsRef<[u8]>,
+    ) -> Result<(), Thrown> {
+        self.keep(req, code, message.as_ref());
+        set_code(req, code);
+        custom_msg(req, Some(pending), message.as_ref())
+    }
+
     /// The outside error's code and message.
     fn keep(&mut self, req: &mut Request, code: Code, message: &[u8]) {
         let text = prefixed(req, message);
