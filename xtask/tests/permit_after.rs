@@ -618,6 +618,20 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
             before.contains("toolu_01AskFixtureApproval0001"),
             "{before}"
         );
+        // An approval pending for a line is no change yet, so no audit
+        // entry is written before it runs (#2281).
+        let approvals = root.join("target/harness/permit/approvals");
+        let entries = || -> Vec<serde_json::Value> {
+            std::fs::read_dir(&approvals).map_or_else(
+                |_| Vec::new(),
+                |d| {
+                    d.map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+                        .map(|t| serde_json::from_str(&t).unwrap())
+                        .collect()
+                },
+            )
+        };
+        assert!(entries().is_empty(), "{:?}", entries());
         shell(&root, &command);
         let (code, out, err) = permit(&root, &hook("PostToolUse"), &["--after"]);
         assert_eq!(code, 0, "{err}");
@@ -643,9 +657,22 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
                 .unwrap()
                 .expect("the approved write is a permit reading");
             assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+            // What stands as approved is one entry of permit's audit
+            // record, written after the line ran (#2281).
+            let entries = entries();
+            assert_eq!(entries.len(), 1, "{entries:?}");
+            assert_eq!(entries[0]["file"], "docs/divergence.toml");
+            assert_eq!(entries[0]["ask"], "toolu_01AskFixtureApproval0001");
+            assert_eq!(entries[0]["tool"], "Bash");
+            assert_eq!(entries[0]["call"], id);
+            assert_eq!(
+                entries[0]["after"],
+                git(&root, &["hash-object", "docs/divergence.toml"]).trim()
+            );
         } else {
             assert_eq!(read(&root, "docs/divergence.toml"), was);
             assert_denied(&root, &out, "docs/divergence.toml", "one line more");
+            assert!(entries().is_empty(), "{:?}", entries());
         }
     }
 }

@@ -63,7 +63,7 @@ pub(super) struct Asked {
     result: Value,
 }
 
-/// One option of a question, as the audit log names it.
+/// One option of a question, as the audit record names it ([`super::audit`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Choice {
     label: String,
@@ -83,7 +83,7 @@ struct Approval {
 }
 
 /// An approval admitting one change: what the call's note and the audit
-/// log carry. `before` and `after` are the file's blob ids, `None` where
+/// record carry. `before` and `after` are the file's blob ids, `None` where
 /// there is no file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Admission {

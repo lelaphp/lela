@@ -7,9 +7,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
 
 use super::approval::Evidence;
+use super::audit;
 use super::call::Call;
 use super::hand_off::hand_off;
 use super::rules::{Judgement, Kind, deny_output, judge};
@@ -168,9 +168,10 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     };
     match judge(&manifest, &workspace, &call) {
         Ok(judgement) => {
-            if let Some(output) = admitted(judgement.hook_stdout(), &judgement, adapter) {
+            if let Some(output) = judgement.hook_stdout() {
                 println!("{output}");
             }
+            record_the_approvals(&checkout, &call, &judgement);
             if let Err(err) = record(&checkout, &call, &judgement, adapter) {
                 eprintln!("xtask permit: the decision stands but was not recorded: {err:#}");
             }
@@ -185,21 +186,21 @@ pub fn run(root: &Path, json: Option<&str>, adapter: Adapter) -> Result<()> {
     Ok(())
 }
 
-/// The hook's stdout with, for the function hook alone, the approvals that
-/// admitted the call as `admitted`, which its audit log records (#2247);
-/// the command hook's stdout is Claude Code's, in its shape alone.
-fn admitted(output: Option<Value>, judgement: &Judgement, adapter: Adapter) -> Option<Value> {
-    let admitted: Vec<_> = judgement
+/// The audit entry of each approval that admitted an `Edit` or a
+/// `Write` ([`audit`]); a `Bash` line's is `permit --after`'s, once what
+/// it wrote stands. Best effort, as recording the decision is.
+fn record_the_approvals(checkout: &Path, call: &Call, judgement: &Judgement) {
+    if call.tool_name == "Bash" || judgement.denial().is_some() {
+        return;
+    }
+    for admission in judgement
         .findings
         .iter()
         .filter_map(|f| f.admission.as_ref())
-        .collect();
-    match (output, adapter) {
-        (Some(Value::Object(mut output)), Adapter::AboveTheCommandHook) if !admitted.is_empty() => {
-            output.insert("admitted".to_owned(), json!(admitted));
-            Some(Value::Object(output))
+    {
+        if let Err(err) = audit::record(checkout, call, admission) {
+            eprintln!("xtask permit: the approval stands but its entry was not written: {err:#}");
         }
-        (output, _) => output,
     }
 }
 

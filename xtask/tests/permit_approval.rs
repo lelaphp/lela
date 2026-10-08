@@ -151,40 +151,88 @@ fn denied(out: &Value) -> bool {
     out["hookSpecificOutput"]["permissionDecision"] == "deny"
 }
 
+/// The entries of permit's audit record in the store of `root`.
+fn entries(root: &Path) -> Vec<Value> {
+    let dir = root.join("target/harness/permit/approvals");
+    let Ok(listing) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    listing
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap())
+        .collect()
+}
+
 /// Each adapter reads its own evidence: the command hook the transcript,
-/// the function hook the records it read from the engine, `asked`; the
-/// function hook alone hands back what admitted the call, for its audit
-/// log, and the command hook's stdout stays in Claude Code's shape.
+/// the function hook the records it read from the engine, `asked`. The
+/// change an approval admitted is one entry of the audit record `permit`
+/// writes (#2281), the approval whole, though both adapters judge the
+/// call; a call denied writes none, and the hook's stdout stays in
+/// Claude Code's shape.
 #[test]
-fn each_adapter_reads_its_own_evidence_and_the_function_hook_is_told_what_admitted_it() {
+fn each_adapter_reads_its_own_evidence_and_an_admitted_change_is_one_audit_entry() {
     let root = scratch("adapters");
     let above = ["--above-the-command-hook"];
 
     let transcript = stdin(&fixture().join("admit"), &root);
-    let out = permit(&root, &transcript, &[]);
-    assert!(!denied(&out), "{out}");
-    let context = out["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(context.contains(ASK), "{context}");
-    assert!(out.get("admitted").is_none(), "{out}");
-    assert!(denied(&permit(&root, &transcript, &above)), "no `asked`");
-
     let engine = stdin(&fixture().join("engine"), &root);
+    assert!(denied(&permit(&root, &transcript, &above)), "no `asked`");
     assert!(denied(&permit(&root, &engine, &[])), "`asked` is not read");
-    let out = permit(&root, &engine, &above);
-    assert!(!denied(&out), "{out}");
-    let admitted = &out["admitted"][0];
-    assert_eq!(admitted["ask"], ASK, "{out}");
-    assert_eq!(admitted["file"], "docs/divergence.toml");
-    assert_eq!(admitted["answer"], "Apply this diff");
-    assert_eq!(admitted["notes"], "Ceiling ruled on the ticket.");
-    let diff = admitted["diff"].as_str().unwrap();
+    let forged = stdin(&fixture().join("deny-other-diff"), &root);
+    assert!(denied(&permit(&root, &forged, &[])));
+    assert_eq!(entries(&root), Vec::<Value>::new(), "a denial is no entry");
+
+    for (input, args) in [(&transcript, &[][..]), (&engine, &above[..])] {
+        let out = permit(&root, input, args);
+        assert!(!denied(&out), "{out}");
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(context.contains(ASK), "{context}");
+        assert!(out.get("admitted").is_none(), "{out}");
+    }
+
+    let entries = entries(&root);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let entry = &entries[0];
+    assert_eq!(entry["ask"], ASK, "{entry}");
+    assert_eq!(entry["file"], "docs/divergence.toml");
+    assert_eq!(entry["answer"], "Apply this diff");
+    assert_eq!(entry["notes"], "Ceiling ruled on the ticket.");
+    assert_eq!(entry["options"][1]["label"], "Leave it");
+    assert!(
+        entry["question"]
+            .as_str()
+            .unwrap()
+            .contains("docs/divergence.toml")
+    );
+    let diff = entry["diff"].as_str().unwrap();
     assert!(diff.starts_with("--- a/docs/divergence.toml\n"), "{diff}");
-    assert_eq!(admitted["diff_hash"], hash_object(diff.as_bytes()), "{out}");
-    let before = std::fs::read(root.join("docs/divergence.toml")).unwrap();
-    assert_eq!(admitted["before"], hash_object(&before));
-    assert_eq!(admitted["options"][1]["label"], "Leave it");
+    assert_eq!(entry["diff_hash"], hash_object(diff.as_bytes()), "{entry}");
+    let before = std::fs::read_to_string(root.join("docs/divergence.toml")).unwrap();
+    let edit = &transcript["tool_input"];
+    let after = before.replacen(
+        edit["old_string"].as_str().unwrap(),
+        edit["new_string"].as_str().unwrap(),
+        1,
+    );
+    assert_eq!(entry["before"], hash_object(before.as_bytes()));
+    assert_eq!(entry["after"], hash_object(after.as_bytes()));
+    assert_eq!(entry["session"], SESSION);
+    assert_eq!(entry["tool"], "Edit");
+    assert_eq!(entry["call"], "toolu_01EditFixture0001");
+    assert!(entry["time"].as_str().unwrap().ends_with('Z'), "{entry}");
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        entry["head"],
+        String::from_utf8(head.stdout).unwrap().trim()
+    );
 }
 
 /// The first live use (2026-10-07): the person's answer to a question whose

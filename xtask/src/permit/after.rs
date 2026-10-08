@@ -58,7 +58,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use super::INSTRUMENT;
+use super::approval::Admission;
 use super::argv;
+use super::audit;
 use super::call::Call;
 use super::kept;
 use super::writes::{self, Place};
@@ -105,6 +107,10 @@ struct Moved {
     was: Option<String>,
     said: String,
     verdict: Verdict,
+    /// The person's approval the write stands on, for a
+    /// [`Verdict::Approved`] one; its audit entry is written with the
+    /// reading ([`audit`]).
+    admission: Option<Admission>,
 }
 
 /// What the sensor did with a moved file, as the call's line reads.
@@ -252,8 +258,8 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
             let approved = writes
                 .then(|| approved(&guarded.checkout, path, was.as_deref(), call))
                 .flatten();
-            let (verdict, said) = if let Some(said) = approved {
-                (Verdict::Approved, format!("{path}: {said}"))
+            let (verdict, said) = if let Some(admission) = &approved {
+                (Verdict::Approved, format!("{path}: {}", admission.said()))
             } else if writes {
                 let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
                 (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
@@ -269,6 +275,7 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
                 was: was.clone(),
                 said,
                 verdict,
+                admission: approved,
             });
         }
     }
@@ -290,10 +297,10 @@ pub(super) fn written(checkout: &Path, call: &Call, line: &argv::Line) -> Vec<St
         .collect()
 }
 
-/// What the person's approval says of the file the call left at `path`,
-/// where it admits exactly the change from the blob `was` to what stands
-/// now ([`super::approval`]); `None` where none does.
-fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Option<String> {
+/// The person's approval of the file the call left at `path`, where it
+/// admits exactly the change from the blob `was` to what stands now
+/// ([`super::approval`]); `None` where none does.
+fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Option<Admission> {
     let before = match was {
         Some(id) => Some(String::from_utf8(cat_blob(checkout, id).ok()?).ok()?),
         None => None,
@@ -304,7 +311,6 @@ fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Opti
     };
     call.approvals()
         .admits(Path::new(path), before.as_deref(), now.as_deref())
-        .map(|admission| admission.said())
 }
 
 /// What a file the line cannot write says when it moved: kept, why, and
@@ -385,8 +391,9 @@ fn resolved(path: &Path) -> PathBuf {
 
 /// One reading per moved file, in the store of the checkout the file is
 /// in, stamped over the file as it stands: a failure for one put back, a
-/// note that passes for one kept or approved; and a kept one's record,
-/// which `done` reads ([`kept::keep`]).
+/// note that passes for one kept or approved; a kept one's record, which
+/// `done` reads ([`kept::keep`]); and an approved one's audit entry
+/// ([`audit::record`]).
 fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
     let words = format!("{} {}", call.tool_name, call.subject(root));
     for one in moved {
@@ -401,6 +408,9 @@ fn record_moved(root: &Path, call: &Call, moved: &[Moved]) -> Result<()> {
         Store::of_workspace(&one.checkout).record(&[reading])?;
         if one.verdict == Verdict::Kept {
             kept::keep(&one.checkout, &one.path, one.was.as_deref(), &words)?;
+        }
+        if let Some(admission) = &one.admission {
+            audit::record(&one.checkout, call, admission)?;
         }
     }
     Ok(())
