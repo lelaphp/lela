@@ -12,13 +12,17 @@
 //! drops the entry. At the request's end every entry it still holds is
 //! given back to the pool, its resource and `stream->ctx` forgotten as
 //! `forget_persistent_resource_id_numbers` forgets them; the next request
-//! to ask the key takes it out, checked for liveness first.
+//! to ask the key takes it out, checked for liveness first. The pool is
+//! the layer's engine state's ([`EngineState`]), typed by the entry it
+//! keeps (#1962).
 //!
 //! [`Pool`]: crate::api::abi::Pool
 
 use std::sync::Arc;
 
-use crate::api::abi::PersistentList;
+use crate::api::abi::Pool;
+use crate::api::layer::Face as _;
+use crate::state::EngineState;
 
 use super::sockets::Socket;
 use super::{PhpStream, Request, Stream};
@@ -57,7 +61,7 @@ pub(crate) trait Persistent {
     fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Owner<Stream>, Thrown>;
     fn hold_persistent(&mut self, key: Vec<u8>, stream: Stream);
     fn drop_persistent(&mut self, res: Resource);
-    fn persistent_pool(&mut self) -> Arc<PersistentList>;
+    fn persistent_pool(&mut self) -> Option<Arc<EngineState>>;
 }
 
 impl Persistent for Request {
@@ -105,11 +109,11 @@ impl Persistent for Request {
                 }
                 State::Idle(entry) => self.lend(key, entry)?,
             }
-        } else if let Some(entry) = self.persistent_pool().take(&key.to_vec()) {
-            let Ok(entry) = entry.downcast::<Entry>() else {
-                return Ok(None);
-            };
-            self.lend(key.to_vec(), *entry)?
+        } else if let Some(entry) = self
+            .persistent_pool()
+            .and_then(|engine| engine.persistent.take(&key.to_vec()))
+        {
+            self.lend(key.to_vec(), entry)?
         } else {
             return Ok(None);
         };
@@ -174,16 +178,18 @@ impl Persistent for Request {
             .retain(|held| !matches!(held.state, State::InResource(r) if r == res));
     }
 
-    /// The engine's pool, `EG(persistent_list)`, kept in the request's
-    /// state once asked for, so the entries held go back to it as the
-    /// request is dropped ([`give_back`]).
-    fn persistent_pool(&mut self) -> Arc<PersistentList> {
-        if let Some(pool) = &self.streams().pool {
-            return Arc::clone(pool);
+    /// The layer's engine state, whose pool is `EG(persistent_list)`,
+    /// kept in the request's state once asked for, so the entries held go
+    /// back to it as the request is dropped ([`give_back`]); `None` on an
+    /// engine no stream layer was supplied to, where a held entry closes
+    /// with the request.
+    fn persistent_pool(&mut self) -> Option<Arc<EngineState>> {
+        if let Some(engine) = &self.streams().engine {
+            return Some(Arc::clone(engine));
         }
-        let pool = self.persistent_list();
-        self.streams().pool = Some(Arc::clone(&pool));
-        pool
+        let engine = self.layer_state::<EngineState>()?;
+        self.streams().engine = Some(Arc::clone(&engine));
+        Some(engine)
     }
 }
 
@@ -225,13 +231,13 @@ pub(crate) fn unlist(req: &mut Request, stream: Stream) {
 /// resource and its `stream->ctx` forgotten. Served as the request's
 /// stream state is dropped, after the resources are closed, when every
 /// entry is idle.
-pub(crate) fn give_back(pool: &PersistentList, held: Vec<Held>) {
+pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
     for held in held {
         if let State::Idle(mut entry) = held.state {
             entry.socket.forget_request();
             // An entry past the pool's bound is closed here, outside the
             // lock.
-            drop(pool.give_back(held.key, Box::new(entry)));
+            drop(pool.give_back(held.key, entry));
         }
     }
 }

@@ -21,6 +21,8 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     spend,
     standard_handles: crate::streams::standard_handles,
     get_line,
+    state: crate::state::engine_state,
+    engine_end: crate::state::engine_end,
 };
 
 /// `php_stream_open_for_zend_ex` and `zend_stream_fixup` for an include

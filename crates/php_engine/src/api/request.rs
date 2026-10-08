@@ -799,13 +799,6 @@ impl Request {
     pub fn stream_thrown(&mut self) -> &mut Option<Thrown> {
         &mut self.stream_thrown
     }
-
-    /// php's `EG(persistent_list)`, the engine's pool of what the stream
-    /// layer keeps between requests ([`crate::api::abi::PersistentList`]).
-    #[must_use]
-    pub fn persistent_list(&self) -> Arc<crate::api::abi::PersistentList> {
-        Arc::clone(&self.shared.persistent)
-    }
 }
 
 /// The request's side of the heap's upward seam (design §4.3, seam 1):

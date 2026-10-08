@@ -318,8 +318,8 @@ struct Idle<K, V> {
 impl<K: Hash + Eq, V> Pool<K, V> {
     /// A pool keeping at most `capacity` idle entries; one given back past
     /// the bound is answered to the caller to close ([`give_back`]). The
-    /// engine's own for its streams, and an extension's as a field of its
-    /// engine state, as persistent PDO's is; what a request took out it
+    /// stream layer's in its engine state, and an extension's as a field of
+    /// its engine state, as persistent PDO's is; what a request took out it
     /// holds in a [`Lent`] of its request state.
     ///
     /// [`give_back`]: Pool::give_back
@@ -385,8 +385,9 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     /// `zend_hash_graceful_reverse_destroy` destroys `EG(persistent_list)`
     /// last entry first; from here every entry given back is answered to
     /// its caller ([`give_back`](Pool::give_back)). What an extension's
-    /// engine-end function does with its pools (ADR-0010), and the engine
-    /// with its own before any engine-end function, as `zend_shutdown`
+    /// engine-end function does with its pools (ADR-0010), and the stream
+    /// layer with its own before any engine-end function
+    /// ([`StreamHooks::engine_end`](crate::layer::StreamHooks::engine_end)), as `zend_shutdown`
     /// destroys `EG(persistent_list)` before `zend_destroy_modules`
     /// (`Z/Zend/zend.c:1166-1170`).
     #[must_use]
@@ -412,11 +413,6 @@ impl<K: Hash + Eq, V> Pool<K, V> {
             .collect()
     }
 }
-
-/// php's `EG(persistent_list)`, the engine's [`Pool`] the stream layer
-/// lends its persistent entries from, each a value of the layer's own
-/// type under php's key ([`Request::persistent_list`]).
-pub type PersistentList = Pool<Vec<u8>, Box<dyn Any + Send>>;
 
 /// The entries of a [`Pool`] one request holds, each under php's key from
 /// the ask that took it out or opened it to the request's end: a second

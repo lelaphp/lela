@@ -13,7 +13,9 @@
 //! the fds a stream holds, `php_process`'s bindings in its `unsafe` home
 //! (#1935), which the layer has no edge of its own to (#1874).
 
+use std::any::Any;
 use std::os::fd::BorrowedFd;
+use std::sync::Arc;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -32,9 +34,11 @@ pub use php_process::{
 /// php's `zend_stream_open_function` and `zend_resolve_path` as
 /// `php_module_startup` points them at main's streams, opcache's open of
 /// a file it holds, and the standard streams `do_cli` registers and reads
-/// stdin through. With none the engine is Zend alone: an include opens a
-/// plain file and nothing else, a path resolves by `realpath(3)`
-/// (`zend_resolve_path_func`), and no standard stream is registered.
+/// stdin through; and the layer's engine state, which the engine builds
+/// and ends for it. With none the engine is Zend alone: an include opens
+/// a plain file and nothing else, a path resolves by `realpath(3)`
+/// (`zend_resolve_path_func`), no standard stream is registered and no
+/// stream outlives its request.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamHooks {
     /// `php_stream_open_for_zend_ex(USE_PATH | REPORT_ERRORS |
@@ -60,6 +64,17 @@ pub struct StreamHooks {
     /// reads `STDIN` a line at a time for `-R`, `-F` and `-B`; `None` at
     /// its end, or where it names no stream.
     pub get_line: fn(&mut Request, &Value) -> Option<Vec<u8>>,
+    /// The layer's engine state, built once as the engine is
+    /// ([`Face::layer_state`]): what streams keep across requests, php's
+    /// `EG(persistent_list)` as `zend_startup`'s `zend_init_rsrc_plist`
+    /// sets it up (#1962). The engine holds it and cannot name its type;
+    /// the layer reads it back as the type it is.
+    pub state: fn() -> Arc<dyn Any + Send + Sync>,
+    /// `zend_shutdown`'s `zend_destroy_rsrc_list(&EG(persistent_list))`
+    /// (`Z/Zend/zend.c:1166`): served on the engine-end request before
+    /// any extension's engine end, so the layer's idle persistent
+    /// sockets close first.
+    pub engine_end: fn(&mut Request),
 }
 
 /// [`StreamHooks::open`].
@@ -87,13 +102,14 @@ mod sealed {
 }
 
 /// The request's operations the stream layer calls and no extension
-/// does, each the engine's own method of the name, which the engine
-/// calls as well and documents where it is written: the host's standard
-/// fds, `php://input` and `php://memory`'s limit, the open of a
-/// temporary file and the path past the `open_basedir` guard, the
-/// wrapper's warning and `realpath`, a user-space wrapper's calls into
-/// PHP code and what a throwable left pending, and the layer's own
-/// request state read shared.
+/// does, each but [`Face::layer_state`] the engine's own method of the
+/// name, which the engine calls as well and documents where it is
+/// written: the host's standard fds, `php://input` and `php://memory`'s
+/// limit, the open of a temporary file and the path past the
+/// `open_basedir` guard, the wrapper's warning and `realpath`, a
+/// user-space wrapper's calls into PHP code and what a throwable left
+/// pending, and the layer's own request state, read shared, and engine
+/// state.
 pub trait Face: sealed::Sealed {
     /// The fd the host handed under one of its standard streams, `None`
     /// where it handed none.
@@ -144,6 +160,12 @@ pub trait Face: sealed::Sealed {
     /// request held shared.
     #[must_use]
     fn state_ref<T: Send + 'static>(&self) -> Option<&T>;
+    /// The layer's engine state ([`StreamHooks::state`]) as the `T` it
+    /// is, shared, so a request state can hold it past the request's
+    /// last borrow; `None` with no stream layer supplied, or for another
+    /// type.
+    #[must_use]
+    fn layer_state<T: Send + Sync + 'static>(&self) -> Option<Arc<T>>;
 }
 
 impl Face for Request {
@@ -201,5 +223,8 @@ impl Face for Request {
     }
     fn state_ref<T: Send + 'static>(&self) -> Option<&T> {
         Request::state_ref(self)
+    }
+    fn layer_state<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        Arc::clone(self.shared.layer.as_ref()?).downcast().ok()
     }
 }

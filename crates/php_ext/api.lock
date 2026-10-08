@@ -240,7 +240,6 @@ abi::OpcodesDeclared
 abi::OrFalse
 abi::Passed
 abi::Path
-abi::PersistentList
 abi::Pool
 abi::Pool::drain
 abi::Pool::give_back
@@ -770,7 +769,6 @@ request::Request::parse_body
 request::Request::parse_encoding_list
 request::Request::parse_query
 request::Request::periods_elapsed
-request::Request::persistent_list
 request::Request::phpinfo_as_text
 request::Request::preloading
 request::Request::raised

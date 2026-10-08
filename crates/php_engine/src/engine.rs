@@ -574,13 +574,6 @@ enum Begun {
 /// keeps before it drops half of them.
 const MAX_ACCELERATED_FILES: usize = 10_000;
 
-/// The idle entries the persistent pool keeps (design §4.10). php's list
-/// has no bound of its own, being one per worker process, whose count
-/// bounds it; one pool shared by every request thread keeps at most this
-/// many, and one given back past it is closed, so a burst of concurrent
-/// requests does not leave every connection it opened held open.
-const PERSISTENT_ENTRIES: usize = 1024;
-
 /// What every request shares: the bundle, the linked declarations, the
 /// engine states, the ini defaults and the loop (design §5.14).
 pub(crate) struct Shared {
@@ -761,12 +754,13 @@ pub(crate) struct Shared {
     /// new one, the old dropped with its last holder
     /// ([`crate::arena::Epochs`]).
     pub(crate) arena: crate::arena::Epochs,
-    /// The persistent pool (design §4.10, #1172), php's
-    /// `EG(persistent_list)`: what the stream layer keeps between
-    /// requests, the sockets `pfsockopen` and `STREAM_CLIENT_PERSISTENT`
-    /// open, each lent to one request at a time
-    /// ([`Request::persistent_list`](crate::api::request::Request::persistent_list)).
-    pub(crate) persistent: Arc<crate::api::abi::PersistentList>,
+    /// The stream layer's engine state, which the engine builds at its
+    /// start from [`StreamHooks::state`](crate::layer::StreamHooks::state)
+    /// and cannot name: the layer's own types, its persistent pool among
+    /// them, php's `EG(persistent_list)` (design §4.10, #1172, #1962). The
+    /// layer reads it as [`Face::layer_state`](crate::layer::Face::layer_state);
+    /// `None` with no stream layer supplied.
+    pub(crate) layer: Option<Arc<dyn Any + Send + Sync>>,
     /// The engine's execution timer (design §5.14, **Threads**): the one
     /// thread that raises every request's interrupt at its deadlines,
     /// started by the first deadline a request sets and joined once none
@@ -3042,6 +3036,7 @@ impl EngineBuilder {
             functions.len().saturating_add(methods.len()),
             crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
         ));
+        let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -3090,7 +3085,7 @@ impl EngineBuilder {
                 script_encodings: Vec::new(),
                 units,
                 arena,
-                persistent: Arc::new(crate::api::abi::Pool::new(PERSISTENT_ENTRIES)),
+                layer,
                 timer: crate::interrupt::Timer::default(),
                 strings: Mutex::new(strings),
                 names,
@@ -3459,10 +3454,11 @@ impl EngineEnd {
 
 impl Drop for EngineEnd {
     /// `php_module_shutdown`'s `zend_shutdown` (`Z/Zend/zend.c:1162-1170`):
-    /// the engine's own persistent sockets closed first, as
-    /// `EG(persistent_list)` is destroyed first; then the shutdown
-    /// request, the mirror of the startup request: request states built
-    /// in bundle order, each extension's engine-end function in reverse
+    /// the shutdown request, the mirror of the startup request, on which
+    /// the stream layer's engine end closes its persistent sockets first
+    /// ([`StreamHooks::engine_end`](crate::layer::StreamHooks::engine_end)),
+    /// as `EG(persistent_list)` is destroyed first; then request states
+    /// built in bundle order, each extension's engine-end function in reverse
     /// ([`end_phase`]), the request dropped with its states in reverse;
     /// and then, with the last owner of what every request shares, the
     /// engine states in reverse (`zend_destroy_modules`). What the
@@ -3483,13 +3479,15 @@ impl Drop for EngineEnd {
         {
             return;
         }
-        drop(shared.persistent.drain());
         let description = RequestDescription {
             sapi_name: sapi_name.to_owned(),
             ..RequestDescription::default()
         };
         let mut req = Request::new(Arc::clone(&shared), description);
         req.enter_phase(crate::api::request::Phase::EngineEnd);
+        if let Some(hooks) = shared.supplied.stream_hooks.get() {
+            (hooks.engine_end)(&mut req);
+        }
         end_phase(&shared.extensions, &mut req, |e| e.engine_end);
     }
 }
