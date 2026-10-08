@@ -102,3 +102,140 @@ fn an_included_file_of_declarations_alone_is_stepped() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A function, a method and a file's own code, each with oplines.
+const OPLINES: &str = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nclass A { function b() { return 2; } }\nfoo();\n(new A)->b();\n";
+
+/// `b f.php:#N` keeps the file as typed (`phpdbg_set_breakpoint_file_opline`,
+/// `Z/sapi/phpdbg/phpdbg_bp.c:738`): a relative name is pending under
+/// that name and never resolves against the compiled `/abs/f.php`. An
+/// absolute one at a prompt with a frame of that file's code executing
+/// is resolved at once (`phpdbg_resolve_opline_break`, `:591-603`), and
+/// resolved again before each opline of that code.
+#[test]
+fn a_file_opline_breakpoint_keeps_its_name_and_resolves_in_an_executing_frame() {
+    let dir = laid("file-opline", &[("f.php", OPLINES)]);
+    let d = dir.display();
+    assert_eq!(
+        debugged(&dir, "f.php", "b f.php:#0\nr\nq\n"),
+        format!(
+            "[Successful compilation of {d}/f.php]\n\
+             prompt> [Pending breakpoint #0 at f.php:0]\n\
+             prompt> [Script ended normally]\n\
+             prompt> "
+        )
+    );
+    assert_eq!(
+        addresses_cut(&debugged(
+            &dir,
+            "f.php",
+            "b foo\nr\nb {dir}/f.php:#0\nc\nq\n"
+        )),
+        format!(
+            "[Successful compilation of {d}/f.php]\n\
+             prompt> [Breakpoint #0 added at foo]\n\
+             prompt> [Breakpoint #0 in foo() at {d}/f.php:3, hits: 1]\n\
+             >00003:   $a = 1;\n \
+             00004:   return $a;\n \
+             00005: }}\n\
+             prompt> [Breakpoint #1 added at {d}/f.php:0]\n\
+             prompt> [Breakpoint #1 resolved at {d}/f.php#0 (opline #N)]\n\
+             [Breakpoint #1 resolved at {d}/f.php#0 (opline #N)]\n\
+             [Breakpoint #1 resolved at {d}/f.php#0 (opline #N)]\n\
+             [Breakpoint #1 resolved at {d}/f.php#0 (opline #N)]\n\
+             [Script ended normally]\n\
+             prompt> "
+        )
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// php keeps a function, method or file opline breakpoint, once
+/// resolved, in `PHPDBG_BREAK_OPLINE` too, and `info break` lists it
+/// under `Opline Breakpoints` with its address and the kind it was
+/// resolved from (`phpdbg_print_breakpoints`), above the named tables.
+#[test]
+fn info_break_lists_resolved_opline_breakpoints_under_the_opline_table() {
+    let dir = laid("info-oplines", &[("f.php", OPLINES)]);
+    let d = dir.display();
+    assert_eq!(
+        addresses_cut(&debugged(
+            &dir,
+            "f.php",
+            "b foo\nr\nb foo#0\nb A::b#0\nb {dir}/f.php:#0\ni b\nq\n"
+        )),
+        format!(
+            "[Successful compilation of {d}/f.php]\n\
+             prompt> [Breakpoint #0 added at foo]\n\
+             prompt> [Breakpoint #0 in foo() at {d}/f.php:3, hits: 1]\n\
+             >00003:   $a = 1;\n \
+             00004:   return $a;\n \
+             00005: }}\n\
+             prompt> [Breakpoint #1 added at foo#0]\n\
+             prompt> [Breakpoint #2 added at A::b#0]\n\
+             prompt> [Breakpoint #3 added at {d}/f.php:0]\n\
+             prompt> ------------------------------------------------\n\
+             Function Breakpoints:\n\
+             #0\t\tfoo\n\
+             ------------------------------------------------\n\
+             Opline Breakpoints:\n\
+             #1\t\t#N\t\t(function breakpoint)\n\
+             #2\t\t#N\t\t(method breakpoint)\n\
+             #3\t\t#N\t\t(file breakpoint)\n\
+             ------------------------------------------------\n\
+             File opline Breakpoints:\n\
+             #3\t\t{d}/f.php opline 0\n\
+             ------------------------------------------------\n\
+             Function opline Breakpoints:\n\
+             #1\t\tfoo opline 0\n\
+             ------------------------------------------------\n\
+             Method opline Breakpoints:\n\
+             #2\t\tA::b opline 0\n\
+             prompt> "
+        )
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A second opline breakpoint on one opline of one function or method
+/// is refused after its notice and its number given back
+/// (`Z/sapi/phpdbg/phpdbg_bp.c:676-682`, `:719-725`): nothing is added
+/// to the named tables, while the opline table, which php updated before
+/// it refused, keeps the refused number under a resolved opline.
+#[test]
+fn a_second_opline_breakpoint_on_one_opline_is_refused() {
+    let dir = laid("dup-oplines", &[("f.php", OPLINES)]);
+    let d = dir.display();
+    assert_eq!(
+        addresses_cut(&debugged(
+            &dir,
+            "f.php",
+            "b foo#0\nb foo#0\nb baz#0\nb baz#0\nb A::b#0\nb A::b#0\ni b\nq\n"
+        )),
+        format!(
+            "[Successful compilation of {d}/f.php]\n\
+             prompt> [Breakpoint #0 added at foo#0]\n\
+             prompt> [Breakpoint #1 added at foo#0]\n\
+             [Breakpoint already exists for foo#0]\n\
+             prompt> [Pending breakpoint #1 at baz#0]\n\
+             prompt> [Pending breakpoint #2 at baz#0]\n\
+             [Breakpoint already exists for baz#0]\n\
+             prompt> [Breakpoint #2 added at A::b#0]\n\
+             prompt> [Breakpoint #3 added at A::b#0]\n\
+             [Breakpoint already exists for A::b#0]\n\
+             prompt> ------------------------------------------------\n\
+             Opline Breakpoints:\n\
+             #1\t\t#N\t\t(function breakpoint)\n\
+             #3\t\t#N\t\t(method breakpoint)\n\
+             ------------------------------------------------\n\
+             Function opline Breakpoints:\n\
+             #0\t\tfoo opline 0\n\
+             #1\t\tbaz opline 0\n\
+             ------------------------------------------------\n\
+             Method opline Breakpoints:\n\
+             #2\t\tA::b opline 0\n\
+             prompt> "
+        )
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

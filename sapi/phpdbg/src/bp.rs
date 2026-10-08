@@ -75,7 +75,62 @@ enum Table {
     File = 4,
 }
 
+impl Table {
+    /// The table an op array's opline resolves into: a method's where it
+    /// has a scope, a function's where it has a name, a file's else, as
+    /// `phpdbg_resolve_op_array_break` types the opline it keeps.
+    fn of(op: OpArray<'_>) -> Table {
+        match (op.function, op.class) {
+            (None, _) => Table::File,
+            (Some(_), None) => Table::Function,
+            (Some(_), Some(_)) => Table::Method,
+        }
+    }
+
+    /// The word `info break` writes for an opline resolved into it.
+    fn word(self) -> &'static str {
+        match self {
+            Table::Function => "function",
+            Table::Method => "method",
+            Table::File => "file",
+        }
+    }
+}
+
+/// What `phpdbg_resolve_opline_break` found for an opline of a named op
+/// array: the opline, at its address, or nothing yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    At(u64),
+    Pending,
+}
+
+/// One row of `PHPDBG_BREAK_OPLINE`: the opline's address, the number of
+/// the breakpoint php keeps under it, and the table of the breakpoint it
+/// was resolved from, none for one set on the opline itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Kept {
+    address: u64,
+    id: u32,
+    from: Option<Table>,
+}
+
 impl Kind {
+    /// How php names an opline of a named op array in the notices it
+    /// writes when it sets one: `foo#0`, `A::b#0`, `f.php:0`.
+    fn shown(&self) -> Option<String> {
+        match self {
+            Self::FunctionOpline { name, opline } => Some(format!("{}#{opline}", lossy(name))),
+            Self::MethodOpline {
+                class,
+                name,
+                opline,
+            } => Some(format!("{}::{}#{opline}", lossy(class), lossy(name))),
+            Self::FileOpline { file, opline } => Some(format!("{}:{opline}", lossy(file))),
+            _ => None,
+        }
+    }
+
     /// The resolve table the breakpoint is kept in, none for a kind php
     /// does not resolve.
     fn table(&self) -> Option<Table> {
@@ -85,6 +140,20 @@ impl Kind {
             Self::FileOpline { .. } => Some(Table::File),
             _ => None,
         }
+    }
+
+    /// Whether two breakpoints are one key of their name's table, its
+    /// opline, which php refuses a second of.
+    fn same_opline(&self, other: &Self) -> bool {
+        self.shares_names(other)
+            && match (self, other) {
+                (Self::FunctionOpline { opline, .. }, Self::FunctionOpline { opline: o, .. })
+                | (Self::MethodOpline { opline, .. }, Self::MethodOpline { opline: o, .. })
+                | (Self::FileOpline { opline, .. }, Self::FileOpline { opline: o, .. }) => {
+                    opline == o
+                }
+                _ => false,
+            }
     }
 
     /// Whether two breakpoints sit in one name's table of their resolve
@@ -123,6 +192,15 @@ pub struct At<'a> {
 /// How `info break` renders a breakpoint of one table, none for another's.
 type Row = fn(&Kind) -> Option<String>;
 
+/// Where one table of `info break` is read from.
+enum Listed {
+    /// The breakpoints of the kinds a row renders, titled where there is
+    /// one.
+    Kinds(Row),
+    /// `PHPDBG_BREAK_OPLINE`, titled while `PHPDBG_HAS_OPLINE_BP` is set.
+    Oplines,
+}
+
 /// The breakpoints of the session.
 #[derive(Debug, Default, Clone)]
 pub struct Breakpoints {
@@ -134,7 +212,11 @@ pub struct Breakpoints {
     /// `PHPDBG_BREAK_OPLINE` in its order: each address with the number
     /// of the breakpoint php keeps under it, a resolved one's or one set
     /// on the opline itself.
-    oplines: Vec<(u64, u32)>,
+    oplines: Vec<Kept>,
+    /// `PHPDBG_HAS_OPLINE_BP`: a row was kept in the opline table since
+    /// the breakpoints were last cleared, which a delete does not take
+    /// back, so `info break` titles the table while it is empty.
+    has_oplines: bool,
     /// `PHPDBG_BP_RESOLVE_MASK`'s flags, a [`Table`]'s bit each.
     resolving: u8,
 }
@@ -172,8 +254,9 @@ impl Breakpoints {
         id
     }
 
-    /// A breakpoint added under `id`.
-    pub fn push(&mut self, id: u32, kind: Kind) {
+    /// A breakpoint added under `id`, resolved to the opline at
+    /// `resolved` where it is one.
+    fn push(&mut self, id: u32, kind: Kind, resolved: Option<u64>) {
         if let Some(table) = kind.table() {
             self.resolving |= table as u8;
         }
@@ -182,8 +265,83 @@ impl Breakpoints {
             kind,
             hits: 0,
             disabled: false,
-            resolved: None,
+            resolved,
         });
+    }
+
+    /// `phpdbg_set_breakpoint_function_opline`, `_method_opline` and
+    /// `_file_opline` past `phpdbg_resolve_opline_break`, which the
+    /// caller ran for `id`, the number `next_id` gave, and which found
+    /// the opline or left it pending: the opline table
+    /// keeps the number under that opline first, then the notice, and a
+    /// second breakpoint on one opline of one name is refused after it,
+    /// its number given back.
+    ///
+    /// ```php
+    /// function foo() {
+    ///   return 1;
+    /// }
+    /// class A { function b() { return 2; } }
+    /// ```
+    /// ```request phpdbg
+    /// b foo#0
+    /// b foo#0
+    /// b baz#0
+    /// b baz#0
+    /// b A::b#0
+    /// b A::b#0
+    /// b f.php:#0
+    /// b f.php:#0
+    /// q
+    /// ```
+    /// ```expect
+    /// [Successful compilation of %SCRATCH%/witness.php]
+    /// prompt> [Breakpoint #0 added at foo#0]
+    /// prompt> [Breakpoint #1 added at foo#0]
+    /// [Breakpoint already exists for foo#0]
+    /// prompt> [Pending breakpoint #1 at baz#0]
+    /// prompt> [Pending breakpoint #2 at baz#0]
+    /// [Breakpoint already exists for baz#0]
+    /// prompt> [Breakpoint #2 added at A::b#0]
+    /// prompt> [Breakpoint #3 added at A::b#0]
+    /// [Breakpoint already exists for A::b#0]
+    /// prompt> [Pending breakpoint #3 at f.php:0]
+    /// prompt> [Pending breakpoint #4 at f.php:0]
+    /// [Breakpoint already exists for f.php:0]
+    /// prompt>
+    /// ```
+    pub fn set_named_opline(&mut self, id: u32, kind: Kind, found: Resolution) {
+        let (Some(shown), Some(table)) = (kind.shown(), kind.table()) else {
+            return;
+        };
+        let resolved = match found {
+            Resolution::At(address) => {
+                self.keep(address, id, Some(table));
+                out::notice(format!("Breakpoint #{id} added at {shown}").as_bytes());
+                Some(address)
+            }
+            Resolution::Pending => {
+                out::notice(format!("Pending breakpoint #{id} at {shown}").as_bytes());
+                None
+            }
+        };
+        if self.has(|k| k.same_opline(&kind)) {
+            out::error(format!("Breakpoint already exists for {shown}").as_bytes());
+            self.count -= 1;
+            return;
+        }
+        self.push(id, kind, resolved);
+    }
+
+    /// `zend_hash_index_update` of the opline table: the row at
+    /// `address` given the number `id`, in its place, or added at the end.
+    fn keep(&mut self, address: u64, id: u32, from: Option<Table>) {
+        self.has_oplines = true;
+        let kept = Kept { address, id, from };
+        match self.oplines.iter_mut().find(|row| row.address == address) {
+            Some(row) => *row = kept,
+            None => self.oplines.push(kept),
+        }
     }
 
     /// Whether a resolve flag is set, `PHPDBG_BP_RESOLVE_MASK`.
@@ -192,16 +350,13 @@ impl Breakpoints {
     }
 
     /// `phpdbg_resolve_op_array_break` past its check: the breakpoint
-    /// numbered `id` kept in the opline table under `address`, in the
-    /// place of whatever was kept there, and at its end where nothing was.
-    pub fn resolve_to(&mut self, id: u32, address: u64) {
+    /// numbered `id` resolved to `address`, an opline of an op array of
+    /// `table`, and kept in the opline table under it.
+    fn resolve_to(&mut self, id: u32, address: u64, table: Table) {
         if let Some(brake) = self.list.iter_mut().find(|brake| brake.id == id) {
             brake.resolved = Some(address);
         }
-        match self.oplines.iter_mut().find(|(at, _)| *at == address) {
-            Some(kept) => kept.1 = id,
-            None => self.oplines.push((address, id)),
-        }
+        self.keep(address, id, Some(table));
     }
 
     /// `phpdbg_resolve_op_array_breaks`, before each opline the loop
@@ -247,11 +402,7 @@ impl Breakpoints {
     /// prompt>
     /// ```
     pub fn resolve(&mut self, op: OpArray<'_>, last: u32) {
-        let table = match (op.function, op.class) {
-            (None, _) => Table::File,
-            (Some(_), None) => Table::Function,
-            (Some(_), Some(_)) => Table::Method,
-        };
+        let table = Table::of(op);
         if self.resolving & table as u8 == 0 {
             return;
         }
@@ -294,12 +445,12 @@ impl Breakpoints {
                 );
                 continue;
             }
-            self.resolve_to(id, address(op, opline));
-            let Some((address, kept)) = self.oplines.last() else {
+            self.resolve_to(id, address(op, opline), table);
+            let Some(Kept { address, id, .. }) = self.oplines.last() else {
                 continue;
             };
             out::notice(
-                format!("Breakpoint #{kept} resolved at {shown}#{opline} (opline #{address})")
+                format!("Breakpoint #{id} resolved at {shown}#{opline} (opline #{address})")
                     .as_bytes(),
             );
         }
@@ -343,7 +494,7 @@ impl Breakpoints {
         } else {
             format!("Breakpoint #{id} added at {}:{line}", lossy(file))
         };
-        self.push(id, kind);
+        self.push(id, kind, None);
         out::notice(message.as_bytes());
     }
 
@@ -380,6 +531,7 @@ impl Breakpoints {
             Kind::Symbol {
                 name: name.to_vec(),
             },
+            None,
         );
         out::notice(format!("Breakpoint #{id} added at {}", lossy(name)).as_bytes());
     }
@@ -402,6 +554,7 @@ impl Breakpoints {
                 class: class.to_vec(),
                 name: name.to_vec(),
             },
+            None,
         );
         out::notice(
             format!(
@@ -425,6 +578,7 @@ impl Breakpoints {
             Kind::Opcode {
                 name: name.to_vec(),
             },
+            None,
         );
         out::notice(format!("Breakpoint #{id} added at {}", lossy(name)).as_bytes());
     }
@@ -434,12 +588,12 @@ impl Breakpoints {
     /// numbers it by address.
     pub fn set_opline(&mut self, at: &At<'_>, opline: u32) {
         let address = address(at.op_array(), opline);
-        if self.oplines.iter().any(|(kept, _)| *kept == address) {
+        if self.oplines.iter().any(|row| row.address == address) {
             out::error(format!("Breakpoint exists for opline #{address}").as_bytes());
             return;
         }
         let id = self.next_id();
-        self.oplines.push((address, id));
+        self.keep(address, id, None);
         self.push(
             id,
             Kind::Opline {
@@ -449,6 +603,7 @@ impl Breakpoints {
                 opline,
                 address,
             },
+            None,
         );
         out::notice(format!("Breakpoint #{id} added at #{address}").as_bytes());
     }
@@ -486,7 +641,7 @@ impl Breakpoints {
             _ => None,
         };
         if let Some(address) = kept {
-            self.oplines.retain(|(at, _)| *at != address);
+            self.oplines.retain(|row| row.address != address);
         }
         out::notice(format!("Deleted breakpoint #{id}").as_bytes());
     }
@@ -664,72 +819,155 @@ impl Breakpoints {
         }
         self.list.clear();
         self.oplines.clear();
+        self.has_oplines = false;
         self.resolving = 0;
         self.count = 0;
     }
 
     /// `info break`: each table in `phpdbg_info_break`'s order, a
-    /// separator and its title before a table with rows.
+    /// separator and its title before a table with rows; the opline
+    /// table's in its own order, a resolved row with the kind of the
+    /// breakpoint it was resolved from, as `phpdbg_print_breakpoints`
+    /// writes it.
+    ///
+    /// ```php
+    /// function foo() {
+    ///   return 1;
+    /// }
+    /// class A { function b() { return 2; } }
+    /// foo();
+    /// ```
+    /// ```request phpdbg
+    /// b foo
+    /// r
+    /// b foo#0
+    /// b A::b#0
+    /// b foo#0
+    /// b ZEND_ECHO
+    /// i b
+    /// q
+    /// ```
+    /// ```expect
+    /// [Successful compilation of %SCRATCH%/witness.php]
+    /// prompt> [Breakpoint #0 added at foo]
+    /// prompt> [Breakpoint #0 in foo() at %SCRATCH%/witness.php:3, hits: 1]
+    /// >00003:   return 1;
+    ///  00004: }
+    ///  00005: class A { function b() { return 2; } }
+    /// prompt> [Breakpoint #1 added at foo#0]
+    /// prompt> [Breakpoint #2 added at A::b#0]
+    /// prompt> [Breakpoint #3 added at foo#0]
+    /// [Breakpoint already exists for foo#0]
+    /// prompt> [Breakpoint #3 added at ZEND_ECHO]
+    /// prompt> ------------------------------------------------
+    /// Function Breakpoints:
+    /// #0%sfoo
+    /// ------------------------------------------------
+    /// Opline Breakpoints:
+    /// #3%s#%d%s(function breakpoint)
+    /// #2%s#%d%s(method breakpoint)
+    /// ------------------------------------------------
+    /// Function opline Breakpoints:
+    /// #1%sfoo opline 0
+    /// ------------------------------------------------
+    /// Method opline Breakpoints:
+    /// #2%sA::b opline 0
+    /// ------------------------------------------------
+    /// Opcode Breakpoints:
+    /// #3%sZEND_ECHO
+    /// prompt>
+    /// ```
     pub fn print(&self) {
         const SEPARATE: &[u8] = b"------------------------------------------------\n";
-        let tables: [(&str, Row); 9] = [
-            ("File Breakpoints", |k| match k {
-                Kind::File { file, line } => Some(format!("{}:{line}", lossy(file))),
-                _ => None,
-            }),
-            ("Pending File Breakpoints", |k| match k {
-                Kind::PendingFile { file, line } => Some(format!("{}:{line}", lossy(file))),
-                _ => None,
-            }),
-            ("Function Breakpoints", |k| match k {
-                Kind::Symbol { name } => Some(lossy(name)),
-                _ => None,
-            }),
-            ("Method Breakpoints", |k| match k {
-                Kind::Method { class, name } => Some(format!("{}::{}", lossy(class), lossy(name))),
-                _ => None,
-            }),
-            ("Opline Breakpoints", |k| match k {
-                Kind::Opline { address, .. } => Some(format!("#{address}")),
-                _ => None,
-            }),
-            ("File opline Breakpoints", |k| match k {
-                Kind::FileOpline { file, opline } => {
-                    Some(format!("{} opline {opline}", lossy(file)))
-                }
-                _ => None,
-            }),
-            ("Function opline Breakpoints", |k| match k {
-                Kind::FunctionOpline { name, opline } => {
-                    Some(format!("{} opline {opline}", lossy(name)))
-                }
-                _ => None,
-            }),
-            ("Method opline Breakpoints", |k| match k {
-                Kind::MethodOpline {
-                    class,
-                    name,
-                    opline,
-                } => Some(format!("{}::{} opline {opline}", lossy(class), lossy(name))),
-                _ => None,
-            }),
-            ("Opcode Breakpoints", |k| match k {
-                Kind::Opcode { name } => Some(lossy(name)),
-                _ => None,
-            }),
+        let tables: [(&str, Listed); 9] = [
+            (
+                "File Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::File { file, line } => Some(format!("{}:{line}", lossy(file))),
+                    _ => None,
+                }),
+            ),
+            (
+                "Pending File Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::PendingFile { file, line } => Some(format!("{}:{line}", lossy(file))),
+                    _ => None,
+                }),
+            ),
+            (
+                "Function Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::Symbol { name } => Some(lossy(name)),
+                    _ => None,
+                }),
+            ),
+            (
+                "Method Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::Method { class, name } => {
+                        Some(format!("{}::{}", lossy(class), lossy(name)))
+                    }
+                    _ => None,
+                }),
+            ),
+            ("Opline Breakpoints", Listed::Oplines),
+            (
+                "File opline Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::FileOpline { file, opline } => {
+                        Some(format!("{} opline {opline}", lossy(file)))
+                    }
+                    _ => None,
+                }),
+            ),
+            (
+                "Function opline Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::FunctionOpline { name, opline } => {
+                        Some(format!("{} opline {opline}", lossy(name)))
+                    }
+                    _ => None,
+                }),
+            ),
+            (
+                "Method opline Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::MethodOpline {
+                        class,
+                        name,
+                        opline,
+                    } => Some(format!("{}::{} opline {opline}", lossy(class), lossy(name))),
+                    _ => None,
+                }),
+            ),
+            (
+                "Opcode Breakpoints",
+                Listed::Kinds(|k| match k {
+                    Kind::Opcode { name } => Some(lossy(name)),
+                    _ => None,
+                }),
+            ),
         ];
-        for (title, row) in tables {
-            let rows: Vec<String> = self
-                .list
-                .iter()
-                .filter_map(|brake| {
-                    row(&brake.kind).map(|text| {
-                        let disabled = if brake.disabled { " [disabled]" } else { "" };
-                        format!("#{}\t\t{text}{disabled}", brake.id)
+        for (title, listed) in tables {
+            let rows: Vec<String> = match listed {
+                Listed::Oplines if !self.has_oplines => continue,
+                Listed::Oplines => self
+                    .oplines
+                    .iter()
+                    .map(|kept| self.opline_row(kept))
+                    .collect(),
+                Listed::Kinds(row) => self
+                    .list
+                    .iter()
+                    .filter_map(|brake| {
+                        row(&brake.kind).map(|text| {
+                            let disabled = if brake.disabled { " [disabled]" } else { "" };
+                            format!("#{}\t\t{text}{disabled}", brake.id)
+                        })
                     })
-                })
-                .collect();
-            if rows.is_empty() {
+                    .collect(),
+            };
+            if rows.is_empty() && !matches!(listed, Listed::Oplines) {
                 continue;
             }
             out::out(SEPARATE);
@@ -738,6 +976,23 @@ impl Breakpoints {
                 out::writeln(line.as_bytes());
             }
         }
+    }
+
+    /// One row of the opline table as `info break` writes it: a resolved
+    /// row never disabled, since the breakpoint php disables is the one
+    /// it was resolved from, and a row set on the opline itself as its
+    /// breakpoint stands.
+    fn opline_row(&self, kept: &Kept) -> String {
+        let Kept { address, id, from } = *kept;
+        if let Some(table) = from {
+            return format!("#{id}\t\t#{address}\t\t({} breakpoint)", table.word());
+        }
+        let disabled = self
+            .list
+            .iter()
+            .any(|brake| brake.id == id && brake.disabled);
+        let disabled = if disabled { " [disabled]" } else { "" };
+        format!("#{id}\t\t#{address}{disabled}")
     }
 
     /// `phpdbg_export_breakpoints_to_string`: a `break` line for each
@@ -813,29 +1068,6 @@ impl Breakpoints {
     /// Whether a line waits on a file not compiled yet.
     pub fn has_pending(&self) -> bool {
         self.has(|k| matches!(k, Kind::PendingFile { .. }))
-    }
-
-    /// `phpdbg_set_breakpoint_file_opline`: the opline `opline` of the
-    /// file's own code, pending until the file stands.
-    pub fn set_file_opline(&mut self, file: &[u8], opline: u32) {
-        let id = self.next_id();
-        if self.has(
-            |k| matches!(k, Kind::FileOpline { file: f, opline: o } if f == file && *o == opline),
-        ) {
-            out::error(
-                format!("Breakpoint already exists for {}:#{opline}", lossy(file)).as_bytes(),
-            );
-            self.count -= 1;
-            return;
-        }
-        out::notice(format!("Pending breakpoint #{id} at {}:{opline}", lossy(file)).as_bytes());
-        self.push(
-            id,
-            Kind::FileOpline {
-                file: file.to_vec(),
-                opline,
-            },
-        );
     }
 }
 
