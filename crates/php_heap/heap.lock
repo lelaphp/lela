@@ -159,6 +159,7 @@ Heap::resource_native
 Heap::resource_native_mut
 Heap::resource_persistent
 Heap::resource_sized
+Heap::resource_unlist
 Heap::resource_with
 Heap::resources
 Heap::sense_leaks

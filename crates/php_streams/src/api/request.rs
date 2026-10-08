@@ -1536,12 +1536,13 @@ pub trait Streams {
         xport: Xport,
     ) -> Result<Result<Owner<Stream>, XportFailure>, Thrown>;
 
-    /// The connection [`OwnedStream::keep`] took out lent to this request
-    /// under `key`: a fresh resource of the `persistent stream` type over
-    /// its socket, held under `key` in the request's persistent list as
-    /// `php_stream_from_persistent_id` registers one, `r+` and seeking
-    /// nowhere, until its owner keeps it again or closes it.
-    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Owner<Stream>, Thrown>;
+    /// The connection [`OwnedStream::keep`] took out lent to this request:
+    /// a fresh resource of the `persistent stream` type over its socket,
+    /// `r+` and seeking nowhere, in neither of the request's lists
+    /// ([`OwnedStream::unlist`]), as php's persistent mysqlnd connection
+    /// carries its `php_stream` between requests in none, until its owner
+    /// keeps it again or frees it.
+    fn stream_lend(&mut self, kept: Persisted) -> Result<Owner<Stream>, Thrown>;
 }
 
 /// What a native does with the owner of a stream it opened, which it
@@ -1557,16 +1558,24 @@ pub trait OwnedStream {
 
     /// The persistent stream's connection taken out of the request for
     /// the extension that opened it to keep across requests, in the one
-    /// list it keeps its connection in, as php's mysqlnd deletes the
-    /// stream it opened from `EG(persistent_list)` and `EG(regular_list)`
-    /// (`mysqlnd_vio::open_tcp_or_unix`): the socket, its owed write
-    /// flushed, out of the engine's persistent list and out of the
-    /// resource, which is closed, and the owner given up. The request
-    /// that takes the connection up lends it again with
+    /// list it keeps its connection in, as php's persistent mysqlnd
+    /// connection keeps its `php_stream`: the socket, its owed write
+    /// flushed, out of the resource, which is closed, and the owner given
+    /// up. The request that takes the connection up lends it again with
     /// [`Streams::stream_lend`]. `None`, and the stream freed, for a
     /// stream that is not a socket's.
     #[must_use]
     fn keep(self, req: &mut Request) -> Option<Persisted>;
+
+    /// What php's mysqlnd does to the stream it opens
+    /// (`mysqlnd_vio::open_tcp_or_unix`, `mysqlnd_fixup_regular_list`):
+    /// the stream deleted from `EG(regular_list)` and, a persistent one,
+    /// from `EG(persistent_list)`, each without its destructor, so it is
+    /// the owner's alone. `get_resources()` no longer lists it, its id
+    /// stays spent, and the request's end neither closes it nor holds a
+    /// persistent one's socket idle under its key; the owner frees it
+    /// ([`OwnedStream::free`]) or keeps it ([`OwnedStream::keep`]).
+    fn unlist(&self, req: &mut Request);
 }
 
 impl OwnedStream for Owner<Stream> {
@@ -1577,6 +1586,10 @@ impl OwnedStream for Owner<Stream> {
 
     fn keep(self, req: &mut Request) -> Option<Persisted> {
         crate::streams::persistent::keep(req, self).map(Persisted)
+    }
+
+    fn unlist(&self, req: &mut Request) {
+        crate::streams::persistent::unlist(req, **self);
     }
 }
 
@@ -1765,7 +1778,7 @@ impl Streams for Request {
         Transports::xport_create(self, name, xport)
     }
 
-    fn stream_lend(&mut self, key: Vec<u8>, kept: Persisted) -> Result<Owner<Stream>, Thrown> {
-        crate::streams::persistent::Persistent::lend(self, key, kept.0)
+    fn stream_lend(&mut self, kept: Persisted) -> Result<Owner<Stream>, Thrown> {
+        crate::streams::persistent::lend_alone(self, kept.0)
     }
 }
