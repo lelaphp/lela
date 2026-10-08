@@ -173,6 +173,27 @@ fn an_addref_of_a_freed_block_during_shutdown_is_raised_at_the_request_end() {
     assert_eq!(served.exit_code, 255);
 }
 
+/// A request a sensed refusal has ended renders that one fatal alone: a
+/// later refusal, here in a request-end function, is read through
+/// memory the first has made untrustworthy, and is not raised (#2052).
+#[test]
+fn a_request_a_sensed_refusal_ended_renders_no_second() {
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .functions(vec![freed_addref::declared()])
+            .rshutdown(freed_addref_at_rshutdown)
+            .build("freed_use_twice")])
+        .build();
+    let served = engine.serve_capture(
+        "<?php echo 'a';\nfreed_addref('string');\necho 'went on';\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(stdout.starts_with(&format!("a\n{REFUSED}")), "{stdout}");
+    assert_eq!(stdout.matches("InternalError").count(), 1, "{stdout}");
+    assert_eq!(served.exit_code, 255);
+}
+
 /// A refusal made after a fatal, in a request-end function, is still
 /// raised where the request ends: the fatal's `zend_bailout` was caught
 /// before it, and a refused refcount change is a defect on any path

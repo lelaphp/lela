@@ -114,6 +114,8 @@ mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
 mod response;
+#[cfg(debug_assertions)]
+mod sensing;
 pub(crate) use response::Sink;
 pub use response::{
     BufferHandler, BufferInit, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp,
@@ -371,9 +373,10 @@ pub struct Request {
     returned: Value,
     /// The interrupt, the timer and the stack limit ([`limits::Limits`]).
     limits: limits::Limits,
-    /// The frames' debug record (`frames::Frames`).
+    /// What a debug build's sensors have made of the request
+    /// ([`sensing::Sensing`]).
     #[cfg(debug_assertions)]
-    frames: frames::Frames,
+    sensing: sensing::Sensing,
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
     hold: hold::Holding,
     /// The objects of foreign libraries the request keeps for the
@@ -762,7 +765,7 @@ impl Request {
             accel_loaded: None,
             early_bound: None,
             #[cfg(debug_assertions)]
-            frames: frames::Frames::default(),
+            sensing: sensing::Sensing::default(),
             hold: hold::Holding::default(),
             foreign: foreign::Table::default(),
         };
