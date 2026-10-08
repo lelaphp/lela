@@ -180,8 +180,29 @@ fn begin(req: &mut Request, this: PhpObject) -> Saved {
     saved
 }
 
-/// `SOAP_SERVER_END_CODE`.
+/// `SOAP_SERVER_END_CODE`, which a fatal's `zend_bailout` never
+/// reaches, since a server stands in no `zend_try` of its own: after a
+/// fatal the handler stays on, with the server as its object, through
+/// the shutdown functions, so a warning one raises is not shown.
+///
+/// ```php
+/// function f($a) { echo "partial"; trigger_error("boom", E_USER_ERROR); }
+/// $s = new SoapServer(null, ['uri' => 'http://test-uri/']);
+/// $s->addFunction('f');
+/// register_shutdown_function(function () { echo "\nsd\n"; echo $undefined; var_dump(use_soap_error_handler()); });
+/// $s->handle('<?xml version="1.0"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://test-uri/"><SOAP-ENV:Body><ns1:f><a>1</a></ns1:f></SOAP-ENV:Body></SOAP-ENV:Envelope>');
+/// ```
+/// ```expect exit=255
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>boom</faultstring><detail>partial</detail></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+///
+/// sd
+/// bool(true)
+/// ```
 fn end(req: &mut Request, saved: &Saved) {
+    if req.bailing_out() {
+        return;
+    }
     let state = req.state::<State>();
     state.use_soap_error_handler = saved.use_handler;
     state.error_code = saved.error_code;
