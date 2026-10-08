@@ -35,9 +35,9 @@ use php_ext::request::{Allocation, AllocationObserverId, ObserveAllocations, Req
 /// `zend_test.zend_mm_custom_handlers.enabled`.
 pub(crate) const ENABLED: &[u8] = b"zend_test.zend_mm_custom_handlers.enabled";
 
-/// The switch, its `on_modify`, and the `RINIT` and `RSHUTDOWN` that put
-/// the observer in and take it out at the request's edges, which are
-/// this file's alone of the extension's. Turned off, the switch writes
+/// The switch and its `on_modify`; the extension's `RINIT` and
+/// `RSHUTDOWN` serve [`rinit`] and [`rshutdown`], which put the observer
+/// in and take it out at the request's edges. Turned off, the switch writes
 /// nothing, as php's `zend_test_mm_custom_handlers_shutdown` returns at
 /// once where no heap is installed:
 ///
@@ -60,8 +60,6 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
             system: false,
         }])
         .on_modify(ENABLED, on_update_enabled)
-        .rinit(rinit)
-        .rshutdown(rshutdown)
 }
 
 /// Where the observer stands in the request's heap while the switch is
@@ -75,7 +73,7 @@ pub(crate) struct ObservedHeap(Option<AllocationObserverId>);
     clippy::unnecessary_wraps,
     reason = "the `rinit` slot's shape, which a request start that throws needs"
 )]
-fn rinit(req: &mut Request) -> Result<(), Thrown> {
+pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     if req.ini_get(ENABLED).is_some_and(Request::ini_parse_bool) {
         install(req);
     }
@@ -83,7 +81,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `zend_test_mm_custom_handlers_rshutdown`: the observer taken out.
-fn rshutdown(req: &mut Request) {
+pub(crate) fn rshutdown(req: &mut Request) {
     remove(req);
 }
 

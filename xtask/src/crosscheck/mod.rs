@@ -79,9 +79,11 @@ use crate::carried::Carried;
 use crate::divergence::{Kind, Registry};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{self, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked};
+use crate::oracle::{
+    self, Ended, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked,
+};
 use crate::reading::{Reading, Status, Store, listed, plural};
-use crate::sources::{self, Standing};
+use crate::sources::{self, Outside, Standing};
 use crate::tally;
 use crate::witness::Binary;
 use crate::{git, key};
@@ -174,6 +176,11 @@ pub struct Ask {
     /// control; a column whose file is absent rendered nothing;
     /// without it the engine's side is the linked engine's own rendering.
     pub renderings: Option<PathBuf>,
+    /// A binary standing for `php-linked`, which serves the linked
+    /// engine's side: what a test hands the lane to hold a rendering
+    /// served through one that dies (#1069); without it, the one built
+    /// from the workspace.
+    pub linked: Option<PathBuf>,
 }
 
 /// The engine's side of one extension.
@@ -370,6 +377,7 @@ pub fn run(
     let engines = Engines {
         linked: Carried::linked(root)?,
         binary: Binary::of(root),
+        server: ask.linked.clone(),
     };
     // The tree before anything renders: what each reading is stamped with.
     let snapshot = Snapshot::disk(root)?;
@@ -426,7 +434,7 @@ pub fn run(
             } else {
                 host::oracle_side(oracle, host, name, column)?
             };
-            if observed.exit != Some(0) {
+            if observed.exit != Ended::Status(0) {
                 reading.status = Status::Fail;
                 reading.message = format!(
                     "{}: the oracle has no such extension under `{recipe}`; {}",
@@ -482,6 +490,8 @@ struct Engines {
     linked: Carried,
     /// The binary, built at the first extension that asks for it.
     binary: Binary,
+    /// What stands for `php-linked`, where the run was handed one.
+    server: Option<PathBuf>,
 }
 
 /// The engine's side for `name` in `column`: the file a test handed the
@@ -513,8 +523,13 @@ fn rendering(
                 )
             })
         } else if linked {
-            linked::serve(&manifest.pin.recipe, None, &program)
-                .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
+            linked::serve_by(
+                engines.server.as_deref(),
+                &manifest.pin.recipe,
+                None,
+                &program,
+            )
+            .map_err(|trouble| format!("the linked engine did not serve it: {trouble:#}"))
         } else {
             engines
                 .binary
@@ -524,7 +539,7 @@ fn rendering(
         };
         return Ok(match served {
             Err(why) => Rendering::Absent(why),
-            Ok(served) if served.exit != Some(0) => Rendering::Absent(said(&served)),
+            Ok(served) if served.exit != Ended::Status(0) => Rendering::Absent(said(&served)),
             Ok(served) => Rendering::Bytes(served.stdout),
         });
     };
@@ -569,10 +584,7 @@ fn said(observed: &Observation) -> String {
         .find(|stream| !stream.is_empty())
         .map(|stream| String::from_utf8_lossy(stream).trim().to_owned())
         .unwrap_or_default();
-    let status = observed
-        .exit
-        .map_or_else(|| "a signal".to_owned(), |code| code.to_string());
-    format!("the request ended on status {status}: {words}")
+    format!("the request ended on {}: {words}", observed.exit)
 }
 
 /// The reading of one extension in one column, over the crate's sources
@@ -677,7 +689,12 @@ impl Reads {
 /// through its key is rendered unless both its columns' readings pass
 /// over what is staged ([`Standing`]), which is how a run already taken
 /// over the commit's content, or a change to an extension's closure that
-/// was rendered before it was staged, is relied on and named.
+/// was rendered before it was staged, is relied on and named. A staged
+/// file outside every crate reaches renderings as [`sources::Outside`]
+/// sorts it (#1738): one every reading reads, such as `oracle.toml` or
+/// `docs/divergence.toml`, renders every extension again, and a staged
+/// lock reaches, as a staged change to its crate would, each extension
+/// whose closure it pins otherwise than `HEAD` ([`sources::lock_moved`]).
 pub(crate) fn staged(
     root: &Path,
     manifest: &Manifest,
@@ -702,6 +719,25 @@ pub(crate) fn staged(
         }
     }
     let standing = Standing::for_commit_over(root, manifest, store, INSTRUMENT, &scopes)?;
+    let locked = match standing.outside() {
+        Outside::Every(file) => {
+            println!(
+                "{INSTRUMENT}: {file} is staged and every rendering reads it, so every extension renders again"
+            );
+            return Ok(carried.to_vec());
+        }
+        Outside::Lock => {
+            let paths: Vec<(&str, PathBuf)> = pairs
+                .iter()
+                .map(|(name, host)| (name.as_str(), stamped_path(manifest, name, *host)))
+                .collect();
+            let taken = paths
+                .iter()
+                .map(|(name, path)| (*name, path.as_path(), "HEAD"));
+            sources::lock_moved(root, manifest, taken)?
+        }
+        Outside::Nothing => Vec::new(),
+    };
     let reached = |dirs: &[PathBuf]| {
         files
             .iter()
@@ -720,7 +756,7 @@ pub(crate) fn staged(
             unkeyed.push(name);
             true
         } else {
-            reached(&reads.keyed).is_some() && !stands
+            (reached(&reads.keyed).is_some() || locked.contains(name)) && !stands
         };
         if again && !render.contains(name) {
             render.push(name.clone());

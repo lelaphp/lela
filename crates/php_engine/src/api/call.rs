@@ -1140,12 +1140,13 @@ pub fn instantiate(
 /// with the positional arguments and the named ones placed as
 /// [`call_named`] places them. A class with no constructor takes
 /// positional arguments and no named one, php's `Unknown named
-/// parameter`. The object is the caller's, one owner; what the
-/// constructor threw is the `Err`, the object given up destructed
+/// parameter`, the object given up with no destructor served. The
+/// object is the caller's, one owner; what the constructor threw is the
+/// `Err`, the object given up destructed
 /// (`zend_object_store_ctor_failed`). The arguments stay the caller's.
 ///
 /// ```php
-/// #[Attribute] class MyAttrib {}
+/// #[Attribute] class MyAttrib { function __destruct() { echo "d\n"; } }
 /// #[MyAttrib(notinterned: '')] class Test1 {}
 /// $attr = (new ReflectionClass(Test1::class))->getAttributes()[0];
 /// try { $attr->newInstance(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
@@ -1184,6 +1185,8 @@ pub(crate) fn instantiate_named_made(
     };
     let Some(constructor) = constructor else {
         if let Some((name, _)) = named.first() {
+            // `zend_object_store_ctor_failed`: no destructor is served.
+            object.mark_destructor_called();
             req.release(object.as_value());
             let message = format!(
                 "Unknown named parameter ${}",

@@ -68,7 +68,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::{Linked, Observation, Program, Recipe, Regime, Scratch};
+use super::{Ended, Linked, Observation, Program, Recipe, Regime, Scratch};
 use crate::scratch::Tree;
 
 /// The host whose binary serves the snippets, its package and binary.
@@ -87,7 +87,19 @@ pub(crate) fn serve(
     regime: Option<&Regime>,
     snippet: &str,
 ) -> Result<Observation> {
-    run(recipe, regime, snippet).map(|(observed, _)| observed)
+    serve_by(None, recipe, regime, snippet)
+}
+
+/// [`serve`] by `server`, a binary standing for `php-linked` that a test
+/// hands a lane to serve through one that misbehaves (#1069), or the one
+/// built from the workspace where none is named.
+pub(crate) fn serve_by(
+    server: Option<&Path>,
+    recipe: &Recipe,
+    regime: Option<&Regime>,
+    snippet: &str,
+) -> Result<Observation> {
+    run(server, recipe, regime, snippet).map(|(observed, _)| observed)
 }
 
 /// [`serve`] with the natives the request entered beside what it
@@ -99,10 +111,15 @@ pub(crate) fn serve_traced(
     regime: Option<&Regime>,
     snippet: &str,
 ) -> Result<(Observation, String)> {
-    run(recipe, regime, snippet)
+    run(None, recipe, regime, snippet)
 }
 
-fn run(recipe: &Recipe, regime: Option<&Regime>, snippet: &str) -> Result<(Observation, String)> {
+fn run(
+    server: Option<&Path>,
+    recipe: &Recipe,
+    regime: Option<&Regime>,
+    snippet: &str,
+) -> Result<(Observation, String)> {
     let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
     // The engine has no command line here, so a regime's arguments other
     // than `-e` are refused rather than dropped from this side of the
@@ -129,7 +146,7 @@ fn run(recipe: &Recipe, regime: Option<&Regime>, snippet: &str) -> Result<(Obser
     write("ini", ini.as_bytes())?;
     write("extended", if linked.extended_info { b"1" } else { b"0" })?;
     let started = Instant::now();
-    ask(&request)?;
+    ask(&request, server)?;
     let wall = started.elapsed();
     if request.join("panicked").exists() {
         bail!("the linked engine panicked; the panic itself is on the harness's second stream");
@@ -142,7 +159,7 @@ fn run(recipe: &Recipe, regime: Option<&Regime>, snippet: &str) -> Result<(Obser
     let observed = Observation {
         stdout: scratch.normalise(&recipe.normalise, read("stdout")),
         stderr: scratch.normalise(&recipe.normalise, read("stderr")),
-        exit: Some(exit),
+        exit: Ended::Status(exit),
         wall,
     };
     Ok((
@@ -156,14 +173,22 @@ fn run(recipe: &Recipe, regime: Option<&Regime>, snippet: &str) -> Result<(Obser
 /// crate's fences into the next crate's.
 static IDLE: Mutex<Vec<Server>> = Mutex::new(Vec::new());
 
-/// The request at `dir` served by an idle binary, or one started where
-/// none is idle; one the request ended is dropped, so the next starts
-/// afresh.
-fn ask(dir: &Path) -> Result<()> {
-    let idle = IDLE.lock().unwrap_or_else(PoisonError::into_inner).pop();
+/// The request at `dir` served by an idle `server`, the built binary
+/// where none is named, or one started where none is idle; one the
+/// request ended is dropped, so the next starts afresh.
+fn ask(dir: &Path, server: Option<&Path>) -> Result<()> {
+    let binary = match server {
+        Some(path) => path.to_path_buf(),
+        None => binary()?,
+    };
+    let idle = {
+        let mut idle = IDLE.lock().unwrap_or_else(PoisonError::into_inner);
+        let at = idle.iter().position(|server| server.binary == binary);
+        at.map(|at| idle.swap_remove(at))
+    };
     let mut server = match idle {
         Some(server) => server,
-        None => Server::start()?,
+        None => Server::start(binary)?,
     };
     server.ask(dir)?;
     IDLE.lock()
@@ -172,16 +197,18 @@ fn ask(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A running `php-linked --serve` and the two ends of its pipes.
+/// A running `php-linked --serve`, the binary it runs, and the two ends
+/// of its pipes.
 struct Server {
+    binary: PathBuf,
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
 }
 
 impl Server {
-    fn start() -> Result<Server> {
-        let mut child = Command::new(binary()?)
+    fn start(binary: PathBuf) -> Result<Server> {
+        let mut child = Command::new(&binary)
             .arg("--serve")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -190,6 +217,7 @@ impl Server {
         let stdin = child.stdin.take().context("the server's stdin")?;
         let stdout = child.stdout.take().context("the server's stdout")?;
         Ok(Server {
+            binary,
             child,
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),

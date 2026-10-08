@@ -134,6 +134,7 @@ oracle::Binary::file
 oracle::Binary::variant
 oracle::Build
 oracle::ENGINE
+oracle::Ended
 oracle::Host
 oracle::Invocation
 oracle::Invocation::new
@@ -276,6 +277,7 @@ scratch::Tree::new
 scratch::Tree::path
 scratch::cargo
 scratch::repository
+status::Against
 status::render
 status::session
 steer::STEERABLE

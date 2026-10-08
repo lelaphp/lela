@@ -94,8 +94,26 @@ impl Request {
     /// payload's receiver and scope, with the closure itself on the
     /// call so the body's `BIND_STATIC` prologue finds the variables it
     /// bound (`ZEND_CALL_CLOSURE`). The closure is one more owner for
-    /// the span of the call, as php's `zend_init_func_execute_data`
-    /// takes one.
+    /// the span of the call, taken where `zend_call_function` takes it,
+    /// once the arguments are placed ([`Request::serve_call`]), so a call
+    /// a handler's throw stops before it is made takes none and the
+    /// closure is freed where its last owner lets go of it:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// set_error_handler(function () { throw new Exception('x'); });
+    /// $d = new D;
+    /// $f = function (array &$r) use ($d) {};
+    /// unset($d);
+    /// try { call_user_func($f, 'v'); } catch (Exception $e) { echo "caught\n"; }
+    /// unset($f);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// caught
+    /// d
+    /// end
+    /// ```
     pub(crate) fn serve_closure(
         &mut self,
         object: PhpObject,
@@ -109,7 +127,6 @@ impl Request {
                 "Closure object cannot have properties",
             ));
         };
-        self.addref(&object.as_value());
         self.serve_call(
             closure.function,
             closure.this,
@@ -141,7 +158,6 @@ impl Request {
         let held = object
             .native_mut::<ClosureInfo>(self)
             .map(|payload| payload.scope.replace(scope));
-        self.addref(&object.as_value());
         let served = self.serve_call(
             closure.function,
             Some(this),
@@ -366,11 +382,18 @@ impl Request {
         // `func->common.function_name`, which the function carries; no
         // constant spelled it, so the call carries no name of its own
         // and interns none into the request's memory.
+        let extra_named = exec::ExtraNamed::laid(self, extra_named.to_vec())?;
+        // `GC_ADDREF(ZEND_CLOSURE_OBJECT(func))` with `ZEND_CALL_CLOSURE`,
+        // once the arguments are placed: the call's own owner of the
+        // closure, which its end gives up.
+        if let Some(closure) = closure {
+            self.addref(&closure.as_value());
+        }
         let call = CallState {
             receiver,
             called_scope,
             closure,
-            extra_named: exec::ExtraNamed::laid(self, extra_named.to_vec())?,
+            extra_named,
             ..CallState::serving(function, sent)
         };
         self.vm.push_call(call);
@@ -635,9 +658,11 @@ impl Request {
     /// `destroy` is served after the fatal a class declaration raised.
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let caught = self.bailout;
-        self.bailout = false;
+        self.catch_bailout();
         let served = self.serve_user_uncaught(function, call);
-        self.bailout |= caught;
+        if caught {
+            self.set_bailing_out(true);
+        }
         served
     }
 
@@ -1138,17 +1163,45 @@ impl Request {
         name: &[u8],
         entry: crate::api::abi::Entry,
     ) -> Option<Function> {
+        self.native_trampoline_as(name, entry, true)
+    }
+
+    /// [`Request::native_trampoline`] for a call named on the class,
+    /// `ZEND_ACC_STATIC` beside `ZEND_ACC_CALL_VIA_HANDLER`: what a
+    /// class's [`ObjectHandlers::get_static_method`] answers for a name
+    /// its table has no row for.
+    ///
+    /// [`ObjectHandlers::get_static_method`]: crate::api::abi::ObjectHandlers::get_static_method
+    pub fn native_static_trampoline(
+        &mut self,
+        name: &[u8],
+        entry: crate::api::abi::Entry,
+    ) -> Option<Function> {
+        self.native_trampoline_as(name, entry, false)
+    }
+
+    fn native_trampoline_as(
+        &mut self,
+        name: &[u8],
+        entry: crate::api::abi::Entry,
+        is_instance: bool,
+    ) -> Option<Function> {
         let held = self.calls.trampolines.iter().position(|made| {
             matches!(made.via, crate::trampoline::Via::Native(made_entry)
                 if std::ptr::fn_addr_eq(made_entry, entry))
                 && *made.decl.function.name.0 == *name
+                && made.decl.is_instance == is_instance
         });
         let at = if let Some(at) = held {
             at
         } else {
             self.calls
                 .trampolines
-                .push(crate::trampoline::CallTrampoline::native(entry, name));
+                .push(crate::trampoline::CallTrampoline::native(
+                    entry,
+                    name,
+                    is_instance,
+                ));
             self.calls.trampolines.len().checked_sub(1)?
         };
         crate::trampoline::number(at, crate::trampoline::Served::Trampoline)

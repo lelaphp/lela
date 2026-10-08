@@ -350,6 +350,7 @@ fn ticket_command(
 /// `xtask phpt`: the subsets asked for, each run and each written.
 fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt) -> Result<()> {
     let registry = Registry::load(root)?;
+    let since = ask.base;
     let ask = phpt::Ask {
         subset: ask.subset,
         full: ask.full,
@@ -361,6 +362,9 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
         locks: None,
         unkept: ask.unkept,
     };
+    if let Some(since) = &since {
+        return phpt::base::take(root, manifest, &registry, &ask, since);
+    }
     let readings = phpt::run(root, manifest, &registry, &ask)?;
     let outcome = recorded(store, &readings)?;
     // `--against` asks whether a test met at the commit fails here, and
@@ -451,7 +455,7 @@ fn crosscheck_command(
     };
     let ask = crosscheck::Ask {
         ext,
-        renderings: None,
+        ..crosscheck::Ask::default()
     };
     record(
         store,
@@ -496,7 +500,7 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             ..
         } => Some(track_work::command(root, run, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
-        Command::Regions { files } => Some(computed::command(root, files)),
+        Command::Regions { staged, files } => Some(computed::command(root, files, *staged)),
         Command::Steer {
             file,
             from,
@@ -540,6 +544,7 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         week,
         session_id,
         uncut,
+        tracked,
         every,
         log,
         session: _,
@@ -551,10 +556,15 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         Some(section) if every => status::every::render(store, section, format, log.as_deref())?,
         Some(section) => {
             let registry = Registry::load(root)?;
+            let against = if tracked {
+                status::Against::Tree
+            } else {
+                status::Against::Checkout(store)
+            };
             status::render(
                 manifest,
                 &registry,
-                store,
+                against,
                 root,
                 section,
                 format,

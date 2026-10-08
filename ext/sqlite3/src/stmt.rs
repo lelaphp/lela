@@ -206,15 +206,6 @@ pub(crate) fn prepare_on(
     Ok(Some(made))
 }
 
-/// What `php_sqlite3_bind_params` writes into the parameter in place:
-/// through the reference where it holds one, as `convert_to_*` writes.
-fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
-    match value.as_php_ref().copied() {
-        Some(cell) => cell.convert(req, new),
-        None => std::mem::replace(value, new).give_up(req),
-    }
-}
-
 /// `php_sqlite3_bind_params`: each parameter bound by its type, `null`
 /// as `NULL` whatever the type; `false` for php's `FAILURE`.
 fn bind_params(req: &mut Request, taken: &Taken, params: &mut [Bound]) -> Result<bool, Thrown> {
@@ -232,13 +223,13 @@ fn bind_params(req: &mut Request, taken: &Taken, params: &mut [Bound]) -> Result
                 Kind::Integer => {
                     let n = to_long(req, &value)?;
                     let converted = Owner::take(req, Value::int(n));
-                    replace(req, &mut param.value, converted);
+                    param.value.convert(req, converted);
                     stmt.bind_int(at, n)
                 }
                 Kind::Float => {
                     let f = to_double(req, &value)?;
                     let converted = Owner::take(req, Value::float(f));
-                    replace(req, &mut param.value, converted);
+                    param.value.convert(req, converted);
                     stmt.bind_double(at, f)
                 }
                 Kind::Blob if matches!(value.as_ref(), ValueRef::Resource(_)) => {

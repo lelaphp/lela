@@ -315,9 +315,17 @@ impl Base {
         let looked = looked.join(", ");
         let Base { commit, tree } = self;
         Ok(Err(format!(
-            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; take one with `xtask phpt` in a worktree of this repository at {commit}, `git worktree add --detach <dir> {commit}`, with its engine built"
+            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; take one with `{}`, which builds the engine at {commit} in a worktree of its own and keeps the run in the main worktree",
+            super::base::call(commit, scope)
         )))
     }
+}
+
+/// The run of `scope` kept at `commit`'s engine tree in a workspace of
+/// the repository at `root` ([`roots`]), or why there is none: what
+/// `--against` holds a subset to, and what `phpt --base` keeps.
+pub(crate) fn kept_at(root: &Path, commit: &str, scope: &str) -> Result<Result<Run, String>> {
+    Base::at(root, commit)?.run(&roots(root), scope)
 }
 
 /// Where a kept run or target is looked for from the workspace at `root`:

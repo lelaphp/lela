@@ -76,6 +76,7 @@ Heap::addref
 Heap::array
 Heap::array_add_new
 Heap::array_append
+Heap::array_clean
 Heap::array_del
 Heap::array_dup
 Heap::array_extend
@@ -91,6 +92,7 @@ Heap::block_resize
 Heap::call_destructors
 Heap::close_resources
 Heap::dup_value
+Heap::fatal_leaving
 Heap::free_block
 Heap::free_object_storage
 Heap::gc_call_destructor

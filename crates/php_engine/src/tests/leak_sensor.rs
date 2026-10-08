@@ -182,7 +182,9 @@ fn the_backtrace_mode_names_the_leaking_line() {
 
 /// The same dropped owner in a request that then ends in a fatal: the
 /// fatal is rendered and the sensor stays silent, since the frames
-/// `zend_bailout` left were never unwound.
+/// `zend_bailout` left were never unwound. `E_USER_ERROR`, the memory
+/// limit and a throwable no frame stood to take, which php renders and
+/// then bails out of, are each such a fatal.
 #[test]
 fn a_request_ending_in_a_fatal_reports_nothing() {
     let engine = Engine::cli_builder()
@@ -190,8 +192,15 @@ fn a_request_ending_in_a_fatal_reports_nothing() {
         .sense_leaks(LeakSensor::Armed)
         .build();
     for (fatal, rendered) in [
-        ("undefined_function();", "Call to undefined function"),
         ("trigger_error('boom', E_USER_ERROR);", "Fatal error: boom"),
+        (
+            "ini_set('memory_limit', '2M'); $s = 'x'; while (true) { $s .= $s; }",
+            "Fatal error: Allowed memory size of 2097152 bytes exhausted",
+        ),
+        (
+            "register_shutdown_function(function () { throw new Exception('late'); });",
+            "Fatal error: Uncaught Exception: late",
+        ),
     ] {
         let served = engine.serve_capture(
             &format!("<?php dropped_owner();\n{fatal}\n"),
@@ -201,6 +210,32 @@ fn a_request_ending_in_a_fatal_reports_nothing() {
         assert!(stdout.contains(rendered), "{fatal}: {stdout}");
         assert!(!stdout.contains("InternalError"), "{fatal}: {stdout}");
         assert_eq!(served.exit_code, 255, "{fatal}");
+    }
+}
+
+/// A program that ends in an uncaught throwable is not one php bails out
+/// of: `zend_exception_error` renders it `E_DONT_BAIL`, so the shutdown
+/// is clean and a debug php reports the request's leaks. The faulty
+/// native's block is reported after the uncaught fatal (#2058).
+#[test]
+fn a_request_ending_in_an_uncaught_throwable_reports_its_leak() {
+    let engine = Engine::cli_builder()
+        .extensions(&[faulty()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    for uncaught in ["throw new Exception('x');", "undefined_function();"] {
+        let served = engine.serve_capture(
+            &format!("<?php dropped_owner();\n{uncaught}\n"),
+            Capture::default(),
+        );
+        let stdout = String::from_utf8_lossy(&served.stdout);
+        let (rendered, sensed) = stdout.split_once(LEAKED).unwrap_or_default();
+        assert!(
+            rendered.contains("Fatal error: Uncaught "),
+            "{uncaught}: {stdout}"
+        );
+        assert!(sensed.contains(BY_LEAK_SENSOR), "{uncaught}: {stdout}");
+        assert_eq!(served.exit_code, 255, "{uncaught}");
     }
 }
 

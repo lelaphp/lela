@@ -371,6 +371,9 @@ pub struct StringBeneath<'a> {
     pub(crate) links: &'a [CompileStringHook],
     pub(crate) source: &'a [u8],
     pub(crate) name: &'a [u8],
+    /// Where `compile_string`'s scanner begins, after an open tag for an
+    /// `eval`.
+    pub(crate) position: php_compile::syntax::Position,
 }
 
 /// What a string's compile answered: the unit, or the compiler's
@@ -404,7 +407,11 @@ impl<'a> StringBeneath<'a> {
                     ..self
                 },
             ),
-            None => Ok(Compiled(req.compile_string_own(source, self.name))),
+            None => Ok(Compiled(req.compile_string_own(
+                source,
+                self.name,
+                self.position,
+            ))),
         }
     }
 }

@@ -672,7 +672,7 @@ fn rows_of(
     }
     let rows = match mode {
         STORE => mysql.store(req)?,
-        USE => mysql.use_unbuffered(req),
+        USE => mysql.use_unbuffered(req)?,
         _ => None,
     };
     let Some(rows) = rows else {
@@ -736,7 +736,7 @@ pub(crate) fn reap_async_query(
     let mode = with_conn(req, on.object, |c| c.async_mode).unwrap_or(STORE);
     let rows = match mode {
         STORE => mysql.store(req)?,
-        USE => mysql.use_unbuffered(req),
+        USE => mysql.use_unbuffered(req)?,
         _ => None,
     };
     let Some(rows) = rows else {
@@ -754,7 +754,7 @@ pub(crate) fn take_rows(
 ) -> Result<OrFalse<Owner<Instance<mysqli_result>>>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
     let rows = if mode == USE {
-        mysql.use_unbuffered(req)
+        mysql.use_unbuffered(req)?
     } else {
         mysql.store(req)?
     };

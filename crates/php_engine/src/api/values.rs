@@ -745,46 +745,14 @@ impl PhpArray {
         Ok(req.array_del(self.0, key.heap()))
     }
 
-    /// `SEPARATE_ARRAY` and `zend_hash_clean` (`Z/Zend/zend_hash.c:1875`):
-    /// every row's value destroyed in place, in order, its destructor
-    /// served as it goes, with every key standing until the last value
-    /// is destroyed; then the table emptied, its keys given up, and
-    /// `nNextFreeElement` back to `ZEND_LONG_MIN`. A destroyed row reads
-    /// as `null` where php's reads the freed value. The walk stops at
-    /// the rows the table held as it began, as php's `end` does, and
-    /// ends where a destructor destroys the table, which php's loop reads
-    /// freed; a hash iterator registered at the table says so, and
-    /// carries the walk's position past a rehash a destructor's write
-    /// sets off. Rows a destructor wrote are given up as the table is
-    /// emptied, where php drops them unreleased. `session_unset` is
-    /// php's caller.
+    /// `SEPARATE_ARRAY` and `zend_hash_clean` (`Z/Zend/zend_hash.c:1875`),
+    /// [`php_heap::Heap::array_clean`]: every row's value destroyed in
+    /// place, in order, its destructor served as it goes, then the table
+    /// emptied in one pass, its keys given up and `nNextFreeElement` back
+    /// to `ZEND_LONG_MIN`. `session_unset` is php's caller.
     pub fn clean(&mut self, req: &mut Request) -> Result<(), Thrown> {
         self.separate(req)?;
-        let table = self.0;
-        let watch = req.heap_mut().iterator_add(table, 0);
-        let end = table.num_used();
-        while req.heap_mut().iterator_on(watch, table) {
-            let pos = req.heap_mut().iterator_pos(watch, table);
-            if pos >= end {
-                break;
-            }
-            req.heap_mut().iterator_set_pos(watch, pos + 1);
-            if let Some(place) = table.value_ref_at(pos) {
-                let old = place.read();
-                if !old.is_undef() {
-                    place.write(Zval::null());
-                    req.release(Value::of_zval(old));
-                }
-            }
-        }
-        while req.heap_mut().iterator_on(watch, table) {
-            let Some((_, key, _)) = table.live_from(0) else {
-                table.set_next_free(i64::MIN);
-                break;
-            };
-            req.array_del(table, key);
-        }
-        req.heap_mut().iterator_del(watch);
+        req.array_clean(self.0);
         Ok(())
     }
 
@@ -3207,10 +3175,15 @@ mod tests {
     /// release frees it.
     #[test]
     fn a_resource_is_a_list_entry_closed_once_and_freed_at_the_last_release() {
-        fn dtor(req: &mut Request, r: Resource) {
+        #[expect(
+            clippy::unnecessary_wraps,
+            reason = "the resource destructor's shape, which a destructor that throws needs"
+        )]
+        fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
             let seen = r.native::<u32>(req).copied().unwrap_or(0);
             let seen = Owner::take(req, Value::int(i64::from(seen)));
             req.define_constant(b"dtor", seen);
+            Ok(())
         }
         let mut req = crate::test::request();
         let start = req.memory_usage(false);

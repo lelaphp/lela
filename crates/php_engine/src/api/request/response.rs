@@ -469,7 +469,7 @@ impl Request {
         self.response.connection = Connection::Aborted;
         crate::output::disable(self);
         if !self.ini_flag(b"ignore_user_abort") {
-            self.leave_by_zend_bailout();
+            self.bail_out();
         }
     }
 

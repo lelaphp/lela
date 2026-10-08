@@ -100,7 +100,7 @@ impl Stmt {
         let result = if h.buffered {
             h.server.store(req)?
         } else {
-            h.server.use_unbuffered(req)
+            h.server.use_unbuffered(req)?
         };
         let Some(result) = result else {
             return Err(self.error(req));
@@ -358,7 +358,7 @@ impl Statement for Stmt {
                             ));
                         };
                         let text = stream.copy_to_mem(req, None)?;
-                        replace(req, param.value, text.into_value());
+                        param.value.convert(req, text.into_value());
                     }
                     _ => {}
                 }
@@ -483,15 +483,5 @@ impl Statement for Stmt {
         if !self.done {
             self.drain(req).ok();
         }
-    }
-}
-
-/// `zval_ptr_dtor(parameter)` and `new` in its place: a bound value
-/// replaced, through its reference for `bindParam()`, as php's
-/// `convert_to_*` writes in place.
-fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
-    match value.as_php_ref().copied() {
-        Some(cell) => cell.convert(req, new),
-        None => std::mem::replace(value, new).give_up(req),
     }
 }

@@ -583,6 +583,46 @@ impl Arr {
         header.lead.set(0);
     }
 
+    /// The end of `zend_hash_clean`: in one pass over the positions used,
+    /// every string key given up, then the hash slots reset and the
+    /// counts, the internal pointer and `nNextFreeElement` back to an
+    /// empty table's, the data and its size kept. What the rows still
+    /// held that is counted is handed back to be given up once the table
+    /// is empty, so a destructor it serves reads an empty table.
+    fn emptied_in_place(self, heap: &mut Heap) -> Vec<Zval> {
+        let mut left = Vec::new();
+        let used = self.num_used();
+        if self.is_packed() {
+            for idx in 0..used {
+                let z = self.read_slot(idx);
+                if z.is_refcounted() {
+                    left.push(z);
+                }
+            }
+        } else if !self.is_uninitialized() {
+            for idx in 0..used {
+                let b = self.read_bucket(idx);
+                if b.val.is_undef() {
+                    continue;
+                }
+                if let Some(k) = b.key {
+                    heap.release_string(k);
+                }
+                if b.val.is_refcounted() {
+                    left.push(b.val);
+                }
+            }
+            self.hash_reset();
+        }
+        let header = self.header();
+        header.num_used.set(0);
+        header.num_elements.set(0);
+        header.internal_pointer.set(0);
+        header.next_free.set(i64::MIN);
+        header.lead.set(0);
+        left
+    }
+
     /// `ZVAL_EMPTY_ARRAY`: the process's one immutable empty array,
     /// php's `zend_empty_array`, which costs a request nothing and is
     /// what php answers wherever an array has nothing in it
@@ -1916,6 +1956,46 @@ impl crate::Heap {
         true
     }
 
+    /// `zend_hash_clean` (`Z/Zend/zend_hash.c:1875`) over `a`, which has
+    /// one owner: every row's value destroyed in place, in order, its
+    /// destructor served as it goes, with every key standing until the
+    /// last value is destroyed; then in one pass over the buckets the
+    /// keys given up, and the table emptied where it stands, its data
+    /// kept, `nNumUsed`, `nNumOfElements` and `nInternalPointer` back to
+    /// zero, `nNextFreeElement` to `ZEND_LONG_MIN` and the hash slots
+    /// reset. A destroyed row reads as `null`. The walk stops at the rows
+    /// the table held as it began, as php's `end` does, and ends where a
+    /// destructor destroys the table; a hash iterator registered at the
+    /// table says so, and carries the walk's position past a rehash a
+    /// destructor's write sets off. Rows a destructor wrote are given up
+    /// once the table is empty. Other iterators on the table are left
+    /// where they stand, as php leaves them.
+    pub fn array_clean(hooks: &mut dyn HeapHooks, a: Arr) {
+        let watch = hooks.heap().iterator_add(a, 0);
+        let end = a.num_used();
+        while hooks.heap().iterator_on(watch, a) {
+            let pos = hooks.heap().iterator_pos(watch, a);
+            if pos >= end {
+                break;
+            }
+            hooks.heap().iterator_set_pos(watch, pos + 1);
+            if let Some(place) = a.value_ref_at(pos) {
+                let old = place.read();
+                if !old.is_undef() {
+                    place.write(Zval::null());
+                    Heap::release(hooks, old);
+                }
+            }
+        }
+        let standing = hooks.heap().iterator_on(watch, a);
+        hooks.heap().iterator_del(watch);
+        if standing {
+            for left in a.emptied_in_place(hooks.heap()) {
+                Heap::release(hooks, left);
+            }
+        }
+    }
+
     /// `zend_array_dup`: a new array of one owner holding what `a`
     /// holds, every refcounted element one more owner and every string
     /// key too, the tombstones left behind and the internal pointer
@@ -3009,6 +3089,60 @@ mod tests {
         assert_eq!(a.next_free(), 2);
         assert!(a.is_packed());
         Heap::release(&mut nothing, Zval::array(a));
+    }
+
+    /// `zend_hash_clean` over a hash of 100,000 rows, each key and value
+    /// a string of the request's own: one pass, not the n²/2 bucket reads
+    /// of a delete per row from position 0 that #2284 measured, which at
+    /// this size is five billion reads and takes minutes; this test holds
+    /// the clean to five seconds where one pass takes milliseconds. The
+    /// table is left empty where it stands, its data and size kept, every
+    /// key and value given back, and it takes rows again from the start.
+    #[test]
+    fn a_clean_empties_a_hash_in_one_pass_and_keeps_its_data() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let Ok(a) = nothing.heap.array() else {
+            return;
+        };
+        let rows = 100_000;
+        for i in 0..rows {
+            let (Ok(key), Ok(value)) = (
+                nothing.heap.string(format!("key{i}").as_bytes()),
+                nothing.heap.string(format!("value{i}").as_bytes()),
+            ) else {
+                return;
+            };
+            assert!(
+                Heap::array_update(&mut nothing, a, Key::Str(key), Zval::string(value)).is_ok()
+            );
+            nothing.heap.release_string(key);
+        }
+        let Ok(three) = nothing.heap.string(b"key3") else {
+            return;
+        };
+        assert!(Heap::array_del(&mut nothing, a, Key::Str(three)));
+        let size = a.table_size();
+        let held = a.len();
+        assert_eq!(held, rows - 1);
+        let began = std::time::Instant::now();
+        Heap::array_clean(&mut nothing, a);
+        let took = began.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "a clean of {held} rows took {took:?}"
+        );
+        assert!(a.is_empty() && a.num_used() == 0 && a.position() == 0);
+        assert_eq!(a.next_free(), i64::MIN);
+        assert_eq!(a.table_size(), size, "the data is kept");
+        assert!(a.get(Key::Str(three)).is_none());
+        nothing.heap.release_string(three);
+        assert!(Heap::array_update(&mut nothing, a, Key::Long(7), Zval::long(1)).is_ok());
+        assert_eq!(a.live_from(0).map(|(pos, _, _)| pos), Some(0));
+        assert_eq!(a.next_free(), 8);
+        Heap::release(&mut nothing, Zval::array(a));
+        assert_eq!(nothing.heap.memory_usage(false), start);
     }
 
     /// A hash of `n` string-keyed elements `k0`, `k1`, … holding their

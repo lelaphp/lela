@@ -117,9 +117,23 @@ fn freed_protected(req: &mut Request) {
     }
 }
 
+/// The line of `freed_read`'s read of the freed string's bytes.
+const READ_AT: u32 = line!() + 9;
+
+/// `freed_read(): int`, faulty on purpose: a string freed, then its
+/// bytes read, the stale read of #1985-#1989's regressions; what it
+/// read is the length it answers.
+#[php_function]
+fn freed_read(req: &mut Request) -> i64 {
+    freed(req, b"string")
+        .and_then(Zval::as_str)
+        .map_or(-1, |s| i64::try_from(s.bytes().len()).unwrap_or(-1))
+}
+
 fn faulty() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
+            freed_read::declared(),
             freed_addref::declared(),
             freed_then_made::declared(),
             freed_protected::declared(),
@@ -149,8 +163,8 @@ fn an_addref_of_a_freed_block_ends_the_request_at_the_next_sensing_point() {
         );
         assert!(stdout.contains(SITE), "{kind}: {stdout}");
         // The loop asks after the native's handler, which has moved
-        // the frame to the next opline, so that is the line rendered.
-        assert!(stdout.contains(" on line 3\n"), "{kind}: {stdout}");
+        // the frame to the next opline; the fatal names the call's line.
+        assert!(stdout.contains(" on line 2\n"), "{kind}: {stdout}");
         assert!(!stdout.contains("went on"), "{kind}: {stdout}");
         assert_eq!(served.exit_code, 255, "{kind}");
     }
@@ -169,6 +183,52 @@ fn an_addref_of_a_freed_block_during_shutdown_is_raised_at_the_request_end() {
     let stdout = String::from_utf8_lossy(&served.stdout);
     assert!(stdout.starts_with(&format!("ran\n{REFUSED}")), "{stdout}");
     assert!(stdout.contains(SITE), "{stdout}");
+    assert!(stdout.contains(" in Unknown on line 0\n"), "{stdout}");
+    assert_eq!(served.exit_code, 255);
+}
+
+/// A request a sensed refusal has ended renders that one fatal alone: a
+/// later refusal, here in a request-end function, is read through
+/// memory the first has made untrustworthy, and is not raised (#2052).
+#[test]
+fn a_request_a_sensed_refusal_ended_renders_no_second() {
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .functions(vec![freed_addref::declared()])
+            .rshutdown(freed_addref_at_rshutdown)
+            .build("freed_use_twice")])
+        .build();
+    let served = engine.serve_capture(
+        "<?php echo 'a';\nfreed_addref('string');\necho 'went on';\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(stdout.starts_with(&format!("a\n{REFUSED}")), "{stdout}");
+    assert_eq!(stdout.matches("InternalError").count(), 1, "{stdout}");
+    assert_eq!(served.exit_code, 255);
+}
+
+/// A refusal made after a fatal, in a request-end function, is still
+/// raised where the request ends: the fatal's `zend_bailout` was caught
+/// before it, and a refused refcount change is a defect on any path
+/// (#2048).
+#[test]
+fn an_addref_of_a_freed_block_after_a_fatal_is_raised_at_the_request_end() {
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .rshutdown(freed_addref_at_rshutdown)
+            .build("freed_use_after_fatal")])
+        .build();
+    let served = engine.serve_capture(
+        "<?php ini_set('memory_limit', '2M');\n$s = 'x';\nwhile (true) { $s .= $s; }\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.starts_with("\nFatal error: Allowed memory size of 2097152 bytes exhausted"),
+        "{stdout}"
+    );
+    assert!(stdout.contains(REFUSED), "{stdout}");
     assert!(stdout.contains(" in Unknown on line 0\n"), "{stdout}");
     assert_eq!(served.exit_code, 255);
 }
@@ -265,4 +325,64 @@ fn a_write_into_a_freed_block_is_found_as_it_leaves_the_quarantine() {
         assert!(!stdout.contains("and on"), "{evict}: {stdout}");
         assert_eq!(served.exit_code, 255, "{evict}");
     }
+}
+
+/// A write into a freed block its bin still holds back when the request
+/// ends is found there: the request leak sensor's sweep drains the
+/// quarantine through the same check before it walks, and the write is
+/// raised where the request ends, with nothing executing (#2053). A
+/// clean request, its sensor armed as it is, reports nothing.
+#[test]
+fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
+    let engine = Engine::cli_builder().extensions(&[faulty()]).build();
+    let served = engine.serve_capture(
+        "<?php freed_protected(); echo 'went on';\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    let (before, after) = stdout.split_once("-byte block at 0x").unwrap_or_default();
+    assert!(
+        before.starts_with("went on\nFatal error: InternalError: a write into the "),
+        "{stdout}"
+    );
+    assert!(
+        after.contains(
+            " after the heap freed it, found as it left the quarantine in Unknown on line 0\n"
+        ),
+        "{stdout}"
+    );
+    assert_eq!(served.exit_code, 255);
+    let clean = engine.serve_capture(
+        "<?php $a = [1]; unset($a); echo 'clean';\n",
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&clean.stdout), "clean");
+    assert_eq!(clean.exit_code, 0);
+}
+
+/// A read of a freed string's bytes is refused rather than aborting the
+/// process on a slice the length of the freed-block mark: the native
+/// reads no bytes, and the request ends in the `InternalError` naming
+/// the block and the line that read (#2051).
+#[test]
+fn a_read_of_a_freed_strings_bytes_ends_the_request_and_names_the_line() {
+    let engine = Engine::cli_builder().extensions(&[faulty()]).build();
+    let served = engine.serve_capture(
+        "<?php echo 'a';\necho freed_read();\necho 'went on';\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.starts_with("a\nFatal error: InternalError: a read of the block at 0x"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            ", which the heap has freed, at crates/php_engine/src/tests/freed_use.rs:{READ_AT}:"
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains(" on line 2\n"), "{stdout}");
+    assert!(!stdout.contains("went on"), "{stdout}");
+    assert_eq!(served.exit_code, 255);
 }

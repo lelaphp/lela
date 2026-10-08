@@ -22,7 +22,9 @@ use php_ext::raising::{
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value};
+use php_ext::values::{
+    ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value,
+};
 use php_ext_mysqlnd::client::{Field, ResultSet};
 
 use crate::link::{self, Need, mysqli};
@@ -34,30 +36,63 @@ pub(crate) const ASSOC: i64 = 1;
 pub(crate) const NUM: i64 = 2;
 pub(crate) const BOTH: i64 = 3;
 
+/// `sizeof(MYSQLI_RESOURCE)`: `ptr`, `info` and `status`.
+const RESOURCE: usize = 24;
+
 /// The rows: held whole (`MYSQLI_STORE_RESULT`), read one at a time
 /// off the line (`MYSQLI_USE_RESULT`), or freed, php's null `ptr`.
 #[derive(Default)]
 pub(crate) enum Rows {
     #[default]
     Freed,
-    Stored(ResultSet),
-    Used(ResultSet),
+    Stored(Resource),
+    Used(Resource),
+}
+
+/// `MYSQLI_RESOURCE`: the rows, in the allocation php `ecalloc`s to point
+/// at them, on the request's heap until `MYSQLI_CLEAR_RESOURCE` or the
+/// object's free gives it back.
+pub(crate) struct Resource {
+    set: ResultSet,
+    held: Emalloc,
 }
 
 impl Rows {
-    fn of(set: ResultSet) -> Rows {
-        if set.is_buffered() {
-            Rows::Stored(set)
+    /// `ecalloc(1, sizeof(MYSQLI_RESOURCE))` pointed at `set`; the `Err`
+    /// is the memory limit's fatal, the rows freed first.
+    fn of(req: &mut Request, set: ResultSet) -> Result<Rows, Thrown> {
+        let held = match Emalloc::new(req, RESOURCE) {
+            Ok(held) => held,
+            Err(thrown) => {
+                set.free(req, false).ok();
+                return Err(thrown);
+            }
+        };
+        let buffered = set.is_buffered();
+        let resource = Resource { set, held };
+        Ok(if buffered {
+            Rows::Stored(resource)
         } else {
-            Rows::Used(set)
-        }
+            Rows::Used(resource)
+        })
     }
 
     fn set(&mut self) -> Option<&mut ResultSet> {
         match self {
-            Rows::Stored(set) | Rows::Used(set) => Some(set),
+            Rows::Stored(r) | Rows::Used(r) => Some(&mut r.set),
             Rows::Freed => None,
         }
+    }
+
+    /// `mysqli_free_result(result, FALSE)` and the resource's `efree`:
+    /// `None` where the rows were freed already.
+    fn free(self, req: &mut Request) -> Option<Result<(), Thrown>> {
+        let (Rows::Stored(r) | Rows::Used(r)) = self else {
+            return None;
+        };
+        let freed = r.set.free(req, false);
+        r.held.free(req);
+        Some(freed)
     }
 }
 
@@ -68,21 +103,42 @@ fn result_class(req: &mut Request) -> Result<ClassId, Thrown> {
 }
 
 /// `MYSQLI_RETVAL_RESOURCE(result, mysqli_result_class_entry)`: the rows
-/// on a new `mysqli_result`.
+/// on a new `mysqli_result`, behind their `MYSQLI_RESOURCE`. What
+/// `memory_get_usage()` sees of stored rows is their pool, their row
+/// buffers and their resource, which `mysqli_free_result` gives back with
+/// the rows, leaving the row fetched:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $m = memory_get_usage();
+/// $r = mysqli_query($l, "SELECT REPEAT('x', 1000000) AS a, REPEAT('y', 1000000) AS b");
+/// echo memory_get_usage() - $m, "\n";
+/// $row = mysqli_fetch_row($r);
+/// echo memory_get_usage() - $m, "\n";
+/// mysqli_free_result($r);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 4022472
+/// 6029760
+/// 2007448
+/// ```
 pub(crate) fn wrap(
     req: &mut Request,
     set: ResultSet,
 ) -> Result<Owner<Instance<mysqli_result>>, Thrown> {
     let class = result_class(req)?;
+    let rows = Rows::of(req, set)?;
     let object = match new_object(req, class) {
         Ok(object) => object,
         Err(thrown) => {
-            set.free(req, false).ok();
+            rows.free(req);
             return Err(thrown);
         }
     };
-    if let Some(rows) = crate::payload::<Rows>(req, *object) {
-        *rows = Rows::of(set);
+    if let Some(slot) = crate::payload::<Rows>(req, *object) {
+        *slot = rows;
     }
     Ok(object.into_instance())
 }
@@ -612,9 +668,9 @@ pub(crate) fn free(req: &mut Request, on: On) -> Result<(), Thrown> {
     let rows = crate::payload::<Rows>(req, on.object)
         .map(std::mem::take)
         .unwrap_or_default();
-    match rows {
-        Rows::Stored(set) | Rows::Used(set) => set.free(req, false),
-        Rows::Freed => Err(closed(req, on.object)),
+    match rows.free(req) {
+        Some(freed) => freed,
+        None => Err(closed(req, on.object)),
     }
 }
 
@@ -734,7 +790,7 @@ impl mysqli_result {
         let conn = link::conn(req, mysql.object(), Need::Open)?;
         let set = match result_mode {
             link::STORE => conn.store(req)?,
-            link::USE => conn.use_unbuffered(req),
+            link::USE => conn.use_unbuffered(req)?,
             _ => {
                 return Err(arg_value_error(
                     req,
@@ -749,8 +805,9 @@ impl mysqli_result {
         };
         let status = conn.status(req).server_status;
         let index = crate::report_index(req, b"from previous query", status);
-        if let Some(rows) = crate::payload::<Rows>(req, this.object()) {
-            *rows = Rows::of(set);
+        let rows = Rows::of(req, set)?;
+        if let Some(slot) = crate::payload::<Rows>(req, this.object()) {
+            *slot = rows;
         }
         index
     }
@@ -1073,8 +1130,6 @@ impl Props for ResultProps {
         let rows = crate::payload::<Rows>(req, object)
             .map(std::mem::take)
             .unwrap_or_default();
-        if let Rows::Stored(set) | Rows::Used(set) = rows {
-            set.free(req, false).ok();
-        }
+        rows.free(req);
     }
 }

@@ -388,7 +388,7 @@ pub(crate) fn result_metadata(
     on: On,
 ) -> Result<OrFalse<Owner<Instance<mysqli_result>>>, Thrown> {
     let rows = with_stmt(req, on.object, Need::Open, |req, s| {
-        let rows = s.stmt.described(req);
+        let rows = s.stmt.described(req)?;
         if rows.is_none() {
             report_stmt(req, &s.stmt)?;
         }

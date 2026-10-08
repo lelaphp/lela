@@ -227,7 +227,7 @@ impl Request {
 
     /// The function the method at `at` among `class`'s own declarations
     /// is.
-    fn method_function(&self, class: ClassId, at: u32) -> Option<Function> {
+    pub(super) fn method_function(&self, class: ClassId, at: u32) -> Option<Function> {
         let at = usize::try_from(at).ok()?;
         let functions = match self.native_class_at(class) {
             Some(native) => self.shared.method_functions.get(native)?,

@@ -2,16 +2,12 @@
 //! serves, a frame pushed for user code, a code frame or a native's
 //! call, its slots read and written, the receivers it was lent, and the
 //! frame left and popped; the fibers each with the stack that resumed
-//! them, and the chain of frames and calls a backtrace walks. A debug
-//! build's record of a temporary written over an owner is `Frames`'s,
-//! whose field no file but this one reads; the stack and the VM stay on
-//! the request, since every area reaches them.
+//! them, and the chain of frames and calls a backtrace walks. The stack
+//! and the VM stay on the request, since every area reaches them.
 
 use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Slot, VmStack, Zval, ZvalRef};
-#[cfg(debug_assertions)]
-use php_unit::Opcode;
 use php_unit::{CacheSlot, Unit};
 
 use crate::api::call::Function;
@@ -20,17 +16,6 @@ use crate::api::values::{PhpObject, Value};
 use crate::exec::{self, TableId, Vm};
 
 use super::Request;
-
-/// A write a debug build stopped: the opline whose `TMP` it was, the
-/// opcode serving it, the temporary's number and what the slot held.
-#[cfg(debug_assertions)]
-#[derive(Debug, Clone, Copy)]
-struct DirtyTemporary {
-    opline: u32,
-    opcode: Opcode,
-    number: u32,
-    held: php_heap::ZvalType,
-}
 
 /// The links of one stack, innermost first: the frames `frames` numbers
 /// and the calls `calls` numbers that are being served, each frame's
@@ -127,17 +112,6 @@ impl<'a> Slots<'a> {
             Slots::Kept(frame) => Some(frame),
         }
     }
-}
-
-/// A debug build's record of a temporary written over an owner, whose
-/// field no file but this one reads.
-#[cfg(debug_assertions)]
-#[derive(Default)]
-pub(super) struct Frames {
-    /// A debug build's record of the first write of a `TMP` it found
-    /// over a slot that still held an owner, until the loop takes it
-    /// ([`Request::take_sensed`]).
-    dirty: Option<DirtyTemporary>,
 }
 
 impl Request {
@@ -675,9 +649,9 @@ impl Request {
     /// whose owner a handler moved without emptying the slot is released
     /// a second time by the next write (#723). A debug build stops that
     /// write: the `TMP` the opline the frame stands at writes, found
-    /// holding an owner, is recorded for [`Request::take_sensed`]. A
-    /// scalar left there is no owner and no second release, and php
-    /// writes over one itself: `JMPZ_EX` and `JMPNZ_EX` write the `TMP`
+    /// holding an owner, is recorded for the loop's next sensing point
+    /// ([`Request::sense_dirty_temporary`]). A scalar left there is no owner and no second release, and
+    /// php writes over one itself: `JMPZ_EX` and `JMPNZ_EX` write the `TMP`
     /// the `BOOL` after them writes again.
     pub(crate) fn set_slot(&mut self, frame: FrameRef, at: u32, value: Value) -> Value {
         let Some(f) = self
@@ -701,86 +675,6 @@ impl Request {
     pub(crate) fn replace_slot(&mut self, frame: FrameRef, at: u32, value: Value) {
         let previous = self.set_slot(frame, at, value);
         self.release(previous);
-    }
-
-    /// A debug build's question at a write over a slot that held an
-    /// owner of a `held`: whether the slot is the `TMP` of the opline
-    /// `frame` stands at, which the handler that read it last should
-    /// have left empty. The first such write is recorded.
-    #[cfg(debug_assertions)]
-    fn sense_dirty_temporary(&mut self, frame: FrameRef, at: u32, held: php_heap::ZvalType) {
-        if self.frames.dirty.is_some() {
-            return;
-        }
-        let opline = self.vm.opline(frame);
-        let Some(serving) = self.vm.serving(frame) else {
-            return;
-        };
-        let Some(op) = serving
-            .code()
-            .and_then(|code| exec::opline_at(code, opline).map(|op| (code, *op)))
-        else {
-            return;
-        };
-        let (code, op) = op;
-        let its_own = match op.out_type {
-            php_unit::OperandKind::Tmp => exec::temporary_slot(code, op.out) == at,
-            php_unit::OperandKind::Var
-            | php_unit::OperandKind::Cv
-            | php_unit::OperandKind::Const
-            | php_unit::OperandKind::Unused => false,
-        };
-        if its_own {
-            self.frames.dirty = Some(DirtyTemporary {
-                opline,
-                opcode: op.opcode,
-                number: op.out,
-                held,
-            });
-        }
-    }
-
-    /// What a debug build's sensors found since the loop last asked
-    /// (design §10, #761): a `TMP` written over an owner it still held,
-    /// or what the heap's sensors found ([`php_heap::Heap::take_sensed`]),
-    /// a refcount operation on a block the heap had freed among them, as
-    /// the `InternalError` fatal that ends the request; the first of
-    /// them, and taken. The loop asks after every handler, and
-    /// [`Request::end_in_sensed`] asks where the request ends.
-    #[cfg(debug_assertions)]
-    pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
-        let dirty = self.frames.dirty.take().map(|dirty| {
-            Fatal::Error(format!(
-                "InternalError: {} at opline {} writes its TMP #{} over an owner it still holds ({:?}): the handler that last read the slot moved it out and did not empty it",
-                dirty.opcode.name(),
-                dirty.opline,
-                dirty.number,
-                dirty.held,
-            ))
-        });
-        dirty.or_else(|| self.heap.take_sensed())
-    }
-
-    /// A debug build's sensing point outside the loop, where a request
-    /// ends: [`Engine::shutdown_request`] after the request's last
-    /// release and [`Engine::start_failed`] where its startup failed.
-    /// What the sensors found that no handler step was left to ask for,
-    /// in a request-end function or as the request's tables were freed,
-    /// ends the request here in the `InternalError` the loop would have
-    /// ended it in, rendered with nothing executing, so no refusal goes
-    /// unraised. It is a step of its own, as each step of
-    /// `php_request_shutdown` is its own `zend_try`, so a fatal raised
-    /// before it and still leaving does not keep it from being rendered.
-    ///
-    /// [`Engine::shutdown_request`]: crate::engine::Engine::shutdown_request
-    /// [`Engine::start_failed`]: crate::engine::Engine::start_failed
-    #[cfg(debug_assertions)]
-    pub(crate) fn end_in_sensed(&mut self) {
-        if let Some(sensed) = self.take_sensed() {
-            self.catch_bailout();
-            self.end_in(&sensed);
-            self.catch_bailout();
-        }
     }
 
     /// The zval in a slot of `frame` in place, php's `EX_VAR(var)`

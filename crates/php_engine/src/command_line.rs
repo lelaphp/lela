@@ -188,7 +188,9 @@ impl Request {
 fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) -> bool {
     let shared = Arc::clone(&req.shared);
     {
-        let unit = match req.host_string(|req| req.compile_string(code, name)) {
+        let unit = match req.host_string(|req| {
+            req.compile_string(code, name, php_compile::syntax::Position::AfterOpenTag)
+        }) {
             Ok(Ok(unit)) => unit,
             Ok(Err(refused)) => {
                 crate::engine::refused_program(req, &refused, name);
@@ -199,7 +201,7 @@ fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) ->
                 return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
             }
         };
-        if !crate::engine::note_compiled(req, &unit, SourceKind::Eval) {
+        if !crate::engine::note_compiled(req, &unit, SourceKind::EVAL) {
             return uncaught.map_or(!req.bailing_out(), |level| take_uncaught(req, level));
         }
         let standing = req.vm().frames().len();

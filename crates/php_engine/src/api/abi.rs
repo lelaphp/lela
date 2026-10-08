@@ -990,10 +990,35 @@ impl ExtensionBuilder {
     /// what makes a forgotten member impl a build error on this line.
     #[must_use]
     pub fn class<C: Header + Members>(self) -> ExtensionBuilder {
+        self.class_reshaped::<C>(|_| {})
+    }
+
+    /// [`ExtensionBuilder::class`], the declaration then reshaped by
+    /// what the attributes cannot say and php's `MINIT` writes by hand
+    /// after `register_class_*`: a property whose type is an
+    /// intersection or in disjunctive normal form
+    /// (`zend_declare_typed_property` with a type list), the doc comment
+    /// `@genstubs-expose-comment-block` keeps, a trait's kind, an
+    /// instance method whose body reads no receiver. `reshape` sees the
+    /// methods in `methods` and reshapes them in place: one it adds or
+    /// takes away is not registered, since each keeps its entry. What it
+    /// leaves is registered as `class` registers it.
+    #[must_use]
+    pub fn class_reshaped<C: Header + Members>(
+        self,
+        reshape: impl FnOnce(&mut ClassDecl),
+    ) -> ExtensionBuilder {
         let mut class = C::header();
-        let (constants, properties, methods) = C::members();
+        let (constants, properties, mut methods) = C::members();
         class.constants.extend(constants);
         class.properties.extend(properties);
+        let seen = methods.iter().map(|(method, _)| method.clone()).collect();
+        let header = std::mem::replace(&mut class.methods, seen);
+        reshape(&mut class);
+        let reshaped = std::mem::replace(&mut class.methods, header);
+        for ((method, _), reshaped) in methods.iter_mut().zip(reshaped) {
+            *method = reshaped;
+        }
         class.properties = class
             .properties
             .into_iter()
@@ -2052,6 +2077,16 @@ pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<Owner<PhpRe
 /// them calls is called from the loop's frame. The state names no value
 /// of the heap; what it walks is the object's.
 pub trait ClassIterator: Send {
+    /// The rest of the class's `get_iterator` once `zend_iterator_init`
+    /// has put the iterator in the object store, so what it makes takes a
+    /// number after the iterator's: `pdo_stmt_iter_get` fetches its first
+    /// row here. A throw is a throw from `get_iterator`, the iterator
+    /// released through [`ClassIterator::release`] as
+    /// `zend_iterator_dtor` releases it. Nothing by default.
+    fn made(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let _ = (req, object);
+        Ok(())
+    }
     /// `funcs->rewind`.
     fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown>;
     /// `funcs->valid`, `SUCCESS` as `true`.
@@ -2402,6 +2437,24 @@ pub trait ObjectHandlers: Send + Sync {
         lowered: &[u8],
     ) -> Result<Option<Function>, Thrown> {
         Ok(req.std_method(object.class(), lowered))
+    }
+
+    /// `ce->get_static_method`, asked before `zend_std_get_static_method`
+    /// for a method a call names on the class: `None`, `Std`'s answer,
+    /// leaves the name to the standard lookup. A class that answers a
+    /// name its table has no row for answers a trampoline
+    /// ([`Request::native_static_trampoline`]), as php's test
+    /// extension's `_ZendTestClass` answers `test`; `written` is the name
+    /// as the call wrote it.
+    fn get_static_method(
+        &self,
+        req: &mut Request,
+        class: ClassId,
+        lowered: &[u8],
+        written: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        let _ = (req, class, lowered, written);
+        Ok(None)
     }
 
     /// php's `get_method` as the slot is handed the name the call wrote

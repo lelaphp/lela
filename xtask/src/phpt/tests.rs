@@ -2043,7 +2043,7 @@ fn a_mysql_subset_runs_in_a_database_of_its_own() {
             None,
         )
         .unwrap();
-    assert_eq!(made.exit, Some(0), "{made:?}");
+    assert_eq!(made.exit, crate::oracle::Ended::Status(0), "{made:?}");
     let name = {
         let database = server::Database::made(&oracle, "ext/mysqli").unwrap();
         let mut pin = manifest.pin.clone();

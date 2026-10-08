@@ -1169,10 +1169,119 @@ fn dirname(path: &[u8]) -> Vec<u8> {
     path[..end].to_vec()
 }
 
+impl<'a> Emit<'a> {
+    /// The walk's state before the first statement of `parsed`.
+    #[allow(clippy::too_many_lines)] // the emitter laid down a field a line
+    fn new(
+        parsed: &'a Parsed,
+        options: &Options<'a>,
+        strings: &'a mut dyn Intern,
+        halt: Option<i64>,
+    ) -> Emit<'a> {
+        Emit {
+            parsed,
+            strings,
+            precision: options.precision,
+            assertions: assert::Assertions::of(options.assertions),
+            persistent: options.persistent,
+            functions: options.functions,
+            known_classes: options.classes,
+            hooked: options.hooked,
+            extended_info: options.extended_info,
+            request_classes: options.request_classes,
+            frameless: frameless_table(options.functions),
+            namespace: None,
+            namespacing: Namespacing::Global,
+            imports: Imports::default(),
+            active_class: None,
+            active_parent: None,
+            active_constants: Vec::new(),
+            active_function: None,
+            this_in_scope: false,
+            return_type: None,
+            returns_by_ref: false,
+            depth: 0,
+            active_property: None,
+            active_hook: None,
+            in_jmp_frameless_branch: false,
+            statements_seen: 0,
+            top_list: TopList::Declares,
+            typing: Typing::of(options.strict_types),
+            ticks: None,
+            stack: options.stack,
+            oplines: Vec::new(),
+            short_circuits: Vec::new(),
+            chain_inner: None,
+            memo: memo::Memo::default(),
+            znodes: Vec::new(),
+            const_evaluation: Evaluation::Once,
+            substitution: Substitution::Persistent,
+            constants: Vec::new(),
+            const_exprs: Vec::new(),
+            vars: Vec::new(),
+            http_response_header: ResponseHeader::Predefined,
+            safepoints: vec![OplineIdx(0)],
+            temporaries: 0,
+            cache_slots: 0,
+            line: 1,
+            diagnostics: Vec::new(),
+            classes: Vec::new(),
+            bound: Vec::new(),
+            runtime_keys: Vec::new(),
+            attributed_constants: Vec::new(),
+            keys_before: options.keys_before,
+            functions_declared: Vec::new(),
+            dynamic: Vec::new(),
+            cell: php_unit::UnitCell::default(),
+            function_callables: 0,
+            dynamic_func_defs: Vec::new(),
+            static_vars: Vec::new(),
+            fold: Fold::Compile,
+            fn_flags: FnFlags::default(),
+            numeric_dims: Vec::new(),
+            methods: Vec::new(),
+            hooks: Vec::new(),
+            filename: options.filename.clone(),
+            cwd: options.cwd.clone(),
+            loops: Vec::new(),
+            current_loop: None,
+            jumps: Vec::new(),
+            labels: Vec::new(),
+            try_catch: Vec::new(),
+            unwind: Vec::new(),
+            fast_call_var: None,
+            try_catch_offset: None,
+            generators: walk::generators(&parsed.tree),
+            arms: Vec::new(),
+            halt,
+            halted: None,
+        }
+    }
+}
+
+/// `zend_ast_export("", ast, "")` over a parsed file
+/// (`Z/Zend/zend_ast.c:2954`): php's text of each top statement at no
+/// indent, through the exporter `assert()`'s description is written by.
+pub(crate) fn export(
+    parsed: &Parsed,
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+) -> Result<Vec<u8>, CompileError> {
+    let mut emit = Emit::new(parsed, options, strings, None);
+    let mut out = Vec::new();
+    let file = parsed
+        .tree
+        .root()
+        .and_then(php_syntax::tree::Element::id::<php_syntax::tree::SourceFile>);
+    if let Some(file) = file {
+        emit.export_stmts(&mut out, &parsed.tree[file].stmts, 0)?;
+    }
+    Ok(out)
+}
+
 /// The unit of one source file: its main op array, the statements and
 /// then php's implicit final `RETURN 1` (`zend_emit_final_return`, with
 /// `extended_value` at -1), and the diagnostics raised on the way.
-#[allow(clippy::too_many_lines)] // the emitter laid down a field a line, and the unit taken off it
 pub(crate) fn unit(
     parsed: &Parsed,
     options: &Options<'_>,
@@ -1180,84 +1289,7 @@ pub(crate) fn unit(
     halt: Option<i64>,
 ) -> Result<Unit, CompileError> {
     let lines = u32::try_from(parsed.source.split(|b| *b == b'\n').count()).unwrap_or(u32::MAX);
-    let mut emit = Emit {
-        parsed,
-        strings,
-        precision: options.precision,
-        assertions: assert::Assertions::of(options.assertions),
-        persistent: options.persistent,
-        functions: options.functions,
-        known_classes: options.classes,
-        hooked: options.hooked,
-        extended_info: options.extended_info,
-        request_classes: options.request_classes,
-        frameless: frameless_table(options.functions),
-        namespace: None,
-        namespacing: Namespacing::Global,
-        imports: Imports::default(),
-        active_class: None,
-        active_parent: None,
-        active_constants: Vec::new(),
-        active_function: None,
-        this_in_scope: false,
-        return_type: None,
-        returns_by_ref: false,
-        depth: 0,
-        active_property: None,
-        active_hook: None,
-        in_jmp_frameless_branch: false,
-        statements_seen: 0,
-        top_list: TopList::Declares,
-        typing: Typing::of(options.strict_types),
-        ticks: None,
-        stack: options.stack,
-        oplines: Vec::new(),
-        short_circuits: Vec::new(),
-        chain_inner: None,
-        memo: memo::Memo::default(),
-        znodes: Vec::new(),
-        const_evaluation: Evaluation::Once,
-        substitution: Substitution::Persistent,
-        constants: Vec::new(),
-        const_exprs: Vec::new(),
-        vars: Vec::new(),
-        http_response_header: ResponseHeader::Predefined,
-        safepoints: vec![OplineIdx(0)],
-        temporaries: 0,
-        cache_slots: 0,
-        line: 1,
-        diagnostics: Vec::new(),
-        classes: Vec::new(),
-        bound: Vec::new(),
-        runtime_keys: Vec::new(),
-        attributed_constants: Vec::new(),
-        keys_before: options.keys_before,
-        functions_declared: Vec::new(),
-        dynamic: Vec::new(),
-        cell: php_unit::UnitCell::default(),
-        function_callables: 0,
-        dynamic_func_defs: Vec::new(),
-        static_vars: Vec::new(),
-        fold: Fold::Compile,
-        fn_flags: FnFlags::default(),
-        numeric_dims: Vec::new(),
-        methods: Vec::new(),
-        hooks: Vec::new(),
-        filename: options.filename.clone(),
-        cwd: options.cwd.clone(),
-        loops: Vec::new(),
-        current_loop: None,
-        jumps: Vec::new(),
-        labels: Vec::new(),
-        try_catch: Vec::new(),
-        unwind: Vec::new(),
-        fast_call_var: None,
-        try_catch_offset: None,
-        generators: walk::generators(&parsed.tree),
-        arms: Vec::new(),
-        halt,
-        halted: None,
-    };
+    let mut emit = Emit::new(parsed, options, strings, halt);
     // A fatal leaves the file with what `zend_error` had raised before
     // it already rendered, so those travel with it.
     if let Err(mut refused) = emit.source_file() {

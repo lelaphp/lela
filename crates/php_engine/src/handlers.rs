@@ -3349,7 +3349,7 @@ fn included(
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let source = match kind {
-        exec::IncludeKind::Eval => php_compile::SourceKind::Eval,
+        exec::IncludeKind::Eval => php_compile::SourceKind::EVAL,
         _ => php_compile::SourceKind::File,
     };
     if !crate::engine::note_compiled(req, &unit, source) {
@@ -4983,6 +4983,12 @@ fn static_method(
     this: Option<PhpObject>,
 ) -> Result<(Function, bool), Thrown> {
     let name = written.as_str_bytes().unwrap_or_default().to_vec();
+    if let Some(function) = req
+        .handlers_of(class)
+        .get_static_method(req, class, lowered, &name)?
+    {
+        return Ok((function, true));
+    }
     let function = match req.method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
         Some(function) => {
@@ -22833,11 +22839,13 @@ mod tests {
                     op1: 0,
                     out_type: OperandKind::Tmp,
                     out: 0,
+                    lineno: 5,
                     ..Opline::default()
                 }]
                 .into_boxed_slice(),
                 literals: vec![php_heap::Zval::long(7)].into_boxed_slice(),
                 num_tmps: 1,
+                filename: php_unit::decl::Name::from("planted.php"),
                 ..OpArray::default()
             },
             ..Unit::default()
@@ -22862,6 +22870,13 @@ mod tests {
             req.slot(frame, 0).as_int(),
             Some(7),
             "the write itself stood"
+        );
+        // Rendered at the line of the handler that wrote the temporary
+        // (#2046).
+        assert!(
+            matches!(req.ending(), Some(crate::api::request::Ending::Fatal(logged)) if logged.contains(" in planted.php on line 5")),
+            "{:?}",
+            req.ending()
         );
         req.pop_frame();
     }

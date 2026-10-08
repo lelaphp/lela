@@ -1670,7 +1670,7 @@ impl<'a> Emit<'a> {
     }
 
     /// `zend_ast_export_stmt` over a statement list.
-    fn export_stmts(
+    pub(super) fn export_stmts(
         &mut self,
         out: &mut Vec<u8>,
         stmts: &[Stmt],
@@ -1680,6 +1680,86 @@ impl<'a> Emit<'a> {
             self.export_stmt(out, *stmt, indent)?;
         }
         Ok(())
+    }
+
+    /// `ZEND_AST_NAMESPACE`: the name where one is written, then the
+    /// braces' statements a level in, or the `;` of the unbracketed form.
+    fn export_namespace(
+        &mut self,
+        out: &mut Vec<u8>,
+        id: NodeId<tree::NamespaceDef>,
+        indent: usize,
+    ) -> Result<(), CompileError> {
+        let parsed: &'a Parsed = self.parsed;
+        let node = &parsed.tree[id];
+        indent_to(out, indent);
+        out.extend(b"namespace");
+        if let Some(name) = node.name {
+            out.push(b' ');
+            out.extend(text(parsed, name));
+        }
+        match node.body {
+            Some(body) => {
+                out.extend(b" {\n");
+                self.export_stmts(out, &parsed.tree[body].stmts, indent + 1)?;
+                indent_to(out, indent);
+                out.extend(b"}\n");
+            }
+            None => out.push(b';'),
+        }
+        out.push(b'\n');
+        Ok(())
+    }
+
+    /// `ZEND_AST_USE`: `use ` and each name, ` as ` its alias where one is
+    /// written, without the leading backslash the parser drops. php writes no
+    /// `function` or `const`, since the node's `attr` is the symbol kind
+    /// and not the token its `T_FUNCTION` test reads.
+    fn export_use(&self, out: &mut Vec<u8>, id: NodeId<tree::UseStmt>) {
+        let parsed = self.parsed;
+        let tree = &parsed.tree;
+        let node = &tree[id];
+        let unprefixed = |name: &'a [u8]| name.strip_prefix(b"\\").unwrap_or(name);
+        out.extend(b"use ");
+        let mut items: Vec<(&[u8], Option<&[u8]>)> = Vec::new();
+        let prefix = node
+            .use_group
+            .map(|group| unprefixed(text(parsed, tree[group].prefix)));
+        match node.use_group {
+            Some(group) => {
+                for item in &tree[group].use_group_items {
+                    let item = &tree[*item];
+                    items.push((
+                        text(parsed, item.name),
+                        item.alias.map(|a| text(parsed, tree[a].name)),
+                    ));
+                }
+            }
+            None => {
+                for clause in &node.use_clauses {
+                    let clause = &tree[*clause];
+                    let alias = clause.alias.map(|a| text(parsed, tree[a].name));
+                    items.push((unprefixed(text(parsed, clause.name)), alias));
+                }
+            }
+        }
+        if let Some(prefix) = prefix {
+            out.extend(prefix);
+            out.extend(b"\\{");
+        }
+        for (at, (name, alias)) in items.into_iter().enumerate() {
+            if at > 0 {
+                out.extend(b", ");
+            }
+            out.extend(name);
+            if let Some(alias) = alias {
+                out.extend(b" as ");
+                out.extend(alias);
+            }
+        }
+        if prefix.is_some() {
+            out.push(b'}');
+        }
     }
 
     /// One php statement: the indent, the node, `;` unless the node is
@@ -1713,10 +1793,13 @@ impl<'a> Emit<'a> {
         let tree = &parsed.tree;
         match stmt {
             Stmt::Block(id) => self.export_stmts(out, &tree[id].stmts, indent),
-            // An empty statement is no node of php's; `use` and
-            // `namespace` stand only at the top of a file, which no
-            // expression holds.
-            Stmt::EmptyStmt(_) | Stmt::UseStmt(_) | Stmt::NamespaceDef(_) => Ok(()),
+            // An empty statement is no node of php's.
+            Stmt::EmptyStmt(_) => Ok(()),
+            Stmt::NamespaceDef(id) => self.export_namespace(out, id, indent),
+            Stmt::UseStmt(id) => self.line(out, indent, true, |this, out| {
+                this.export_use(out, id);
+                Ok(())
+            }),
             Stmt::ExprStmt(id) => {
                 let expr = tree[id].expr;
                 self.line(out, indent, true, |s, out| s.export(out, expr, 0, indent))

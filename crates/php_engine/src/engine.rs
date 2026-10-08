@@ -1322,7 +1322,7 @@ impl Shared {
     /// ini and working directory, its constant strings interned into the
     /// request's own memory and gone with it (design §5.2): a source the
     /// host handed over, and the string an `eval` hands over
-    /// ([`SourceKind::Eval`]), as php holds what it compiles for `-r`
+    /// ([`SourceKind::EVAL`]), as php holds what it compiles for `-r`
     /// and for `eval`. Such a unit is never published: nothing outside
     /// the request reaches it, and it lives as long as the frame serving
     /// it or the functions and classes it declared.
@@ -4873,7 +4873,7 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
     // it compiles, before what it declares.
     let recording = match kind {
         SourceKind::File => Some(req.begin_recording()),
-        SourceKind::Eval => None,
+        SourceKind::Eval(_) => None,
     };
     for raised in &unit.diagnostics {
         req.note_error_in(

@@ -7,14 +7,14 @@
 //! every `.phpt` under `php-src/ext/zend_test`, through `xtask phpt
 //! --subset`.
 //!
-//! What is ported is the part #1782 ruled: the observer, `observer.c`
-//! ([`observer`]), the one bundled user of design §4.3 seam 9, whose
-//! tests set its ini switches. The rest of php's test extension, its
-//! test functions and classes, comes only with a raise of the crate's
-//! ceiling. The observed opcodes, `zend_test.observer.show_opcode` and
-//! `show_opcode_in_user_handler` (#1824), are [`observer`]'s; the
-//! allocator hooks of `zend_mm_custom_handlers.c` are ported by
-//! observation (#2024, [`mm_custom_handlers`]).
+//! php's test extension is the native half of its Zend-level tests: each
+//! function, class and constant reaches one API of the engine. Here
+//! `test.c`'s are [`functions`] and [`classes`], with its weak table
+//! [`weakmap`]; `iterators.c`'s is [`iterators`] and `object_handlers.c`'s
+//! are [`object_handlers`]. The observer of `observer.c` is [`observer`], the one
+//! bundled user of design §4.3 seam 9, and the allocator hooks of
+//! `zend_mm_custom_handlers.c` are ported by observation
+//! ([`mm_custom_handlers`], #2024).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -28,19 +28,59 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod classes;
+mod functions;
+mod iterators;
 mod mm_custom_handlers;
+mod object_handlers;
 mod observer;
+mod weakmap;
+
+use std::io::Write as _;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
+use php_ext::decl::{IniDecl, Name};
+use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
+use php_ext::values::{Owner, ResourceType, Value};
 
-/// The extension value (design §7.1): `zend_test_module_entry` as far
-/// as this crate carries it, the observer ([`observer::declared`]) and the
-/// `MINFO` function.
+/// `zend_test.str_test`, `OnUpdateStr`.
+pub(crate) const STR_TEST: &[u8] = b"zend_test.str_test";
+
+/// `zend_test.quantity_value`, `OnUpdateLong`.
+const QUANTITY_VALUE: &[u8] = b"zend_test.quantity_value";
+
+/// `zend_test.not_empty_str_test`, `OnUpdateStrNotEmpty`.
+const NOT_EMPTY_STR_TEST: &[u8] = b"zend_test.not_empty_str_test";
+
+/// `zend_test.print_stderr_mshutdown`.
+const PRINT_STDERR_MSHUTDOWN: &[u8] = b"zend_test.print_stderr_mshutdown";
+
+/// `test.c`'s `PHP_INI_BEGIN` table, in its order: each entry's name,
+/// its default, and whether a request may change it (`PHP_INI_ALL`) or
+/// only the host (`PHP_INI_SYSTEM`). `zend_test.limit_copy_file_range`
+/// is `HAVE_COPY_FILE_RANGE`'s, which the oracle's platform has not.
+/// `replace_zend_execute_ex` and `observe_opline_in_zendmm` swap a
+/// pointer and a heap of php's, nothing a program prints tells apart,
+/// and here are entries alone.
+const ENTRIES: [(&[u8], &[u8], bool); 7] = [
+    (b"zend_test.replace_zend_execute_ex", b"0", false),
+    (b"zend_test.register_passes", b"0", false),
+    (PRINT_STDERR_MSHUTDOWN, b"0", false),
+    (QUANTITY_VALUE, b"0", true),
+    (STR_TEST, b"", true),
+    (NOT_EMPTY_STR_TEST, b"val", true),
+    (b"zend_test.observe_opline_in_zendmm", b"0", true),
+];
+
+/// The extension value (design §7.1): `zend_test_module_entry`, `MINIT`'s
+/// registrations in its order, the request's edges and the `MINFO`
+/// function.
 ///
 /// ```php
 /// var_dump(extension_loaded('zend_test'), ini_get('zend_test.observer.enabled'), ini_get('zend_test.observer.show_output'));
 /// var_dump(ini_set('zend_test.observer.observe_function_names', 'foo'), ini_get('zend_test.observer.observe_function_names'));
+/// var_dump(ini_set('zend_test.not_empty_str_test', ''), ini_set('zend_test.quantity_value', '1MB'), ini_get('zend_test.quantity_value'));
 /// ```
 /// ```expect
 /// bool(true)
@@ -48,28 +88,116 @@ use php_ext::request::Request;
 /// string(1) "1"
 /// bool(false)
 /// string(0) ""
+///
+/// Warning: Invalid "zend_test.quantity_value" setting. Invalid quantity "1MB": unknown multiplier "B", interpreting as "1" for backwards compatibility in %s on line 4
+/// bool(false)
+/// string(1) "0"
+/// string(3) "1MB"
 /// ```
 pub fn extension() -> Extension {
-    let builder = observer::declared(ExtensionBuilder::default());
+    let builder = functions::declared(ExtensionBuilder::default());
+    let builder = classes::declared(builder);
+    let builder = iterators::declared(builder);
+    let builder = object_handlers::declared(builder)
+        .ini(ini())
+        .on_modify(QUANTITY_VALUE, on_update_quantity)
+        .on_modify(NOT_EMPTY_STR_TEST, on_update_not_empty);
+    let builder = observer::declared(builder);
     mm_custom_handlers::declared(builder)
         .request_state::<State>()
+        .rinit(rinit)
+        .rshutdown(rshutdown)
+        .engine_end(mshutdown)
         .info(info)
+        .version("0.1.0")
         .build("zend_test")
 }
 
+/// The table as the extension declares it.
+fn ini() -> Vec<IniDecl> {
+    ENTRIES
+        .iter()
+        .map(|&(name, default, user)| IniDecl {
+            name: Name(name.into()),
+            default: Some(default.into()),
+            user,
+            per_dir: user,
+            system: true,
+        })
+        .collect()
+}
+
+/// `OnUpdateLong`: the value a quantity, whose odd shapes warn naming
+/// the entry, `zend_ini_parse_quantity_warn`.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `on_modify` slot's shape, which a handler that throws needs"
+)]
+fn on_update_quantity(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let (_, complaint) = Request::ini_parse_quantity(value.unwrap_or_default());
+    if let Some(complaint) = complaint {
+        let name = String::from_utf8_lossy(QUANTITY_VALUE);
+        warning(req, &format!("Invalid \"{name}\" setting. {complaint}"));
+    }
+    Ok(true)
+}
+
+/// `OnUpdateStrNotEmpty`: the empty string refused.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `on_modify` slot's shape, which a handler that throws needs"
+)]
+fn on_update_not_empty(_: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    Ok(value.is_some_and(|value| !value.is_empty()))
+}
+
 /// The extension's request state (ADR-0005), the part of php's
-/// `zend_test` request state this crate carries: the observer's, and
-/// where the allocation observer stands.
+/// `zend_test` request state this crate carries: the observer's, where
+/// the allocation observer stands, the weak table, the resource type
+/// whose destructor throws, and the owners `zend_leak_variable` took.
 #[derive(Debug, Default)]
 struct State {
     observer: observer::Observing,
     allocations: mm_custom_handlers::ObservedHeap,
+    weakmap: weakmap::Map,
+    throwing_resource: Option<ResourceType>,
+    leaked: Vec<Owner<Value>>,
+}
+
+/// `PHP_RINIT_FUNCTION(zend_test)`: the allocator hooks' start; the weak
+/// table is made on its first use.
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    mm_custom_handlers::rinit(req)
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(zend_test)`: the weak table given up, then
+/// the allocator hooks' end; and the owners `zend_leak_variable` took,
+/// which php frees with its heap.
+fn rshutdown(req: &mut Request) {
+    weakmap::release(req);
+    for leaked in std::mem::take(&mut req.state::<State>().leaked) {
+        leaked.give_up(req);
+    }
+    mm_custom_handlers::rshutdown(req);
+}
+
+/// `PHP_MSHUTDOWN_FUNCTION(zend_test)`: under `print_stderr_mshutdown`,
+/// a line written to the process's standard error, as php's `fprintf`
+/// writes it past the request.
+fn mshutdown(req: &mut Request) {
+    if req
+        .ini_get(PRINT_STDERR_MSHUTDOWN)
+        .is_some_and(Request::ini_parse_bool)
+    {
+        std::io::stderr().write_all(b"[zend_test] MSHUTDOWN\n").ok();
+    }
 }
 
 /// `PHP_MINFO_FUNCTION(zend_test)`: the one row, then the ini entries.
 fn info(req: &mut Request) {
     req.info_table(&[&["zend_test extension", "enabled"]]);
-    let mut names: Vec<&[u8]> = observer::ENTRIES.iter().map(|entry| entry.0).collect();
+    let mut names: Vec<&[u8]> = ENTRIES.iter().map(|entry| entry.0).collect();
+    names.extend(observer::ENTRIES.iter().map(|entry| entry.0));
     names.push(mm_custom_handlers::ENABLED);
     req.info_ini_entries(&names);
 }

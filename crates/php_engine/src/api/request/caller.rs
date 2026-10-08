@@ -202,7 +202,7 @@ impl Request {
 
     /// The innermost user frame, the one a native's variable access
     /// reads: `EG(current_execute_data)`'s caller.
-    fn caller_frame(&self) -> Option<FrameRef> {
+    pub(super) fn caller_frame(&self) -> Option<FrameRef> {
         let count = self.vm.frames().len();
         let at = count.checked_sub(1)?;
         Some(FrameRef(u32::try_from(at).ok()?))
@@ -652,13 +652,42 @@ impl Request {
         ))
     }
 
+    /// `get_function_or_method_name(EX(prev_execute_data)->func)`: the
+    /// function the native being served was called from, as a message
+    /// names it, `Class::method` for a method and a native's name for a
+    /// native's call, and `main` for a file's own code. What the test
+    /// extension's `zend_get_current_func_name` answers, the witness
+    /// there.
+    #[must_use]
+    pub fn caller_function_name(&self) -> String {
+        let mut chain = self.chain();
+        let _served = chain.next();
+        let function = match chain.next() {
+            Some(Link::Frame(_, state)) => state.function,
+            Some(Link::Call(call)) => Some(call.function),
+            Some(Link::Site(_)) | None => None,
+        };
+        function.map_or_else(
+            || String::from("main"),
+            |function| self.qualified_name(function, None),
+        )
+    }
+
     /// `get_active_function_or_method_name`: the native being served as
     /// a message names it, `Class::method` for a method, which is what
     /// a native writes before `(): ` in a sentence of its own that no
-    /// raiser here words, as `pdo_sqlite`'s callback refusals do.
+    /// raiser here words, as `pdo_sqlite`'s callback refusals do. Where
+    /// no native is served, as when a handler runs for an opcode, it is
+    /// the innermost user frame's function, `main` for a file's own code,
+    /// as `EG(current_execute_data)->func` is: ext/intl's
+    /// `ResourceBundle` words a missing element read as `$b['x']` so.
     #[must_use]
     pub fn active_function_name(&self) -> String {
-        self.active_native()
+        if self.vm_serving_native() || self.include_being_opened().is_some() {
+            return self.active_native();
+        }
+        self.active_user_function()
+            .unwrap_or_else(|| self.active_native())
     }
 
     /// `func->common.function_name`: the name a function was declared

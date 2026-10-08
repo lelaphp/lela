@@ -31,6 +31,7 @@ use php_macros::php_function;
 use php_unit::decl::{ClassKind, Type, Visibility};
 
 use crate::api::abi::{Callable, Entry, Never, OrFalse, Passed, Raw, Union, Variadic};
+use crate::api::coerce::declared_type_name;
 use crate::api::coerce::to_string;
 use crate::api::raising::{
     Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
@@ -1557,6 +1558,23 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
 /// `*RECURSION*` the second time and an object reached twice side by
 /// side is printed in full both times.
 ///
+/// The type an uninitialized property shows is `zend_type_to_string`'s,
+/// the class names first, an intersection among them bracketed, then the
+/// builtins in php's order:
+///
+/// ```php
+/// class T { public int|string|null $x; public (Countable&Traversable)|array $y; }
+/// var_dump(new T);
+/// ```
+/// ```expect
+/// object(T)#1 (0) {
+///   ["x"]=>
+///   uninitialized(string|int|null)
+///   ["y"]=>
+///   uninitialized((Countable&Traversable)|array)
+/// }
+/// ```
+///
 /// A dynamic property is its own row whatever a parent declared private
 /// under its name:
 ///
@@ -1818,7 +1836,7 @@ fn dump_members(
                 None if ty.is_some() => {
                     dump_property_name(req, out, level, &mangled);
                     out.extend(std::iter::repeat_n(b' ', level + 1));
-                    let ty = ty.as_ref().map(type_text).unwrap_or_default();
+                    let ty = ty.as_ref().map(declared_type_name).unwrap_or_default();
                     out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
                 }
                 None => {}
@@ -2060,35 +2078,6 @@ fn dump_rows(
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }
     out.extend_from_slice(b"}\n");
-}
-
-/// `zend_type_to_string` over a declared type: the scalar names, a
-/// class name as written, `?T`, and `|` and `&` between the members of
-/// a union and an intersection.
-pub(crate) fn type_text(ty: &Type) -> String {
-    match ty {
-        Type::Mixed => String::from("mixed"),
-        Type::Void => String::from("void"),
-        Type::Never => String::from("never"),
-        Type::Null => String::from("null"),
-        Type::Bool => String::from("bool"),
-        Type::False => String::from("false"),
-        Type::True => String::from("true"),
-        Type::Int => String::from("int"),
-        Type::Float => String::from("float"),
-        Type::String => String::from("string"),
-        Type::Array => String::from("array"),
-        Type::Object => String::from("object"),
-        Type::Iterable => String::from("iterable"),
-        Type::Callable => String::from("callable"),
-        Type::CalledClass => String::from("static"),
-        Type::SelfClass => String::from("self"),
-        Type::ParentClass => String::from("parent"),
-        Type::Named(name) => String::from_utf8_lossy(&name.0).into_owned(),
-        Type::Nullable(inner) => format!("?{}", type_text(inner)),
-        Type::Union(members) => members.iter().map(type_text).collect::<Vec<_>>().join("|"),
-        Type::Intersection(members) => members.iter().map(type_text).collect::<Vec<_>>().join("&"),
-    }
 }
 
 /// `memory_get_usage(bool $real_usage = false): int`, php's

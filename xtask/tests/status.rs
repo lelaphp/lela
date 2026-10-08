@@ -93,6 +93,45 @@ fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
     assert_eq!(row["reading"], serde_json::Value::Null);
 }
 
+/// `--tracked` renders a section against the tree alone, as a tracked
+/// region carries it (harness-design.md §5, revision 6; #630): a reading
+/// the store holds is `no reading` there and still the plain section's,
+/// and a section whose rows are this checkout's alone is refused.
+#[test]
+fn tracked_renders_no_reading_whatever_the_store_holds() {
+    let root = scratch("tracked");
+    let mut reading = Reading::new("permit", "harness.self");
+    reading.status = Status::Fail;
+    reading.rule = "harness.self".into();
+    Store::of_workspace(&root)
+        .record(std::slice::from_ref(&reading))
+        .unwrap();
+    let row = "| harness.self |  | deny |";
+
+    let (ok, live, err) = status(&root, &["--section", "rules"]);
+    assert!(ok, "{err}");
+    assert!(live.contains(&format!("{row} fail |")), "{live}");
+    let (ok, tracked, err) = status(&root, &["--section", "rules", "--tracked"]);
+    assert!(ok, "{err}");
+    assert!(
+        tracked.contains(&format!("{row} no reading |")),
+        "{tracked}"
+    );
+    assert_eq!(
+        tracked,
+        live.replace(&format!("{row} fail |"), &format!("{row} no reading |"))
+    );
+
+    for section in ["git", "permits", "phpt"] {
+        let (ok, out, err) = status(&root, &["--section", section, "--tracked"]);
+        assert!(!ok, "{section}: {out}");
+        assert!(
+            err.contains(&format!("the {section} section is this checkout's")),
+            "{section}: {err}"
+        );
+    }
+}
+
 #[test]
 fn every_section_reports_no_reading_when_the_store_is_gone() {
     let root = scratch("empty");
@@ -284,17 +323,26 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
     heap.message = "php_heap: 20001 lines over the ceiling of 20000".into();
     store.record(std::slice::from_ref(&heap)).unwrap();
 
-    // The ceiling column is the tracked manifest's `[budget] api_items`,
-    // whatever a person has it at (#338).
+    // The items column is what the tree's lock lists, `__private`'s lines
+    // apart as `api_items` holds them, and not the reading's count; the
+    // ceiling column is the tracked manifest's `[budget] api_items`,
+    // whatever a person has it at (#338, #631).
+    std::fs::create_dir_all(root.join("crates/php_ext")).unwrap();
+    std::fs::write(
+        root.join("crates/php_ext/api.lock"),
+        "# a header\nvalues::Zval\nvalues::Array\n\n__private::Entry\nrequest::Request\n",
+    )
+    .unwrap();
     let ceiling = Manifest::load(&root).unwrap().budget.api_items.to_string();
     let (ok, md, _) = status(&root, &["--section", "locks"]);
     assert!(ok);
     assert!(
-        md.contains("api.lock") && md.contains("301") && md.contains(&ceiling),
+        md.contains(&format!("| api | api.lock | 3 | {ceiling} | pass |")),
         "{md}"
     );
+    assert!(!md.contains("301"), "{md}");
     assert!(
-        md.contains("heap.lock") && md.contains("no reading"),
+        md.contains("| heap | heap.lock |  |  | no reading |"),
         "{md}"
     );
 

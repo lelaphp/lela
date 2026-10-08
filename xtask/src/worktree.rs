@@ -251,7 +251,7 @@ pub fn retire(root: &Path, branch: &str) -> Result<()> {
         );
     }
     let appended = append_log(&dir, store)?;
-    carry_runs(&dir)?;
+    carry_runs(&dir, RETIRE)?;
     git(store, &["worktree", "remove", &dir.to_string_lossy()], None).with_context(|| {
         if appended {
             "git worktree remove refused; the readings are appended already, so commit or discard what is uncommitted and call again"
@@ -312,13 +312,13 @@ fn append_log(dir: &Path, root: &Path) -> Result<bool> {
 /// outlives it: `phpt --against` looks for a base's run in every worktree
 /// that stands ([`against::carry`]), so a run left here would go with the
 /// worktree (#1268). Each one main keeps none of is copied, and one it
-/// keeps already stays as it stood.
-fn carry_runs(dir: &Path) -> Result<()> {
+/// keeps already stays as it stood. What it did is said under `whose`.
+pub(crate) fn carry_runs(dir: &Path, whose: &str) -> Result<()> {
     let main = track::main_worktree(dir)?;
     let carried = against::carry(dir, &main)?;
     let runs = main.join(against::RUNS);
     say(
-        RETIRE,
+        whose,
         &match carried {
             against::Carried {
                 carried: 0,
@@ -334,31 +334,47 @@ fn carry_runs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The worktree's `target/debug` seeded from the clone's at `root` with
-/// `cp -c -R`, a clone-on-write copy where the volume supports one, so the
-/// build that follows compiles the workspace's own crates and no
-/// dependency (harness-design.md §5, "Worktrees"; #245). The
-/// copy is `target/debug` and nothing beside it: the worktree's
-/// `target/harness/` is its own from its first instrument. Best-effort: a
-/// clone with no `target/debug`, and a `cp -c` that fails, are one line
-/// and a cold start, with what a failed copy left removed so the worktree
-/// is as cold as the line says. The seeded `xtask` binary is taken away
+/// The worktree's `target/debug` seeded from the clone's at `root`
+/// ([`seed_build`]), so the build that follows compiles the workspace's
+/// own crates and no dependency (harness-design.md §5, "Worktrees";
+/// #245). The copy is `target/debug` and nothing beside it: the
+/// worktree's `target/harness/` is its own from its first instrument.
+/// Best-effort: a clone with no `target/debug`, and a `cp -c` that fails,
+/// are one line and a cold start. The seeded `xtask` binary is taken away
 /// too, so the one under the worktree's `target/debug` is built from the
 /// worktree's sources or is not there: a build that fails leaves no binary
 /// whose root is the clone's for the hook's walk to find.
 fn seed(dir: &Path, root: &Path) {
-    let from = root.join("target/debug");
-    if !from.is_dir() {
-        say(
+    match seed_build(dir, root, "debug") {
+        Ok(true) => {
+            fs::remove_file(dir.join("target/debug/xtask")).ok();
+            say(
+                ADD,
+                "seeded target/debug from the clone's by cp -c: the dependencies are blocks the two share, and the build compiles the workspace's own crates",
+            );
+        }
+        Ok(false) => say(
             ADD,
             &format!(
                 "nothing to seed target/debug from: {} holds no build, so the worktree starts cold",
-                from.display()
+                root.join("target/debug").display()
             ),
-        );
-        return;
+        ),
+        Err(failed) => complain(ADD, &format!("{failed}; the worktree starts cold")),
     }
-    let to = dir.join("target/debug");
+}
+
+/// `target/<build>` of the worktree at `dir` seeded from the one at
+/// `root` with `cp -c -R`, a clone-on-write copy where the volume
+/// supports one, so the dependencies are blocks the two share: whether
+/// there was a build to copy, or why the copy failed, with what it left
+/// removed so the worktree is as cold as that says.
+pub(crate) fn seed_build(dir: &Path, root: &Path, build: &str) -> Result<bool, String> {
+    let from = root.join("target").join(build);
+    if !from.is_dir() {
+        return Ok(false);
+    }
+    let to = dir.join("target").join(build);
     let copied = fs::create_dir_all(dir.join("target")).and_then(|()| {
         Command::new("cp")
             .args(["-c", "-R"])
@@ -368,14 +384,7 @@ fn seed(dir: &Path, root: &Path) {
             .output()
     });
     let failed = match copied {
-        Ok(out) if out.status.success() => {
-            fs::remove_file(to.join("xtask")).ok();
-            say(
-                ADD,
-                "seeded target/debug from the clone's by cp -c: the dependencies are blocks the two share, and the build compiles the workspace's own crates",
-            );
-            return;
-        }
+        Ok(out) if out.status.success() => return Ok(true),
         Ok(out) => {
             let why = String::from_utf8_lossy(&out.stderr);
             format!(
@@ -387,7 +396,7 @@ fn seed(dir: &Path, root: &Path) {
         Err(err) => format!("cp did not run ({err})"),
     };
     fs::remove_dir_all(&to).ok();
-    complain(ADD, &format!("{failed}; the worktree starts cold"));
+    Err(failed)
 }
 
 /// `xtask` built here, so the first `Edit` is judged rather than waiting

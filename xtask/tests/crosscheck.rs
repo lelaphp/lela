@@ -137,7 +137,7 @@ fn count(reading: &Reading, key: &str) -> i64 {
 /// It rises onto one of the six extensions whose columns differ between
 /// the keg and a Linux build (`ext/standard`, `ext/pcre`, `ext/pdo`,
 /// `ext/pdo_sqlite`, `ext/dom`, `ext/iconv`) only under #635's ruling
-/// (harness-design.md §7, revision 102): when the engine renders the
+/// (harness-design.md §7, revision 103): when the engine renders the
 /// pinned keg's bytes, with no library version or driver list normalised.
 const FLOOR: [&str; 9] = [
     "ext/ctype",
@@ -280,7 +280,7 @@ fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_h
     let rendered = xtask::status::render(
         &scratch.manifest,
         &registry(),
-        &scratch.store,
+        xtask::status::Against::Checkout(&scratch.store),
         &scratch.root,
         Section::Crosscheck,
         Format::Md,
@@ -567,4 +567,51 @@ fn staged_with_no_file_a_rendering_reads_renders_nothing() {
     );
     let store = Store::of_workspace(&root);
     assert!(store.read("crosscheck", "ext/json").unwrap().is_none());
+}
+
+/// A `php-linked` that dies on a signal ends one extension's rendering,
+/// not the run (#1069, design §8): the extension it died serving reads
+/// `fail` in both columns naming the signal, and the next is served by a
+/// binary started again and renders. The binary is a stand-in that
+/// speaks `--serve`'s protocol, a request directory per line answered
+/// `served`, killing itself on ctype's program and answering json's with
+/// the oracle's own rendering.
+#[test]
+fn a_php_linked_that_dies_on_a_signal_fails_that_extension_and_the_next_still_renders() {
+    let Some(php) = oracle() else {
+        return;
+    };
+    let scratch = Scratch::new("signal");
+    let server = scratch.root.join("php-linked");
+    fs::write(
+        &server,
+        format!(
+            "#!/bin/sh\nwhile read dir; do\n  case \"$(cat \"$dir/source\")\" in\n    *\"'ctype'\"*) kill -SEGV $$ ;;\n    *'->info()'*) flag=--ri ;;\n    *) flag=--re ;;\n  esac\n  '{}' -n $flag json > \"$dir/stdout\"\n  printf 0 > \"$dir/exit\"\n  echo served\ndone\n",
+            php.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let readings = scratch.run(&Ask {
+        ext: vec!["ctype".to_owned(), "json".to_owned()],
+        linked: Some(server),
+        ..Ask::default()
+    });
+    assert_eq!(readings.len(), 4, "{readings:#?}");
+    for reading in &readings[..2] {
+        assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+        assert!(
+            reading.message.contains("the engine rendered nothing")
+                && reading.message.contains("died on signal 11"),
+            "{}",
+            reading.message
+        );
+    }
+    for reading in &readings[2..] {
+        assert!(reading.scope.starts_with("ext/json"), "{reading:#?}");
+        assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    }
 }

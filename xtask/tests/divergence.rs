@@ -496,7 +496,7 @@ fn docs_divergence_md_is_the_status_section_as_a_computed_region() {
         .find(|l| l.starts_with("<!-- computed exec"))
         .expect("one exec region");
     assert!(
-        opener.contains("cmd=\"cargo xtask status --section divergence --uncut\""),
+        opener.contains("cmd=\"cargo xtask status --section divergence --uncut --tracked\""),
         "the command is the status section, reasons whole: {opener}"
     );
     assert!(opener.contains("inputs=divergence.toml"), "{opener}");

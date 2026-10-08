@@ -706,8 +706,13 @@ impl<const N: u8> TestExt<N> {
         record(N, Phase::EngineEnd(engine));
     }
 
-    fn resource_closed(_: &mut Request, _: Resource) {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the resource destructor's shape, which a destructor that throws needs"
+    )]
+    fn resource_closed(_: &mut Request, _: Resource) -> Result<(), Thrown> {
         record(N, Phase::ResourceClosed);
+        Ok(())
     }
 
     fn error(req: &mut Request, beneath: ErrorBeneath<'_>) {

@@ -69,6 +69,12 @@ pub(crate) enum Command {
         /// `permits` and every rule's text.
         #[arg(long)]
         uncut: bool,
+        /// Render against the tree alone, as a tracked region carries the
+        /// section: every reading `no reading`, so the bytes are the same on
+        /// any checkout; a section whose rows are this checkout's alone is
+        /// refused (harness-design.md §5, revision 6).
+        #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "every"])]
+        tracked: bool,
         /// Every reading of a section that keeps one per scope, in the
         /// log's order, rather than the one that stands, as
         /// `--format jsonl`: one line per reading carrying `v`, the version
@@ -219,6 +225,12 @@ pub(crate) enum Command {
     /// missing `computed` and an untrusted checkout, whose `computed trust`
     /// line is printed as a person's.
     Regions {
+        /// For pre-commit: refuse, before rendering, a region the commit
+        /// would carry, one it would write or one of a file the commit
+        /// stages, that reads a path whose working copy is not what the
+        /// commit stages, since its render carries that change (#2236).
+        #[arg(long)]
+        staged: bool,
         /// The files, relative to the root.
         #[arg(required = true, value_name = "FILE")]
         files: Vec<String>,
@@ -478,6 +490,19 @@ pub(crate) struct Phpt {
     /// test met there is not met here, and the exit is those readings'.
     #[arg(long, value_name = "COMMIT")]
     pub against: Option<String>,
+    /// Take the run `--against` holds each subset to at the merge base
+    /// with this ref, `main` unless named, as `done --base` takes it: the
+    /// subset named or every touched one the lane runs, run in a worktree
+    /// laid at the base with its hosts built, the runs kept in the main
+    /// worktree and the worktree removed (#2364).
+    #[arg(
+        long,
+        value_name = "REF",
+        num_args = 0..=1,
+        default_missing_value = "main",
+        conflicts_with_all = ["full", "jit", "engine", "against", "unkept"]
+    )]
+    pub base: Option<String>,
     /// How many tests run at once: the machine's cores unless named, and
     /// one test at a time at 1. Tests that share a `--CONFLICTS--` key
     /// never run at once whatever the number.
@@ -719,8 +744,9 @@ pub enum Section {
     /// judges it and its reading; the text its failure prints is under
     /// `--uncut` and in JSON (#1772).
     Rules,
-    /// Each lock's width against `api_items`: the api-check readings, of
-    /// which `--every` renders every one, a crate's edges among them.
+    /// Each lock's width, as the tree's lock lists it, against
+    /// `api_items`, with its api-check reading; `--every` renders every
+    /// api-check reading, a crate's edges among them.
     #[value(alias = "api-check")]
     Locks,
     /// Each crate against its ceiling.

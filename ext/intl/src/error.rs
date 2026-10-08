@@ -68,6 +68,15 @@ pub(crate) fn reset(req: &mut Request) {
     global(req).reset();
 }
 
+/// `INTL_METHOD_INIT_VARS` before the arguments are parsed, as most of
+/// php's natives reset the request's error: the reset, then the count of
+/// arguments held to `min..=max`; the native holds each one itself
+/// (`arity = manual`).
+pub(crate) fn init_vars(req: &mut Request, min: usize, max: usize) -> Result<(), Thrown> {
+    reset(req);
+    php_ext::raising::arity(req, min, Some(max))
+}
+
 /// `intl_error_set_code(NULL, code)`.
 pub(crate) fn set_code(req: &mut Request, code: Code) {
     global(req).code = code;
@@ -213,9 +222,10 @@ pub(crate) fn errors_set_code<P: Carrier>(req: &mut Request, object: PhpObject, 
 pub(crate) fn errors_set_custom_msg<P: Carrier>(
     req: &mut Request,
     object: PhpObject,
-    message: &str,
+    message: impl AsRef<[u8]>,
 ) -> Result<(), Thrown> {
-    let text = prefixed(req, message.as_bytes());
+    let message = message.as_ref();
+    let text = prefixed(req, message);
     if let Some(error) = carried::<P>(req, object) {
         error.message = Some(Box::new(text));
     }

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::oracle::{Observation, Oracle, normalise_in};
+use crate::oracle::{Ended, Observation, Oracle, normalise_in};
 use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
 use crate::scratch::Tree;
@@ -254,7 +254,7 @@ pub(crate) fn served_as_fpm(
     Ok(Observation {
         stdout: normalise_in(rules, own.path(), stdout),
         stderr: normalise_in(rules, own.path(), stderr),
-        exit: Some(0),
+        exit: Ended::Status(0),
         wall: started.elapsed(),
     })
 }

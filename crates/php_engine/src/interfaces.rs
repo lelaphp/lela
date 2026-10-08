@@ -622,7 +622,10 @@ pub(crate) fn get_iterator(
 }
 
 /// `zend_iterator_init`: the iterator over `data`, one owner the
-/// iterator's, taken from the caller, in the object store as php keeps it.
+/// iterator's, taken from the caller, in the object store as php keeps it;
+/// then a class's own iterator's [`ClassIterator::made`], the rest of its
+/// `get_iterator`, whose throw releases the iterator as
+/// `zend_iterator_dtor` does.
 fn wrap(
     req: &mut Request,
     funcs: Funcs,
@@ -648,7 +651,13 @@ fn wrap(
             "InternalError: the iterator wrapper class is not declared",
         )),
     };
-    wrapper.inspect_err(|_| req.release(data.as_value()))
+    let wrapper = wrapper.inspect_err(|_| req.release(data.as_value()))?;
+    let it = Walk { wrapper, data };
+    if let Some(Err(thrown)) = class_step(req, it, |iter, req, data| iter.made(req, data)) {
+        req.release(wrapper.as_value());
+        return Err(thrown);
+    }
+    Ok(wrapper)
 }
 
 /// The table [`get_iterator`] chooses for `object`, the object it

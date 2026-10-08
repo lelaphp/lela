@@ -114,6 +114,8 @@ mod recording;
 mod resources;
 pub use resources::{ResourceDtor, Resources};
 mod response;
+#[cfg(debug_assertions)]
+mod sensing;
 pub(crate) use response::Sink;
 pub use response::{
     BufferHandler, BufferInit, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp,
@@ -370,9 +372,10 @@ pub struct Request {
     returned: Value,
     /// The interrupt, the timer and the stack limit ([`limits::Limits`]).
     limits: limits::Limits,
-    /// The frames' debug record (`frames::Frames`).
+    /// What a debug build's sensors have made of the request
+    /// ([`sensing::Sensing`]).
     #[cfg(debug_assertions)]
-    frames: frames::Frames,
+    sensing: sensing::Sensing,
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
     hold: hold::Holding,
     /// The objects of foreign libraries the request keeps for the
@@ -763,7 +766,7 @@ impl Request {
             accel_loaded: None,
             early_bound: None,
             #[cfg(debug_assertions)]
-            frames: frames::Frames::default(),
+            sensing: sensing::Sensing::default(),
             hold: hold::Holding::default(),
             foreign: foreign::Table::default(),
         };
@@ -945,10 +948,19 @@ impl HeapHooks for Hooks<'_> {
 
     /// `list_dtor_ex`: the type's destructor as registered, handed the
     /// resource with the type it had, as php hands it a copy of the
-    /// struct; a type with no destructor closes silently.
+    /// struct; a type with no destructor closes silently. What it throws
+    /// is pending from here, with what was pending before chained under
+    /// it as its `previous`, as `zend_throw_exception_internal` chains a
+    /// throwable raised while `EG(exception)` stands.
     fn free_resource(&mut self, res: Res, kind: ResourceType) {
-        if let Some(dtor) = self.0.resources.dtor(kind) {
-            dtor(self.0, Resource::of(res));
+        if let Some(dtor) = self.0.resources.dtor(kind)
+            && let Err(thrown) = dtor(self.0, Resource::of(res))
+        {
+            let before = self.0.take_raised();
+            self.0.leave_pending(&thrown);
+            if let Some(before) = before {
+                self.0.raise_under(before);
+            }
         }
         // `zend_close_rsrc_list`'s `zend_catch`: what a destructor bailed
         // out of is caught behind it, and the walk goes on.

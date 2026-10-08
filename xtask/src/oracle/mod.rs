@@ -760,10 +760,48 @@ pub enum Program<'a> {
 pub struct Observation {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// The exit code, or `None` when a signal ended the process.
-    pub exit: Option<i32>,
+    /// How the process ended: its exit status, or the signal.
+    pub exit: Ended,
     /// Wall time, disclosure only; the limit is the recipe's.
     pub wall: Duration,
+}
+
+/// How a process ended: the status it exited with, or the signal that
+/// ended it, which a lane names where a binary died (#1069).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// It exited with this status.
+    Status(i32),
+    /// This signal ended it.
+    Signal(i32),
+}
+
+impl Ended {
+    /// How a process that `status` reports on ended.
+    pub(crate) fn of(status: std::process::ExitStatus) -> Ended {
+        use std::os::unix::process::ExitStatusExt;
+        match status.code() {
+            Some(code) => Ended::Status(code),
+            None => Ended::Signal(status.signal().unwrap_or_default()),
+        }
+    }
+
+    /// The status it exited with, and `None` where a signal ended it.
+    pub(crate) fn code(self) -> Option<i32> {
+        match self {
+            Ended::Status(code) => Some(code),
+            Ended::Signal(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Ended {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Ended::Status(code) => write!(f, "status {code}"),
+            Ended::Signal(signal) => write!(f, "signal {signal}"),
+        }
+    }
 }
 
 /// How a run ended that the recipe's limit ended: the process ran past
@@ -1289,7 +1327,7 @@ impl<'a> Oracle<'a> {
         Ok(Observation {
             stdout,
             stderr,
-            exit: status.code(),
+            exit: Ended::of(status),
             wall,
         })
     }
@@ -1317,15 +1355,7 @@ pub const ENGINE: &str = hosts::CLI.binary;
 /// with every workspace member's features unified, the harness's
 /// extensions among them, which is not the binary the lane measures.
 pub(crate) fn engine_build() -> String {
-    let packages: Vec<String> = hosts::HOSTS
-        .iter()
-        .map(|host| format!("-p {}", host.package()))
-        .collect();
-    format!(
-        "cargo build --profile {} {}",
-        profile::LANE.name(),
-        packages.join(" ")
-    )
+    format!("cargo {}", profile::hosts().join(" "))
 }
 
 /// The extensions php names otherwise than their crates, the module's

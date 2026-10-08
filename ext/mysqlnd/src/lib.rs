@@ -34,6 +34,7 @@ mod consts;
 mod error;
 mod loaddata;
 mod net;
+mod pool;
 mod ps;
 mod result;
 mod stats;
@@ -308,6 +309,11 @@ impl Handle {
         slot.conn.as_ref()?.net.persistent_id.as_ref()?;
         let mut conn = slot.conn.take()?;
         slot.refs -= 1;
+        // A result's pool is the request's heap's, which the request's
+        // end releases: none waits with the connection.
+        if let Some(result) = conn.current_result.take() {
+            result.release(req);
+        }
         conn.net.give_back(req);
         Some(conn)
     }

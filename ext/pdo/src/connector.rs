@@ -333,16 +333,6 @@ pub struct Binding<'a> {
     pub value: &'a mut Owner<Value>,
 }
 
-/// `zval_ptr_dtor(parameter)` and `new` in its place: a bound value
-/// replaced, through its reference for `bindParam()`, as php's
-/// `convert_to_*` writes in place.
-pub(crate) fn replace(req: &mut Request, value: &mut Owner<Value>, new: Owner<Value>) {
-    match value.as_php_ref().copied() {
-        Some(cell) => cell.convert(req, new),
-        None => std::mem::replace(value, new).give_up(req),
-    }
-}
-
 /// `enum pdo_placeholder_support`: what a statement's connector takes
 /// itself, the rest being PDO's to rewrite or emulate
 /// (`pdo_sql_parser.re`).
