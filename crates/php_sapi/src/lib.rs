@@ -85,9 +85,16 @@ pub mod tier {
 /// `opcache.file_cache` or a preload that fails, ends the process with
 /// php's status before the host opens its file, answers `-i` or binds a
 /// socket.
+///
+/// The process's streams and `log_message` are left with the engine for
+/// its end too ([`EngineBuilder::ends_into`]): what an extension's
+/// engine-end function raises is displayed and logged there, as
+/// `php_module_shutdown` writes it with `php_output` not activated.
 #[must_use]
 pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn(&[u8])) -> Engine {
-    let engine = prepare(builder, ini).build();
+    let engine = prepare(builder, ini)
+        .ends_into(Box::new(Starting(log_message)))
+        .build();
     std::io::stderr()
         .lock()
         .write_all(engine.startup_errors())
@@ -106,7 +113,8 @@ pub fn start(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)], log_message: fn
     engine
 }
 
-/// Where php writes while it starts, before any request: the body
+/// Where php writes while it starts, before any request, and while it
+/// ends, after the last: the body
 /// straight to the process's stdout (`php_output_direct`, which
 /// `php_output_startup` points at `php_output_stdout`), the error stream
 /// to its stderr, no head, and the log through the host's function, each
