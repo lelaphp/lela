@@ -2480,7 +2480,7 @@ mahout = "semantics::dump_prop_entries"
 sites = 4
 crates = 1
 status = "renamed"
-api = "values::PhpObject::entries"
+api = "values::PhpObject::properties_for"
 
 [[item]]
 mahout = "semantics::dump_view"
@@ -2550,7 +2550,7 @@ mahout = "semantics::HookedTablePolicy"
 sites = 3
 crates = 2
 status = "renamed"
-api = "values::PhpObject::entries"
+api = "values::PhpObject::properties_for"
 
 [[item]]
 mahout = "semantics::class_const_reflect"
@@ -2592,7 +2592,7 @@ mahout = "semantics::hooked_object_prop_table"
 sites = 3
 crates = 2
 status = "renamed"
-api = "values::PhpObject::entries"
+api = "values::PhpObject::properties_for"
 
 [[item]]
 mahout = "semantics::identical"
@@ -2704,7 +2704,7 @@ mahout = "semantics::object_prop_entries"
 sites = 2
 crates = 2
 status = "renamed"
-api = "values::PhpObject::entries"
+api = "values::PhpObject::property_table"
 
 [[item]]
 mahout = "semantics::proxy_real"
@@ -2921,7 +2921,7 @@ mahout = "semantics::declared_prop_order"
 sites = 1
 crates = 1
 status = "renamed"
-api = "values::PhpObject::entries"
+api = "values::PhpObject::property_table"
 
 [[item]]
 mahout = "semantics::default_error_display"
@@ -3103,7 +3103,7 @@ mahout = "semantics::object_prop_entries_flagged"
 sites = 1
 crates = 1
 status = "renamed"
-api = "values::PhpObject::entries"
+api = "values::PhpObject::property_table"
 
 [[item]]
 mahout = "semantics::operand_type_name"

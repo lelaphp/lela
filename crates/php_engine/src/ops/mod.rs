@@ -18,6 +18,7 @@ use crate::api::raising::{
     Level, Thrown, deprecated, none_pending, raise, throw, throw_error, warning,
 };
 use crate::api::request::Request;
+use crate::api::values::walk::Table;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
@@ -757,6 +758,20 @@ pub(crate) fn cast(req: &mut Request, value: &Value, to: CastTo) -> Result<Value
 ///   float(NAN)
 /// }
 /// ```
+///
+/// An object whose table nothing has laid down is cast without laying
+/// it (`zend_std_build_object_properties_array`), and one whose table a
+/// reader laid down is cast from that table, as php casts each:
+///
+/// ```php
+/// class K { public $d = 1; }
+/// $k = new K; $m = memory_get_usage(); $c = (array) $k; echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v = var_export($k, true); $c2 = (array) $k; echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 376
+/// 816
+/// ```
 pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
     let value = value.deref();
     match value.as_ref() {
@@ -766,21 +781,36 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
             Ok(*a)
         }
         ValueRef::Object(&o) if req.class_named(b"Closure") != Some(o.class()) => {
-            let table = req.object_handlers(o.heap());
+            // `zend_std_build_object_properties_array`, the cast's walk
+            // that rebuilds no table (`Z/Zend/zend_execute.h:267`).
+            if let Some(slots) = o.slots_without_table(req)? {
+                return mangled_array(req, o, slots);
+            }
             // `ZEND_PROP_PURPOSE_ARRAY_CAST`, `zend_get_properties_no_lazy_init`
             // under a class that answers no table of its own: a lazy
             // object is cast as it stands.
-            let rows = match table.get_properties_for(req, o, PropertyPurpose::ArrayCast)? {
-                PropertiesFor::Rows(rows) => rows,
-                PropertiesFor::Standard => match object_symtable(req, o)? {
-                    Some(array) => return Ok(array),
-                    None => req.properties_no_lazy_init(o)?,
+            match req.properties_answered(o, PropertyPurpose::ArrayCast)? {
+                PropertiesFor::Table(table) => match object_symtable(req, o)? {
+                    Some(array) => Ok(array),
+                    None => mangled_array(req, o, table),
                 },
+                PropertiesFor::Temporary(table) => {
+                    let made = mangled_array(req, o, Table::Array(*table));
+                    table.give_up_nogc(req);
+                    made
+                }
+                PropertiesFor::Debug(info) => {
+                    let made = mangled_array(req, o, Table::Array(*info.table));
+                    info.table.give_up_nogc(req);
+                    match info.thrown {
+                        Some(thrown) => Err(thrown),
+                        None => made,
+                    }
+                }
                 // `zend_get_properties_for` answering `NULL`:
                 // `ZVAL_EMPTY_ARRAY` (`Z/Zend/zend_execute.h:280`).
-                PropertiesFor::Null => return Ok(PhpArray::empty()),
-            };
-            mangled_array(req, o, rows)
+                PropertiesFor::Null => Ok(PhpArray::empty()),
+            }
         }
         _ => {
             if value.as_float().is_some_and(f64::is_nan) {
@@ -842,18 +872,39 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 /// NULL
 /// int(1)
 /// ```
+///
+/// A dynamic row named as a parent's private slot nothing holds stays
+/// unmangled, since the slot is no row:
+///
+/// ```php
+/// class B { private $s = 0; function __construct() { unset($this->s); } }
+/// #[AllowDynamicProperties] class K extends B {}
+/// $o = new K; $o->s = 1;
+/// foreach ((array) $o as $k => $v) echo str_replace("\0", '\0', $k), "=$v\n";
+/// ```
+/// ```expect
+/// s=1
+/// ```
 pub(crate) fn mangled_array(
     req: &mut Request,
     object: PhpObject,
-    rows: Vec<(Key, Value)>,
+    table: Table,
 ) -> Result<PhpArray, Thrown> {
-    let mangled = mangled_names(req, object);
-    let source = object.heap().properties();
-    let duplicate = !mangled.is_empty()
+    let o = object.heap();
+    let eager = o.laziness() == php_heap::Laziness::Eager;
+    // A table that holds copies of the declared rows holds them under
+    // the names php's does, so nothing of it is declared.
+    let declared = o.declared_rows() == php_heap::DeclaredRows::Slots
+        && req.placed(object.class()).any(|(slot, _, _)| {
+            let i = u32::try_from(slot).unwrap_or(u32::MAX);
+            !eager || i >= o.slots() || !o.slot(i).is_undef()
+        });
+    let source = o.properties();
+    let duplicate = declared
         || req.own_handlers(object.class()).is_some()
         || source.is_some_and(|table| table.is_recursive());
+    let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(req, table).collect();
     let mut array = req.array()?;
-    let mut at = 0;
     for (key, entry) in rows {
         // The table php hands on as it stands holds each row as it is;
         // a copy of it holds each as its copy does.
@@ -864,26 +915,13 @@ pub(crate) fn mangled_array(
             entry
         };
         let entry = Owner::adopt(req, entry);
-        let name = match key {
-            Key::Int(n) => {
-                array.set(req, Owner::take(req, Key::Int(n)), entry)?;
-                continue;
-            }
-            Key::Str(name) => name,
+        // A declared row's mangled name is no number; a dynamic one is
+        // read as a symbol table reads it, so `"1"` is `1`.
+        let key = match key {
+            Key::Int(n) => Key::Int(n),
+            Key::Str(name) => Key::lookup(name),
         };
-        let key = if let Some(prefix) = mangled_prefix(&mangled, &mut at, name) {
-            let bytes = [prefix.as_slice(), name.as_bytes()].concat();
-            match PhpString::new(req, &bytes) {
-                Ok(mangled) => mangled.into_key(),
-                Err(thrown) => {
-                    entry.give_up(req);
-                    return Err(thrown);
-                }
-            }
-        } else {
-            Owner::take(req, Key::lookup(name))
-        };
-        array.set(req, key, entry)?;
+        array.set(req, Owner::take(req, key), entry)?;
     }
     Ok(array)
 }
@@ -930,66 +968,6 @@ pub(crate) fn object_symtable(
     let always_duplicate = req.own_handlers(object.class()).is_some();
     let array = req.proptable_to_symtable(table, always_duplicate)?;
     Ok(Some(PhpArray::of(array)))
-}
-
-/// One declared instance property as `zend_mangle_property_name` reads
-/// it: the name as written, and the prefix the mangled key carries,
-/// `None` for a public property, which is mangled with nothing.
-struct MangledName {
-    name: Box<[u8]>,
-    prefix: Option<Vec<u8>>,
-}
-
-/// The prefix `zend_mangle_property_name` puts before each declared
-/// instance property of `class` that is not public: `\0*\0` for a
-/// protected one, `\0Class\0` for a private one, and none for a public
-/// one. Every declared slot that holds a value is a row, in slot order,
-/// so a caller that walks the object's rows beside this one keeps its
-/// place, and a dynamic row named as a slot nothing holds, a parent's
-/// private one, stays unmangled.
-///
-/// ```php
-/// class B { private $s = 0; function __construct() { unset($this->s); } }
-/// #[AllowDynamicProperties] class K extends B {}
-/// $o = new K; $o->s = 1;
-/// foreach ((array) $o as $k => $v) echo str_replace("\0", '\0', $k), "=$v\n";
-/// ```
-/// ```expect
-/// s=1
-/// ```
-fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
-    let o = object.heap();
-    // A table that holds copies of the declared rows holds them under
-    // the names php's does, which are read as they stand.
-    if o.declared_rows() == php_heap::DeclaredRows::Copied {
-        return Vec::new();
-    }
-    let eager = o.laziness() == php_heap::Laziness::Eager;
-    req.placed(object.class())
-        .filter(|(slot, _, _)| {
-            let i = u32::try_from(*slot).unwrap_or(u32::MAX);
-            !eager || i >= o.slots() || !o.slot(i).is_undef()
-        })
-        .map(|(_, declaring, p)| MangledName {
-            name: p.name.0.clone(),
-            prefix: req.property_prefix(declaring, p.visibility),
-        })
-        .collect()
-}
-
-/// The prefix the row named `name` carries, the declared names walked
-/// with a cursor rather than looked up: a class that declares `$p` over
-/// a parent's private `$p` has two slots of that name, and the second
-/// row is the second slot. `at` is the caller's place in that walk and
-/// stands where the row was found.
-fn mangled_prefix(mangled: &[MangledName], at: &mut usize, name: PhpString) -> Option<Vec<u8>> {
-    let found = mangled
-        .iter()
-        .skip(*at)
-        .position(|slot| &*slot.name == name.as_bytes())
-        .map(|i| i + *at)?;
-    *at = found + 1;
-    mangled.get(found).and_then(|slot| slot.prefix.clone())
 }
 
 /// The value a type check over `value` lands: `value` where the check
@@ -1612,241 +1590,6 @@ fn property_type_error(
             String::from_utf8_lossy(name)
         ),
     )
-}
-
-/// `zend_get_properties_for(object, purpose)`, the rows one reader of
-/// an object's properties sees: the class's `get_properties_for` first and
-/// `get_properties` where that slot is null, each declared name carrying
-/// the prefix `zend_mangle_property_name` puts before it, `\0*\0p` for a
-/// protected property and `\0C\0p` for a private one, so a reader
-/// unmangles the name as php's `print_hash` does and never asks the
-/// engine for a visibility beside it. Views, no owner taken, and a
-/// mangled name is interned as php's is, so a second walk of the same
-/// object allocates nothing.
-///
-/// ```php
-/// class A { public $a = 1; protected $b = 2; private $c = 3; }
-/// class B extends A { private $c = 4; }
-/// print_r(new B);
-/// ```
-/// ```expect
-/// B Object
-/// (
-///     [a] => 1
-///     [b:protected] => 2
-///     [c:A:private] => 3
-///     [c:B:private] => 4
-/// )
-/// ```
-pub(crate) fn properties_for(
-    req: &mut Request,
-    object: PhpObject,
-    purpose: PropertyPurpose,
-) -> Result<Vec<(Key, Value)>, Thrown> {
-    match properties_answered(req, object, purpose)? {
-        Answered::Own(rows) | Answered::Built(rows) => Ok(rows),
-        Answered::Table(table) => Ok(crate::api::values::walk::rows(req, table).collect()),
-        // A table of the class's own dies with its one owner, so no view
-        // of it outlives this call; the reader that holds it is
-        // `PhpObject::props_held`.
-        Answered::Debug(info) => {
-            info.table.give_up(req);
-            Err(crate::api::raising::fatal(
-                req,
-                "InternalError: a class's debug table is read held, through props_held",
-            ))
-        }
-    }
-}
-
-/// What `zend_get_properties_for` hands one reader: the table and its
-/// `*is_temp`, as three shapes of owner.
-pub(crate) enum Answered {
-    /// The object's own table, laid down as `get_properties` lays it.
-    Table(crate::api::values::walk::ObjectTable),
-    /// The rows of the object a reader sees, views: what the class's own
-    /// `get_properties` answers, or the hooked properties' rows.
-    Own(Vec<(Key, Value)>),
-    /// Rows the class's `get_properties_for` built for the reader
-    /// (`*is_temp`), views of values the object holds elsewhere.
-    Built(Vec<(Key, Value)>),
-    /// Under [`PropertyPurpose::Debug`], the table the class's
-    /// `get_debug_info` answers in place of its properties, one owner
-    /// the caller's, and what it left pending while it built it.
-    Debug(crate::api::abi::DebugInfo),
-}
-
-/// [`properties_for`] as the shape of its owner: the class's
-/// `get_properties_for` first, then `zend_std_get_properties_for`
-/// (`Z/Zend/zend_object_handlers.c:2173`), which under
-/// [`PropertyPurpose::Debug`] serves the class's `get_debug_info` and
-/// the object's own table only where that answers none.
-///
-/// ```php
-/// class A { public $a = 1; protected $b = 2; private $c = 3; }
-/// print_r(new A);
-/// echo "\n";
-/// class B { public $hidden = 1; function __debugInfo() { return ['shown' => 2]; } }
-/// var_dump(new B);
-/// ```
-/// ```expect
-/// A Object
-/// (
-///     [a] => 1
-///     [b:protected] => 2
-///     [c:A:private] => 3
-/// )
-///
-/// object(B)#1 (1) {
-///   ["shown"]=>
-///   int(2)
-/// }
-/// ```
-pub(crate) fn properties_answered(
-    req: &mut Request,
-    object: PhpObject,
-    purpose: PropertyPurpose,
-) -> Result<Answered, Thrown> {
-    let table = req.object_handlers(object.heap());
-    // What `get_properties_for` answers is the table php hands back as
-    // it stands, whose names are already what a reader shows; what
-    // `get_properties` answers is the members, whose names the slot
-    // carries unmangled here.
-    let rows = match table.get_properties_for(req, object, purpose)? {
-        PropertiesFor::Rows(rows) => return Ok(Answered::Built(rows)),
-        // php's `NULL` table, which every reader here walks as none.
-        PropertiesFor::Null => return Ok(Answered::Built(Vec::new())),
-        // `zend_std_get_properties_for`'s `num_hooked_props` arm for the
-        // readers that run hooks.
-        PropertiesFor::Standard
-            if matches!(purpose, PropertyPurpose::Json | PropertyPurpose::VarExport) =>
-        {
-            if let Some(rows) = req.hooked_properties_for(object)? {
-                return Ok(Answered::Own(rows));
-            }
-            table.get_properties(req, object)?
-        }
-        PropertiesFor::Standard => match purpose {
-            // `zend_std_get_properties_for`'s `get_debug_info`: what
-            // `__debugInfo` returns, a forwarding proxy's instance, or a
-            // table of the class's own; where it answers none, the
-            // debug table of a lazy object reads what stands without
-            // initialising it, as the `(array)` cast does and a
-            // serialization the object was made to skip it for; every
-            // other reader initialises.
-            PropertyPurpose::Debug => match table.get_debug_info(req, object)? {
-                Some(info) => return Ok(Answered::Debug(info)),
-                None if !table.answers_properties() => {
-                    return Ok(Answered::Table(req.debug_table(object)?));
-                }
-                None => req.properties_no_lazy_init(object)?,
-            },
-            PropertyPurpose::ArrayCast => req.properties_no_lazy_init(object)?,
-            PropertyPurpose::Serialize if req.lazy_skips_serialize(object.heap()) => {
-                req.properties_no_lazy_init(object)?
-            }
-            _ => table.get_properties(req, object)?,
-        },
-    };
-    let mangled = mangled_names(req, object);
-    let mut at = 0;
-    let mut out = Vec::with_capacity(rows.len());
-    for (key, entry) in rows {
-        let Key::Str(name) = key else {
-            out.push((key, entry));
-            continue;
-        };
-        let name = match mangled_prefix(&mangled, &mut at, name) {
-            Some(prefix) => {
-                let bytes = [prefix.as_slice(), name.as_bytes()].concat();
-                req.interned(&bytes)?
-            }
-            None => name,
-        };
-        out.push((Key::Str(name), entry));
-    }
-    Ok(Answered::Own(out))
-}
-
-/// The object's own debug table as `php_debug_zval_dump` walks it
-/// (`Z/ext/standard/var.c:334-350`): each declared slot in slot order,
-/// its value where it holds one and `uninitialized(T)` where it is
-/// typed and holds none, then the dynamic rows; beside them
-/// `zend_array_count` over the table, [`Request::property_count`] for
-/// an object that is not lazy and the rows that hold a value for one
-/// that is. `rows` is what [`properties_answered`] read, the declared
-/// rows first; where they are not the slots this walks, as a class's
-/// own `get_properties` may answer, they stand as they are.
-///
-/// ```php
-/// #[AllowDynamicProperties]
-/// class C { public int $i; public $j = 1; }
-/// $c = new C;
-/// $c->d = 2;
-/// debug_zval_dump($c);
-/// ```
-/// ```expect
-/// object(C)#1 (2) refcount(2){
-///   ["i"]=>
-///   uninitialized(int)
-///   ["j"]=>
-///   int(1)
-///   ["d"]=>
-///   int(2)
-/// }
-/// ```
-pub(crate) fn debug_rows(
-    req: &mut Request,
-    object: PhpObject,
-    rows: Vec<(Key, Value)>,
-) -> Result<(Vec<(Key, crate::api::values::HeldRow)>, usize), Thrown> {
-    use crate::api::values::HeldRow;
-    let reader = req.lazy_reader(object);
-    let o = reader.heap();
-    // A table that holds copies of the declared rows has no
-    // `IS_INDIRECT` to a slot, so no row reads `uninitialized`.
-    let placed = match o.declared_rows() {
-        php_heap::DeclaredRows::Slots => req.placed_properties(reader.class()).to_vec(),
-        php_heap::DeclaredRows::Copied => Vec::new(),
-    };
-    let mut out = Vec::with_capacity(rows.len());
-    let mut rest = rows.into_iter().peekable();
-    for (&info, at) in placed.iter().zip(0u32..) {
-        let Some(p) = req.property_decl(info) else {
-            continue;
-        };
-        let prefix = req.property_prefix(info.declaring, p.visibility);
-        let bytes = [prefix.unwrap_or_default().as_slice(), &p.name.0].concat();
-        let uninitialized = o
-            .slot(at)
-            .is_undef()
-            .then(|| p.ty.as_ref().map(crate::natives::type_text))
-            .flatten();
-        let key = req.interned(&bytes)?;
-        if !o.slot(at).is_undef() {
-            let Some((k, value)) = rest
-                .next_if(|(k, _)| matches!(k, Key::Str(name) if name.as_bytes() == key.as_bytes()))
-            else {
-                out.extend(rest.map(|(k, value)| (k, HeldRow::Value(value))));
-                let count = out.len();
-                return Ok((out, count));
-            };
-            out.push((k, HeldRow::Value(value)));
-        } else if let Some(shown) = uninitialized {
-            out.push((Key::Str(key), HeldRow::Uninitialized(shown)));
-        }
-    }
-    out.extend(rest.map(|(k, value)| (k, HeldRow::Value(value))));
-    let held = out
-        .iter()
-        .filter(|(_, row)| matches!(row, HeldRow::Value(_)))
-        .count();
-    let count = if object.heap().laziness() == php_heap::Laziness::Eager {
-        req.property_count(object)?
-    } else {
-        held
-    };
-    Ok((out, count))
 }
 
 /// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the

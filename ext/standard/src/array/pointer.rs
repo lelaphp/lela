@@ -17,11 +17,11 @@ use std::cmp::Ordering;
 
 use php_ext::abi::{Raw, Ref, Union, Variadic};
 use php_ext::attr::php_function;
-use php_ext::coerce::{coerce_param, compare, to_array, value_name};
+use php_ext::coerce::{coerce_param, compare, value_name};
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, PointerMove, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, PointerMove, Value, ValueRef, walk};
 
 use super::keys::key_return;
 
@@ -286,16 +286,14 @@ fn key(
     Ok(key)
 }
 
-/// What a pointer native reads: an array, the table a class that
-/// answers its rows itself built for the read, or an object whose
-/// property table holds the pointer.
+/// What a pointer native reads: an array, a table made for the read,
+/// or an object whose property table holds the pointer.
 enum Pointed {
-    /// The argument's array, a view.
+    /// The argument's array, or the table a class keeps in place of the
+    /// object's (`sxe_get_properties`), a view.
     Array(PhpArray),
     /// A table made for this read, one owner the reader's, given up once
-    /// it is read: the `(array)` cast's, where php reads the table
-    /// `sxe_get_properties` keeps on the object, and a mover's copy of an
-    /// array sent by value.
+    /// it is read: a mover's copy of an array sent by value.
     Built(Owner<PhpArray>),
     Object(PhpObject),
 }
@@ -310,9 +308,23 @@ impl Pointed {
 }
 
 /// `Z_PARAM_ARRAY_OR_OBJECT`, then `get_ht_for_iap` over an object: the
-/// deprecation, and the object, or the table a class that answers its
-/// rows itself builds, the `(array)` cast's; the `TypeError` for
-/// anything else.
+/// deprecation, and the object, or the table its class's `get_properties`
+/// keeps in place of the object's; the `TypeError` for anything else.
+/// `SimpleXMLElement`'s table is built afresh on each call, so its
+/// pointer stands at the first row at each:
+///
+/// ```php
+/// $x = simplexml_load_string('<a><b>1</b><c>2</c></a>');
+/// var_dump(@next($x), @key($x));
+/// $f = new SplFixedArray(2); $f[0] = 5;
+/// var_dump(@current($f), @current(new ArrayObject([7])));
+/// ```
+/// ```expect
+/// string(1) "2"
+/// string(1) "b"
+/// bool(false)
+/// bool(false)
+/// ```
 fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thrown> {
     match given.as_ref() {
         ValueRef::Array(array) => Ok(Pointed::Array(*array)),
@@ -322,9 +334,8 @@ fn pointed(req: &mut Request, given: &Value, name: &str) -> Result<Pointed, Thro
                 Level::Deprecated,
                 &format!("Calling {name}() on an object is deprecated"),
             );
-            if object.handlers(req).answers_properties() {
-                // The cast's table, the read's to give up.
-                return to_array(req, given).map(Pointed::Built);
+            if let walk::Table::Array(array) = object.property_table(req)? {
+                return Ok(Pointed::Array(array));
             }
             Ok(Pointed::Object(*object))
         }

@@ -14,7 +14,7 @@ use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Thrown, arg_type_error, deprecated, pending, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::cdata::{
     CData, Data, Fetch, Place, alloc, as_cdata, free, free_types, hold, hold_types, make, remember,
@@ -1369,8 +1369,8 @@ impl ObjectHandlers for Handlers {
         Err(bad_array_access(req))
     }
 
-    fn get_properties(&self, _: &mut Request, _: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-        Ok(Vec::new())
+    fn get_properties(&self, _: &mut Request, _: PhpObject) -> Result<walk::Table, Thrown> {
+        Ok(walk::Table::Array(PhpArray::empty()))
     }
 
     fn properties_overloaded(&self) -> bool {

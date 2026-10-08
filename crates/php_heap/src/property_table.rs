@@ -60,6 +60,19 @@ impl Obj {
             table,
         })
     }
+
+    /// The object's property table as it stands, laid down by nothing:
+    /// its own where something has laid it down, and otherwise its
+    /// declared slots before the process's empty table, the positions
+    /// php's encoders walk without rebuilding the table
+    /// (`OBJ_PROP(obj, prop_info->offset)` over `default_properties_count`).
+    #[must_use]
+    pub fn slot_table(self) -> PropertyTable {
+        PropertyTable {
+            object: self,
+            table: self.properties().unwrap_or_else(Arr::empty),
+        }
+    }
 }
 
 impl Heap {

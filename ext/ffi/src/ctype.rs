@@ -11,7 +11,8 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use php_ext::values::walk;
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 use crate::cdata::free_types;
 use crate::types::{Kind, TypeId};
@@ -590,8 +591,8 @@ impl ObjectHandlers for Handlers {
         Err(bad_array_access(req))
     }
 
-    fn get_properties(&self, _: &mut Request, _: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-        Ok(Vec::new())
+    fn get_properties(&self, _: &mut Request, _: PhpObject) -> Result<walk::Table, Thrown> {
+        Ok(walk::Table::Array(PhpArray::empty()))
     }
 
     fn properties_overloaded(&self) -> bool {

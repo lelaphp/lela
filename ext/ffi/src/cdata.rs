@@ -20,6 +20,7 @@ use php_ext::call::{Function, new_object};
 use php_ext::coerce::{BinaryOp, to_double, to_long, to_string, truthy, value_name, with_string};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{
     ClosureInfo, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
 };
@@ -1116,8 +1117,8 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `zend_fake_get_properties`: none.
-    fn get_properties(&self, _: &mut Request, _: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-        Ok(Vec::new())
+    fn get_properties(&self, _: &mut Request, _: PhpObject) -> Result<walk::Table, Thrown> {
+        Ok(walk::Table::Array(PhpArray::empty()))
     }
 
     fn properties_overloaded(&self) -> bool {

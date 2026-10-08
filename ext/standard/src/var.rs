@@ -857,7 +857,7 @@ pub(super) fn render(
         // otherwise, held until its rows are rendered, php's
         // `zend_release_properties`. A typed property nothing has
         // written is no row of php's walk (`ZEND_HASH_FOREACH_KEY_VAL_IND`).
-        let held = object.props_held(req, PropertyPurpose::Debug)?;
+        let held = object.properties_for(req, PropertyPurpose::Debug)?;
         object.protect_in(req, RecursionGuard::Debug);
         let mut printed = Printed::open(out, indent, true);
         let walked = walk::properties(req, &held, Unwritten::Skipped, |req, row| {
@@ -1202,6 +1202,18 @@ pub fn export(
 /// its unmangled name, `(object) array(` for the one class with no
 /// `__set_state`, and `\Suit::Hearts` for an enum case, which carries
 /// neither its properties nor the closing pair.
+///
+/// The table is `zend_get_properties_for`'s, laid down where the object
+/// has none, as `rebuild_object_properties` lays php's, and
+/// `memory_get_usage()` counts it:
+///
+/// ```php
+/// class K { public $d = 1; }
+/// $k = new K; $m = memory_get_usage(); $v = var_export($k, true); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 440
+/// ```
 fn export_object(
     req: &mut Request,
     out: &mut Vec<u8>,
@@ -1214,8 +1226,8 @@ fn export_object(
         return Ok(());
     }
     object.protect_in(req, RecursionGuard::Export);
-    let rows = match object.props_for(req, PropertyPurpose::VarExport) {
-        Ok(rows) => rows,
+    let held = match object.properties_for(req, PropertyPurpose::VarExport) {
+        Ok(held) => held,
         Err(thrown) => {
             object.unprotect_in(req, RecursionGuard::Export);
             return Err(thrown);
@@ -1223,7 +1235,7 @@ fn export_object(
     };
     let Some(decl) = req.class_decl(object.class()) else {
         object.unprotect_in(req, RecursionGuard::Export);
-        return Ok(());
+        return held.release(req);
     };
     let (name, is_enum) = (decl.name.0.to_vec(), matches!(decl.kind, ClassKind::Enum));
     let standard = name == b"stdClass";
@@ -1247,13 +1259,16 @@ fn export_object(
             out.extend_from_slice(b"::__set_state(array(\n");
         }
     }
-    let mut written = Ok(());
-    if !is_enum {
-        for (key, element) in rows {
+    // `ZEND_HASH_FOREACH_KEY_VAL_IND(myht, index, key, val)` over the
+    // table held until `zend_release_properties`.
+    let written = if is_enum {
+        Ok(None)
+    } else {
+        walk::properties(req, &held, Unwritten::Skipped, |req, row| {
             out.extend(std::iter::repeat_n(b' ', level + 2));
             // `php_object_element_export`: a name quoted, unmangled; an
             // integer key as it stands.
-            match key {
+            match row.key() {
                 Key::Str(key) => {
                     let (_, name) = unmangle(key.as_bytes());
                     out.push(b'\'');
@@ -1263,15 +1278,15 @@ fn export_object(
                 Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),
             }
             out.extend_from_slice(b" => ");
-            written = export(req, out, &element, level + 2);
-            if written.is_err() {
-                break;
-            }
+            export(req, out, row.value(), level + 2)?;
             out.extend_from_slice(b",\n");
-        }
-    }
+            Ok(ControlFlow::<()>::Continue(()))
+        })
+    };
     object.unprotect_in(req, RecursionGuard::Export);
+    let released = held.release(req);
     written?;
+    released?;
     if level > 1 && !is_enum {
         out.extend(std::iter::repeat_n(b' ', level - 1));
     }

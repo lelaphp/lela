@@ -232,15 +232,12 @@ impl SplFixedArray {
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let this = this.object();
         if with(req, this, |a| a.elements.is_empty())? {
-            let props = Std.get_properties(req, this)?;
+            let table = Std.get_properties(req, this)?;
+            let props: Vec<(Key, Value)> = walk::rows(req, table).collect();
             let mut elements = Vec::with_capacity(props.len());
             for (key, value) in props {
                 elements.push(Owner::take(req, value.deref()));
-                let unset = match key {
-                    Key::Str(name) => Std.unset_property(req, this, name.as_bytes()),
-                    Key::Int(_) => this.unset_row(req, &key),
-                };
-                if let Err(thrown) = unset {
+                if let Err(thrown) = this.unset_row(req, &key) {
                     crate::give_up_all(req, elements);
                     return Err(thrown);
                 }
@@ -900,33 +897,10 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<PropertiesFor, Thrown> {
-        // php asserts no serializer asks, the class having `__serialize`;
-        // what reads the table under that purpose reads the object's own.
-        if purpose == PropertyPurpose::Serialize {
-            return Ok(PropertiesFor::Standard);
+        match elements_table(req, object, purpose)? {
+            Some(table) => Ok(PropertiesFor::Temporary(table)),
+            None => Std.get_properties_for(req, object, purpose),
         }
-        // "The array elements are not *real properties*": what
-        // `get_object_vars()` reads is the object's own table alone, a
-        // copy, so its mangled names reach the reader as they stand.
-        let elements = if purpose == PropertyPurpose::GetObjectVars {
-            Vec::new()
-        } else {
-            with(req, object, |a| views(&a.elements))?
-        };
-        let props = crate::std_properties(req, object)?;
-        if elements.is_empty() && props.is_empty() {
-            return Ok(PropertiesFor::Standard);
-        }
-        // Each element under its integer index
-        // (`zend_hash_next_index_insert`), then each property under its
-        // name (`zend_hash_add_new`), so a property named `"0"` stands
-        // beside element 0.
-        let mut out: Vec<(Key, Value)> = Vec::with_capacity(elements.len() + props.len());
-        for (at, value) in elements.into_iter().enumerate() {
-            out.push((Key::Int(i64::try_from(at).unwrap_or(i64::MAX)), value));
-        }
-        out.extend(props);
-        Ok(PropertiesFor::Rows(out))
     }
 
     fn get_debug_info(
@@ -934,15 +908,8 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
-        let rows = self.get_properties_for(req, object, PropertyPurpose::Debug)?;
-        let PropertiesFor::Rows(rows) = rows else {
-            return Ok(None);
-        };
-        let mut out = PhpArray::new(req)?;
-        for (key, value) in rows {
-            out.set(req, Owner::take(req, key), Owner::take(req, value))?;
-        }
-        Ok(Some(out.into()))
+        let table = elements_table(req, object, PropertyPurpose::Debug)?;
+        Ok(table.map(Into::into))
     }
 
     fn iterator_element(
@@ -1075,4 +1042,46 @@ fn clone_array(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>,
             resizing: None,
         }),
     )
+}
+
+/// `spl_fixedarray_object_get_properties_for`'s table, a temporary one:
+/// each element under its integer index (`zend_hash_next_index_insert`),
+/// then each property under its name (`zend_hash_add_new`), so a
+/// property named `"0"` stands beside element 0, one owner of each.
+/// "The array elements are not *real properties*": what
+/// `get_object_vars()` reads is the object's own table alone, so its
+/// mangled names reach the reader as they stand. `None` where there is
+/// neither an element nor a property, and for a serializer, which php
+/// asserts never asks, the class having `__serialize`: the reader reads
+/// the object's own table then.
+fn elements_table(
+    req: &mut Request,
+    object: PhpObject,
+    purpose: PropertyPurpose,
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
+    if purpose == PropertyPurpose::Serialize {
+        return Ok(None);
+    }
+    let elements = if purpose == PropertyPurpose::GetObjectVars {
+        Vec::new()
+    } else {
+        with(req, object, |a| views(&a.elements))?
+    };
+    let props = crate::std_properties(req, object)?;
+    if elements.is_empty() && props.is_empty() {
+        return Ok(None);
+    }
+    let rows = elements
+        .into_iter()
+        .enumerate()
+        .map(|(at, value)| (Key::Int(i64::try_from(at).unwrap_or(i64::MAX)), value))
+        .chain(props);
+    let mut table = PhpArray::new(req)?;
+    for (key, value) in rows {
+        if let Err(thrown) = table.set(req, Owner::take(req, key), Owner::take(req, value)) {
+            table.give_up(req);
+            return Err(thrown);
+        }
+    }
+    Ok(Some(table))
 }

@@ -179,7 +179,6 @@ abi::Never
 abi::Null
 abi::NullDefault
 abi::ObjectHandlers
-abi::ObjectHandlers::answers_properties
 abi::ObjectHandlers::cast_object
 abi::ObjectHandlers::clone_obj
 abi::ObjectHandlers::clone_obj_with
@@ -1135,6 +1134,7 @@ values::HashIterator::set_position
 values::HeldProperties
 values::HeldProperties::count
 values::HeldProperties::release
+values::HeldProperties::table
 values::Key
 values::Key::from_string
 values::Key::lookup
@@ -1214,10 +1214,10 @@ values::PhpObject::closure
 values::PhpObject::closure_bound
 values::PhpObject::debug_info
 values::PhpObject::declared_rows
-values::PhpObject::entries
 values::PhpObject::extend_properties
 values::PhpObject::free_beside
 values::PhpObject::handlers
+values::PhpObject::has_hooked_properties
 values::PhpObject::index
 values::PhpObject::instance_of
 values::PhpObject::is_lazy
@@ -1234,11 +1234,10 @@ values::PhpObject::native_mut_or_fatal
 values::PhpObject::pointer_move
 values::PhpObject::pointer_row
 values::PhpObject::prop
+values::PhpObject::properties_for
 values::PhpObject::properties_shared
 values::PhpObject::property_table
 values::PhpObject::props
-values::PhpObject::props_for
-values::PhpObject::props_held
 values::PhpObject::protect
 values::PhpObject::protect_in
 values::PhpObject::rebuild_properties
@@ -1250,6 +1249,7 @@ values::PhpObject::set_prop
 values::PhpObject::set_row
 values::PhpObject::set_slot
 values::PhpObject::slot
+values::PhpObject::slots_without_table
 values::PhpObject::typed_row_ref
 values::PhpObject::unprotect
 values::PhpObject::unprotect_in
@@ -1332,7 +1332,6 @@ values::Value::type_name
 values::Value::unpassed
 values::ValueRef
 values::View
-values::walk::BuiltRows
 values::walk::Guarded
 values::walk::Hold
 values::walk::ObjectTable
@@ -1344,6 +1343,7 @@ values::walk::Row::value
 values::walk::Rows
 values::walk::Step
 values::walk::Table
+values::walk::Table::array
 values::walk::Unwritten
 values::walk::detached
 values::walk::foreach

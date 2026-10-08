@@ -4,14 +4,15 @@
 use std::path::PathBuf;
 
 use php_ext::abi::{
-    Callable, DebugInfo, ObjectHandlers, OrFalse, Path, PropertiesFor, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Ref, Refusals, Std, This, Union, Untyped,
+    Callable, DebugInfo, ObjectHandlers, OrFalse, Path, PropertyPlace, PropertyRead, PropertyTest,
+    Ref, Refusals, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, while_pending};
 use php_ext::request::{Request, Streams as _};
+use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::archive::{self as za, Archive, Source};
@@ -298,11 +299,7 @@ impl ObjectHandlers for Handlers {
     /// int(0)
     /// O:10:"ZipArchive":6:{s:6:"lastId";i:-1;s:6:"status";i:0;s:9:"statusSys";i:0;s:8:"numFiles";i:0;s:8:"filename";s:0:"";s:7:"comment";s:0:"";}
     /// ```
-    fn get_properties(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-    ) -> Result<Vec<(Key, Value)>, Thrown> {
+    fn get_properties(&self, req: &mut Request, object: PhpObject) -> Result<walk::Table, Thrown> {
         refresh(req, object)?;
         Std.get_properties(req, object)
     }
@@ -315,18 +312,6 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<DebugInfo>, Thrown> {
         refresh(req, object)?;
         Std.get_debug_info(req, object)
-    }
-
-    /// The standard table for every purpose, as `get_properties` reads
-    /// it.
-    fn get_properties_for(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-        _purpose: PropertyPurpose,
-    ) -> Result<PropertiesFor, Thrown> {
-        refresh(req, object)?;
-        Ok(PropertiesFor::Standard)
     }
 
     /// `php_zip_get_properties` stands in `get_properties`, so a

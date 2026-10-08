@@ -1445,13 +1445,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         _: PropertyPurpose,
     ) -> Result<PropertiesFor, Thrown> {
-        let (value, value_name, scale_name) = kept(req, object)?;
-        let scale = held(req, object)?.scale;
-        let scale = Value::int(i64::try_from(scale).unwrap_or(i64::MAX));
-        Ok(PropertiesFor::Rows(vec![
-            (Key::Str(value_name), Value::string(value)),
-            (Key::Str(scale_name), scale),
-        ]))
+        number_table(req, object).map(PropertiesFor::Temporary)
     }
 
     /// The debug purpose of `bcmath_number_get_properties_for`, the
@@ -1473,20 +1467,32 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<php_ext::abi::DebugInfo>, Thrown> {
-        let rows = match self.get_properties_for(req, object, PropertyPurpose::Debug)? {
-            PropertiesFor::Rows(rows) => rows,
-            PropertiesFor::Standard | PropertiesFor::Null => Vec::new(),
-        };
-        let mut table = PhpArray::new(req)?;
-        for (key, value) in rows {
-            table.set(req, Owner::take(req, key), Owner::take(req, value))?;
-        }
-        Ok(Some(table.into()))
+        number_table(req, object).map(|table| Some(table.into()))
     }
 
     fn properties_overloaded(&self) -> bool {
         true
     }
+}
+
+/// `bcmath_number_get_properties_for`'s table, a temporary one, which
+/// every purpose reads: `value` and `scale`, each one owner.
+fn number_table(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
+    let (value, value_name, scale_name) = kept(req, object)?;
+    let scale = held(req, object)?.scale;
+    let scale = Value::int(i64::try_from(scale).unwrap_or(i64::MAX));
+    let mut table = PhpArray::new(req)?;
+    table.set(
+        req,
+        Owner::take(req, Key::Str(value_name)),
+        Owner::take(req, Value::string(value)),
+    )?;
+    table.set(
+        req,
+        Owner::take(req, Key::Str(scale_name)),
+        Owner::take(req, scale),
+    )?;
+    Ok(table)
 }
 
 /// `bcmath_number_clone`: a fresh number holding the same `bc_num`, one

@@ -14,6 +14,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, throw_error, warning};
 use crate::api::request::Request;
+use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// `zend_lookup_class_ex`: a leading `\` dropped, the table under the
@@ -467,22 +468,28 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>
 /// int(1)
 /// int(5)
 /// ```
+///
+/// The table it reads is `zend_get_properties_for`'s, which lays the
+/// object's own table down where it has none, as php's
+/// `rebuild_object_properties` does, and `memory_get_usage()` counts it:
+///
+/// ```php
+/// class K { public $d = 1; }
+/// $k = new K; $m = memory_get_usage(); $a = get_object_vars($k); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 752
+/// ```
 #[php_function]
 fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
     let class = object.class();
     let scope = req.scope();
-    // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
-    // class that answers the purpose itself hands back its table.
-    let table = req.object_handlers(object.heap());
-    match table.get_properties_for(req, object, PropertyPurpose::GetObjectVars)? {
-        PropertiesFor::Rows(rows) => return answered_vars(req, class, rows),
-        // No table: `RETURN_EMPTY_ARRAY` (`Z/Zend/zend_builtin_functions.c:849`).
-        PropertiesFor::Null => return Ok(Owner::take(req, PhpArray::empty())),
-        PropertiesFor::Standard => {}
-    }
-    // Over a class with a hooked property it is the table its hooks
-    // answer, each row one owner of its own.
-    if let Some(rows) = req.hooked_object_rows(object)? {
+    // Over a class with a hooked property whose handlers are php's own,
+    // `zend_std_get_properties_for` answers the table its hooks answer,
+    // each row one owner of its own, read here with the slot each hooked
+    // row stands for, php's `IS_PTR`.
+    let overloaded = req.object_handlers(object.heap()).properties_overloaded();
+    if !overloaded && let Some(rows) = req.hooked_object_rows(object)? {
         let mut array = PhpArray::new(req)?;
         for (key, value, declared) in rows {
             let value = Owner::adopt(req, value);
@@ -513,12 +520,30 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         }
         return Ok(array);
     }
+    // `zend_get_properties_for(ZEND_PROP_PURPOSE_GET_OBJECT_VARS)`: a
+    // class that answers the purpose itself hands back its table.
+    let table = match req.properties_answered(object, PropertyPurpose::GetObjectVars)? {
+        PropertiesFor::Table(Table::Object(table)) => table,
+        PropertiesFor::Table(Table::Array(array)) => return answered_vars(req, class, array),
+        PropertiesFor::Temporary(table) => {
+            let made = answered_vars(req, class, *table);
+            table.give_up(req);
+            return made;
+        }
+        PropertiesFor::Debug(info) => {
+            let made = answered_vars(req, class, *info.table);
+            info.table.give_up(req);
+            return made;
+        }
+        // No table: `RETURN_EMPTY_ARRAY` (`Z/Zend/zend_builtin_functions.c:849`).
+        PropertiesFor::Null => return Ok(Owner::take(req, PhpArray::empty())),
+    };
     // The fast copy (`Z/Zend/zend_builtin_functions.c:852`): a class
     // that declares nothing hands its own table on.
     if let Some(array) = crate::ops::object_symtable(req, object)? {
         return Ok(Owner::adopt(req, array));
     }
-    let rows = req.property_rows(object)?;
+    let rows = req.property_rows(&table)?;
     let mut array = PhpArray::new(req)?;
     for (key, value, declared) in rows {
         // An integer key, which only a loophole such as
@@ -579,8 +604,9 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
 fn answered_vars(
     req: &mut Request,
     class: ClassId,
-    rows: Vec<(Key, Value)>,
+    table: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
+    let rows: Vec<(Key, Value)> = walk::rows(req, table).collect();
     let mut array = PhpArray::new(req)?;
     for (key, value) in rows {
         // An integer key is an element the class shows among its
@@ -636,8 +662,8 @@ fn get_mangled_object_vars(
     if let Some(array) = crate::ops::object_symtable(req, object)? {
         return Ok(Owner::adopt(req, array));
     }
-    let rows = req.properties_no_lazy_init(object)?;
-    let made = crate::ops::mangled_array(req, object, rows);
+    let table = req.properties_no_lazy_init(object)?;
+    let made = crate::ops::mangled_array(req, object, table);
     crate::api::values::adopted(req, made)
 }
 

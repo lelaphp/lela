@@ -5760,11 +5760,11 @@ fn class_string(
 
 /// The names in the object's property table the class did not declare,
 /// in the table's order: `_adddynproperty` over `get_properties`, which
-/// passes over every slot, `IS_INDIRECT`, and keeps the rest. A slot of
-/// a public property holds its bare name; any other holds a mangled one,
-/// so a row of a bare name beyond the non-public slots of that name the
-/// object holds is a dynamic property, one named as a parent's private
-/// property among them. `_class_string`'s count is another rule
+/// passes over every declared slot, `IS_INDIRECT`, and keeps the rest.
+/// A slot of a public property stands under its bare name and any other
+/// under a mangled one, so a row of a bare name no public property of
+/// the chain declares is a dynamic property, one named as a parent's
+/// private property among them. `_class_string`'s count is another rule
 /// ([`undeclared_properties`]).
 ///
 /// ```php
@@ -5783,60 +5783,31 @@ fn class_string(
 /// ```
 fn dynamic_properties(req: &mut Request, class: ClassId, object: PhpObject) -> Vec<Vec<u8>> {
     let mut public: Vec<Vec<u8>> = Vec::new();
-    let mut mangled: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for at in class_chain(req, class) {
-        let Some(decl) = req.class_decl(at).cloned() else {
+        let Some(decl) = req.class_decl(at) else {
             continue;
         };
-        for p in decl.properties.iter().filter(|p| p.is_instance) {
-            let name = p.name.0.to_vec();
-            let prefix = match p.visibility {
-                Visibility::Public => {
-                    public.push(name);
-                    continue;
-                }
-                Visibility::Protected => b"*".to_vec(),
-                Visibility::Private => decl.name.0.to_vec(),
-            };
-            let key = [&b"\0"[..], &prefix, &b"\0"[..], &name].concat();
-            if !mangled.iter().any(|(_, held)| *held == key) {
-                mangled.push((name, key));
-            }
-        }
+        let names = decl.properties.iter().filter(|p| p.is_instance);
+        public.extend(
+            names
+                .filter(|p| p.visibility == Visibility::Public)
+                .map(|p| p.name.0.to_vec()),
+        );
     }
     // `classname_obj->handlers->get_properties(classname_obj)`: the
     // table the class answers, a `DateInterval`'s fields among it.
     let handlers = object.handlers(req);
-    let Ok(entries) = handlers.get_properties(req, object) else {
+    let Ok(table) = handlers.get_properties(req, object) else {
         return Vec::new();
     };
-    let mut seen: std::collections::HashMap<Vec<u8>, usize> = std::collections::HashMap::new();
-    let mut dynamic = Vec::new();
     // An integer key is no property, as `_adddynproperty` ignores it.
-    for (key, _) in entries {
-        let Key::Str(name) = key else { continue };
-        let name = name.as_bytes().to_vec();
-        if name.first().is_none_or(|byte| *byte == 0) || public.contains(&name) {
-            continue;
-        }
-        let rows = seen.entry(name.clone()).or_insert(0);
-        *rows += 1;
-        let rows = *rows;
-        let mut held = 0;
-        for (_, key) in mangled.iter().filter(|(n, _)| *n == name) {
-            let Ok(string) = PhpString::new(req, key) else {
-                continue;
-            };
-            if object.row(req, &Key::Str(*string)).ok().flatten().is_some() {
-                held += 1;
-            }
-            string.give_up(req);
-        }
-        if rows > held {
-            dynamic.push(name);
-        }
-    }
-    dynamic
+    walk::rows(req, table)
+        .filter_map(|(key, _)| match key {
+            Key::Str(name) => Some(name.as_bytes().to_vec()),
+            Key::Int(_) => None,
+        })
+        .filter(|name| name.first().is_some_and(|byte| *byte != 0) && !public.contains(name))
+        .collect()
 }
 
 /// `_class_string`'s `Dynamic properties`: the bare names of
@@ -5871,7 +5842,9 @@ fn undeclared_properties(req: &mut Request, class: ClassId, object: PhpObject) -
         object.props(req)
     } else {
         let handlers = object.handlers(req);
-        handlers.get_properties(req, object)
+        handlers
+            .get_properties(req, object)
+            .map(|table| walk::rows(req, table).collect())
     };
     let Ok(entries) = entries else {
         return Vec::new();

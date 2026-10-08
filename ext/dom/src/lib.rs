@@ -47,8 +47,8 @@ mod xpath;
 
 use php_ext::abi::{
     DebugInfo, Dependency, DependencyKind, Extension, ExtensionBuilder, FromArgument, Instance,
-    ObjectHandlers, OrFalse, Passed, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
-    Raw, Std, Union, Untyped,
+    ObjectHandlers, OrFalse, Passed, PropertyPlace, PropertyRead, PropertyTest, Raw, Std, Union,
+    Untyped,
 };
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
@@ -57,7 +57,8 @@ use php_ext::raising::{
     Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw_error, throw_value,
 };
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::walk;
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{
     Borrowed, ClassType, DocProps, Exported, Kind, Name, Node, NodeObject, Ns, SharedDoc,
     XML_ATTRIBUTE_ID,
@@ -1025,7 +1026,9 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
     if matches!(Std.get_method(req, object, b"__debuginfo"), Ok(Some(_))) {
         return Std.get_debug_info(req, object);
     }
-    let own = object.props_for(req, PropertyPurpose::ArrayCast)?;
+    // `zend_array_dup(zend_std_get_properties(object))`.
+    let own = object.property_table(req)?;
+    let own: Vec<(Key, Value)> = walk::rows(req, own).collect();
     let mut out = PhpArray::new(req)?;
     for (key, value) in own {
         let value = Owner::take(req, value);

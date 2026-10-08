@@ -11,7 +11,8 @@ use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
 use php_ext::raising::{Thrown, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::walk;
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::stmt;
 
@@ -381,7 +382,9 @@ impl ObjectHandlers for Handlers {
 /// row one more owner, then each column but `queryString` fetched,
 /// `zend_hash_update` under its name.
 fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut Owner<PhpArray>) -> Result<(), Thrown> {
-    for (key, value) in Std.get_properties(req, stmt)? {
+    let table = Std.get_properties(req, stmt)?;
+    let rows: Vec<(Key, Value)> = walk::rows(req, table).collect();
+    for (key, value) in rows {
         out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let names: Vec<Vec<u8>> = stmt::read(req, stmt, |s| {
