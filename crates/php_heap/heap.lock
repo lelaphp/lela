@@ -76,6 +76,7 @@ Heap::addref
 Heap::array
 Heap::array_add_new
 Heap::array_append
+Heap::array_clean
 Heap::array_del
 Heap::array_dup
 Heap::array_extend

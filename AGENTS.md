@@ -120,17 +120,17 @@ third-engine-design.md
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 376 |  | no reading |
+| heap | heap.lock | 377 |  | no reading |
 | process | process.lock | 35 |  | no reading |
 | unit | unit.lock | 95 |  | no reading |
 | link | link.lock | 37 |  | no reading |
 | ops | ops.lock | 209 |  | no reading |
-| api | api.lock | 1362 | 1500 | no reading |
+| api | api.lock | 1364 | 1500 | no reading |
 | sapi | sapi.lock | 43 |  | no reading |
 | tier | tier.lock | 67 |  | no reading |
 | harness | xtask.lock | 380 |  | no reading |
 
-<!-- /computed in=d48299263ae2253c36e2931701cef13e9e0a1f5c7095b64b5381b94fa70d91a1 out=47b165906b6639a74c817f5e02e23b44bf5b0399ff73f12caeed742b810331c6 -->
+<!-- /computed in=45521c6f1a808ce2cdf6c0f3dc33d7455041490f116b6074f9788a5cc0445530 out=e5e5fc861821da42057cab568d34560ae17f622911ba35a0bcc42c4a2bf7fd20 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
