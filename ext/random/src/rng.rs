@@ -56,20 +56,6 @@ impl Rng {
         }
     }
 
-    /// `algo->range(state, min, max)`: a uniform integer in `[min, max]`.
-    ///
-    /// ```php
-    /// $r = new Random\Randomizer(new Random\Engine\Mt19937(7)); var_dump($r->getInt(-3, 3), $r->getInt(0, PHP_INT_MAX));
-    /// ```
-    /// ```expect
-    /// int(2)
-    /// int(5163590386386658500)
-    /// ```
-    pub fn range(self, req: &mut Request, min: i64, max: i64) -> Result<i64, Thrown> {
-        self.with(req, |algo| algo.range(min, max))
-            .map_err(|failure| failure.raise(req))
-    }
-
     /// `php_array_data_shuffle` over the array's values once packed, and
     /// `php_binary_string_shuffle` over a string's bytes: from the last
     /// place down, each swapped with one drawn from `[0, place]`.
