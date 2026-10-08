@@ -212,7 +212,11 @@ jobs:
       # targets (§4.5, ADR-0009). A push to `main` passes none, and the
       # merge base with `main` that `done` takes by default is the push
       # itself: what the push changed was judged on its pull request.
+      # `done`'s list is kept for the red-main job through `tee`, and the
+      # step fails with `done`: `shell: bash` runs it with pipefail, where
+      # a step that names no shell would end with tee's exit.
       - name: done
+        shell: bash
         run: |
           # shellcheck disable=SC1010 # `done` is xtask's instrument, not the loop's keyword
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
@@ -260,7 +264,11 @@ jobs:
         with:
           clean: false
           fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      # A filing that fails is the step's warning and never the run's
+      # failure: the next run reads this run's verdict, and a red here would
+      # count a green main as the first of two reds.
       - name: two red runs in a row, one ticket
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           RED: ${{ contains(needs.*.result, 'failure') }}

@@ -70,10 +70,20 @@ fi
 
 # The red streak's first run: the oldest of the red runs before the newest green.
 first=$(jq -r '(map(.conclusion == "success") | index(true)) as $g | .[0:($g // length)] | last | "\(.headSha) \(.url)"' <<<"$runs")
+# The title names the failing readings, `done`'s first unmet line and
+# how many follow it, and the failing jobs and steps where done listed
+# none (it did not run, or something before it failed).
+unmet=$(grep -E '^- ' <<<"${UNMET:-}" || true)
 failing=$(gh run view "$run" --repo "$repo" --json jobs --jq '[.jobs[] | select(.conclusion == "failure")
     | .name + ([.steps[] | select(.conclusion == "failure") | .name] | if length > 0 then " (" + join(", ") + ")" else "" end)]
     | join("; ")')
-title="harness.yml: main is red since ${first:0:8}: ${failing:-a failed job}"
+if [ -n "$unmet" ]; then
+    more=$(($(wc -l <<<"$unmet") - 1))
+    named="$(head -n 1 <<<"$unmet" | sed 's/^- //')$([ "$more" -eq 0 ] || echo " and $more more")"
+else
+    named=${failing:-a failed job}
+fi
+title="harness.yml: main is red since ${first:0:8}: $named"
 ticket() {
     cat <<EOF
 ## What happened
