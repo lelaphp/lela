@@ -16,7 +16,7 @@ built; the instrument reads manifests and sources.
 | `harness-edge` | a crate no `[[edge]]` row names depending on a workspace crate: the harness linking `php_bundle`, which the tracked manifest forbids since #2213 | fail |
 | `host-edge` | a host under `sapi/` depending on `php_engine` past its facade (ADR-0008), beside one within its edges | fail |
 | `deny-edge` | a `use` path across a `deny = true` module edge | fail |
-| `bundle`    | a bundle order that is not topological          | fail |
+| `bundle`    | a bundle that lists an extension before one it depends on, behind no feature: the order written is php's and free under `order = "registration"` (#2255) | pass |
 | `registration` | under `order = "registration"` (#1778, #1882), which the test sets on the tracked manifest's `php_bundle` row: a bundle feature that does not switch on the feature of an extension its extension links, beside one that does and a dev-dependency that requires nothing; the test also lays it down in a scratch workspace with its bundle's `src/lib.rs` replaced, for a required extension registered nowhere, a registration behind a `cfg` the instrument does not read, and one extension registered twice | fail |
 | `harness-lock` | a public item of the harness with no line in `xtask.lock`, under the rows #55 proposes | fail |
 | `ops-lock`  | a hand-edited line of `ops.lock`, the lock rendered from `ops.toml` | fail |

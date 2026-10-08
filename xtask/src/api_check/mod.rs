@@ -23,11 +23,10 @@
 //!   module edge fails; a `reexports_only` crate may define nothing.
 //! - `php_bundle`'s registrations, read as the `php_ext_<name>::extension`
 //!   paths in its sources and the features they stand behind, are held to
-//!   the `ext/*` dependency graph as its row's `order` says: under
-//!   `"topological"` the order written lists each extension after those it
-//!   depends on; under `"registration"`, the order #1778 ruled, the order
-//!   written is php's and free, and each extension's feature switches on
-//!   the features of every extension it links ([`bundle`]).
+//!   the `ext/*` dependency graph under its row's `order =
+//!   "registration"`, the one order #1778 ruled and api-check serves: the
+//!   order written is php's and free, and each extension's feature switches
+//!   on the features of every extension it links ([`bundle`]).
 //!
 //! An item lock's reading counts its lines by the module that defines each
 //! in its `groups`, a key per module, beside the total in `numbers` (#1795):
@@ -588,17 +587,17 @@ fn crate_reading(
     // The bundle's order, held to the ext/* graph as the row's `order`
     // says.
     if let Some(order) = rows.iter().find_map(|e| e.order.as_deref()) {
-        match bundle::Order::named(order) {
-            Some(order) => {
-                let read = bundle::Bundle::read(krate)?;
-                reading
-                    .numbers
-                    .insert(numbers::EXTENSIONS.to_owned(), count(read.names().len()));
-                problems.extend(order.problems(crates, &read));
-            }
-            None => problems.push(format!(
-                "order = \"{order}\" is not an order api-check knows"
-            )),
+        if order == bundle::REGISTRATION {
+            let read = bundle::Bundle::read(krate)?;
+            reading
+                .numbers
+                .insert(numbers::EXTENSIONS.to_owned(), count(read.names().len()));
+            problems.extend(bundle::unswitched(crates, &read));
+        } else {
+            problems.push(format!(
+                "order = \"{order}\" is not an order api-check knows; it serves \"{}\" alone (#2255)",
+                bundle::REGISTRATION
+            ));
         }
     }
 

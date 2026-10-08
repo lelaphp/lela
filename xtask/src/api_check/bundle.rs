@@ -1,18 +1,15 @@
-//! `php_bundle`'s registrations held to the `ext/*` graph, as the
-//! `order` of the bundle's `[[edge]]` row names (design §4.10, ADR-0004).
-//!
-//! - `"topological"`: the order written lists each extension after every
-//!   extension it depends on, a dev-dependency included, as the order
-//!   has been held since revision 4.
-//! - `"registration"`, as #1778 ruled: the order written is php's
-//!   registration order for the oracle's enabled set, which the engine
-//!   sorts as `zend_sort_modules` does and `php_bundle`'s witness holds
-//!   to the oracle, and which Cargo edges do not constrain; each
-//!   extension's feature switches on the features of every extension its
-//!   library links, so a build that registers an extension registers what
-//!   it requires (#1882). A dev- or build-dependency links into the
-//!   crate's tests or its `build.rs`, never into the library a request
-//!   runs, so it requires nothing.
+//! `php_bundle`'s registrations held to the `ext/*` graph under the
+//! `order = "registration"` of the bundle's `[[edge]]` row, as #1778
+//! ruled (design §4.10, ADR-0004): the order written is php's
+//! registration order for the oracle's enabled set, which the engine
+//! sorts as `zend_sort_modules` does and `php_bundle`'s witness holds to
+//! the oracle, and which Cargo edges do not constrain; each extension's
+//! feature switches on the features of every extension its library
+//! links, so a build that registers an extension registers what it
+//! requires (#1882). A dev- or build-dependency links into the crate's
+//! tests or its `build.rs`, never into the library a request runs, so it
+//! requires nothing. The row names no other order api-check serves
+//! (#2255).
 //!
 //! The feature an extension registers behind is read from the
 //! `#[cfg(feature = "...")]` on its `php_ext_<name>::extension` path, or
@@ -31,34 +28,8 @@ use toml::Value;
 use super::module_of;
 use super::workspace::{Crates, Present};
 
-/// An `order` the instrument knows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Order {
-    /// Each extension listed after every extension it depends on.
-    Topological,
-    /// Each extension's feature switching on what its library links.
-    Registration,
-}
-
-impl Order {
-    /// The order a manifest value names; `None` for one this instrument
-    /// does not know.
-    pub(super) fn named(value: &str) -> Option<Order> {
-        match value {
-            "topological" => Some(Order::Topological),
-            "registration" => Some(Order::Registration),
-            _ => None,
-        }
-    }
-
-    /// Why `bundle` does not hold under this order.
-    pub(super) fn problems(self, crates: &Crates, bundle: &Bundle) -> Vec<String> {
-        match self {
-            Order::Topological => not_topological(crates, &bundle.names()),
-            Order::Registration => unswitched(crates, bundle),
-        }
-    }
-}
+/// The one `order` the bundle's `[[edge]]` row may name (#1778, #2255).
+pub(super) const REGISTRATION: &str = "registration";
 
 /// What the instrument reads of `php_bundle`: its registrations, in the
 /// order written, and its `[features]`.
@@ -130,39 +101,12 @@ struct Registration {
     unread: Vec<String>,
 }
 
-/// Why the registered names are not a topological order of the `ext/*`
-/// graph: an extension before one it depends on, or one whose dependency
-/// is absent.
-fn not_topological(crates: &Crates, names: &[&str]) -> Vec<String> {
-    let position: BTreeMap<&str, usize> = names.iter().enumerate().map(|(i, n)| (*n, i)).collect();
-    let mut out = Vec::new();
-    for (at, name) in names.iter().enumerate() {
-        let Some(krate) = crates.named(name) else {
-            continue;
-        };
-        for dep in krate.deps.iter().filter(|d| d.name.starts_with("ext/")) {
-            match position.get(dep.name.as_str()) {
-                None => out.push(format!(
-                    "the bundle lists {name} but not {}, which it depends on",
-                    dep.name
-                )),
-                Some(&dep_at) if dep_at > at => out.push(format!(
-                    "the bundle lists {name} before {}, which it depends on; the order is not topological (design §4.10)",
-                    dep.name
-                )),
-                Some(_) => {}
-            }
-        }
-    }
-    out
-}
-
 /// Why a registration's features do not switch on what its extension
 /// requires: a `cfg` around it the instrument does not read; or, for each
 /// extension its library links, one the bundle registers nowhere, or
 /// registers only behind features the first one's do not switch on, named
 /// together in one line per registration.
-fn unswitched(crates: &Crates, bundle: &Bundle) -> Vec<String> {
+pub(super) fn unswitched(crates: &Crates, bundle: &Bundle) -> Vec<String> {
     let mut out = Vec::new();
     for registration in &bundle.registered {
         let name = &registration.name;

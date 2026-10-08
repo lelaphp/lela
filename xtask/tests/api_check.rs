@@ -399,21 +399,6 @@ fn a_use_path_across_a_denied_module_edge_fails() {
     );
 }
 
-#[test]
-fn a_bundle_order_that_is_not_topological_fails() {
-    let readings = api_check::hold(&under("topological"), &fixture("bundle"), false).unwrap();
-    let bundle = of(&readings, "php_bundle");
-    assert_eq!(bundle.status, Status::Fail);
-    assert!(
-        bundle.message.contains("ext/standard"),
-        "{}",
-        bundle.message
-    );
-    assert!(bundle.message.contains("ext/random"), "{}", bundle.message);
-    assert!(bundle.adr.contains("0004"), "{}", bundle.adr);
-    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
-}
-
 /// The tracked manifest with `php_bundle`'s edge read as `order`, so a
 /// test holds the order it names whatever the tracked row says.
 fn under(order: &str) -> Manifest {
@@ -464,9 +449,9 @@ fn a_bundle_feature_that_does_not_switch_on_what_its_extension_requires_fails() 
     assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
-/// Under `order = "registration"` the order written is no longer held to
-/// the crate graph: the `bundle` fixture, whose extensions are behind no
-/// feature, passes where the topological order fails it.
+/// Under `order = "registration"` the order written is not held to the
+/// crate graph: the `bundle` fixture, which lists ext/standard before
+/// ext/random, which it depends on, behind no feature, passes.
 #[test]
 fn the_registration_order_does_not_hold_the_order_written() {
     let readings = api_check::hold(&under_registration(), &fixture("bundle"), false).unwrap();
@@ -563,24 +548,23 @@ fn each_registration_of_one_extension_is_read() {
     assert_eq!(bundle.numbers["extensions"], 3.into());
 }
 
-/// An order the instrument does not know is refused, never read as one
-/// it knows.
+/// An order the instrument does not serve is refused, never read as one
+/// it does: `"topological"`, retired by #1882 and its code gone since
+/// #2255, among them.
 #[test]
-fn an_order_api_check_does_not_know_fails() {
-    let mut manifest = under_registration();
-    for edge in manifest.edges.iter_mut().filter(|e| e.from == "php_bundle") {
-        edge.order = Some("alphabetical".to_owned());
+fn an_order_api_check_does_not_serve_fails() {
+    for order in ["alphabetical", "topological"] {
+        let readings = api_check::hold(&under(order), &fixture("clean"), false).unwrap();
+        let bundle = of(&readings, "php_bundle");
+        assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+        assert!(
+            bundle.message.contains(&format!(
+                "order = \"{order}\" is not an order api-check knows; it serves \"registration\" alone"
+            )),
+            "{}",
+            bundle.message
+        );
     }
-    let readings = api_check::hold(&manifest, &fixture("clean"), false).unwrap();
-    let bundle = of(&readings, "php_bundle");
-    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
-    assert!(
-        bundle
-            .message
-            .contains("order = \"alphabetical\" is not an order api-check knows"),
-        "{}",
-        bundle.message
-    );
 }
 
 /// The tracked workspace passes under `order = "registration"` as under

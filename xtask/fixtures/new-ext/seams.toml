@@ -38,7 +38,7 @@ adr = "0004"
 [[edge]]
 from = "php_bundle"
 to = ["ext/*", "php_ext"]
-order = "topological"
+order = "registration"
 adr = "0004"
 
 [[rule]]
