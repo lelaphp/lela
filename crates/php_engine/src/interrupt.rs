@@ -717,6 +717,7 @@ mod tests {
 
     use super::*;
     use crate::engine::{Engine, RequestDescription};
+    use crate::observer::Untold;
     use crate::probe::{Asked, Probe};
     use crate::tier::{Nop, Site, execute};
 
@@ -762,7 +763,7 @@ mod tests {
         req.interrupt().elapsed(1);
 
         assert_eq!(
-            execute::<Probe>(&mut req, frame),
+            execute::<Probe, Untold>(&mut req, frame),
             Err(Fatal::Error(String::from(TIMED_OUT)))
         );
         assert_eq!(
@@ -785,7 +786,7 @@ mod tests {
         asked.elapsed = Some(1);
 
         assert_eq!(
-            execute::<Probe>(&mut req, frame),
+            execute::<Probe, Untold>(&mut req, frame),
             Err(Fatal::Error(String::from(TIMED_OUT)))
         );
         assert_eq!(req.state::<Asked>().sites, vec![(Site::Entry, frame)]);
@@ -807,7 +808,7 @@ mod tests {
         let frame = req.pushed(looping());
 
         assert_eq!(
-            execute::<Nop>(&mut req, frame),
+            execute::<Nop, Untold>(&mut req, frame),
             Err(Fatal::Error(String::from(TIMED_OUT)))
         );
         assert!(

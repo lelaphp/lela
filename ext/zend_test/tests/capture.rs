@@ -145,3 +145,57 @@ fn the_allocation_switch_is_taken_and_leaves_what_the_program_writes_alone() {
     assert!(on.starts_with("string(1) \"0\"\nstring(1) \"1\"\n"), "{on}");
     assert_eq!(on.lines().nth(2), off.lines().nth(2), "{on}\n{off}");
 }
+
+/// `ext/opcache/tests/jit/ignored_opcodes.phpt`'s program, the one php
+/// test that sets `show_opcode_in_user_handler` (design §7.1, revision
+/// 107), served under its `--INI--` less opcache's: each silence opline
+/// told before its handler, at the depth its frame stands, and the
+/// program's own observation around them. The lines are the `zend-test`
+/// oracle's under the same switches; the first and last name the
+/// file, which differs.
+#[test]
+fn ignored_opcodes_tells_each_silence_opline_as_the_oracle_does() {
+    let out = served(
+        &[
+            ("enabled", "1"),
+            ("show_output", "1"),
+            ("observe_all", "1"),
+            (
+                "show_opcode_in_user_handler",
+                "ZEND_BEGIN_SILENCE, ZEND_END_SILENCE",
+            ),
+        ],
+        "<?php\nfunction test(): int\n{\n    return 0;\n}\n\nexit(@test());\n?>\n",
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines.first().is_some_and(|l| l.starts_with("<!-- init '")),
+        "{out}"
+    );
+    assert_eq!(
+        lines.get(2..lines.len().saturating_sub(1)),
+        Some(
+            &[
+                "  <!-- opcode: 'ZEND_BEGIN_SILENCE' in user handler -->",
+                "  <!-- init test() -->",
+                "  <test>",
+                "  </test>",
+                "  <!-- opcode: 'ZEND_END_SILENCE' in user handler -->",
+                "  <!-- init exit() -->",
+                "  <exit>",
+                "    <!-- Exception: UnwindExit -->",
+                "  </exit>",
+                "  <!-- Exception: UnwindExit -->",
+            ][..]
+        ),
+        "{out}"
+    );
+    assert!(
+        lines.get(1).is_some_and(|l| l.starts_with("<file '")),
+        "{out}"
+    );
+    assert!(
+        lines.last().is_some_and(|l| l.starts_with("</file '")),
+        "{out}"
+    );
+}

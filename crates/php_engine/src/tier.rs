@@ -24,6 +24,7 @@
 use std::sync::atomic::AtomicU32;
 
 use crate::api::abi::Extension;
+use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
 use crate::{exec, interrupt};
 
 pub use crate::api::request::Request;
@@ -223,6 +224,50 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
     answered(req, flow, frame)
 }
 
+/// One entry of the loop, as the engine binds it.
+pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
+
+/// How an engine binds its tier's loop once its declared opcodes are
+/// fixed: [`Loops::bound`] for the tier.
+pub(crate) type BindLoops = fn(&ObservedOpcodes) -> Loops;
+
+/// The loop's three entries, [`execute`], [`reenter`] and [`resume`],
+/// bound to one tier and to one choice of whether declared opcodes are
+/// told: the engine binds them as it starts, once the declared set is
+/// fixed, as php resolves an opline's handler when it compiles it
+/// (design §5.8, §7.1).
+#[derive(Clone, Copy)]
+pub(crate) struct Loops {
+    /// The loop over a serving's entry frame, `execute_ex`.
+    pub(crate) entry: Loop,
+    /// The same loop for a serving inside a serving,
+    /// `zend_call_function` over a user function.
+    pub(crate) reenter: Loop,
+    /// The same loop over a generator's frame the resumption put back.
+    pub(crate) resume: Loop,
+}
+
+impl Loops {
+    /// `T`'s loop for an engine whose declared set is `opcodes`: the
+    /// instantiation that tells the set's observers where an extension
+    /// declared an opcode, and the one with no test where none did.
+    pub(crate) fn bound<T: Tier>(opcodes: &ObservedOpcodes) -> Loops {
+        if opcodes.declares_any() {
+            Loops::of::<T, Declared>()
+        } else {
+            Loops::of::<T, Untold>()
+        }
+    }
+
+    fn of<T: Tier, D: Telling>() -> Loops {
+        Loops {
+            entry: execute::<T, D>,
+            reenter: reenter::<T, D>,
+            resume: resume::<T, D>,
+        }
+    }
+}
+
 /// The dispatch loop over `frame` until the entry frame returns, asking
 /// `T` at the safepoints. `Ok(())` exactly when the entry frame has
 /// returned or left a throwable it did not catch pending; `Err` carries
@@ -243,8 +288,11 @@ fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fat
 /// #1 {main}
 ///   thrown in [no active file] on line 0
 /// ```
-pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
-    serving::<T>(req, frame)
+pub(crate) fn execute<T: Tier, D: Telling>(
+    req: &mut Request,
+    frame: FrameRef,
+) -> Result<(), Fatal> {
+    serving::<T, D>(req, frame)
 }
 
 /// `zend_call_function` over a user function: the same loop on a frame
@@ -253,8 +301,11 @@ pub fn execute<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal>
 /// entry frame did not catch stays pending and `Ok(())` says the
 /// serving is over, not that the frame returned; the caller reads the
 /// pending slot, as php's caller reads `EG(exception)`.
-pub(crate) fn reenter<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
-    serving::<T>(req, frame)
+pub(crate) fn reenter<T: Tier, D: Telling>(
+    req: &mut Request,
+    frame: FrameRef,
+) -> Result<(), Fatal> {
+    serving::<T, D>(req, frame)
 }
 
 /// `zend_generator_resume`'s `zend_execute_ex(generator->execute_data)`
@@ -266,7 +317,7 @@ pub(crate) fn reenter<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(),
 /// is pending, which is how `Generator::throw` raises at the `yield`.
 /// The serving is over when the frame yields, returns, or leaves a
 /// throwable it did not catch pending for the resumer to read.
-pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
+pub(crate) fn resume<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
     if refused_at_entry(req) {
         req.stack_mut().pop_entry(guard);
@@ -277,7 +328,7 @@ pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), 
     } else {
         Stepped::Same(frame)
     };
-    let outcome = serve_from::<T>(req, first);
+    let outcome = serve_from::<T, D>(req, first);
     crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
     outcome
@@ -285,9 +336,9 @@ pub(crate) fn resume<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), 
 
 /// One serving: the entry slot pushed, the loop, the entry slot popped
 /// on the fatal path as on the normal one.
-fn serving<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
+fn serving<T: Tier, D: Telling>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
     let guard = req.stack_mut().push_entry(frame);
-    let outcome = serve::<T>(req, frame);
+    let outcome = serve::<T, D>(req, frame);
     crate::observer::loop_left(req, &outcome);
     req.stack_mut().pop_entry(guard);
     outcome
@@ -296,9 +347,9 @@ fn serving<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<(), Fatal> {
 /// The loop itself, with the entry slot standing. `execute` activates
 /// its own entry frame whatever the caller is, where php installs its
 /// own site (design §4.3 seam 8).
-fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
+fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     if interrupt::check(req)? {
-        return serve_from::<T>(req, Stepped::Threw(entry));
+        return serve_from::<T, D>(req, Stepped::Threw(entry));
     }
     // A throwable raised before any opline of the entry frame ran, where
     // php clears `EG(opline_before_exception)` so that
@@ -314,7 +365,7 @@ fn serve<T: Tier>(req: &mut Request, entry: FrameRef) -> Result<(), Fatal> {
     }
     let flow = T::safepoint(req, entry, Site::Entry);
     let first = answered(req, flow, entry)?;
-    serve_from::<T>(req, first)
+    serve_from::<T, D>(req, first)
 }
 
 /// `execute_ex`'s own check (`Z/Zend/zend_vm_execute.h:116244`), after
@@ -347,9 +398,12 @@ fn refused_at_entry(req: &mut Request) -> bool {
     }
 }
 
-/// The loop from the edge its first step took.
-fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
-    let declared = crate::observer::Declared::of(req);
+/// The loop from the edge its first step took, telling the observers of
+/// declared opcodes as `D` says: [`Untold`] has nothing to tell and no
+/// test, so the loop of an engine where none is declared pays nothing
+/// for them (design §5.8, §7.1).
+fn serve_from<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
+    let declared = D::of(req);
     let mut frame;
     let mut stepped = first;
     loop {

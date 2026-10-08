@@ -1,7 +1,8 @@
-//! Observation of a declared set of opcodes (design §7.1, revision 83,
-//! as #1780 ruled): php's `zend_set_user_opcode_handler` with a handler
-//! that answers `ZEND_USER_OPCODE_DISPATCH`, and nothing else of it. An
-//! extension declares, as the engine starts, which opcodes it observes
+//! Observation of a declared set of opcodes (design §7.1, revisions 83
+//! and 107, as #1780 and #2032 ruled): php's
+//! `zend_set_user_opcode_handler` with a handler that answers
+//! `ZEND_USER_OPCODE_DISPATCH`, and nothing else of it. An extension
+//! declares, as the engine starts, which opcodes it observes
 //! ([`ExtensionBuilder::opcodes`]); the loop tells it of each opline of
 //! one of them before the opcode's handler runs, and the handler always
 //! runs. No extension replaces a handler: every semantic lives in one
@@ -17,16 +18,19 @@
 //! of a passed argument a function with no declared type skips, and not
 //! of the `exception_op` the unwinder serves, whose handler
 //! `zend_startup` resolved before any `MINIT` (`Z/Zend/zend.c:1064`).
-//! The loop tells it where it dispatches ([`Declared::before`]); a
+//! The loop tells it where it dispatches ([`Telling::before`]); a
 //! stepping host's [`crate::tier::step`] where it does, and a frame's
 //! parameter prologue at each `RECV*` it serves, which php's VM
 //! dispatches ([`tell_before`]); so each of those is php's set.
 //!
 //! The declared set is the engine's, fixed as it starts
 //! ([`ObservedOpcodes`]): a unit is shared by every engine and holds no
-//! trace of it. A serving reads it once, as its loop is entered, and
-//! each opline pays one test of what it read; with none declared that
-//! is a word that is zero.
+//! trace of it. So the engine chooses its loop there, as php chooses an
+//! opline's handler when it compiles it: the loop is generic over
+//! [`Telling`], and the engine binds [`Declared`]'s instantiation where
+//! an extension declared an opcode and [`Untold`]'s, which has no test,
+//! where none did (design §5.8). The told loop reads the set once, as
+//! it is entered, and each opline pays one test of what it read.
 //!
 //! [`ExtensionBuilder::opcodes`]: crate::api::abi::ExtensionBuilder::opcodes
 
@@ -128,7 +132,6 @@ pub(crate) struct OpcodeObserver {
 #[derive(Debug, Default)]
 pub(crate) struct ObservedOpcodes {
     any: Opcodes,
-    observing: bool,
     observers: Box<[(Opcodes, OpcodeHandler)]>,
 }
 
@@ -151,58 +154,78 @@ impl ObservedOpcodes {
             .fold(Opcodes::default(), |any, (declared, _)| {
                 any.union(*declared)
             });
-        ObservedOpcodes {
-            any,
-            observing: !any.is_empty(),
-            observers,
-        }
+        ObservedOpcodes { any, observers }
     }
 
-    /// Whether no extension observes any opcode.
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.any.is_empty() && self.observers.is_empty()
+    /// Whether any extension declared an opcode, which chooses the loop
+    /// the engine binds ([`crate::tier::Loops::bound`]).
+    pub(crate) fn declares_any(&self) -> bool {
+        !self.any.is_empty()
     }
 }
 
-/// What one serving read of the declared set as its loop was entered:
-/// the set, and whether it holds any opcode, which is the one test an
-/// opline pays while it holds none.
-#[derive(Clone, Copy)]
-pub(crate) struct Declared {
-    observing: bool,
-    opcodes: Opcodes,
-}
-
-impl Declared {
-    /// The engine's set, read once per serving.
-    #[inline(always)] // read at the loop's entry, outside the loop
-    #[allow(clippy::inline_always)]
-    pub(crate) fn of(req: &Request) -> Declared {
-        Declared {
-            observing: req.shared.opcodes.observing,
-            opcodes: req.shared.opcodes.any,
-        }
-    }
+/// Whether a loop tells the observers of the declared opcodes, a type
+/// the loop is generic over (design §5.8, §7.1): the engine binds one
+/// instantiation as it starts, [`Declared`]'s where an extension
+/// declared an opcode and [`Untold`]'s where none did.
+pub(crate) trait Telling: Copy {
+    /// What a serving reads as its loop is entered.
+    fn of(req: &Request) -> Self;
 
     /// The loop's home: the observers of `opcode` told of the opline
-    /// `frame` stands at, before its handler runs. One test of a word
-    /// while none is declared.
+    /// `frame` stands at, before its handler runs.
+    fn before(self, req: &mut Request, frame: FrameRef, opcode: Opcode);
+}
+
+/// The loop of an engine where no extension declared an opcode: it
+/// reads nothing and tests nothing, as php's VM, whose handlers are
+/// resolved when the opline is compiled, tests nothing for an opcode
+/// with no user handler.
+#[derive(Clone, Copy)]
+pub(crate) struct Untold;
+
+impl Telling for Untold {
+    #[inline(always)] // nothing, so the loop has nothing of it
+    #[allow(clippy::inline_always)]
+    fn of(_: &Request) -> Untold {
+        Untold
+    }
+
+    #[inline(always)] // as `of`
+    #[allow(clippy::inline_always)]
+    fn before(self, _: &mut Request, _: FrameRef, _: Opcode) {}
+}
+
+/// The loop of an engine where an extension declared an opcode: the
+/// engine's set, read once per serving, and one test of it per opline.
+/// [`tell_before`] reads it too, for an opline served outside the loop,
+/// whichever loop the engine bound.
+#[derive(Clone, Copy)]
+pub(crate) struct Declared(Opcodes);
+
+impl Telling for Declared {
+    #[inline(always)] // read at the loop's entry, outside the loop
+    #[allow(clippy::inline_always)]
+    fn of(req: &Request) -> Declared {
+        Declared(req.shared.opcodes.any)
+    }
+
     #[inline(always)] // the loop pays a test and a branch, never a call
     #[allow(clippy::inline_always)]
-    pub(crate) fn before(self, req: &mut Request, frame: FrameRef, opcode: Opcode) {
-        if self.observing && self.opcodes.contains(opcode) {
+    fn before(self, req: &mut Request, frame: FrameRef, opcode: Opcode) {
+        if self.0.contains(opcode) {
             tell(req, frame, opcode);
         }
     }
 }
 
-/// [`Declared::before`] where one opline is dispatched outside the
-/// loop: by a stepping host's [`crate::tier::step`], and by a frame's
+/// [`Telling::before`] where one opline is dispatched outside the loop:
+/// by a stepping host's [`crate::tier::step`], and by a frame's
 /// parameter prologue, which serves the `RECV*` php's VM dispatches
-/// ([`crate::exec::parameter_prologue`]). One load and one branch while
-/// none is declared.
-#[inline(always)] // as `Declared::before`
+/// ([`crate::exec::parameter_prologue`]). Neither is generic over the
+/// loop's choice, so each pays one test of the set, a word that is zero
+/// while none is declared.
+#[inline(always)] // as `Telling::before`
 #[allow(clippy::inline_always)]
 pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {
     Declared::of(req).before(req, frame, opcode);

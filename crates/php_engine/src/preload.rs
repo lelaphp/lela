@@ -104,7 +104,7 @@ impl Engine {
             Err(_) => None,
         };
         let failed = match compiled {
-            Some(Ok(unit)) => !serve_unit(&mut req, &unit, self.shared.entry),
+            Some(Ok(unit)) => !serve_unit(&mut req, &unit, self.shared.loops.entry),
             Some(Err(refused)) => {
                 refused_program(&mut req, &refused, script);
                 true

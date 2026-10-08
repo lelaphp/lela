@@ -142,7 +142,7 @@ impl Request {
         }
         let standing = self.vm.frames().len();
         let callee = self.push_frame(unit)?;
-        let reenter = self.shared.reenter;
+        let reenter = self.shared.loops.reenter;
         let served = self.serve_host_string(|req| reenter(req, callee));
         while self.vm.frames().len() > standing {
             let top = self.stack.current();
@@ -212,7 +212,7 @@ impl Request {
             Some(frame) => self.push_code_frame(unit, frame, None)?,
             None => self.push_frame(unit)?,
         };
-        let reenter = self.shared.reenter;
+        let reenter = self.shared.loops.reenter;
         let served = self.serve_host_string(|req| reenter(req, callee));
         // `zend_leave_helper`'s arm for a nested code frame: its CVs
         // detached into the table it shares with the frame it was
