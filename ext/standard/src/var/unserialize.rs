@@ -2297,6 +2297,17 @@ impl State<'_> {
     }
 
     /// `"E:" uiv ":" ["]`: `Enum:Case`, the case read back.
+    ///
+    /// The class named is `zend_lookup_class`, which asks the autoloaders.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { enum Lazy { case A; } } });
+    /// var_dump(unserialize('E:6:"Lazy:A";'));
+    /// ```
+    /// ```expect
+    /// load Lazy
+    /// enum(Lazy::A)
+    /// ```
     fn enum_case(
         &mut self,
         req: &mut Request,
@@ -2341,7 +2352,7 @@ impl State<'_> {
         if !valid_class_name(enum_name) {
             return Ok(false);
         }
-        let Some(class) = lookup_class(req, enum_name)? else {
+        let Some(class) = autoload(req, enum_name)? else {
             docref(
                 req,
                 Level::Warning,

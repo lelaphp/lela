@@ -1573,6 +1573,22 @@ pub fn passthrough(req: &mut Request, first: Option<Owner<Value>>) -> Result<Own
 /// }
 /// bool(false)
 /// ```
+///
+/// A registered autoloader is not asked; the lookup that asks it is
+/// [`autoload`].
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; });
+/// var_dump(class_parents('Nope', false), class_parents('Nope'));
+/// ```
+/// ```expect
+/// Warning: class_parents(): Class Nope does not exist in %s on line 3
+/// load Nope
+///
+/// Warning: class_parents(): Class Nope does not exist and could not be loaded in %s on line 3
+/// bool(false)
+/// bool(false)
+/// ```
 pub fn lookup_class(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     Ok(req.class_named(name.strip_prefix(b"\\").unwrap_or(name)))
 }

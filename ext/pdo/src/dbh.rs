@@ -9,7 +9,7 @@ use php_ext::abi::{
     Instance, Lent, ObjectHandlers, OrFalse, Passed, Pool, Refusals, Static, Std, This, Variadic,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{Function, known_method, lookup_class, new_object};
+use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::decl::Name;
 use php_ext::raising::{
@@ -1082,6 +1082,19 @@ fn set_statement_class(
 /// value names, held to php's refusals; `arg` is the argument
 /// `setAttribute()` names, `None` for `prepare()`'s options, whose
 /// refusals name none.
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy extends PDOStatement { protected function __construct() {} } } });
+/// $db = new PDO('sqlite::memory:');
+/// $db->setAttribute(PDO::ATTR_STATEMENT_CLASS, ['Lazy']);
+/// echo get_class($db->query('SELECT 1')), "\n";
+/// ```
+/// ```expect
+/// load Lazy
+/// Lazy
+/// ```
 pub(super) fn statement_class(
     req: &mut Request,
     value: &Value,
@@ -1106,7 +1119,7 @@ pub(super) fn statement_class(
         });
     };
     let class = match first.deref().as_str_bytes().map(<[u8]>::to_vec) {
-        Some(name) => lookup_class(req, &name)?,
+        Some(name) => autoload(req, &name)?,
         None => None,
     };
     let Some(class) = class else {

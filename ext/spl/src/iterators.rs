@@ -20,7 +20,8 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{
-    Function, Iter, call, call_method, instantiate, iterate, known_method, lookup_class, read_prop,
+    Function, Iter, autoload, call, call_method, instantiate, iterate, known_method, lookup_class,
+    read_prop,
 };
 use php_ext::coerce::{coerce_param, to_string, truthy, with_string};
 use php_ext::decl::{Name, Type};
@@ -740,6 +741,17 @@ impl IteratorIterator {
     /// 3
     /// Class to downcast to not found or not base class or does not implement Traversable
     /// ```
+    ///
+    /// The class named is `zend_lookup_class`, which asks the autoloaders.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "load $c\n"; });
+    /// try { new IteratorIterator(new ArrayObject([1]), 'Nope'); } catch (LogicException $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// load Nope
+    /// Class to downcast to not found or not base class or does not implement Traversable
+    /// ```
     #[php(arity = manual)]
     fn __construct(
         req: &mut Request,
@@ -755,7 +767,7 @@ impl IteratorIterator {
         if !crate::is_a(req, cast, b"Iterator")
             && let Some(name) = class.hold(req)?
         {
-            match lookup_class(req, name.as_bytes())? {
+            match autoload(req, name.as_bytes())? {
                 Some(to)
                     if crate::class_is(req, cast, to, 0)
                         && crate::is_a(req, to, b"Traversable") =>

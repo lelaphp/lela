@@ -709,6 +709,19 @@ fn schema_validate_as(
 }
 
 /// `dom_document_register_node_class`.
+///
+/// Both classes are `Z_PARAM_CLASS`, `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy extends DOMElement {} } });
+/// $doc = new DOMDocument;
+/// $doc->registerNodeClass('DOMElement', 'Lazy');
+/// echo get_class($doc->createElement('a')), "\n";
+/// ```
+/// ```expect
+/// load Lazy
+/// Lazy
+/// ```
 fn register_node_class_as(
     req: &mut Request,
     this: PhpObject,
@@ -719,7 +732,7 @@ fn register_node_class_as(
     let this = crate::intern(req, this)?;
     let node_name = if modern { "Dom\\Node" } else { "DOMNode" };
     let node_class = crate::class(req, node_name)?;
-    let base = match php_ext::call::lookup_class(req, base_name)? {
+    let base = match php_ext::call::autoload(req, base_name)? {
         Some(c) if req.class_decl(c).is_some() && crate::class_extends(req, c, node_class) => c,
         Some(c) => {
             let shown = crate::class_name(req, c);
@@ -741,7 +754,7 @@ fn register_node_class_as(
     let extended = match extended {
         None => None,
         Some(name) => {
-            if let Some(c) = php_ext::call::lookup_class(req, name)? {
+            if let Some(c) = php_ext::call::autoload(req, name)? {
                 Some(c)
             } else {
                 let shown = String::from_utf8_lossy(name).into_owned();

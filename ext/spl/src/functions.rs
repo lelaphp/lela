@@ -25,10 +25,11 @@ fn subject(req: &mut Request, given: Value, autoloading: bool) -> Result<Option<
         ValueRef::Object(object) => Ok(Some(object.class())),
         ValueRef::Str(name) => {
             let name = name.as_bytes().to_vec();
-            let mut found = lookup_class(req, &name)?;
-            if found.is_none() && autoloading {
-                found = autoload(req, &name)?;
-            }
+            let found = if autoloading {
+                autoload(req, &name)?
+            } else {
+                lookup_class(req, &name)?
+            };
             if found.is_none() {
                 let tail = if autoloading {
                     " and could not be loaded"
