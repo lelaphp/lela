@@ -292,6 +292,12 @@ impl Request {
         Heap::array_del(&mut Hooks(self), a, key)
     }
 
+    /// `zend_hash_clean` over `a`, which has one owner
+    /// ([`Heap::array_clean`]).
+    pub(crate) fn array_clean(&mut self, a: Arr) {
+        Heap::array_clean(&mut Hooks(self), a);
+    }
+
     /// `zend_array_dup`: a copy of `a` with one owner.
     pub(crate) fn array_dup(&mut self, a: Arr) -> Result<Arr, Thrown> {
         let copied = self.heap.array_dup(a);
