@@ -41,7 +41,6 @@ mod timezone;
 mod tzdb;
 mod zone;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
@@ -57,7 +56,7 @@ use crate::classes::{
     DateMalformedStringException, DateObjectError, DateRangeError, DateTimeInterface,
 };
 use crate::datetime::{DateTime, DateTimeImmutable};
-use crate::ffi::{Errors, Tzdb};
+use crate::ffi::{Errors, Tzdb, Zones};
 pub use crate::ffi::{Offset, Zone};
 use crate::interval::DateInterval;
 pub use crate::obj::TzKind;
@@ -72,8 +71,8 @@ struct State {
     /// `DATEG(timezone)`, what `date_default_timezone_set` set.
     timezone: Option<Vec<u8>>,
     /// `DATEG(tzcache)`: every zone the request parsed, by the name it
-    /// was asked for.
-    zones: HashMap<Vec<u8>, Arc<Zone>>,
+    /// was asked for, the parsers' wrapper's among them.
+    zones: Zones,
     /// `DATEG(last_errors)`: the messages of the last parse that had any.
     last_errors: Option<Errors>,
 }
