@@ -523,10 +523,15 @@ pub(crate) struct IntlException;
 #[php_class]
 impl IntlException {}
 
-/// A `zend_long` cast to `UErrorCode`, C's truncation to its low 32 bits.
-pub(crate) fn code_of(n: i64) -> Code {
+/// A `zend_long` cast to `int32_t`, C's truncation to its low 32 bits.
+pub(crate) fn truncated(n: i64) -> i32 {
     let b = n.to_le_bytes();
-    Code(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    i32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// A `zend_long` cast to `UErrorCode`.
+pub(crate) fn code_of(n: i64) -> Code {
+    Code(truncated(n))
 }
 
 /// `intl_get_error_code(): int`: the request's last code.

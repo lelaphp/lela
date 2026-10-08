@@ -4,7 +4,7 @@
 //! check reads `uspoof_check2UTF8` into the object's `USpoofCheckResult`, and a
 //! new checker starts at `USPOOF_HIGHLY_RESTRICTIVE`.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, Ref, This, Untyped};
+use php_ext::abi::{CloneObj, ObjectHandlers, Raw, Ref, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::clone_with;
 use php_ext::raising::{
@@ -13,61 +13,59 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 
-use crate::error::{self, Carrier, IntlError};
+use crate::error;
 use crate::ffi::spoofchecker::{self as uspoof, CheckResult, Checker, Set};
 use crate::ffi::{self, Code, c_string};
 
 type Answer<T> = Result<T, Thrown>;
 
-/// `USPOOF_HIGHLY_RESTRICTIVE`, `SPOOFCHECKER_DEFAULT_RESTRICTION_LEVEL`.
-const HIGHLY_RESTRICTIVE: i32 = 0x3000_0000;
-
-/// The `URestrictionLevel`s `setRestrictionLevel` takes, `USPOOF_ASCII`
-/// to `USPOOF_UNRESTRICTIVE`.
+/// The `URestrictionLevel`s `setRestrictionLevel` takes.
 const LEVELS: [i64; 6] = [
-    0x1000_0000,
-    0x2000_0000,
-    0x3000_0000,
-    0x4000_0000,
-    0x5000_0000,
-    0x6000_0000,
+    Spoofchecker::ASCII,
+    Spoofchecker::SINGLE_SCRIPT_RESTRICTIVE,
+    Spoofchecker::HIGHLY_RESTRICTIVE,
+    Spoofchecker::MODERATELY_RESTRICTIVE,
+    Spoofchecker::MINIMALLY_RESTRICTIVE,
+    Spoofchecker::UNRESTRICTIVE,
 ];
 
 /// The `uset_applyPattern` options `setAllowedChars` takes: none, or
-/// `USET_IGNORE_SPACE` alone or with `USET_SIMPLE_CASE_INSENSITIVE`,
-/// `USET_CASE_INSENSITIVE` or `USET_ADD_CASE_MAPPINGS`.
-const PATTERN_OPTIONS: [i64; 5] = [0, 1, 1 | 6, 1 | 2, 1 | 4];
+/// `IGNORE_SPACE` alone or with one of the three case options.
+const PATTERN_OPTIONS: [i64; 5] = [
+    0,
+    Spoofchecker::IGNORE_SPACE,
+    Spoofchecker::IGNORE_SPACE | Spoofchecker::SIMPLE_CASE_INSENSITIVE,
+    Spoofchecker::IGNORE_SPACE | Spoofchecker::CASE_INSENSITIVE,
+    Spoofchecker::IGNORE_SPACE | Spoofchecker::ADD_CASE_MAPPINGS,
+];
 
-/// `Spoofchecker_object` past its `zend_object`: the error, the checker
-/// a constructor opened and the `USpoofCheckResult` it opened beside it, which
-/// a clone does not carry.
+/// `Spoofchecker_object` past its `zend_object`: the checker a
+/// constructor opened and the `USpoofCheckResult` it opened beside it,
+/// which a clone does not carry. php's `intl_error` is left out: no
+/// method of the class reads it, and only the request's is reset.
 #[derive(Default)]
 pub(crate) struct SpoofObject {
-    error: IntlError,
     uspoof: Option<Checker>,
     result: Option<CheckResult>,
 }
 
-impl Carrier for SpoofObject {
-    fn error(&mut self) -> &mut IntlError {
-        &mut self.error
-    }
+/// `SPOOFCHECKER_METHOD_FETCH_OBJECT`: php's `Error` where no
+/// constructor opened a checker.
+fn constructed(req: &mut Request, object: PhpObject) -> Answer<()> {
+    with(req, object, |_, _| ())
 }
 
-/// `SPOOFCHECKER_METHOD_INIT_VARS` and `SPOOFCHECKER_METHOD_FETCH_OBJECT`:
-/// both errors reset, then `f` over the payload, or php's `Error` where
-/// no constructor opened a checker.
+/// `f` over the object's checker and its `USpoofCheckResult`, or php's `Error`
+/// where no constructor opened a checker.
 fn with<T>(
     req: &mut Request,
     object: PhpObject,
     f: impl FnOnce(&mut Checker, Option<&mut CheckResult>) -> T,
 ) -> Answer<T> {
-    error::errors_reset::<SpoofObject>(req, object);
     match object.native_mut::<SpoofObject>(req) {
         Some(SpoofObject {
             uspoof: Some(checker),
             result,
-            ..
         }) => Ok(f(checker, result.as_mut())),
         _ => Err(throw_error(
             req,
@@ -77,10 +75,8 @@ fn with<T>(
     }
 }
 
-/// What ICU left in the object's code, which no method of the class
-/// reads: where it is a failure, php's `(<code>) <name>` warning and
-/// `true`.
-fn failed(req: &mut Request, status: Code) -> bool {
+/// php's `(<code>) <name>` warning where ICU failed; whether it did.
+fn warn_on_failure(req: &mut Request, status: Code) -> bool {
     if status.is_failure() {
         let message = format!("({}) {}", status.0, status.name());
         docref(req, Level::Warning, &message);
@@ -114,21 +110,21 @@ fn clone_checker(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject
         .native::<SpoofObject>(req)
         .and_then(|o| o.uspoof.as_ref())
         .map(|checker| checker.try_clone(&mut status));
-    let message = match &copy {
-        None => "Cannot clone uninitialized SpoofChecker",
-        Some(_) if status.is_failure() => "Failed to clone SpoofChecker",
-        Some(_) => "",
+    let refusal = match &copy {
+        None => Some("Cannot clone uninitialized SpoofChecker"),
+        Some(_) if status.is_failure() => Some("Failed to clone SpoofChecker"),
+        Some(_) => None,
     };
     let payload = SpoofObject {
         uspoof: copy.flatten(),
         ..SpoofObject::default()
     };
     let new = clone_with(req, &object, payload)?;
-    if message.is_empty() {
+    let Some(refusal) = refusal else {
         return Ok(new);
-    }
+    };
     new.give_up(req);
-    Err(throw_error(req, "Error", message))
+    Err(throw_error(req, "Error", refusal))
 }
 
 /// `class Spoofchecker`: ICU's spoof checker, which tells whether a
@@ -154,6 +150,9 @@ fn clone_checker(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject
 /// try { clone $u; } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// class Typed { public string $x = ''; }
 /// $t = new Typed; $s->areConfusable('a', 'a', $t->x); var_dump($t->x);
+/// resourcebundle_create('en', 'nope');
+/// try { new Spoofchecker(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
 /// ```
 /// ```expect
 /// bool(true)
@@ -180,6 +179,8 @@ fn clone_checker(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject
 /// Found unconstructed Spoofchecker
 /// Cannot clone uninitialized SpoofChecker
 /// string(1) "1"
+/// Spoofchecker::__construct() expects exactly 0 arguments, 1 given
+/// int(0)
 /// ```
 #[php_class(not_serializable, size = 88, payload = SpoofObject, handlers = crate::spoofchecker::HANDLERS)]
 pub(crate) struct Spoofchecker;
@@ -209,9 +210,10 @@ impl Spoofchecker {
 
     /// `uspoof_open`, at `USPOOF_HIGHLY_RESTRICTIVE`, with a
     /// `USpoofCheckResult` beside it; php's `IntlException` where ICU opened none.
+    #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Answer<()> {
         let object = this.object();
-        error::errors_reset::<SpoofObject>(req, object);
+        error::init_vars(req, 0, 0)?;
         if object
             .native::<SpoofObject>(req)
             .is_some_and(|o| o.uspoof.is_some())
@@ -224,7 +226,7 @@ impl Spoofchecker {
             let message = "Spoofchecker::__construct(): unable to open ICU Spoof Checker";
             return Err(throw(req, "IntlException", message));
         };
-        checker.set_restriction_level(HIGHLY_RESTRICTIVE);
+        checker.set_restriction_level(crate::truncated(Spoofchecker::HIGHLY_RESTRICTIVE));
         let result = CheckResult::open(&mut status);
         if let Some(o) = object.native_mut::<SpoofObject>(req) {
             o.uspoof = Some(checker);
@@ -233,13 +235,15 @@ impl Spoofchecker {
         Ok(())
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn isSuspicious(
         req: &mut Request,
         this: This<Self>,
-        string: PhpString,
+        string: Raw<PhpString>,
         #[php(default = null)] errorCode: Ref<Untyped<Value>>,
     ) -> Answer<bool> {
+        error::init_vars(req, 1, 2)?;
+        let string = string.hold(req)?;
         let object = this.object();
         let mut status = Code::ZERO;
         let (checks, mask) = with(req, object, |checker, mut result| {
@@ -247,7 +251,7 @@ impl Spoofchecker {
             let mut code = status;
             (checks, uspoof::result_checks(result.as_deref(), &mut code))
         })?;
-        if failed(req, status) {
+        if warn_on_failure(req, status) {
             if mask != checks {
                 let message = format!(
                     "unexpected error ({checks}), does not relate to the flags passed to setChecks ({mask})"
@@ -260,70 +264,84 @@ impl Spoofchecker {
         Ok(checks != 0)
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn areConfusable(
         req: &mut Request,
         this: This<Self>,
-        string1: PhpString,
-        string2: PhpString,
+        string1: Raw<PhpString>,
+        string2: Raw<PhpString>,
         #[php(default = null)] errorCode: Ref<Untyped<Value>>,
     ) -> Answer<bool> {
+        error::init_vars(req, 2, 3)?;
+        let (string1, string2) = (string1.hold(req)?, string2.hold(req)?);
         let object = this.object();
         let mut status = Code::ZERO;
         let checks = with(req, object, |checker, _| {
             checker.confusable(string1.as_bytes(), string2.as_bytes(), &mut status)
         })?;
-        if failed(req, status) {
+        if warn_on_failure(req, status) {
             return Ok(true);
         }
         assign(req, &errorCode, checks)?;
         Ok(checks != 0)
     }
 
-    #[php(tentative)]
-    fn setAllowedLocales(req: &mut Request, this: This<Self>, locales: PhpString) -> Answer<()> {
+    #[php(tentative, arity = manual)]
+    fn setAllowedLocales(
+        req: &mut Request,
+        this: This<Self>,
+        locales: Raw<PhpString>,
+    ) -> Answer<()> {
+        error::init_vars(req, 1, 1)?;
+        let locales = c_string(locales.hold(req)?.as_bytes());
         let object = this.object();
-        let locales = c_string(locales.as_bytes());
         let mut status = Code::ZERO;
         with(req, object, |checker, _| {
             checker.set_allowed_locales(&locales, &mut status);
         })?;
-        failed(req, status);
+        warn_on_failure(req, status);
         Ok(())
     }
 
-    #[php(tentative)]
-    fn setChecks(req: &mut Request, this: This<Self>, checks: i64) -> Answer<()> {
+    #[php(tentative, arity = manual)]
+    fn setChecks(req: &mut Request, this: This<Self>, checks: Raw<i64>) -> Answer<()> {
+        error::init_vars(req, 1, 1)?;
+        let checks = checks.hold(req)?;
         let object = this.object();
         let mut status = Code::ZERO;
         with(req, object, |checker, _| {
-            checker.set_checks(crate::code_of(checks).0, &mut status);
+            checker.set_checks(crate::truncated(checks), &mut status);
         })?;
-        failed(req, status);
+        warn_on_failure(req, status);
         Ok(())
     }
 
-    #[php(tentative)]
-    fn setRestrictionLevel(req: &mut Request, this: This<Self>, level: i64) -> Answer<()> {
+    #[php(tentative, arity = manual)]
+    fn setRestrictionLevel(req: &mut Request, this: This<Self>, level: Raw<i64>) -> Answer<()> {
+        error::init_vars(req, 1, 1)?;
+        let level = level.hold(req)?;
         let object = this.object();
-        with(req, object, |_, _| ())?;
+        constructed(req, object)?;
         if !LEVELS.contains(&level) {
             let message = "be one of Spoofchecker::ASCII, Spoofchecker::SINGLE_SCRIPT_RESTRICTIVE, Spoofchecker::HIGHLY_RESTRICTIVE, Spoofchecker::MODERATELY_RESTRICTIVE, Spoofchecker::MINIMALLY_RESTRICTIVE, or Spoofchecker::UNRESTRICTIVE";
             return Err(arg_value_error(req, 1, message));
         }
         with(req, object, |checker, _| {
-            checker.set_restriction_level(crate::code_of(level).0);
+            checker.set_restriction_level(crate::truncated(level));
         })
     }
 
+    #[php(arity = manual)]
     fn setAllowedChars(
         req: &mut Request,
         this: This<Self>,
-        pattern: PhpString,
-        #[php(default = 0)] patternOptions: i64,
+        pattern: Raw<PhpString>,
+        #[php(default = 0)] patternOptions: Raw<i64>,
     ) -> Answer<()> {
+        error::init_vars(req, 1, 2)?;
+        let (pattern, patternOptions) = (pattern.hold(req)?, patternOptions.hold(req)?);
         let object = this.object();
-        with(req, object, |_, _| ())?;
+        constructed(req, object)?;
         let pattern = pattern.as_bytes();
         if ffi::length(pattern.len()).is_err() {
             let message = "be less than or equal to 2147483647 bytes long";
@@ -361,7 +379,7 @@ impl Spoofchecker {
         with(req, object, |checker, _| {
             checker.set_allowed_chars(&set, &mut status);
         })?;
-        failed(req, status);
+        warn_on_failure(req, status);
         Ok(())
     }
 }
