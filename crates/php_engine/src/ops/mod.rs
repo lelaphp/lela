@@ -5157,25 +5157,7 @@ fn numbers(
     left: &Value,
     right: &Value,
 ) -> Result<(Number, Number), Thrown> {
-    let (left, right) = (&left.deref(), &right.deref());
-    let unsupported = |req: &mut Request| {
-        throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Unsupported operand types: {} {operator} {}",
-                zval_type_name(req, left),
-                zval_type_name(req, right)
-            ),
-        )
-    };
-    let Some(a) = to_number(req, left)? else {
-        return Err(unsupported(req));
-    };
-    let Some(b) = to_number(req, right)? else {
-        return Err(unsupported(req));
-    };
-    Ok((a, b))
+    operands(req, operator, left, right, to_number)
 }
 
 /// Both operands as `convert_op1_op2_long` converts them, which is
@@ -5188,25 +5170,31 @@ fn longs(
     left: &Value,
     right: &Value,
 ) -> Result<(i64, i64), Thrown> {
+    operands(req, operator, left, right, to_long)
+}
+
+/// Both operands as `convert` converts them, the left first, or
+/// `zend_binop_error`'s `TypeError` for the first that fails, naming
+/// php's types around the operator as written.
+fn operands<T>(
+    req: &mut Request,
+    operator: &str,
+    left: &Value,
+    right: &Value,
+    convert: fn(&mut Request, &Value) -> Result<Option<T>, Thrown>,
+) -> Result<(T, T), Thrown> {
     let (left, right) = (&left.deref(), &right.deref());
-    let unsupported = |req: &mut Request| {
-        throw_error(
-            req,
-            "TypeError",
-            &format!(
-                "Unsupported operand types: {} {operator} {}",
-                zval_type_name(req, left),
-                zval_type_name(req, right)
-            ),
-        )
-    };
-    let Some(a) = to_long(req, left)? else {
-        return Err(unsupported(req));
-    };
-    let Some(b) = to_long(req, right)? else {
-        return Err(unsupported(req));
-    };
-    Ok((a, b))
+    if let Some(a) = convert(req, left)?
+        && let Some(b) = convert(req, right)?
+    {
+        return Ok((a, b));
+    }
+    let message = format!(
+        "Unsupported operand types: {} {operator} {}",
+        zval_type_name(req, left),
+        zval_type_name(req, right)
+    );
+    Err(throw_error(req, "TypeError", &message))
 }
 
 /// `zendi_try_get_long`: the long php works in, or nothing for an array,
