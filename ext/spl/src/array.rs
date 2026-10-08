@@ -26,7 +26,7 @@ use php_ext::abi::{
     True, Union,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{call, call_method, clone_with, instantiate, lookup_class};
+use php_ext::call::{autoload, call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{Level, Thrown, deprecated, throw, throw_error, warning};
 use php_ext::request::Request;
@@ -775,6 +775,19 @@ impl ArrayObject {
     /// ```expect
     /// 17352 568
     /// ```
+    ///
+    /// The class named is `zend_lookup_class`, which asks the autoloaders.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'It') { class It extends ArrayIterator {} } });
+    /// $a = new ArrayObject([1]);
+    /// $a->__unserialize([0, [], [], 'It']);
+    /// echo $a->getIteratorClass(), "\n";
+    /// ```
+    /// ```expect
+    /// load It
+    /// It
+    /// ```
     #[php(tentative)]
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();
@@ -814,7 +827,7 @@ impl ArrayObject {
         crate::load_members(req, this, &members)?;
         if let Some(name) = class.and_then(|c| c.as_str_bytes().map(<[u8]>::to_vec)) {
             let shown = String::from_utf8_lossy(&name).into_owned();
-            let Some(found) = lookup_class(req, &name)? else {
+            let Some(found) = autoload(req, &name)? else {
                 return Err(throw(
                     req,
                     "UnexpectedValueException",
@@ -1276,7 +1289,7 @@ impl RecursiveArrayIterator {
             if flags & Self::CHILD_ARRAYS_ONLY != 0 {
                 return Ok(None);
             }
-            if crate::class_is(req, object.class(), this.class(), 0) {
+            if req.instance_of(object.class(), this.class()) {
                 return Ok(Some(Owner::take(req, object).into_instance()));
             }
         }
@@ -2676,10 +2689,7 @@ fn iterator_class_argument(
     name: PhpString,
     position: u32,
 ) -> Result<ClassId, Thrown> {
-    let found = match lookup_class(req, name.as_bytes())? {
-        Some(found) => Some(found),
-        None => php_ext::call::autoload(req, name.as_bytes())?,
-    };
+    let found = autoload(req, name.as_bytes())?;
     match found {
         Some(class) if crate::is_a(req, class, b"ArrayIterator") => Ok(class),
         _ => {

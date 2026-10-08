@@ -13,7 +13,7 @@
 
 use php_ext::abi::{Instance, This, Union, Untyped};
 use php_ext::attr::php_class;
-use php_ext::call::{autoload, eval_const_expr, eval_declared, lookup_class};
+use php_ext::call::{Function, autoload, eval_const_expr, eval_declared, lookup_class};
 use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
 use php_ext::raising::{Thrown, throw, throw_error};
@@ -38,17 +38,19 @@ pub(super) enum FunctionRef {
     Global(Vec<u8>),
     Method(ClassId, Vec<u8>),
     Closure(PhpObject),
-    Invoke(Option<PhpObject>),
+    /// A closure's `__invoke`, over the closure's function
+    /// ([`super::HeldMethod::Invoke`]).
+    Invoke(Option<Function>),
 }
 
 impl FunctionRef {
     /// The closure a reflector over this function holds as php's
-    /// `intern->obj`: the closure itself, or the one its `__invoke` was
-    /// made over, which the declaration is read back off.
+    /// `intern->obj`, which the declaration is read back off; none for
+    /// a closure's `__invoke`, whose trampoline borrows the function.
     fn closure(&self) -> Option<PhpObject> {
         match *self {
-            FunctionRef::Closure(closure) | FunctionRef::Invoke(Some(closure)) => Some(closure),
-            FunctionRef::Global(_) | FunctionRef::Method(..) | FunctionRef::Invoke(None) => None,
+            FunctionRef::Closure(closure) => Some(closure),
+            FunctionRef::Global(_) | FunctionRef::Method(..) | FunctionRef::Invoke(_) => None,
         }
     }
 }
@@ -527,8 +529,8 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                     ),
                 ));
             };
-            if found.via_handler {
-                FunctionRef::Invoke(object)
+            if let Some(super::HeldMethod::Invoke(function)) = found.held {
+                FunctionRef::Invoke(function)
             } else {
                 FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
             }
@@ -707,13 +709,28 @@ pub(super) fn this_function(
     // the declaration back off it with `zend_get_closure_method_def`,
     // since the `{closure:…}` name is in no table to look up. A method
     // reflector keeps one for a closure with a scope, whose parameter's
-    // `getDeclaringFunction` made it, and for the closure's `__invoke`,
-    // which the lookup below reaches.
+    // `getDeclaringFunction` made it.
     if let Some(closure) = kept
         && let Some(decl) = closure_decl(req, closure)
         && (scope.is_none() || decl.name.0.as_ref() == name.as_slice())
     {
         return Ok((FunctionRef::Closure(closure), decl));
+    }
+    // `intern->ptr`, the method a `ReflectionMethod`'s constructor or
+    // factory found, read as php reads it: no lookup by name again.
+    match super::kept_method(req, this) {
+        Some(super::HeldMethod::Row(row)) => {
+            if let Some(method) = req.row_method(row) {
+                let decl = method.function.clone();
+                return Ok((FunctionRef::Method(row.scope(), decl.name.0.to_vec()), decl));
+            }
+        }
+        Some(super::HeldMethod::Invoke(function)) => {
+            if let Some(invoke) = super::closure_invoke(req, function) {
+                return Ok((FunctionRef::Invoke(function), invoke.decl.function));
+            }
+        }
+        None => {}
     }
     let function = if let Some(scope) = scope {
         {
@@ -741,8 +758,8 @@ pub(super) fn this_function(
                     ),
                 ));
             };
-            if found.via_handler {
-                FunctionRef::Invoke(kept)
+            if let Some(super::HeldMethod::Invoke(function)) = found.held {
+                FunctionRef::Invoke(function)
             } else {
                 FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
             }
@@ -1042,15 +1059,16 @@ impl ReflectionParameter {
                 object
             }
             // `reflection_method_factory` over the `__invoke` the parameter
-            // belongs to, keeping the closure it was made over.
-            FunctionRef::Invoke(closure) => {
-                let closure = *closure;
+            // belongs to, the trampoline over the closure's function.
+            FunctionRef::Invoke(function) => {
+                let function = *function;
                 let class = class_named(req, b"ReflectionMethod")?;
                 let object = new_object(req, class)?;
                 set_name(req, *object, b"__invoke")?;
                 set_string_prop(req, *object, b"class", b"Closure")?;
                 let scope = class_named(req, b"Closure")?;
-                super::keep(req, *object, scope, closure);
+                super::keep(req, *object, scope, None);
+                super::keep_method(req, *object, Some(super::HeldMethod::Invoke(function)));
                 object
             }
         };

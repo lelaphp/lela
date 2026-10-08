@@ -2206,8 +2206,19 @@ impl ReflectionClassConstant {
     }
 }
 
-/// `ReflectionConstant` as the stub declares it.
-#[php_class(implements(crate::Reflector), not_serializable, size = 96)]
+/// `ReflectionConstant` as the stub declares it, `@strict-properties`
+/// among its flags: a write of an undeclared property is php's `Error`.
+///
+/// ```php
+/// $r = new ReflectionConstant("PHP_VERSION");
+/// try { $r->x = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(isset($r->x));
+/// ```
+/// ```expect
+/// Cannot create dynamic property ReflectionConstant::$x
+/// bool(false)
+/// ```
+#[php_class(implements(crate::Reflector), not_serializable, size = 96, dynamic_properties = forbidden)]
 pub(crate) struct ReflectionConstant;
 
 #[php_class]

@@ -488,6 +488,7 @@ raising::throw
 raising::throw_at
 raising::throw_chained
 raising::throw_error
+raising::throw_error_chained
 raising::throw_value
 raising::throwing_warnings
 raising::too_few_arguments
@@ -661,6 +662,7 @@ request::Request::caller_var
 request::Request::captured
 request::Request::cfg_entry
 request::Request::check_open_basedir
+request::Request::class_constant_of
 request::Request::class_decl
 request::Request::class_extension
 request::Request::class_extension_name
@@ -675,6 +677,7 @@ request::Request::connection_status
 request::Request::constant_attributes
 request::Request::constant_file
 request::Request::constants
+request::Request::constants_in_order
 request::Request::content_type
 request::Request::core_ini_info
 request::Request::ctype_locale
@@ -755,6 +758,7 @@ request::Request::ini_stage
 request::Request::ini_value
 request::Request::input_bytes
 request::Request::input_variables
+request::Request::instance_of
 request::Request::instantiable
 request::Request::interfaces
 request::Request::interrupt
@@ -813,6 +817,7 @@ request::Request::restore_error_handler
 request::Request::restore_exception_handler
 request::Request::return_value_used
 request::Request::row_method
+request::Request::row_prototype
 request::Request::running_handler_flags
 request::Request::sapi_name
 request::Request::scope

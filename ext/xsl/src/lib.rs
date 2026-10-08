@@ -26,7 +26,7 @@ use php_ext::abi::{
     Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True, Union,
 };
 use php_ext::attr::{php_class, php_const};
-use php_ext::call::{lookup_class, new_object};
+use php_ext::call::{autoload, lookup_class, new_object};
 use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw_error,
@@ -695,6 +695,23 @@ impl XSLTProcessor {
     /// XSLTProcessor::transformToDoc(): Argument #2 ($returnClass) must be a class name compatible with DOMDocument, stdClass given
     /// XSLTProcessor::transformToDoc() can only be called after a stylesheet has been imported
     /// ```
+    ///
+    /// The class named is `zend_lookup_class`, which asks the autoloaders.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy extends DOMDocument {} } });
+    /// $xsl = new DOMDocument;
+    /// $xsl->loadXML('<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:template match="/"><b/></xsl:template></xsl:stylesheet>');
+    /// $p = new XSLTProcessor;
+    /// $p->importStylesheet($xsl);
+    /// $doc = new DOMDocument;
+    /// $doc->loadXML('<a/>');
+    /// echo get_class($p->transformToDoc($doc, 'Lazy')), "\n";
+    /// ```
+    /// ```expect
+    /// load Lazy
+    /// Lazy
+    /// ```
     #[php(tentative)]
     fn transformToDoc(
         req: &mut Request,
@@ -705,7 +722,7 @@ impl XSLTProcessor {
         let this = this.object();
         let class = match returnClass {
             Some(name) => {
-                let found = lookup_class(req, name.as_bytes())?;
+                let found = autoload(req, name.as_bytes())?;
                 if found.is_none() {
                     let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
                     let tail = format!("be a valid class name or null, {shown} given");

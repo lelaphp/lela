@@ -25,6 +25,7 @@ Row
 Row::holder_in
 Rows
 Rows::find
+Rows::find_at
 Rows::rows
 Site
 TentativeReturn

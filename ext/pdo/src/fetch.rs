@@ -7,7 +7,7 @@
 //! `setFetchMode()` over it.
 
 use php_ext::abi::{Callable, ClassRef, OrFalse, Raw, True};
-use php_ext::call::{call, call_array, known_method, lookup_class, new_object};
+use php_ext::call::{autoload, call, call_array, known_method, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{
@@ -552,6 +552,21 @@ fn made(
 /// without its constructor, which `FETCH_PROPS_LATE` serves now; with
 /// the class. `None` where php refuses the fetch, its error raised on
 /// the statement.
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy { public $a; } } });
+/// $db = new PDO('sqlite::memory:');
+/// var_dump($db->query("SELECT 'Lazy' AS c, 1 AS a")->fetch(PDO::FETCH_CLASS | PDO::FETCH_CLASSTYPE));
+/// ```
+/// ```expect
+/// load Lazy
+/// object(Lazy)#4 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// ```
 fn class_object(
     req: &mut Request,
     object: PhpObject,
@@ -571,7 +586,7 @@ fn class_object(
         let bytes = name.as_str_bytes().map(<[u8]>::to_vec);
         name.give_up(req);
         let found = match bytes {
-            Some(name) => lookup_class(req, &name)?,
+            Some(name) => autoload(req, &name)?,
             None => named.map(|(class, _)| class),
         };
         match found {
@@ -1213,6 +1228,22 @@ pub(super) fn setup_mode(
 /// `setup_fetch_mode`'s `FETCH_CLASS` arm: the class the first argument
 /// names and the constructor arguments the second may give, held to
 /// php's counts and types.
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy { public $a; } } });
+/// $s = (new PDO('sqlite::memory:'))->query('SELECT 1 AS a');
+/// $s->setFetchMode(PDO::FETCH_CLASS, 'Lazy');
+/// var_dump($s->fetch());
+/// ```
+/// ```expect
+/// load Lazy
+/// object(Lazy)#4 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// ```
 fn class_target(
     req: &mut Request,
     args: &[Value],
@@ -1242,7 +1273,7 @@ fn class_target(
             &format!("must be of type string, {shown} given"),
         ));
     };
-    let Some(class) = lookup_class(req, &name)? else {
+    let Some(class) = autoload(req, &name)? else {
         return Err(argument_error(
             req,
             "TypeError",
@@ -1347,6 +1378,20 @@ pub(super) fn fetch(
 }
 
 /// `PDOStatement::fetch_object`'s body, its arguments held by the method.
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy { public $a; } } });
+/// var_dump((new PDO('sqlite::memory:'))->query('SELECT 1 AS a')->fetchObject('Lazy'));
+/// ```
+/// ```expect
+/// load Lazy
+/// object(Lazy)#4 (1) {
+///   ["a"]=>
+///   int(1)
+/// }
+/// ```
 pub(super) fn fetch_object(
     req: &mut Request,
     this: PhpObject,
@@ -1356,7 +1401,7 @@ pub(super) fn fetch_object(
     let named = class.map(|name| name.as_bytes().to_vec());
     let class = match named {
         Some(name) => {
-            if let Some(class) = lookup_class(req, &name)? {
+            if let Some(class) = autoload(req, &name)? {
                 class
             } else {
                 let shown = String::from_utf8_lossy(&name).into_owned();
@@ -1425,6 +1470,23 @@ pub(super) fn fetch_column(
 
 /// `fetchAll(PDO::FETCH_CLASS, ...)`'s class, `stdClass` where none is
 /// named, and its constructor arguments.
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy { public $a; } } });
+/// var_dump((new PDO('sqlite::memory:'))->query('SELECT 1 AS a')->fetchAll(PDO::FETCH_CLASS, 'Lazy'));
+/// ```
+/// ```expect
+/// load Lazy
+/// array(1) {
+///   [0]=>
+///   object(Lazy)#4 (1) {
+///     ["a"]=>
+///     int(1)
+///   }
+/// }
+/// ```
 fn all_class(
     req: &mut Request,
     second: Option<Value>,
@@ -1441,7 +1503,7 @@ fn all_class(
                     &format!("must be of type string, {shown} given"),
                 ));
             };
-            match lookup_class(req, &bytes)? {
+            match autoload(req, &bytes)? {
                 Some(class) => class,
                 None => {
                     return Err(argument_error(req, "TypeError", 2, "must be a valid class"));

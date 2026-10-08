@@ -98,7 +98,7 @@
 
 use php_ext::abi::{ConstValue, Instance, OrFalse, Passed, Ref, This, Untyped};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::call::{call_method, lookup_class, new_object, write_prop};
+use php_ext::call::{autoload, call_method, lookup_class, new_object, write_prop};
 use php_ext::coerce::{is_callable, to_long};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{
@@ -510,6 +510,18 @@ impl StreamFilter for UserFilter {
 /// the class is not defined; then an object of it, no constructor
 /// called, its `filtername` and `params` set, and `onCreate()`, whose
 /// `false` refuses the filter.
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy extends php_user_filter {} } });
+/// stream_filter_register('lazy.*', 'Lazy');
+/// var_dump(stream_filter_append(fopen("php://memory", "w+"), "lazy.one") !== false);
+/// ```
+/// ```expect
+/// load Lazy
+/// bool(true)
+/// ```
 fn user_filter_factory(
     req: &mut Request,
     name: &[u8],
@@ -537,7 +549,7 @@ fn user_filter_factory(
     let Some(class_name) = class_name else {
         return Ok(None);
     };
-    let Some(class) = lookup_class(req, &class_name)? else {
+    let Some(class) = autoload(req, &class_name)? else {
         let text = format!(
             "User-filter \"{}\" requires class \"{}\", but that class is not defined",
             String::from_utf8_lossy(name),

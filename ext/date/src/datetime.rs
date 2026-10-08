@@ -786,6 +786,19 @@ fn set_state(req: &mut Request, class: &str, hash: PhpArray) -> Result<Owner<Php
 /// int(0)
 /// int(10)
 /// ```
+///
+/// A private property's class is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; });
+/// $d = new DateTime('2020-01-01 UTC');
+/// $d->__unserialize(['date' => '2020-01-01 00:00:00.000000', 'timezone_type' => 3, 'timezone' => 'UTC', "\0Lazy\0p" => 1]);
+/// echo $d->format('Y'), "\n";
+/// ```
+/// ```expect
+/// load Lazy
+/// 2020
+/// ```
 pub(super) fn restore_properties(
     req: &mut Request,
     object: PhpObject,
@@ -814,7 +827,7 @@ pub(super) fn restore_properties(
                 let scope = if owner == b"*" {
                     object.class()
                 } else {
-                    let Some(class) = php_ext::call::lookup_class(req, owner)? else {
+                    let Some(class) = php_ext::call::autoload(req, owner)? else {
                         return Ok(ControlFlow::Continue(()));
                     };
                     class

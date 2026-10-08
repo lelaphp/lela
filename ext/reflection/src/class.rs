@@ -4,13 +4,14 @@
 //! three ways php makes an instance. Each reads the linked tables the
 //! reflector's `$name` looks up again, the same `_class_string`
 //! renders: the engine's function table (`Request::method_rows`,
-//! `Request::method_row`), and `linked_interfaces`,
-//! `linked_constants` and `linked_properties`.
+//! `Request::method_row`), interface list (`Request::interfaces`) and
+//! constants table (`Request::constants_in_order`), and
+//! `linked_properties`.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
-    call_named, eval_declared, initialize_lazy, known_method, mark_lazy_initialized,
+    autoload, call_named, eval_declared, initialize_lazy, known_method, mark_lazy_initialized,
     read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
@@ -20,12 +21,12 @@ use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value
 
 use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
-    Reference, answer, attr, class_chain, class_constant_named, class_extension_name, class_is,
-    class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
-    dynamic_properties, is_closure_invoke, is_internal, keep, keep_method, keep_reference,
-    kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties, looked_up,
-    lookup_class, method_or_invoke, namespace_end, new_object, property_named,
-    reflection_class_factory, set_name, set_string_prop, string_value, this_class, user_line,
+    HeldMethod, Reference, answer, attr, class_chain, class_constant_named, class_extension_name,
+    class_name_of, class_named, class_of, class_string, closure_invoke, constant_rows,
+    constant_value, dynamic_properties, is_closure_invoke, is_internal, keep, keep_method,
+    keep_reference, kept_closure, kept_object, linked_properties, lookup_class, method_or_invoke,
+    namespace_end, new_object, property_named, reflection_class_factory, set_name, set_string_prop,
+    string_value, this_class, user_line,
 };
 
 /// The name of the first of `traits` whose function table has `method`,
@@ -95,7 +96,7 @@ pub(super) fn method_factory(
     name: &[u8],
     scope: ClassId,
     ce: ClassId,
-    held: Option<MethodRow>,
+    held: Option<HeldMethod>,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let class = class_named(req, b"ReflectionMethod")?;
     let object = new_object(req, class)?;
@@ -168,7 +169,7 @@ fn reflector_class(
         }
         Union::B(name) => name.as_bytes().to_vec(),
     };
-    match looked_up(req, &name)? {
+    match autoload(req, &name)? {
         Some(class) => Ok(class),
         None => Err(throw(
             req,
@@ -1008,7 +1009,13 @@ impl ReflectionClass {
         let Some((decl, row)) = constructor_of(req, class) else {
             return Ok(None);
         };
-        let object = method_factory(req, &decl.function.name.0, row.scope(), class, Some(row))?;
+        let object = method_factory(
+            req,
+            &decl.function.name.0,
+            row.scope(),
+            class,
+            Some(HeldMethod::Row(row)),
+        )?;
         Ok(Some(object.into_instance()))
     }
 
@@ -1080,14 +1087,8 @@ impl ReflectionClass {
             &found.decl.function.name.0,
             found.scope,
             class,
-            found.row,
+            found.held,
         )?;
-        // The `__invoke` php makes keeps the closure it was made over.
-        if found.via_handler
-            && let Some(kept) = kept
-        {
-            keep(req, *object, class, Some(kept));
-        }
         Ok(object.into_instance())
     }
 
@@ -1122,22 +1123,26 @@ impl ReflectionClass {
             })
             .collect();
         for (row, name) in rows {
-            let object = method_factory(req, &name.0, row.scope(), class, Some(row))?;
+            let object =
+                method_factory(req, &name.0, row.scope(), class, Some(HeldMethod::Row(row)))?;
             methods.append(req, object.into_value())?;
         }
         // `zend_get_closure_invoke_method` over the kept closure, or a fresh
         // one, appended where the filter keeps a public instance method.
         let is_closure = lookup_class(req, b"Closure")?.is_some_and(|c| c == class);
-        let kept = kept_closure(req, this.object());
+        let kept = kept_closure(req, this.object())
+            .and_then(|closure| closure.closure(req).map(|c| c.function));
         if is_closure
             && filter & 1 != 0
             && let Some(invoke) = closure_invoke(req, kept)
         {
-            let object =
-                method_factory(req, &invoke.decl.function.name.0, invoke.scope, class, None)?;
-            if let Some(kept) = kept {
-                keep(req, *object, class, Some(kept));
-            }
+            let object = method_factory(
+                req,
+                &invoke.decl.function.name.0,
+                invoke.scope,
+                class,
+                invoke.held,
+            )?;
             methods.append(req, object.into_value())?;
         }
         Ok(methods)
@@ -1245,7 +1250,7 @@ impl ReflectionClass {
         if let Some(at) = name.windows(2).position(|pair| pair == b"::") {
             short = name[at + 2..].to_vec();
             let base = class_named(req, &name[..at])?;
-            if !class_is(req, class, base, 0) {
+            if !req.instance_of(class, base) {
                 let (base, named) = (class_name_of(req, base), class_name_of(req, class));
                 return Err(throw(
                     req,
@@ -1363,7 +1368,7 @@ impl ReflectionClass {
         let filter = filter.unwrap_or(1 | 2 | 4);
         let class = this_class(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
-        for (decl, scope) in linked_constants(req, class) {
+        for (decl, scope) in constant_rows(req, class) {
             let bits = match decl.visibility {
                 Visibility::Public => 1,
                 Visibility::Protected => 2,
@@ -1403,7 +1408,7 @@ impl ReflectionClass {
         let filter = filter.unwrap_or(1 | 2 | 4);
         let class = this_class(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
-        for (decl, scope) in linked_constants(req, class) {
+        for (decl, scope) in constant_rows(req, class) {
             let bits = match decl.visibility {
                 Visibility::Public => 1,
                 Visibility::Protected => 2,
@@ -1504,7 +1509,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaces(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = linked_interfaces(req, class);
+        let linked = req.interfaces(class).to_vec();
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -1532,10 +1537,31 @@ impl ReflectionClass {
     ///   string(10) "Stringable"
     /// }
     /// ```
+    ///
+    /// The list is the linked record's (`Request::interfaces`), in php's
+    /// order for a user class (the parent's, its own, then their
+    /// parents) and for an internal one (the parent's, then each of its
+    /// own followed by that one's parents).
+    ///
+    /// ```php
+    /// interface I0 {} interface I1 extends I0 {} interface J {}
+    /// class P implements J {} class C extends P implements I1, Countable { function count(): int { return 0; } function __toString(): string { return ''; } }
+    /// echo implode(', ', (new ReflectionClass('C'))->getInterfaceNames()), "\n";
+    /// echo implode(', ', (new ReflectionClass('ArrayIterator'))->getInterfaceNames()), "\n";
+    /// echo implode(', ', (new ReflectionClass('RecursiveCachingIterator'))->getInterfaceNames()), "\n";
+    /// var_dump((new ReflectionClass('C'))->implementsInterface('I0'), (new ReflectionClass('C'))->isSubclassOf('J'));
+    /// ```
+    /// ```expect
+    /// J, I1, Countable, Stringable, I0
+    /// SeekableIterator, Traversable, Iterator, ArrayAccess, Serializable, Countable
+    /// Countable, ArrayAccess, OuterIterator, Traversable, Iterator, Stringable, RecursiveIterator
+    /// bool(true)
+    /// bool(true)
+    /// ```
     #[php(tentative)]
     fn getInterfaceNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = linked_interfaces(req, class);
+        let linked = req.interfaces(class).to_vec();
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -1820,7 +1846,7 @@ impl ReflectionClass {
     fn isInstance(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
         let of = object.class();
         let class = this_class(req, this.object())?;
-        Ok(class_is(req, of, class, 0))
+        Ok(req.instance_of(of, class))
     }
 
     /// `ReflectionClass::newInstance(mixed ...$args)`: `object_init_ex`
@@ -2309,7 +2335,7 @@ impl ReflectionClass {
     ) -> Result<bool, Thrown> {
         let this = this_class(req, this.object())?;
         let of = reflector_class(req, class, "Class")?;
-        Ok(this != of && class_is(req, this, of, 0))
+        Ok(this != of && req.instance_of(this, of))
     }
 
     /// `ReflectionClass::getStaticProperties()`: `CE_STATIC_MEMBERS(ce)` as
@@ -2705,7 +2731,7 @@ impl ReflectionClass {
         let Some(traversable) = lookup_class(req, b"Traversable")? else {
             return Ok(false);
         };
-        Ok(class_is(req, class, traversable, 0))
+        Ok(req.instance_of(class, traversable))
     }
 
     #[php(tentative, implementation = ReflectionClass::isIterable)]
@@ -2748,7 +2774,7 @@ impl ReflectionClass {
             ));
         }
         let class = this_class(req, this.object())?;
-        Ok(class_is(req, class, interface, 0))
+        Ok(req.instance_of(class, interface))
     }
 
     /// `ReflectionClass::getExtension()`: `ce->info.internal.module` as a
