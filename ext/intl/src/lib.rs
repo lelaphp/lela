@@ -50,6 +50,7 @@ mod locale;
 mod msgformat;
 mod normalizer;
 mod resourcebundle;
+mod spoofchecker;
 mod timezone;
 mod transliterator;
 mod uchar;
@@ -355,6 +356,7 @@ pub fn extension() -> Extension {
         .class::<timezone::IntlTimeZone>()
         .class::<calendar::IntlCalendar>()
         .class::<calendar::IntlGregorianCalendar>()
+        .class::<spoofchecker::Spoofchecker>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>()
         .class::<breakiterator::IntlBreakIterator>()

@@ -49,6 +49,7 @@ pub(crate) mod locale;
 pub(crate) mod msgformat;
 pub(crate) mod normalizer;
 pub(crate) mod resourcebundle;
+pub(crate) mod spoofchecker;
 pub(crate) mod timezone;
 pub(crate) mod transliterator;
 pub(crate) mod uchar;
