@@ -184,8 +184,8 @@ pub(crate) fn instruments_of(
     carried: &Carried,
 ) -> impl Iterator<Item = &'static str> {
     let harness = krate.name == HARNESS;
+    let measured_by_the_lane = measured_by_the_lane(krate, carried);
     let carried = carried.carries(krate);
-    let measured_by_the_lane = !krate.subsets().is_empty() && carried;
     let home_of_the_lock = lock_home == Some(krate.name.as_str());
     let carried_extension = krate.name.starts_with("ext/") && carried;
     FRESH.into_iter().filter(move |i| match *i {
@@ -195,6 +195,13 @@ pub(crate) fn instruments_of(
         "crosscheck" => carried_extension,
         _ => true,
     })
+}
+
+/// Whether the per-commit lane runs a subset of `krate`: it owns one, and
+/// the binary under test carries it. The one rule `phpt --base` takes the
+/// touched crates' runs by, as condition 1 asks them for a reading.
+pub(crate) fn measured_by_the_lane(krate: &Crate, carried: &Carried) -> bool {
+    !krate.subsets().is_empty() && carried.carries(krate)
 }
 
 /// The name of the crate `api.lock` lives with, the one crate condition 1

@@ -350,6 +350,7 @@ fn ticket_command(
 /// `xtask phpt`: the subsets asked for, each run and each written.
 fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt) -> Result<()> {
     let registry = Registry::load(root)?;
+    let since = ask.base;
     let ask = phpt::Ask {
         subset: ask.subset,
         full: ask.full,
@@ -361,6 +362,9 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
         locks: None,
         unkept: ask.unkept,
     };
+    if let Some(since) = &since {
+        return phpt::base::take(root, manifest, &registry, &ask, since);
+    }
     let readings = phpt::run(root, manifest, &registry, &ask)?;
     let outcome = recorded(store, &readings)?;
     // `--against` asks whether a test met at the commit fails here, and

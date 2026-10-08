@@ -77,8 +77,7 @@ pub(crate) fn build(
     features: Option<&str>,
 ) -> Result<PathBuf> {
     let profile = LANE;
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
+    let status = Command::new(cargo())
         .args([
             "build",
             "--quiet",
@@ -105,6 +104,42 @@ pub(crate) fn build(
         bail!("cargo built {binary} and it is not at {}", built.display());
     }
     Ok(built)
+}
+
+/// The cargo the harness builds with: the one `CARGO` names, which
+/// `cargo xtask` sets, else the one on `PATH`.
+fn cargo() -> std::ffi::OsString {
+    std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
+}
+
+/// The arguments of the cargo line that builds every host of
+/// [`super::hosts::HOSTS`] in the lanes' profile, their crates by package
+/// ([`super::engine_build`] says why by package).
+pub(crate) fn hosts() -> Vec<String> {
+    let mut args = ["build", "--profile", LANE.name()]
+        .map(str::to_owned)
+        .to_vec();
+    for host in super::hosts::HOSTS {
+        args.extend(["-p".to_owned(), host.package()]);
+    }
+    args
+}
+
+/// Every host built in `root` by [`hosts`]' line, what cargo prints on
+/// the harness's streams.
+pub(crate) fn build_hosts(root: &Path) -> Result<()> {
+    let status = Command::new(cargo())
+        .args(hosts())
+        .current_dir(root)
+        .status()
+        .context("running cargo to build the hosts")?;
+    if !status.success() {
+        bail!(
+            "cargo could not build the hosts in {} ({status})",
+            root.display()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

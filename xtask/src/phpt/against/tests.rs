@@ -177,7 +177,10 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
     assert_eq!(why.matches(&main_named).count(), 1, "{why}");
     assert_eq!(why.matches(linked_str).count(), 1, "{why}");
     assert!(
-        why.contains(&format!("git worktree add --detach <dir> {}", base.commit)),
+        why.contains(&format!(
+            "`cargo xtask phpt --base {} --subset ext/fixture`",
+            base.commit
+        )),
         "{why}"
     );
 
