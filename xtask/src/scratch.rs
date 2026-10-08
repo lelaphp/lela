@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
 
 use crate::git::git;
+use crate::reading::{Reading, Status};
 
 /// Set to anything non-empty and a scratch tree is made, named on stderr
 /// and left standing: what a session debugging a failure sets, so the tree
@@ -124,8 +125,13 @@ impl Tree {
         let held = if keep { None } else { Some(hold(&named)?) };
 
         std::fs::remove_dir_all(&named).ok();
-        std::fs::create_dir_all(&named)
-            .with_context(|| format!("creating the scratch tree {}", named.display()))?;
+        std::fs::create_dir_all(&named).map_err(|err| {
+            made(
+                err,
+                &named,
+                format!("creating the scratch tree {}", named.display()),
+            )
+        })?;
         let path = std::fs::canonicalize(&named)
             .with_context(|| format!("resolving the scratch tree {}", named.display()))?;
         if keep {
@@ -138,6 +144,101 @@ impl Tree {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// A scratch tree, its lock, or a file a lane writes into one, that could
+/// not be made for want of space (#644). The volume it would stand on is
+/// full, so the run it was for was not measured: a lane reads this off the
+/// error ([`Full::of`]) and says so as a skip naming the volume, where it
+/// would otherwise be a witness that borked or a subset refused, a red line
+/// a session reads as its own diff.
+#[derive(Debug)]
+pub(crate) struct Full {
+    /// What could not be made.
+    pub(crate) path: PathBuf,
+    /// The mount point of the volume `path` stands on, as `df` names it,
+    /// or the nearest directory of `path` that stands where `df` says
+    /// nothing.
+    pub(crate) volume: PathBuf,
+}
+
+impl Full {
+    /// The number a reading of a run this kept from being measured counts,
+    /// one, so the store is read for such a reading by it.
+    pub(crate) const NUMBER: &str = "full";
+
+    /// The `Full` somewhere in `err`, under whatever context was added.
+    pub(crate) fn of(err: &anyhow::Error) -> Option<&Full> {
+        err.downcast_ref::<Full>()
+    }
+
+    /// `reading`, of the run of `name` that `why` ended, made the skip
+    /// that says the volume was full and names it: no witness borked and
+    /// no subset was refused, the run was not measured.
+    pub(crate) fn skipped(
+        mut reading: Reading,
+        name: &str,
+        why: &anyhow::Error,
+    ) -> Result<Reading> {
+        reading.status = Status::Skip;
+        reading.message = format!("{name}: not measured for want of space: {why:#}");
+        reading.count(Full::NUMBER, 1)?;
+        Ok(reading)
+    }
+}
+
+impl std::fmt::Display for Full {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no space left on {} for {}",
+            self.volume.display(),
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for Full {}
+
+/// `err`, met making `path` in a scratch tree, with `doing` as its
+/// context: a [`Full`] where the volume had no room for it, so a lane can
+/// tell the disk from its own trouble, and the error as it came otherwise.
+pub(crate) fn made(err: std::io::Error, path: &Path, doing: String) -> anyhow::Error {
+    use std::io::ErrorKind::{QuotaExceeded, StorageFull};
+    if matches!(err.kind(), StorageFull | QuotaExceeded) {
+        let volume = volume(path);
+        let path = path.to_path_buf();
+        anyhow::Error::new(Full { path, volume }).context(doing)
+    } else {
+        anyhow::Error::new(err).context(doing)
+    }
+}
+
+/// The mount point of the volume `path` stands on: `df -P`'s last column
+/// for the nearest directory of `path` that stands, which reading needs no
+/// room on the volume; that directory itself where `df` says nothing.
+fn volume(path: &Path) -> PathBuf {
+    let standing = path
+        .ancestors()
+        .find(|dir| dir.is_dir())
+        .unwrap_or(Path::new("/"));
+    std::process::Command::new("df")
+        .arg("-P")
+        .arg(standing)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let line = text.lines().last()?.to_owned();
+            let mounted = line
+                .split_whitespace()
+                .skip(5)
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!mounted.is_empty()).then(|| PathBuf::from(mounted))
+        })
+        .unwrap_or_else(|| standing.to_path_buf())
 }
 
 /// `cargo` stood in at `dir/cargo`, and the `PATH` that finds it first.
@@ -305,15 +406,26 @@ fn hold(tree: &Path) -> Result<(PathBuf, File)> {
         .create(true)
         .truncate(false)
         .open(&taking)
-        .with_context(|| format!("opening the scratch lock {}", taking.display()))?;
+        .map_err(|err| {
+            made(
+                err,
+                &taking,
+                format!("opening the scratch lock {}", taking.display()),
+            )
+        })?;
     if file.try_lock().is_err() {
         anyhow::bail!(
             "the scratch lock {} is held: another run is working there",
             taking.display()
         );
     }
-    std::fs::rename(&taking, &lock)
-        .with_context(|| format!("naming the scratch lock {}", lock.display()))?;
+    std::fs::rename(&taking, &lock).map_err(|err| {
+        made(
+            err,
+            &lock,
+            format!("naming the scratch lock {}", lock.display()),
+        )
+    })?;
     Ok((lock, file))
 }
 
@@ -412,7 +524,8 @@ impl Drop for Tree {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{Tree, hold, reap};
+    use super::{Full, Tree, hold, made, reap};
+    use crate::reading::{Reading, Status};
 
     /// A sweep never meets a lock before it is held (#1252): one thread
     /// takes lock after lock in a directory of its own while another sweeps
@@ -445,5 +558,55 @@ mod tests {
             failed
         });
         assert_eq!(failed, None);
+    }
+
+    /// A scratch tree the volume has no room for is [`Full`], naming the
+    /// volume `df` says it stands on, under whatever context is added
+    /// above it; any other trouble making it is not (#644). And the reading
+    /// of the run it ended is the skip that says so, never a fail.
+    #[test]
+    fn a_scratch_the_volume_has_no_room_for_is_full_and_its_run_a_skip_naming_the_volume() {
+        let tree = Tree::new("full").unwrap();
+        let path = tree.join("lock-taking");
+        let enospc = std::io::Error::from_raw_os_error(nix::errno::Errno::ENOSPC as i32);
+        let err = made(enospc, &path, "opening the scratch lock".to_owned())
+            .context("running ext/fixture/tests/one.phpt");
+        let full = Full::of(&err).expect("ENOSPC is the volume's");
+        assert_eq!(full.path, path);
+        let df = std::process::Command::new("df")
+            .arg("-P")
+            .arg(tree.path())
+            .output()
+            .unwrap();
+        let df = String::from_utf8(df.stdout).unwrap();
+        let mounted = df.lines().last().unwrap().split_whitespace().skip(5);
+        assert_eq!(
+            full.volume.to_str().unwrap(),
+            mounted.collect::<Vec<_>>().join(" ")
+        );
+
+        let mut reading = Reading::new("phpt", "ext/fixture");
+        reading.status = Status::Fail;
+        let reading = Full::skipped(reading, "ext/fixture", &err).unwrap();
+        assert_eq!(reading.status, Status::Skip);
+        assert!(
+            reading
+                .message
+                .starts_with("ext/fixture: not measured for want of space: ")
+                && reading.message.contains(&format!(
+                    "no space left on {} for {}",
+                    full.volume.display(),
+                    path.display()
+                )),
+            "{}",
+            reading.message
+        );
+        assert_eq!(
+            reading.numbers.get(Full::NUMBER),
+            Some(&crate::reading::Number::Int(1))
+        );
+
+        let denied = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
+        assert!(Full::of(&made(denied, &path, "opening".to_owned())).is_none());
     }
 }

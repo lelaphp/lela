@@ -170,7 +170,7 @@ use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::{Oracle, Oracles, Pin, Runner, Source};
 use crate::reading::{Reading, listed, plural};
-use crate::scratch::Tree;
+use crate::scratch::{self, Full, Tree};
 use crate::sources;
 use crate::tally::{self, Outcome};
 use adapter::Adapter;
@@ -986,17 +986,14 @@ pub fn run(
     }
     let locks = ask.locks.clone().unwrap_or_else(across::machine);
     let jobs = ask.jobs.unwrap_or_else(tally::cores);
-    // The run's own copy of the pinned tree, which every subset runs in and
-    // which goes when the run does; none where no test will run.
-    let copy = if todo
-        .iter()
-        .filter_map(|(_, side)| side.as_ref().ok())
-        .any(Side::runs)
-    {
-        Some(copy_of(&source, jobs)?)
-    } else {
-        None
+    // No room for the copy every subset runs in leaves the copy's error
+    // standing, and each subset is a run not measured, its reading the
+    // skip that names the volume (#644); any other trouble ends the run.
+    let copy = match copied(&todo, &source, jobs) {
+        Err(why) if Full::of(&why).is_none() => return Err(why),
+        copy => copy,
     };
+    let tree = copy.as_ref().ok().and_then(Option::as_ref);
     let mut readings = Vec::new();
     // The lane's census, folded over the subsets as each is run, so the
     // widest cause of the whole corpus is one line at the end and not a
@@ -1009,17 +1006,14 @@ pub fn run(
     // before and after it wrote with it (#1612).
     let mut taken = |subset: &Subset, side: &Side, held_as: &Scope| -> Result<Vec<Reading>> {
         let scope = &held_as.to_string();
-        let running = copy.is_some() && side.runs();
+        let running = tree.is_some() && side.runs();
         let runner = side.runner;
         let own = Own::of(side.oracle, subset, scope, running)?;
         let beside = own.pin.as_ref().map(|pin| side.oracle.beside(pin));
         let oracle = beside.as_ref().unwrap_or(side.oracle);
         let under = side.under(ask.lane, jobs, own.served.as_deref(), &locks);
         let ((tally, waited), removed) = swept_around(oracle, scope, running, || {
-            let within = copy
-                .as_ref()
-                .filter(|_| running)
-                .map(|copy| subset.rooted(copy));
+            let within = tree.filter(|_| running).map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
         let mut reading = reading(&tally, runs.snapshot(), manifest, &source, subset, under)?;
@@ -1045,15 +1039,7 @@ pub fn run(
             target.as_ref(),
         )?;
         if ask.census {
-            let mut counted = census::Census::default();
-            counted.add(census::misses(&tally));
-            counted
-                .accounts_for(census::verdicts(&tally))
-                .map_err(|why| anyhow::anyhow!("{}: {why}", subset.scope))?;
-            counted.print(&subset.scope);
-            for row in counted.unread_rows() {
-                reading.group(&row.signature.to_string(), row.tests.len() as u64)?;
-            }
+            counted(&tally, &subset.scope, &mut reading)?;
             lane.add(census::misses(&tally));
         }
         Ok(std::iter::once(reading).chain(held).collect())
@@ -1062,12 +1048,26 @@ pub fn run(
     // refused as any other subset the lane could not run, naming it.
     for (subset, side) in todo {
         let scope = subset.scope(side.as_ref().map_or(runner, |side| side.runner), ask.lane);
+        if let Err(full) = &copy {
+            readings.push(refused(
+                runs.snapshot(),
+                manifest,
+                &scope.to_string(),
+                full,
+            )?);
+            continue;
+        }
         let side = side
             .as_ref()
             .map_err(|unknown| anyhow::anyhow!("{unknown:#}"));
         match side.and_then(|side| taken(subset, side, &scope)) {
             Ok(taken) => readings.extend(taken),
-            Err(why) => readings.push(refused(&runs, manifest, &scope.to_string(), &why)?),
+            Err(why) => readings.push(refused(
+                runs.snapshot(),
+                manifest,
+                &scope.to_string(),
+                &why,
+            )?),
         }
     }
     // One subset's census is the census; a lane's is worth a second line
@@ -1076,6 +1076,36 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// One subset's census under `--census`: printed under `scope`, and the
+/// rows its compiler did not read grouped on `reading`.
+fn counted(tally: &Tally, scope: &str, reading: &mut Reading) -> Result<()> {
+    let mut counted = census::Census::default();
+    counted.add(census::misses(tally));
+    counted
+        .accounts_for(census::verdicts(tally))
+        .map_err(|why| anyhow::anyhow!("{scope}: {why}"))?;
+    counted.print(scope);
+    for row in counted.unread_rows() {
+        reading.group(&row.signature.to_string(), row.tests.len() as u64)?;
+    }
+    Ok(())
+}
+
+/// The run's own copy of the pinned tree at `source`, which every subset
+/// of `todo` runs in and which goes when the run does; none where no test
+/// will run.
+fn copied(
+    todo: &[(&Subset, &Result<Side>)],
+    source: &Path,
+    jobs: NonZeroUsize,
+) -> Result<Option<Tree>> {
+    let runs = todo
+        .iter()
+        .filter_map(|(_, side)| side.as_ref().ok())
+        .any(Side::runs);
+    runs.then(|| copy_of(source, jobs)).transpose()
 }
 
 /// The subsets a run under `ask` runs, each beside its side: all of them,
@@ -1279,15 +1309,20 @@ fn asked(root: &Path, manifest: &Manifest, source: &Path, ask: &Ask) -> Result<V
 
 /// The reading of a subset the lane could not run, a fail whose message
 /// is the cause and whose `refused` counts it, so the lane's other
-/// readings are written beside it and its exit says it (#1612).
+/// readings are written beside it and its exit says it (#1612). A scratch
+/// tree the volume had no room for is no refusal but a run not measured,
+/// and the reading is the skip that names the volume (#644).
 fn refused(
-    runs: &against::Runs,
+    snapshot: &Snapshot,
     manifest: &Manifest,
     scope: &str,
     why: &anyhow::Error,
 ) -> Result<Reading> {
     let mut reading =
-        Reading::for_scope(INSTRUMENT, scope, manifest, runs.snapshot())?.under(&manifest.pin);
+        Reading::for_scope(INSTRUMENT, scope, manifest, snapshot)?.under(&manifest.pin);
+    if Full::of(why).is_some() {
+        return Full::skipped(reading, scope, why);
+    }
     reading.status = crate::reading::Status::Fail;
     reading.message = format!("{why:#}");
     reading.count("refused", 1)?;
@@ -1448,7 +1483,8 @@ fn copy_one(from: &Path, to: &Path) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", from.display())),
     };
     if let Some(dir) = to.parent() {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        fs::create_dir_all(dir)
+            .map_err(|err| scratch::made(err, dir, format!("creating {}", dir.display())))?;
     }
     let copied = if kind.is_symlink() {
         fs::read_link(from).and_then(|target| std::os::unix::fs::symlink(target, to))
@@ -1457,7 +1493,13 @@ fn copy_one(from: &Path, to: &Path) -> Result<()> {
     } else {
         fs::copy(from, to).map(drop)
     };
-    copied.with_context(|| format!("copying {} to {}", from.display(), to.display()))
+    copied.map_err(|err| {
+        scratch::made(
+            err,
+            to,
+            format!("copying {} to {}", from.display(), to.display()),
+        )
+    })
 }
 
 /// Run one subset: every test through the runner, each verdict printed as

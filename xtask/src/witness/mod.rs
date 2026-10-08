@@ -126,6 +126,7 @@ use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Linked, Oracle, Oracles, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
+use crate::scratch::Full;
 use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Record;
@@ -576,8 +577,9 @@ fn run_in(
         if !crates.is_empty() && !crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        // The reading of a crate no witness runs for: the harness's, or
-        // one not yet created, which carries no stamp.
+        // The reading of a crate no witness runs for: the harness's, one
+        // not yet created, which carries no stamp, one whose sources could
+        // not be read, and one a full volume kept from running.
         let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
             .under(&manifest.pin);
         if krate.name == crate::done::HARNESS {
@@ -603,12 +605,9 @@ fn run_in(
             // pass over sources never seen, or never held to an oracle,
             // would say the crate was measured when it was not.
             Err(unread) => {
-                let mut failed =
-                    under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
-                        .under(&manifest.pin);
-                failed.status = Status::Fail;
-                failed.message = format!("{}: {unread:#}", krate.name);
-                readings.push(failed);
+                unrun.status = Status::Fail;
+                unrun.message = format!("{}: {unread:#}", krate.name);
+                readings.push(unrun);
                 continue;
             }
         };
@@ -617,7 +616,16 @@ fn run_in(
         }
         served += found.witnesses.len();
         let watch = journal.map(|j| j.over(&krate.name));
-        let tally = judge(oracle, &binary, registry, ask, &found, watch)?;
+        let tally = match judge(oracle, &binary, registry, ask, &found, watch) {
+            Ok(tally) => tally,
+            // No room for a scratch tree: the crate was not measured, its
+            // reading a skip naming the volume, and the crates after it run.
+            Err(why) if Full::of(&why).is_some() => {
+                readings.push(Full::skipped(unrun, &krate.name, &why)?);
+                continue;
+            }
+            Err(why) => return Err(why),
+        };
         for missing in &tally.missing {
             println!("missing {missing}");
         }
@@ -787,7 +795,7 @@ pub(crate) fn judge(
                 let record = match judge::serve(oracle, binary, witness, *regime) {
                     Ok((_, natives)) => Record::Entered(natives),
                     Err(trouble) => {
-                        unserved.push(format!("{}: {trouble}", witness.at()));
+                        unserved.push(format!("{}: {trouble:#}", witness.at()));
                         Record::Unserved
                     }
                 };
@@ -805,7 +813,7 @@ pub(crate) fn judge(
                 watch.serving(witness)?;
             }
             let mut kept = judge::Kept::default();
-            let judged = judge::one(oracle, registry, ask, witness, *regime, binary, &mut kept);
+            let judged = judge::one(oracle, registry, ask, witness, *regime, binary, &mut kept)?;
             captured
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)

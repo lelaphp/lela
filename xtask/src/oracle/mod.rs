@@ -1669,8 +1669,10 @@ impl Scratch {
             Program::Snippet(code) => {
                 let own = Tree::new("oracle")?;
                 let script = PathBuf::from(&recipe.script_name);
-                fs::write(own.join(&script), format!("{}{code}", recipe.preamble))
-                    .with_context(|| format!("writing {}", recipe.script_name))?;
+                let path = own.join(&script);
+                fs::write(&path, format!("{}{code}", recipe.preamble)).map_err(|err| {
+                    crate::scratch::made(err, &path, format!("writing {}", recipe.script_name))
+                })?;
                 Scratch {
                     dir: own.path().to_path_buf(),
                     script,

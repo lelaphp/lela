@@ -1035,3 +1035,29 @@ fn unmeasured_measures_a_crate_again_once_a_crate_it_is_built_from_changes() {
         ["ext/ctype"]
     );
 }
+
+/// A full volume is no witness that borked (#644): the trouble that
+/// carries [`crate::scratch::Full`] leaves the judge as the error the
+/// crate's reading says as a skip naming the volume, and any other trouble
+/// is the witness's bork, its whole sentence kept.
+#[test]
+fn a_witness_the_volume_had_no_room_for_is_no_bork() {
+    let text =
+        "/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn native() {}\n";
+    let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), text);
+    let witness = &found.witnesses[0];
+    let tree = Tree::new("witness-full").unwrap();
+    let full = crate::scratch::made(
+        std::io::Error::from_raw_os_error(nix::errno::Errno::ENOSPC as i32),
+        &tree.join("oracle.lock-taking"),
+        "opening the scratch lock".to_owned(),
+    )
+    .context("the oracle did not run it");
+    let full = judge::borked(witness, full).expect_err("a full volume is not a verdict");
+    assert!(crate::scratch::Full::of(&full).is_some(), "{full:#}");
+
+    let other = anyhow::anyhow!("php ended").context("the oracle did not run it");
+    let judged = judge::borked(witness, other).unwrap();
+    assert_eq!(judged.judgement, Judgement::Bork);
+    assert_eq!(judged.note, "the oracle did not run it: php ended");
+}
