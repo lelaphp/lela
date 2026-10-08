@@ -14,9 +14,9 @@ use php_ext::abi::{
 };
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, truthy};
-use php_ext::decl::Visibility;
-use php_ext::raising::{Level, Thrown, fatal, raise, throw_error};
+use php_ext::raising::{Level, Thrown, raise, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::ffi::{RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zone};
@@ -28,12 +28,10 @@ use crate::interval::DateInterval;
 pub(super) const CIVIL: i64 = 1;
 pub(super) const WALL: i64 = 2;
 
-/// `php_date_obj`: the time, none until a constructor set it, and the
-/// values the last property read made, which the rows it answered name.
+/// `php_date_obj`: the time, none until a constructor set it.
 #[derive(Default)]
 pub(crate) struct DateState {
     pub time: Option<Time>,
-    rows: Vec<Owner<Value>>,
     /// What the time holds on the request's heap: the `timelib_time`
     /// and the `tz_abbr` `timelib_strdup` made.
     held: Option<Held>,
@@ -81,7 +79,6 @@ impl TzKind {
 #[derive(Default)]
 pub(crate) struct TzState {
     pub tz: Option<TzKind>,
-    rows: Vec<Owner<Value>>,
     /// The `tzi.z.abbr` copy an abbreviation zone holds on the request's
     /// heap; kept by [`set_tz`].
     held: Option<Held>,
@@ -122,7 +119,6 @@ pub(crate) struct PeriodState {
     /// How many steps past its rewind `current` stands, the index the
     /// last iterator over the period asked for; none before any walk.
     pub cursor: Option<usize>,
-    rows: Vec<Owner<Value>>,
     /// What `start`, `current`, `end` and `interval` hold on the
     /// request's heap, in that order; kept by [`hold_period`].
     held: [Option<Held>; 4],
@@ -385,57 +381,11 @@ pub(super) fn set_string(
     set_str(req, array, key, value)
 }
 
-/// A declared property's name as the readers key it: `\0*\0p` for a
-/// protected one, `\0C\0p` for a private one of class `C`. Interned,
-/// as php's `prop_info->name` is (`zend_declare_typed_property`), so a
-/// row keyed by it is a view no reader takes an owner from.
-fn mangled(req: &mut Request, class: ClassId, name: PhpString) -> Result<PhpString, Thrown> {
-    let mut at = Some(class);
-    while let Some(c) = at {
-        let found = req.class_decl(c).and_then(|decl| {
-            decl.properties
-                .iter()
-                .find(|p| p.is_instance && *p.name.0 == *name.as_bytes())
-                .map(|p| (p.visibility, decl.name.0.clone()))
-        });
-        if let Some((visibility, owner)) = found {
-            let prefix: Vec<u8> = match visibility {
-                Visibility::Public => return Ok(name),
-                Visibility::Protected => b"\0*\0".to_vec(),
-                Visibility::Private => [&b"\0"[..], &owner, b"\0"].concat(),
-            };
-            return PhpString::interned(req, &[prefix.as_slice(), name.as_bytes()].concat());
-        }
-        at = parent_of(req, c);
-    }
-    Ok(name)
-}
-
-/// `zend_std_get_properties(object)` with each declared name mangled as
-/// a reader keys it, an integer key as it stands: views, no owner taken.
+/// `zend_std_get_properties(object)`, each declared name mangled as a
+/// reader keys it, an integer key as it stands: views, no owner taken.
 pub(super) fn std_rows(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-    let rows = Std.get_properties(req, object)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for (key, value) in rows {
-        let key = match key {
-            Key::Str(name) => Key::Str(mangled(req, object.class(), name)?),
-            Key::Int(_) => key,
-        };
-        out.push((key, value));
-    }
-    Ok(out)
-}
-
-/// `zend_hash_str_update(props, name, value)` over rows: the value of a
-/// row already named replaced where it stands, a new row appended.
-fn update(rows: &mut Vec<(Key, Value)>, name: PhpString, value: Value) {
-    match rows
-        .iter_mut()
-        .find(|(n, _)| matches!(n, Key::Str(n) if n.as_bytes() == name.as_bytes()))
-    {
-        Some(row) => row.1 = value,
-        None => rows.push((Key::Str(name), value)),
-    }
+    let table = Std.get_properties(req, object)?;
+    Ok(walk::rows(req, table).collect())
 }
 
 /// The fields a `*_object_to_hash` answers, each value one owner, which
@@ -524,53 +474,19 @@ pub(super) fn rows_array(
     Ok(array)
 }
 
-/// The rows a property reader sees: the object's own rows with the
-/// fields updated into them. The values made for the fields are kept in
-/// `keep`, which owns them until the next read or the object's release,
-/// so the rows answered are views as the slot's contract asks.
-fn rows_view(
+/// `date_object_get_properties_for`'s table, a temporary one:
+/// `zend_array_dup(zend_std_get_properties(object))`, the object's own
+/// rows each one more owner, with `fields` updated into it where a row
+/// of its name stands and appended where none does
+/// (`zend_hash_str_update`).
+fn fields_table(
     req: &mut Request,
     object: PhpObject,
-    fields: Fields,
-    keep: fn(&mut Request, PhpObject) -> Option<&mut Vec<Owner<Value>>>,
-) -> Result<Vec<(Key, Value)>, Thrown> {
-    let mut rows = match std_rows(req, object) {
-        Ok(rows) => rows,
-        Err(thrown) => {
-            give_up_fields(req, fields);
-            return Err(thrown);
-        }
-    };
-    let mut made = Vec::with_capacity(fields.len() * 2);
-    let mut fields = fields.into_iter();
-    while let Some((name, value)) = fields.next() {
-        let view = *value;
-        made.push(value);
-        let name = match PhpString::new(req, name) {
-            Ok(name) => name,
-            Err(thrown) => {
-                give_up_fields(req, fields.collect());
-                release_rows(req, Some(made));
-                return Err(thrown);
-            }
-        };
-        update(&mut rows, *name, view);
-        made.push(name.into_value());
-    }
-    let Some(kept) = keep(req, object) else {
-        release_rows(req, Some(made));
-        return Err(fatal(req, "InternalError: a date object with no payload"));
-    };
-    let old = std::mem::replace(kept, made);
-    release_rows(req, Some(old));
-    Ok(rows)
-}
-
-/// What `free_obj` gives back of the kept rows.
-fn release_rows(req: &mut Request, rows: Option<Vec<Owner<Value>>>) {
-    for value in rows.into_iter().flatten() {
-        value.give_up(req);
-    }
+    fields: impl FnOnce(&mut Request) -> Result<Fields, Thrown>,
+) -> Result<PropertiesFor, Thrown> {
+    let own = std_rows(req, object)?;
+    let fields = fields(req)?;
+    rows_array(req, &own, fields, false).map(PropertiesFor::Temporary)
 }
 
 /// Whether the class declares `__debugInfo`, php's `ce->__debugInfo`.
@@ -701,12 +617,10 @@ pub(crate) static DATE: DateHandlers = DateHandlers;
 
 impl ObjectHandlers for DateHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let (rows, held) = object
+        let held = object
             .native_mut::<DateObj>(req)
-            .map(|d| (std::mem::take(&mut d.rows), d.held.take()))
-            .unzip();
-        release_rows(req, rows);
-        if let Some(held) = held.flatten() {
+            .and_then(|d| d.held.take());
+        if let Some(held) = held {
             held.free(req);
         }
     }
@@ -776,17 +690,13 @@ impl ObjectHandlers for DateHandlers {
             purpose,
             PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
         ) {
-            return Ok(PropertiesFor::Standard);
+            return Std.get_properties_for(req, object, purpose);
         }
         let time = object.native::<DateObj>(req).and_then(|d| d.time.clone());
-        let fields = match &time {
-            Some(t) => date_fields(req, t)?,
-            None => Vec::new(),
-        };
-        rows_view(req, object, fields, |req, o| {
-            o.native_mut::<DateObj>(req).map(|d| &mut d.rows)
+        fields_table(req, object, |req| match &time {
+            Some(t) => date_fields(req, t),
+            None => Ok(Vec::new()),
         })
-        .map(PropertiesFor::Rows)
     }
 }
 
@@ -812,12 +722,8 @@ pub(crate) static TIMEZONE: TzHandlers = TzHandlers;
 
 impl ObjectHandlers for TzHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let (rows, held) = object
-            .native_mut::<TzObj>(req)
-            .map(|t| (std::mem::take(&mut t.rows), t.held.take()))
-            .unzip();
-        release_rows(req, rows);
-        if let Some(held) = held.flatten() {
+        let held = object.native_mut::<TzObj>(req).and_then(|t| t.held.take());
+        if let Some(held) = held {
             held.free(req);
         }
     }
@@ -897,17 +803,13 @@ impl ObjectHandlers for TzHandlers {
             purpose,
             PropertyPurpose::Debug | PropertyPurpose::GetObjectVars
         ) {
-            return Ok(PropertiesFor::Standard);
+            return Std.get_properties_for(req, object, purpose);
         }
         let kind = object.native::<TzObj>(req).and_then(|t| t.tz.clone());
-        let fields = match &kind {
-            Some(kind) => tz_fields(req, kind)?,
-            None => Vec::new(),
-        };
-        rows_view(req, object, fields, |req, o| {
-            o.native_mut::<TzObj>(req).map(|t| &mut t.rows)
+        fields_table(req, object, |req| match &kind {
+            Some(kind) => tz_fields(req, kind),
+            None => Ok(Vec::new()),
         })
-        .map(PropertiesFor::Rows)
     }
 }
 
@@ -1183,11 +1085,7 @@ impl ObjectHandlers for IntervalHandlers {
     /// y p q m d h i s f invert days from_string
     /// y m d h i s f invert days from_string
     /// ```
-    fn get_properties(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-    ) -> Result<Vec<(Key, Value)>, Thrown> {
+    fn get_properties(&self, req: &mut Request, object: PhpObject) -> Result<walk::Table, Thrown> {
         write_fields(req, object)?;
         Std.get_properties(req, object)
     }
@@ -1313,11 +1211,9 @@ impl ObjectHandlers for PeriodHandlers {
     }
 
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let (rows, held) = object
+        let held = object
             .native_mut::<PeriodObj>(req)
-            .map(|p| (std::mem::take(&mut p.rows), std::mem::take(&mut p.held)))
-            .unzip();
-        release_rows(req, rows);
+            .map(|p| std::mem::take(&mut p.held));
         for held in held.into_iter().flatten().flatten() {
             held.free(req);
         }
@@ -1325,14 +1221,6 @@ impl ObjectHandlers for PeriodHandlers {
 
     fn clone_obj(&self) -> Option<CloneObj> {
         Some(clone_period)
-    }
-
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        if let Some(p) = object.native::<PeriodObj>(req) {
-            for value in &p.rows {
-                visit(**value);
-            }
-        }
     }
 
     fn read_property(
@@ -1473,20 +1361,18 @@ impl ObjectHandlers for PeriodHandlers {
         purpose: PropertyPurpose,
     ) -> Result<PropertiesFor, Thrown> {
         if purpose == PropertyPurpose::Debug {
-            return Ok(PropertiesFor::Standard);
+            return Std.get_properties_for(req, object, purpose);
         }
         let initialized = object
             .native::<PeriodObj>(req)
             .is_some_and(|p| p.initialized);
-        let fields = if initialized {
-            period_fields(req, object)?
-        } else {
-            Vec::new()
-        };
-        rows_view(req, object, fields, |req, o| {
-            o.native_mut::<PeriodObj>(req).map(|p| &mut p.rows)
+        fields_table(req, object, |req| {
+            if initialized {
+                period_fields(req, object)
+            } else {
+                Ok(Vec::new())
+            }
         })
-        .map(PropertiesFor::Rows)
     }
 }
 
@@ -1505,19 +1391,15 @@ impl PeriodState {
             include_end_date: self.include_end_date,
             initialized: self.initialized,
             cursor: None,
-            rows: Vec::new(),
             held: Default::default(),
         })
     }
 
-    /// `state` put in place of the period's, the rows its readers hold
-    /// kept for `free_obj` to give back, and what its structs hold kept
+    /// `state` put in place of the period's, what its structs hold kept
     /// for [`hold_period`] to bring to the new ones.
     pub(super) fn replace(&mut self, state: PeriodObj) {
-        let rows = std::mem::take(&mut self.rows);
         let held = std::mem::take(&mut self.held);
         *self = *state;
-        self.rows = rows;
         self.held = held;
     }
 }

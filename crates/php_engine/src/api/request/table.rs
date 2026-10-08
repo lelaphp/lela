@@ -29,8 +29,9 @@ use php_heap::{Direction, Heap, Obj, PropertyTable, TableRow};
 use php_unit::decl::Visibility;
 
 use super::{Hooks, Request};
+use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::raising::Thrown;
-use crate::api::values::walk::{BuiltRows, ObjectTable, Table};
+use crate::api::values::walk::{ObjectTable, Table};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, PointerMove, Value,
 };
@@ -270,21 +271,15 @@ impl Request {
         self.table_row_ref(object, key)
     }
 
-    /// [`PhpObject::entries`]: the rows in the table's order, the slots
-    /// that hold a value by their mangled names and then the dynamic
-    /// table, each key as it stands; views, no owner taken.
-    pub(crate) fn table_entries(&mut self, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
-        let object = self.table_owner(object)?;
-        crate::ops::properties_for(self, object, crate::api::abi::PropertyPurpose::Serialize)
-    }
-
     /// `get_ht_for_iap` (`Z/ext/standard/array.c:993`) past its
     /// deprecation: the object's table separated first where another
     /// holder shares it and `separate` asks, as `zend_array_dup` does,
     /// then the class's `get_properties`, which lays the table down,
     /// initialises a lazy object, whose instance's table is then the one
     /// the pointer moves over, and at `DateInterval` writes the fields
-    /// into it. The object whose table it is rides beside it.
+    /// into it. The object whose table it is rides beside it; a class
+    /// that keeps a table in place of the object's has the pointer
+    /// moved over the object's own all the same.
     pub(crate) fn pointer_table(
         &mut self,
         object: PhpObject,
@@ -293,32 +288,158 @@ impl Request {
         if separate && object.heap().properties().is_some_and(|t| t.refcount() > 1) {
             self.separated_properties(object.heap())?;
         }
-        let object = self.table_owner(object)?;
         let handlers = self.object_handlers(object.heap());
-        handlers.get_properties(self, object)?;
+        if let Table::Object(table) = handlers.get_properties(self, object)? {
+            return Ok((table.owner(), table.positions()));
+        }
+        let object = self.table_owner(object)?;
         let table = self.heap.object_property_table(object.heap());
         Ok((object, self.fatal_of(table)?))
     }
 
-    /// [`PhpObject::property_table`]: php's `Z_OBJPROP`, the class's
-    /// `get_properties` over the object a lazy one initialises to; the
-    /// table it lays down, or where the class builds a table of its own
-    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)),
-    /// the rows it builds.
-    pub(crate) fn property_table(&mut self, object: PhpObject) -> Result<Table, Thrown> {
-        let handlers = self.object_handlers(object.heap());
-        if handlers.answers_properties() {
-            let object = self.table_owner(object)?;
-            let rows = handlers.get_properties(self, object)?;
-            return Ok(Table::Built(BuiltRows::of(rows)));
-        }
-        let (owner, table) = self.pointer_table(object, false)?;
+    /// `zend_std_get_properties`, `Std`'s `get_properties`: the class's
+    /// table laid down for the object a lazy one initialises to, in
+    /// php's positions.
+    pub(crate) fn std_properties(&mut self, object: PhpObject) -> Result<Table, Thrown> {
+        let owner = self.table_owner(object)?;
+        let table = self.heap.object_property_table(owner.heap());
+        let table = self.fatal_of(table)?;
         self.object_table(owner, table).map(Table::Object)
+    }
+
+    /// `zend_get_properties_no_lazy_init`: the class's `get_properties`
+    /// over an object that is not lazy, and over a lazy one the table of
+    /// the object its reader reads, laid down and nothing initialised
+    /// (`rebuild_object_properties_internal`, through
+    /// [`Request::lay_properties_no_lazy_init`]).
+    ///
+    /// ```php
+    /// class C { public $a = 1; }
+    /// $r = new ReflectionClass('C');
+    /// $o = $r->newLazyGhost(function () { echo "init\n"; }, ReflectionClass::SKIP_INITIALIZATION_ON_SERIALIZE);
+    /// echo serialize($o), "\n";
+    /// var_dump(get_object_vars($o));
+    /// $p = $r->newLazyGhost(function () { echo "init p\n"; });
+    /// var_export($p);
+    /// echo "\n";
+    /// ```
+    /// ```expect
+    /// O:1:"C":0:{}
+    /// init
+    /// array(1) {
+    ///   ["a"]=>
+    ///   int(1)
+    /// }
+    /// init p
+    /// \C::__set_state(array(
+    ///    'a' => 1,
+    /// ))
+    /// ```
+    pub(crate) fn properties_no_lazy_init(&mut self, object: PhpObject) -> Result<Table, Thrown> {
+        if object.heap().laziness() == php_heap::Laziness::Eager {
+            let handlers = self.object_handlers(object.heap());
+            return handlers.get_properties(self, object);
+        }
+        let owner = self.lay_properties_no_lazy_init(object)?;
+        let table = self.heap.object_property_table(owner.heap());
+        let table = self.fatal_of(table)?;
+        self.object_table(owner, table).map(Table::Object)
+    }
+
+    /// `zend_get_properties_for(obj, purpose)`: the class's
+    /// `get_properties_for`, [`Request::std_properties_for`] at `Std`.
+    pub(crate) fn properties_answered(
+        &mut self,
+        object: PhpObject,
+        purpose: PropertyPurpose,
+    ) -> Result<PropertiesFor, Thrown> {
+        let handlers = self.object_handlers(object.heap());
+        handlers.get_properties_for(self, object, purpose)
+    }
+
+    /// `zend_std_get_properties_for` (`Z/Zend/zend_object_handlers.c:2608`),
+    /// `Std`'s `get_properties_for`: under [`PropertyPurpose::Debug`] the
+    /// class's `get_debug_info`, and where that shows the members,
+    /// `zend_std_get_debug_info`'s table, a lazy object's read as it
+    /// stands (`zend_lazy_object_debug_info`); the hooked properties'
+    /// table for the readers that call hooks; the table as it stands for
+    /// the `(array)` cast and for a serialization a lazy object was made
+    /// to skip initialising for; and `get_properties`' table otherwise.
+    ///
+    /// ```php
+    /// class A { public $a = 1; protected $b = 2; private $c = 3; }
+    /// print_r(new A);
+    /// echo "\n";
+    /// class B { public $hidden = 1; function __debugInfo() { return ['shown' => 2]; } }
+    /// var_dump(new B);
+    /// ```
+    /// ```expect
+    /// A Object
+    /// (
+    ///     [a] => 1
+    ///     [b:protected] => 2
+    ///     [c:A:private] => 3
+    /// )
+    ///
+    /// object(B)#1 (1) {
+    ///   ["shown"]=>
+    ///   int(2)
+    /// }
+    /// ```
+    pub(crate) fn std_properties_for(
+        &mut self,
+        object: PhpObject,
+        purpose: PropertyPurpose,
+    ) -> Result<PropertiesFor, Thrown> {
+        let handlers = self.object_handlers(object.heap());
+        match purpose {
+            PropertyPurpose::Debug => match handlers.get_debug_info(self, object)? {
+                Some(info) => Ok(PropertiesFor::Debug(info)),
+                None => self
+                    .properties_no_lazy_init(object)
+                    .map(PropertiesFor::Table),
+            },
+            PropertyPurpose::Json | PropertyPurpose::GetObjectVars | PropertyPurpose::VarExport => {
+                if let Some(table) = self.hooked_properties_table(object)? {
+                    return Ok(PropertiesFor::Temporary(table));
+                }
+                handlers
+                    .get_properties(self, object)
+                    .map(PropertiesFor::Table)
+            }
+            PropertyPurpose::ArrayCast => self
+                .properties_no_lazy_init(object)
+                .map(PropertiesFor::Table),
+            PropertyPurpose::Serialize if self.lazy_skips_serialize(object.heap()) => self
+                .properties_no_lazy_init(object)
+                .map(PropertiesFor::Table),
+            PropertyPurpose::Serialize => handlers
+                .get_properties(self, object)
+                .map(PropertiesFor::Table),
+        }
     }
 
     /// `owner`'s table `table`, laid down, in php's positions, each
     /// declared slot named by the key [`Request::slot_names`] interns
-    /// for it. The `Err` is the memory limit refusing a name.
+    /// for it, the name `zend_mangle_property_name` makes, so a reader
+    /// unmangles it as php's `print_hash` does and never asks the engine
+    /// for a visibility beside it. The `Err` is the memory limit refusing
+    /// a name.
+    ///
+    /// ```php
+    /// class A { public $a = 1; protected $b = 2; private $c = 3; }
+    /// class B extends A { private $c = 4; }
+    /// print_r(new B);
+    /// ```
+    /// ```expect
+    /// B Object
+    /// (
+    ///     [a] => 1
+    ///     [b:protected] => 2
+    ///     [c:A:private] => 3
+    ///     [c:B:private] => 4
+    /// )
+    /// ```
     pub(crate) fn object_table(
         &mut self,
         owner: PhpObject,
@@ -335,25 +456,6 @@ impl Request {
             ))));
         }
         Ok(ObjectTable::of(owner, table, names.into_boxed_slice()))
-    }
-
-    /// `zend_std_get_debug_info` past `__debugInfo`: the table
-    /// `get_properties` lays down, the class's `get_properties` called
-    /// first, or for a lazy object the table of the object its reader
-    /// reads, laid down and nothing initialised
-    /// (`zend_lazy_object_debug_info`, through
-    /// [`Request::lay_properties_no_lazy_init`]).
-    pub(crate) fn debug_table(&mut self, object: PhpObject) -> Result<ObjectTable, Thrown> {
-        let owner = if object.heap().laziness() == php_heap::Laziness::Eager {
-            let handlers = self.object_handlers(object.heap());
-            handlers.get_properties(self, object)?;
-            object
-        } else {
-            self.lay_properties_no_lazy_init(object)?
-        };
-        let table = self.heap.object_property_table(owner.heap());
-        let table = self.fatal_of(table)?;
-        self.object_table(owner, table)
     }
 
     /// [`PhpObject::pointer_move`]: `reset`, `end`, `next` or `prev`

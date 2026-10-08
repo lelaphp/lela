@@ -47,7 +47,7 @@ use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
 use php_ext::request::{BodyLimits, Request};
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
 
@@ -273,13 +273,43 @@ impl Query<'_> {
     /// ```expect regime=small-stack
     /// Maximum call stack size reached.
     /// ```
+    ///
+    /// The guard is php's `GC_TRY_PROTECT_RECURSION(ht)` over the table
+    /// being walked while a nested one is (`Z/ext/standard/http.c:213`),
+    /// and the test at the top of each level is of the table it is
+    /// handed: an object's property table, so an object whose rows lead
+    /// back to it stops there, the outer walk's own rows still written.
+    ///
+    /// ```php
+    /// class S { public $o; function __toString(): string { $this->o->b = 'replaced'; $this->o->c = 'zz'; return "s"; } }
+    /// $o = new stdClass;
+    /// $s = new S; $s->o = $o;
+    /// $o->a = $s;
+    /// $o->b = str_repeat('x', 40);
+    /// $o->c = str_repeat('y', 40);
+    /// echo http_build_query($o), "\n";
+    /// $a = ['a' => $s, 'b' => str_repeat('x', 40)];
+    /// $s2 = new class { public $arr; function __toString(): string { global $a; $a['b'] = 'new'; return 't'; } };
+    /// $a['a'] = $s2;
+    /// echo http_build_query($a), "\n";
+    /// ```
+    /// ```expect
+    /// b=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&c=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+    /// b=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    /// ```
     fn hash(
         &mut self,
         req: &mut Request,
-        rows: Rows,
+        table: walk::Table,
+        object: Option<PhpObject>,
         num_prefix: &[u8],
         key_prefix: Option<&[u8]>,
     ) -> Result<(), Thrown> {
+        // `GC_IS_RECURSIVE(ht)`: a table already being walked is
+        // skipped where it meets itself again, before the stack is asked.
+        if table.array().is_recursive() {
+            return Ok(());
+        }
         if req.stack_overflowed() {
             return Err(throw_error(
                 req,
@@ -287,28 +317,34 @@ impl Query<'_> {
                 "Maximum call stack size reached.",
             ));
         }
-        match rows {
+        let scope = req.scope();
         // The table is walked with no owner of it taken: what holds it
         // keeps it while code of the program runs under the walk, and
         // where that code frees it, the walk ends there. A declared slot
         // nothing holds is stepped over.
-            Rows::Array(array) => {
-                walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-                    let key = match row.key() {
-                        Key::Int(n) => KeyText::Index(*n),
-                        Key::Str(s) => KeyText::Name(s.as_bytes().to_vec()),
-                    };
-                    self.row(req, &key, *row.value(), num_prefix, key_prefix)?;
-                    Ok(ControlFlow::Continue(()))
-                })?;
-            }
-            Rows::Built(rows) => {
-                for (key, value) in rows {
-                    self.row(req, &key, value, num_prefix, key_prefix)?;
+        let walked = walk::foreach_guarded(req, table, Hold::None, |req, row| -> walk::Step<()> {
+            let key = match row.key() {
+                Key::Int(n) => KeyText::Index(*n),
+                Key::Str(name) => {
+                    let name = name.as_bytes();
+                    match object {
+                        Some(object) if name.first() == Some(&0) => {
+                            match visible_name(req, object, scope, name) {
+                                Some(name) => KeyText::Name(name),
+                                None => return Ok(ControlFlow::Continue(())),
+                            }
+                        }
+                        _ => KeyText::Name(name.to_vec()),
+                    }
                 }
-            }
+            };
+            self.row(req, &key, *row.value(), num_prefix, key_prefix)?;
+            Ok(ControlFlow::Continue(()))
+        })?;
+        match walked {
+            // A walk inside the table already: nothing, as the test above.
+            walk::Guarded::Walked(_) | walk::Guarded::Recursive => Ok(()),
         }
-        Ok(())
     }
 
     /// One row of [`Query::hash`]'s walk: a nested array or object
@@ -324,13 +360,14 @@ impl Query<'_> {
     ) -> Result<(), Thrown> {
         let value = value.deref();
         let nested = match value.as_ref() {
-            ValueRef::Array(array) => Some(Nested::Array(*array)),
+            ValueRef::Array(array) => Some((walk::Table::Array(*array), None)),
             ValueRef::Object(object) if enum_backing(req, *object).is_none() => {
-                Some(Nested::Object(*object))
+                // `HASH_OF(zdata)`, the object's `Z_OBJPROP`.
+                Some((object.property_table(req)?, Some(*object)))
             }
             _ => None,
         };
-        if let Some(nested) = nested {
+        if let Some((table, object)) = nested {
             let mut prefix: Vec<u8> = Vec::new();
             match &key {
                 KeyText::Name(name) => {
@@ -359,33 +396,7 @@ impl Query<'_> {
                     }
                 }
             }
-            // `GC_IS_RECURSIVE`: an array already being walked is
-            // skipped where it meets itself again.
-            match nested {
-                Nested::Array(array) => {
-                    if array.is_recursive() {
-                        return Ok(());
-                    }
-                    array.protect();
-                    let walked = self.hash(req, Rows::Array(array), b"", Some(&prefix));
-                    array.unprotect();
-                    walked?;
-                }
-                Nested::Object(object) => {
-                    if object.is_recursive() {
-                        return Ok(());
-                    }
-                    object.protect();
-                    let rows = object_rows(req, object);
-                    let walked = match rows {
-                        Ok(rows) => self.hash(req, Rows::Built(rows), b"", Some(&prefix)),
-                        Err(thrown) => Err(thrown),
-                    };
-                    object.unprotect();
-                    walked?;
-                }
-            }
-            return Ok(());
+            return self.hash(req, table, object, b"", Some(&prefix));
         }
         if matches!(value.as_ref(), ValueRef::Null | ValueRef::Resource(_)) {
             return Ok(());
@@ -402,54 +413,28 @@ enum KeyText {
     Index(i64),
 }
 
-/// What a nested value is walked as.
-enum Nested {
-    Array(PhpArray),
-    Object(PhpObject),
-}
-
-/// What [`Query::hash`] walks: an array's rows, walked as they stand,
-/// or an object's visible properties, read for it.
-enum Rows {
-    Array(PhpArray),
-    Built(Vec<(KeyText, Value)>),
-}
-
-/// An object's properties the calling scope may read,
-/// `zend_check_property_access` over the mangled names: a public or
-/// dynamic one always, a protected one from a scope the object is an
-/// instance of, a private one from its declaring class; each unmangled.
-fn object_rows(req: &mut Request, object: PhpObject) -> Result<Vec<(KeyText, Value)>, Thrown> {
-    let scope = req.scope();
-    let table = object.property_table(req)?;
-    let mut rows = Vec::new();
-    for (key, value) in walk::rows(req, table) {
-        let name = match key {
-            Key::Int(n) => {
-                rows.push((KeyText::Index(n), value));
-                continue;
-            }
-            Key::Str(s) => s.as_bytes().to_vec(),
-        };
-        if name.first() != Some(&0) {
-            rows.push((KeyText::Name(name), value));
-            continue;
-        }
-        let mut parts = name[1..].splitn(2, |c| *c == 0);
-        let class = parts.next().unwrap_or(&[]).to_vec();
-        let prop = parts.next().unwrap_or(&[]).to_vec();
-        let visible = match scope {
-            None => false,
-            Some(scope) if class == b"*" => object.instance_of(req, scope),
-            Some(scope) => req
-                .class_decl(scope)
-                .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(&class)),
-        };
-        if visible {
-            rows.push((KeyText::Name(prop), value));
-        }
-    }
-    Ok(rows)
+/// A mangled property name of `object`'s table as `zend_check_property_access`
+/// lets the calling scope see it, unmangled
+/// (`zend_unmangle_property_name_ex`): a protected one from a scope the
+/// object is an instance of, a private one from its declaring class;
+/// `None` for one the scope may not see.
+fn visible_name(
+    req: &mut Request,
+    object: PhpObject,
+    scope: Option<ClassId>,
+    name: &[u8],
+) -> Option<Vec<u8>> {
+    let mut parts = name.get(1..)?.splitn(2, |c| *c == 0);
+    let class = parts.next().unwrap_or(&[]);
+    let prop = parts.next().unwrap_or(&[]).to_vec();
+    let visible = match scope {
+        None => false,
+        Some(scope) if class == b"*" => object.instance_of(req, scope),
+        Some(scope) => req
+            .class_decl(scope)
+            .is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(class)),
+    };
+    visible.then_some(prop)
 }
 
 /// `http_build_query(array|object $data, ...): string`, the stub's
@@ -487,8 +472,8 @@ fn http_build_query(
     #[php(default = PHP_QUERY_RFC1738)] encoding_type: i64,
 ) -> Result<Owner<PhpString>, Thrown> {
     let data = data.value();
-    let rows = match data.as_ref() {
-        ValueRef::Array(array) => Rows::Array(*array),
+    let (table, object) = match data.as_ref() {
+        ValueRef::Array(array) => (walk::Table::Array(*array), None),
         ValueRef::Object(object) => {
             if enum_backing(req, *object).is_some() {
                 let name = value_name(req, &data);
@@ -498,7 +483,7 @@ fn http_build_query(
                     &format!("not be an enum, {name} given"),
                 ));
             }
-            Rows::Built(object_rows(req, *object)?)
+            (object.property_table(req)?, Some(*object))
         }
         _ => {
             let name = value_name(req, &data);
@@ -523,7 +508,7 @@ fn http_build_query(
         raw: encoding_type == PHP_QUERY_RFC3986,
     };
     let num_prefix = numeric_prefix.as_bytes().to_vec();
-    query.hash(req, rows, &num_prefix, None)?;
+    query.hash(req, table, object, &num_prefix, None)?;
     PhpString::new(req, &query.out)
 }
 

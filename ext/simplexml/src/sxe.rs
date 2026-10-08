@@ -5,15 +5,15 @@
 //! the Rust of its C function.
 
 use php_ext::abi::{
-    ClassIterator, CloneObj, DimensionRead, ObjectHandlers, PropertiesFor, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Std,
+    ClassIterator, CloneObj, DimensionRead, ObjectHandlers, PropertyPlace, PropertyRead,
+    PropertyTest, Std,
 };
 use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name, with_string};
 use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 use php_ext_libxml::ffi::{Borrowed, Kind, Node, NodeObject, XPath};
 
 /// `SXE_ITER`: what an object walks from the node it holds, matched
@@ -1562,37 +1562,12 @@ impl ObjectHandlers for Handlers {
         prop_dim_delete(req, object, &member, Access::Attributes)
     }
 
-    fn get_properties(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-    ) -> Result<Vec<(Key, Value)>, Thrown> {
-        let table = properties(req, object)?;
-        Ok(walk::rows(req, table)
-            .map(|(key, value)| (key, value.deref()))
-            .collect())
-    }
-
-    fn get_properties_for(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-        purpose: PropertyPurpose,
-    ) -> Result<PropertiesFor, Thrown> {
-        if purpose == PropertyPurpose::Debug {
-            return Ok(PropertiesFor::Standard);
-        }
-        let table = properties(req, object)?;
-        let rows = walk::rows(req, table).map(|(key, value)| (key, value.deref()));
-        Ok(PropertiesFor::Rows(rows.collect()))
+    /// `sxe_get_properties`: the table rebuilt and kept on the object.
+    fn get_properties(&self, req: &mut Request, object: PhpObject) -> Result<walk::Table, Thrown> {
+        properties(req, object).map(walk::Table::Array)
     }
 
     fn properties_overloaded(&self) -> bool {
-        true
-    }
-
-    /// `sxe_get_properties` builds the element's table afresh.
-    fn answers_properties(&self) -> bool {
         true
     }
 

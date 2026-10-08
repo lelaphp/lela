@@ -304,7 +304,7 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
             // table from `zend_get_properties_for` to
             // `zend_release_properties`, so the refcount printed counts
             // the owners a class's own table takes.
-            let held = match object.props_held(req, PropertyPurpose::Debug) {
+            let held = match object.properties_for(req, PropertyPurpose::Debug) {
                 Ok(held) => held,
                 Err(thrown) => {
                     object.unprotect_in(req, RecursionGuard::Debug);

@@ -49,7 +49,7 @@ use std::cmp::Ordering;
 
 use php_heap::{Arr, Obj, Ref, Res, Str, Zval, ZvalType};
 
-use crate::api::abi::{ClassRef, PropertyPurpose};
+use crate::api::abi::{ClassRef, PropertiesFor, PropertyPurpose};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
@@ -1063,54 +1063,25 @@ impl ArrayIter {
 }
 
 /// The table `zend_get_properties_for` hands a reader, held until
-/// `zend_release_properties`: [`PhpObject::props_held`]'s answer, with
-/// what php's reader holds: the object's own table laid down and one
-/// owner of it, rows the class answers with one owner of each, or the
-/// class's debug table and its owner. [`walk::properties`] walks it;
-/// [`HeldProperties::release`] gives it back, after the reader has
-/// cleared its recursion guard, as php releases it after
-/// `ZEND_GUARD_OR_GC_UNPROTECT_RECURSION`.
+/// `zend_release_properties`: [`PhpObject::properties_for`]'s answer,
+/// the table and the owner php's reader holds of it, the object's own
+/// table or one the class keeps by the owner `GC_TRY_ADDREF` takes, or
+/// a table built for the reader by its one owner, php's `*is_temp`.
+/// [`walk::properties`] walks it; [`HeldProperties::release`] gives it
+/// back, after the reader has cleared its recursion guard, as php
+/// releases it after `ZEND_GUARD_OR_GC_UNPROTECT_RECURSION`.
 #[derive(Debug)]
-#[must_use = "the rows are held until they are released"]
+#[must_use = "the table is held until it is released"]
 pub struct HeldProperties {
-    held: Held,
+    /// What the walk reads.
+    table: walk::Table,
+    /// The reader's owner of the table it stands on
+    /// ([`walk::Table::array`]), or of the table built for it.
+    owner: Owner<PhpArray>,
+    /// What the class's `get_debug_info` left pending while it built
+    /// the table.
+    thrown: Option<Thrown>,
     count: usize,
-}
-
-/// What [`HeldProperties`] holds and gives back at its release, php's
-/// table and its `*is_temp`.
-#[derive(Debug)]
-enum Held {
-    /// The object's own table as `get_properties` lays it down, and the
-    /// reader's owner of it, `zend_std_get_properties_for`'s
-    /// `GC_TRY_ADDREF`.
-    Table(walk::ObjectTable, Owner<PhpArray>),
-    /// Rows the class answers, built for the reader
-    /// (`get_properties_for`, php's `*is_temp`) or by its own
-    /// `get_properties`: one owner of each key and value.
-    Rows(Vec<(Owner<Key>, Kept)>),
-    /// The class's debug table, its owner, and what the class left
-    /// pending while it built it.
-    Debug(Owner<PhpArray>, Option<Thrown>),
-}
-
-/// One row [`Held::Rows`] keeps: a value it owns, or a typed property
-/// nothing has written.
-#[derive(Debug)]
-enum Kept {
-    Value(Owner<Value>),
-    Uninitialized(String),
-}
-
-/// One row of [`HeldProperties`] as `zend_hash` walks it: a value, or
-/// under [`PropertyPurpose::Debug`] a typed property nothing has
-/// written, php's `IS_INDIRECT` to an `IS_UNDEF` slot that
-/// `zend_get_typed_property_info_for_slot` finds a type for, which a
-/// dumper shows as `uninitialized(T)` with the type's text.
-#[derive(Debug, Clone)]
-pub(crate) enum HeldRow {
-    Value(Value),
-    Uninitialized(String),
 }
 
 impl HeldProperties {
@@ -1123,49 +1094,25 @@ impl HeldProperties {
         self.count
     }
 
-    /// `zend_release_properties`: the owners the rows held given back.
-    /// The `Err` is what the class's `get_debug_info` left pending while
-    /// it built the table, handed on once the rows have been read, as
+    /// The table held, a view, which the hold keeps until its release:
+    /// read under the borrowed request ([`walk::rows`]), or guarded as
+    /// php guards `prop_ht` ([`walk::Table::array`]).
+    #[must_use]
+    pub fn table(&self) -> walk::Table {
+        self.table.clone()
+    }
+
+    /// `zend_release_properties`: the reader's owner given back,
+    /// `zend_array_release`, one owner fewer, the table destroyed at the
+    /// last, and no possible root of the cycle collector. The `Err` is
+    /// what the class's `get_debug_info` left pending while it built
+    /// the table, handed on once the rows have been read, as
     /// `php_var_dump` and `php_debug_zval_dump` leave `EG(exception)`
     /// standing after the dump (`Z/ext/standard/var.c:184`).
     pub fn release(self, req: &mut Request) -> Result<(), Thrown> {
-        match self.held {
-            // `zend_array_release`: one owner fewer, the table destroyed at
-            // the last, and no possible root of the cycle collector.
-            Held::Table(_, table) => {
-                table.give_up_nogc(req);
-                Ok(())
-            }
-            Held::Rows(rows) => {
-                for (key, kept) in rows {
-                    if let Kept::Value(value) = kept {
-                        value.give_up(req);
-                    }
-                    key.give_up(req);
-                }
-                Ok(())
-            }
-            Held::Debug(table, thrown) => {
-                table.give_up_nogc(req);
-                thrown.map_or(Ok(()), Err)
-            }
-        }
+        self.owner.give_up_nogc(req);
+        self.thrown.map_or(Ok(()), Err)
     }
-}
-
-/// [`Held::Rows`] over `rows`, one owner of each key and value taken.
-fn kept(req: &Request, rows: Vec<(Key, HeldRow)>) -> Held {
-    Held::Rows(
-        rows.into_iter()
-            .map(|(key, row)| {
-                let kept = match row {
-                    HeldRow::Value(value) => Kept::Value(Owner::take(req, value)),
-                    HeldRow::Uninitialized(ty) => Kept::Uninitialized(ty),
-                };
-                (Owner::take(req, key), kept)
-            })
-            .collect(),
-    )
 }
 
 /// Where a value stands in a table, php's `zval *` into a bucket, which
@@ -1476,7 +1423,7 @@ impl PhpObject {
     /// table a class shows in place of its properties, with one owner,
     /// the caller's, which is php's `*is_temp` one and is released once
     /// the rows have been read. `None` for a class that shows its
-    /// members. [`PhpObject::props_held`] under the same purpose asks
+    /// members. [`PhpObject::properties_for`] under the same purpose asks
     /// this first and reads the members where it answers none, so a
     /// typed property nothing has written still shows as one. The throwable
     /// the class left pending while it built the table rides beside it,
@@ -1488,41 +1435,25 @@ impl PhpObject {
         req.object_handlers(self.0).get_debug_info(req, *self)
     }
 
-    /// The properties one reader of them sees, `zend_get_properties_for`
-    /// under its purpose: the declared slots that hold a value in slot
-    /// order and then the dynamic table, each name a string key carrying
-    /// the prefix `zend_mangle_property_name` puts before it, `\0*\0p`
-    /// for a protected property and `\0C\0p` for a private one, which is
-    /// what `print_r` unmangles and `var_export` strips; or the rows a
-    /// class answers for the purpose, under the keys its table holds
-    /// them by, an integer one among them. Views, no owner taken, and a
-    /// mangled name is interned as php's is; the `Err` is the memory
-    /// limit refusing the intern. Under [`PropertyPurpose::Debug`] a
-    /// class may answer a table of its own, which no view outlives, so
-    /// that purpose is read through [`PhpObject::props_held`] and is an
-    /// `InternalError` here where the class answers one.
-    pub fn props_for(
-        &self,
-        req: &mut Request,
-        purpose: PropertyPurpose,
-    ) -> Result<Vec<(Key, Value)>, Thrown> {
-        crate::ops::properties_for(req, *self, purpose)
-    }
-
-    /// [`PhpObject::props_for`] for a reader that holds the table while
-    /// it reads, `zend_get_properties_for` to `zend_release_properties`:
-    /// where the class builds the table for the reader
-    /// (`get_properties_for`, php's `*is_temp`), each row is one more
-    /// owner of its value until [`HeldProperties::release`], as
-    /// `spl_fixedarray_object_get_properties_for`'s `Z_TRY_ADDREF_P` makes
-    /// it, so an element that is the object itself counts while the
-    /// reader prints its refcount; the object's own table, which php
-    /// hands out with `GC_TRY_ADDREF` on the table alone, takes none.
-    /// Under [`PropertyPurpose::Debug`] the class's `get_debug_info` is
-    /// asked first, as `zend_std_get_properties_for` asks it
-    /// (`Z/Zend/zend_object_handlers.c:2179`), and the table it answers
-    /// is held whole, its rows views of it, so a value it alone holds
-    /// prints one owner.
+    /// `zend_get_properties_for(obj, purpose)`, php's second entry point
+    /// to an object's properties, held until
+    /// [`HeldProperties::release`], `zend_release_properties`: the table
+    /// the class's `get_properties_for` answers the purpose with, and at
+    /// `Std` what `zend_std_get_properties_for` answers, the object's
+    /// table as `get_properties` lays it down ([`PhpObject::property_table`]),
+    /// a lazy one read as it stands where the purpose initialises
+    /// nothing, the hooked properties' table for the readers that call
+    /// hooks, and under [`PropertyPurpose::Debug`] what the class's
+    /// `get_debug_info` answers first (`Z/Zend/zend_object_handlers.c:2611`).
+    /// A table the object or the class keeps is held by one more owner,
+    /// `GC_TRY_ADDREF`, so a write that code of the program makes while
+    /// the reader walks it separates it; one built for the reader,
+    /// `*is_temp`, by its one owner, so an element that is the object
+    /// itself counts while the reader prints its refcount; php's `NULL`
+    /// table is held as the empty one. Each declared row is keyed by the
+    /// name `zend_mangle_property_name` makes, `\0*\0p` for a protected
+    /// property and `\0C\0p` for a private one. The `Err` is what the
+    /// lazy initializer or the class threw, or the memory limit.
     ///
     /// ```php
     /// class D { public int $u; public $a = 1; public function __debugInfo(): array { return ['shown' => str_repeat('s', 2)]; } }
@@ -1556,59 +1487,60 @@ impl PhpObject {
     ///   string(3) "UTC" refcount(1)
     /// }
     /// ```
-    pub fn props_held(
+    pub fn properties_for(
         &self,
         req: &mut Request,
         purpose: PropertyPurpose,
     ) -> Result<HeldProperties, Thrown> {
-        use crate::ops::Answered;
-        let (held, count) = match crate::ops::properties_answered(req, *self, purpose)? {
-            Answered::Table(table) => {
-                // `Answered::Table` is the Debug purpose's alone.
-                let count = if self.0.laziness() == php_heap::Laziness::Eager {
-                    req.property_count(*self)?
-                } else {
-                    table.held()
-                };
-                let owner = Owner::take(req, table.dynamic());
-                (Held::Table(table, owner), count)
+        let (table, owner, thrown) = match req.properties_answered(*self, purpose)? {
+            PropertiesFor::Table(table) => {
+                let owner = Owner::take(req, table.array());
+                (table, owner, None)
             }
-            Answered::Own(rows) if purpose == PropertyPurpose::Debug => {
-                let (rows, count) = crate::ops::debug_rows(req, *self, rows)?;
-                (kept(req, rows), count)
+            PropertiesFor::Temporary(owner) => (walk::Table::Array(*owner), owner, None),
+            PropertiesFor::Debug(info) => {
+                (walk::Table::Array(*info.table), info.table, info.thrown)
             }
-            Answered::Own(rows) | Answered::Built(rows) => {
-                let count = rows.len();
-                let rows = rows
-                    .into_iter()
-                    .map(|(key, value)| (key, HeldRow::Value(value)))
-                    .collect();
-                (kept(req, rows), count)
-            }
-            // The class's debug table, which the answer holds one owner
-            // of until its release.
-            Answered::Debug(info) => {
-                let count = info.table.len();
-                (Held::Debug(info.table, info.thrown), count)
+            PropertiesFor::Null => {
+                let empty = Owner::take(req, PhpArray::empty());
+                (walk::Table::Array(*empty), empty, None)
             }
         };
-        Ok(HeldProperties { held, count })
+        let count = match &table {
+            walk::Table::Object(object) if self.0.laziness() == php_heap::Laziness::Eager => {
+                req.property_count(object.owner())
+            }
+            walk::Table::Object(object) => Ok(object.held()),
+            walk::Table::Array(array) => Ok(array.len()),
+        };
+        let held = HeldProperties {
+            table,
+            owner,
+            thrown,
+            count: 0,
+        };
+        match count {
+            Ok(count) => Ok(HeldProperties { count, ..held }),
+            Err(thrown) => match held.release(req) {
+                Ok(()) => Err(thrown),
+                Err(earlier) => Err(earlier.chain(req, thrown)),
+            },
+        }
     }
 
-    /// php's `Z_OBJPROP_P`, `zend_std_get_properties`: the object's
-    /// property table laid down for a walk ([`walk::foreach`],
-    /// [`walk::rows`]), [`walk::Table::Object`], a lazy object initialised first and the class's
-    /// `get_properties` called, so the table is the instance's and a
-    /// class that writes its fields into the table at that call
-    /// (`DateInterval`) has written them. A class whose `get_properties`
-    /// answers a table of its own making
-    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties),
-    /// `sxe_get_properties`) is read as the rows it builds,
-    /// [`walk::Table::Built`]. The table
-    /// stays laid down, as php's object keeps the table
-    /// `rebuild_object_properties` built, and `memory_get_usage()` counts
-    /// it as php's does. The `Err` is what the lazy initializer or the
-    /// class threw, or the memory limit refusing a name.
+    /// php's `Z_OBJPROP_P`, the first of php's two entry points to an
+    /// object's properties: the table the class's `get_properties`
+    /// answers, a view ([`walk::foreach`], [`walk::rows`]). At `Std`,
+    /// `zend_std_get_properties`, it is the object's own property table
+    /// laid down, [`walk::Table::Object`], a lazy object initialised
+    /// first, so the table is the instance's; a class that writes its
+    /// fields into the table at that call (`DateInterval`) has written
+    /// them, and a class that keeps a table in its place
+    /// (`sxe_get_properties`) answers that one, [`walk::Table::Array`].
+    /// The table stays laid down, as php's object keeps the table
+    /// `rebuild_object_properties` built, and `memory_get_usage()`
+    /// counts it as php's does. The `Err` is what the lazy initializer
+    /// or the class threw, or the memory limit refusing a name.
     ///
     /// ```php
     /// class K { public $d = 1; }
@@ -1622,31 +1554,51 @@ impl PhpObject {
     /// []
     /// ```
     pub fn property_table(&self, req: &mut Request) -> Result<walk::Table, Thrown> {
-        req.property_table(*self)
+        req.object_handlers(self.0).get_properties(req, *self)
     }
 
-    /// The object's property table as `get_properties` holds it,
-    /// php's `zobj->properties`: the declared slots that hold a value,
-    /// each keyed by the name `zend_mangle_property_name` makes (`\0*\0p`
-    /// for a protected property, `\0C\0p` for a private one), then the
-    /// dynamic table, a lazy object initialised first as
-    /// `zend_std_get_properties` initialises it. Every row's key is the
-    /// string it stands under; views, no owner taken. The rows
-    /// [`PhpObject::row`], [`PhpObject::set_row`], [`PhpObject::unset_row`]
-    /// address by key; the `Err` is what the
-    /// lazy initializer threw or the memory limit refusing a name.
+    /// php's `obj->ce->num_hooked_props != 0`: whether a class of the
+    /// object's chain declares a property with hooks, which
+    /// `zend_std_get_properties_for` reads the hooks' table for, and
+    /// whose readers guard the object rather than that table.
+    #[must_use]
+    pub fn has_hooked_properties(&self, req: &Request) -> bool {
+        req.class_has_hooks(self.class())
+    }
+
+    /// The walk php's encoders take where they do not rebuild the
+    /// property table ("Optimized version without rebuilding properties
+    /// `HashTable`", `Z/ext/json/json_encoder.c:129`,
+    /// `Z/ext/standard/var.c:1155`): over an object that has no table
+    /// laid down, is not lazy, and whose class answers neither
+    /// `get_properties` nor `get_properties_for` itself, its declared
+    /// slots alone, each read in its slot as it stands
+    /// (`OBJ_PROP(obj, prop_info->offset)`) under the name
+    /// `zend_mangle_property_name` makes, nothing laid down; `None` for
+    /// any other object, which the encoder reads through
+    /// [`PhpObject::properties_for`]. The `Err` is the memory limit
+    /// refusing a name.
     ///
     /// ```php
-    /// #[AllowDynamicProperties] class P { private $a = 1; protected $b = 2; public $c = 3; }
-    /// $o = new P; $o->d = 4;
-    /// foreach (@new ArrayObject($o) as $k => $v) echo str_replace("\0", '\0', $k), "=$v ";
-    /// echo count(@new ArrayObject($o)), "\n";
+    /// class K { public $d = 1; }
+    /// $k = new K; $m = memory_get_usage(); $j = json_encode($k); echo memory_get_usage() - $m, "\n";
+    /// $l = new K; $m = memory_get_usage(); $s = serialize($l); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// c=3 d=4 2
+    /// 32
+    /// 56
     /// ```
-    pub fn entries(&self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
-        req.table_entries(*self)
+    pub fn slots_without_table(&self, req: &mut Request) -> Result<Option<walk::Table>, Thrown> {
+        let o = self.heap();
+        if o.properties().is_some()
+            || o.laziness() != php_heap::Laziness::Eager
+            || req.object_handlers(o).properties_overloaded()
+        {
+            return Ok(None);
+        }
+        let table = o.slot_table();
+        req.object_table(*self, table)
+            .map(|table| Some(walk::Table::Object(table)))
     }
 
     /// `zend_std_get_properties_ex` for what it leaves behind: the
@@ -1707,9 +1659,9 @@ impl PhpObject {
     /// object initialised; `false` and nothing moved where the table has
     /// no row. The pointer stays on the table between calls, and a
     /// declared slot is a row to it whether or not it holds a value, as
-    /// php's `IS_INDIRECT` is. What a class whose `get_properties`
-    /// answers rows of its own holds is not this table
-    /// ([`ObjectHandlers::answers_properties`](crate::api::abi::ObjectHandlers::answers_properties)).
+    /// php's `IS_INDIRECT` is. A class whose `get_properties` keeps a
+    /// table in place of the object's ([`PhpObject::property_table`]'s
+    /// [`walk::Table::Array`]) holds its pointer there, not on this one.
     pub fn pointer_move(&self, req: &mut Request, how: PointerMove) -> Result<bool, Thrown> {
         req.pointer_move(*self, how)
     }
@@ -2263,7 +2215,7 @@ impl PhpObject {
     /// `ArrayObject` sort, a lazy ghost's initializer). A reader that
     /// tells php's `IS_INDIRECT` from a plain value, as
     /// `spl_array_object_count_elements_helper` does, reads it after
-    /// [`PhpObject::entries`] has laid the table down.
+    /// [`PhpObject::property_table`] has laid the table down.
     #[must_use]
     pub fn declared_rows(&self) -> DeclaredRows {
         self.0.declared_rows()
@@ -3201,7 +3153,7 @@ mod tests {
             Some(b"a string the object holds".to_vec())
         );
         assert_eq!(object.prop(&req, b"missing"), None);
-        assert_eq!(object.entries(&mut req).map(|e| e.len()), Ok(1));
+        assert_eq!(object.props(&mut req).map(|e| e.len()), Ok(1));
         req.release(object.as_value());
         assert_eq!(
             req.memory_usage(false),

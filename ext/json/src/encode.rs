@@ -14,13 +14,16 @@
 
 use std::ops::ControlFlow;
 
+use php_ext::abi::PropertyPurpose;
 use php_ext::call;
 use php_ext::coerce::{Exponent, float_format, numeric_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Hold};
-use php_ext::values::{ClassId, Key, Owner, PhpObject, RecursionGuard, Value, ValueRef};
+use php_ext::values::walk::{self, Hold, Unwritten};
+use php_ext::values::{
+    ClassId, HeldProperties, Key, Owner, PhpArray, PhpObject, RecursionGuard, Value, ValueRef,
+};
 
 use crate::constants::{
     JSON_ERROR_DEPTH, JSON_ERROR_INF_OR_NAN, JSON_ERROR_NON_BACKED_ENUM, JSON_ERROR_NONE,
@@ -426,40 +429,6 @@ fn enum_case(
     encode(req, buf, &case, options, enc)
 }
 
-/// The rows an object contributes, in php's order: its declared
-/// properties and then its dynamic ones with the private and protected of the class skipped,
-/// which is `ZSTR_VAL(key)[0] == '\0'` over `zend_get_properties_for`.
-/// A hooked property is what its `get` hook answers, and a virtual one
-/// with none is no row; a class that answers `ZEND_PROP_PURPOSE_JSON`
-/// itself is its answer.
-///
-/// ```php
-/// class H { public $a = 1; public $v { get => 'v'; } protected $p = 2; public $w { set {} } }
-/// class P { private $x = 1; } class C extends P { public $y = 2; }
-/// echo json_encode(new H), json_encode(new C), "\n";
-/// echo json_encode(new DateTimeImmutable('2000-01-01 UTC')), "\n";
-/// ```
-/// ```expect
-/// {"a":1,"v":"v"}{"y":2}
-/// {"date":"2000-01-01 00:00:00.000000","timezone_type":3,"timezone":"UTC"}
-/// ```
-fn object_rows(req: &mut Request, value: &Value) -> Result<Vec<(Key, Value)>, Thrown> {
-    let Some(object) = value.as_object() else {
-        return Ok(Vec::new());
-    };
-    // `zend_get_properties_for(val, ZEND_PROP_PURPOSE_JSON)`, which
-    // initialises a lazy object and reads what that answers.
-    let object = &php_ext::call::initialize_lazy(req, object)?;
-    // The class's own table where it answers the purpose itself, as
-    // `DateTime`'s and `DatePeriod`'s do, else its hooked properties'
-    // or its members', every name mangled as the table holds it.
-    Ok(object
-        .props_for(req, php_ext::abi::PropertyPurpose::Json)?
-        .into_iter()
-        .filter(|(key, _)| !matches!(key, Key::Str(name) if name.as_bytes().first() == Some(&0)))
-        .collect())
-}
-
 /// `php_json_encode_array`: the brackets, the rows between them, the
 /// recursion guard around the walk and the depth read after it.
 ///
@@ -502,42 +471,161 @@ fn encode_array(
         }
         return Ok(false);
     }
-    let array = value.as_array().copied();
-    let object = value.as_object().copied();
-    let mut as_object = options & JSON_FORCE_OBJECT != 0;
-    if let Some(array) = array {
-        as_object = as_object || !array.is_list();
-        if array.is_recursive() {
-            enc.error_code = JSON_ERROR_RECURSION;
-            buf.extend_from_slice(b"null");
-            return Ok(false);
+    if let Some(object) = value.as_object().copied() {
+        return encode_object(req, buf, object, options, enc);
+    }
+    let Some(array) = value.as_array().copied() else {
+        return Ok(true);
+    };
+    let as_object = options & JSON_FORCE_OBJECT != 0 || !array.is_list();
+    let rows = Rows::Array(array);
+    guarded(req, buf, Guard::Table(array), rows, options, enc, as_object)
+}
+
+/// What a guard of `php_json_encode_array` stands on, php's
+/// `recursion_rc`: an object, or the table it walks.
+#[derive(Clone, Copy)]
+enum Guard {
+    Object(PhpObject),
+    Table(PhpArray),
+}
+
+impl Guard {
+    fn is_recursive(self) -> bool {
+        match self {
+            Guard::Object(object) => object.is_recursive(),
+            Guard::Table(table) => table.is_recursive(),
         }
-        array.protect();
     }
-    if let Some(object) = object {
-        as_object = true;
-        if object.is_recursive() {
-            enc.error_code = JSON_ERROR_RECURSION;
-            buf.extend_from_slice(b"null");
-            return Ok(false);
+
+    fn protect(self) {
+        match self {
+            Guard::Object(object) => object.protect(),
+            Guard::Table(table) => table.protect(),
         }
-        object.protect();
     }
-    let wrote = write_rows(req, buf, value, options, enc, as_object);
-    if let Some(array) = array {
-        array.unprotect();
+
+    fn unprotect(self) {
+        match self {
+            Guard::Object(object) => object.unprotect(),
+            Guard::Table(table) => table.unprotect(),
+        }
     }
-    if let Some(object) = object {
-        object.unprotect();
+}
+
+/// `php_json_encode_array` over an object: the rows it contributes, in
+/// php's order, its declared properties and then its dynamic ones with
+/// the private and protected of the class skipped, which is
+/// `ZSTR_VAL(key)[0] == '\0'` over the table. An object whose table is
+/// not laid down and whose class answers no table of its own is walked
+/// slot by slot and guarded itself, the table never built
+/// ([`PhpObject::slots_without_table`]); any other is read through
+/// `zend_get_properties_for(val, ZEND_PROP_PURPOSE_JSON)`, which
+/// initialises a lazy object, guarded on the table it answers, or on
+/// the object where its class has hooked properties, whose table is
+/// built for the encoder.
+/// A hooked property is what its `get` hook answers, and a virtual one
+/// with none is no row; a class that answers `ZEND_PROP_PURPOSE_JSON`
+/// itself is its answer.
+///
+/// ```php
+/// class H { public $a = 1; public $v { get => 'v'; } protected $p = 2; public $w { set {} } }
+/// class P { private $x = 1; } class C extends P { public $y = 2; }
+/// echo json_encode(new H), json_encode(new C), "\n";
+/// echo json_encode(new DateTimeImmutable('2000-01-01 UTC')), "\n";
+/// ```
+/// ```expect
+/// {"a":1,"v":"v"}{"y":2}
+/// {"date":"2000-01-01 00:00:00.000000","timezone_type":3,"timezone":"UTC"}
+/// ```
+fn encode_object(
+    req: &mut Request,
+    buf: &mut Vec<u8>,
+    object: PhpObject,
+    options: i64,
+    enc: &mut Encoder,
+) -> Wrote {
+    let hooked = object.has_hooked_properties(req);
+    let slots = if hooked {
+        None
+    } else {
+        object.slots_without_table(req)?
+    };
+    if let Some(slots) = slots {
+        return guarded(
+            req,
+            buf,
+            Guard::Object(object),
+            Rows::Slots(slots),
+            options,
+            enc,
+            true,
+        );
     }
+    let held = object.properties_for(req, PropertyPurpose::Json)?;
+    let guard = if hooked {
+        Guard::Object(object)
+    } else {
+        Guard::Table(held.table().array())
+    };
+    let wrote = guarded(req, buf, guard, Rows::Held(&held), options, enc, true);
+    held.release(req)?;
+    wrote
+}
+
+/// The rows [`write_rows`] walks: an array, an object's slots read
+/// where they stand, or the table `zend_get_properties_for` answered,
+/// held until its release.
+enum Rows<'h> {
+    Array(PhpArray),
+    Slots(walk::Table),
+    Held(&'h HeldProperties),
+}
+
+/// `php_json_encode_array`'s guard around its walk: `null` and the
+/// recursion error where a walk is inside what `guard` stands on already.
+fn guarded(
+    req: &mut Request,
+    buf: &mut Vec<u8>,
+    guard: Guard,
+    rows: Rows<'_>,
+    options: i64,
+    enc: &mut Encoder,
+    as_object: bool,
+) -> Wrote {
+    if guard.is_recursive() {
+        enc.error_code = JSON_ERROR_RECURSION;
+        buf.extend_from_slice(b"null");
+        return Ok(false);
+    }
+    guard.protect();
+    let wrote = write_rows(req, buf, rows, options, enc, as_object);
+    guard.unprotect();
     wrote
 }
 
 /// The body of `php_json_encode_array` inside its guard.
+///
+/// An object's rows are the table `zend_get_properties_for` hands the
+/// encoder, held from the first row to the last
+/// (`ZEND_HASH_FOREACH_KEY_VAL_IND`, `Z/ext/json/json_encoder.c:243`):
+/// a `jsonSerialize` that writes the object's dynamic properties
+/// separates the table from the rows being written, and one that frees
+/// a row's value frees none of what is still to be written.
+///
+/// ```php
+/// class J implements JsonSerializable { public $o; function jsonSerialize(): mixed { $this->o->b = 'new'; $this->o->c = null; $x = [str_repeat('q', 30), str_repeat('r', 30)]; return 1; } }
+/// $o = new stdClass; $j = new J; $j->o = $o;
+/// $o->a = $j; $o->b = str_repeat('b', 30); $o->c = [str_repeat('c', 30)];
+/// echo json_encode($o), "\n";
+/// ```
+/// ```expect
+/// {"a":1,"b":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","c":["cccccccccccccccccccccccccccccc"]}
+/// ```
 fn write_rows(
     req: &mut Request,
     buf: &mut Vec<u8>,
-    value: &Value,
+    rows: Rows<'_>,
     options: i64,
     enc: &mut Encoder,
     as_object: bool,
@@ -545,39 +633,34 @@ fn write_rows(
     buf.push(if as_object { b'{' } else { b'[' });
     enc.depth += 1;
     let mut comma = false;
-    if let Some(array) = value.as_array().copied() {
-        // `ZEND_HASH_FOREACH_KEY_VAL_IND(myht, …)`
-        // (`Z/ext/json/json_encoder.c:243`) over the array
-        // `php_json_encode_zval`'s `ZVAL_COPY` holds ([`held`]): the walk
-        // takes no owner of its own, so a `jsonSerialize` that assigns over
-        // what holds the array leaves it standing, and one that writes it
-        // separates it from the rows being written.
-        let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
-            let element = row.value().deref();
-            let row = (row.key(), &element);
-            if write_row(req, buf, row, options, enc, as_object, &mut comma)? {
-                Ok(ControlFlow::Continue(()))
-            } else {
-                Ok(ControlFlow::Break(()))
-            }
-        })?;
-        if walked.is_some() {
-            return Ok(false);
+    let object = !matches!(rows, Rows::Array(_));
+    // `ZEND_HASH_FOREACH_KEY_VAL_IND(myht, …)`
+    // (`Z/ext/json/json_encoder.c:243`): over an array the walk takes no
+    // owner of its own, since `php_json_encode_zval`'s `ZVAL_COPY` holds
+    // it ([`held`], so a `jsonSerialize` that assigns over what holds the
+    // array leaves it standing, and one that writes it separates it from
+    // the rows being written; over an object's table the owner
+    // `zend_get_properties_for` took.
+    let mut body = |req: &mut Request, row: &mut walk::Row| -> walk::Step {
+        // "Skip protected and private members."
+        if object && matches!(row.key(), Key::Str(name) if name.as_bytes().first() == Some(&0)) {
+            return Ok(ControlFlow::Continue(()));
         }
-    } else {
-        for (key, element) in object_rows(req, value)? {
-            if !write_row(
-                req,
-                buf,
-                (&key, &element),
-                options,
-                enc,
-                as_object,
-                &mut comma,
-            )? {
-                return Ok(false);
-            }
+        let element = row.value().deref();
+        let row = (row.key(), &element);
+        if write_row(req, buf, row, options, enc, as_object, &mut comma)? {
+            Ok(ControlFlow::Continue(()))
+        } else {
+            Ok(ControlFlow::Break(()))
         }
+    };
+    let walked = match rows {
+        Rows::Array(array) => walk::foreach(req, array, Hold::None, &mut body)?,
+        Rows::Slots(slots) => walk::foreach(req, slots, Hold::None, &mut body)?,
+        Rows::Held(held) => walk::properties(req, held, Unwritten::Skipped, &mut body)?,
+    };
+    if walked.is_some() {
+        return Ok(false);
     }
     if enc.depth > enc.max_depth {
         enc.error_code = JSON_ERROR_DEPTH;

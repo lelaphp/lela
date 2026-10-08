@@ -22,7 +22,8 @@ use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{Request, Unresolved};
 use crate::api::values::{
-    ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
+    ClassId, ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
+    walk,
 };
 use crate::supplied::{Keyed, Registered, Supplies};
 
@@ -2021,21 +2022,30 @@ pub enum PropertyPurpose {
     GetObjectVars,
 }
 
-/// What a class's `get_properties_for` answers for one purpose: no slot,
-/// a table of its own, or php's `NULL` table, which no reader may stand
-/// in for with an empty one, since `get_object_vars()`, the `(array)`
-/// cast and `get_mangled_object_vars()` answer the process's empty
-/// array for it (`ZVAL_EMPTY_ARRAY`, `Z/Zend/zend_builtin_functions.c:849`,
+/// What `get_properties_for` answers for one purpose, php's
+/// `HashTable *` and its `*is_temp`: a table the object or the class
+/// keeps, which the reader holds one more owner of while it reads
+/// (`GC_TRY_ADDREF`); a table built for the reader, its one owner the
+/// reader's to give up (`zend_release_properties`); or php's `NULL`
+/// table, which no reader may stand in for with an empty one, since
+/// `get_object_vars()`, the `(array)` cast and
+/// `get_mangled_object_vars()` answer the process's empty array for it
+/// (`ZVAL_EMPTY_ARRAY`, `Z/Zend/zend_builtin_functions.c:849`,
 /// `Z/Zend/zend_execute.h:280`) where a table, however empty, is copied
 /// into an array of the request's.
 #[derive(Debug)]
 pub enum PropertiesFor {
-    /// No slot of the class's own, `Std`'s answer: the reader reads
-    /// `get_properties`, as `zend_std_get_properties_for` does.
-    Standard,
+    /// A table the object or the class keeps, a view: what
+    /// `get_properties` answers, or a table the class holds in its
+    /// place (`spl_array_get_hash_table`'s storage).
+    Table(walk::Table),
     /// A table the class built for this reader (`*is_temp`), each row
     /// under the key php's table holds it by.
-    Rows(Vec<(Key, Value)>),
+    Temporary(Owner<PhpArray>),
+    /// Under [`PropertyPurpose::Debug`], the table the class's
+    /// `get_debug_info` built in place of its properties, a temporary
+    /// one, with what it left pending while it built it.
+    Debug(DebugInfo),
     /// The slot's `NULL`: no table, which a dumper, an encoder and a
     /// serializer read as no properties
     /// (`attributes_sensitive_parameter_value_get_properties_for`).
@@ -2417,20 +2427,18 @@ pub trait ObjectHandlers: Send + Sync {
         req.unset_dimension(object, offset)
     }
 
-    /// `get_properties`, `zend_std_get_properties` at `Std`: the
-    /// declared slots that hold a value then the dynamic table, in
-    /// `rebuild_object_properties`' order; views, no owner taken. A
-    /// declared slot is keyed by its name unmangled, and a dynamic row by
-    /// the table's key, an integer one as the integer it is. A lazy
-    /// object is initialised first and the rows are those of what that
-    /// answers, `zend_lazy_object_get_properties`.
-    fn get_properties(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-    ) -> Result<Vec<(Key, Value)>, Thrown> {
-        let object = req.lazy_init(object)?;
-        req.object_entries(object.heap())
+    /// `get_properties`, php's `HashTable *`, which
+    /// [`PhpObject::property_table`] reads: at `Std`,
+    /// `zend_std_get_properties`, the object's own property table laid
+    /// down as `rebuild_object_properties` lays it, the declared slots
+    /// then the dynamic table, each declared row keyed by its mangled
+    /// name; a lazy object initialised first and the table that of what
+    /// that answers, `zend_lazy_object_get_properties`. A class that
+    /// writes its fields into the table first (`DateInterval`) answers
+    /// `Std`'s after; one that keeps a table in its place answers that
+    /// one (`sxe_get_properties`). A view, no owner taken.
+    fn get_properties(&self, req: &mut Request, object: PhpObject) -> Result<walk::Table, Thrown> {
+        req.std_properties(object)
     }
 
     /// `get_method`, `zend_std_get_method` at `Std`: the method under
@@ -2726,21 +2734,27 @@ pub trait ObjectHandlers: Send + Sync {
         88
     }
 
-    /// `get_properties_for`: the rows one purpose reads, each under the
-    /// key php's table holds it by, a property's name as a string key
-    /// even where it reads as a number and an element a class shows
+    /// `get_properties_for`: the table one purpose reads, each row under
+    /// the key php's table holds it by, a property's name as a string
+    /// key even where it reads as a number and an element a class shows
     /// among its properties as an integer one
-    /// (`spl_fixedarray_object_get_properties_for`);
-    /// [`PropertiesFor::Standard`] at `Std`, php's null slot, so every
-    /// purpose reads `get_properties`.
+    /// (`spl_fixedarray_object_get_properties_for`). At `Std`, php's null
+    /// slot, `zend_std_get_properties_for`
+    /// (`Z/Zend/zend_object_handlers.c:2608`), which a class that
+    /// answers some purposes itself answers the others with: the class's
+    /// `get_debug_info` first under [`PropertyPurpose::Debug`], and where
+    /// it shows the members, the table `get_properties` lays down, a lazy
+    /// object's read as it stands; the hooked properties' table for the
+    /// readers that call hooks; and `get_properties`' table otherwise, a
+    /// lazy object read as it stands under the `(array)` cast and under a
+    /// serialization it was made to skip initialising for.
     fn get_properties_for(
         &self,
         req: &mut Request,
         object: PhpObject,
         purpose: PropertyPurpose,
     ) -> Result<PropertiesFor, Thrown> {
-        let _ = (req, object, purpose);
-        Ok(PropertiesFor::Standard)
+        req.std_properties_for(object, purpose)
     }
 
     /// Whether the table's `get_properties` is not
@@ -2764,36 +2778,6 @@ pub trait ObjectHandlers: Send + Sync {
     /// stdClass backs
     /// ```
     fn properties_overloaded(&self) -> bool {
-        false
-    }
-
-    /// Whether the table's `get_properties` answers rows of its own
-    /// making, not the object's property table as
-    /// `zend_std_get_properties` holds it: `sxe_get_properties`, which
-    /// builds a table of the element's children on each call. The
-    /// internal pointer the pointer natives move over an object
-    /// ([`PhpObject::pointer_move`](crate::api::values::PhpObject::pointer_move))
-    /// is the object's table's, so over such a class they read a table
-    /// fresh on each call, which is php's answer for `SimpleXMLElement`, whose
-    /// table is rebuilt between calls. `false` at `Std`, at every class
-    /// that sets `get_properties_for` alone, and at one whose
-    /// `get_properties` writes into the object's own table and answers
-    /// it (`date_object_get_properties_interval`), whose pointer natives
-    /// read the object's own table as php's do.
-    ///
-    /// ```php
-    /// $x = simplexml_load_string('<a><b>1</b><c>2</c></a>');
-    /// var_dump(@next($x), @key($x));
-    /// $f = new SplFixedArray(2); $f[0] = 5;
-    /// var_dump(@current($f), @current(new ArrayObject([7])));
-    /// ```
-    /// ```expect
-    /// string(1) "2"
-    /// string(1) "b"
-    /// bool(false)
-    /// bool(false)
-    /// ```
-    fn answers_properties(&self) -> bool {
         false
     }
 

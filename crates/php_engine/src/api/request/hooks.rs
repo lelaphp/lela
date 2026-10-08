@@ -17,7 +17,7 @@ use crate::api::__private::{native_function, parameter};
 use crate::api::abi::{Entry, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Key, Owner, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::engine::MethodAt;
 use crate::trampoline::public_method;
 
@@ -1238,15 +1238,16 @@ impl Request {
 }
 
 impl Request {
-    /// [`Request::hooked_object_rows`] as `zend_get_properties_for`
-    /// hands its table to `json_encode` and `var_export`: each declared
-    /// name mangled as php keys it, `\0*\0p` for a protected property
-    /// and `\0C\0p` for a private one, and each value a view whose owner
-    /// the native being served holds until it returns, as php's reader
-    /// holds the table until `zend_release_properties`. None for a class
-    /// with no hooked property. A lazy object whose initializer throws
-    /// answers no rows and leaves the throwable pending for the reader to
-    /// hand on once it has written what it read, as
+    /// [`Request::hooked_object_rows`] as `zend_get_properties_for` hands
+    /// its table to `json_encode`, `var_export` and `get_object_vars`
+    /// (`zend_hooked_object_build_properties`): a table built for the
+    /// reader, php's `*is_temp`, each declared name mangled as php keys
+    /// it, `\0*\0p` for a protected property and `\0C\0p` for a private
+    /// one, each row laid down without the lookup, so a name the hooks
+    /// answer and the table holds as a copy is two rows. None for a
+    /// class with no hooked property. A lazy object whose initializer
+    /// throws answers the empty table and leaves the throwable pending
+    /// for the reader to hand on once it has written what it read, as
     /// `zend_hooked_object_build_properties` answers `zend_empty_array`
     /// under `EG(exception)` (`Z/Zend/zend_property_hooks.c:137`).
     ///
@@ -1266,10 +1267,10 @@ impl Request {
     /// lazy ghost object(H)#3 (0) {
     /// }
     /// ```
-    pub(crate) fn hooked_properties_for(
+    pub(crate) fn hooked_properties_table(
         &mut self,
         object: PhpObject,
-    ) -> Result<Option<Vec<(Key, Value)>>, Thrown> {
+    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
         if !self.class_has_hooks(object.class()) {
             return Ok(None);
         }
@@ -1278,39 +1279,63 @@ impl Request {
                 return Err(thrown);
             }
             self.leave_pending(&thrown);
-            return Ok(Some(Vec::new()));
+            return Ok(Some(Owner::take(self, PhpArray::empty())));
         }
         let Some(rows) = self.hooked_object_rows(object)? else {
             return Ok(None);
         };
-        let mut out = Vec::with_capacity(rows.len());
-        let mut held = Vec::with_capacity(rows.len() * 2);
-        for (key, value, declared) in rows {
-            let Key::Str(name) = key else {
-                held.push(value);
-                out.push((key, value));
-                continue;
-            };
-            let prefix = declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
-            held.push(Value::string(name));
-            let key = if let Some(prefix) = prefix {
-                self.interned(&[prefix.as_slice(), name.as_bytes()].concat())?
-            } else {
-                name
-            };
-            held.push(value);
-            out.push((Key::Str(key), value));
-        }
-        let Some(call) = self.vm.serving_call_mut() else {
-            for value in held {
-                self.release(value);
+        let mut rows = rows.into_iter();
+        let mut table = match PhpArray::new(self) {
+            Ok(table) => table,
+            Err(thrown) => {
+                self.give_up_hooked(rows);
+                return Err(thrown);
             }
-            return self.fatal_of(Err(php_heap::Fatal::Error(String::from(
-                "InternalError: a hooked object's properties read with no native to hold them",
-            ))));
         };
-        call.coerced.extend(held);
-        Ok(Some(out))
+        while let Some((key, value, declared)) = rows.next() {
+            let value = Owner::adopt(self, value);
+            let key = match key {
+                Key::Str(name) => {
+                    let name = Owner::adopt(self, name);
+                    let prefix =
+                        declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
+                    match prefix {
+                        Some(prefix) => {
+                            let mangled =
+                                self.interned(&[prefix.as_slice(), name.as_bytes()].concat());
+                            name.give_up(self);
+                            mangled.map(|mangled| Owner::take(self, Key::Str(mangled)))
+                        }
+                        None => Ok(name.into_key()),
+                    }
+                }
+                Key::Int(_) => Ok(Owner::take(self, key)),
+            };
+            let laid = match key {
+                Ok(key) => table.add_new(self, key, value),
+                Err(thrown) => {
+                    value.give_up(self);
+                    Err(thrown)
+                }
+            };
+            if let Err(thrown) = laid {
+                self.give_up_hooked(rows);
+                table.give_up(self);
+                return Err(thrown);
+            }
+        }
+        Ok(Some(table))
+    }
+
+    /// The owners [`Request::hooked_object_rows`] took for `rows` given
+    /// back: each value's, and a dynamic row's name's.
+    fn give_up_hooked(&mut self, rows: impl Iterator<Item = HookedRow>) {
+        for (key, value, _) in rows {
+            self.release(value);
+            if let Key::Str(name) = key {
+                Owner::adopt(self, name).give_up(self);
+            }
+        }
     }
 }
 

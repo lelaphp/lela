@@ -7,8 +7,8 @@
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    ClassIterator, Instance, ObjectHandlers, OrFalse, Passed, PropertiesFor, PropertyPurpose, Raw,
-    Ref, Refusals, Std, This, True, Union, Variadic,
+    ClassIterator, Instance, ObjectHandlers, OrFalse, Passed, Raw, Ref, Refusals, Std, This, True,
+    Union, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::call::internal_iterator;
@@ -326,16 +326,6 @@ impl ObjectHandlers for Handlers {
             key: None,
             ahead: None,
         })))
-    }
-
-    fn get_properties_for(
-        &self,
-        req: &mut Request,
-        object: PhpObject,
-        purpose: PropertyPurpose,
-    ) -> Result<PropertiesFor, Thrown> {
-        let _ = (req, object, purpose);
-        Ok(PropertiesFor::Standard)
     }
 }
 

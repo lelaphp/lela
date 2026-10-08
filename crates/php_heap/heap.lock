@@ -239,6 +239,7 @@ Obj::set_weakly_referenced
 Obj::slot
 Obj::slot_bit
 Obj::slot_ref
+Obj::slot_table
 Obj::slot_uninit
 Obj::slots
 Obj::unprotect

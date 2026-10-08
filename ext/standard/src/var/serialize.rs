@@ -606,11 +606,7 @@ fn object_value(
         return written;
     }
     let incomplete = write_class_name(req, out, object);
-    let props = object.props_for(req, PropertyPurpose::Serialize)?;
-    let mut table = PhpArray::new(req)?;
-    for (key, value) in props {
-        table.set(req, Owner::take(req, key), Owner::take(req, value))?;
-    }
+    let table = object_rows(req, object)?;
     let written = nested(
         req,
         out,
@@ -625,6 +621,55 @@ fn object_value(
         hash.fail(object);
     }
     written
+}
+
+/// The rows `php_var_serialize_intern` writes for an object its class
+/// serializes no way of its own, copied into a table of their own, one
+/// owner each: its slots read where they stand where php's walk rebuilds
+/// no table (`Z/ext/standard/var.c:1155`), and otherwise the table
+/// `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_SERIALIZE)`
+/// answers, held while it is copied.
+///
+/// ```php
+/// #[AllowDynamicProperties] class K { public $d = 1; public $p = [2]; }
+/// $k = new K; $m = memory_get_usage(); $s = serialize($k); echo memory_get_usage() - $m, "\n";
+/// $k->e = 3; echo serialize($k), "\n";
+/// ```
+/// ```expect
+/// 80
+/// O:1:"K":3:{s:1:"d";i:1;s:1:"p";a:1:{i:0;i:2;}s:1:"e";i:3;}
+/// ```
+fn object_rows(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArray>, Thrown> {
+    let (table, held) = if let Some(slots) = object.slots_without_table(req)? {
+        (slots, None)
+    } else {
+        let held = object.properties_for(req, PropertyPurpose::Serialize)?;
+        (held.table(), Some(held))
+    };
+    let rows: Vec<(Key, Value)> = walk::rows(req, table).collect();
+    let copied = copied_rows(req, rows);
+    let released = held.map_or(Ok(()), |held| held.release(req));
+    match (copied, released) {
+        (Ok(copied), Ok(())) => Ok(copied),
+        (Ok(copied), Err(thrown)) => {
+            copied.give_up(req);
+            Err(thrown)
+        }
+        (Err(thrown), _) => Err(thrown),
+    }
+}
+
+/// `rows` laid down in a table of their own, one owner of each key and
+/// value taken.
+fn copied_rows(req: &mut Request, rows: Vec<(Key, Value)>) -> Result<Owner<PhpArray>, Thrown> {
+    let mut table = PhpArray::new(req)?;
+    for (key, value) in rows {
+        if let Err(thrown) = table.set(req, Owner::take(req, key), Owner::take(req, value)) {
+            table.give_up(req);
+            return Err(thrown);
+        }
+    }
+    Ok(table)
 }
 
 /// An object whose class has `__sleep`, held by its caller: the names
@@ -783,12 +828,14 @@ fn custom(
 /// among the properties php serializes; php's warnings for a name that
 /// is no string, is not there, or comes twice.
 ///
-/// php finds each name in the table as it stands when the name is read
+/// php finds each name in the table `zend_get_properties_for` handed it
+/// before the names are walked, held until `zend_release_properties`
 /// (`zend_hash_find`). A warning can reach the program's handler, and a
 /// name's conversion its `__toString()`, either of which can write the
-/// object's properties, so the rows read before one of them are read
-/// again before the next name is looked up, never named through a view
-/// of a value the write freed.
+/// object's properties: a declared row is read in its slot as it stands
+/// when its name is looked up, and a dynamic one in the table held,
+/// which the write separates, so no row is named through a view of a
+/// value the write freed.
 ///
 /// ```php
 /// set_error_handler(function () { global $o; $o->b = 'new'; return true; });
@@ -806,11 +853,18 @@ fn sleep_props(
     list: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
     // `zend_get_properties_for` before the names are walked, which
-    // initializes a lazy object first; the rows as they stand, `None`
-    // once program code may have written them.
-    let mut rows = Some(object.props_for(req, PropertyPurpose::Serialize)?);
+    // initializes a lazy object first, held until the last is.
+    let held = object.properties_for(req, PropertyPurpose::Serialize)?;
     let shown_class = String::from_utf8_lossy(class).into_owned();
-    let mut out = PhpArray::new(req)?;
+    let mut out = match PhpArray::new(req) {
+        Ok(out) => out,
+        Err(thrown) => {
+            return Err(match held.release(req) {
+                Ok(()) => thrown,
+                Err(earlier) => earlier.chain(req, thrown),
+            });
+        }
+    };
     // `ZEND_HASH_FOREACH_VAL_IND(sleep_retval, name_val)`
     // (`Z/ext/standard/var.c:919`), which holds nothing: the caller owns
     // what `__sleep()` answered.
@@ -818,7 +872,6 @@ fn sleep_props(
         // A name the list holds by reference is what the reference holds.
         let name = row.value().deref();
         if name.as_php_string().is_none() {
-            rows = None;
             docref(
                 req,
                 Level::Warning,
@@ -835,17 +888,12 @@ fn sleep_props(
         let mut protected = b"\0*\0".to_vec();
         protected.extend_from_slice(&text);
         let candidates = [text.clone(), private, protected];
-        let props = match rows.take() {
-            Some(props) => props,
-            None => object.props_for(req, PropertyPurpose::Serialize)?,
-        };
         let found = candidates.iter().find_map(|candidate| {
-            props.iter().find_map(|(key, value)| match key {
-                Key::Str(prop) if prop.as_bytes() == candidate.as_slice() => Some((*prop, *value)),
+            walk::rows(req, held.table()).find_map(|(key, value)| match key {
+                Key::Str(prop) if prop.as_bytes() == candidate.as_slice() => Some((prop, value)),
                 _ => None,
             })
         });
-        rows = Some(props);
         let shown = String::from_utf8_lossy(&text).into_owned();
         // A typed property nothing has written yet is left out quietly.
         if found.is_none()
@@ -856,7 +904,6 @@ fn sleep_props(
             return Ok(ControlFlow::Continue(()));
         }
         let Some((prop, value)) = found else {
-            rows = None;
             docref(
                 req,
                 Level::Warning,
@@ -868,7 +915,6 @@ fn sleep_props(
         };
         let key = Key::Str(prop);
         if out.contains(&key) {
-            rows = None;
             docref(
                 req,
                 Level::Warning,
@@ -881,8 +927,9 @@ fn sleep_props(
         out.set(req, key, value)?;
         Ok(ControlFlow::<()>::Continue(()))
     });
-    match walked {
-        Ok(_) => Ok(out),
+    let released = held.release(req);
+    match walked.and(released) {
+        Ok(()) => Ok(out),
         Err(thrown) => {
             out.give_up(req);
             Err(thrown)

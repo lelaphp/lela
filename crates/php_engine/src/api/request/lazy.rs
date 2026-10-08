@@ -22,7 +22,7 @@ use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
 use crate::api::raising::{Thrown, throw_error};
-use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, TypeTag, Value};
+use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
 pub(crate) const SKIP_INITIALIZATION_ON_SERIALIZE: i64 = 1 << 3;
@@ -143,45 +143,6 @@ impl Request {
             }
         }
         at
-    }
-
-    /// `zend_get_properties_no_lazy_init`: the rows `get_properties`
-    /// answers for an object that is not lazy, and for one that is, the
-    /// members of the object the initialised proxies lead to as they
-    /// stand, nothing initialised. Views, no owner taken.
-    ///
-    /// ```php
-    /// class C { public $a = 1; }
-    /// $r = new ReflectionClass('C');
-    /// $o = $r->newLazyGhost(function () { echo "init\n"; }, ReflectionClass::SKIP_INITIALIZATION_ON_SERIALIZE);
-    /// echo serialize($o), "\n";
-    /// var_dump(get_object_vars($o));
-    /// $p = $r->newLazyGhost(function () { echo "init p\n"; });
-    /// var_export($p);
-    /// echo "\n";
-    /// ```
-    /// ```expect
-    /// O:1:"C":0:{}
-    /// init
-    /// array(1) {
-    ///   ["a"]=>
-    ///   int(1)
-    /// }
-    /// init p
-    /// \C::__set_state(array(
-    ///    'a' => 1,
-    /// ))
-    /// ```
-    pub(crate) fn properties_no_lazy_init(
-        &mut self,
-        object: PhpObject,
-    ) -> Result<Vec<(Key, Value)>, Thrown> {
-        if object.heap().laziness() == Laziness::Eager {
-            let table = self.object_handlers(object.heap());
-            return table.get_properties(self, object);
-        }
-        let reader = self.lay_properties_no_lazy_init(object)?;
-        self.object_entries(reader.heap())
     }
 
     /// `zend_get_properties_no_lazy_init`'s `rebuild_object_properties_internal`

@@ -8,13 +8,14 @@
 //! the source lists and the scope a write names are [`Properties`]'s,
 //! whose fields no file but this one reads.
 
-use php_heap::{Fatal, Heap, Intern, Obj, Ref, Zval};
+use php_heap::{Fatal, Heap, Intern, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
 
 use crate::api::abi::{PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown, none_pending};
+use crate::api::values::walk::{self, ObjectTable, Table};
 use crate::api::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, TypeTag, Value, adopted,
 };
@@ -3112,7 +3113,8 @@ impl Request {
         // and goes over what the class answers.
         let handlers = self.object_handlers(o);
         if handlers.properties_overloaded() {
-            if handlers.get_properties(self, object)?.is_empty() {
+            let answered = handlers.get_properties(self, object)?;
+            if walk::rows(self, answered).next().is_none() {
                 return Ok(None);
             }
             return Ok(Some(self.heap.iterator_add(table, 0)));
@@ -3259,58 +3261,100 @@ impl Request {
         idx: u32,
     ) -> Result<Option<(php_heap::Key, Walked)>, Thrown> {
         let class = object.class();
-        let o = object.heap();
-        let handlers = self.object_handlers(o);
-        let rows = handlers.get_properties(self, object)?;
-        let placed = self.placed_properties(class);
-        let mut cursor = 0;
-        let mut at = self.heap.iterator_lead(idx) as usize;
-        let mut found = None;
-        for (i, (name, value)) in rows.into_iter().enumerate() {
-            // The declared slot a row is, by the cursor over the
-            // placed properties `object_entries` answers them in.
-            let slot = placed
-                .iter()
-                .skip(cursor)
-                .position(|info| {
-                    self.property_decl(*info)
-                        .is_some_and(|p| key_names(&name, &p.name.0))
-                })
-                .map(|found| found + cursor);
-            if let Some(slot) = slot {
-                cursor = slot + 1;
-            }
-            if i < at {
-                continue;
-            }
-            at = i + 1;
-            let declaring = slot
-                .and_then(|slot| placed.get(slot))
-                .map(|info| info.declaring);
-            // An integer key is no name `zend_check_property_access`
-            // is asked about.
-            if let Key::Str(name) = name
-                && !self.property_row_visible(class, name.as_bytes(), declaring)
-            {
-                continue;
-            }
-            let key = name.heap();
-            let walked = match slot.and_then(|slot| u32::try_from(slot).ok()) {
-                Some(slot) if !o.slot(slot).is_undef() => Walked::Slot(slot),
-                _ if o.properties().is_some_and(|table| table.contains(key)) => {
-                    Walked::Dynamic(key)
+        let handlers = self.object_handlers(object.heap());
+        let mut at = self.heap.iterator_lead(idx);
+        let found = match handlers.get_properties(self, object)? {
+            // The object's own table, a `DateInterval`'s fields among its
+            // dynamic rows: a slot walked as that slot and a dynamic row
+            // as that entry, so a walk by reference binds it.
+            Table::Object(table) => loop {
+                let end = table.positions().used();
+                if at >= end {
+                    break None;
                 }
-                _ => {
-                    self.addref(&value);
-                    Walked::Answered(value)
+                let pos = at;
+                at = at.saturating_add(1);
+                let Some(((name, _, declared), row)) = self.table_row_named(&table, pos)? else {
+                    continue;
+                };
+                // An integer key is no name `zend_check_property_access`
+                // is asked about.
+                if let Key::Str(name) = name
+                    && !self.property_row_visible(
+                        class,
+                        name.as_bytes(),
+                        declared.map(|(declaring, _)| declaring),
+                    )
+                {
+                    continue;
                 }
-            };
-            found = Some((key, walked));
-            break;
-        }
-        self.heap
-            .iterator_set_lead(idx, u32::try_from(at).unwrap_or(u32::MAX));
+                let walked = match row {
+                    TableRow::Slot(slot) => Walked::Slot(slot),
+                    TableRow::Entry(key) => Walked::Dynamic(key),
+                };
+                break Some((name.heap(), walked));
+            },
+            // A table the class keeps in place of the object's: each row
+            // the value it answered.
+            Table::Array(array) => {
+                let row = array
+                    .iter()
+                    .enumerate()
+                    .skip(usize::try_from(at).unwrap_or(usize::MAX))
+                    .find(|(_, (key, _))| match key {
+                        Key::Str(name) => self.property_row_visible(class, name.as_bytes(), None),
+                        Key::Int(_) => true,
+                    });
+                match row {
+                    Some((i, (key, value))) => {
+                        at = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+                        self.addref(&value);
+                        Some((key.heap(), Walked::Answered(value)))
+                    }
+                    None => None,
+                }
+            }
+        };
+        self.heap.iterator_set_lead(idx, at);
         Ok(found)
+    }
+
+    /// The row at position `pos` of `table` that holds a value, as a
+    /// reader that unmangles reads it: a declared slot under its name as
+    /// declared, beside the class that declared it and its visibility,
+    /// and a dynamic row under its key, with what stands there; `None`
+    /// for a slot nothing holds and a tombstone. The `Err` is the memory
+    /// limit refusing the intern of a name.
+    fn table_row_named(
+        &mut self,
+        table: &ObjectTable,
+        pos: u32,
+    ) -> Result<Option<(PropertyRow, TableRow)>, Thrown> {
+        let Some((row, z)) = table.positions().row_at(pos) else {
+            return Ok(None);
+        };
+        if z.is_undef() {
+            return Ok(None);
+        }
+        let value = Value::of_zval(z);
+        match row {
+            TableRow::Entry(key) => Ok(Some(((Key::of(key), value, None), row))),
+            TableRow::Slot(slot) => {
+                let class = table.owner().class();
+                let info = usize::try_from(slot)
+                    .ok()
+                    .and_then(|slot| self.placed_properties(class).get(slot).copied());
+                let Some((info, decl)) =
+                    info.and_then(|info| Some((info, self.property_decl(info)?)))
+                else {
+                    return Ok(None);
+                };
+                let (visibility, name) = (decl.visibility, decl.name.0.clone());
+                let name = self.interned(&name)?;
+                let row = (Key::Str(name), value, Some((info.declaring, visibility)));
+                Ok(Some((row, TableRow::Slot(slot))))
+            }
+        }
     }
 
     /// The key `FE_FETCH` hands a loop over an object's table for the row
@@ -3520,42 +3564,22 @@ impl Request {
                 || self.wrong_name(object.class(), name))
     }
 
-    /// The rows `get_properties` answers for `object`, each beside the
-    /// declared slot it is, the class that declared what stands there
-    /// and its visibility, or none for a dynamic row: the rows of the
-    /// std table are the slots that hold a value, in slot order, and
-    /// then the dynamic table, so the slots are walked with a cursor
-    /// beside them, as `zend_mangle_property_name` is walked by the
-    /// `(array)` cast. Views, no owner taken.
-    pub(crate) fn property_rows(&mut self, object: PhpObject) -> Result<Vec<PropertyRow>, Thrown> {
-        let table = self.object_handlers(object.heap());
-        let rows = table.get_properties(self, object)?;
-        // Rows a table holds as copies are plain values to php's
-        // `zend_check_property_access`, `is_dynamic` for each.
-        let placed = match object.heap().declared_rows() {
-            php_heap::DeclaredRows::Slots => self.placed_properties(object.class()),
-            php_heap::DeclaredRows::Copied => &[],
-        };
-        let mut at = 0;
-        Ok(rows
-            .into_iter()
-            .map(|(name, value)| {
-                let slot = placed
-                    .iter()
-                    .skip(at)
-                    .position(|info| {
-                        self.property_decl(*info)
-                            .is_some_and(|p| key_names(&name, &p.name.0))
-                    })
-                    .map(|i| i + at);
-                let declared = slot.and_then(|i| {
-                    at = i + 1;
-                    let info = *placed.get(i)?;
-                    Some((info.declaring, self.property_decl(info)?.visibility))
-                });
-                (name, value, declared)
-            })
-            .collect())
+    /// The rows of `table` that hold a value, each beside the declared
+    /// slot it is, the class that declared what stands there and its
+    /// visibility, or none for a dynamic row, in php's positions: the
+    /// slots in slot order, then the dynamic table, a declared row under
+    /// its name as declared. Views, no owner taken.
+    pub(crate) fn property_rows(
+        &mut self,
+        table: &ObjectTable,
+    ) -> Result<Vec<PropertyRow>, Thrown> {
+        let mut rows = Vec::new();
+        for pos in 0..table.positions().used() {
+            if let Some((row, _)) = self.table_row_named(table, pos)? {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 
     /// The properties in order, the declared slots that hold a value
@@ -4117,10 +4141,4 @@ impl Request {
         }
         Ok(())
     }
-}
-
-/// Whether a row's key is the declared name `name`: a string key of its
-/// bytes, never an integer one.
-fn key_names(key: &Key, name: &[u8]) -> bool {
-    matches!(key, Key::Str(s) if s.as_bytes() == name)
 }

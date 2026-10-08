@@ -19,7 +19,7 @@ use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, fatal, pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{Guarded, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 /// `mb_fast_convert` under a substitute, with the errors met.
 pub(crate) fn convert(
@@ -818,7 +818,7 @@ fn find_strings(req: &mut Request, value: &Value, out: &mut Vec<Vec<u8>>) -> Res
                 return Ok(true);
             }
             object.protect();
-            for (_, v) in object.entries(req)? {
+            for (_, v) in object_rows(req, object)? {
                 if find_strings(req, &v, out)? {
                     object.unprotect();
                     return Ok(true);
@@ -829,6 +829,12 @@ fn find_strings(req: &mut Request, value: &Value, out: &mut Vec<Vec<u8>>) -> Res
         _ => {}
     }
     Ok(false)
+}
+
+/// `HASH_OF(var)` over an object, its `Z_OBJPROP`: the rows, views.
+fn object_rows(req: &mut Request, object: PhpObject) -> Result<Vec<(Key, Value)>, Thrown> {
+    let table = object.property_table(req)?;
+    Ok(walk::rows(req, table).collect())
 }
 
 /// What converting one slot's value leaves, `mb_recursive_convert_variable`.
@@ -907,7 +913,7 @@ fn convert_value(
                 return Ok(Walk::Stopped);
             }
             object.protect();
-            for (key, v) in object.entries(req)? {
+            for (key, v) in object_rows(req, object)? {
                 match convert_value(req, &v, from, to)? {
                     Walk::Stopped => {
                         object.unprotect();

@@ -1412,12 +1412,17 @@ impl Table {
     /// them under their mangled names: what `zend_array_dup` copies and
     /// what `spl_array_get_properties_for` hands a cast; views.
     fn every_row(self, req: &mut Request) -> Result<Vec<(Key, Value)>, Thrown> {
+        let table = self.walked(req)?;
+        Ok(walk::rows(req, table).collect())
+    }
+
+    /// The table itself, php's `HashTable *` that
+    /// `spl_array_get_hash_table` answers: the storage, or the backing
+    /// object's `Z_OBJPROP`.
+    fn walked(self, req: &mut Request) -> Result<walk::Table, Thrown> {
         match self {
-            Table::Array(_, array) => Ok(walk::rows(req, array).collect()),
-            Table::Props(object) => {
-                let table = object.property_table(req)?;
-                Ok(walk::rows(req, table).collect())
-            }
+            Table::Array(_, array) => Ok(walk::Table::Array(array)),
+            Table::Props(object) => object.property_table(req),
         }
     }
 
@@ -2456,11 +2461,24 @@ impl ObjectHandlers for Handlers {
                 PropertyPurpose::ArrayCast | PropertyPurpose::VarExport | PropertyPurpose::Json
             )
         {
-            return Ok(PropertiesFor::Standard);
+            return Std.get_properties_for(req, object, purpose);
         }
-        // Views, as `get_properties_for`'s rows are, each under the key the
-        // storage holds it by.
-        Ok(PropertiesFor::Rows(table(req, object)?.every_row(req)?))
+        // `spl_array_get_properties_for`: the storage itself, `GC_ADDREF`,
+        // for a reader that leaves the object alone meanwhile, and a
+        // `zend_array_dup` of it for the cast, which keeps what it reads.
+        let rows = table(req, object)?;
+        if purpose != PropertyPurpose::ArrayCast {
+            return rows.walked(req).map(PropertiesFor::Table);
+        }
+        let rows = rows.every_row(req)?;
+        let mut copy = PhpArray::new(req)?;
+        for (key, value) in rows {
+            if let Err(thrown) = copy.set(req, Owner::take(req, key), Owner::take(req, value)) {
+                copy.give_up(req);
+                return Err(thrown);
+            }
+        }
+        Ok(PropertiesFor::Temporary(copy))
     }
 }
 

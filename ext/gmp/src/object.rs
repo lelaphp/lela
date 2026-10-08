@@ -102,7 +102,8 @@ impl GMP {
         let mut array = PhpArray::new(req)?;
         let text = PhpString::new(req, &text)?;
         array.append(req, text.into_value())?;
-        let rows = object.entries(req)?;
+        let table = object.property_table(req)?;
+        let rows: Vec<(Key, Value)> = walk::rows(req, table).collect();
         if !rows.is_empty() {
             let mut props = PhpArray::new(req)?;
             for (key, value) in rows {
@@ -379,7 +380,8 @@ impl ObjectHandlers for Handlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
-        let rows = object.entries(req)?;
+        let own = object.property_table(req)?;
+        let rows: Vec<(Key, Value)> = walk::rows(req, own).collect();
         let mut table = PhpArray::new(req)?;
         for (key, value) in rows {
             let key = Owner::take(req, key.clone());
