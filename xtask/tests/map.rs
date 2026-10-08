@@ -187,6 +187,38 @@ fn tracked() -> Vec<String> {
         .collect()
 }
 
+/// Every tracked file with a region is one pre-commit renders and CI
+/// holds with `computed check`, so no region's render waits on a session
+/// that happens to run `computed` on its file (#631); a fixture's are the
+/// harness's own tests'.
+#[test]
+fn pre_commit_renders_and_ci_checks_every_tracked_file_with_a_region() {
+    let files = tracked();
+    let ci = read(".github/workflows/harness.yml");
+    let checked = ci
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("- run: computed check "))
+        .expect("CI runs computed check");
+    assert_eq!(checked.split_whitespace().collect::<Vec<_>>(), files);
+    let listed = Command::new("git")
+        .args(["ls-files", "--", "*.md"])
+        .current_dir(workspace())
+        .output()
+        .unwrap();
+    for file in String::from_utf8(listed.stdout).unwrap().lines() {
+        if file.starts_with("xtask/fixtures/") {
+            continue;
+        }
+        let regions = staged(workspace(), file)
+            .lines()
+            .any(|l| l.starts_with("<!-- computed "));
+        assert!(
+            !regions || files.iter().any(|f| f == file),
+            "{file} has a region that pre-commit does not render: {files:?}"
+        );
+    }
+}
+
 /// Every `xtask status` region of a tracked file, its file and its opener.
 fn status_regions() -> Vec<(String, String)> {
     tracked()
@@ -228,7 +260,14 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
     use xtask::reading::{Reading, Status, Store};
 
     let regions = status_regions();
-    for name in ["crates", "seams", "rules", "bundle-order", "divergence"] {
+    for name in [
+        "crates",
+        "seams",
+        "rules",
+        "bundle-order",
+        "divergence",
+        "edges",
+    ] {
         assert!(
             regions
                 .iter()
