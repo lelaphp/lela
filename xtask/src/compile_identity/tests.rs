@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::dump::{Dumped, Held, held, verdict};
+use super::dump::{Dumped, Held, engine_side, held, verdict};
 use super::*;
 use crate::divergence::Registry;
 use crate::oracle::Runner;
@@ -349,4 +349,43 @@ fn a_file_outside_the_corpus_is_named_by_its_own_name() {
     let elsewhere = Path::new("/somewhere/else/one.phpt");
     assert_eq!(corpus.name(elsewhere), "one.phpt");
     assert_eq!(corpus.id(elsewhere), "compile:php-src/one.phpt");
+}
+
+/// The engine's side of a file it finished no dump of is that file's
+/// verdict and never the run's end (design §8): a dump past the recipe's
+/// limit is the file's `fail` naming the limit (#699), one a signal ended
+/// is the file's `fail` naming the signal (#1069), and a binary that would
+/// not run is the file's `bork`.
+#[test]
+fn a_dump_past_the_limit_or_ended_by_a_signal_is_the_files_fail_naming_it() {
+    let past = crate::oracle::PastLimit {
+        binary: PathBuf::from("target/lanes/php"),
+        script: PathBuf::from("/s/identity.php"),
+        limit_s: 1,
+    };
+    let (judgement, why) = engine_side(Err(past.into())).unwrap_err();
+    assert_eq!(judgement, Judgement::Fail);
+    assert!(why.contains("past the recipe's limit of 1 s"), "{why}");
+
+    let died = crate::oracle::Observation {
+        stdout: Vec::new(),
+        stderr: b"op arrays, half of them".to_vec(),
+        exit: crate::oracle::Ended::Signal(11),
+        wall: std::time::Duration::ZERO,
+    };
+    let (judgement, why) = engine_side(Ok(died)).unwrap_err();
+    assert_eq!(judgement, Judgement::Fail);
+    assert!(why.contains("died on signal 11"), "{why}");
+
+    let (judgement, why) = engine_side(Err(anyhow::anyhow!("no such file"))).unwrap_err();
+    assert_eq!(judgement, Judgement::Bork);
+    assert!(why.contains("no such file"), "{why}");
+
+    let dumped = crate::oracle::Observation {
+        stdout: b"No syntax errors detected".to_vec(),
+        stderr: b"$_main:".to_vec(),
+        exit: crate::oracle::Ended::Status(0),
+        wall: std::time::Duration::ZERO,
+    };
+    assert_eq!(engine_side(Ok(dumped)).unwrap().arrays, b"$_main:");
 }

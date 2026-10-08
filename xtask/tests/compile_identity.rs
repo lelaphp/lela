@@ -742,3 +742,36 @@ fn one_file_of_the_pinned_tree_is_keyed_by_the_corpus_it_stands_in() {
         compile_identity::run(&scratch.root, &scratch.manifest, &registry(""), &ask).unwrap_err();
     assert!(format!("{refused:#}").contains(&inside), "{refused:#}");
 }
+
+/// A binary under measurement whose dump of one file runs past the
+/// recipe's limit, or dies on a signal, fails that file and the lane goes
+/// on to the next (#699, #1069): of three files, the one it hangs on and
+/// the one it dies on differ, and the one after both is still dumped and
+/// identical. The limit is a second, in the test's own pin; the oracle's
+/// own dumps take a fraction of it.
+#[test]
+fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_judged() {
+    let Some(php) = oracle() else {
+        return;
+    };
+    let mut scratch = Scratch::of("past-limit", &["identity.phpt", "plain.php"]);
+    fs::write(scratch.corpus.join("zz.php"), "<?php\necho 1;\n").unwrap();
+    scratch.manifest.pin.recipe.limits.timeout_s = 1;
+    let engine = scratch.binary(
+        "php",
+        &format!(
+            "case \"$*\" in\n  *identity.php*) sleep 30 ;;\n  *plain.php*) kill -SEGV $$ ;;\nesac\nexec \"{}\" \"$@\"",
+            php.display()
+        ),
+    );
+    let reading = scratch.run(&registry(""), &engine);
+    assert_eq!(count(&reading, "files"), 3, "{reading:#?}");
+    assert_eq!(count(&reading, "differ"), 2, "{reading:#?}");
+    assert_eq!(count(&reading, "borked"), 0, "{reading:#?}");
+    assert_eq!(count(&reading, "identical"), 1, "{reading:#?}");
+    assert!(
+        reading.message.contains("identity.phpt") && reading.message.contains("plain.php"),
+        "{}",
+        reading.message
+    );
+}

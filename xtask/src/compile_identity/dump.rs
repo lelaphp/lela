@@ -24,7 +24,9 @@ use anyhow::{Context, Result};
 
 use super::{Corpus, Judged, Judgement, LINT};
 use crate::divergence::Registry;
-use crate::oracle::{self, Invocation, Oracle, Program, Verdict as Compared};
+use crate::oracle::{
+    self, Ended, Invocation, Observation, Oracle, PastLimit, Program, Verdict as Compared,
+};
 use crate::phpt::file::Phpt;
 use crate::scratch::Tree;
 
@@ -70,21 +72,23 @@ impl<'a> Dumps<'a> {
             Held::Unreadable(why) => return Ok(Judged::new(&id, &name, Judgement::Bork, why)),
         };
         let program = self.dir.write(file, &body)?;
-        let expected = self.dump(&self.oracle.pin().oracle.path, &program)?;
+        let oracle = &self.oracle.pin().oracle.path;
+        let expected = self
+            .dump(oracle, &program)
+            .with_context(|| format!("dumping {} under {}", program.display(), oracle.display()))?;
         let actual = self.dump(self.compiler, &program);
         fs::remove_file(&program).ok();
-        // Trouble on the engine's side is one file's and never the
-        // lane's: a binary that would not start or died (design §8). The
-        // rest of the corpus is still measured and this file is counted
-        // against the reading.
-        let actual = match actual {
+        let actual = match engine_side(actual) {
             Ok(dumped) => dumped,
-            Err(trouble) => {
-                let why = format!("the engine's side did not dump it: {trouble:#}");
-                return Ok(Judged::new(&id, &name, Judgement::Bork, why));
-            }
+            Err((judgement, why)) => return Ok(Judged::new(&id, &name, judgement, why)),
         };
-        Ok(verdict(self.registry, &id, &name, &expected, &actual))
+        Ok(verdict(
+            self.registry,
+            &id,
+            &name,
+            &expected.into(),
+            &actual,
+        ))
     }
 
     /// What one binary prints compiling the program: the pin's recipe, its
@@ -92,19 +96,47 @@ impl<'a> Dumps<'a> {
     /// file and does not run it. php prints its op arrays on the second stream, so the dump is
     /// what that stream carries; the first holds `-l`'s own sentence,
     /// which is no op array and is not compared.
-    fn dump(&self, binary: &Path, program: &Path) -> Result<Dumped> {
-        let out = self
-            .oracle
-            .run_under(&Invocation {
-                regimes: &self.regimes,
-                flags: &self.flags,
-                ..Invocation::new(binary, Program::File(program))
-            })
-            .with_context(|| format!("dumping {} under {}", program.display(), binary.display()))?;
-        Ok(Dumped {
+    fn dump(&self, binary: &Path, program: &Path) -> Result<Observation> {
+        self.oracle.run_under(&Invocation {
+            regimes: &self.regimes,
+            flags: &self.flags,
+            ..Invocation::new(binary, Program::File(program))
+        })
+    }
+}
+
+/// The engine's side of one file: its dump, or, where it finished none,
+/// the file's verdict, and never the lane's end (design §8). A dump past
+/// the recipe's limit, or one a signal ended, is the compiler's failure on
+/// the file as a wrong dump is, named (#699, #1069), and a binary that
+/// would not run at all is the file's bork; the rest of the corpus is
+/// judged either way.
+pub(super) fn engine_side(run: Result<Observation>) -> Result<Dumped, (Judgement, String)> {
+    match run {
+        Ok(Observation {
+            exit: Ended::Signal(signal),
+            ..
+        }) => Err((
+            Judgement::Fail,
+            format!("the engine's binary died on signal {signal} dumping it"),
+        )),
+        Ok(observed) => Ok(observed.into()),
+        Err(trouble) => Err(match trouble.downcast_ref::<PastLimit>() {
+            Some(past) => (Judgement::Fail, past.to_string()),
+            None => (
+                Judgement::Bork,
+                format!("the engine's side did not dump it: {trouble:#}"),
+            ),
+        }),
+    }
+}
+
+impl From<Observation> for Dumped {
+    fn from(out: Observation) -> Dumped {
+        Dumped {
             arrays: out.stderr,
             said: out.stdout,
-        })
+        }
     }
 }
 
