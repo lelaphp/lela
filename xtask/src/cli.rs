@@ -618,9 +618,10 @@ pub(crate) enum TicketCommand {
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
     },
-    /// Read as `read` does, then record the branch ready to merge with what
-    /// the work opened, `branch.<name>.ready`, which the merge into `main`
-    /// closes the ticket by (#2270, #2311); refuse while a box is unticked,
+    /// Read as `read` does, then record the ticket ready to merge on the
+    /// branch with what the work opened, `branch.<name>.ready-<n>`, one per
+    /// ticket (#2358), which the merge into `main` closes the ticket by
+    /// (#2270, #2311); refuse while a box is unticked,
     /// while a successor is closed or missing, and without `--opens` or
     /// `--opens-nothing`. Nothing at the tracker changes.
     Ready {
@@ -639,8 +640,8 @@ pub(crate) enum TicketCommand {
         opens_nothing: bool,
     },
     /// Close each open ticket the merge commits since `--since` name as
-    /// `#n`, with the successors its branch's ready record names; one with
-    /// no ready record fails, named. What the hooks on a merge into `main`
+    /// `#n`, with the successors its ready record names; one with no ready
+    /// record fails, named, and `done` names it. What the hooks on a merge into `main`
     /// run (#2311); off `main` it closes nothing.
     Merged {
         /// The commit `main` stood at before the merge.
