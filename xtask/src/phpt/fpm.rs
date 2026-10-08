@@ -10,30 +10,16 @@
 //! the pin names none, nothing is linked and the tests skip in upstream's
 //! words, `php-fpm binary not found`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use super::Subset;
-use crate::oracle::Pin;
 use crate::oracle::hosts::FPM;
 
 /// Where the tests stand in the tree, the directory `FPM\Tester` looks
 /// beside.
 const TESTS: &str = "sapi/fpm/tests";
-
-/// The php-fpm a run hands `sapi/fpm/tests`: the one `[sapi]` pins where
-/// `binary` is the pinned php or the run is the control, and otherwise the
-/// engine's own `php-fpm` beside `binary`; `None` where the pin names none
-/// or none is at its path.
-pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
-    let host = if control || binary == pin.oracle.path {
-        pin.sapi.fpm.as_ref().map(|fpm| fpm.path.clone())
-    } else {
-        Some(binary.with_file_name(FPM.binary))
-    };
-    host.filter(|path| path.is_file())
-}
 
 /// `host` linked as `php-fpm` beside each directory of `subset` that is
 /// `sapi/fpm/tests`, where `FPM\Tester::findExecutable` looks last; a link
