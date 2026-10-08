@@ -67,14 +67,9 @@ impl Request {
             return Row::Dynamic(php_heap::Key::Str(name.heap()));
         }
         for (at, declaring, property) in self.placed(class) {
-            let prefix: Vec<u8> = match property.visibility {
-                Visibility::Public => Vec::new(),
-                Visibility::Protected => b"\0*\0".to_vec(),
-                Visibility::Private => self
-                    .class_decl(declaring)
-                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
-                    .unwrap_or_default(),
-            };
+            let prefix = self
+                .property_prefix(declaring, property.visibility)
+                .unwrap_or_default();
             if bytes.len() == prefix.len() + property.name.0.len()
                 && bytes.starts_with(&prefix)
                 && bytes[prefix.len()..] == *property.name.0
@@ -567,16 +562,29 @@ impl Request {
         let Some((declaring, property)) = self.placed_property(class, at) else {
             return Ok(None);
         };
-        let prefix: Vec<u8> = match property.visibility {
-            Visibility::Public => Vec::new(),
-            Visibility::Protected => b"\0*\0".to_vec(),
+        let prefix = self
+            .property_prefix(declaring, property.visibility)
+            .unwrap_or_default();
+        let name = self.interned(&[prefix.as_slice(), &property.name.0].concat())?;
+        Ok(Some(name.heap()))
+    }
+
+    /// `zend_mangle_property_name`'s prefix for a property `declaring`
+    /// declares under `visibility`: none for a public one, `\0*\0` for a
+    /// protected one, and for a private one `\0Class\0`, the class that
+    /// declared it (`property_info->ce->name`), a class above for an
+    /// inherited one; none where that class has no declaration.
+    pub(crate) fn property_prefix(
+        &self,
+        declaring: ClassId,
+        visibility: Visibility,
+    ) -> Option<Vec<u8>> {
+        match visibility {
+            Visibility::Public => None,
+            Visibility::Protected => Some(b"\0*\0".to_vec()),
             Visibility::Private => self
                 .class_decl(declaring)
-                .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
-                .unwrap_or_default(),
-        };
-        let key = [prefix.as_slice(), &property.name.0].concat();
-        let name = self.interned(&key)?;
-        Ok(Some(name.heap()))
+                .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
+        }
     }
 }

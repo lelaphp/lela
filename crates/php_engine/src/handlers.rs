@@ -305,11 +305,7 @@ pub(crate) fn declare_class<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CLASS on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let key = runtime_key(code, op)?;
     match req.bind_class_in_slot(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
@@ -320,12 +316,18 @@ pub(crate) fn declare_class<T: Tier>(
 /// The runtime definition key a class-declaring opline carries in the
 /// constant after its `op1`, php's `rtd_key = lcname + 1`.
 fn runtime_key(code: &OpArray, op: &Opline) -> Result<Vec<u8>, Fatal> {
-    exec::constant(code, ConstIdx(op.op1.saturating_add(1)))
+    constant_bytes(code, op, op.op1.saturating_add(1))
+}
+
+/// The string a declaring opline carries in its constant `at`, the name
+/// it declares or its runtime definition key.
+fn constant_bytes(code: &OpArray, op: &Opline, at: u32) -> Result<Vec<u8>, Fatal> {
+    exec::constant(code, ConstIdx(at))
         .as_str_bytes()
         .map(<[u8]>::to_vec)
         .ok_or_else(|| {
             Fatal::Error(format!(
-                "InternalError: a {} with no runtime definition key after its op1",
+                "InternalError: a {} with no string in its constant {at}",
                 op.opcode.name().trim_start_matches("ZEND_")
             ))
         })
@@ -354,11 +356,7 @@ pub(crate) fn declare_class_delayed<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CLASS_DELAYED on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let key = runtime_key(code, op)?;
     match req.bind_delayed(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
@@ -425,19 +423,8 @@ pub(crate) fn declare_anon_class<T: Tier>(
     let class = if let Cached::Class(class) = req.cached(frame, slot) {
         class
     } else {
-        let Some(serving) = req.vm().serving(frame) else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a DECLARE_ANON_CLASS on a frame serving no op array",
-            )));
-        };
-        let Some(key) = exec::constant(code, ConstIdx(op.op1))
-            .as_str_bytes()
-            .map(<[u8]>::to_vec)
-        else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a DECLARE_ANON_CLASS with no name in its op1",
-            )));
-        };
+        let serving = exec::standing(req, frame)?;
+        let key = constant_bytes(code, op, op.op1)?;
         match req.declare_anonymous(&serving.unit, &key) {
             Ok(class) => {
                 req.prime(frame, slot, Cached::Class(class));
@@ -500,24 +487,13 @@ pub(crate) fn declare_function<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_FUNCTION on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
         return Err(Fatal::Error(String::from(
             "InternalError: a DECLARE_FUNCTION whose op2 names no dynamic function definition",
         )));
     };
-    let Some(lowered) = exec::constant(code, ConstIdx(op.op1))
-        .as_str_bytes()
-        .map(<[u8]>::to_vec)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_FUNCTION whose op1 is no function name",
-        )));
-    };
+    let lowered = constant_bytes(code, op, op.op1)?;
     match req.bind_function(&serving.unit, at, &lowered) {
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
@@ -576,14 +552,7 @@ pub(crate) fn declare_const<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(written) = exec::constant(code, ConstIdx(op.op1))
-        .as_str_bytes()
-        .map(<[u8]>::to_vec)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CONST whose op1 is no constant name",
-        )));
-    };
+    let written = constant_bytes(code, op, op.op1)?;
     // A value the compiler could not fold is its constant expression,
     // evaluated here as `zval_update_constant` evaluates it; the value is
     // the constant's, one owner.
@@ -673,11 +642,7 @@ pub(crate) fn declare_attributed_const<T: Tier>(
             "InternalError: a DECLARE_ATTRIBUTED_CONST with no name or no OP_DATA after it",
         )));
     };
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_ATTRIBUTED_CONST on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let Some(decl) = code
         .literals
         .get(data.op1 as usize)
@@ -779,11 +744,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_LAMBDA_FUNCTION on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
         return Err(Fatal::Error(String::from(
             "InternalError: a DECLARE_LAMBDA_FUNCTION whose op2 names no dynamic function definition",
@@ -3468,16 +3429,8 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let callee = req.push_user_frame(function, call, returns_to, exec::Caller::Opline(frame))?;
-    let Some(serving) = req.vm().serving(callee) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: the frame just pushed is serving no op array",
-        )));
-    };
-    let Some(body) = serving.code() else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: the frame just pushed names a body the unit has not",
-        )));
-    };
+    let serving = exec::standing(req, callee)?;
+    let body = exec::serving_code(&serving, callee)?;
     if let Some(at) = exec::parameter_prologue(req, callee, body)? {
         return Ok(Stepped::Threw(at));
     }
@@ -10327,6 +10280,27 @@ fn non_static_method_call(req: &mut Request, function: Function) -> Thrown {
     )
 }
 
+/// The opline a handler that is two oplines stands at, and the
+/// `OP_DATA` after it that carries its value (`OP_DATA` in php's
+/// `zend_vm_def.h`, read with `opline + 1`).
+fn data_after(
+    req: &Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<(u32, Opline), Fatal> {
+    let at = req.vm().opline(frame);
+    exec::opline_at(code, at.saturating_add(1))
+        .filter(|next| next.opcode == Opcode::OpData)
+        .map(|data| (at, *data))
+        .ok_or_else(|| {
+            Fatal::Error(format!(
+                "InternalError: {} with no OP_DATA after it",
+                op.opcode.name()
+            ))
+        })
+}
+
 /// The `Threw` edge: the throwable left pending where the loop reads it.
 fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     req.leave_pending(thrown);
@@ -10679,12 +10653,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1)) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_FRAMELESS_ICALL_3 with no OP_DATA after it",
-        )));
-    };
+    let (_, data) = data_after(req, frame, code, op)?;
     frameless_call(
         req,
         frame,
@@ -11294,14 +11263,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OBJ_REF with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let mut member = exec::Member::default();
     let found = property_place(req, frame, code, op, PropertyRead::Silent, &mut member);
@@ -11620,14 +11582,7 @@ pub(crate) fn assign_obj<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1))
-        .filter(|next| next.opcode == php_unit::Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OBJ with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     // A CV is read through its slot after the value, as php reads
     // `object` after `GET_OP_DATA_ZVAL_PTR`: an undefined value's
     // handler may have replaced it.
@@ -12001,14 +11956,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1))
-        .filter(|next| next.opcode == php_unit::Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let scope = req.executed_scope();
     let (addressed, name) = match static_member(req, frame, code, op) {
@@ -12276,14 +12224,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             op.extended_value
         )));
     };
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let placed = match static_place(req, frame, code, op) {
         Ok(placed) => placed,
@@ -12709,14 +12650,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let placed = match static_place(req, frame, code, op) {
         Ok(placed) => placed,
@@ -13105,15 +13039,7 @@ pub(crate) fn assign_dim<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1))
-        .filter(|next| next.opcode == php_unit::Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_DIM with no OP_DATA after it",
-        )));
-    };
-    let data = *data;
+    let (at, data) = data_after(req, frame, code, op)?;
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_ASSIGN_DIM over a constant or a temporary, which php compiles no write over",
@@ -13578,15 +13504,7 @@ pub(crate) fn assign_dim_op<T: Tier>(
             op.extended_value
         )));
     };
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_DIM_OP with no OP_DATA after it",
-        )));
-    };
-    let data = *data;
+    let (at, data) = data_after(req, frame, code, op)?;
     let step = Compound {
         op,
         data,
@@ -13969,15 +13887,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
             op.extended_value
         )));
     };
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OBJ_OP with no OP_DATA after it",
-        )));
-    };
-    let data = *data;
+    let (at, data) = data_after(req, frame, code, op)?;
     // The name, and then an undefined CV's warning, before the container
     // is read, whose handler may have replaced it
     // (`Z/Zend/zend_vm_def.h:1023-1026`).
@@ -19398,19 +19308,7 @@ pub(crate) fn jmpnz<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let taken = crate::ops::is_true(req, &value);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    if !taken {
-        return Ok(advance(req, frame));
-    }
-    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
-    // test served may have thrown.
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, at, op.op2, op.out)
+    branched::<T, true, false>(req, frame, code, op)
 }
 
 /// `ZEND_JMPZ`: `ZEND_JMPNZ` with the test the other way round, the jump
@@ -19432,19 +19330,7 @@ pub(crate) fn jmpz<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let taken = !crate::ops::is_true(req, &value);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    if !taken {
-        return Ok(advance(req, frame));
-    }
-    // `ZEND_VM_JMP` reads `EG(exception)` first: a conversion the
-    // test served may have thrown.
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, at, op.op2, op.out)
+    branched::<T, false, false>(req, frame, code, op)
 }
 
 /// `ZEND_JMPZ_EX` (`Z/Zend/zend_vm_def.h:3180`), the jump
@@ -19479,17 +19365,7 @@ pub(crate) fn jmpz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let held = crate::ops::is_true(req, &value);
-    exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    write_out(req, frame, code, op, &Value::bool(held));
-    if held {
-        return Ok(advance(req, frame));
-    }
-    if req.is_pending() {
-        return Ok(Stepped::Threw(frame));
-    }
-    jump_to(req, frame, op.op2)
+    branched::<T, false, true>(req, frame, code, op)
 }
 
 /// `ZEND_JMPNZ_EX` (`Z/Zend/zend_vm_def.h:3216`): [`jmpz_ex`] with the
@@ -19513,17 +19389,39 @@ pub(crate) fn jmpnz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    branched::<T, true, true>(req, frame, code, op)
+}
+
+/// The body the four conditional jumps share: the operand read as
+/// [`crate::ops::is_true`] reads it and freed, the bool written into the
+/// temporary for an `_EX` (`EX`) whichever way the test went, and the
+/// jump to `op2` taken where the truth is `ON`, after `ZEND_VM_JMP`'s
+/// read of `EG(exception)`, since a conversion the test served may have
+/// thrown. The plain pair's jump is [`jumped`], a back-edge's loop
+/// safepoint among it; an `_EX`'s is [`jump_to`], which no loop closes.
+fn branched<T: Tier, const ON: bool, const EX: bool>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
     let value = exec::operand(req, frame, code, op.op1_type, op.op1);
-    let held = crate::ops::is_true(req, &value);
+    let truth = crate::ops::is_true(req, &value);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
-    write_out(req, frame, code, op, &Value::bool(held));
-    if !held {
+    if EX {
+        write_out(req, frame, code, op, &Value::bool(truth));
+    }
+    if truth != ON {
         return Ok(advance(req, frame));
     }
     if req.is_pending() {
         return Ok(Stepped::Threw(frame));
     }
-    jump_to(req, frame, op.op2)
+    if EX {
+        return jump_to(req, frame, op.op2);
+    }
+    let at = req.vm().opline(frame);
+    jumped::<T>(req, frame, at, op.op2, op.out)
 }
 
 /// `ZEND_JMP_SET`: the left operand of `a ?: c`
@@ -20767,15 +20665,7 @@ pub(crate) fn handle_exception<T: Tier>(
         cleanup_live_vars(req, frame, code, op_num, moved);
         op_num = moved;
     }
-    let mut current = None;
-    for (at, element) in code.try_catch.iter().enumerate() {
-        if element.try_op.0 > op_num {
-            break;
-        }
-        if op_num < element.catch_op.0 || op_num < element.finally_end.0 {
-            current = u32::try_from(at).ok();
-        }
-    }
+    let current = exec::innermost_try(code, op_num);
     cleanup_unfinished_calls(req, frame);
     free_throwing_result(req, frame, code, op);
     unwind_from::<T>(req, frame, code, current, op_num)
