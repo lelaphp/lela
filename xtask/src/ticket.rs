@@ -191,22 +191,49 @@ pub(crate) const STAMPED_OVER: &str = ".";
 /// What a ready record says of a branch whose work opened nothing.
 const NOTHING: &str = "nothing";
 
-/// The configuration key of a branch's ready record (#2311): written by
-/// `ticket ready` beside `branch.<name>.ticket`, in the configuration
-/// every worktree of the repository shares, and read at the merge.
-fn ready_key(branch: &str) -> String {
-    format!("branch.{branch}.ready")
+/// The configuration key of `ticket`'s ready record on `branch` (#2311),
+/// one per ticket, so a branch carrying a bundle keeps every ticket it
+/// readied (#2358): written by `ticket ready` beside
+/// `branch.<name>.ticket`, in the configuration every worktree of the
+/// repository shares, read at the merge, and dropped with the branch.
+fn ready_key(branch: &str, ticket: Ticket) -> String {
+    format!("branch.{branch}.{}", ready_name(ticket))
 }
 
-/// The successors `branch`'s ready record names, `None` where it records
-/// none: what `track work` reads a session's end by and the merge closes
-/// the ticket with (#2311).
-pub fn ready_of(root: &Path, branch: &str) -> Result<Option<Successors>> {
-    let Ok(text) = crate::git::git(root, &["config", "--get", &ready_key(branch)], None) else {
+/// The variable name of `ticket`'s ready record in its branch's section,
+/// the one spelling [`ready_key`] writes and [`record_of`] seeks.
+fn ready_name(ticket: Ticket) -> String {
+    format!("ready-{}", ticket.number())
+}
+
+/// The successors `ticket`'s ready record on `branch` names, `None` where
+/// it records none: what `track work` reads a session's end by (#2311).
+pub fn ready_of(root: &Path, branch: &str, ticket: Ticket) -> Result<Option<Successors>> {
+    let key = ready_key(branch, ticket);
+    let Ok(text) = crate::git::git(root, &["config", "--get", &key], None) else {
         return Ok(None);
     };
     Successors::of_record(&text).map(Some)
 }
+
+/// The successors the ready record of `ticket` names on whichever branch
+/// wrote it, the last in the configuration's order where two branches did,
+/// so a retry on a later branch wins, `None` where no branch has one:
+/// what the merge closes the ticket with, since a bundle's tickets are
+/// readied on a branch that records only the first of them (#2358).
+fn record_of(root: &Path, ticket: Ticket) -> Result<Option<Successors>> {
+    let pattern = format!(r"^branch\..*\.{}$", ready_name(ticket));
+    let Ok(found) = crate::git::git(root, &["config", "--get-regexp", &pattern], None) else {
+        return Ok(None);
+    };
+    found
+        .lines()
+        .last()
+        .and_then(|line| line.split_once(' '))
+        .map(|(_, text)| Successors::of_record(text))
+        .transpose()
+}
+
 /// The heading whose boxes are the acceptance criteria, matched without
 /// regard to case at level two.
 const HEADING: &str = "acceptance criteria";
@@ -1338,8 +1365,9 @@ fn counted(
 /// The tickets the merge commits `since..HEAD` name, each closed as it
 /// lands (#2270, #2311): the hook on a merge commit, and on a fast-forward
 /// of `main`, calls this. An open ticket a subject names as `#n` is
-/// closed through [`run`] with the successors its branch's ready record
-/// names; one with no ready record fails, named, and the merge stands. A
+/// closed through [`run`] with the successors its ready record names,
+/// whichever branch wrote it (#2358); one with no ready record fails,
+/// named, and the merge stands, and `done` names it ([`stranded`]). A
 /// ticket closed already, and a number the tracker answers no issue for,
 /// is passed over. Off `main` nothing is closed: the fast-forward that
 /// brings the merge there calls this again.
@@ -1347,30 +1375,15 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     if Reach::of(root)? != Reach::Landed {
         return Ok(Vec::new());
     }
-    let range = format!("{since}..HEAD");
-    let subjects = crate::git::git(root, &["log", "--merges", "--format=%s", &range], None)?;
-    let mut named: Vec<Ticket> = Vec::new();
-    for word in subjects.split(|c: char| !(c == '#' || c.is_ascii_digit())) {
-        if let Some(Ok(number)) = word.strip_prefix('#').map(str::parse) {
-            let ticket = Ticket::new(number);
-            if !named.contains(&ticket) {
-                named.push(ticket);
-            }
-        }
-    }
     let mut readings = Vec::new();
-    for ticket in named {
+    for ticket in named_by_merges(root, &format!("{since}..HEAD"))? {
         let Ok(issue) = gh.view(root, ticket) else {
             continue;
         };
         if issue.state == State::Closed {
             continue;
         }
-        let ready = crate::track::branch_of_ticket(root, ticket)
-            .map(|branch| ready_of(root, &branch))
-            .transpose()?
-            .flatten();
-        let Some(successors) = ready else {
+        let Some(successors) = record_of(root, ticket)? else {
             let mut unready = Reading::stamped_over(
                 INSTRUMENT,
                 &scope(ticket),
@@ -1378,8 +1391,9 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
                 Path::new(STAMPED_OVER),
             )?;
             unready.status = Status::Fail;
+            unready.count(UNREADY, 1)?;
             unready.message = format!(
-                "{ticket} is named by a merge into main and its branch has no ready record; not closed: close it with `xtask ticket close {}` naming what it opened",
+                "{ticket} is named by a merge into main and no branch has a ready record of it; not closed: close it with `xtask ticket close {}` naming what it opened",
                 ticket.number()
             );
             readings.push(unready);
@@ -1389,6 +1403,55 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
         readings.push(run(root, manifest, gh, act, ticket, None)?);
     }
     Ok(readings)
+}
+
+/// The number a reading of [`merged`] counts for a ticket the merge named
+/// and left open for want of a ready record, which [`stranded`] reads.
+const UNREADY: &str = "unready";
+
+/// The tickets the subjects of the merge commits of `range` name as `#n`,
+/// each once, in the order named.
+fn named_by_merges(root: &Path, range: &str) -> Result<Vec<Ticket>> {
+    let subjects = crate::git::git(root, &["log", "--merges", "--format=%s", range], None)?;
+    let mut named: Vec<Ticket> = Vec::new();
+    for word in subjects.split(|c: char| !(c == '#' || c.is_ascii_digit())) {
+        if let Some(Ok(number)) = word.strip_prefix('#').map(str::parse) {
+            let ticket = Ticket::new(number);
+            if !named.contains(&ticket) {
+                named.push(ticket);
+            }
+        }
+    }
+    Ok(named)
+}
+
+/// What `done` names of the merges since `base` (#2358): each ticket a
+/// merge commit's subject names whose last `ticket` reading is
+/// [`merged`]'s refusal for want of a ready record, until a close
+/// replaces it. Where `base` is `HEAD`, as on `main`, the merges are
+/// `HEAD`'s own, so the session that made the merge reads what it
+/// stranded, and a branch laid on that tip with no commit of its own
+/// reads it the same; a branch reads the merges it carries, `main`'s
+/// being behind its base. The store is read, never the tracker.
+pub fn stranded(root: &Path, store: &crate::reading::Store, base: &str) -> Result<Vec<String>> {
+    let head = crate::git::git(root, &["rev-parse", "HEAD"], None)?;
+    let range = if head.trim() != base {
+        format!("{base}..HEAD")
+    } else if crate::git::git(root, &["rev-parse", "--verify", "--quiet", "HEAD^1"], None).is_ok() {
+        String::from("HEAD^1..HEAD")
+    } else {
+        // A root commit has no first parent, and so no merge to read.
+        return Ok(Vec::new());
+    };
+    let mut unmet = Vec::new();
+    for ticket in named_by_merges(root, &range)? {
+        if let Some(reading) = store.read(INSTRUMENT, &scope(ticket))?
+            && reading.numbers.contains_key(UNREADY)
+        {
+            unmet.push(format!("ticket: {}", reading.message));
+        }
+    }
+    Ok(unmet)
 }
 
 /// The branch ready to merge (#2311): every successor held as a close
@@ -1412,7 +1475,7 @@ fn ready(
         .map_err(|err| format!("{err:#}; not ready, nothing recorded"))?;
     let branch = crate::track::head_branch(root)
         .ok_or("HEAD is detached, and a ready record is a branch's; not ready, nothing recorded")?;
-    let key = ready_key(&branch);
+    let key = ready_key(&branch, Ticket::new(issue.number));
     crate::git::git(root, &["config", &key, &successors.record()], None)
         .map_err(|err| format!("{key} could not be written: {err:#}; not ready"))?;
     Ok(format!(

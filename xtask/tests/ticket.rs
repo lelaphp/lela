@@ -11,9 +11,9 @@ use std::path::Path;
 use std::process::Command;
 
 use xtask::manifest::Manifest;
-use xtask::reading::Status;
+use xtask::reading::{Status, Store};
 use xtask::scratch::Tree;
-use xtask::ticket::{Act, CAP, Gh, Reach, Successors, Verdict, merged, parent, run};
+use xtask::ticket::{Act, CAP, Gh, Reach, Successors, Verdict, merged, parent, run, stranded};
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
@@ -333,26 +333,30 @@ fn repository(name: &str) -> Tree {
 }
 
 /// `ticket ready` holds the boxes and the successors as a close does,
-/// writes the branch's ready record and closes nothing (#2311).
+/// writes a ready record of the ticket on the branch and closes nothing
+/// (#2311); a second ticket readied on the same branch keeps the first's
+/// record, and readying a ticket again replaces its own (#2358).
 #[test]
-fn ready_records_the_branch_with_its_successors_and_closes_nothing() {
+fn ready_records_each_ticket_of_the_branch_with_its_successors_and_closes_nothing() {
     let root = repository("ticket-ready");
     git(&root, &["checkout", "-q", "-b", "t7"]);
     let recorded = Recorded::lay("ready");
     recorded.issue(7, "OPEN", UNTICKED);
+    recorded.issue(8, "OPEN", TICKED);
     recorded.issue(9, "OPEN", TICKED);
-    let ready = |ticket: u64| {
+    let ready = |ticket: u64, successors: Successors| {
         run(
             &root,
             &manifest(),
             &recorded.gh(),
-            Act::Ready(Successors::Tickets(vec![Ticket::new(9)])),
+            Act::Ready(successors),
             Ticket::new(ticket),
             None,
         )
         .unwrap()
     };
-    let refused = ready(7);
+    let opens_nine = || Successors::Tickets(vec![Ticket::new(9)]);
+    let refused = ready(7, opens_nine());
     assert_eq!(refused.status, Status::Fail, "{}", refused.message);
     assert!(
         refused.message.ends_with("not ready, nothing recorded"),
@@ -361,37 +365,49 @@ fn ready_records_the_branch_with_its_successors_and_closes_nothing() {
     );
 
     recorded.issue(7, "OPEN", TICKED);
-    let reading = ready(7);
+    let reading = ready(7, Successors::Nothing);
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     assert!(
         reading
             .message
-            .contains("recorded as branch.t7.ready; the merge into main closes it"),
+            .contains("recorded as branch.t7.ready-7; the merge into main closes it"),
         "{}",
         reading.message
     );
-    assert_eq!(git(&root, &["config", "branch.t7.ready"]), "9");
+    let second = ready(8, Successors::Nothing);
+    assert_eq!(second.status, Status::Pass, "{}", second.message);
+    let again = ready(7, opens_nine());
+    assert_eq!(again.status, Status::Pass, "{}", again.message);
+    assert_eq!(git(&root, &["config", "branch.t7.ready-7"]), "9");
+    assert_eq!(git(&root, &["config", "branch.t7.ready-8"]), "nothing");
     assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
 }
 
-/// The merge into `main` closes the open tickets its subject names with
-/// the successors their branches' ready records name (#2311): one with a
-/// record closes, one with none fails naming it and is left open, one
-/// closed already is passed over, and off `main` nothing is closed.
+/// The merge into `main` closes every open ticket its subject names with
+/// the successors that ticket's ready record names (#2311), a bundle's
+/// three tickets readied on one branch all three (#2358); one with no
+/// record fails naming it, is left open and is what `done` names after
+/// the merge, one closed already is passed over, and off `main` nothing
+/// is closed.
 #[test]
-fn a_merge_into_main_closes_the_ready_tickets_its_subject_names() {
+fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     let root = repository("ticket-merged");
-    for n in ["7", "8"] {
-        git(&root, &["checkout", "-q", "-b", &format!("t{n}"), "main"]);
-        let work = format!("the work of #{n}");
-        git(&root, &["commit", "-q", "--allow-empty", "-m", &work]);
-        git(&root, &["config", &format!("branch.t{n}.ticket"), n]);
+    git(&root, &["checkout", "-q", "-b", "t7"]);
+    git(
+        &root,
+        &["commit", "-q", "--allow-empty", "-m", "the bundle"],
+    );
+    git(&root, &["config", "branch.t7.ticket", "7"]);
+    for (n, successors) in [("7", "nothing"), ("8", "12"), ("9", "nothing")] {
+        git(
+            &root,
+            &["config", &format!("branch.t7.ready-{n}"), successors],
+        );
     }
-    git(&root, &["config", "branch.t7.ready", "nothing"]);
-    git(&root, &["checkout", "-q", "t8"]);
     let recorded = Recorded::lay("merged");
-    recorded.issue(7, "OPEN", TICKED);
-    recorded.issue(8, "OPEN", TICKED);
+    for n in [7, 8, 9, 11, 12] {
+        recorded.issue(n, "OPEN", TICKED);
+    }
     recorded.issue(10, "CLOSED", TICKED);
     assert!(
         merged(&root, &manifest(), &recorded.gh(), "main")
@@ -408,35 +424,72 @@ fn a_merge_into_main_closes_the_ready_tickets_its_subject_names() {
             "-q",
             "--no-ff",
             "t7",
-            "t8",
             "-m",
-            "Merge t7, t8: the work (#7, #8, #10)",
+            "Merge t7: the bundle (#7, #8, #9, #10, #11)",
         ],
     );
     let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
-    assert_eq!(readings.len(), 2, "{readings:#?}");
-    assert_eq!(readings[0].scope, "7");
-    assert_eq!(readings[0].status, Status::Pass, "{}", readings[0].message);
-    assert_eq!(readings[1].scope, "8");
-    assert_eq!(readings[1].status, Status::Fail, "{}", readings[1].message);
+    let verdicts: Vec<(&str, Status)> = readings
+        .iter()
+        .map(|r| (r.scope.as_str(), r.status))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            ("7", Status::Pass),
+            ("8", Status::Pass),
+            ("9", Status::Pass),
+            ("11", Status::Fail)
+        ],
+        "{readings:#?}"
+    );
     assert!(
-        readings[1]
+        readings[3]
             .message
-            .contains("#8 is named by a merge into main and its branch has no ready record"),
+            .contains("#11 is named by a merge into main and no branch has a ready record of it"),
         "{}",
-        readings[1].message
+        readings[3].message
     );
     let calls = recorded.calls();
-    assert!(
-        calls.iter().any(|c| c.starts_with("issue close 7")),
-        "{calls:?}"
-    );
+    for n in [7, 8, 9] {
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with(&format!("issue close {n} "))),
+            "#{n} not closed: {calls:?}"
+        );
+    }
     assert!(
         !calls
             .iter()
-            .any(|c| c.starts_with("issue close 8") || c.starts_with("issue close 10")),
+            .any(|c| c.starts_with("issue close 11") || c.starts_with("issue close 10")),
         "{calls:?}"
     );
+
+    // What `done` says on `main` after the merge: the ticket the merge
+    // named and did not close, until a close replaces its reading.
+    let dir = Tree::new("ticket-merged-store").unwrap();
+    let store = Store::at(dir.to_path_buf());
+    store.record(&readings).unwrap();
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let unmet = stranded(&root, &store, &head).unwrap();
+    assert_eq!(unmet.len(), 1, "{unmet:?}");
+    assert!(
+        unmet[0].contains("#11 is named by a merge into main"),
+        "{unmet:?}"
+    );
+    let closed = run(
+        &root,
+        &manifest(),
+        &recorded.gh(),
+        done(Successors::Nothing),
+        Ticket::new(11),
+        None,
+    )
+    .unwrap();
+    assert_eq!(closed.status, Status::Pass, "{}", closed.message);
+    store.record(&[closed]).unwrap();
+    assert!(stranded(&root, &store, &head).unwrap().is_empty());
 }
 
 /// Where a close's commit stands against `main` (#2249): `main`'s own

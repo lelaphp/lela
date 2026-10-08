@@ -3,8 +3,8 @@
 # #2311). A ticket closes when its work is on `main`, so `/build` ends at
 # `xtask ticket ready`, and the merge commit closes each open `#n` its
 # subject names through `xtask ticket close`, with the successors its
-# branch's ready record names; a ticket named with no ready record is
-# named and left open. `xtask ticket merged` closes nothing off `main`: a
+# own ready record names, one per ticket of a branch (#2358); a ticket
+# named with no ready record is named and left open. `xtask ticket merged` closes nothing off `main`: a
 # merge made elsewhere closes its tickets when `main` is fast-forwarded to
 # it, through post-merge. The commit stands whatever the close says, since
 # a hook after the commit cannot take it back, so a failure is said on the
