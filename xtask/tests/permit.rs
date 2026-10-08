@@ -280,9 +280,9 @@ const PROPOSED_NO_VERIFY: [&str; 4] = [
 /// `git.no-verify` reads git commit's own argv (#1001): every `deny*.json`
 /// under its fixtures is denied and every `allow*.json` let through, under
 /// the row as tracked and under the row as proposed. A grep for the word
-/// with line numbers, a `sed -n` over it, a heredoc body naming the bypass
-/// and `git log -n 3` are allowed; `-n`, `--no-verify`, `-anm` and a commit
-/// after a `cd` are denied. `deny-hooks-path.json` is the proposed row's
+/// with line numbers, a `sed -n` over it, a `head -n` over a `commit.txt`,
+/// a heredoc body naming the bypass and `git log -n 3` are allowed (#517);
+/// `-n`, `--no-verify`, `-anm` and a commit after a `cd` are denied. `deny-hooks-path.json` is the proposed row's
 /// alone until a person lands it, the tracked row naming no hooks path.
 #[test]
 fn git_no_verify_reads_git_commit_s_own_argv() {
