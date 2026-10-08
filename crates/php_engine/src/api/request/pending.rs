@@ -201,7 +201,7 @@ impl Request {
             // (`Z/Zend/zend_exceptions.c:1005`); a fatal's bailout is
             // caught where the serving is left.
             self.raised = None;
-            self.bailout = false;
+            self.catch_bailout();
             return Ok(());
         };
         let class = self.class_name_of(throwable);
@@ -285,12 +285,12 @@ impl Request {
         match self.uncaught() {
             Err(fatal) => {
                 self.end_in(&fatal);
-                self.leave_by_zend_bailout();
+                self.bail_out();
                 Err(Thrown::of(None))
             }
             Ok(()) if threw => Ok(Value::undef()),
             Ok(()) => {
-                self.leave_by_zend_bailout();
+                self.bail_out();
                 Err(Thrown::of(None))
             }
         }

@@ -433,9 +433,7 @@ fn serve_from<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<
         declared.before(req, frame, op.opcode);
         stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
         #[cfg(debug_assertions)]
-        if let Some(sensed) = req.take_sensed() {
-            return Err(sensed);
-        }
+        req.sensed_after(code, &op)?;
     }
 }
 
@@ -477,9 +475,7 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     crate::observer::tell_before(req, frame, op.opcode);
     let stepped = dispatch::dispatch::<Nop>(req, frame, code, &op)?;
     #[cfg(debug_assertions)]
-    if let Some(sensed) = req.take_sensed() {
-        return Err(sensed);
-    }
+    req.sensed_after(code, &op)?;
     match stepped {
         Stepped::Pushed(callee) => match activated::<Nop>(req, callee)? {
             Stepped::Threw(at) => Ok(Stepped::Threw(at)),

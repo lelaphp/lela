@@ -554,7 +554,8 @@ impl Request {
     /// where a destructor left a throwable pending and nothing is
     /// executing: php calls `zend_throw_exception_internal(NULL)`, which
     /// renders the uncaught fatal there and `zend_bailout`s
-    /// (`Z/Zend/zend_exceptions.c:203-222`); `shutdown_destructors`
+    /// (`Z/Zend/zend_exceptions.c:203-222`), so the shutdown is unclean
+    /// and a debug build's leak sensor is silent; `shutdown_destructors`
     /// catches that `zend_bailout` and calls
     /// `zend_objects_store_mark_destructed`, so neither walk serves
     /// another destructor. The fatal is rendered here rather than left
@@ -619,6 +620,7 @@ impl Request {
         self.heap.mark_destructed();
         if let Err(fatal) = self.uncaught() {
             self.end_in(&fatal);
+            self.bail_out();
         }
     }
 

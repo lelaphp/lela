@@ -62,6 +62,30 @@ fn appended(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Throw
     Ok(owner)
 }
 
+/// `held_past_the_limit(mixed $value, int $bytes): void`: an owner of
+/// `$value` held while a string of `$bytes` is made, which meets the
+/// memory limit, so the owner is dropped as the native leaves by its
+/// fatal; given up otherwise.
+#[php_function]
+fn held_past_the_limit(req: &mut Request, value: Value, bytes: i64) -> Result<(), Thrown> {
+    let owner = Owner::take(req, value);
+    let made = PhpString::new(req, &vec![b'x'; usize::try_from(bytes).unwrap_or(0)])?;
+    made.give_up(req);
+    owner.give_up(req);
+    Ok(())
+}
+
+/// The line of `held_past_a_throw`'s [`Owner::take`].
+const THROWN_AT: u32 = line!() + 6;
+
+/// `held_past_a_throw(mixed $value): void`, faulty on purpose: an owner
+/// of `$value` dropped unconsumed as the native leaves by an `Error`.
+#[php_function]
+fn held_past_a_throw(req: &mut Request, value: Value) -> Result<(), Thrown> {
+    let _owner = Owner::take(req, value);
+    Err(crate::api::raising::throw_error(req, "Error", "thrown"))
+}
+
 /// `s($c)`: a string of the request's, counted, which the program builds.
 const COUNTED: &str = "function s($c) { return $c . PHP_INT_MAX; }";
 
@@ -74,6 +98,8 @@ fn owners() -> Extension {
             first::declared(),
             fresh::declared(),
             appended::declared(),
+            held_past_the_limit::declared(),
+            held_past_a_throw::declared(),
         ])
         .build("owners")
 }
@@ -174,4 +200,44 @@ fn returning_a_view_of_an_element_takes_the_engines_own_owner() {
         "x9223372036854775807\ny9223372036854775807\n"
     );
     assert_eq!(served.exit_code, 0);
+}
+
+/// An owner a native holds as it meets the memory limit is dropped on
+/// the fatal's path, which php leaves by `zend_bailout` with the native's
+/// locals the heap's to discard: the request renders php's fatal alone
+/// (#2048). The same native given room gives its owner up.
+#[test]
+fn an_owner_dropped_on_the_path_to_a_fatal_is_not_reported() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        &format!("<?php {COUNTED} held_past_the_limit(s('x'), 8);\necho 'room';\nini_set('memory_limit', '2M');\nheld_past_the_limit(s('x'), 4 << 20);\necho 'went on';\n"),
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.starts_with("room\nFatal error: Allowed memory size of 2097152 bytes exhausted"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("InternalError"), "{stdout}");
+    assert!(!stdout.contains("went on"), "{stdout}");
+    assert_eq!(served.exit_code, 255);
+}
+
+/// An owner dropped unconsumed as its native leaves by a throwable is on
+/// an ordinary path, which the native was to clean up after: it is
+/// reported with the line that made it (#2048).
+#[test]
+fn an_owner_dropped_on_an_exceptions_path_is_reported() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        &format!("<?php {COUNTED} try {{ held_past_a_throw(s('x')); }} catch (Error $e) {{ echo 'caught'; }}\necho 'went on';\n"),
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.contains(&format!("Fatal error: InternalError: the owner made at crates/php_engine/src/tests/owners.rs:{THROWN_AT}:")),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("went on"), "{stdout}");
+    assert_eq!(served.exit_code, 255);
 }

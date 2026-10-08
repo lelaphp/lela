@@ -27,22 +27,24 @@
 
 use crate::Fatal;
 
-/// What a refcount operation was asked to do.
+/// What was asked of a block: a move of its refcount, or a read of a
+/// string's bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefOp {
+pub(crate) enum Use {
     Addref,
     Release,
+    Read,
 }
 
 /// One defect a debug build sensed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Sensed {
-    /// A refcount operation refused because the block it named was one
-    /// the heap had freed: the block, the operation and the line that
-    /// asked for it.
+    /// A refcount operation or a read of a string's bytes refused
+    /// because the block it named was one the heap had freed: the block,
+    /// what was asked and the line that asked for it.
     FreedUse {
         at: usize,
-        op: RefOp,
+        op: Use,
         site: &'static std::panic::Location<'static>,
     },
     /// A write into a freed bin slot while its bin's quarantine held it
@@ -117,8 +119,9 @@ impl Sensed {
         match self {
             Sensed::FreedUse { at, op, site } => {
                 let op = match op {
-                    RefOp::Addref => "an addref",
-                    RefOp::Release => "a release",
+                    Use::Addref => "an addref",
+                    Use::Release => "a release",
+                    Use::Read => "a read",
                 };
                 Fatal::Error(format!(
                     "InternalError: {op} of the block at {at:#x}, which the heap has freed, at {site}"
@@ -158,10 +161,17 @@ impl Sensed {
 /// dropped, so the defect sits in a `Mutex`, and the `AtomicBool`
 /// beside it lets the engine's question after every handler be one load
 /// while nothing is kept.
+///
+/// While a fatal leaves the request (`zend_bailout`), an owner dropped
+/// unconsumed is not a defect: php's `longjmp` leaves a native's locals
+/// for the heap to discard, and the native that drops its owners as it
+/// returns the fatal's error is doing what php's jump does. A refused
+/// refcount change is a defect on every path, the fatal's included.
 #[derive(Default)]
 pub(crate) struct Record {
     kept: std::sync::atomic::AtomicBool,
     defect: std::sync::Mutex<Option<Sensed>>,
+    fatal_leaving: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Record {
@@ -221,9 +231,24 @@ impl std::fmt::Debug for Sensor {
 
 impl Sensor {
     /// An owner made at `site` dropped without being handed to a sink
-    /// or given up, kept for the engine's next question.
+    /// or given up, kept for the engine's next question; nothing while a
+    /// fatal leaves the request ([`Record`]).
     pub fn unconsumed(&self, site: &'static std::panic::Location<'static>) {
-        self.0.record(Sensed::Unconsumed { site });
+        if !self
+            .0
+            .fatal_leaving
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.0.record(Sensed::Unconsumed { site });
+        }
+    }
+
+    /// Whether a fatal is leaving the request, as the engine says where
+    /// `zend_bailout` begins and where its `zend_try` catches it.
+    pub(crate) fn fatal_leaving(&self, leaving: bool) {
+        self.0
+            .fatal_leaving
+            .store(leaving, std::sync::atomic::Ordering::Release);
     }
 
     /// A record of its own, for a new heap.
