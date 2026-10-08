@@ -1828,7 +1828,9 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
 /// the group kill 13 times in 200 at twelve jobs, the oracle's as often as
 /// the engine's. One that still holds the pipe at the limit leaves what
 /// came by then and goes with its group, so it neither holds the run nor
-/// outlives it.
+/// outlives it. The first half's limit is one the 300 ms child meets with
+/// room under any load, since a run read to its end pays none of it; two
+/// seconds was not, at a load average of 80 to 108 (#2293).
 #[test]
 fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
     if oracle().is_none() {
@@ -1846,7 +1848,7 @@ fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
         "writes-after",
         &shares(r#"usleep(300000); echo "child\n";"#),
     );
-    let tally = run_on(&subset, 1, 2);
+    let tally = run_on(&subset, 1, 30);
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 
     let (root, subset) = rooted("holds-past-limit", &shares("sleep(120);"));
