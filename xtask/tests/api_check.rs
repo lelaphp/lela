@@ -167,6 +167,23 @@ fn a_public_item_without_a_lock_line_fails_naming_the_lock_file() {
     assert_eq!(failures(&readings).len(), 1);
 }
 
+/// A type `include!`d from `OUT_DIR`, as `php_unit::Opcode` is (#2025):
+/// the instrument reads no generated file, so the type's definition is
+/// out of its sight, and the inherent impl in `kind.rs` is joined to it
+/// by the name the including module re-exports. `Kind::COUNT` has its
+/// line and `Kind::name` has none, so the reading names it; the private
+/// method is no line.
+#[test]
+fn a_method_of_a_type_included_from_out_dir_without_a_lock_line_fails() {
+    let readings = readings("include");
+    let heap = of(&readings, "heap");
+    assert_eq!(heap.status, Status::Fail, "{}", heap.message);
+    assert!(heap.message.contains("Kind::name"), "{}", heap.message);
+    assert!(!heap.message.contains("COUNT"), "{}", heap.message);
+    assert!(!heap.message.contains("private"), "{}", heap.message);
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
 /// One order for a lock's lines (#403): `--write` renders them ascending
 /// and a check that read the set alone accepted a file it would rewrite,
 /// which is how `crates/php_heap/heap.lock` carried `Arr::live_from`

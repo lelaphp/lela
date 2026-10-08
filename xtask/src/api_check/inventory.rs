@@ -31,6 +31,13 @@
 //! workspace by the module whose `pub use` writes it. A type whose
 //! methods are spread over one file per area is counted per file.
 //!
+//! A module that `include!`s a file, generated into `OUT_DIR` and so not
+//! read, is taken to define every name a path asks of it that nothing
+//! else there defines or imports: `pub use opcode::Opcode` beside
+//! `mod opcode { include!(...) }` names a type of that module, and the
+//! inherent impls written on `Opcode` elsewhere in the crate list under
+//! it (#2025).
+//!
 //! Known limits: `#[path]` on a `mod` is not read; `cfg` is not evaluated,
 //! so a `pub` item behind a feature is always listed.
 
@@ -508,6 +515,20 @@ impl<'a> Inventory<'a> {
                 Leaf::Name(_) => {}
             }
         }
+        // A name nothing above defines, in a module that `include!`s a
+        // file the instrument cannot read (`OUT_DIR`), is taken for one
+        // the included file defines, unless a `use` there brings it in:
+        // the code compiles, so the name is there (#2025).
+        let imported = module.items.iter().any(|i| {
+            matches!(i, Item::Use(u)
+                if flatten(&u.tree).iter().any(|p| p.leaf == Leaf::Name(name.to_owned())))
+        });
+        if includes(&module) && !imported {
+            return Ok(Target::Item {
+                module: id.clone(),
+                name: name.to_owned(),
+            });
+        }
         Ok(Target::Opaque)
     }
 
@@ -566,6 +587,16 @@ impl<'a> Inventory<'a> {
 /// it.
 fn list_first(out: &mut Lines, line: String, module: &ModId) {
     out.entry(line).or_insert_with(|| module.clone());
+}
+
+/// Whether `module` writes an `include!` at item level: items the
+/// instrument does not read, since nothing is built and the file is
+/// generated into `OUT_DIR`.
+fn includes(module: &Module) -> bool {
+    module
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Macro(m) if m.mac.path.is_ident("include")))
 }
 
 fn parse(file: &Path) -> Result<Vec<Item>> {
