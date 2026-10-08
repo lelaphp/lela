@@ -900,10 +900,11 @@ impl Lent {
 
 /// A walk's pin over a row's key or value, kept for its step where
 /// nothing else the walk holds keeps the row and php's native takes no
-/// owner of it (design §4.4, #2159): no count, so the count the program
-/// reads is php's, and where the row's last owner goes during the step
-/// its free, and an object's destructor with it, waits for the pin to be
-/// let go ([`php_heap::Heap::pin_block`]). Taken from a view and let go
+/// owner of it (design §4.4, #2159, #2230): no count, so the count the
+/// program reads is php's, and where the row's last owner goes during
+/// the step the row is destroyed there, as php destroys it, and only its
+/// bytes wait for the pin to be let go ([`php_heap::Heap::pin_block`]),
+/// so the walk reads it destroyed and never freed. Taken from a view and let go
 /// by the walk on every way out, never by a `Drop` (design §5.1). Never a
 /// way to own: nothing reads it as a count, and the body hands a sink an
 /// owner it takes of the value, never the pin.
@@ -924,11 +925,11 @@ impl<T: View> Pin<T> {
         Pin { view, set }
     }
 
-    /// The pin let go: what names the view freed here where its last
-    /// owner went while the pin stood.
+    /// The pin let go: the bytes of what the view names given back
+    /// where it was destroyed while the pin stood.
     fn let_go(self, req: &mut Request) {
         if self.set {
-            req.unpin_block(self.view.counted());
+            req.heap_mut().unpin_block(self.view.counted().to_zval());
         }
     }
 }

@@ -87,6 +87,7 @@ pub use string::{FreshStr, Intern, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
 use gc::Refcounted;
+use std::ptr::NonNull;
 
 /// The per-request heap (design §5.13): the allocator every string,
 /// array, object and frame passes through, and the only accountant of
@@ -386,22 +387,51 @@ impl Heap {
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed
-    /// when the last gives it up. An interned string is never freed. A
+    /// when the last gives it up, its bytes kept while a pin names it
+    /// ([`Heap::give_back`]). An interned string is never freed. A
     /// debug build's freed-use guard is the header's decrement, and names
     /// the caller.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_string(&mut self, s: Str) {
-        // A pinned string's free waits for its pin ([`Heap::unpin_block`]).
-        if s.is_interned() || s.delref() != 0 || s.gc().pinned() {
+        if s.is_interned() || s.gc().release() != gc::Release::Last {
             return;
         }
         if s.is_persistent() {
-            string::free_persistent(s);
+            // Outside the request's heap nothing is counted, so a pinned
+            // one is freed whole at its pin's let-go.
+            if !s.gc().pinned() {
+                string::free_persistent(s);
+            }
             return;
         }
         // SAFETY: the string came from this heap's `string` and its last
-        // owner has given it up, so nothing names it.
-        unsafe { self.mm.free(s.address()) };
+        // owner has given it up, so only a pin names it.
+        unsafe { self.give_back(s.address(), s.gc().pinned()) };
+    }
+
+    /// The end of `rc_dtor_func` once the block at `at` is destroyed,
+    /// php's `efree`: its bytes back to the heap, or, while a pin stands
+    /// over it, the free counted now, where php counts it, and the bytes
+    /// kept for the last pin's let-go ([`Heap::unpin_block`]), so a
+    /// frame or a walk that still names the block reads it destroyed
+    /// and never freed (design §4.4, #2230). A block whose free was
+    /// counted already, given up again by an owner taken of it since,
+    /// has its bytes back with nothing counted twice.
+    ///
+    /// # Safety
+    ///
+    /// `at` is a block of this heap whose destruction is done, and
+    /// nothing but a pin names it, which `pinned` says.
+    pub(crate) unsafe fn give_back(&mut self, at: NonNull<u8>, pinned: bool) {
+        if pinned {
+            self.mm.retire(at);
+        } else if self.mm.is_retired(at) {
+            // SAFETY: the caller's contract: no pin and no owner names it.
+            unsafe { self.mm.free_retired(at) };
+        } else {
+            // SAFETY: the caller's contract.
+            unsafe { self.mm.free(at) };
+        }
     }
 
     /// What a debug build's sensors found in this heap since the
@@ -526,7 +556,7 @@ impl Heap {
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
         match Heap::give_up(hooks, z) {
             GivenUp::Owned => Heap::gc_check_possible_root(hooks, z),
-            GivenUp::Freed | GivenUp::Pinned => {}
+            GivenUp::Freed => {}
             GivenUp::Last(last) => Heap::destroy(hooks, last),
         }
     }
@@ -540,12 +570,29 @@ impl Heap {
     pub fn release_nogc(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
         match Heap::give_up(hooks, z) {
             GivenUp::Owned => true,
-            GivenUp::Freed | GivenUp::Pinned => false,
+            GivenUp::Freed => false,
             GivenUp::Last(last) => {
                 Heap::destroy(hooks, last);
                 false
             }
         }
+    }
+
+    /// `GC_DELREF` and `gc_check_possible_root`: one owner of `z` given
+    /// up where the caller holds that another stands, so the value is
+    /// offered to the collector as a possible root and never destroyed
+    /// here, as php gives up the collector's fiber running the code that
+    /// gives it up (`Z/Zend/zend_gc.c:2343`). Whether an owner was given
+    /// up: not the last, which is the caller's broken invariant and is
+    /// left standing, so nothing is freed under what names it.
+    #[must_use = "the last owner kept is the caller's InternalError"]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn release_held(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
+        if counted_header(z, Refcounted::refcount).is_some_and(|count| count <= 1) {
+            return false;
+        }
+        Heap::release(hooks, z);
+        true
     }
 
     /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
@@ -573,71 +620,116 @@ impl Heap {
             hooks.heap().release_string(s);
             return GivenUp::Freed;
         }
-        // At zero, the one test a pin costs: the count's word is in hand,
-        // and a pinned block's free waits for its pin
-        // ([`Heap::unpin_block`]).
-        if let Some(a) = z.as_arr() {
-            if a.delref() == 0 {
-                if a.gc().pinned() {
-                    return GivenUp::Pinned;
+        // At zero the block is destroyed whether or not a pin stands:
+        // a pin keeps only its bytes ([`Heap::give_back`]).
+        match counted_header(z, Refcounted::release) {
+            Some(gc::Release::Owned) => GivenUp::Owned,
+            Some(gc::Release::Last) => {
+                if let Some(a) = z.as_arr() {
+                    GivenUp::Last(Last::Table(a))
+                } else if let Some(r) = z.as_reference() {
+                    GivenUp::Last(Last::Cell(r))
+                } else {
+                    if let Some(o) = z.as_obj() {
+                        Heap::store_del(hooks, o);
+                    } else if let Some(r) = z.as_resource() {
+                        Heap::resource_free(hooks, r);
+                    }
+                    GivenUp::Freed
                 }
-                return GivenUp::Last(Last::Table(a));
             }
-        } else if let Some(o) = z.as_obj() {
-            if o.delref() == 0 {
-                if o.gc().pinned() {
-                    return GivenUp::Pinned;
-                }
-                Heap::store_del(hooks, o);
-                return GivenUp::Freed;
-            }
-        } else if let Some(r) = z.as_resource() {
-            if r.delref() == 0 {
-                if r.gc().pinned() {
-                    return GivenUp::Pinned;
-                }
-                Heap::resource_free(hooks, r);
-            }
-            return GivenUp::Freed;
-        } else if let Some(r) = z.as_reference()
-            && r.delref() == 0
-        {
-            if r.gc().pinned() {
-                return GivenUp::Pinned;
-            }
-            return GivenUp::Last(Last::Cell(r));
+            Some(gc::Release::Ownerless) | None => GivenUp::Freed,
         }
-        GivenUp::Owned
     }
 
-    /// A walk's pin over the block `z` names (design §4.4, #2197): an
-    /// uncounted guard, so where the block's last owner goes while the
-    /// pin stands, its free, and an object's destructor with it, waits
-    /// for [`Heap::unpin_block`], and where an owner is taken again
-    /// meanwhile nothing is freed at all. The count is untouched, so
-    /// every count php reads and every separation it makes stand as
-    /// php's. Not the pin a frame takes of its receiver ([`Obj::pin`]),
-    /// which frees an object's members at php's moment and keeps only
-    /// its bytes. Whether this call set it: not for a value that carries
-    /// no count, and not for a block pinned already, which the pin that
-    /// set it keeps until after this one is let go, as a walk's steps
-    /// nest.
+    /// A pin over the block `z` names (design §4.4, #2197, #2230): an
+    /// uncounted guard over the block's bytes. Where the block's last
+    /// owner goes while the pin stands, it is destroyed then, as php
+    /// destroys it, its destructor served, its rows or members released,
+    /// an object's id freed and its bytes counted off
+    /// `memory_get_usage()`, and only the bytes wait for
+    /// [`Heap::unpin_block`], so what names the block reads it destroyed
+    /// and never freed. The count is untouched, so every count php reads
+    /// and every separation it makes stand as php's. An object's pins
+    /// are counted, the pin a frame takes of its receiver among them
+    /// ([`Obj::pin`]), so this always sets one; any other block has one
+    /// pin, and a block pinned already is kept by the pin that set it,
+    /// which is let go after this one, as a walk's steps nest. Whether
+    /// this call set it: not for a value that carries no count.
+    ///
+    /// A row the program frees while a walk reads it is destroyed at the
+    /// `unset`, as php destroys it, whether it is an object or a table,
+    /// and php's ids and counted memory follow:
+    ///
+    /// ```php
+    /// class X { public $c; function __destruct() { echo "X gone\n"; } }
+    /// class C { function __serialize(): array { unset($GLOBALS['r'][0]); echo "after unset\n"; return []; } }
+    /// $x = new X; $x->c = new C; $r = [$x, 1]; unset($x); $o = [&$r];
+    /// echo serialize($o), "\n";
+    /// ```
+    /// ```expect
+    /// X gone
+    /// after unset
+    /// a:1:{i:0;a:2:{i:0;O:1:"X":1:{s:1:"c";O:1:"C":0:{}}i:1;i:1;}}
+    /// ```
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "D gone\n"; } }
+    /// class C { function __serialize(): array { unset($GLOBALS['r'][0]); echo "after unset\n"; return []; } }
+    /// $r = [[new D, new C], 1]; $o = [&$r];
+    /// echo serialize($o), "\n";
+    /// ```
+    /// ```expect
+    /// D gone
+    /// after unset
+    /// a:1:{i:0;a:2:{i:0;a:2:{i:0;O:1:"D":0:{}i:1;O:1:"C":0:{}}i:1;i:1;}}
+    /// ```
+    ///
+    /// ```php
+    /// class X { public $c; function __destruct() { echo "X gone\n"; } }
+    /// class C { function __serialize(): array { $m0 = memory_get_usage(); unset($GLOBALS['r'][0]); echo "after unset\n"; $n = new stdClass; echo "id ", spl_object_id($n), " freed-mem ", $m0 - memory_get_usage(), "\n"; return []; } }
+    /// $x = new X; echo "x id ", spl_object_id($x), "\n"; $x->c = new C; $r = [$x, 1]; unset($x); $o = [&$r];
+    /// echo serialize($o), "\n";
+    /// ```
+    /// ```expect
+    /// x id 1
+    /// X gone
+    /// after unset
+    /// id 1 freed-mem 16
+    /// a:1:{i:0;a:2:{i:0;O:1:"X":1:{s:1:"c";O:1:"C":0:{}}i:1;i:1;}}
+    /// ```
     #[must_use = "a pin that was set is let go with Heap::unpin_block"]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn pin_block(z: Zval) -> bool {
+        if let Some(o) = z.as_obj() {
+            o.pin();
+            return true;
+        }
         counted_header(z, Refcounted::pin).unwrap_or(false)
     }
 
-    /// The pin [`Heap::pin_block`] set over `z` let go: where the block's
-    /// last owner went while it stood, the block is freed now as that
-    /// release would have freed it, an object's destructor served first,
-    /// and a table's rows and a reference's value released with it,
-    /// never a possible root of the cycle collector.
+    /// The pin [`Heap::pin_block`] set over `z` let go: where the block
+    /// was destroyed while it stood and no owner was taken of it since,
+    /// its bytes go back now, nothing else, since its destruction was
+    /// served at php's moment.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn unpin_block(hooks: &mut dyn HeapHooks, z: Zval) {
-        if counted_header(z, Refcounted::unpin) == Some(0) {
-            hooks.heap().addref(z);
-            Heap::release_nogc(hooks, z);
+    pub fn unpin_block(&mut self, z: Zval) {
+        if let Some(o) = z.as_obj() {
+            self.unpin(o);
+            return;
+        }
+        if counted_header(z, Refcounted::unpin) != Some(0) {
+            return;
+        }
+        if let Some(s) = z.as_str()
+            && s.is_persistent()
+        {
+            string::free_persistent(s);
+        } else if let Some(at) = counted_header(z, |header| NonNull::from(header).cast()) {
+            // SAFETY: where it is retired, the block's last owner went
+            // while the pin stood, its destruction is done, and the pin
+            // was the last thing naming it.
+            unsafe { self.mm.free_retired(at) };
         }
     }
 }
@@ -662,12 +754,10 @@ fn counted_header<R>(z: Zval, f: impl FnOnce(&Refcounted) -> R) -> Option<R> {
 }
 
 /// What one owner fewer left: owners still, nothing to free or freed
-/// already, the last owner gone from a pinned block whose free waits
-/// for its pin, or a table or a reference cell whose last owner it was.
+/// already, or a table or a reference cell whose last owner it was.
 enum GivenUp {
     Owned,
     Freed,
-    Pinned,
     Last(Last),
 }
 
@@ -1312,6 +1402,33 @@ mod tests {
             hooks.heap.release_string(s);
         }
         assert_eq!(hooks.heap.take_sensed(), None);
+    }
+
+    /// A block freed a second time while its bin's quarantine holds it
+    /// is not freed again, and the free is recorded as the
+    /// `InternalError` naming the block: the bin hands the block out once.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_free_of_a_quarantined_slot_is_refused_and_named() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let Ok(at) = heap.mm.alloc(32) else {
+            return;
+        };
+        let held = heap.memory_usage(false);
+        // SAFETY: the block was allocated just above and nothing names it.
+        unsafe { heap.mm.free(at) };
+        // SAFETY: the defect planted: the block is freed and its bin's
+        // quarantine holds it, which is what the sensor reads first.
+        unsafe { heap.mm.free(at) };
+        assert_eq!(held - heap.memory_usage(false), 32, "counted off once");
+        assert_eq!(
+            heap.take_sensed(),
+            Some(Fatal::Error(format!(
+                "InternalError: a free of the 32-byte block at {:#x}, which the heap has freed",
+                at.as_ptr().addr()
+            )))
+        );
     }
 
     /// A write into a block its bin's quarantine holds is found as the

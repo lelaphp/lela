@@ -160,12 +160,6 @@ impl Ref {
         self.header().gc.addref();
     }
 
-    /// `GC_DELREF`, and what is left.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn delref(self) -> u32 {
-        self.header().gc.delref()
-    }
-
     /// Whether two names name one reference, php's pointer equality.
     #[must_use]
     pub fn is_same(&self, other: Ref) -> bool {

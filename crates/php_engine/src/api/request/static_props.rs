@@ -30,6 +30,27 @@ pub(super) struct StaticProps {
     slots: Vec<((ClassId, Vec<u8>), Value)>,
 }
 
+impl StaticProps {
+    /// The slot of the `static` property `name` that `declaring`
+    /// declares; none where it is not laid down.
+    fn slot(&self, declaring: ClassId, name: &[u8]) -> Option<&Value> {
+        let held = self
+            .slots
+            .iter()
+            .find(|((at, under), _)| *at == declaring && under == name);
+        held.map(|(_, value)| value)
+    }
+
+    /// [`StaticProps::slot`] to write.
+    fn slot_mut(&mut self, declaring: ClassId, name: &[u8]) -> Option<&mut Value> {
+        let held = self
+            .slots
+            .iter_mut()
+            .find(|((at, under), _)| *at == declaring && under == name);
+        held.map(|(_, value)| value)
+    }
+}
+
 impl Request {
     /// Every `static` property's slot given up, a debug build's teardown,
     /// as `zend_shutdown_executor_values` releases the static members
@@ -163,12 +184,7 @@ impl Request {
             return Ok(());
         };
         let name = &property.name.0;
-        if self
-            .static_props
-            .slots
-            .iter()
-            .any(|((held, under), _)| *held == declaring && **under == **name)
-        {
+        if self.static_props.slot(declaring, name).is_some() {
             return Ok(());
         }
         // The default expression alone is handed on past what writes the
@@ -196,10 +212,8 @@ impl Request {
     /// unwritten or the table has none.
     pub(crate) fn held_static(&self, declaring: ClassId, name: &[u8]) -> Value {
         self.static_props
-            .slots
-            .iter()
-            .find(|((at, under), _)| *at == declaring && under == name)
-            .map_or_else(Value::undef, |(_, value)| *value)
+            .slot(declaring, name)
+            .map_or_else(Value::undef, |value| *value)
     }
 
     /// `zend_read_static_property_ex` (`Z/Zend/zend_API.c`): the value
@@ -363,10 +377,8 @@ impl Request {
         // another `static` than this one (`Test::$x =& Test::$y`).
         let held = |req: &Request| {
             req.static_props
-                .slots
-                .iter()
-                .find(|((at, under), _)| *at == declaring && under == name)
-                .map_or(Value::null(), |(_, held)| held.deref())
+                .slot(declaring, name)
+                .map_or(Value::null(), Value::deref)
         };
         let garbage = held(self);
         self.addref(&garbage);
@@ -409,29 +421,17 @@ impl Request {
     /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
     /// ```
     pub(crate) fn store_static_property(&mut self, declaring: ClassId, name: &[u8], value: Value) {
-        let held = self
-            .static_props
-            .slots
-            .iter()
-            .position(|((at, under), _)| *at == declaring && under == name);
-        let Some(at) = held else {
+        let Some(slot) = self.static_props.slot_mut(declaring, name) else {
             self.release(value);
             return;
         };
-        if let Some(ValueRef::Reference(cell)) =
-            self.static_props.slots.get(at).map(|(_, v)| v.as_ref())
-        {
+        if let ValueRef::Reference(cell) = slot.as_ref() {
             // What the cell held is given up after the write.
             let cell = cell.heap();
             self.reference_set(cell, value);
             return;
         }
-        let previous = self
-            .static_props
-            .slots
-            .get_mut(at)
-            .map(|(_, slot)| std::mem::replace(slot, value))
-            .unwrap_or_default();
+        let previous = std::mem::replace(slot, value);
         self.release(previous);
     }
 
@@ -471,15 +471,7 @@ impl Request {
         // The row owns what it holds and the cell takes that owner, so
         // the row's value is replaced and never released.
         let cell = self.reference(held)?;
-        let at = self
-            .static_props
-            .slots
-            .iter()
-            .position(|((held, under), _)| *held == declaring && under == name);
-        let Some(at) = at else {
-            return Ok(cell.heap().val_ref());
-        };
-        if let Some((_, slot)) = self.static_props.slots.get_mut(at) {
+        if let Some(slot) = self.static_props.slot_mut(declaring, name) {
             *slot = Value::reference(cell);
         }
         Ok(cell.heap().val_ref())
@@ -491,10 +483,8 @@ impl Request {
     /// `ZEND_ASSIGN_STATIC_PROP_OP`); none where the slot holds a value.
     pub(crate) fn static_slot_cell(&self, declaring: ClassId, name: &[u8]) -> Option<PhpRef> {
         self.static_props
-            .slots
-            .iter()
-            .find(|((at, under), _)| *at == declaring && under == name)
-            .and_then(|(_, value)| value.as_php_ref().copied())
+            .slot(declaring, name)
+            .and_then(|value| value.as_php_ref().copied())
     }
 
     /// `zend_assign_to_variable_reference` over a `static` property's
@@ -522,21 +512,11 @@ impl Request {
                 return Err(thrown);
             }
         };
-        let held = self
-            .static_props
-            .slots
-            .iter()
-            .position(|((at, under), _)| *at == declaring && under == name);
-        let Some(at) = held else {
+        let Some(slot) = self.static_props.slot_mut(declaring, name) else {
             self.release(bound);
             return Ok(());
         };
-        let previous = self
-            .static_props
-            .slots
-            .get_mut(at)
-            .map(|(_, slot)| std::mem::replace(slot, bound))
-            .unwrap_or_default();
+        let previous = std::mem::replace(slot, bound);
         self.release(previous);
         Ok(())
     }

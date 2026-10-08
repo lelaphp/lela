@@ -148,6 +148,7 @@ Heap::reference
 Heap::reference_separate
 Heap::reference_set
 Heap::release
+Heap::release_held
 Heap::release_nogc
 Heap::release_string
 Heap::reset_peak

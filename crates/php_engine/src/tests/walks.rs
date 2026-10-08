@@ -4,8 +4,8 @@
 //! table is freed where the program lets it go, and a guarded walk
 //! leaves the table unmarked; a live walk's row stands for its step
 //! whatever the step's code does to the table, and so does a pinned
-//! row of a foreach walk holding nothing, whose free waits for the step's
-//! end.
+//! row of a foreach walk holding nothing, destroyed where the program
+//! lets it go and its bytes kept to the step's end.
 
 use std::ops::ControlFlow;
 
@@ -473,15 +473,11 @@ fn a_guarded_walk_over_an_object_marks_its_table() {
 }
 
 /// A row a foreach walk holding nothing lends is pinned for its step, so
-/// one the callback frees by unsetting it, its last owner, is not freed
-/// then: the native takes an owner of it after the callback, which is
-/// the row's first owner again, and gives it up, and the free, with the
-/// object's destructor, waits for the step's end.
-/// The callback's string of the row's size takes no
-/// slot the row held, and no row's count shows the pin: the leak sensor
-/// is armed and nothing is left.
+/// one the callback frees by unsetting it is destroyed then, and only
+/// its bytes wait for the step's end; nothing is freed twice and the
+/// leak sensor finds nothing left.
 #[test]
-fn a_row_freed_during_its_own_step_is_freed_as_the_step_ends() {
+fn a_row_freed_during_its_own_step_is_destroyed_there_and_its_bytes_wait() {
     let served = armed().serve_capture(
         "<?php class D { function __destruct() { echo 'gone '; } }\n\
          function s($c) { return $c . PHP_INT_MAX; }\n\
@@ -492,7 +488,7 @@ fn a_row_freed_during_its_own_step_is_freed_as_the_step_ends() {
     );
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
-        "unset read object gone unset read v9223372036854775807 emptied\n"
+        "gone unset read object unset read v9223372036854775807 emptied\n"
     );
     assert_eq!(served.fatal, None);
     assert_eq!(served.exit_code, 0);

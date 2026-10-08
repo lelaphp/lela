@@ -242,22 +242,23 @@ fn print_r_ends_an_object_s_nested_array_where_a_debug_info_method_destroys_it()
 }
 
 /// `print_r` over an object whose property alone holds a nested array:
-/// the walk over the object's table owns each row for its step (#1980,
-/// candidate 3), so an element's `__debugInfo` that assigns over the
-/// property leaves the array standing until its row is printed, and
-/// every row of it prints (#2160).
+/// the walk over the object's table pins each row for its step (#2197),
+/// and a pin keeps only a row's bytes (#2230), so an element's
+/// `__debugInfo` that assigns over the property destroys the array
+/// there, as php destroys it, and the walk over it ends at its
+/// destruction, its later rows unprinted.
 ///
 /// No divergence row records the walk's end: no witness or phpt
 /// compares this input.
 #[test]
-fn print_r_prints_an_object_s_nested_array_its_row_holds() {
+fn print_r_ends_an_object_s_nested_array_its_row_held_where_it_is_destroyed() {
     let (stdout, fatal) = armed(
         "<?php class C { function __debugInfo() { $GLOBALS['o']->p = 0; $GLOBALS['x'] = $GLOBALS['z'] . $GLOBALS['z']; return []; } }\nclass O { public $p; }\n$v = 'vvvvv'; $z = 'ZZZZZ';\n$o = new O; $o->p = [new C, $v . $v];\nprint_r($o);",
     );
     assert_eq!(fatal, None);
     assert_eq!(
         stdout,
-        "O Object\n(\n    [p] => Array\n        (\n            [0] => C Object\n                (\n                )\n\n            [1] => vvvvvvvvvv\n        )\n\n)\n"
+        "O Object\n(\n    [p] => Array\n        (\n            [0] => C Object\n                (\n                )\n\n        )\n\n)\n"
     );
 }
 

@@ -1,0 +1,48 @@
+# The MySQL server the mysqli and pdo_mysql suites, their tests and the
+# witnesses marked `mysql` run against, as ci/mysql/compose.yaml sets it up
+# (#1345): 8.4, on 127.0.0.1:3306, root with an empty password from any host,
+# and a `test` database. A run gets a fresh server, since the runner outlives
+# it: where nothing answers, `xtask phpt` and the witnesses refuse rather than
+# skip (#1366).
+#
+# On Linux, the compose file itself, recreated with a fresh data volume; the
+# runner's user is in the `docker` group (scripts/ci/runner.sh). On the Mac,
+# which has no Docker, Homebrew's mysql@8.4 on a data directory of the job's
+# own, after the pinned php, whose icu4c@78 and openssl@3 it shares, so
+# nothing php links is replaced; a server an earlier job left is shut down
+# first.
+name: mysql
+description: Start the MySQL server of ci/mysql/compose.yaml for this job
+runs:
+  using: composite
+  steps:
+    - name: the MySQL server of ci/mysql/compose.yaml, in Docker
+      if: runner.os == 'Linux'
+      shell: bash
+      run: docker compose -f ci/mysql/compose.yaml up -d --wait --force-recreate --renew-anon-volumes
+    - name: the MySQL server of ci/mysql/compose.yaml, from Homebrew
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: 1
+        HOMEBREW_NO_INSTALL_CLEANUP: 1
+        HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        HOMEBREW_NO_ANALYTICS: 1
+      run: |
+        brew install mysql@8.4
+        bin="$(brew --prefix mysql@8.4)/bin"
+        answers() { "$bin/mysqladmin" ping --protocol=tcp -h 127.0.0.1 -uroot --silent 2>/dev/null; }
+        if answers; then "$bin/mysqladmin" shutdown --protocol=tcp -h 127.0.0.1 -uroot; fi
+        data="$RUNNER_TEMP/mysql"
+        rm -rf "$data"
+        "$bin/mysqld" --no-defaults --initialize-insecure --datadir="$data"
+        nohup "$bin/mysqld" --no-defaults --datadir="$data" --bind-address=127.0.0.1 --port=3306 \
+          --socket="$RUNNER_TEMP/mysql.sock" --mysqlx=OFF > "$RUNNER_TEMP/mysqld.log" 2>&1 &
+        # compose.yaml's healthcheck: a TCP ping, every 2 s, 60 times.
+        for _ in $(seq 60); do answers && break; sleep 2; done
+        answers || { cat "$RUNNER_TEMP/mysqld.log"; echo "::error::the MySQL server did not answer"; exit 1; }
+        "$bin/mysql" --socket="$RUNNER_TEMP/mysql.sock" -uroot -e "
+          CREATE USER IF NOT EXISTS 'root'@'%' IDENTIFIED BY '';
+          GRANT ALL PRIVILEGES ON *.* TO 'root'@'%' WITH GRANT OPTION;
+          CREATE DATABASE IF NOT EXISTS test;
+          SELECT VERSION();"
