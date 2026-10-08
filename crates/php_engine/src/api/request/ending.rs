@@ -253,8 +253,11 @@ impl Request {
             line,
             ..
         } = error;
+        if !diagnostics::fatal_errors(level) {
+            return;
+        }
         let left_in_log = self.take_left_in_log();
-        if !diagnostics::fatal_errors(level) || (self.bailout && !left_in_log) {
+        if self.bailout && !left_in_log {
             return;
         }
         if !left_in_log {
