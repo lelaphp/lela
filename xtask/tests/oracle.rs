@@ -63,7 +63,7 @@ fn a_snippet_runs_as_witness_php_and_its_output_is_normalised() {
         "a\nb  \n\nNotice: x in %SCRATCH%/witness.php on line 2\n%SCRATCH%"
     );
     assert_eq!(String::from_utf8_lossy(&out.stderr), "err");
-    assert_eq!(out.exit, Some(3));
+    assert_eq!(out.exit, xtask::oracle::Ended::Status(3));
 }
 
 /// The load number (#317): `extension #<digits>` is `extension #<token>`

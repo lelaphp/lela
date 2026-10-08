@@ -131,7 +131,7 @@ pub(super) fn one(
             return borked(witness, trouble.context("the oracle did not run it"));
         }
     };
-    let Some(status) = oracle_out.exit else {
+    let Some(status) = oracle_out.exit.code() else {
         kept.entered = Record::Unserved;
         return Ok(judged(
             witness,
@@ -321,7 +321,7 @@ pub(super) fn held(
         let actual = shown(
             &String::from_utf8_lossy(&observed.stdout),
             &String::from_utf8_lossy(&observed.stderr),
-            observed.exit,
+            observed.exit.code(),
         );
         match oracle::verdict(registry, &id, met, &expected, &actual) {
             Compared::Same => {}
@@ -354,7 +354,7 @@ pub(super) fn held(
 /// runner matches an `--EXPECTF--` section, since the lines a witness pins
 /// carry the same wildcards (design §8), and the status exactly.
 fn met(pin: &Pin, witness: &Witness, exit: Exit, ran: &Observation) -> Result<bool> {
-    if ran.exit != exit.asserted() {
+    if ran.exit.code() != exit.asserted() {
         return Ok(false);
     }
     let stdout = Expectation::Format(normalised(pin, &witness.stdout));

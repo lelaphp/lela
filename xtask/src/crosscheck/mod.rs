@@ -79,7 +79,9 @@ use crate::carried::Carried;
 use crate::divergence::{Kind, Registry};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::oracle::{self, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked};
+use crate::oracle::{
+    self, Ended, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked,
+};
 use crate::reading::{Reading, Status, Store, listed, plural};
 use crate::sources::{self, Outside, Standing};
 use crate::tally;
@@ -426,7 +428,7 @@ pub fn run(
             } else {
                 host::oracle_side(oracle, host, name, column)?
             };
-            if observed.exit != Some(0) {
+            if observed.exit != Ended::Status(0) {
                 reading.status = Status::Fail;
                 reading.message = format!(
                     "{}: the oracle has no such extension under `{recipe}`; {}",
@@ -524,7 +526,7 @@ fn rendering(
         };
         return Ok(match served {
             Err(why) => Rendering::Absent(why),
-            Ok(served) if served.exit != Some(0) => Rendering::Absent(said(&served)),
+            Ok(served) if served.exit != Ended::Status(0) => Rendering::Absent(said(&served)),
             Ok(served) => Rendering::Bytes(served.stdout),
         });
     };
@@ -569,10 +571,7 @@ fn said(observed: &Observation) -> String {
         .find(|stream| !stream.is_empty())
         .map(|stream| String::from_utf8_lossy(stream).trim().to_owned())
         .unwrap_or_default();
-    let status = observed
-        .exit
-        .map_or_else(|| "a signal".to_owned(), |code| code.to_string());
-    format!("the request ended on status {status}: {words}")
+    format!("the request ended on {}: {words}", observed.exit)
 }
 
 /// The reading of one extension in one column, over the crate's sources

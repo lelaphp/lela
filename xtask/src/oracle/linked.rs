@@ -68,7 +68,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::{Linked, Observation, Program, Recipe, Regime, Scratch};
+use super::{Ended, Linked, Observation, Program, Recipe, Regime, Scratch};
 use crate::scratch::Tree;
 
 /// The host whose binary serves the snippets, its package and binary.
@@ -142,7 +142,7 @@ fn run(recipe: &Recipe, regime: Option<&Regime>, snippet: &str) -> Result<(Obser
     let observed = Observation {
         stdout: scratch.normalise(&recipe.normalise, read("stdout")),
         stderr: scratch.normalise(&recipe.normalise, read("stderr")),
-        exit: Some(exit),
+        exit: Ended::Status(exit),
         wall,
     };
     Ok((

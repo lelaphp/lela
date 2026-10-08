@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::Column;
-use crate::oracle::{self, Observation, Oracle, normalise_in};
+use crate::oracle::{self, Ended, Observation, Oracle, normalise_in};
 use crate::scratch::Tree;
 
 /// What serves a module's rendering.
@@ -243,7 +243,7 @@ pub(crate) fn served_by_server(
         return Ok(Observation {
             stdout: normalise_in(&recipe.normalise, own.path(), body),
             stderr: Vec::new(),
-            exit: Some(if status == 200 { 0 } else { i32::from(status) }),
+            exit: Ended::Status(if status == 200 { 0 } else { i32::from(status) }),
             wall: started.elapsed(),
         });
     }

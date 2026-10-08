@@ -142,8 +142,8 @@ impl Expectation {
             ..Invocation::new(&oracle.pin().oracle.path, Program::Snippet(PREG_MATCH))
         })?;
         match seen.exit {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
+            super::Ended::Status(0) => Ok(true),
+            super::Ended::Status(1) => Ok(false),
             _ => bail!(
                 "the EXPECTREGEX section is not a pattern PCRE takes: {}: {}",
                 String::from_utf8_lossy(&seen.stdout).trim(),
