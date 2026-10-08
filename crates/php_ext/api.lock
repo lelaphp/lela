@@ -79,6 +79,7 @@ abi::ExtensionBuilder::class
 abi::ExtensionBuilder::class_constants
 abi::ExtensionBuilder::class_linked_observer
 abi::ExtensionBuilder::class_payload
+abi::ExtensionBuilder::class_reshaped
 abi::ExtensionBuilder::class_with
 abi::ExtensionBuilder::classes
 abi::ExtensionBuilder::compile_file
@@ -201,6 +202,7 @@ abi::ObjectHandlers::get_method_as
 abi::ObjectHandlers::get_properties
 abi::ObjectHandlers::get_properties_for
 abi::ObjectHandlers::get_property_ptr_ptr
+abi::ObjectHandlers::get_static_method
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
@@ -666,6 +668,7 @@ request::Request::buffer_handler_started
 request::Request::buffer_status
 request::Request::build_defs
 request::Request::called_scope
+request::Request::caller_function_name
 request::Request::caller_preloaded
 request::Request::caller_var
 request::Request::captured
@@ -712,6 +715,7 @@ request::Request::execution
 request::Request::execution_trace
 request::Request::exit_status
 request::Request::expand_filepath
+request::Request::export_tree
 request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions
@@ -760,6 +764,7 @@ request::Request::ini_get
 request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
 request::Request::ini_parse_quantity
+request::Request::ini_parse_uquantity
 request::Request::ini_restore
 request::Request::ini_set
 request::Request::ini_set_string
@@ -785,6 +790,7 @@ request::Request::method_row
 request::Request::method_rows
 request::Request::multibyte_provider
 request::Request::named_arguments
+request::Request::native_static_trampoline
 request::Request::native_trampoline
 request::Request::observe_allocations
 request::Request::op_array
@@ -833,6 +839,7 @@ request::Request::scope
 request::Request::script_name
 request::Request::serialize_precision
 request::Request::serve_method
+request::Request::serve_string
 request::Request::set_caller_var
 request::Request::set_ctype_locale
 request::Request::set_cwd
@@ -1060,6 +1067,7 @@ syntax::Opt
 syntax::Options
 syntax::Parsed
 syntax::Parsed::dump
+syntax::Position
 syntax::ScannedToken
 syntax::Scanning
 syntax::SyntaxKind

@@ -801,7 +801,7 @@ impl Request {
     /// and an entry's `on_modify` as its own.
     ///
     /// ```php
-    /// foreach (['1M', ' 2k ', '0x10', '010', '0b101', '-0x0B', '', '1.5M', 'abc', '0x', '0z1', '5 KB', '99999999999999999999'] as $q) var_dump(ini_parse_quantity($q));
+    /// foreach (['1M', ' 2k ', '0x10', '010', '0b101', '-0x0B', '', '1.5M', 'abc', '0x', '0z1', '5 KB', ' 3 KB', '99999999999999999999'] as $q) var_dump(ini_parse_quantity($q));
     /// ```
     /// ```expect
     /// int(1048576)
@@ -827,12 +827,25 @@ impl Request {
     /// Warning: Invalid quantity "5 KB": unknown multiplier "B", interpreting as "5 " for backwards compatibility in %s on line 2
     /// int(5)
     ///
+    /// Warning: Invalid quantity " 3 KB": unknown multiplier "B", interpreting as " 3 " for backwards compatibility in %s on line 2
+    /// int(3)
+    ///
     /// Warning: Invalid quantity "99999999999999999999": value is out of range, using overflow result for backwards compatibility in %s on line 2
     /// int(-1)
     /// ```
     #[must_use]
     pub fn ini_parse_quantity(value: &[u8]) -> (i64, Option<String>) {
         crate::ini_quantity::parse(value)
+    }
+
+    /// `zend_ini_parse_uquantity`: [`Request::ini_parse_quantity`] held
+    /// to the unsigned range, where `-1` alone among the negatives is
+    /// taken, as the maximum, and any other is out of range. What the
+    /// test extension's `zend_test_zend_ini_parse_uquantity` answers,
+    /// the witness there.
+    #[must_use]
+    pub fn ini_parse_uquantity(value: &[u8]) -> (u64, Option<String>) {
+        crate::ini_quantity::parse_unsigned(value)
     }
 
     /// The stage an entry's `on_modify` is served at, php's `stage`

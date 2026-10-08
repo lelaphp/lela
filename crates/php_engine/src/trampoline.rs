@@ -141,15 +141,16 @@ impl CallTrampoline {
 
     /// The native `zend_ffi_get_func` makes (`Z/ext/ffi/ffi.c:2956-2970`):
     /// `ZEND_ACC_CALL_VIA_TRAMPOLINE` with no scope and no `arg_info`,
-    /// every argument passed by value, named as the call was.
-    pub(crate) fn native(entry: crate::api::abi::Entry, name: &[u8]) -> Self {
-        let function = FunctionDecl {
-            parameters: vec![variadic(b"arguments", None)],
-            ..native_function(name)
-        };
+    /// every argument passed by value, named as the call was. It is not
+    /// `ZEND_ACC_VARIADIC`, as a magic method's trampoline is, so a named
+    /// argument is php's `Unknown named parameter`.
+    /// A trampoline a class's `get_static_method` answers is
+    /// `ZEND_ACC_STATIC` beside it, `is_instance` false.
+    pub(crate) fn native(entry: crate::api::abi::Entry, name: &[u8], is_instance: bool) -> Self {
+        let function = native_function(name);
         CallTrampoline {
             via: Via::Native(entry),
-            decl: public_method(function, true),
+            decl: public_method(function, is_instance),
         }
     }
 

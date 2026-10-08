@@ -40,9 +40,9 @@ pub use stack::StackLimit;
 pub mod syntax {
     pub use php_syntax::tree::{Element, TokenId, Tree};
     pub use php_syntax::{
-        Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, ScannedToken,
-        SyntaxKind, Token, amp_name, cast_name, highlight, html_puts, int_overflows, lex,
-        magic_const_name, operator_name, parse, scanned, strip,
+        Colours, Diagnostic, FileId, Level, LexOptions, Lexed, Options, Parsed, Position,
+        ScannedToken, SyntaxKind, Token, amp_name, cast_name, highlight, html_puts, int_overflows,
+        lex, magic_const_name, operator_name, parse, scanned, strip,
     };
 }
 
@@ -268,13 +268,18 @@ pub enum SourceKind {
     /// value an `include` of it answers where it returns nothing.
     #[default]
     File,
-    /// `compile_string`'s `ZEND_EVAL_CODE` at
-    /// `ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`, the string an `eval`
-    /// hands over (`Z/Zend/zend_execute.c:5354`): it begins in code, as
-    /// though an open tag stood before its first byte, and its main op
-    /// array ends in `RETURN null`, the value an `eval` of it answers
-    /// where it returns nothing.
-    Eval,
+    /// `compile_string`'s `ZEND_EVAL_CODE`, the scanner begun where the
+    /// position says, and its main op array ending in `RETURN null`, the
+    /// value an `eval` of it answers where it returns nothing. An `eval`
+    /// hands its string over at `ZEND_COMPILE_POSITION_AFTER_OPEN_TAG`
+    /// (`Z/Zend/zend_execute.c:5354`), [`SourceKind::EVAL`]: code from
+    /// the first byte, as though an open tag stood before it.
+    Eval(php_syntax::Position),
+}
+
+impl SourceKind {
+    /// The string an `eval` hands over.
+    pub const EVAL: SourceKind = SourceKind::Eval(php_syntax::Position::AfterOpenTag);
 }
 
 /// A compile-time fatal: php's message, at php's line, at the level
@@ -381,7 +386,7 @@ pub fn compile_source(
             detect_unicode: multibyte.detect_unicode,
             listed: multibyte.listed,
         },
-        SourceKind::Eval => multibyte::Source::Eval,
+        SourceKind::Eval(_) => multibyte::Source::Eval,
     };
     let opened =
         multibyte::open(multibyte.encodings, source, from).map_err(|refused| CompileError {
@@ -400,6 +405,30 @@ pub fn compile_source(
     compile_scanned(&parsed, options, strings, Some(scanning))
 }
 
+/// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
+/// (`Z/Zend/zend_language_scanner.l:604`, `Z/Zend/zend_ast.c:2954`):
+/// `source` parsed from where `options` begins the scanner, the parse's
+/// first fatal its refusal, and php's text of the tree, which is what
+/// `assert()`'s description is written by over the whole file.
+pub fn export_source(
+    source: &[u8],
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+) -> Result<Vec<u8>, CompileError> {
+    let parsed = php_syntax::parse(source, &syntax_options(options));
+    if let Some(fatal) = parsed.diagnostics.iter().find(|d| d.level.is_fatal()) {
+        return Err(CompileError {
+            level: level_of(fatal.level),
+            message: fatal.message.clone(),
+            line: fatal.line,
+            raised: Vec::new(),
+            thrown: false,
+            stage: Stage::Compiling,
+        });
+    }
+    emit::export(&parsed, options, strings)
+}
+
 /// What the lexer is told of a source the compiler is handed: the
 /// entry `CG(short_tags)` reads and where the scanner begins.
 fn syntax_options(options: &Options<'_>) -> php_syntax::Options {
@@ -411,7 +440,7 @@ fn syntax_options(options: &Options<'_>) -> php_syntax::Options {
                     php_syntax::Position::AtShebang
                 }
                 SourceKind::File => php_syntax::Position::AtOpenTag,
-                SourceKind::Eval => php_syntax::Position::AfterOpenTag,
+                SourceKind::Eval(position) => position,
             },
         },
         ..php_syntax::Options::default()
@@ -2683,7 +2712,7 @@ mod tests {
     #[test]
     fn an_eval_string_begins_in_code_and_returns_null() {
         let options = Options {
-            kind: SourceKind::Eval,
+            kind: SourceKind::EVAL,
             ..bundled()
         };
         let mut strings = php_heap::Strings::new();

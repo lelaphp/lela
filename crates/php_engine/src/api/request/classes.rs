@@ -31,6 +31,11 @@ use super::{
 pub(super) struct Members {
     served: Vec<Option<crate::enums::EnumMethod>>,
     rows: Vec<(Option<u32>, UserFunction)>,
+    /// The methods a native trait gave the class, each by its index
+    /// beside the native that serves it: the copy of the
+    /// `zend_internal_function` php lays in the class's function table
+    /// (`zend_add_trait_method`) keeps the trait's handler.
+    natives: Vec<(u32, Function)>,
 }
 
 /// What numbering a class's members settles: the function each of its
@@ -47,6 +52,14 @@ impl Members {
                 method.and_then(|method| functions.get_mut(usize::try_from(method).ok()?))
             {
                 *slot = Some(Function(number));
+            }
+        }
+        for &(method, native) in &self.natives {
+            if let Some(slot) = usize::try_from(method)
+                .ok()
+                .and_then(|at| functions.get_mut(at))
+            {
+                *slot = Some(native);
             }
         }
         functions
@@ -595,8 +608,13 @@ impl Request {
         // The rows the class's members take, in the order php's tables
         // list them, each method's beside its place among the methods.
         let mut rows: Vec<(Option<u32>, UserFunction)> = Vec::new();
+        let mut natives = Vec::new();
         for ((method, served), decl) in (0u32..).zip(&served).zip(&decl.methods) {
             if served.is_some() {
+                continue;
+            }
+            if let Some(native) = self.native_trait_method(row, method) {
+                natives.push((method, native));
                 continue;
             }
             let Some((unit, body)) = self.method_body(row, method) else {
@@ -643,7 +661,11 @@ impl Request {
                 ));
             }
         }
-        Some(Members { served, rows })
+        Some(Members {
+            served,
+            rows,
+            natives,
+        })
     }
 
     /// A class of the request's own's members numbered among the
@@ -778,6 +800,20 @@ impl Request {
     ///   string(1) "A"
     /// }
     /// ```
+    /// The native that serves method number `method` of a composed
+    /// class, where a native trait gave the class that method; none
+    /// for a method a program's code serves.
+    fn native_trait_method(&self, declared: &Declared, method: u32) -> Option<Function> {
+        let composed = declared.composed.as_ref()?;
+        let body = composed.bodies.get(usize::try_from(method).ok()?)?;
+        if composed.decl.name.0.eq_ignore_ascii_case(&body.class.0) {
+            return None;
+        }
+        let holder = self.class_named(&body.class.0)?;
+        self.native_class_at(holder)?;
+        self.method_function(holder, body.method)
+    }
+
     fn method_body<'r>(
         &'r self,
         declared: &'r Declared,

@@ -273,12 +273,16 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
 /// socket open and held idle under its key. One held under none, which
 /// its owner took off the lists ([`unlist`]), is closed, as
 /// `php_stream_free` closes the stream it reaches with no resource.
-pub(crate) fn dtor(req: &mut Request, r: Resource) {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the resource destructor's shape, which a destructor that throws needs"
+)]
+pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
     let Some(mut stream) = r
         .native_mut::<Option<PhpStream>>(req)
         .and_then(Option::take)
     else {
-        return;
+        return Ok(());
     };
     stream.flush_owed(req);
     let held = req
@@ -302,4 +306,5 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
         }
     }
     req.streams().pclose_ret = stream.release(req);
+    Ok(())
 }

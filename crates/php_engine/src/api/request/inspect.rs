@@ -137,7 +137,7 @@ impl Request {
                 return Ok(Evaluated::NotCompiled);
             }
         };
-        if !crate::engine::note_compiled(self, &unit, SourceKind::Eval) || self.bailing_out() {
+        if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL) || self.bailing_out() {
             return Ok(Evaluated::NotCompiled);
         }
         let standing = self.vm.frames().len();
@@ -204,7 +204,7 @@ impl Request {
                 return Ok(Evaluation::NotCompiled);
             }
         };
-        if !crate::engine::note_compiled(self, &unit, SourceKind::Eval) {
+        if !crate::engine::note_compiled(self, &unit, SourceKind::EVAL) {
             return Ok(Evaluation::Refused);
         }
         let standing = self.vm.frames().len();

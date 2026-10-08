@@ -356,9 +356,13 @@ const fn stop_sig(status: i32) -> i32 {
 /// without blocking unless `proc_close` is closing it, and
 /// `FG(pclose_ret)` its exit status, the wait status where a signal ended
 /// it, or `-1` where no status was had.
-fn process_dtor(req: &mut Request, res: Resource) {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the resource destructor's shape, which a destructor that throws needs"
+)]
+fn process_dtor(req: &mut Request, res: Resource) -> Result<(), Thrown> {
     let Some(process) = res.native_mut::<Process>(req) else {
-        return;
+        return Ok(());
     };
     let pipes = std::mem::take(&mut process.pipes);
     for pipe in pipes {
@@ -372,7 +376,7 @@ fn process_dtor(req: &mut Request, res: Resource) {
     }
     let wait = req.state::<State>().proc_open.pclose_wait;
     let Some(process) = res.native_mut::<Process>(req) else {
-        return;
+        return Ok(());
     };
     let options = if wait { 0 } else { crate::ffi::WNOHANG };
     let ret = match waitpid_cached(process, options) {
@@ -386,6 +390,7 @@ fn process_dtor(req: &mut Request, res: Resource) {
         _ => -1,
     };
     req.state::<State>().proc_open.pclose_ret = i64::from(ret);
+    Ok(())
 }
 
 /// `zend_fetch_resource(res, "process", le_proc_open)` over the

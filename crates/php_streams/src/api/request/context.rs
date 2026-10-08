@@ -144,7 +144,11 @@ struct Notice<'a> {
 
 /// `le_stream_context`'s destructor, `php_stream_context_free`: the
 /// options and the notifier given back.
-pub(crate) fn context_dtor(req: &mut Request, res: Resource) {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the resource destructor's shape, which a destructor that throws needs"
+)]
+pub(crate) fn context_dtor(req: &mut Request, res: Resource) -> Result<(), Thrown> {
     let taken = res
         .native_mut::<Context>(req)
         .map(|context| (context.options.take(), context.notifier.take()));
@@ -156,6 +160,7 @@ pub(crate) fn context_dtor(req: &mut Request, res: Resource) {
             options.give_up(req);
         }
     }
+    Ok(())
 }
 
 impl ResourceView for StreamCtx {

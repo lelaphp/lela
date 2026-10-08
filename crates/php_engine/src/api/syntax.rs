@@ -11,7 +11,7 @@
 //! one walk every host reads its own command line with (`main/getopt.c`).
 
 pub use php_compile::syntax::{
-    Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, ScannedToken,
+    Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, Position, ScannedToken,
     SyntaxKind, Token, TokenId, Tree, amp_name, cast_name, int_overflows, lex, magic_const_name,
     operator_name, parse, scanned,
 };

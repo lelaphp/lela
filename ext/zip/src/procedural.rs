@@ -53,7 +53,11 @@ fn entry_type(req: &mut Request) -> ResourceType {
 
 /// `php_zip_free_dir`: the archive closed, php's warning where that
 /// fails.
-fn free_dir(req: &mut Request, res: Resource) {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the resource destructor's shape, which a destructor that throws needs"
+)]
+fn free_dir(req: &mut Request, res: Resource) -> Result<(), Thrown> {
     struct None_;
     impl crate::write::Hooks for None_ {
         fn progress(&mut self, _: f64) {}
@@ -62,12 +66,13 @@ fn free_dir(req: &mut Request, res: Resource) {
         }
     }
     let Some(mut za) = res.native_mut::<Dir>(req).and_then(|d| d.za.take()) else {
-        return;
+        return Ok(());
     };
     let umask = req.umask();
     if za.close(&mut None_, umask).is_err() {
         docref(req, Level::Warning, "Cannot destroy the zip context");
     }
+    Ok(())
 }
 
 /// `zend_fetch_resource` of `kind`, php's `TypeError` for another.

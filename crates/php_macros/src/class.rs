@@ -462,7 +462,10 @@ fn enumeration(attribute: Tokens, mut item: ItemEnum) -> syn::Result<Tokens> {
                 let mut properties = vec![name];
                 #value_property
                 let mut class = #root::__private::class(#class_name, #root::decl::ClassKind::Enum);
+                // An enum is final and takes no dynamic property, as the
+                // compiler declares a program's.
                 class.flags.is_final = true;
+                class.flags.dynamic_properties = #root::decl::DynamicProperties::Forbidden;
                 class.backing = #backing;
                 class.interfaces = interfaces;
                 class.constants = vec![#(#cases),*];

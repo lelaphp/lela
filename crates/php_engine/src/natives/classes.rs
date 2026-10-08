@@ -1197,11 +1197,13 @@ fn get_declared_classes(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 }
 
 /// `get_declared_traits(): array`, php's
-/// `ZEND_FUNCTION(get_declared_traits)`.
+/// `ZEND_FUNCTION(get_declared_traits)`: the bundle's own traits first,
+/// `zend_test`'s `_ZendTestTrait` where the engine links it, then the
+/// program's.
 ///
 /// ```php
 /// trait T {} class C { use T; } trait U {}
-/// var_dump(get_declared_traits());
+/// var_dump(array_slice(get_declared_traits(), -2));
 /// ```
 /// ```expect
 /// array(2) {

@@ -125,12 +125,12 @@ third-engine-design.md
 | unit | unit.lock | 95 |  | pass |
 | link | link.lock | 37 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1354 | 1500 | pass |
+| api | api.lock | 1362 | 1500 | pass |
 | sapi | sapi.lock | 43 |  | pass |
 | tier | tier.lock | 67 |  | pass |
-| harness | xtask.lock | 377 |  | pass |
+| harness | xtask.lock | 378 |  | pass |
 
-<!-- /computed in=be0cfe594f963121c5f8dba6ee50a73aea3c096f46c3030ff43cf5fd85e0c0a1 out=19c1bd35d7a4b0fb977b3bb00dea12e55a2ef4573225d25918cd598626bfae4d -->
+<!-- /computed in=b5008546c68cfe9e84b4436a6a378d1beb87cf010d0f1777ad5f4aae61cb5e13 out=3109c0c416978704a37e27fa16b817e1658585aa1683363470ce802be7146b4d -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -159,13 +159,13 @@ third-engine-design.md
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | fail |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
+| harness.self |  | deny | pass |
 | harness.self-shell |  | deny_pattern | fail |
 | harness.transcript |  | deny_pattern | no reading |
 | divergence.reason |  | check | pass |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=3db45df6dd597c017466fc053673e7d321ccdc3fc9301473eecdd4b6495e1653 out=47444399d029cf7085b79987f3be236d8131f5378a1ee473a0d1e8b51eee8f36 -->
+<!-- /computed in=3db45df6dd597c017466fc053673e7d321ccdc3fc9301473eecdd4b6495e1653 out=81360bf66e85a7c7c228557dc5beeb7dbea8b0c19066e6ac6fb24d0401ca310b -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

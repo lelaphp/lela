@@ -5245,14 +5245,19 @@ impl Ops for Listing {
 /// the stream freed under `PHP_STREAM_FREE_CLOSE |
 /// PHP_STREAM_FREE_RSRC_DTOR`, with the resource already closed, and
 /// what the kind's close answered kept as `FG(pclose_ret)`.
-pub(crate) fn dtor(req: &mut Request, r: Resource) {
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the resource destructor's shape, which a destructor that throws needs"
+)]
+pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
     let Some(stream) = r
         .native_mut::<Option<PhpStream>>(req)
         .and_then(Option::take)
     else {
-        return;
+        return Ok(());
     };
     req.streams().pclose_ret = stream.free(req);
+    Ok(())
 }
 
 /// The `stream` resource type, `le_stream`, and the `persistent stream`
