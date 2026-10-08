@@ -966,7 +966,7 @@ impl Request {
         let table = self
             .shared
             .trampoline_tables
-            .get(usize::try_from(class.0).ok()?)?;
+            .get(self.native_class_at(class)?)?;
         super::lowered_key(lowered, |key| table.get(key).copied())
     }
 

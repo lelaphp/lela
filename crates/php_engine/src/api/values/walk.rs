@@ -697,8 +697,9 @@ impl ObjectTable {
         while pos < end {
             match self.table.row_at(pos) {
                 Some((TableRow::Slot(slot), value)) if value.is_undef() => {
-                    let placed = req.placed_properties(self.owner.class());
-                    if let Some((_, property)) = placed.get(usize::try_from(slot).ok()?)
+                    let placed =
+                        req.placed_property(self.owner.class(), usize::try_from(slot).ok()?);
+                    if let Some((_, property)) = placed
                         && let Some(ty) = property.ty.as_ref()
                     {
                         let at = At::Slot {

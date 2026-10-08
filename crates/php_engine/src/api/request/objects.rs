@@ -23,7 +23,7 @@ use crate::api::values::{
 use methods::visibility_string;
 use pending::Saved;
 
-use super::{Hooks, Placed, Request, Symbol, methods, pending};
+use super::{Hooks, Placed, PropertyInfo, Request, Symbol, methods, pending};
 
 /// Where the destructors' walk was cut short, whose field no file but
 /// this one reads.
@@ -253,13 +253,63 @@ impl Request {
     /// link (`zend_build_properties_info_table`), and read as plain data
     /// after: what a linked class declares, and the chain above it,
     /// never changes.
-    pub(crate) fn placed_properties(&self, class: ClassId) -> &[(ClassId, PropertyDecl)] {
+    pub(crate) fn placed_properties(&self, class: ClassId) -> &[PropertyInfo] {
         match self.native_class_at(class) {
             Some(native) => self.shared.placed.get(native).map_or(&[], |placed| placed),
             None => self
                 .declared_row(class)
                 .map_or(&[], |row| &row.bound.placed),
         }
+    }
+
+    /// `*prop_info`: the declaration a property's row names, read off
+    /// the class that declared it.
+    pub(crate) fn property_decl(&self, info: PropertyInfo) -> Option<&PropertyDecl> {
+        self.class_decl(info.declaring)?
+            .properties
+            .get(usize::try_from(info.at).ok()?)
+    }
+
+    /// `ZEND_TYPE_IS_SET(prop_info->type)`: whether the property is typed.
+    pub(crate) fn property_typed(&self, info: PropertyInfo) -> bool {
+        self.property_decl(info).is_some_and(|p| p.ty.is_some())
+    }
+
+    /// `zend_get_property_info_for_slot`: the property in slot `slot`
+    /// of an object of `class`, beside the class that declared it.
+    pub(crate) fn placed_property(
+        &self,
+        class: ClassId,
+        slot: usize,
+    ) -> Option<(ClassId, &PropertyDecl)> {
+        let info = *self.placed_properties(class).get(slot)?;
+        Some((info.declaring, self.property_decl(info)?))
+    }
+
+    /// [`Request::placed_properties`] read through: each slot of `class`
+    /// in order, its number beside the class that declared it and the
+    /// declaration.
+    pub(crate) fn placed(
+        &self,
+        class: ClassId,
+    ) -> impl DoubleEndedIterator<Item = (usize, ClassId, &PropertyDecl)> + '_ {
+        self.placed_properties(class)
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, info)| Some((slot, info.declaring, self.property_decl(*info)?)))
+    }
+
+    /// The slot on an object of `class` of the property `declaring`
+    /// declares under `name`; none where it takes no slot there.
+    pub(crate) fn slot_declared_by(
+        &self,
+        class: ClassId,
+        declaring: ClassId,
+        name: &[u8],
+    ) -> Option<u32> {
+        self.placed(class)
+            .find(|(_, held, p)| *held == declaring && *p.name.0 == *name)
+            .and_then(|(slot, _, _)| u32::try_from(slot).ok())
     }
 }
 
@@ -307,11 +357,12 @@ impl Request {
 ///   int(7)
 /// }
 /// ```
-pub(crate) fn placed_of(
+pub(crate) fn placed_of<'d>(
     class: ClassId,
     decl: &ClassDecl,
     record: Option<&LinkedClass<ClassId>>,
-    parent: &[(ClassId, PropertyDecl)],
+    parent: &[PropertyInfo],
+    decl_of: impl Fn(PropertyInfo) -> Option<&'d PropertyDecl>,
 ) -> Placed {
     let own_name = |row: &Row<ClassId>| match row.holder {
         None => decl
@@ -328,24 +379,28 @@ pub(crate) fn placed_of(
             .and_then(|row| usize::try_from(row.at).ok()),
         None => decl.properties.iter().position(|p| &*p.name.0 == name),
     };
+    let row = |at: usize| PropertyInfo {
+        declaring: class,
+        at: u32::try_from(at).unwrap_or(u32::MAX),
+    };
     let mut took = vec![false; decl.properties.len()];
     let mut placed = Vec::with_capacity(parent.len().saturating_add(decl.properties.len()));
-    for (holder, inherited) in parent {
-        let redeclared = (inherited.visibility != Visibility::Private)
-            .then(|| own(&inherited.name.0))
-            .flatten()
+    for &inherited in parent {
+        let redeclared = decl_of(inherited)
+            .filter(|property| property.visibility != Visibility::Private)
+            .and_then(|property| own(&property.name.0))
             .filter(|at| decl.properties.get(*at).is_some_and(|p| p.is_instance));
-        match redeclared.and_then(|at| Some((took.get_mut(at)?, decl.properties.get(at)?))) {
-            Some((took, property)) => {
+        match redeclared.and_then(|at| Some((at, took.get_mut(at)?))) {
+            Some((at, took)) => {
                 *took = true;
-                placed.push((class, property.clone()));
+                placed.push(row(at));
             }
-            None => placed.push((*holder, inherited.clone())),
+            None => placed.push(inherited),
         }
     }
-    for (property, took) in decl.properties.iter().zip(took) {
+    for (at, (property, took)) in decl.properties.iter().zip(took).enumerate() {
         if property.is_instance && !property.is_virtual && !took {
-            placed.push((class, property.clone()));
+            placed.push(row(at));
         }
     }
     placed.into_boxed_slice()
@@ -775,7 +830,7 @@ impl Request {
     /// The handler table `class` itself declares, none where it declares
     /// none of its own.
     fn handler_row(&self, class: ClassId) -> Option<&'static dyn ObjectHandlers> {
-        let at = usize::try_from(class.0).ok()?;
+        let at = self.native_class_at(class)?;
         self.shared.handlers.get(at).copied().flatten()
     }
 
@@ -806,7 +861,7 @@ impl Request {
     /// is `zend_objects_new`.
     pub(crate) fn native_new_of(&self, class: ClassId) -> Option<NativeNew> {
         self.lineage(class).find_map(|class| {
-            let at = usize::try_from(class.0).ok()?;
+            let at = self.native_class_at(class)?;
             self.shared.natives.get(at).copied().flatten()
         })
     }

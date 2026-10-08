@@ -66,12 +66,12 @@ impl Request {
         if object_rows == php_heap::DeclaredRows::Copied {
             return Row::Dynamic(php_heap::Key::Str(name.heap()));
         }
-        for (at, (declaring, property)) in self.placed_properties(class).iter().enumerate() {
+        for (at, declaring, property) in self.placed(class) {
             let prefix: Vec<u8> = match property.visibility {
                 Visibility::Public => Vec::new(),
                 Visibility::Protected => b"\0*\0".to_vec(),
                 Visibility::Private => self
-                    .class_decl(*declaring)
+                    .class_decl(declaring)
                     .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
                     .unwrap_or_default(),
             };
@@ -564,7 +564,7 @@ impl Request {
     }
 
     fn slot_name_at(&mut self, class: ClassId, at: usize) -> Result<Option<php_heap::Str>, Thrown> {
-        let Some((declaring, property)) = self.placed_properties(class).get(at).cloned() else {
+        let Some((declaring, property)) = self.placed_property(class, at) else {
             return Ok(None);
         };
         let prefix: Vec<u8> = match property.visibility {
@@ -575,7 +575,8 @@ impl Request {
                 .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat())
                 .unwrap_or_default(),
         };
-        let name = self.interned(&[prefix.as_slice(), &property.name.0].concat())?;
+        let key = [prefix.as_slice(), &property.name.0].concat();
+        let name = self.interned(&key)?;
         Ok(Some(name.heap()))
     }
 }

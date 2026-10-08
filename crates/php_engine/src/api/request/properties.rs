@@ -21,7 +21,7 @@ use crate::api::values::{
 
 use frames::Link;
 
-use super::{DeclaredSlot, Hooks, Request, frames};
+use super::{DeclaredSlot, Hooks, PropertyInfo, Request, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
 /// (`Z/Zend/zend_object_handlers.c:43`, over
@@ -239,11 +239,10 @@ impl Request {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let declaring = self
-            .placed_properties(class)
-            .iter()
+            .placed(class)
             .rev()
-            .find(|(_, p)| &*p.name.0 == name)
-            .map(|(declaring, _)| *declaring);
+            .find(|(_, _, p)| &*p.name.0 == name)
+            .map(|(_, declaring, _)| declaring);
         let saved = self.properties.fake_scope;
         self.properties.fake_scope = declaring.or(saved);
         let done = f(self);
@@ -305,10 +304,10 @@ impl Request {
     /// since a class's own declaration is appended after a parent's
     /// private one of the same name and hides it.
     pub(super) fn prop_slot(&self, class: ClassId, name: &[u8]) -> Option<u32> {
-        self.placed_properties(class)
-            .iter()
-            .rposition(|(_, p)| &*p.name.0 == name)
-            .and_then(|i| u32::try_from(i).ok())
+        self.placed(class)
+            .rev()
+            .find(|(_, _, p)| &*p.name.0 == name)
+            .and_then(|(slot, _, _)| u32::try_from(slot).ok())
     }
 
     /// The dynamic table's entry for `name`, a view; none where the
@@ -577,24 +576,22 @@ impl Request {
         })
     }
 
-    fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, PropertyDecl)> {
-        let placed = self.placed_properties(class);
-        let mut at = placed.iter().rposition(|(_, p)| &*p.name.0 == name)?;
-        let (declaring, p) = placed.get(at)?;
-        if self.property_scope() != Some(*declaring) {
+    fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, &PropertyDecl)> {
+        let named = |(_, _, p): &(usize, ClassId, &PropertyDecl)| &*p.name.0 == name;
+        let found = self.placed(class).rev().find(named)?;
+        let (_, declaring, p) = found;
+        if self.property_scope() != Some(declaring) {
             if let Some(own) = self.parent_private(class, name) {
-                if let Some(i) = placed
-                    .iter()
-                    .position(|(d, p)| *d == own && &*p.name.0 == name)
-                {
-                    at = i;
-                }
-            } else if p.visibility == Visibility::Private && *declaring != class {
+                return Some(
+                    self.placed(class)
+                        .find(|row| row.1 == own && named(row))
+                        .unwrap_or(found),
+                );
+            } else if p.visibility == Visibility::Private && declaring != class {
                 return None;
             }
         }
-        let (declaring, p) = placed.get(at)?;
-        Some((at, *declaring, p.clone()))
+        Some(found)
     }
 
     /// `zend_asymmetric_property_has_set_access`
@@ -610,12 +607,12 @@ impl Request {
         scope == Some(class) || (set == Visibility::Protected && self.check_protected(class, scope))
     }
 
-    /// Whether `property`, which `declaring` declares, has a set
-    /// visibility the executed scope lacks.
-    pub(crate) fn lacks_set_access(&self, declaring: ClassId, property: &PropertyDecl) -> bool {
-        property
-            .set_visibility
-            .is_some_and(|set| !self.has_set_access(declaring, set))
+    /// Whether the property `info` names has a set visibility the
+    /// executed scope lacks.
+    pub(crate) fn lacks_set_access(&self, info: PropertyInfo) -> bool {
+        self.property_decl(info)
+            .and_then(|property| property.set_visibility)
+            .is_some_and(|set| !self.has_set_access(info.declaring, set))
     }
 
     /// `prop_info->flags & ZEND_ACC_PPP_SET_MASK &&
@@ -648,23 +645,14 @@ impl Request {
     ///   int(1)
     /// }
     /// ```
-    pub(crate) fn set_refused(
-        &mut self,
-        declaring: ClassId,
-        property: &PropertyDecl,
-        operation: &str,
-    ) -> Option<Thrown> {
-        let set = property.set_visibility?;
-        if !self.lacks_set_access(declaring, property) {
+    pub(crate) fn set_refused(&mut self, info: PropertyInfo, operation: &str) -> Option<Thrown> {
+        if !self.lacks_set_access(info) {
             return None;
         }
-        Some(self.set_inaccessible_property(
-            declaring,
-            set,
-            property.is_readonly,
-            &property.name.0,
-            operation,
-        ))
+        let property = self.property_decl(info)?;
+        let set = property.set_visibility?;
+        let (readonly, name) = (property.is_readonly, property.name.0.clone());
+        Some(self.set_inaccessible_property(info.declaring, set, readonly, &name, operation))
     }
 
     /// `zend_asymmetric_visibility_property_modification_error`
@@ -796,19 +784,23 @@ impl Request {
         class: ClassId,
         name: &[u8],
     ) -> Option<(ClassId, &PropertyDecl)> {
-        let row = self.linked_class(class)?.properties.find(name, |row| {
-            self.row_property(class, *row)
-                .map_or(&[][..], |(_, property)| &property.name.0)
-        })?;
-        self.row_property(class, *row)
+        let info = self.property_info(class, name)?;
+        Some((info.declaring, self.property_decl(info)?))
     }
 
-    /// The property a row of `class`'s `properties_info` is, beside the
-    /// class that declared it.
-    fn row_property(&self, class: ClassId, row: Row<ClassId>) -> Option<(ClassId, &PropertyDecl)> {
-        let holder = row.holder_in(class);
-        let decl = self.class_decl(holder)?;
-        Some((holder, decl.properties.get(usize::try_from(row.at).ok()?)?))
+    /// [`Request::property_info_of`]'s row alone, the row a caller
+    /// keeps across what writes the request and reads the declaration
+    /// through again ([`Request::property_decl`]).
+    pub(crate) fn property_info(&self, class: ClassId, name: &[u8]) -> Option<PropertyInfo> {
+        let row = |row: &Row<ClassId>| PropertyInfo {
+            declaring: row.holder_in(class),
+            at: row.at,
+        };
+        let found = self.linked_class(class)?.properties.find(name, |at| {
+            self.property_decl(row(at))
+                .map_or(&[][..], |property| &property.name.0)
+        })?;
+        Some(row(found))
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` (`Z/Zend/zend_types.h:1082`): the
@@ -873,9 +865,9 @@ impl Request {
     pub(crate) fn slot_source_gone(&mut self, object: PhpObject, slot: u32, cell: Ref) {
         let typed = usize::try_from(slot)
             .ok()
-            .and_then(|at| self.placed_properties(object.class()).get(at))
+            .and_then(|at| self.placed_property(object.class(), at))
             .filter(|(_, p)| p.ty.is_some())
-            .map(|(declaring, p)| (*declaring, p.name.0.clone()));
+            .map(|(declaring, p)| (declaring, p.name.0.clone()));
         if let Some((declaring, name)) = typed {
             self.ref_del_type_source(cell, declaring, &name);
         }
@@ -980,12 +972,10 @@ impl Request {
         class: ClassId,
         slot: u32,
     ) -> Option<(TypedProperty, Vec<u8>)> {
-        let placed = self.placed_properties(class);
-        let at = usize::try_from(slot).ok()?;
-        let (declaring, p) = placed.get(at)?;
+        let (declaring, p) = self.placed_property(class, usize::try_from(slot).ok()?)?;
         let name = p.name.0.to_vec();
         let typed = TypedProperty {
-            declaring: *declaring,
+            declaring,
             ty: p.ty.clone()?,
             readonly: p.is_readonly,
         };
@@ -998,13 +988,15 @@ impl Request {
     /// others, since another object's slot of the same property may
     /// hold it as well. A slot of an untyped property types nothing.
     pub(crate) fn slot_source_added(&mut self, object: PhpObject, slot: u32, cell: Ref) {
-        let placed = self.placed_properties(object.class());
-        let Some((declaring, p)) = usize::try_from(slot).ok().and_then(|at| placed.get(at)) else {
+        let Some((declaring, p)) = usize::try_from(slot)
+            .ok()
+            .and_then(|at| self.placed_property(object.class(), at))
+        else {
             return;
         };
         if let Some(ty) = p.ty.clone() {
             let source = RefSource {
-                declaring: *declaring,
+                declaring,
                 name: p.name.0.to_vec(),
                 ty,
             };
@@ -2182,7 +2174,7 @@ impl Request {
         name: &[u8],
     ) -> Option<TypedProperty> {
         let (_, declaring, p) = self.placed_row(class, name)?;
-        p.ty.map(|ty| TypedProperty {
+        p.ty.clone().map(|ty| TypedProperty {
             declaring,
             ty,
             readonly: p.is_readonly,
@@ -2879,8 +2871,7 @@ impl Request {
             None => (None, key),
         };
         let class_name = self.class_name_bytes(class);
-        let placed = self.placed_properties(class);
-        let exact = placed.iter().rposition(|(declaring, p)| {
+        let exact = self.placed(class).rev().find(|(_, declaring, p)| {
             if *p.name.0 != *name {
                 return false;
             }
@@ -2891,7 +2882,7 @@ impl Request {
                 _ => false,
             }
         });
-        exact.or_else(|| {
+        exact.map(|(slot, _, _)| slot).or_else(|| {
             let reachable =
                 mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(&class_name));
             if !reachable {
@@ -2900,7 +2891,10 @@ impl Request {
             // `ce->properties_info` holds a parent's private property
             // too, unless the class declares the name again, which the
             // later row of `placed` is.
-            placed.iter().rposition(|(_, p)| *p.name.0 == *name)
+            self.placed(class)
+                .rev()
+                .find(|(_, _, p)| *p.name.0 == *name)
+                .map(|(slot, _, _)| slot)
         })
     }
 
@@ -2917,10 +2911,9 @@ impl Request {
         let Some(at) = self.unserialize_slot(object, key) else {
             return Ok(());
         };
-        let placed = self.placed_properties(object.class());
-        let Some((declaring, ty, name)) = placed
-            .get(at)
-            .and_then(|(declaring, p)| Some((*declaring, p.ty.clone()?, p.name.0.to_vec())))
+        let Some((declaring, ty, name)) = self
+            .placed_property(object.class(), at)
+            .and_then(|(declaring, p)| Some((declaring, p.ty.clone()?, p.name.0.to_vec())))
         else {
             return Ok(());
         };
@@ -3178,9 +3171,8 @@ impl Request {
             // alone, each of them a row of its own.
             let declared: Vec<(Box<[u8]>, ClassId)> = match o.declared_rows() {
                 php_heap::DeclaredRows::Slots => self
-                    .placed_properties(class)
-                    .iter()
-                    .map(|(declaring, p)| (p.name.0.clone(), *declaring))
+                    .placed(class)
+                    .map(|(_, declaring, p)| (p.name.0.clone(), declaring))
                     .collect(),
                 php_heap::DeclaredRows::Copied => Vec::new(),
             };
@@ -3280,7 +3272,10 @@ impl Request {
             let slot = placed
                 .iter()
                 .skip(cursor)
-                .position(|(_, p)| key_names(&name, &p.name.0))
+                .position(|info| {
+                    self.property_decl(*info)
+                        .is_some_and(|p| key_names(&name, &p.name.0))
+                })
                 .map(|found| found + cursor);
             if let Some(slot) = slot {
                 cursor = slot + 1;
@@ -3291,7 +3286,7 @@ impl Request {
             at = i + 1;
             let declaring = slot
                 .and_then(|slot| placed.get(slot))
-                .map(|(declaring, _)| *declaring);
+                .map(|info| info.declaring);
             // An integer key is no name `zend_check_property_access`
             // is asked about.
             if let Key::Str(name) = name
@@ -3382,15 +3377,19 @@ impl Request {
         }
         match walked {
             Walked::Slot(slot) => {
-                let placed = self.placed_properties(object.class());
-                let Some((declaring, decl)) = placed.get(slot as usize).cloned() else {
+                let declared =
+                    self.placed_property(object.class(), slot as usize)
+                        .map(|(declaring, p)| {
+                            (declaring, p.is_readonly, p.name.0.to_vec(), p.ty.clone())
+                        });
+                let Some((declaring, readonly, name, ty)) = declared else {
                     return self.fatal_of(Err(Fatal::Error(format!(
                         "InternalError: a walk over slot {slot}, which the class does not declare"
                     ))));
                 };
-                if decl.is_readonly {
+                if readonly {
                     let class = self.class_name(declaring);
-                    let shown = String::from_utf8_lossy(&decl.name.0).into_owned();
+                    let shown = String::from_utf8_lossy(&name).into_owned();
                     return Err(crate::api::raising::throw_error(
                         self,
                         "Error",
@@ -3401,12 +3400,12 @@ impl Request {
                 if let Some(place) = o.slot_ref(slot) {
                     place.write(cell.as_value().to_zval());
                 }
-                if let Some(ty) = decl.ty.clone() {
+                if let Some(ty) = ty {
                     self.ref_add_type_source(
                         cell.heap(),
                         RefSource {
                             declaring,
-                            name: decl.name.0.to_vec(),
+                            name,
                             ty,
                         },
                     );
@@ -3544,11 +3543,15 @@ impl Request {
                 let slot = placed
                     .iter()
                     .skip(at)
-                    .position(|(_, p)| key_names(&name, &p.name.0))
+                    .position(|info| {
+                        self.property_decl(*info)
+                            .is_some_and(|p| key_names(&name, &p.name.0))
+                    })
                     .map(|i| i + at);
                 let declared = slot.and_then(|i| {
                     at = i + 1;
-                    placed.get(i).map(|(class, p)| (*class, p.visibility))
+                    let info = *placed.get(i)?;
+                    Some((info.declaring, self.property_decl(info)?.visibility))
                 });
                 (name, value, declared)
             })
@@ -3600,9 +3603,8 @@ impl Request {
         // as php reads the plain values its `zend_array_dup` left.
         let declared: Vec<Box<[u8]>> = match o.declared_rows() {
             php_heap::DeclaredRows::Slots => self
-                .placed_properties(ClassId(o.class()))
-                .iter()
-                .map(|(_, p)| p.name.0.clone())
+                .placed(ClassId(o.class()))
+                .map(|(_, _, p)| p.name.0.clone())
                 .collect(),
             php_heap::DeclaredRows::Copied => Vec::new(),
         };
