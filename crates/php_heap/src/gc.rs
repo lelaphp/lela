@@ -12,7 +12,8 @@ use std::cell::Cell;
 
 use crate::ZvalType;
 
-/// A debug build's freed-use guard, asked before a refcount moves:
+/// A debug build's freed-use guard, asked before a refcount moves and
+/// before a string's length or bytes are read:
 /// whether the refcounted block at `at` is one the heap has freed
 /// ([`crate::mm::freed`]). One that is is recorded in its heap's sensed
 /// record ([`crate::sensed`]), with the operation and the line that
@@ -22,7 +23,7 @@ use crate::ZvalType;
 #[cfg(debug_assertions)]
 pub(crate) fn refuses_freed(
     at: std::ptr::NonNull<u8>,
-    op: crate::sensed::RefOp,
+    op: crate::sensed::Use,
     site: &'static std::panic::Location<'static>,
 ) -> bool {
     if !crate::mm::freed::is_freed(at) {
@@ -184,7 +185,7 @@ impl Refcounted {
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn addref(&self) {
         #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::RefOp::Addref) {
+        if self.refuses(crate::sensed::Use::Addref) {
             return;
         }
         // The count saturates beneath the pin's bit ([`PINNED`]).
@@ -207,7 +208,7 @@ impl Refcounted {
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn delref(&self) -> u32 {
         #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::RefOp::Release) {
+        if self.refuses(crate::sensed::Use::Release) {
             return 1;
         }
         let word = self.refcount.get();
@@ -248,7 +249,7 @@ impl Refcounted {
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn pin(&self) -> bool {
         #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::RefOp::Addref) {
+        if self.refuses(crate::sensed::Use::Addref) {
             return false;
         }
         let word = self.refcount.get();
@@ -263,7 +264,7 @@ impl Refcounted {
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn unpin(&self) -> u32 {
         #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::RefOp::Release) {
+        if self.refuses(crate::sensed::Use::Release) {
             return 1;
         }
         let count = self.refcount.get() & COUNT;
@@ -275,7 +276,7 @@ impl Refcounted {
     /// bytes of its block, for the line that asked.
     #[cfg(debug_assertions)]
     #[track_caller]
-    fn refuses(&self, op: crate::sensed::RefOp) -> bool {
+    fn refuses(&self, op: crate::sensed::Use) -> bool {
         refuses_freed(
             std::ptr::NonNull::from(self).cast(),
             op,

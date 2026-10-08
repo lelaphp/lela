@@ -27,22 +27,24 @@
 
 use crate::Fatal;
 
-/// What a refcount operation was asked to do.
+/// What was asked of a block: a move of its refcount, or a read of a
+/// string's bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RefOp {
+pub(crate) enum Use {
     Addref,
     Release,
+    Read,
 }
 
 /// One defect a debug build sensed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Sensed {
-    /// A refcount operation refused because the block it named was one
-    /// the heap had freed: the block, the operation and the line that
-    /// asked for it.
+    /// A refcount operation or a read of a string's bytes refused
+    /// because the block it named was one the heap had freed: the block,
+    /// what was asked and the line that asked for it.
     FreedUse {
         at: usize,
-        op: RefOp,
+        op: Use,
         site: &'static std::panic::Location<'static>,
     },
     /// A write into a freed bin slot while its bin's quarantine held it
@@ -117,8 +119,9 @@ impl Sensed {
         match self {
             Sensed::FreedUse { at, op, site } => {
                 let op = match op {
-                    RefOp::Addref => "an addref",
-                    RefOp::Release => "a release",
+                    Use::Addref => "an addref",
+                    Use::Release => "a release",
+                    Use::Read => "a read",
                 };
                 Fatal::Error(format!(
                     "InternalError: {op} of the block at {at:#x}, which the heap has freed, at {site}"

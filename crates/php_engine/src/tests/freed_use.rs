@@ -117,9 +117,23 @@ fn freed_protected(req: &mut Request) {
     }
 }
 
+/// The line of `freed_read`'s read of the freed string's bytes.
+const READ_AT: u32 = line!() + 9;
+
+/// `freed_read(): int`, faulty on purpose: a string freed, then its
+/// bytes read, the stale read of #1985-#1989's regressions; what it
+/// read is the length it answers.
+#[php_function]
+fn freed_read(req: &mut Request) -> i64 {
+    freed(req, b"string")
+        .and_then(Zval::as_str)
+        .map_or(-1, |s| i64::try_from(s.bytes().len()).unwrap_or(-1))
+}
+
 fn faulty() -> Extension {
     ExtensionBuilder::default()
         .functions(vec![
+            freed_read::declared(),
             freed_addref::declared(),
             freed_then_made::declared(),
             freed_protected::declared(),
@@ -344,4 +358,31 @@ fn a_write_into_a_freed_block_still_held_at_the_end_is_raised_there() {
     );
     assert_eq!(String::from_utf8_lossy(&clean.stdout), "clean");
     assert_eq!(clean.exit_code, 0);
+}
+
+/// A read of a freed string's bytes is refused rather than aborting the
+/// process on a slice the length of the freed-block mark: the native
+/// reads no bytes, and the request ends in the `InternalError` naming
+/// the block and the line that read (#2051).
+#[test]
+fn a_read_of_a_freed_strings_bytes_ends_the_request_and_names_the_line() {
+    let engine = Engine::cli_builder().extensions(&[faulty()]).build();
+    let served = engine.serve_capture(
+        "<?php echo 'a';\necho freed_read();\necho 'went on';\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.starts_with("a\nFatal error: InternalError: a read of the block at 0x"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            ", which the heap has freed, at crates/php_engine/src/tests/freed_use.rs:{READ_AT}:"
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains(" on line 2\n"), "{stdout}");
+    assert!(!stdout.contains("went on"), "{stdout}");
+    assert_eq!(served.exit_code, 255);
 }

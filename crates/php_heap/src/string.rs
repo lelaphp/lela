@@ -420,9 +420,14 @@ impl Str {
     /// ```expect exit=0
     /// %r(?:dax){1000}%r
     /// ```
+    ///
+    /// A debug build reads no bytes of a string the heap has freed: the
+    /// read is refused, recorded for the line that asked, and answers an
+    /// empty slice ([`Str::len`]).
     #[must_use]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn bytes(&self) -> &[u8] {
-        let len = self.header().len;
+        let len = self.len();
         // SAFETY: the bytes are inside the allocation, right after the
         // header.
         let val = unsafe { self.0.as_ptr().cast::<u8>().add(HEADER) };
@@ -441,8 +446,25 @@ impl Str {
     }
 
     /// The length in bytes, `strlen`.
+    ///
+    /// A debug build reads no length of a string the heap has freed,
+    /// whose header's hash and length the freed-block mark stands over:
+    /// the read is refused and recorded in the heap's sensed record for
+    /// the line that asked, as a refcount move on a freed block is
+    /// ([`crate::gc::refuses_freed`]), and answers zero, so a stale read
+    /// ends the request at the engine's next sensing point rather than
+    /// building a slice of the mark's length (#2051).
     #[must_use]
+    #[cfg_attr(debug_assertions, track_caller)]
     pub fn len(&self) -> usize {
+        #[cfg(debug_assertions)]
+        if crate::gc::refuses_freed(
+            self.address(),
+            crate::sensed::Use::Read,
+            std::panic::Location::caller(),
+        ) {
+            return 0;
+        }
         self.header().len
     }
 

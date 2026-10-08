@@ -616,7 +616,7 @@ impl Heap {
         // asked first here, and a refused release does nothing at all.
         #[cfg(debug_assertions)]
         if let Some(at) = z.counted()
-            && gc::refuses_freed(at, sensed::RefOp::Release, std::panic::Location::caller())
+            && gc::refuses_freed(at, sensed::Use::Release, std::panic::Location::caller())
         {
             return GivenUp::Freed;
         }
@@ -1317,6 +1317,39 @@ mod tests {
         hooks.heap.fatal_leaving(false);
         sensor.unconsumed(site);
         assert!(hooks.heap.take_sensed().is_some());
+    }
+
+    /// A debug build refuses a read of a freed string's bytes: the slot
+    /// its bin's quarantine holds carries the freed-block mark over the
+    /// header's hash and length, so the read answers no bytes rather
+    /// than a slice of the mark's length, and is recorded as the
+    /// `InternalError` naming the block and the line that read (#2051).
+    /// Its length reads as zero the same way.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_read_of_a_freed_strings_bytes_is_refused_and_named() {
+        let _alone = alone();
+        let mut hooks = Recorder { heap: Heap::new() };
+        let made = hooks.heap.string(b"a string of its own block");
+        assert!(made.is_ok(), "the heap would not allocate");
+        let Ok(s) = made else {
+            return;
+        };
+        Heap::release(&mut hooks, Zval::string(s));
+        assert_eq!(hooks.heap.take_sensed(), None);
+        let read = s.bytes();
+        let site = line!() - 1;
+        assert_eq!(read, b"");
+        let at = s.address().as_ptr().addr();
+        assert_eq!(
+            hooks.heap.take_sensed(),
+            Some(Fatal::Error(format!(
+                "InternalError: a read of the block at {at:#x}, which the heap has freed, at {}:{site}:22",
+                file!()
+            )))
+        );
+        assert_eq!(s.len(), 0);
+        assert!(hooks.heap.take_sensed().is_some(), "the length's read too");
     }
 
     /// A debug build stops at a second release of a block, #723's
