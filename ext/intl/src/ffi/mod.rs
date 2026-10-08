@@ -46,6 +46,7 @@ pub(crate) mod grapheme;
 pub(crate) mod idn;
 pub(crate) mod listformatter;
 pub(crate) mod locale;
+pub(crate) mod msgformat;
 pub(crate) mod normalizer;
 pub(crate) mod timezone;
 pub(crate) mod transliterator;
