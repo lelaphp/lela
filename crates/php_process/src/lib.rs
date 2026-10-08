@@ -1,6 +1,6 @@
 //! The process-wide mechanisms (design §4.1, #1779): what a process has
-//! one of, whichever request or engine asks. Three of them, each a
-//! mechanism that decides nothing of when or why it is used:
+//! one of, whichever request or engine asks. Each is a mechanism that
+//! decides nothing of when or why it is used:
 //!
 //! - [`fork`], the one call in the workspace that makes a process
 //!   (`fork.home`); `php_engine` decides around it, the threads it joins
@@ -9,12 +9,20 @@
 //!   the wake set it raises (design §5.8, revision 38), which `php_engine`
 //!   holds the one instance of;
 //! - [`reset_lc_ctype_locale`], the process's `LC_CTYPE`, set once before
-//!   any extension starts.
+//!   any extension starts;
+//! - [`process`], the process's identity, its real user and group and its
+//!   supplementary groups (revision 41);
+//! - the calls on the process's file descriptors that `std` has no answer
+//!   for, [`poll_fd`], [`select_fds`] and the socket calls, which the
+//!   streams layer reaches through `php_engine`'s face (#1874).
 //!
 //! Revision 38 kept the pool in `php_heap` until more than signals and
 //! `LC_CTYPE` arrived; `fork` is what arrived, and the two moved here
-//! unchanged. The crate is an `unsafe` home of its own, every block one
-//! operation with its `SAFETY` comment.
+//! unchanged. The process's identity and its file descriptors followed by
+//! the rule that `php_heap` holds memory and stacks and this crate the
+//! process and its file descriptors (#1935), moved as they stood. The
+//! crate is an `unsafe` home of its own, every block one operation with
+//! its `SAFETY` comment.
 #![deny(
     clippy::undocumented_unsafe_blocks,
     clippy::multiple_unsafe_ops_per_block
@@ -30,9 +38,15 @@
     clippy::unimplemented
 )]
 
+mod fd;
 mod fork;
 mod locale;
 pub mod post;
+pub mod process;
 
+pub use fd::{
+    BUFSIZ, Readiness, SockOpt, bind_fd, connect_fd, dup_fd, fd_table_size, listen_fd, new_socket,
+    peek_fd, poll_fd, select_fds, set_fd_blocking, set_sockopt, sync_fd,
+};
 pub use fork::{Forked, Pid, fork};
 pub use locale::reset_lc_ctype_locale;
