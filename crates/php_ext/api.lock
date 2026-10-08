@@ -748,6 +748,7 @@ request::Request::ini_get
 request::Request::ini_parse_bool
 request::Request::ini_parse_bytes
 request::Request::ini_parse_quantity
+request::Request::ini_parse_uquantity
 request::Request::ini_restore
 request::Request::ini_set
 request::Request::ini_set_string

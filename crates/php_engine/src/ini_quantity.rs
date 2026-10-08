@@ -5,9 +5,30 @@
 //! [`Request::ini_parse_quantity`](crate::api::request::Request::ini_parse_quantity)
 //! is its face, and the witnesses stand there.
 
-/// The value, and the sentence where php writes one.
-#[allow(clippy::too_many_lines)] // one C function, kept whole
+/// The value, and the sentence where php writes one: `zend_ini_parse_quantity`.
 pub(crate) fn parse(value: &[u8]) -> (i64, Option<String>) {
+    let (bits, sentence) = quantity(value, Signedness::Signed);
+    (i64::from_ne_bytes(bits.to_ne_bytes()), sentence)
+}
+
+/// `zend_ini_parse_uquantity`: the value read as unsigned, `-1` alone
+/// among the negatives taken, as the maximum, since `memory_limit=-1`
+/// spells it so.
+pub(crate) fn parse_unsigned(value: &[u8]) -> (u64, Option<String>) {
+    quantity(value, Signedness::Unsigned)
+}
+
+/// `zend_ini_parse_quantity_signed_result_t`: what range the value is
+/// held to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Signedness {
+    Signed,
+    Unsigned,
+}
+
+/// `zend_ini_parse_quantity_internal` (`Z/Zend/zend_ini.c:613-841`).
+#[allow(clippy::too_many_lines)] // one C function, kept whole
+fn quantity(value: &[u8], signedness: Signedness) -> (u64, Option<String>) {
     let invalid = || escaped(value);
     let mut start = 0;
     let mut end = value.len();
@@ -81,12 +102,25 @@ pub(crate) fn parse(value: &[u8]) -> (i64, Option<String>) {
     let mut overflow = range;
     let mut result = magnitude;
     if !overflow {
-        if negative && magnitude == 1u64 << 63 {
-            result = magnitude.wrapping_neg();
-        } else if i64::try_from(magnitude).is_err() {
-            overflow = true;
-        } else if negative {
-            result = magnitude.wrapping_neg();
+        match signedness {
+            // "-1" is the one negative taken, `memory_limit=-1`'s maximum.
+            Signedness::Unsigned if negative => {
+                if magnitude == 1 && digits_end == end {
+                    result = u64::MAX;
+                } else {
+                    overflow = true;
+                }
+            }
+            Signedness::Unsigned => {}
+            Signedness::Signed => {
+                if negative && magnitude == 1u64 << 63 {
+                    result = magnitude.wrapping_neg();
+                } else if i64::try_from(magnitude).is_err() {
+                    overflow = true;
+                } else if negative {
+                    result = magnitude.wrapping_neg();
+                }
+            }
         }
     }
     if digits_end == start {
@@ -107,7 +141,7 @@ pub(crate) fn parse(value: &[u8]) -> (i64, Option<String>) {
             b'k' | b'K' => 1 << 10,
             _ => {
                 return (
-                    signed(result),
+                    result,
                     Some(format!(
                         "Invalid quantity \"{}\": unknown multiplier \"{chr}\", interpreting as \"{interpreted}\" for backwards compatibility",
                         invalid()
@@ -116,18 +150,22 @@ pub(crate) fn parse(value: &[u8]) -> (i64, Option<String>) {
             }
         };
         if !overflow {
-            let n = signed(result);
-            let f = signed(factor);
-            overflow = if n > 0 {
-                n > i64::MAX / f
-            } else {
-                n < i64::MIN / f
+            overflow = match signedness {
+                Signedness::Signed => {
+                    let (n, f) = (signed(result), signed(factor));
+                    if n > 0 {
+                        n > i64::MAX / f
+                    } else {
+                        n < i64::MIN / f
+                    }
+                }
+                Signedness::Unsigned => result > u64::MAX / factor,
             };
         }
         result = result.wrapping_mul(factor);
         if digits_end != end - 1 {
             return (
-                signed(result),
+                result,
                 Some(format!(
                     "Invalid quantity \"{}\", interpreting as \"{interpreted}{chr}\" for backwards compatibility",
                     invalid()
@@ -137,14 +175,14 @@ pub(crate) fn parse(value: &[u8]) -> (i64, Option<String>) {
     }
     if overflow {
         return (
-            signed(result),
+            result,
             Some(format!(
                 "Invalid quantity \"{}\": value is out of range, using overflow result for backwards compatibility",
                 invalid()
             )),
         );
     }
-    (signed(result), None)
+    (result, None)
 }
 
 /// `zend_is_whitespace`: the six bytes the ini quantity reader skips.

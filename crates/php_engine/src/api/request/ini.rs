@@ -835,6 +835,16 @@ impl Request {
         crate::ini_quantity::parse(value)
     }
 
+    /// `zend_ini_parse_uquantity`: [`Request::ini_parse_quantity`] held
+    /// to the unsigned range, where `-1` alone among the negatives is
+    /// taken, as the maximum, and any other is out of range. What the
+    /// test extension's `zend_test_zend_ini_parse_uquantity` answers,
+    /// the witness there.
+    #[must_use]
+    pub fn ini_parse_uquantity(value: &[u8]) -> (u64, Option<String>) {
+        crate::ini_quantity::parse_unsigned(value)
+    }
+
     /// The stage an entry's `on_modify` is served at, php's `stage`
     /// argument to a `PHP_INI_MH`. [`IniStage::Startup`] is also
     /// `php_during_module_startup()`, which `php_verror` names the origin
