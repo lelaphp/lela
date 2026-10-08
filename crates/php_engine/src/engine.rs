@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
@@ -2656,6 +2656,8 @@ pub struct EngineBuilder {
     hooked: php_compile::Hooked,
     extended_info: bool,
     sapi_name: &'static str,
+    /// Where the engine end writes ([`EngineBuilder::ends_into`]).
+    ends_into: Option<Box<dyn OutputSink + Send>>,
     additional_extension: Option<Extension>,
     additional_functions: Vec<(FunctionDecl, Entry)>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
@@ -2711,6 +2713,19 @@ impl EngineBuilder {
     #[must_use]
     pub fn sense_leaks(mut self, sensor: LeakSensor) -> EngineBuilder {
         self.sense_leaks = sensor;
+        self
+    }
+
+    /// Where the engine end (ADR-0010) writes: what an extension's
+    /// engine-end function raises, displayed to `sink`'s body and logged
+    /// through its log, as `php_module_shutdown` serves `MSHUTDOWN` with
+    /// `php_output` not activated, so php displays through `php_output_direct`
+    /// to the process's stdout and logs through `sapi_module.log_message`.
+    /// The streams are the host's, so the host leaves them; an engine left
+    /// none ends with what it writes reaching no host.
+    #[must_use]
+    pub fn ends_into(mut self, sink: Box<dyn OutputSink + Send>) -> EngineBuilder {
+        self.ends_into = Some(sink);
         self
     }
 
@@ -3113,7 +3128,7 @@ impl EngineBuilder {
             },
             self.bind_loops,
         );
-        engine.end.arm(&engine.shared);
+        engine.end.arm(&engine.shared, self.ends_into);
         engine
     }
 }
@@ -3563,12 +3578,19 @@ pub struct Engine {
 /// master's to end. Armed once the engine has started; an engine whose
 /// start was refused is not ended.
 #[derive(Default)]
-struct EngineEnd(OnceLock<Arc<Shared>>);
+struct EngineEnd {
+    shared: OnceLock<Arc<Shared>>,
+    /// What the host left for the end to write to
+    /// ([`EngineBuilder::ends_into`]), taken once, by the drop.
+    sink: Mutex<Option<Box<dyn OutputSink + Send>>>,
+}
 
 impl EngineEnd {
-    /// From here the drop of the engine's last clone ends `shared`.
-    fn arm(&self, shared: &Arc<Shared>) {
-        self.0.set(Arc::clone(shared)).ok();
+    /// From here the drop of the engine's last clone ends `shared`,
+    /// writing to `sink` where the host left one.
+    fn arm(&self, shared: &Arc<Shared>, sink: Option<Box<dyn OutputSink + Send>>) {
+        self.shared.set(Arc::clone(shared)).ok();
+        *self.sink.lock().unwrap_or_else(PoisonError::into_inner) = sink;
     }
 }
 
@@ -3581,13 +3603,16 @@ impl Drop for EngineEnd {
     /// ([`end_phase`]), the request dropped with its states in reverse;
     /// and then, with the last owner of what every request shares, the
     /// engine states in reverse (`zend_destroy_modules`). What the
-    /// request writes reaches no host. A start an extension refused, or
+    /// request writes, a diagnostic an engine-end function raised among
+    /// it, goes to the sink the host left ([`EngineBuilder::ends_into`]),
+    /// as php writes it with `php_output` not activated, and reaches no host
+    /// where none was left. A start an extension refused, or
     /// the extensions' post-startup refused, ends nothing: a failed
     /// `MINIT` ends php's process from `php_error_cb` (`exit(-2)`), and no
     /// host of php's calls `php_module_shutdown` once
     /// `php_module_startup` failed.
     fn drop(&mut self) {
-        let Some(shared) = self.0.take() else {
+        let Some(shared) = self.shared.take() else {
             return;
         };
         if shared.refused.is_some()
@@ -3604,8 +3629,17 @@ impl Drop for EngineEnd {
             ..RequestDescription::default()
         };
         let mut req = Request::new(Arc::clone(&shared), description);
+        let mut sink = (self.sink.get_mut())
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(held) = sink.as_mut().and_then(|sink| sink.held()) {
+            req.hold(held);
+        }
         req.enter_phase(crate::api::request::Phase::EngineEnd);
         end_phase(&shared.extensions, &mut req, |e| e.engine_end);
+        if let Some(sink) = sink.as_mut() {
+            crate::preload::hand_over(&mut req, sink.as_mut());
+        }
     }
 }
 
@@ -3649,6 +3683,7 @@ impl Engine {
             cli_shell: false,
             configure: &[],
             trace_to: None,
+            ends_into: None,
             #[cfg(debug_assertions)]
             sense_leaks: LeakSensor::default(),
         }
