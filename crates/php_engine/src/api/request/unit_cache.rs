@@ -332,6 +332,26 @@ impl Request {
     /// 5 1 7 1 8 1 9
     /// 5 1 7 1 9 1 10
     /// ```
+    ///
+    /// After `opcache_reset()` nothing new is held, so each include is a
+    /// miss by the key that opens the file: compiled in the first child,
+    /// and in the second read back from the file cache, which kept the
+    /// first child's copy (the file changed since at the same `mtime`):
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/reset' . getmypid(); @mkdir($dir); $t = time() - 10;
+    /// $code = 'function r() { return get_resource_id(fopen("php://memory", "r")); } echo implode(" ", [r(), opcache_reset() ? 1 : 0, r(), include $argv[1], r(), include $argv[1], r()]), "\n";';
+    /// foreach ([1, 2] as $run) {
+    ///     file_put_contents("$dir/a.inc", "<?php return $run;"); touch("$dir/a.inc", $t);
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', "opcache.file_cache=$dir", '-r', $code, "$dir/a.inc"], [1 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]); proc_close($p);
+    /// }
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// 5 1 6 1 8 1 10
+    /// 5 1 6 1 8 1 10
+    /// ```
     pub(crate) fn cached_file(
         &mut self,
         path: &[u8],
