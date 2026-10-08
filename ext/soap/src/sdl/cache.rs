@@ -937,7 +937,7 @@ fn deserialize_parameters(r: &Refs, input: &mut In<'_>) -> Option<Option<Table<P
 
 /// What a cache file held.
 enum Cached {
-    /// The file is not one to read: no such file, or one php leaves.
+    /// The file is not one to read: no such file, or a body cut short.
     Missing,
     /// The file is stale or not this URI's, and is removed.
     Stale,
@@ -1149,7 +1149,28 @@ fn read_body(input: &mut In<'_>) -> Option<Sdl> {
 
 /// `get_sdl_from_cache`: the description in the file at `path` where it
 /// is this version's, no older than `t` and of `uri`; a file that is not
-/// removed.
+/// removed, so the WSDL is read again and written in its place. A file
+/// whose header is whole and whose body is cut short reads as none, and
+/// the WSDL read again replaces it.
+///
+/// ```php
+/// $d = sys_get_temp_dir() . '/soap-cache-' . getmypid(); @mkdir($d); ini_set('soap.wsdl_cache_dir', $d); $w = "$d/t.wsdl";
+/// file_put_contents($w, "<definitions xmlns='http://schemas.xmlsoap.org/wsdl/' xmlns:s='http://schemas.xmlsoap.org/wsdl/soap/' xmlns:t='urn:t' targetNamespace='urn:t'><portType name='P'/><binding name='B' type='t:P'><s:binding transport='http://schemas.xmlsoap.org/soap/http'/></binding><service name='S'><port name='p' binding='t:B'><s:address location='http://localhost/'/></port></service></definitions>");
+/// new SoapClient($w, ['cache_wsdl' => WSDL_CACHE_DISK]); [$f] = glob("$d/wsdl-*"); $full = file_get_contents($f);
+/// foreach (['version' => 'wsdl' . chr(9) . substr($full, 5), 'time' => substr_replace($full, str_repeat("\0", 8), 6, 8), 'uri' => substr_replace($full, 'X', 18, 1)] as $what => $bad) {
+///     file_put_contents($f, $bad); new SoapClient($w, ['cache_wsdl' => WSDL_CACHE_DISK]); clearstatcache(); $now = file_get_contents($f);
+///     var_dump($what, strlen($now) === strlen($full) && $now[4] === $full[4] && substr($now, 6, 8) !== str_repeat("\0", 8) && substr($now, 14) === substr($full, 14));
+/// }
+/// array_map('unlink', glob("$d/*")); rmdir($d);
+/// ```
+/// ```expect
+/// string(7) "version"
+/// bool(true)
+/// string(4) "time"
+/// bool(true)
+/// string(3) "uri"
+/// bool(true)
+/// ```
 fn get_sdl_from_cache(path: &std::path::Path, uri: &[u8], t: i64) -> Option<(Sdl, i64)> {
     let buf = std::fs::read(path).ok()?;
     match sdl_deserialize(&buf, uri, t) {
