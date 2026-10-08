@@ -655,6 +655,7 @@ request::Request::buffer_handler_started
 request::Request::buffer_status
 request::Request::build_defs
 request::Request::called_scope
+request::Request::caller_function_name
 request::Request::caller_preloaded
 request::Request::caller_var
 request::Request::captured

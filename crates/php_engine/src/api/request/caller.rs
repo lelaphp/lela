@@ -652,6 +652,27 @@ impl Request {
         ))
     }
 
+    /// `get_function_or_method_name(EX(prev_execute_data)->func)`: the
+    /// function the native being served was called from, as a message
+    /// names it, `Class::method` for a method and a native's name for a
+    /// native's call, and `main` for a file's own code. What the test
+    /// extension's `zend_get_current_func_name` answers, the witness
+    /// there.
+    #[must_use]
+    pub fn caller_function_name(&self) -> String {
+        let mut chain = self.chain();
+        let _served = chain.next();
+        let function = match chain.next() {
+            Some(Link::Frame(_, state)) => state.function,
+            Some(Link::Call(call)) => Some(call.function),
+            Some(Link::Site(_)) | None => None,
+        };
+        function.map_or_else(
+            || String::from("main"),
+            |function| self.qualified_name(function, None),
+        )
+    }
+
     /// `get_active_function_or_method_name`: the native being served as
     /// a message names it, `Class::method` for a method, which is what
     /// a native writes before `(): ` in a sentence of its own that no
