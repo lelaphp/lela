@@ -711,9 +711,10 @@ fn the_built_in_server_ends_a_request_whose_start_failed() {
 /// request's, which the startup request builds too. The one engine
 /// state built drops with the engine. The `error` link of the extension
 /// that started is told both diagnostics, as php's `php_error_cb` is the
-/// error callback a link saved at `MINIT` while php starts; that the
-/// never-started extension's link is told too is #1953's, so the
-/// sequence is read without the error links.
+/// error callback a link saved at `MINIT` while php starts; the refused
+/// extension's and the never-started one's are told nothing, since no
+/// `MINIT` of theirs installed them (#1953), so the sequence is read
+/// without the error links and the links are read apart.
 #[test]
 fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_request() {
     let rec = Recording::start();
@@ -750,15 +751,19 @@ fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_requ
         [Ext(0, EngineStateBuilt(0)), Ext(1, EngineStartRefused)]
     );
     assert_eq!(requests("built", "served"), []);
-    let told: Vec<String> = (events.between("built", "served").0.into_iter())
-        .filter_map(|e| match e {
-            Ext(0, Error(message)) => Some(message),
-            _ => None,
-        })
-        .collect();
+    let told = |n: u8| -> Vec<String> {
+        (events.between("built", "served").0.into_iter())
+            .filter_map(|e| match e {
+                Ext(at, Error(message)) if at == n => Some(message),
+                _ => None,
+            })
+            .collect()
+    };
     let warning = "test_ext_1 refuses to start under 'cli'";
     let fatal = "Unable to start test_ext_1 module";
-    assert_eq!(told, [warning, fatal, warning, fatal]);
+    assert_eq!(told(0), [warning, fatal, warning, fatal]);
+    assert_eq!(told(1), [] as [String; 0]);
+    assert_eq!(told(2), [] as [String; 0]);
     assert_eq!(
         events.between("served", "dropped").0,
         [Ext(0, EngineStateDropped(0))]

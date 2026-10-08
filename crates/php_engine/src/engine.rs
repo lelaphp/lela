@@ -43,7 +43,7 @@ use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
-use crate::supplied::{Keyed, Last, Phase, Resolved};
+use crate::supplied::{Keyed, Resolved, Suppliers};
 use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
@@ -691,7 +691,9 @@ pub(crate) struct Shared {
     /// What the bundle supplies beyond its declarations, each kind
     /// resolved by php's rule ([`crate::supplied`]); the shell only
     /// where the host carries php's table of shell callbacks
-    /// ([`EngineBuilder::cli_shell`]).
+    /// ([`EngineBuilder::cli_shell`]); on an engine whose start refused,
+    /// only what the extensions started before the refusal installed
+    /// ([`Suppliers::refused_at`]).
     pub(crate) supplied: Resolved,
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), and after it what the extensions' `on_modify`
@@ -2922,16 +2924,11 @@ impl EngineBuilder {
         // Each extension's supplies taken out of it, by its number in
         // `module_registry`, which numbers Core 0 and the bundle from 1,
         // and installed by the phase it starts in.
-        let mut supplied = Resolved::resolve(extensions.iter_mut().zip(1u32..).map(|(e, at)| {
-            (
-                ExtensionId(at),
-                Phase::of(e),
-                std::mem::take(&mut e.supplies),
-            )
-        }));
+        let mut suppliers = Suppliers::take((1u32..).map(ExtensionId).zip(&mut extensions));
         if !self.cli_shell {
-            supplied.shell = Last::default();
+            suppliers = suppliers.without_shell();
         }
+        let supplied = suppliers.resolved();
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
         // `standard`'s constants: each extension's constants rewritten
@@ -3104,8 +3101,11 @@ impl EngineBuilder {
         engine.register_ini(
             held,
             startup,
-            &configuration.loads,
-            unloaded,
+            Registry {
+                loads: &configuration.loads,
+                unloaded,
+                suppliers,
+            },
             self.sapi_name,
             self.bind_loops,
         );
@@ -3402,6 +3402,16 @@ fn sort_modules(modules: &mut [Extension]) -> Vec<usize> {
     registered
 }
 
+/// `module_registry` as `php_module_startup` meets it beyond what the
+/// engine's tables hold: the dynamic libraries the ini asked to load,
+/// the extensions refused for a dependency ([`unload_unmet`]), and what
+/// every extension kept supplies ([`Suppliers`]).
+struct Registry<'a> {
+    loads: &'a Loads,
+    unloaded: Vec<Unloaded>,
+    suppliers: Suppliers,
+}
+
 /// An extension `zend_startup_module_ex` refused for a dependency: where
 /// in start order its check stood, as the place in `module_registry`
 /// (Core 0) of the extension that starts next, and php's warning.
@@ -3686,8 +3696,7 @@ impl Engine {
         &mut self,
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
         mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
-        loads: &Loads,
-        unloaded: Vec<Unloaded>,
+        registry: Registry<'_>,
         sapi_name: &'static str,
         bind_loops: BindLoops,
     ) {
@@ -3717,6 +3726,11 @@ impl Engine {
         let mut req = Request::new(Arc::clone(&self.shared), description);
         req.begin_startup();
         let mut taken = core_startup(&mut req);
+        let Registry {
+            loads,
+            unloaded,
+            suppliers,
+        } = registry;
         let failed = register_extensions(&mut req, loads);
         let mut activated = Vec::new();
         let marks = modules_startup(
@@ -3791,6 +3805,9 @@ impl Engine {
             shown.raised.extend(refusal.raised);
             let failed = format!("Unable to start {} module", extension.name);
             shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
+            if let Ok(at) = u32::try_from(at) {
+                shared.supplied = suppliers.refused_at(ExtensionId(at));
+            }
             break;
         }
         if shared.refused.is_none() {

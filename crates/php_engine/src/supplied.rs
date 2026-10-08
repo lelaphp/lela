@@ -24,10 +24,11 @@
 //! every extension's at its `MINIT`, in the order the extensions start,
 //! the host's own extension last among them, as php starts a host's
 //! `additional_module` after the bundle; then every Zend extension's,
-//! in that same order. [`Resolved::resolve`] is handed the start order
-//! with each supplier's extension and phase beside it, so the start
-//! order has one source, the caller's, and a kind added later changes
-//! no read site.
+//! in that same order. [`Suppliers`] holds the start order with each
+//! supplier's extension and phase beside it, so the start order has one
+//! source, the caller's, and a kind added later changes no read site;
+//! a start that refuses resolves it again with what php had installed
+//! by then ([`Suppliers::refused_at`]).
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -74,7 +75,7 @@ pub(crate) type Registered = Arc<dyn Any + Send + Sync>;
 ///
 /// Declared in the order php runs the phases, which the sort reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Phase {
+enum Phase {
     /// An extension's `MINIT`.
     Minit,
     /// A Zend extension's startup, and its `zend_post_startup_cb` after.
@@ -83,7 +84,7 @@ pub(crate) enum Phase {
 
 impl Phase {
     /// The phase `extension` installs what it supplies in.
-    pub(crate) fn of(extension: &Extension) -> Phase {
+    fn of(extension: &Extension) -> Phase {
         if extension.zend.is_some() {
             Phase::ZendExtension
         } else {
@@ -129,6 +130,62 @@ pub(crate) struct Supplies {
     /// [`ExtensionBuilder::build`](crate::api::abi::ExtensionBuilder::build)
     /// takes from it.
     pub(crate) statement_handler: Option<StatementHandler>,
+}
+
+/// Every extension's supplies as its builder took them, in start order,
+/// each beside the extension it is of and the phase it installs in: what
+/// [`Resolved::resolve`] is handed, kept until the engine has started, so
+/// a start that refuses leaves installed only what php's would have.
+pub(crate) struct Suppliers(Vec<(ExtensionId, Phase, Supplies)>);
+
+impl Suppliers {
+    /// The suppliers of `extensions`, each taken out of its extension.
+    pub(crate) fn take<'a>(
+        extensions: impl IntoIterator<Item = (ExtensionId, &'a mut Extension)>,
+    ) -> Suppliers {
+        Suppliers(
+            extensions
+                .into_iter()
+                .map(|(by, e)| (by, Phase::of(e), std::mem::take(&mut e.supplies)))
+                .collect(),
+        )
+    }
+
+    /// The CLI's `cli_shell_callbacks` left out: a host that carries no
+    /// such table has no slot for readline's `MINIT` to write.
+    pub(crate) fn without_shell(mut self) -> Suppliers {
+        for (_, _, own) in &mut self.0 {
+            own.shell = None;
+        }
+        self
+    }
+
+    /// Every supplier's, as an engine that starts installs them.
+    pub(crate) fn resolved(&self) -> Resolved {
+        Resolved::resolve(self.0.iter().cloned())
+    }
+
+    /// What an engine whose start `refused` refused has installed: each
+    /// link an extension's `MINIT` installs, from the extensions started
+    /// before it alone, since `zend_startup_module_ex` ends the startup
+    /// there and no later `MINIT` and no Zend extension's startup runs;
+    /// and the refused one's none, its start having failed. The host's
+    /// own slots stand whatever started: `sapi_module.log_message` is the
+    /// host's table and `zend_stream_open_function` main's, both set
+    /// before any extension starts.
+    pub(crate) fn refused_at(self, refused: ExtensionId) -> Resolved {
+        Resolved::resolve(self.0.into_iter().map(|(by, phase, own)| {
+            if phase == Phase::Minit && by.0 < refused.0 {
+                return (by, phase, own);
+            }
+            let host = Supplies {
+                fatal_logged: own.fatal_logged,
+                stream_hooks: own.stream_hooks,
+                ..Supplies::default()
+            };
+            (by, phase, host)
+        }))
+    }
 }
 
 /// The bundle's supplied behaviour, resolved once as the engine is
@@ -266,9 +323,7 @@ impl Resolved {
     /// is of and the phase it installs in: installed phase by phase,
     /// each phase's in start order ([`Phase`]), and what each `MINIT`
     /// registered in start order alone.
-    pub(crate) fn resolve(
-        suppliers: impl IntoIterator<Item = (ExtensionId, Phase, Supplies)>,
-    ) -> Resolved {
+    fn resolve(suppliers: impl IntoIterator<Item = (ExtensionId, Phase, Supplies)>) -> Resolved {
         let mut table = Resolved::default();
         let mut suppliers: Vec<_> = suppliers.into_iter().collect();
         for (_, _, own) in &mut suppliers {
