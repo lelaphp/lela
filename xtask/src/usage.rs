@@ -312,7 +312,7 @@ mod tests {
             reading.message,
             "turn 14: 152000 of a 200000 token window, 76%"
         );
-        assert!(!reading.tree().is_empty(), "stamped over the workspace");
+        assert!(!reading.key().is_empty(), "stamped over the workspace");
     }
 
     /// On a branch recording none the reading is the session's, and a

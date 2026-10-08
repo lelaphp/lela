@@ -548,7 +548,7 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
     let reading = &readings[0];
     assert_eq!(reading.scope, "ext/pcre");
     assert_eq!(
-        reading.tree(),
+        reading.key(),
         Reading::for_scope(
             "phpt",
             "ext/pcre",
@@ -556,11 +556,11 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
             &xtask::key::Snapshot::disk(&root).unwrap()
         )
         .unwrap()
-        .tree(),
+        .key(),
         "done reads the reading as fresh only when the tree matches the crate's"
     );
     assert_eq!(
-        reading.tree(),
+        reading.key(),
         Reading::for_scope(
             "phpt",
             "ext/pcre@control",
@@ -568,7 +568,7 @@ fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read
             &xtask::key::Snapshot::disk(&root).unwrap()
         )
         .unwrap()
-        .tree(),
+        .key(),
         "a control of the subset is stamped over the same crate"
     );
 }

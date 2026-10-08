@@ -1216,7 +1216,7 @@ fn every_verdict_is_one_reading_of_done_over_the_workspace() {
         "{}",
         reading.message
     );
-    assert_eq!(reading.tree().len(), 40);
+    assert_eq!(reading.key().len(), 40);
     assert_eq!(reading.commit.len(), 7);
 
     let stop = std::fs::read_to_string(fixtures().join("hooks/stop.json")).unwrap();

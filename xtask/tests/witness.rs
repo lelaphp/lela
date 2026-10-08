@@ -416,7 +416,7 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     // wrote, so `done` finds the reading fresh for the line it pinned
     // (#2163).
     let now = xtask::key::Snapshot::disk(&root).unwrap();
-    assert_eq!(reading.tree(), now.key(Path::new("ext/fixture")).unwrap());
+    assert_eq!(reading.key(), now.key(Path::new("ext/fixture")).unwrap());
 
     // The witness now pins the status, so a second run accepts nothing.
     let again = run(&root, &registry(""), true);
@@ -878,7 +878,7 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
     assert_eq!(count(&reading, "run"), 1);
     assert_eq!(count(&reading, "failed"), 0);
     assert_eq!(count(&reading, "missing"), 0);
-    assert!(!reading.tree().is_empty(), "the reading is stamped");
+    assert!(!reading.key().is_empty(), "the reading is stamped");
 }
 
 /// A checkout with no binary on either target path is still a reading of
@@ -972,7 +972,7 @@ fn with_no_binary_built_a_crate_behind_a_feature_is_held_to_its_witnesses() {
         "{}",
         reading.message
     );
-    assert!(!reading.tree().is_empty(), "{reading:#?}");
+    assert!(!reading.key().is_empty(), "{reading:#?}");
 }
 
 /// And the four extensions outside php's default build are in the linked

@@ -461,7 +461,7 @@ fn steered(checkout: &Path, path: &str, was: Option<&str>, since: i64) -> bool {
         || !taken_since
         || reading.message.contains("dry run")
         || on_disk(&checkout.join(path))
-            .is_none_or(|now| reading.tree() != git::file_hash(path, &now))
+            .is_none_or(|now| reading.key() != git::file_hash(path, &now))
     {
         return false;
     }

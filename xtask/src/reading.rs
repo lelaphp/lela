@@ -35,10 +35,46 @@ pub const MIGRATED: &str = "log.migrated.jsonl";
 /// The file of the log a line that is no reading is kept in, as it was.
 pub const UNREAD: &str = "unread";
 
+/// The version of a reading's shape, written as `v` on every reading
+/// (harness-design.md §4.2): 2 since the scope's key is spelled `key`
+/// (#1719). A reading written before carries no `v` and is version 1,
+/// which spells the key `tree`; the store reads both, and refuses a `v` it
+/// does not know. A field a reading may omit, whose absence a reader of
+/// the earlier shape already handles correctly, is added under the same
+/// `v`; a field removed, renamed or retyped, or a meaning changed, is a
+/// new `v` (§4.6, revision 76).
+pub const V: u32 = 2;
+
+/// The `v` of a reading: written as [`V`] whatever version it was read
+/// at, since a reading read back is held in this version's shape, and
+/// read as any version this harness knows, absent for the first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Version;
+
+impl Serialize for Version {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u32(V)
+    }
+}
+
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Version, D::Error> {
+        match u32::deserialize(deserializer)? {
+            V => Ok(Version),
+            v => Err(serde::de::Error::custom(format!(
+                "a reading of v = {v}, which this harness does not know: it reads v = {V}, and a reading with no `v`, the first version"
+            ))),
+        }
+    }
+}
+
 /// One reading, the one shape every instrument writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reading {
+    /// The version of the shape, [`V`]; absent on a reading of the first.
+    #[serde(default)]
+    v: Version,
     /// The subcommands that write one, in the order `cli::Command` has
     /// them: `api-check | permit | done | track-work | ticket | usage |
     /// budget | clippy | test | phpt | port-map | compile-identity |
@@ -56,15 +92,18 @@ pub struct Reading {
     pub message: String,
     /// From the manifest when the rule names one, else empty.
     pub adr: String,
-    /// The key of the scope's sources at the time, [`crate::key::Snapshot::key`]: the
-    /// tree hash of the scope's files and, for a crate, of its workspace
-    /// dependency closure's (#1318); what `done` holds against the scope's
-    /// key now to call the reading fresh (harness-design.md §4.2, §13 D.18). Private, and set by the
-    /// constructors alone: a reading made through [`Reading::for_crate`]
-    /// or [`Reading::for_scope`] is hashed over the manifest's mapping of
-    /// its scope, [`Manifest::scope_path`], the path `done` hashes; one
-    /// made through [`Reading::stamped_over`] says which path it was hashed over.
-    tree: String,
+    /// The scope's key at the time, [`crate::key::Snapshot::key`]: the
+    /// hash of the scope's files and of every workspace crate in its
+    /// declared dependency closure (#1318); what `done` holds against the
+    /// scope's key now to call the reading fresh (harness-design.md §4.2,
+    /// §13 D.18). Spelled `tree` by a reading of the first version, which
+    /// is read as this one. Private, and set by the constructors alone: a
+    /// reading made through [`Reading::for_crate`] or
+    /// [`Reading::for_scope`] is hashed over the manifest's mapping of its
+    /// scope, [`Manifest::scope_path`], the path `done` hashes; one made
+    /// through [`Reading::stamped_over`] says which path it was hashed over.
+    #[serde(alias = "tree")]
+    key: String,
     pub commit: String,
     pub at: Datetime,
     /// The session of the call a `permit` reading judged, from the
@@ -134,8 +173,8 @@ impl Reading {
     /// holds fresh. The snapshot is the one the instrument took before it
     /// measured ([`Snapshot::disk`]), so the key is that of what it
     /// measured and not of what the tree became while it ran. `permit`'s
-    /// readings are one: their scope is the rule that fired and their tree
-    /// is the file the call touched, or the manifest for a refusal to judge
+    /// readings are one: their scope is the rule that fired and their key
+    /// is the file's the call touched, or the manifest for a refusal to judge
     /// (harness-design.md §4.4). The two constructors above come through
     /// here over the manifest's path.
     pub fn stamped_over(
@@ -146,7 +185,7 @@ impl Reading {
     ) -> Result<Reading> {
         let stamp = snapshot.stamp(path)?;
         let mut reading = Reading::new(instrument, scope);
-        reading.tree = stamp.tree;
+        reading.key = stamp.key;
         reading.commit = stamp.commit;
         reading.at = now()?;
         Ok(reading)
@@ -154,12 +193,13 @@ impl Reading {
 
     /// A reading of `instrument` over `scope` with every other field at its
     /// empty value and `at` at the Unix epoch; the instrument fills the
-    /// rest. Its `tree` is empty, which is no scope's hash, so `done` finds
+    /// rest. Its key is empty, which is no scope's hash, so `done` finds
     /// it fresh for nothing: the reading of a crate not yet created, which
     /// nothing measured, and the reading a rendering's test lays in a store
     /// that is no git repository.
     pub fn new(instrument: &str, scope: &str) -> Reading {
         Reading {
+            v: Version,
             instrument: instrument.to_owned(),
             scope: scope.to_owned(),
             rule: String::new(),
@@ -167,7 +207,7 @@ impl Reading {
             numbers: BTreeMap::new(),
             message: String::new(),
             adr: String::new(),
-            tree: String::new(),
+            key: String::new(),
             commit: String::new(),
             at: EPOCH
                 .parse()
@@ -180,9 +220,9 @@ impl Reading {
 }
 
 impl Reading {
-    /// The tree hash the reading was stamped with; empty when it was not.
-    pub fn tree(&self) -> &str {
-        &self.tree
+    /// The key the reading was stamped with; empty when it was not.
+    pub fn key(&self) -> &str {
+        &self.key
     }
 
     /// Whether the reading was taken over the content `hash` names: the
@@ -191,7 +231,7 @@ impl Reading {
     /// [`UNDER_RECIPE`], under the pin whose [`Pin::digest`] is `pin` (#1387).
     /// The one statement of fresh (harness-design.md §4.2, §4.5 condition 1).
     pub fn fresh_for(&self, hash: &str, pin: &str) -> bool {
-        self.tree == hash
+        self.key == hash
             && (!UNDER_RECIPE.contains(&self.instrument.as_str())
                 || self.recipe.as_deref() == Some(pin))
     }
@@ -241,6 +281,7 @@ impl Reading {
             .parse::<Datetime>()
             .context("a log line whose `at` is not a datetime")?;
         Ok(Reading {
+            v: line.v,
             instrument: line.instrument,
             scope: line.scope,
             rule: line.rule,
@@ -248,7 +289,7 @@ impl Reading {
             numbers: line.numbers,
             message: line.message,
             adr: line.adr,
-            tree: line.tree,
+            key: line.key,
             commit: line.commit,
             at,
             session: line.session,
@@ -264,6 +305,8 @@ impl Reading {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Line {
+    #[serde(default)]
+    v: Version,
     instrument: String,
     scope: String,
     rule: String,
@@ -271,7 +314,8 @@ struct Line {
     numbers: BTreeMap<String, Number>,
     message: String,
     adr: String,
-    tree: String,
+    #[serde(alias = "tree")]
+    key: String,
     commit: String,
     at: String,
     #[serde(default)]
@@ -290,6 +334,8 @@ enum Kept {
     /// A reading whole, as `log.jsonl` writes it; a field this build does
     /// not know is ignored, so a newer harness's line still reads.
     Whole {
+        #[serde(default)]
+        v: Version,
         instrument: String,
         scope: String,
         status: Status,
@@ -302,8 +348,8 @@ enum Kept {
         message: String,
         #[serde(default)]
         adr: String,
-        #[serde(default)]
-        tree: String,
+        #[serde(default, alias = "tree")]
+        key: String,
         #[serde(default)]
         commit: String,
         #[serde(default)]
@@ -335,6 +381,7 @@ impl Reading {
         let kept: Kept = serde_json::from_str(line).context("a line that is no reading")?;
         let (mut reading, at) = match kept {
             Kept::Whole {
+                v,
                 instrument,
                 scope,
                 status,
@@ -343,19 +390,20 @@ impl Reading {
                 numbers,
                 message,
                 adr,
-                tree,
+                key,
                 commit,
                 session,
                 groups,
                 recipe,
             } => (
                 Reading {
+                    v,
                     rule,
                     status,
                     numbers,
                     message,
                     adr,
-                    tree,
+                    key,
                     commit,
                     session,
                     groups,
@@ -531,16 +579,16 @@ impl Store {
         Ok(self.root.join(LOG).join(format!("{instrument}.jsonl")))
     }
 
-    /// Where the index keeps `reading`: none for one whose tree is empty,
+    /// Where the index keeps `reading`: none for one whose key is empty,
     /// which names no content.
     fn indexed(&self, reading: &Reading) -> Result<Option<PathBuf>> {
-        if reading.tree.is_empty() {
+        if reading.key.is_empty() {
             return Ok(None);
         }
         let dir = self.dir_of(&reading.instrument, &reading.scope)?;
         Ok(Some(dir.join(format!(
             "{}.toml",
-            index_name(&reading.tree, reading.recipe.as_deref())
+            index_name(&reading.key, reading.recipe.as_deref())
         ))))
     }
 
@@ -757,24 +805,24 @@ impl Store {
         Self::read_file(&path).map(Some)
     }
 
-    /// Of `instrument`, the latest reading of each scope of `trees` taken
-    /// over the content its tree hash names, by scope: the scope's file
-    /// when the reading there is over it, since that one is the latest of
-    /// all, and otherwise the index's entry for the key. The index is
-    /// where a retired worktree's readings are: `worktree retire` lands
-    /// its log here and leaves its files, so a branch's pass stands at its
-    /// merge only when it is found by the tree it was taken over (#1252).
-    /// A scope with no reading over its tree is absent, and so is one
-    /// whose hash is empty, which names no content.
+    /// Of `instrument`, the latest reading of each scope of `keys` taken
+    /// over the content its key names, by scope: the scope's file when the
+    /// reading there is over it, since that one is the latest of all, and
+    /// otherwise the index's entry for the key. The index is where a
+    /// retired worktree's readings are: `worktree retire` lands its log
+    /// here and leaves its files, so a branch's pass stands at its merge
+    /// only when it is found by the key it was taken over (#1252). A scope
+    /// with no reading over its key is absent, and so is one whose key is
+    /// empty, which names no content.
     pub(crate) fn latest_over(
         &self,
         instrument: &str,
-        trees: &BTreeMap<String, String>,
+        keys: &BTreeMap<String, String>,
         pin: &str,
     ) -> Result<BTreeMap<String, Reading>> {
-        let sought: Vec<(String, String, String)> = trees
+        let sought: Vec<(String, String, String)> = keys
             .iter()
-            .map(|(scope, tree)| (instrument.to_owned(), scope.clone(), tree.clone()))
+            .map(|(scope, key)| (instrument.to_owned(), scope.clone(), key.clone()))
             .collect();
         Ok(self
             .latest_over_each(&sought, pin)?
@@ -784,11 +832,11 @@ impl Store {
     }
 
     /// [`Store::latest_over`] for several instruments at once, each sought
-    /// as `(instrument, scope, tree)` and found by instrument and scope:
+    /// as `(instrument, scope, key)` and found by instrument and scope:
     /// what `done` asks of a touched crate whose file holds a reading over
-    /// another tree, such as a refused commit's, while a pass over the
-    /// tree now is in the index (#1312). A lookup reads the scope's file
-    /// and the index's entries for the key, and no log.
+    /// another key, such as a refused commit's, while a pass over the key
+    /// now is in the index (#1312). A lookup reads the scope's file and the
+    /// index's entries for the key, and no log.
     pub(crate) fn latest_over_each(
         &self,
         sought: &[(String, String, String)],
@@ -796,15 +844,15 @@ impl Store {
     ) -> Result<BTreeMap<(String, String), Reading>> {
         self.migrate()?;
         let mut found = BTreeMap::new();
-        for (instrument, scope, tree) in sought.iter().filter(|(_, _, tree)| !tree.is_empty()) {
-            // A file that is no reading is no reading over the tree, and
+        for (instrument, scope, key) in sought.iter().filter(|(_, _, key)| !key.is_empty()) {
+            // A file that is no reading is no reading over the key, and
             // the index is asked instead, as for a stale one (#1235).
             let reading = match self.read(instrument, scope).ok().flatten() {
-                Some(reading) if reading.fresh_for(tree, pin) => Some(reading),
+                Some(reading) if reading.fresh_for(key, pin) => Some(reading),
                 _ => self
-                    .entries(instrument, scope, tree)?
+                    .entries(instrument, scope, key)?
                     .into_iter()
-                    .filter(|r| r.fresh_for(tree, pin))
+                    .filter(|r| r.fresh_for(key, pin))
                     .max_by_key(|r| r.at.to_string()),
             };
             if let Some(reading) = reading {
@@ -833,13 +881,13 @@ impl Store {
         Ok(last)
     }
 
-    /// The index's readings of `instrument` over `scope` taken over
-    /// `tree`, one per oracle pin they were taken under.
-    fn entries(&self, instrument: &str, scope: &str, tree: &str) -> Result<Vec<Reading>> {
+    /// The index's readings of `instrument` over `scope` taken over `key`,
+    /// one per oracle pin they were taken under.
+    fn entries(&self, instrument: &str, scope: &str, key: &str) -> Result<Vec<Reading>> {
         Ok(self
             .keys_of(instrument, scope)?
             .into_iter()
-            .filter(|(key, _)| key == tree)
+            .filter(|(held, _)| held == key)
             .filter_map(|(_, path)| Self::read_file(&path).ok())
             .collect())
     }
@@ -864,35 +912,36 @@ impl Store {
         Ok(keys)
     }
 
-    /// Which of `trees` a reading of `instrument` over `scope` was taken
+    /// Which of `keys` a reading of `instrument` over `scope` was taken
     /// over, whatever its status or recipe: the scope's file, then the
-    /// index's keys of the scope, and for a tree neither holds, the log of
-    /// the instrument, where a key the index let go of still stands. What
-    /// `permit`'s `unless` reads as evidence that an instrument measured a
-    /// commit's content, by the key a commit's objects give
-    /// ([`crate::key::Snapshot::commit`], #1448), however long ago. An
-    /// empty hash names no content and is never found.
+    /// index's keys of the scope, and for a key neither holds, the log of
+    /// the instrument, where a key the index let go of still stands, a
+    /// line of either version ([`V`]). What `permit`'s `unless` reads as
+    /// evidence that an instrument measured a commit's content, by the key
+    /// a commit's objects give ([`crate::key::Snapshot::commit`], #1448),
+    /// however long ago. An empty key names no content and is never found.
     pub(crate) fn measured_over(
         &self,
         instrument: &str,
         scope: &str,
-        trees: &BTreeSet<String>,
+        keys: &BTreeSet<String>,
     ) -> Result<BTreeSet<String>> {
-        const TREE: &str = "\"tree\":\"";
+        /// The key's field in a line of the log, as each version spells it.
+        const SPELLED: [&str; 2] = ["\"key\":\"", "\"tree\":\""];
         self.migrate()?;
         let mut found = BTreeSet::new();
         if let Some(reading) = self.read(instrument, scope).ok().flatten()
-            && !reading.tree.is_empty()
-            && trees.contains(&reading.tree)
+            && !reading.key.is_empty()
+            && keys.contains(&reading.key)
         {
-            found.insert(reading.tree);
+            found.insert(reading.key);
         }
         for (key, _) in self.keys_of(instrument, scope)? {
-            if trees.contains(&key) {
+            if keys.contains(&key) {
                 found.insert(key);
             }
         }
-        if found.len() == trees.iter().filter(|t| !t.is_empty()).count() {
+        if found.len() == keys.iter().filter(|k| !k.is_empty()).count() {
             return Ok(found);
         }
         let path = self.shard(instrument)?;
@@ -902,17 +951,19 @@ impl Store {
             Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
         };
         for line in String::from_utf8_lossy(&bytes).lines() {
-            let Some(at) = line.rfind(TREE) else {
+            let Some(key) = SPELLED.iter().find_map(|field| {
+                let at = line.rfind(field)? + field.len();
+                line[at..].split('"').next()
+            }) else {
                 continue;
             };
-            let tree = line[at + TREE.len()..].split('"').next().unwrap_or("");
-            if tree.is_empty() || !trees.contains(tree) || found.contains(tree) {
+            if key.is_empty() || !keys.contains(key) || found.contains(key) {
                 continue;
             }
             if let Ok(reading) = Reading::from_json(line)
                 && reading.scope == scope
             {
-                found.insert(reading.tree);
+                found.insert(reading.key);
             }
         }
         Ok(found)
@@ -1019,11 +1070,11 @@ impl Store {
 /// The index's file name of a key, without `.toml`: the key, and the pin
 /// a reading was taken under after a dash where it has one. A pin that is
 /// not a hex digest is named by its blob id, so the name stays a name.
-fn index_name(tree: &str, recipe: Option<&str>) -> String {
+fn index_name(key: &str, recipe: Option<&str>) -> String {
     match recipe {
-        None => tree.to_owned(),
-        Some(pin) if pin.chars().all(|c| c.is_ascii_hexdigit()) => format!("{tree}-{pin}"),
-        Some(pin) => format!("{tree}-{}", crate::git::blob_id(pin.as_bytes())),
+        None => key.to_owned(),
+        Some(pin) if pin.chars().all(|c| c.is_ascii_hexdigit()) => format!("{key}-{pin}"),
+        Some(pin) => format!("{key}-{}", crate::git::blob_id(pin.as_bytes())),
     }
 }
 
@@ -1419,14 +1470,14 @@ pub(crate) fn listed(names: &[&str]) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{KEPT, Reading, Status, Store, civil_from_days, days_from_civil, listed};
+    use super::{KEPT, Log, Reading, Status, Store, V, civil_from_days, days_from_civil, listed};
     use crate::scratch::Tree;
 
-    /// A passing reading of `instrument` over `scope`, taken over `tree`
+    /// A passing reading of `instrument` over `scope`, taken over `key`
     /// at `at`.
-    fn over(instrument: &str, scope: &str, tree: &str, at: &str) -> Reading {
+    fn over(instrument: &str, scope: &str, key: &str, at: &str) -> Reading {
         let mut reading = Reading::new(instrument, scope);
-        tree.clone_into(&mut reading.tree);
+        key.clone_into(&mut reading.key);
         reading.status = Status::Pass;
         reading.commit = "0000000".into();
         reading.at = at.parse().unwrap();
@@ -1464,7 +1515,7 @@ mod tests {
         let sought = |n: usize| [("budget".to_owned(), "ext/pcre".to_owned(), key(n))];
         let found = store.latest_over_each(&sought(KEPT + 1), "").unwrap();
         assert_eq!(
-            found.values().next().map(Reading::tree),
+            found.values().next().map(Reading::key),
             Some(key(KEPT + 1).as_str()),
             "found by its key while the scope's file holds the last"
         );
@@ -1479,6 +1530,53 @@ mod tests {
             1,
             "the index's entries are no scope's last reading"
         );
+    }
+
+    /// `reading` as a line of the log of the first version: no `v`, and
+    /// its key spelled `tree`.
+    fn first_version(reading: &Reading) -> serde_json::Value {
+        let mut line = reading.to_json().unwrap();
+        let object = line.as_object_mut().unwrap();
+        assert_eq!(object.remove("v"), Some(V.into()));
+        let key = object.remove("key").unwrap();
+        object.insert("tree".into(), key);
+        line
+    }
+
+    /// `permit`'s look for evidence reads a key the index let go of from
+    /// a line of the log of either version: `key` under `v = 2`, `tree`
+    /// on a line of the first version, which carries no `v` (#1719).
+    #[test]
+    fn a_key_the_index_let_go_is_found_in_a_line_of_either_version() {
+        let dir = Tree::new("store-versions").unwrap();
+        let store = Store::at(dir.path());
+        let v2 = over("budget", "xtask", &key(2), "2026-10-08T01:00:00Z");
+        let v1 = first_version(&over("budget", "xtask", &key(1), "2026-10-08T00:00:00Z"));
+        let log = format!("{v1}\n{}\n", v2.to_json().unwrap());
+        std::fs::create_dir_all(store.root().join("log")).unwrap();
+        std::fs::write(store.root().join("log/budget.jsonl"), log).unwrap();
+        let sought: BTreeSet<String> = [key(1), key(2), key(3)].into();
+        assert_eq!(
+            store.measured_over("budget", "xtask", &sought).unwrap(),
+            [key(1), key(2)].into()
+        );
+    }
+
+    /// A log handed to a rendering reads a whole line of either version,
+    /// each with its key, and counts one of a `v` it does not know as a
+    /// line it could not read (harness-design.md §4.6).
+    #[test]
+    fn a_handed_log_reads_both_versions_and_refuses_an_unknown_one() {
+        let v2 = over("budget", "xtask", &key(2), "2026-10-08T01:00:00Z");
+        let mut unknown = v2.to_json().unwrap();
+        unknown["v"] = (V + 1).into();
+        let log = Log::handed(&format!(
+            "{}\n{}\n{unknown}\n",
+            v2.to_json().unwrap(),
+            first_version(&v2)
+        ));
+        assert_eq!(log.readings, [v2.clone(), v2]);
+        assert_eq!(log.unreadable, [3]);
     }
 
     #[test]
