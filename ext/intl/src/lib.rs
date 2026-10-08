@@ -49,6 +49,8 @@ mod listformatter;
 mod locale;
 mod msgformat;
 mod normalizer;
+mod resourcebundle;
+mod spoofchecker;
 mod timezone;
 mod transliterator;
 mod uchar;
@@ -330,6 +332,7 @@ pub fn extension() -> Extension {
     let builder = locale::functions(builder);
     let builder = msgformat::functions(builder);
     let builder = normalizer::functions(builder);
+    let builder = resourcebundle::functions(builder);
     let builder = timezone::functions(builder);
     let builder = transliterator::functions(builder);
     // The classes in `PHP_MINIT_FUNCTION(intl)`'s order: Collator,
@@ -348,10 +351,12 @@ pub fn extension() -> Extension {
         .class::<msgformat::MessageFormatter>()
         .class::<dateformat::IntlDateFormatter>()
         .class::<datepatterngenerator::IntlDatePatternGenerator>()
+        .class::<resourcebundle::ResourceBundle>()
         .class::<transliterator::Transliterator>()
         .class::<timezone::IntlTimeZone>()
         .class::<calendar::IntlCalendar>()
         .class::<calendar::IntlGregorianCalendar>()
+        .class::<spoofchecker::Spoofchecker>()
         .class::<IntlException>()
         .class::<iterator::IntlIterator>()
         .class::<breakiterator::IntlBreakIterator>()
@@ -518,10 +523,15 @@ pub(crate) struct IntlException;
 #[php_class]
 impl IntlException {}
 
-/// A `zend_long` cast to `UErrorCode`, C's truncation to its low 32 bits.
-pub(crate) fn code_of(n: i64) -> Code {
+/// A `zend_long` cast to `int32_t`, C's truncation to its low 32 bits.
+pub(crate) fn truncated(n: i64) -> i32 {
     let b = n.to_le_bytes();
-    Code(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    i32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// A `zend_long` cast to `UErrorCode`.
+pub(crate) fn code_of(n: i64) -> Code {
+    Code(truncated(n))
 }
 
 /// `intl_get_error_code(): int`: the request's last code.
