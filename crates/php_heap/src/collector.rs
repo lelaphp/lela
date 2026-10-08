@@ -1622,6 +1622,28 @@ mod tests {
         assert_eq!(b.refcount(), 1);
     }
 
+    /// An owner given up where another is held, php's `GC_DELREF` and
+    /// `gc_check_possible_root`, leaves the value a possible root and
+    /// never destroys it; asked of the last owner, it gives nothing up.
+    #[test]
+    fn a_held_release_is_a_possible_root_and_never_the_last() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        let Ok(o) = r.heap.object(1, 0, 0) else {
+            return;
+        };
+        let z = Zval::object(o);
+        o.addref();
+        assert!(Heap::release_held(&mut r, z));
+        assert_eq!(o.refcount(), 1);
+        assert_eq!(r.heap.gc_status().roots, 1, "a possible root");
+        assert!(!Heap::release_held(&mut r, z), "the last owner is kept");
+        assert_eq!(o.refcount(), 1);
+        assert!(r.served.is_empty(), "nothing is destroyed");
+        Heap::release(&mut r, z);
+        assert_eq!(r.served, vec![1]);
+    }
+
     /// A pinned block whose last owner goes is destroyed then, as php
     /// destroys it, and its bytes are counted off then: an object's
     /// destructor is served and a table's rows released, and only the

@@ -1418,13 +1418,20 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
             // again, php's `GC_DELREF` and `gc_check_possible_root`, so
             // the shutdown collection frees it. What destroys a fiber
             // holds an owner of its own across the destroy (the store's
-            // walk and the destructor phase both do), so the release
-            // frees nothing this is running on.
+            // walk and the destructor phase both do); where nothing does,
+            // the collector's owner is the last and is kept, and the
+            // request ends, since this runs on the fiber's own stack.
             let gc = &mut req.fibers_mut().gc;
             if gc.fiber.map(|gc| gc.index()) == Some(fiber.index()) {
                 gc.fiber = None;
             }
-            req.release(fiber.as_value());
+            if !req.release_held(fiber.as_value()) {
+                let fatal = php_heap::Fatal::Error(format!(
+                    "InternalError: the collector's fiber #{} destroyed with the collector's owner its last",
+                    fiber.index()
+                ));
+                return req.fatal_of(Err(fatal));
+            }
             return delegate(req, back);
         }
         if let Transfer::Value(value) = back {

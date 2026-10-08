@@ -578,6 +578,23 @@ impl Heap {
         }
     }
 
+    /// `GC_DELREF` and `gc_check_possible_root`: one owner of `z` given
+    /// up where the caller holds that another stands, so the value is
+    /// offered to the collector as a possible root and never destroyed
+    /// here, as php gives up the collector's fiber running the code that
+    /// gives it up (`Z/Zend/zend_gc.c:2343`). Whether an owner was given
+    /// up: not the last, which is the caller's broken invariant and is
+    /// left standing, so nothing is freed under what names it.
+    #[must_use = "the last owner kept is the caller's InternalError"]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn release_held(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
+        if counted_header(z, Refcounted::refcount).is_some_and(|count| count <= 1) {
+            return false;
+        }
+        Heap::release(hooks, z);
+        true
+    }
+
     /// `i_zval_ptr_dtor` up to `rc_dtor_func`: the refcount decrement,
     /// and at zero a string, an object or a resource freed here, while a
     /// table or a reference cell is handed back undestroyed, since what

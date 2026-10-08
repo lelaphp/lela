@@ -155,6 +155,15 @@ impl Request {
         Heap::release(&mut Hooks(self), value.to_zval());
     }
 
+    /// `GC_DELREF` and `gc_check_possible_root` over a value the caller
+    /// holds that another owner of stands ([`Heap::release_held`]):
+    /// whether an owner was given up, which is never the last.
+    #[allow(clippy::needless_pass_by_value)]
+    #[must_use = "the last owner kept is the caller's InternalError"]
+    pub(crate) fn release_held(&mut self, value: Value) -> bool {
+        Heap::release_held(&mut Hooks(self), value.to_zval())
+    }
+
     /// One owner fewer as `zval_ptr_dtor_nogc` gives it up: what
     /// [`Request::release`] does, and never a possible root of the cycle
     /// collector (design §5.12). What `FREE_OP` does to a temporary
