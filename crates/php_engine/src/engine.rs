@@ -2943,7 +2943,7 @@ impl EngineBuilder {
         // Each extension's supplies taken out of it, by its number in
         // `module_registry`, which numbers Core 0 and the bundle from 1,
         // and installed by the phase it starts in.
-        let mut suppliers = Suppliers::take((1u32..).map(ExtensionId).zip(&mut extensions));
+        let mut suppliers = Suppliers::take((1..).map(ExtensionId::at).zip(&mut extensions));
         if !self.cli_shell {
             suppliers = suppliers.without_shell();
         }
@@ -3843,9 +3843,7 @@ impl Engine {
             shown.raised.extend(refusal.raised);
             let failed = format!("Unable to start {} module", extension.name);
             shared.refused = Some(shown.raise(Level::CoreError, failed));
-            if let Ok(at) = u32::try_from(at) {
-                shared.supplied = suppliers.refused_at(ExtensionId(at));
-            }
+            shared.supplied = suppliers.refused_at(ExtensionId::at(at));
             break;
         }
         if shared.refused.is_none() {
