@@ -2,7 +2,7 @@
 //! engine decides around `php_process`'s one `fork`, which nothing else
 //! calls. php forks with one thread in the process, since its timer
 //! is an interval timer and its server serves on one thread; the engine
-//! runs threads of its own (the request's timer, ADR-0010's Threads), so
+//! runs threads of its own (its timer, ADR-0010's Threads), so
 //! before it forks it joins every one of them, and it forks only where
 //! nothing else is inside the engine: POSIX lets the child of a process
 //! with other threads call only async-signal-safe functions, and a child
@@ -22,16 +22,16 @@
 //! (#1884).
 //!
 //! Two ways in, as the ruling has them. pcntl asks through the request,
-//! [`Request::fork`](crate::api::request::Request::fork): the request's
-//! own threads joined first and started again in the parent over the
-//! deadlines they had, and in the child what php's `php_child_init`
+//! [`Request::fork`](crate::api::request::Request::fork): the engine's
+//! timer thread joined first and started again in the parent over the
+//! deadlines it had, and in the child what php's `php_child_init`
 //! restores. A host asks through the host face, [`fork`], with no request
 //! in flight, as php-fpm's master makes a child or daemonizes.
 //!
 //! What php's `php_child_init` (`Z/main/main.c:1865`) restores in the
 //! child is two things: `zend_max_execution_timer_init`, a timer of the
 //! child's own where a build times with POSIX timers, which here is the
-//! request's timer forgetting its deadlines, as a child inherits no
+//! engine's timer forgetting every deadline, as a child inherits no
 //! interval timer; and `refresh_memory_manager`, a fresh key for the
 //! heap's shadow pointers, which this engine's heap does not have and no
 //! program can observe.
@@ -140,8 +140,9 @@ impl Thread {
 pub(crate) struct Alone(());
 
 /// Who asks for a fork, and so what may stand inside the engine beside
-/// it: the request it is, once its own threads are joined, or nothing at
-/// all for a host.
+/// it: the request it is, once the engine's threads are joined, or
+/// nothing at all for a host, whose fork finds no timer thread, since
+/// with no request in flight no deadline is set.
 #[derive(Debug, Clone, Copy)]
 enum Asker {
     Host = 0,
@@ -185,8 +186,8 @@ impl Drop for Alone {
 }
 
 /// [`Alone`] held for a request and forked: what `Request::fork` calls
-/// once the request's own threads are joined, so what runs inside the
-/// engine is that request alone.
+/// once the engine's threads are joined, so what runs inside the engine
+/// is that request alone.
 pub(crate) fn fork_request() -> io::Result<Forked> {
     Alone::hold(Asker::Request)?.fork()
 }

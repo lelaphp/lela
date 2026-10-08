@@ -696,6 +696,7 @@ impl Request {
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             paths: paths::Paths::startup(&shared),
+            limits: limits::Limits::new(&shared.timer),
             shared,
             description,
             inspect: inspect::Inspected::default(),
@@ -742,7 +743,6 @@ impl Request {
             progress: ending::Progress::default(),
             objects: objects::Objects::default(),
             returned: Value::null(),
-            limits: limits::Limits::new(),
             declared: tables.classes,
             own_classes: Vec::new(),
             arena,
