@@ -25,12 +25,14 @@ const CHUNK: usize = 4096 - crate::net::HEADER_SIZE;
 /// file_put_contents($file, "1,a\n2,b\n");
 /// $root = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
 /// $root->exec('SET GLOBAL local_infile = 1');
+/// $li = 'li_' . bin2hex(random_bytes(4));
+/// $root->exec("CREATE TABLE $li (id INT, l CHAR(1))");
 /// $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [Pdo\Mysql::ATTR_LOCAL_INFILE => true]);
-/// $db->exec('CREATE TEMPORARY TABLE li (id INT, l CHAR(1))');
-/// var_dump($db->exec("LOAD DATA LOCAL INFILE '$file' INTO TABLE li FIELDS TERMINATED BY ','"));
-/// var_dump($db->query('SELECT COUNT(*), GROUP_CONCAT(l) FROM li')->fetch(PDO::FETCH_NUM));
+/// var_dump($db->exec("LOAD DATA LOCAL INFILE '$file' INTO TABLE $li FIELDS TERMINATED BY ','"));
+/// var_dump($db->query("SELECT COUNT(*), GROUP_CONCAT(l) FROM $li")->fetch(PDO::FETCH_NUM));
 /// $no = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
-/// try { $no->exec("LOAD DATA LOCAL INFILE '$file' INTO TABLE li"); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// try { $no->exec("LOAD DATA LOCAL INFILE '$file' INTO TABLE $li"); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// $root->exec("DROP TABLE $li");
 /// $root->exec('SET GLOBAL local_infile = 0');
 /// unlink($file);
 /// ```
