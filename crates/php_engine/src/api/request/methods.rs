@@ -363,7 +363,7 @@ impl Request {
     /// bool(false)
     /// I0,I1,K,J
     /// ```
-    pub(crate) fn instance_of(&self, class: ClassId, of: ClassId) -> bool {
+    pub fn instance_of(&self, class: ClassId, of: ClassId) -> bool {
         if class == of {
             return true;
         }

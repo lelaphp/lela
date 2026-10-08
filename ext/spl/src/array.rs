@@ -1289,7 +1289,7 @@ impl RecursiveArrayIterator {
             if flags & Self::CHILD_ARRAYS_ONLY != 0 {
                 return Ok(None);
             }
-            if crate::class_is(req, object.class(), this.class(), 0) {
+            if req.instance_of(object.class(), this.class()) {
                 return Ok(Some(Owner::take(req, object).into_instance()));
             }
         }
