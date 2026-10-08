@@ -1419,6 +1419,7 @@ name = "php_syntax"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "nix",
 ]
 
 [[package]]
