@@ -46,8 +46,8 @@ pub(crate) struct Entry {
     /// The traits, then the interfaces, the link fetched, in the order
     /// written, `entry->traits_and_interfaces`.
     pub(crate) uses: Box<[ClassId]>,
-    /// Every other class a check read, by its lowered name, beside the
-    /// class the name found, `entry->dependencies`.
+    /// Every other class a check read, by its name as written, beside
+    /// the class the name found, `entry->dependencies`.
     pub(crate) dependencies: Box<[(Box<[u8]>, ClassId)]>,
     /// The published class, `entry->ce`.
     pub(crate) class: ClassId,
