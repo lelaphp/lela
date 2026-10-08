@@ -805,6 +805,7 @@ request::Request::restore_error_handler
 request::Request::restore_exception_handler
 request::Request::return_value_used
 request::Request::row_method
+request::Request::row_prototype
 request::Request::running_handler_flags
 request::Request::sapi_name
 request::Request::scope

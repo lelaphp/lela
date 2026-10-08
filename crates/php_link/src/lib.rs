@@ -1628,6 +1628,34 @@ fn link_composed<'b, H: Copy>(
     (settled, linker.raised, linker.deferred.into_inner())
 }
 
+/// A method of a parent's or an interface's function table, as the
+/// prototype rules read it.
+#[derive(Clone, Copy)]
+struct Above<'a, H> {
+    method: &'a MethodDecl,
+    scope: H,
+    prototype: Option<H>,
+}
+
+impl<H: Copy> Above<'_, H> {
+    /// The prototype `do_inheritance_check_on_method` gives a method over
+    /// this one, the parent's or an interface's method of its name: the
+    /// prototype this one has, or its own scope; none where it gives
+    /// none, this one private and not abstract, or a constructor whose
+    /// prototype is not abstract.
+    fn prototype_over(self) -> Option<H> {
+        let method = self.method;
+        let ctor = method.function.name.0.eq_ignore_ascii_case(b"__construct");
+        if method.visibility == Visibility::Private && !method.is_abstract && !ctor {
+            return None;
+        }
+        if ctor && self.prototype.is_none() && !method.is_abstract {
+            return None;
+        }
+        Some(self.prototype.unwrap_or(self.scope))
+    }
+}
+
 /// What [`Linker::link_refused`] settled: the outcome, which of a
 /// trait's abstract methods the class took as its own (indices into the
 /// copies it was handed), and whether a trait's `__toString` makes it
@@ -1843,11 +1871,154 @@ impl<'a, H: Copy> Linker<'a, H> {
         H: PartialEq,
     {
         let own = child.methods.len().saturating_sub(abstracts);
+        let methods = self.member_rows::<MethodDecl>(child, own)?;
         Some(LinkedClass {
-            methods: self.member_rows::<MethodDecl>(child, own)?,
+            prototypes: self.prototypes(child, &methods)?,
+            methods,
             constants: self.member_rows::<ClassConstDecl>(child, usize::MAX)?,
             properties: self.member_rows::<PropertyDecl>(child, usize::MAX)?,
             interfaces: self.interface_list(child)?,
+        })
+    }
+
+    /// `common.prototype`'s scope for each row of `child`'s function
+    /// table, as `do_inheritance_check_on_method` leaves it once the link
+    /// ran: a method the class declares over its parent's takes the
+    /// parent method's prototype, or the parent method itself, unless
+    /// that one is private and not abstract, or a constructor whose
+    /// prototype is not abstract; an inherited row keeps the prototype it
+    /// has in the parent's table, or in the table of the interface it
+    /// came from; and each interface the class itself names, the parent's
+    /// aside, sets it again where it has a method of the name, a method
+    /// it shares with the row aside (`do_interface_implementation` over
+    /// `ce->interfaces[num_parent_interfaces..num_interfaces]`, the
+    /// named ones before `zend_do_inherit_interfaces` appends their
+    /// parents). An internal class names `Stringable` first where it
+    /// declares `__toString`. An interface's methods take none, since
+    /// `do_interface_implementation` passes an interface no
+    /// `ZEND_INHERITANCE_SET_CHILD_PROTO`. None where the parent or an
+    /// interface is held with no record.
+    ///
+    /// ```php
+    /// interface I { function m(); function __construct(); }
+    /// abstract class P { abstract function a(); private function p() {} function __construct() {} function q() {} }
+    /// class C extends P implements I { function m() {} function a() {} function p() {} function __construct() {} }
+    /// foreach (['m', 'a', 'p', '__construct', 'q'] as $n) { $r = new ReflectionMethod('C', $n); var_dump($r->hasPrototype() ? $r->getPrototype()->class : null); }
+    /// interface J { function q(); }
+    /// class E extends P implements J { function a() {} }
+    /// var_dump((new ReflectionMethod('E', 'q'))->getPrototype()->class, (new ReflectionMethod('P', 'q'))->hasPrototype());
+    /// interface X { function m(); }
+    /// interface A extends X { function m(); }
+    /// var_dump((new ReflectionMethod('A', 'm'))->hasPrototype());
+    /// class D implements A { function m() {} function __toString(): string { return ''; } }
+    /// var_dump((new ReflectionMethod('D', 'm'))->getPrototype()->class, (new ReflectionMethod('D', '__toString'))->getPrototype()->class);
+    /// var_dump((new ReflectionMethod('Exception', '__toString'))->getPrototype()->class, (new ReflectionMethod('ArrayIterator', 'count'))->getPrototype()->class);
+    /// ```
+    /// ```expect
+    /// string(1) "I"
+    /// string(1) "P"
+    /// NULL
+    /// string(1) "I"
+    /// NULL
+    /// string(1) "J"
+    /// bool(false)
+    /// bool(false)
+    /// string(1) "A"
+    /// string(10) "Stringable"
+    /// string(10) "Stringable"
+    /// string(9) "Countable"
+    /// ```
+    fn prototypes(
+        &self,
+        child: &'a ClassDecl,
+        methods: &Rows<Row<H>, Folded>,
+    ) -> Option<Box<[Option<H>]>>
+    where
+        H: PartialEq,
+    {
+        if child.kind == ClassKind::Interface {
+            return Some(vec![None; methods.rows().len()].into_boxed_slice());
+        }
+        // A class held with a record, none where no class has the name.
+        let held = |name: &[u8]| match (self.lookup)(name) {
+            None => Some(None),
+            Some(held) => held
+                .record
+                .map(|(handle, record)| Some((held.decl, handle, record))),
+        };
+        let parent = match &child.parent {
+            Some(name) => held(&name.0)?,
+            None => None,
+        };
+        let inherited = parent.map_or(&[][..], |(_, _, record)| &*record.interfaces);
+        let to_string = |m: &MethodDecl| m.function.name.0.eq_ignore_ascii_case(b"__toString");
+        let stringable = child.file.0.is_empty()
+            && child.kind != ClassKind::Trait
+            && !child.name.0.eq_ignore_ascii_case(b"Stringable")
+            && child.methods.iter().any(to_string);
+        let mut implemented: Vec<(&'a ClassDecl, H, &'a LinkedClass<H>)> = Vec::new();
+        let names = stringable
+            .then(|| &b"Stringable"[..])
+            .into_iter()
+            .chain(child.interfaces.iter().map(|name| &*name.0));
+        for name in names {
+            if let Some(interface) = held(name)?
+                && !inherited.contains(&interface.1)
+                && !implemented.iter().any(|seen| seen.1 == interface.1)
+            {
+                implemented.push(interface);
+            }
+        }
+        let mut prototypes = Vec::with_capacity(methods.rows().len());
+        for row in methods.rows() {
+            let name = self.row_member_name::<MethodDecl>(child, row);
+            let above = parent.and_then(|parent| self.method_above(parent, name));
+            let mut prototype = None;
+            // A row no parent has came from the first interface that
+            // has it, and keeps that one's prototype.
+            let mut appended = false;
+            match above {
+                Some(above) if row.holder.is_some() => prototype = above.prototype,
+                Some(above) => prototype = above.prototype_over(),
+                None => appended = row.holder.is_some(),
+            }
+            for &interface in &implemented {
+                let Some(declared) = self.method_above(interface, name) else {
+                    continue;
+                };
+                if row.holder.is_some() && row.holder == Some(declared.scope) {
+                    // `do_inherit_method`: the same method of an
+                    // interface may be inherited a few times.
+                    if appended {
+                        prototype = declared.prototype;
+                        appended = false;
+                    }
+                    continue;
+                }
+                if let Some(set) = declared.prototype_over() {
+                    prototype = Some(set);
+                }
+            }
+            prototypes.push(prototype);
+        }
+        Some(prototypes.into_boxed_slice())
+    }
+
+    /// The row of `class`'s function table under `name`, with its
+    /// declaration, its scope and the prototype the record holds for it.
+    fn method_above(
+        &self,
+        (decl, handle, record): (&'a ClassDecl, H, &'a LinkedClass<H>),
+        name: &[u8],
+    ) -> Option<Above<'a, H>> {
+        let (at, row) = record
+            .methods
+            .find_at(name, |row| self.row_member_name::<MethodDecl>(decl, row))?;
+        let (_, method) = self.row_member::<MethodDecl>(decl, row)?;
+        Some(Above {
+            method,
+            scope: row.holder_in(handle),
+            prototype: record.prototypes.get(at).copied().flatten(),
         })
     }
 

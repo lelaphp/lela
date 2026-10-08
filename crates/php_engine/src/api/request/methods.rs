@@ -28,6 +28,9 @@ use super::{Member, MemberAt, Request};
 pub struct MethodRow {
     class: ClassId,
     row: Row<ClassId>,
+    /// The row's position in the table, where the record keeps its
+    /// prototype.
+    at: u32,
 }
 
 impl MethodRow {
@@ -121,7 +124,7 @@ impl Request {
     /// Call to private method G::hidden() from scope D
     /// ```
     pub fn method_named(&self, class: ClassId, name: &[u8]) -> Option<Function> {
-        let MethodRow { class, row } = self.method_row(class, name)?;
+        let MethodRow { class, row, .. } = self.method_row(class, name)?;
         self.method_function(row.holder_in(class), row.at)
     }
 
@@ -141,11 +144,11 @@ impl Request {
     /// or allocated.
     pub fn method_row(&self, class: ClassId, name: &[u8]) -> Option<MethodRow> {
         let record = self.linked_class(class)?;
-        let row = record
+        let (at, &row) = record
             .methods
-            .find(name, |row| self.row_method_name(class, *row))
-            .copied()?;
-        Some(MethodRow { class, row })
+            .find_at(name, |row| self.row_method_name(class, *row))?;
+        let at = u32::try_from(at).ok()?;
+        Some(MethodRow { class, row, at })
     }
 
     /// `ZEND_HASH_FOREACH_PTR(&ce->function_table, mptr)`: every row of
@@ -157,7 +160,25 @@ impl Request {
         self.linked_class(class)
             .map_or(&[][..], |record| record.methods.rows())
             .iter()
-            .map(move |&row| MethodRow { class, row })
+            .enumerate()
+            .map(move |(at, &row)| MethodRow {
+                class,
+                row,
+                at: u32::try_from(at).unwrap_or(u32::MAX),
+            })
+    }
+
+    /// `common.prototype`'s scope for the method a row of a function
+    /// table is, which the link set once
+    /// ([`php_link::LinkedClass::prototypes`]): the class whose method the
+    /// row's prototype is, none where it has none.
+    pub fn row_prototype(&self, row: MethodRow) -> Option<ClassId> {
+        let record = self.linked_class(row.class)?;
+        record
+            .prototypes
+            .get(usize::try_from(row.at).ok()?)
+            .copied()
+            .flatten()
     }
 
     /// The declaration of the method a row of a function table is, which
@@ -542,11 +563,11 @@ impl Request {
 
     /// `zend_get_function_root_class`: the class of the method's
     /// `common.prototype` where it has one, the method's own class
-    /// otherwise, which is what a protected method is reached through. A
-    /// method overriding one a parent declares public or protected, or
-    /// abstract, has the parent's for its prototype, or the one that
-    /// method has (`do_inheritance_check_on_method`); a constructor has
-    /// one only where the prototype it would take is abstract.
+    /// otherwise, which is what a protected method is reached through.
+    /// The prototype is the one the link set on the row of the
+    /// declaring class's function table ([`Request::row_prototype`]): a
+    /// parent's method's, an abstract constructor's, or an interface's
+    /// the class names.
     ///
     /// ```php
     /// abstract class Base { abstract protected function __clone(); abstract protected function m(); }
@@ -563,34 +584,11 @@ impl Request {
     /// ```
     fn function_root_class(&self, function: Function) -> Option<ClassId> {
         let class = self.method_class(function)?;
-        let lowered = self.declared_name(function).to_ascii_lowercase();
-        let mut root = class;
-        let mut root_abstract = self.method_decl(function).is_some_and(|m| m.is_abstract);
-        for _ in 0..64 {
-            let Some(overridden) = self
-                .class_parent(root)
-                .and_then(|parent| self.method_named(parent, lowered.as_bytes()))
-            else {
-                break;
-            };
-            let Some(decl) = self.method_decl(overridden) else {
-                break;
-            };
-            // "The parent method is private and not an abstract": no
-            // prototype.
-            if decl.visibility == Visibility::Private && !decl.is_abstract {
-                break;
-            }
-            let Some(declaring) = self.method_class(overridden) else {
-                break;
-            };
-            root = declaring;
-            root_abstract = decl.is_abstract;
-        }
-        if lowered == "__construct" && !root_abstract {
-            return Some(class);
-        }
-        Some(root)
+        let prototype = self
+            .function_decl(function)
+            .and_then(|decl| self.method_row(class, &decl.name.0))
+            .and_then(|row| self.row_prototype(row));
+        Some(prototype.unwrap_or(class))
     }
 
     /// `fn_flags & (ZEND_ACC_PUBLIC|ZEND_ACC_PROTECTED|ZEND_ACC_PRIVATE)`:
