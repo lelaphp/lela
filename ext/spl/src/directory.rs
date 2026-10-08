@@ -16,7 +16,7 @@ use php_ext::abi::{
     Path as PathArg, Raw, Ref, Refusals, Std, This, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_class;
-use php_ext::call::{Function, call_method, instantiate, lookup_class, new_object};
+use php_ext::call::{Function, autoload, call_method, instantiate, lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
@@ -732,6 +732,19 @@ impl SplFileInfo {
 
     /// `setInfoClass(string $class = SplFileInfo::class): void`; the
     /// witness is `getFileInfo`'s and the class's.
+    ///
+    /// The class named is `zend_lookup_class`, which asks the autoloaders.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Info') { class Info extends SplFileInfo {} } });
+    /// $f = new SplFileInfo('x');
+    /// $f->setInfoClass('Info');
+    /// echo get_class($f->getFileInfo()), "\n";
+    /// ```
+    /// ```expect
+    /// load Info
+    /// Info
+    /// ```
     #[php(tentative)]
     fn setInfoClass(
         req: &mut Request,
@@ -2363,7 +2376,7 @@ fn class_argument(
     let name = name
         .as_php_string()
         .map_or_else(Vec::new, |s| s.as_bytes().to_vec());
-    let found = lookup_class(req, &name)?;
+    let found = autoload(req, &name)?;
     match found {
         Some(class) if crate::is_a(req, class, base) => Ok(Some(class)),
         _ => {

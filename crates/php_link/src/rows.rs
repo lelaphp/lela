@@ -19,6 +19,10 @@ pub struct LinkedClass<H> {
     /// declare, then the traits' abstract methods it took, then the
     /// interfaces' methods nothing above declared.
     pub methods: Rows<Row<H>, Folded>,
+    /// `common.prototype`'s scope for each row of `methods`, at the
+    /// row's position: the class whose method the row's prototype is,
+    /// none where the link set none.
+    pub prototypes: Box<[Option<H>]>,
     /// `CE_CONSTANTS_TABLE` in php's order: the class's own constants, a
     /// trait's among them, then each of the parent's table it does not
     /// declare but the parent's private ones, then the interfaces'
@@ -40,6 +44,7 @@ impl<H> Default for LinkedClass<H> {
     fn default() -> Self {
         LinkedClass {
             methods: Rows::default(),
+            prototypes: Box::default(),
             constants: Rows::default(),
             properties: Rows::default(),
             interfaces: Box::default(),
@@ -126,8 +131,13 @@ impl<R, C: Case> Rows<R, C> {
 
     /// The row under `name`, whose own name `named` reads.
     pub fn find<'n>(&self, name: &[u8], named: impl Fn(&R) -> &'n [u8]) -> Option<&R> {
-        self.position(hash::<C>(name), |row| same::<C>(named(row), name))
-            .and_then(|at| self.entries.get(at))
+        self.find_at(name, named).map(|(_, row)| row)
+    }
+
+    /// The row under `name` beside its position among the rows.
+    pub fn find_at<'n>(&self, name: &[u8], named: impl Fn(&R) -> &'n [u8]) -> Option<(usize, &R)> {
+        let at = self.position(hash::<C>(name), |row| same::<C>(named(row), name))?;
+        Some((at, self.entries.get(at)?))
     }
 
     /// `zend_hash_add`: `row` under `name` at the end, unless a row of

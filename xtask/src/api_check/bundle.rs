@@ -1,15 +1,17 @@
 //! `php_bundle`'s registrations held to the `ext/*` graph under the
 //! `order = "registration"` of the bundle's `[[edge]]` row, as #1778
-//! ruled (design §4.10, ADR-0004): the order written is php's
-//! registration order for the oracle's enabled set, which the engine
-//! sorts as `zend_sort_modules` does and `php_bundle`'s witness holds to
-//! the oracle, and which Cargo edges do not constrain; each extension's
-//! feature switches on the features of every extension its library
-//! links, so a build that registers an extension registers what it
-//! requires (#1882). A dev- or build-dependency links into the crate's
-//! tests or its `build.rs`, never into the library a request runs, so it
-//! requires nothing. The row names no other order api-check serves
-//! (#2255).
+//! ruled (design §4.10, ADR-0004), the one order api-check serves
+//! (#2255): the order written is php's registration order for the
+//! oracle's enabled set, which the engine sorts as `zend_sort_modules`
+//! does and `php_bundle`'s witness holds to the oracle, and which Cargo
+//! edges do not constrain; each extension's feature switches on the
+//! features of every extension it declares `Required` through
+//! `ExtensionBuilder::dependencies` (php's `ZEND_MOD_REQUIRED`), so a
+//! build that registers an extension registers what php requires loaded
+//! beside it (#1915), read as [`declared`] says. What its crate links
+//! requires nothing: `ext/sqlite3` links `ext/pdo_sqlite` for its
+//! libsqlite3 binding and declares no dependency, as php's does, so its
+//! feature registers no PDO.
 //!
 //! The feature an extension registers behind is read from the
 //! `#[cfg(feature = "...")]` on its `php_ext_<name>::extension` path, or
@@ -27,6 +29,10 @@ use toml::Value;
 
 use super::module_of;
 use super::workspace::{Crates, Present};
+
+mod declared;
+
+use declared::Declared;
 
 /// The one `order` the bundle's `[[edge]]` row may name (#1778, #2255).
 pub(super) const REGISTRATION: &str = "registration";
@@ -102,12 +108,16 @@ struct Registration {
 }
 
 /// Why a registration's features do not switch on what its extension
-/// requires: a `cfg` around it the instrument does not read; or, for each
-/// extension its library links, one the bundle registers nowhere, or
-/// registers only behind features the first one's do not switch on, named
-/// together in one line per registration.
+/// requires: a `cfg` around it the instrument does not read, or a
+/// declaration of its extension the instrument does not read; or, for
+/// each extension it declares `Required`, one the bundle registers
+/// nowhere, or registers only behind features the first one's do not
+/// switch on, named together in one line per registration. What its
+/// crate links is not read: a link with no declaration behind it, as
+/// `ext/sqlite3`'s of `ext/pdo_sqlite`, requires nothing (#1915).
 pub(super) fn unswitched(crates: &Crates, bundle: &Bundle) -> Vec<String> {
     let mut out = Vec::new();
+    let mut read: BTreeMap<&str, Option<Declared>> = BTreeMap::new();
     for registration in &bundle.registered {
         let name = &registration.name;
         if !registration.unread.is_empty() {
@@ -120,23 +130,24 @@ pub(super) fn unswitched(crates: &Crates, bundle: &Bundle) -> Vec<String> {
         let Some(krate) = crates.named(name) else {
             continue;
         };
+        let declared = read
+            .entry(name)
+            .or_insert_with(|| declarations(name, krate, &mut out));
+        let Some(declared) = declared else {
+            continue;
+        };
         let on = bundle.closure(&registration.features);
         // (the features not yet on, the extension they register)
         let mut missing: Vec<(String, &str)> = Vec::new();
-        for dep in krate
-            .deps
-            .iter()
-            .filter(|d| d.linked && d.name.starts_with("ext/"))
-        {
+        for required in &declared.required {
             let candidates: Vec<&Registration> = bundle
                 .registered
                 .iter()
-                .filter(|r| r.name == dep.name)
+                .filter(|r| &r.name == required)
                 .collect();
             if candidates.is_empty() {
                 out.push(format!(
-                    "the bundle registers {name} but not {}, which it requires",
-                    dep.name
+                    "the bundle registers {name} but not {required}, which it requires"
                 ));
                 continue;
             }
@@ -155,7 +166,7 @@ pub(super) fn unswitched(crates: &Crates, bundle: &Bundle) -> Vec<String> {
             if let Some(needed) = needed
                 && !needed.is_empty()
             {
-                missing.push((and(&needed), &dep.name));
+                missing.push((and(&needed), required));
             }
         }
         if missing.is_empty() {
@@ -189,6 +200,29 @@ pub(super) fn unswitched(crates: &Crates, bundle: &Bundle) -> Vec<String> {
         });
     }
     out
+}
+
+/// What extension `name` declares, read once; `None`, with the reason in
+/// `out`, when its sources cannot be read. A declaration the instrument
+/// does not read is named in `out` and the rest are held.
+fn declarations(name: &str, krate: &Present, out: &mut Vec<String>) -> Option<Declared> {
+    match Declared::read(krate) {
+        Ok(declared) => {
+            if !declared.unread.is_empty() {
+                out.push(format!(
+                    "{name} declares a dependency in {} that api-check does not read; it reads a `Dependency` row or a call naming the module as a string literal and its kind as `DependencyKind::...`, in a `vec!` or array handed to `.dependencies(...)` or returned by a function called there (design §4.10)",
+                    and(&declared.unread)
+                ));
+            }
+            Some(declared)
+        }
+        Err(e) => {
+            out.push(format!(
+                "api-check could not read what {name} declares it requires: {e:#}"
+            ));
+            None
+        }
+    }
 }
 
 /// `a`, `a and b`, `a, b and c`.

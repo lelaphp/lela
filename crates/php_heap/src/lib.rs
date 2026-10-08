@@ -35,7 +35,6 @@ mod block;
 mod call_stack;
 mod collector;
 mod compare;
-mod fd;
 mod fiber;
 mod gc;
 mod hooks;
@@ -46,7 +45,6 @@ mod numeric;
 mod object;
 mod observe;
 mod payload;
-pub mod process;
 mod property_table;
 mod reference;
 mod resource;
@@ -64,10 +62,6 @@ pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size};
 pub use collector::GcStatus;
 pub use compare::{Scalar, compare, compare_constants, identical, identical_constants};
-pub use fd::{
-    BUFSIZ, Readiness, SockOpt, bind_fd, connect_fd, dup_fd, fd_table_size, listen_fd, new_socket,
-    peek_fd, poll_fd, select_fds, set_fd_blocking, set_sockopt, sync_fd,
-};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, HeapHooks};
 pub use map::{MapPtr, MapTable};

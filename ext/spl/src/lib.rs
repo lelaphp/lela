@@ -251,36 +251,13 @@ fn parent_of(req: &mut Request, class: ClassId) -> Option<ClassId> {
 }
 
 /// Whether `class` is, extends or implements the class `name`,
-/// `instanceof_function` over the declarations.
+/// `instanceof_function` over the linked record
+/// ([`Request::instance_of`]).
 fn is_a(req: &mut Request, class: ClassId, name: &[u8]) -> bool {
-    match lookup_class(req, name).ok().flatten() {
-        Some(of) => class_is(req, class, of, 0),
-        None => false,
-    }
-}
-
-/// Whether `class` is `of`, extends it or implements it.
-fn class_is(req: &mut Request, class: ClassId, of: ClassId, depth: u32) -> bool {
-    if class == of {
-        return true;
-    }
-    let Some(decl) = req.class_decl(class).cloned() else {
-        return false;
-    };
-    if depth > 64 {
-        return false;
-    }
-    for interface in &decl.interfaces {
-        if let Some(found) = named(req, interface)
-            && class_is(req, found, of, depth + 1)
-        {
-            return true;
-        }
-    }
-    match decl.parent.as_ref().and_then(|p| named(req, p)) {
-        Some(parent) => class_is(req, parent, of, depth + 1),
-        None => false,
-    }
+    lookup_class(req, name)
+        .ok()
+        .flatten()
+        .is_some_and(|of| req.instance_of(class, of))
 }
 
 /// `zend_zval_type_name`: an object's class name, any other value's

@@ -12,13 +12,12 @@
 //! pinned phpdbg whichever binary is measured, as every section runs under
 //! the oracle.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::Result;
 
 use super::file::Phpt;
-use crate::oracle::hosts::PHPDBG;
 use crate::oracle::{Host, Pin};
 
 /// The flags before the program: no banner, no init file, no colours
@@ -28,20 +27,6 @@ pub(crate) const FLAGS: [&str; 2] = ["-qIb", "-f"];
 /// The flags before a section run beside the test: the same, and run it
 /// straight away and quit (run-tests.php:1912).
 pub(super) const SECTION_FLAGS: [&str; 2] = ["-qIb", "-rr"];
-
-/// The debugger host a run hands a `--PHPDBG--` test to: the phpdbg
-/// `[sapi]` pins where `binary` is the pinned php, which is the runner's
-/// control, and otherwise the engine's own `phpdbg` beside `binary`.
-/// `None` where there is none, which upstream's runner answers with a skip
-/// (run-tests.php:1914).
-pub(crate) fn host(pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
-    let host = if control || binary == pin.oracle.path {
-        pin.sapi.phpdbg.as_ref().map(|dbg| dbg.path.clone())
-    } else {
-        Some(binary.with_file_name(PHPDBG.binary))
-    };
-    host.filter(|path| path.is_file())
-}
 
 /// The pinned phpdbg, held to its digest once per run: the first program
 /// it would run asserts it, and every later one reads what that found.

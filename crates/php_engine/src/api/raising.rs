@@ -876,6 +876,37 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
     }
 }
 
+/// `zend_throw_error` with `EG(exception)` set: [`throw_chained`] with
+/// the buffer `zend_vspprintf` lays down for the message standing
+/// across the throw, as `throw_error` holds it, where `throw_chained`
+/// is `zend_throw_exception`, which formats nothing. A fatal or an
+/// `exit` is handed on as it is.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+/// #[Boom] function f() {}
+/// try { (new ReflectionFunction('f'))->getAttributes()[0]->newInstance(); }
+/// catch (Error $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Attribute class "Boom" not found / boom
+/// ```
+pub fn throw_error_chained(
+    req: &mut Request,
+    previous: Thrown,
+    class: &str,
+    message: &str,
+) -> Thrown {
+    match printf_buffer(req, message.len()) {
+        Ok(buffer) => {
+            let thrown = throw_chained(req, previous, class, message);
+            req.heap_mut().free_block(buffer);
+            thrown
+        }
+        Err(refused) => previous.chain(req, refused),
+    }
+}
+
 /// `zend_throw_error` where `EG(exception)` may already be set, as after
 /// a resolution a deprecation's handler threw through: the new
 /// throwable with the pending one taken off the request and chained as
@@ -884,14 +915,7 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
 /// An `exit` or a fatal standing is handed on as it is.
 pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) -> Thrown {
     match req.take_pending_view() {
-        Some(earlier) => match printf_buffer(req, message.len()) {
-            Ok(buffer) => {
-                let thrown = throw_chained(req, Thrown::of(Some(earlier)), class, message);
-                req.heap_mut().free_block(buffer);
-                thrown
-            }
-            Err(refused) => Thrown::of(Some(earlier)).chain(req, refused),
-        },
+        Some(earlier) => throw_error_chained(req, Thrown::of(Some(earlier)), class, message),
         None if req.is_pending() => Thrown::of(None),
         None => throw_error(req, class, message),
     }

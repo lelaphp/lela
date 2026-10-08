@@ -370,9 +370,8 @@ fn met(pin: &Pin, witness: &Witness, exit: Exit, ran: &Observation) -> Result<bo
 
 /// A pinned stream under the recipe's normalisation, which is what the run's
 /// own streams have been through; the oracle module owns the rule.
-fn normalised(pin: &Pin, text: &str) -> String {
-    let bytes = oracle::normalise(&pin.recipe.normalise, text.as_bytes().to_vec());
-    String::from_utf8_lossy(&bytes).into_owned()
+fn normalised(pin: &Pin, text: &str) -> Vec<u8> {
+    oracle::normalise(&pin.recipe.normalise, text.as_bytes().to_vec())
 }
 
 /// The three streams of one run as one document: what a difference is shown

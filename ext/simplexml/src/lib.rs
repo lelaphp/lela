@@ -31,7 +31,7 @@ use php_ext::abi::{
     Raw, This, Union,
 };
 use php_ext::attr::{php_class, php_function};
-use php_ext::call::{lookup_class, new_object};
+use php_ext::call::{autoload, lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
 use php_ext::raising::{
@@ -134,6 +134,17 @@ fn export_node(req: &mut Request, object: PhpObject) -> Option<Exported> {
 
 /// `Z_PARAM_CLASS_OR_NULL` of a class derived from `SimpleXMLElement`,
 /// `null` being `SimpleXMLElement` itself.
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy extends SimpleXMLElement {} } });
+/// echo get_class(simplexml_load_string('<a/>', 'Lazy')), "\n";
+/// ```
+/// ```expect
+/// load Lazy
+/// Lazy
+/// ```
 fn class_argument(req: &mut Request, given: Value, position: u32) -> Result<ClassId, Thrown> {
     let base = element_class(req)?;
     if matches!(given.as_ref(), ValueRef::Null | ValueRef::Undef) {
@@ -143,7 +154,7 @@ fn class_argument(req: &mut Request, given: Value, position: u32) -> Result<Clas
     let name = name
         .as_php_string()
         .map_or_else(Vec::new, |s| s.as_bytes().to_vec());
-    let found = lookup_class(req, &name)?;
+    let found = autoload(req, &name)?;
     match found {
         Some(class) if derives(req, class, base) => Ok(class),
         _ => {

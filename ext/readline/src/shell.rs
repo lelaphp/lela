@@ -11,7 +11,7 @@
 use std::io::{BufWriter, Write as _};
 use std::process::{ChildStdin, Command, Stdio};
 
-use php_ext::call::{call, lookup_class, lookup_function};
+use php_ext::call::{autoload, call, lookup_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Level, clear, uncaught_at, warning};
 use php_ext::request::Request;
@@ -365,7 +365,7 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
             }
         }
     } else if let Some(split) = text.windows(2).position(|w| w == b"::") {
-        let Ok(Some(class)) = lookup_class(req, &text[..split].to_ascii_lowercase()) else {
+        let Ok(Some(class)) = autoload(req, &text[..split].to_ascii_lowercase()) else {
             return Matches::None;
         };
         let member = text[split + 2..].to_ascii_lowercase();

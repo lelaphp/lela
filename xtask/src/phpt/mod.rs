@@ -168,6 +168,7 @@ use crate::carried::{BINARY, Carried};
 use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
+use crate::oracle::hosts::{CGI, EngineHost, FPM, PHPDBG};
 use crate::oracle::{Oracle, Oracles, Pin, Runner, Source};
 use crate::reading::{Reading, listed, plural};
 use crate::scratch::{self, Full, Tree};
@@ -1534,10 +1535,11 @@ pub(crate) fn run_subset(
         );
     }
     let control = matches!(runner, Runner::Control(_));
-    fpm::place(subset, fpm::host(oracle.pin(), binary, control).as_deref())?;
+    let host = |kind: EngineHost| kind.for_run(oracle.pin(), binary, control);
+    fpm::place(subset, host(FPM).as_deref())?;
     let hosts = adapter::Hosts {
-        cgi: cgi::host(oracle.pin(), binary, control),
-        phpdbg: phpdbg::host(oracle.pin(), binary, control),
+        cgi: host(CGI),
+        phpdbg: host(PHPDBG),
     };
     let adapter = Adapter::new(oracle, registry, binary, hosts, lane);
     let items = adapter.listed(subset, tests)?;

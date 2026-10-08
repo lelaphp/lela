@@ -32,11 +32,12 @@
 //! `zend_do_implement_interfaces` ran is the engine's where the engine
 //! keeps it: the function table is the class's linked record, its rows
 //! read through `api` (`Request::method_rows`, `Request::method_row`)
-//! and held as a `MethodRow`. Each method's prototype, the interface
-//! list in its order, and the constants and the properties with their
-//! shadows are computed here by the same rules over the declarations
-//! (`row_prototype`, `linked_interfaces`, `linked_constants`,
-//! `linked_properties`), so the words `inherits`, `overwrites`,
+//! and held as a `MethodRow`, and the interface list and the constants
+//! table in their order and each method's prototype are the record's
+//! (`Request::interfaces`, `Request::constants_in_order`,
+//! `Request::row_prototype`). The properties with their shadows are
+//! computed here by the same rules over the declarations
+//! (`linked_properties`), so the words `inherits`, `overwrites`,
 //! `prototype` and `ctor` are php's.
 //! Reflection's own twenty-six classes are declared by `#[php_class]`
 //! beside the bodies that serve them, every method the stub has, so
@@ -4498,10 +4499,46 @@ pub(crate) struct ReflectedState {
     /// method table lists: the reflector's `$name`, `$prop::get` or
     /// `$prop::set`, names it among the hooks of `$class`'s property.
     hook: bool,
-    /// php's `intern->ptr` of a `ReflectionMethod`: the row of the
-    /// engine's function table its constructor or factory found, which
-    /// each accessor reads.
-    method: Option<MethodRow>,
+    /// php's `intern->ptr` of a `ReflectionMethod`: the method its
+    /// constructor or factory found, which each accessor reads.
+    method: Option<HeldMethod>,
+}
+
+/// The function a `ReflectionMethod` holds as php's `intern->ptr`.
+///
+/// A reflector over a closure's `__invoke` holds no owner of the closure,
+/// so the closure is freed while the reflector stands, and its parameters
+/// still answer.
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor\n"; } function m() { return fn (int $n) => $n; } }
+/// $m = new ReflectionMethod((new D)->m(), '__invoke');
+/// echo "after\n";
+/// $p = new ReflectionParameter([(new D)->m(), '__invoke'], 0);
+/// echo "after2\n";
+/// var_dump((string) $m->getParameters()[0]->getType(), $p->getName(), $p->getDeclaringFunction()->getNumberOfParameters());
+/// ```
+/// ```expect
+/// dtor
+/// after
+/// dtor
+/// after2
+/// string(3) "int"
+/// string(1) "n"
+/// int(1)
+/// ```
+#[derive(Clone, Copy)]
+pub(crate) enum HeldMethod {
+    /// A row of the engine's function table.
+    Row(MethodRow),
+    /// The `__invoke` `zend_get_closure_invoke_method` makes for a
+    /// closure, `ZEND_ACC_CALL_VIA_HANDLER`, over the closure's function:
+    /// the trampoline borrows the `arg_info` of the op array, which the
+    /// unit holds for the request, so the reflector holds no owner of
+    /// the closure and its parameters answer once the closure is freed.
+    /// `None` for the closure `object_init_ex(zend_ce_closure)` makes,
+    /// which holds no function.
+    Invoke(Option<Function>),
 }
 
 /// The payload: the reflector's fields, boxed, inside the `sizeof` of
@@ -4805,7 +4842,7 @@ fn kept_closure(req: &Request, this: PhpObject) -> Option<PhpObject> {
 /// `intern->ptr` as `reflection_method_factory` and
 /// `ReflectionMethod::__construct` write it: the method found, held, or
 /// none where nothing was found ([`MethodRow`]).
-fn keep_method(req: &mut Request, this: PhpObject, method: Option<MethodRow>) {
+fn keep_method(req: &mut Request, this: PhpObject, method: Option<HeldMethod>) {
     if let Some(reflected) = this.native_mut::<Reflected>(req) {
         reflected.method = method;
     }
@@ -4813,7 +4850,7 @@ fn keep_method(req: &mut Request, this: PhpObject, method: Option<MethodRow>) {
 
 /// The method a `ReflectionMethod` holds ([`keep_method`]); none for one
 /// whose constructor never ran, and for a hook's.
-fn kept_method(req: &Request, this: PhpObject) -> Option<MethodRow> {
+fn kept_method(req: &Request, this: PhpObject) -> Option<HeldMethod> {
     this.native::<Reflected>(req)?.method
 }
 
@@ -4922,25 +4959,13 @@ fn class_of(
 /// `zend_lookup_class` or the `ReflectionException` every reflector
 /// throws for a miss, `Class "X" does not exist`, the name as given.
 fn class_named(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
-    match looked_up(req, name)? {
+    match autoload(req, name)? {
         Some(class) => Ok(class),
         None => Err(throw(
             req,
             "ReflectionException",
             &format!("Class \"{}\" does not exist", String::from_utf8_lossy(name)),
         )),
-    }
-}
-
-/// `zend_lookup_class`: the linked class named, a leading `\\` dropped,
-/// and the autoloader asked where there is none. An anonymous class's
-/// name is no name the autoloader would be handed, so the table is read
-/// first.
-fn looked_up(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
-    let bare = name.strip_prefix(b"\\").unwrap_or(name);
-    match lookup_class(req, bare)? {
-        Some(class) => Ok(Some(class)),
-        None => autoload(req, bare),
     }
 }
 
@@ -5175,33 +5200,6 @@ fn class_chain(req: &mut Request, class: ClassId) -> Vec<ClassId> {
     chain
 }
 
-/// `instanceof_function(ce, of)` over identities: `ce` is `of`,
-/// extends it, or implements it, each class of the chain's interfaces
-/// walked with it.
-fn class_is(req: &mut Request, class: ClassId, of: ClassId, depth: u32) -> bool {
-    if class == of {
-        return true;
-    }
-    if depth > 64 {
-        return false;
-    }
-    let Some(decl) = req.class_decl(class) else {
-        return false;
-    };
-    let names: Vec<Name> = decl
-        .interfaces
-        .iter()
-        .chain(decl.parent.iter())
-        .cloned()
-        .collect();
-    names.iter().any(|name| {
-        lookup_class(req, &name.0)
-            .ok()
-            .flatten()
-            .is_some_and(|linked| class_is(req, linked, of, depth + 1))
-    })
-}
-
 /// `zend_memrchr(name, '\\')`: where the namespace ends, if the name
 /// has one.
 fn namespace_end(name: &[u8]) -> Option<usize> {
@@ -5254,10 +5252,8 @@ fn class_constant_named(
     class: ClassId,
     name: &[u8],
 ) -> Option<(ClassId, ClassConstDecl)> {
-    linked_constants(req, class)
-        .into_iter()
-        .find(|(constant, _)| &*constant.name.0 == name)
-        .map(|(constant, declaring)| (declaring, constant))
+    req.class_constant_of(class, name)
+        .map(|(declaring, constant)| (declaring, constant.clone()))
 }
 
 /// `ReflectionClass::getConstant(string $name)`: the constant's value,
@@ -5665,7 +5661,7 @@ fn class_string(
     // `ZEND_CLASS_CONST_IS_CASE`: an enum's cases go first, under a
     // heading shown only when there are any, and its own constants
     // after them.
-    let (cases, constants): (Vec<_>, Vec<_>) = linked_constants(req, class)
+    let (cases, constants): (Vec<_>, Vec<_>) = constant_rows(req, class)
         .into_iter()
         .partition(|(constant, _)| constant.is_case);
     if !cases.is_empty() {
@@ -5903,7 +5899,7 @@ fn class_header(
         && lookup_class(req, b"Traversable")
             .ok()
             .flatten()
-            .is_some_and(|traversable| class_is(req, class, traversable, 0));
+            .is_some_and(|traversable| req.instance_of(class, traversable));
     let iterable = traversable
         || req.class_own_iterator(class)
         || linked_properties(req, class)
@@ -5942,7 +5938,7 @@ fn class_header(
             EnumBacking::Pure => {}
         }
     }
-    let interfaces = linked_interfaces(req, class);
+    let interfaces = req.interfaces(class).to_vec();
     for (i, interface) in interfaces.iter().enumerate() {
         let name = class_name_of(req, *interface);
         let name = String::from_utf8_lossy(&name);
@@ -6679,19 +6675,14 @@ fn escaped(bytes: &[u8]) -> String {
 /// One method of a linked class's function table, `zend_function` as
 /// `zend_do_inheritance` left it: the declaration, `common.scope`, the
 /// class that declared it, and the row of the engine's table it was
-/// found at, which `common.prototype` is read off ([`row_prototype`]);
-/// no row for a property's hook and for the `__invoke` php makes for a
-/// `Closure`, which no table holds.
+/// found at, which `common.prototype` is read off
+/// ([`Request::row_prototype`]), or the `__invoke` php makes for a
+/// `Closure`, which no table holds; nothing held for a property's hook.
 #[derive(Clone)]
 struct LinkedMethod {
     decl: MethodDecl,
     scope: ClassId,
-    row: Option<MethodRow>,
-    /// `ZEND_ACC_CALL_VIA_HANDLER`: a function no table holds, made on
-    /// the lookup, which is a closure's `__invoke`
-    /// ([`closure_invoke`]); its `module` is null, so it renders as
-    /// `<internal>` with no extension.
-    via_handler: bool,
+    held: Option<HeldMethod>,
 }
 
 impl LinkedMethod {
@@ -6701,9 +6692,33 @@ impl LinkedMethod {
         Some(LinkedMethod {
             decl: req.row_method(row)?.clone(),
             scope: row.scope(),
-            row: Some(row),
-            via_handler: false,
+            held: Some(HeldMethod::Row(row)),
         })
+    }
+
+    /// The method a reflector holds, read back.
+    fn of_held(req: &mut Request, held: HeldMethod) -> Option<LinkedMethod> {
+        match held {
+            HeldMethod::Row(row) => LinkedMethod::of_row(req, row),
+            HeldMethod::Invoke(function) => closure_invoke(req, function),
+        }
+    }
+
+    /// The row of the function table the method is, none for a hook
+    /// and for a closure's `__invoke`.
+    fn row(&self) -> Option<MethodRow> {
+        match self.held {
+            Some(HeldMethod::Row(row)) => Some(row),
+            Some(HeldMethod::Invoke(_)) | None => None,
+        }
+    }
+
+    /// `ZEND_ACC_CALL_VIA_HANDLER`: a function no table holds, made on
+    /// the lookup, which is a closure's `__invoke`
+    /// ([`closure_invoke`]); its `module` is null, so it renders as
+    /// `<internal>` with no extension.
+    fn via_handler(&self) -> bool {
+        matches!(self.held, Some(HeldMethod::Invoke(_)))
     }
 }
 
@@ -6727,7 +6742,8 @@ fn method_or_invoke(
     if found.is_some() || !is_closure_invoke(req, class, &name.to_ascii_lowercase()) {
         return found;
     }
-    closure_invoke(req, closure)
+    let function = closure.and_then(|closure| closure.closure(req).map(|c| c.function));
+    closure_invoke(req, function)
 }
 
 /// `zend_hash_find_ptr(&ce->function_table, lcname)` alone: the
@@ -6816,7 +6832,7 @@ fn table_methods(req: &Request, class: ClassId) -> Vec<LinkedMethod> {
 /// int(7)
 /// Method Closure::__invoke() does not exist
 /// ```
-fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<LinkedMethod> {
+fn closure_invoke(req: &mut Request, closure: Option<Function>) -> Option<LinkedMethod> {
     let scope = lookup_class(req, b"Closure").ok().flatten()?;
     let empty = || FunctionDecl {
         name: Name::default(),
@@ -6832,7 +6848,7 @@ fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<Linke
         frameless: Vec::new(),
     };
     let mut function = closure
-        .and_then(|closure| signature::closure_decl(req, closure))
+        .and_then(|closure| req.function_decl(closure).cloned())
         .unwrap_or_else(empty);
     function.name = Name(b"__invoke".as_slice().into());
     function.file = Name::default();
@@ -6857,8 +6873,7 @@ fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<Linke
             tentative_return: false,
         },
         scope,
-        row: None,
-        via_handler: true,
+        held: Some(HeldMethod::Invoke(closure)),
     })
 }
 
@@ -6867,279 +6882,26 @@ fn is_constructor(method: &MethodDecl) -> bool {
     method.function.name.0.eq_ignore_ascii_case(b"__construct")
 }
 
-/// `common.prototype`'s scope for the method a row of a function table
-/// is, as `do_inheritance_check_on_method` set it while the row's class
-/// linked: a method the class declares over its parent's takes the
-/// parent method's prototype, or the parent method itself, unless the
-/// parent's is private and not abstract, or a constructor with no
-/// abstract prototype; an inherited one keeps the prototype it has in
-/// the parent's table, or in the table of the interface it came from;
-/// and each interface the class implements that its parent does not
-/// sets it again where it declares a method of the name, a method it
-/// shares with the row aside (`do_inherit_method`, `SEPARATE_METHOD`).
-/// None where nothing set one.
+/// `CE_CONSTANTS_TABLE(ce)`: the rows of the engine's linked record in
+/// php's order ([`Request::constants_in_order`]), the class's own first
+/// for a user class and last for an internal one, each declaration
+/// copied out beside the class that declared it, for a walk that
+/// evaluates as it goes.
 ///
 /// ```php
-/// interface I { function m(); function __construct(); }
-/// abstract class P { abstract function a(); private function p() {} function __construct() {} function q() {} }
-/// class C extends P implements I { function m() {} function a() {} function p() {} function __construct() {} }
-/// foreach (['m', 'a', 'p', '__construct', 'q'] as $n) { $r = new ReflectionMethod('C', $n); var_dump($r->hasPrototype() ? $r->getPrototype()->class : null); }
-/// trait T { abstract function t(); function u() {} }
-/// class B { function t() {} }
-/// class D extends B { use T; }
-/// var_dump(array_map(fn ($m) => $m->class . "::" . $m->name, (new ReflectionClass('D'))->getMethods()));
-/// interface J { function q(); }
-/// class E extends P implements J { function a() {} }
-/// var_dump((new ReflectionMethod('E', 'q'))->getPrototype()->class, (new ReflectionMethod('P', 'q'))->hasPrototype());
+/// interface I { const IC = 1; } class P implements I { const PC = 2; private const PP = 3; } class C extends P { const CC = 4; }
+/// foreach (['C', 'RecursiveTreeIterator', 'DateTimeImmutable'] as $c) echo implode(', ', array_keys((new ReflectionClass($c))->getConstants())), "\n";
 /// ```
 /// ```expect
-/// string(1) "I"
-/// string(1) "P"
-/// NULL
-/// string(1) "I"
-/// NULL
-/// array(2) {
-///   [0]=>
-///   string(4) "D::u"
-///   [1]=>
-///   string(4) "B::t"
-/// }
-/// string(1) "J"
-/// bool(false)
+/// CC, PC, IC
+/// LEAVES_ONLY, SELF_FIRST, CHILD_FIRST, CATCH_GET_CHILD, BYPASS_CURRENT, BYPASS_KEY, PREFIX_LEFT, PREFIX_MID_HAS_NEXT, PREFIX_MID_LAST, PREFIX_END_HAS_NEXT, PREFIX_END_LAST, PREFIX_RIGHT
+/// ATOM, COOKIE, ISO8601, ISO8601_EXPANDED, RFC822, RFC850, RFC1036, RFC1123, RFC7231, RFC2822, RFC3339, RFC3339_EXTENDED, RSS, W3C
 /// ```
-fn row_prototype(req: &mut Request, row: MethodRow) -> Option<ClassId> {
-    prototype_at(req, row, 0)
-}
-
-/// [`row_prototype`] at `depth` of the walk up the parents and
-/// interfaces, cut at a depth no declaration can make.
-fn prototype_at(req: &mut Request, row: MethodRow, depth: u32) -> Option<ClassId> {
-    if depth > 64 {
-        return None;
-    }
-    let (class, scope) = (row.class(), row.scope());
-    let name = req.row_method(row)?.function.name.0.clone();
-    let parent = req
-        .class_decl(class)?
-        .parent
-        .clone()
-        .and_then(|parent| lookup_class(req, &parent.0).ok().flatten());
-    let above = parent.and_then(|parent| req.method_row(parent, &name));
-    let mut prototype = None;
-    // A row inherited from no parent was appended from the first of the
-    // class's interfaces declaring it, and keeps that one's prototype.
-    let mut appended = false;
-    match above {
-        Some(above) if scope != class => prototype = prototype_at(req, above, depth + 1),
-        Some(above) => prototype = prototype_over(req, above, depth),
-        None => appended = scope != class,
-    }
-    for interface in new_interfaces(req, class, parent) {
-        let Some(declared) = req.method_row(interface, &name) else {
-            continue;
-        };
-        if declared.scope() == scope {
-            // The same method in an interface may be inherited a few times.
-            if appended {
-                prototype = prototype_at(req, declared, depth + 1);
-                appended = false;
-            }
-            continue;
-        }
-        if let Some(set) = prototype_over(req, declared, depth) {
-            prototype = Some(set);
-        }
-    }
-    prototype
-}
-
-/// The interfaces `class` implements that `parent` does not, in
-/// [`linked_interfaces`]'s order: none, with nothing walked, for a
-/// class that names no interface and declares no `__toString`, which
-/// is what adds `Stringable`.
-fn new_interfaces(req: &mut Request, class: ClassId, parent: Option<ClassId>) -> Vec<ClassId> {
-    let names_one = req.class_decl(class).is_some_and(|decl| {
-        !decl.interfaces.is_empty()
-            || decl
-                .methods
-                .iter()
-                .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__toString"))
-    });
-    if !names_one {
-        return Vec::new();
-    }
-    let inherited = parent.map_or_else(Vec::new, |p| linked_interfaces(req, p));
-    let mut own = linked_interfaces(req, class);
-    own.retain(|interface| !inherited.contains(interface));
-    own
-}
-
-/// The prototype `do_inheritance_check_on_method` gives a method over
-/// `above`, the parent's or an interface's method of its name: the
-/// prototype `above` has, or `above`'s own scope; none where it gives
-/// none, `above` private and not abstract, or a constructor whose
-/// prototype is not abstract.
-fn prototype_over(req: &mut Request, above: MethodRow, depth: u32) -> Option<ClassId> {
-    let decl = req.row_method(above)?;
-    let (is_abstract, is_ctor) = (decl.is_abstract, is_constructor(decl));
-    if decl.visibility == Visibility::Private && !is_abstract && !is_ctor {
-        return None;
-    }
-    let inherited = prototype_at(req, above, depth + 1);
-    if is_ctor && inherited.is_none() && !is_abstract {
-        return None;
-    }
-    Some(inherited.unwrap_or(above.scope()))
-}
-
-/// `ce->interfaces` after linking, in php's order. An internal class
-/// that declares `__toString` has `Stringable` first, added by
-/// `zend_register_functions` before `zend_class_implements` runs; a
-/// user class has it last among its own, where the compiler appends
-/// it. A class with no interfaces of its own takes its parent's in
-/// reverse (`zend_do_inherit_interfaces` walks `if_num--`), which is
-/// why `JsonException` implements `Throwable, Stringable` where
-/// `Exception` implements `Stringable, Throwable`. An internal class
-/// with interfaces of its own appends each after the parent's, followed
-/// by that interface's own parents in reverse
-/// (`zend_do_implement_interface`); a user class appends its own first
-/// and their parents after all of them
-/// (`zend_do_implement_interfaces`).
-fn linked_interfaces(req: &mut Request, class: ClassId) -> Vec<ClassId> {
-    linked_interfaces_at(req, class, 0)
-}
-
-fn linked_interfaces_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<ClassId> {
-    // What the walk reads of the declaration, copied out of it rather
-    // than the declaration whole, which a prototype reads at every row.
-    let Some((internal, maybe_to_string, interfaces, parent)) = req.class_decl(class).map(|decl| {
-        (
-            decl.file.0.is_empty(),
-            decl.kind != ClassKind::Trait
-                && decl
-                    .methods
-                    .iter()
-                    .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__toString")),
-            decl.interfaces.clone(),
-            decl.parent.clone(),
-        )
-    }) else {
-        return Vec::new();
-    };
-    let mut list: Vec<ClassId> = Vec::new();
-    if depth > 64 {
-        return list;
-    }
-    let stringable = lookup_class(req, b"Stringable").ok().flatten();
-    let declares_to_string = maybe_to_string && stringable != Some(class);
-    let mut own: Vec<ClassId> = interfaces
-        .iter()
-        .filter_map(|name| lookup_class(req, &name.0).ok().flatten())
-        .collect();
-    if declares_to_string && let Some(stringable) = stringable {
-        if internal {
-            list.push(stringable);
-        } else if !own.contains(&stringable) {
-            own.push(stringable);
-        }
-    }
-    let parent = parent.and_then(|name| lookup_class(req, &name.0).ok().flatten());
-    let inherited = parent.map_or_else(Vec::new, |p| linked_interfaces_at(req, p, depth + 1));
-    let push = |list: &mut Vec<ClassId>, id: ClassId| {
-        if !list.contains(&id) {
-            list.push(id);
-        }
-    };
-    if internal {
-        for id in inherited.into_iter().rev() {
-            push(&mut list, id);
-        }
-        for interface in own {
-            push(&mut list, interface);
-            for id in linked_interfaces_at(req, interface, depth + 1)
-                .into_iter()
-                .rev()
-            {
-                push(&mut list, id);
-            }
-        }
-    } else if own.is_empty() {
-        for id in inherited.into_iter().rev() {
-            push(&mut list, id);
-        }
-    } else {
-        let mut added: Vec<ClassId> = Vec::new();
-        for id in inherited {
-            push(&mut list, id);
-        }
-        for interface in own {
-            if !list.contains(&interface) {
-                list.push(interface);
-                added.push(interface);
-            }
-        }
-        for interface in added {
-            for id in linked_interfaces_at(req, interface, depth + 1)
-                .into_iter()
-                .rev()
-            {
-                push(&mut list, id);
-            }
-        }
-    }
-    list
-}
-
-/// `ce->constants_table` after linking: the class's own constants, then
-/// the parent's that are not private and not overridden
-/// (`do_inherit_class_constant`), then each new interface's
-/// (`do_inherit_iface_constant`), each with the class that declared it.
-fn linked_constants(req: &mut Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)> {
-    linked_constants_at(req, class, 0)
-}
-
-fn linked_constants_at(
-    req: &mut Request,
-    class: ClassId,
-    depth: u32,
-) -> Vec<(ClassConstDecl, ClassId)> {
-    let Some(decl) = req.class_decl(class).cloned() else {
-        return Vec::new();
-    };
-    let own: Vec<(ClassConstDecl, ClassId)> =
-        decl.constants.iter().map(|c| (c.clone(), class)).collect();
-    // An internal class inherits before `zend_declare_class_constant_ex`
-    // adds its own, so the parent's come first; a user class compiles
-    // its own into the table first.
-    let internal = decl.file.0.is_empty();
-    let mut table: Vec<(ClassConstDecl, ClassId)> = if internal { Vec::new() } else { own.clone() };
-    if depth > 64 {
-        return own;
-    }
-    let parent = decl
-        .parent
-        .as_ref()
-        .and_then(|name| lookup_class(req, &name.0).ok().flatten());
-    let mut sources: Vec<ClassId> = parent.into_iter().collect();
-    let parent_interfaces = parent.map_or_else(Vec::new, |p| linked_interfaces(req, p));
-    sources.extend(
-        linked_interfaces(req, class)
-            .into_iter()
-            .filter(|i| !parent_interfaces.contains(i)),
-    );
-    for source in sources {
-        for (constant, declaring) in linked_constants_at(req, source, depth + 1) {
-            let present = table.iter().any(|(c, _)| c.name == constant.name)
-                || (internal && own.iter().any(|(c, _)| c.name == constant.name));
-            if !present && constant.visibility != Visibility::Private {
-                table.push((constant, declaring));
-            }
-        }
-    }
-    if internal {
-        table.extend(own);
-    }
-    table
+fn constant_rows(req: &Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)> {
+    req.constants_in_order(class)
+        .into_iter()
+        .map(|(declaring, constant)| (constant.clone(), declaring))
+        .collect()
 }
 
 /// `ce->properties_info` after linking: the class's own properties
@@ -7337,7 +7099,7 @@ impl ArgInfo {
 /// method of the same name when the method is `ce`'s own and the
 /// parent's is not private; `prototype` names the prototype's scope.
 fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> String {
-    let module = if method.via_handler {
+    let module = if method.via_handler() {
         None
     } else {
         req.class_extension_name(method.scope).map(str::to_owned)
@@ -7360,7 +7122,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
             words.push(format!("overwrites {}", String::from_utf8_lossy(&scope)));
         }
     }
-    if let Some(prototype) = method.row.and_then(|row| row_prototype(req, row)) {
+    if let Some(prototype) = method.row().and_then(|row| req.row_prototype(row)) {
         let scope = class_name_of(req, prototype);
         words.push(format!("prototype {}", String::from_utf8_lossy(&scope)));
     }
@@ -7375,7 +7137,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         Header::Method(&method.decl, &words),
         indent,
     );
-    let arg_info = if method.via_handler {
+    let arg_info = if method.via_handler() {
         ArgInfo::User
     } else {
         ArgInfo::of(&method.decl.function)

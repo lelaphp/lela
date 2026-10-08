@@ -212,7 +212,7 @@ pub fn select(
     sets: [&mut Vec<std::os::fd::RawFd>; 3],
     timeout: Option<std::time::Duration>,
 ) -> std::io::Result<usize> {
-    php_heap::select_fds(sets, timeout)
+    php_process::select_fds(sets, timeout)
 }
 
 /// Why [`Request::resolve_path`] found no file: the last attempt's

@@ -1,13 +1,16 @@
 //! The engine's hosts a lane runs a program through (ADR-0008, #1908),
-//! beside the pinned php's own (`oracle::Hosts`, `[sapi]` of the pin):
+//! beside the pinned php's own (`oracle::Sapi`, `[sapi]` of the pin):
 //! the one statement of each host's crate, the binary the phpt lane runs
 //! or finds beside the binary under test, as upstream's runner finds
 //! php-cgi, php-fpm and phpdbg beside `TEST_PHP_EXECUTABLE`, and which
 //! the witness lane serves a fence through as well (#2168). The phpt
-//! lane's lookups (`phpt::{cgi,fpm,phpdbg}`), the cargo line that
+//! lane's one lookup ([`EngineHost::for_run`]), the cargo line that
 //! rebuilds a stale binary, the witness lane's builds and what `xtask status --section
 //! corpus` hands CI to build all read [`HOSTS`], and none spells a host.
 
+use std::path::{Path, PathBuf};
+
+use super::Pin;
 use crate::layout;
 
 /// One host: the crate under `sapi/` that builds it, and its binary.
@@ -24,6 +27,22 @@ impl EngineHost {
     /// What cargo calls the crate's package, `php_sapi_cgi`.
     pub(crate) fn package(self) -> String {
         layout::package(self.krate)
+    }
+
+    /// The host of this kind a run hands a test to: the one `[sapi]` pins
+    /// where `binary` is the pinned php or the run is the control, and
+    /// otherwise the engine's own beside `binary`, which the lane's runner
+    /// held to the tree with it (`oracle::Runner::resolve`). `None` where
+    /// the pin names none or none is at its path, or none was built beside
+    /// `binary`, which upstream's runner answers with a skip
+    /// (run-tests.php:1894-1896, 1914; `php-fpm binary not found`).
+    pub(crate) fn for_run(self, pin: &Pin, binary: &Path, control: bool) -> Option<PathBuf> {
+        let host = if control || binary == pin.oracle.path {
+            pin.sapi.of(self).map(|pinned| pinned.path.clone())
+        } else {
+            Some(binary.with_file_name(self.binary))
+        };
+        host.filter(|path| path.is_file())
     }
 }
 
@@ -59,6 +78,28 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::oracle::{Host, Sapi};
+
+    /// Each kind reads its own row of `[sapi]`, and the CLI none.
+    #[test]
+    fn each_kind_reads_its_own_pinned_row() {
+        let row = |name: &str| {
+            Some(Host {
+                path: name.into(),
+                md5: String::new(),
+            })
+        };
+        let sapi = Sapi {
+            cgi: row("cgi"),
+            fpm: row("fpm"),
+            phpdbg: row("phpdbg"),
+        };
+        let read = |kind| sapi.of(kind).map(|host| host.path.display().to_string());
+        assert_eq!(read(CGI).as_deref(), Some("cgi"));
+        assert_eq!(read(FPM).as_deref(), Some("fpm"));
+        assert_eq!(read(PHPDBG).as_deref(), Some("phpdbg"));
+        assert_eq!(read(CLI), None);
+    }
 
     /// Each host is a crate of the workspace, and its package and its
     /// binary are what the crate's Cargo.toml declares. A

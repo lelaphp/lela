@@ -4,7 +4,7 @@
 use super::*;
 
 fn format(expected: &str) -> Expectation {
-    Expectation::Format(expected.to_owned())
+    Expectation::Format(expected.into())
 }
 
 fn exact(expected: &str) -> Expectation {
@@ -187,4 +187,17 @@ fn a_blank_line_is_the_first_only_where_nothing_else_differs() {
     let blank = Miss::of(&exact("a\nb"), b"a\n\nb");
     assert_eq!(blank.actual.as_deref(), Some(""));
     assert_eq!(blank.signature, Signature::Differs);
+}
+
+/// Lines are held as bytes, as the whole section is (#1937): replacement
+/// characters where the test expects Windows-1251 are the engine's own
+/// line, not a line the two share.
+#[test]
+fn a_line_is_held_to_its_bytes() {
+    let miss = Miss::of(
+        &Expectation::Format(b"%s: \xF2\xE5\nok".to_vec()),
+        "x: \u{fffd}\u{fffd}\nok".as_bytes(),
+    );
+    assert_eq!(miss.actual.as_deref(), Some("x: \u{fffd}\u{fffd}"));
+    assert_eq!(miss.expected.as_deref(), Some("%s: \u{fffd}\u{fffd}"));
 }

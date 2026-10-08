@@ -28,7 +28,7 @@
 //!   the `ext/*` dependency graph under its row's `order =
 //!   "registration"`, the one order #1778 ruled and api-check serves: the
 //!   order written is php's and free, and each extension's feature switches
-//!   on the features of every extension it links ([`bundle`]).
+//!   on the features of every extension it declares `Required` ([`bundle`]).
 //!
 //! An item lock's reading counts its lines by the module that defines each
 //! in its `groups`, a key per module, beside the total in `numbers` (#1795):
@@ -41,11 +41,11 @@
 //! `php_engine::api::__private` and so are that module's row; an import
 //! lock, sectioned or not, and a rendered lock keep no groups.
 //!
-//! An extension's `pub` items beyond `extension()` are printed in its
-//! reading and set against design §4.10's list of surfaces, the names a
-//! person wrote there ([`surfaces`]), as the manifest's
-//! `ext.pub-beyond-extension` says (#1781, #1826): an item on no row fails
-//! the reading, save one a filed ticket is to list, which is named with it.
+//! Design §4.10's list of surfaces is held at two places ([`surfaces`],
+//! #2251): an `ext/*` crate's library dependency on another fails its
+//! reading unless a row a person wrote names both, and an extension's
+//! `pub` items beyond `extension()` are its `surface.lock`, regenerated
+//! and diffed as an item lock is; `--write` rewrites those too.
 
 mod bundle;
 mod inventory;
@@ -127,9 +127,14 @@ pub(crate) fn measure(
     write: bool,
     standing: &Standing,
 ) -> Result<Vec<Reading>> {
-    let snapshot = Snapshot::disk(root)?;
     let crates = Crates::scan(manifest, root)?;
     let mut inventory = Inventory::new(&crates);
+    // Written before the snapshot, so each extension's reading is stamped
+    // over the lock it holds.
+    if write {
+        surfaces::write(&crates, &mut inventory)?;
+    }
+    let snapshot = Snapshot::disk(root)?;
     let surfaces = Surfaces::read(root)?;
     let mut readings = Vec::new();
     for seam in &manifest.seams {
@@ -332,10 +337,11 @@ fn seam_reading(
 /// wrong with the committed file, as messages. A block is diffed against
 /// the committed block of its name, a section's against its `[name]`
 /// marker's, and a committed line under a marker the manifest does not
-/// name stands in no section.
+/// name stands in no section. An extension's `surface.lock` is held here
+/// with no seam, as an item lock ([`surfaces`]).
 #[allow(clippy::too_many_arguments)]
-fn hold_lock(
-    seam: &Seam,
+fn hold_lock<'s>(
+    seam: impl Into<Option<&'s Seam>>,
     kind: LockKind,
     path: &Path,
     shown: &str,
@@ -355,6 +361,8 @@ fn hold_lock(
             "{shown} does not exist; `xtask api-check --write` regenerates it"
         )]);
     };
+    let seam: Option<&Seam> = seam.into();
+    let sections = seam.map_or(&[][..], |s| &s.sections[..]);
     let mut problems = Vec::new();
     for block in blocks {
         let (at, listed) = match &block.name {
@@ -376,7 +384,7 @@ fn hold_lock(
             ));
         }
         // An allowlist may name more than its consumer imports today.
-        if !diff.stale.is_empty() && !seam.allowlist {
+        if !diff.stale.is_empty() && !seam.is_some_and(|s| s.allowlist) {
             problems.push(format!(
                 "{} lines of {shown}{at} name no {}: {}",
                 diff.stale.len(),
@@ -385,7 +393,7 @@ fn hold_lock(
             ));
         }
     }
-    if !seam.sections.is_empty() {
+    if !sections.is_empty() {
         let astray: Vec<String> = committed
             .blocks
             .iter()
@@ -393,7 +401,7 @@ fn hold_lock(
             .flat_map(|b| b.as_written.clone())
             .collect();
         if !astray.is_empty() {
-            let names: Vec<&str> = seam.sections.iter().map(Section::name).collect();
+            let names: Vec<&str> = sections.iter().map(Section::name).collect();
             problems.push(format!(
                 "{} lines of {shown} stand in no section of {}: {}",
                 astray.len(),
@@ -612,20 +620,13 @@ fn crate_reading(
         }
     }
 
-    // What an extension exports beyond `extension()`, each item held to
-    // design §4.10's list of surfaces (`ext.pub-beyond-extension`, #1826).
-    if let Some(producer) = krate.name.strip_prefix("ext/") {
+    // An extension's links to others, each held to a row of design §4.10's
+    // list of surfaces, and its surface to its lock (#2251).
+    if krate.name.starts_with("ext/") {
         reading.rule = String::from("ext.pub-beyond-extension");
-        let beyond: Vec<String> = inventory
-            .public_items(krate)?
-            .into_iter()
-            .filter(|item| item != "extension")
-            .collect();
-        if !beyond.is_empty() {
-            let held = surfaces.hold(producer, &beyond);
-            problems.extend(held.problem);
-            notes.extend(held.notes);
-        }
+        let held = surfaces.hold(crates, inventory, krate)?;
+        problems.extend(held.problems);
+        notes.extend(held.notes);
     }
 
     if problems.is_empty() {

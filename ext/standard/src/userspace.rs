@@ -49,7 +49,7 @@
 
 use php_ext::abi::Raw;
 use php_ext::attr::{php_const, php_function};
-use php_ext::call::lookup_class;
+use php_ext::call::autoload;
 use php_ext::raising::{Thrown, arg_type_error};
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::PhpString;
@@ -169,6 +169,17 @@ pub(crate) mod constants {
 /// bool(false)
 /// string(78) "fopen(bare://x): Failed to open stream: "Bare::stream_open" is not implemented"
 /// ```
+///
+/// The class named is `zend_lookup_class`, which asks the autoloaders.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { echo "load $c\n"; if ($c === 'Lazy') { class Lazy { public $context; } } });
+/// var_dump(stream_wrapper_register('lazy', 'Lazy'));
+/// ```
+/// ```expect
+/// load Lazy
+/// bool(true)
+/// ```
 #[php_function(aliases(stream_register_wrapper))]
 fn stream_wrapper_register(
     req: &mut Request,
@@ -179,7 +190,7 @@ fn stream_wrapper_register(
     let protocol = protocol.as_bytes().to_vec();
     let name = class.as_bytes().to_vec();
     // `Z_PARAM_CLASS` looks the class up before `$flags` is held.
-    let Some(class) = lookup_class(req, &name)? else {
+    let Some(class) = autoload(req, &name)? else {
         let text = format!(
             "be a valid class name, {} given",
             String::from_utf8_lossy(&name)

@@ -3,7 +3,10 @@ name = "php_ext_session"
 version = "0.0.0"
 edition = "2024"
 
+# random is linked and declared nowhere, so the bundle's session feature
+# need not switch it on, as sqlite3's need not switch on pdo_sqlite (#1915).
 [dependencies]
+php_ext_random = { path = "../random" }
 php_ext_standard = { path = "../standard" }
 
 [lints]

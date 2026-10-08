@@ -1,0 +1,11 @@
+[package]
+name = "php_ext_spl"
+version = "0.0.0"
+edition = "2024"
+
+# On the design's `pcre` → `spl` row.
+[dependencies]
+php_ext_pcre = { path = "../pcre" }
+
+[lints]
+workspace = true

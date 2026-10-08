@@ -1,0 +1,15 @@
+[package]
+name = "php_ext_zip"
+version = "0.0.0"
+edition = "2024"
+
+# On no row of the design: the edge that fails.
+[dependencies]
+php_ext_pcre = { path = "../pcre" }
+
+# On no row either, and a dev-dependency links nothing, so it is not held.
+[dev-dependencies]
+php_ext_spl = { path = "../spl" }
+
+[lints]
+workspace = true

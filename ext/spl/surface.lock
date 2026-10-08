@@ -1,0 +1,12 @@
+# The pub items of ext/spl beyond extension(), its surface: design §4.10's rows hold its edges, this file its items, and `xtask api-check --write` rewrites it.
+directory::Filesystem
+directory::Other
+directory::Other::clone_other
+directory::Other::dtor
+directory::filesystem
+directory::info_class_of
+directory::other_mut
+directory::set_info_class
+directory::set_other
+directory::take_other
+iterator_apply
