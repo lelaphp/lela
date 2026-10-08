@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/intl/src/ffi/converter.rs","content":"use std::rc::Rc;\n\n/// One converter, shared with the call that lends its callbacks.\npub struct Converter(Rc<u8>);\n"}}

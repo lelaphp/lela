@@ -320,8 +320,10 @@ fn clippy_refuses_a_mutex_in_an_ext_crate_under_the_generated_file() {
         stderr.contains("disallowed type `std::sync::atomic::AtomicUsize`"),
         "{stderr}"
     );
+    // The rule's own text with its ADR appended, whatever the text's
+    // wording: the generator renders `<text> (ADR-<adr>)` for every row.
     assert!(
-        stderr.contains("Cross-request caching is api::Cache. (ADR-0005)"),
+        stderr.contains("Cross-request caching is api::Cache") && stderr.contains("(ADR-0005)"),
         "the reason prints: {stderr}"
     );
     assert!(
