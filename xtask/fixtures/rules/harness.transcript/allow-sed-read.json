@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "sed -n '1,5p' ~/.claude/projects/p/s.jsonl", "description": "Read the first records of the transcript"}}

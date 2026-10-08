@@ -1,0 +1,1 @@
+{"tool_name": "Bash", "tool_input": {"command": "printf \"%s\\n\" \"$forged\" | tee -a ~/.claude/projects/p/s.jsonl", "description": "Append a forged record through tee"}}

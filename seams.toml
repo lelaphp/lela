@@ -800,6 +800,26 @@ deny_pattern = '''(?x)
 text = "Harness configuration, the oracle pin and the divergence registry are edited by a person, through a shell as through Edit and Write."
 
 [[rule]]
+id = "harness.transcript"
+tool = "Bash"
+# A session's transcript under ~/.claude/projects, written by a shell line
+# in the shapes harness.self-shell reads (#2282, ruled 2026-10-08): a
+# redirection into one, `tee` naming one, `sed -i` or `perl -i` over one,
+# `cp`, `mv`, `ln` or `install` with one as the destination, `git apply`
+# or `patch` naming one; the path `~`-relative, `$HOME`'s or absolute.
+# permit reads the person's answers there (#2247); reading one is none
+# of these.
+deny_pattern = '''(?x)
+  [0-9&]?>>?\|?\s*['"]?(?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
+| \btee\b[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
+| \b(?:sed|perl)\b[^|;&\n]*\s(?:-[a-zA-Z]*i|--in-place)[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
+| \b(?:cp|mv|ln|install)\b[^|;&\n]*[\s'"](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/[^\s'"|;&)<>]*
+    ['"]?(?:\s+(?:-\S*|[0-9]*>&?\S*))*\s*(?:$|[|;&\n)])
+| \b(?:git\s+(?:-C\s+\S+\s+)?(?:apply|checkout|restore)|patch)\b[^|;&\n]*[\s'"=](?:~|\$\{?HOME\}?|/[^\s'"|;&)<>]*)/\.claude/projects/
+'''
+text = "A session's transcript is Claude Code's record of what the person said; no agent writes it."
+
+[[rule]]
 id = "divergence.reason"
 scope = "docs/divergence.toml"
 check = "divergence-reason"
