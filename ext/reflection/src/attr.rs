@@ -22,7 +22,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{attribute_object, autoload, eval_const_expr, eval_declared};
 use php_ext::coerce::value_name;
 use php_ext::decl::{Attribute, class_attribute_refusal, hook_attribute_refusal};
-use php_ext::raising::{Thrown, arg_value_error, throw, throw_chained, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, throw, throw_error, throw_error_chained};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, FreshString, Owner, PhpArray, PhpObject, PhpString};
 
@@ -650,6 +650,21 @@ impl ReflectionAttribute {
     /// load Boom
     /// Attribute class "Boom" not found / boom
     /// ```
+    ///
+    /// That refusal is `zend_throw_error` over what the autoloader threw,
+    /// so `zend_vspprintf`'s buffer stands across it, which php's peak
+    /// shows.
+    ///
+    /// ```php
+    /// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+    /// #[Boom] function f() {}
+    /// $a = (new ReflectionFunction('f'))->getAttributes()[0];
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// pk(function () use ($a) { try { $a->newInstance(); } catch (Error $e) {} });
+    /// ```
+    /// ```expect
+    /// 4856 32
+    /// ```
     fn newInstance(req: &mut Request, this: This<Self>) -> Result<Owner<PhpObject>, Thrown> {
         let kept = this_attribute(req, this.object())?;
         let written = String::from_utf8_lossy(&kept.attribute.name.0).into_owned();
@@ -665,7 +680,7 @@ impl ReflectionAttribute {
             }
             Err(thrown) => {
                 let message = format!("Attribute class \"{written}\" not found");
-                return Err(throw_chained(req, thrown, "Error", &message));
+                return Err(throw_error_chained(req, thrown, "Error", &message));
             }
         };
         let flags = marker_flags(req, class, &written)?;
