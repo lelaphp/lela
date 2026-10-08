@@ -7,7 +7,7 @@
 # the run uploads, and the permits section is the summary. A ticket is closed by
 # the session that worked it, through `xtask ticket close`, the instrument
 # that reads its acceptance criteria; CI closes none (#290; CONTEXT.md,
-# Ticket).
+# Ticket). A red main is filed, once, by the last job (#1156).
 #
 # Every job runs on one of two self-hosted runners, as Mitchell ruled on
 # 2026-10-07 (#2218, #2253), set up by scripts/ci/runner.sh and registered
@@ -191,6 +191,8 @@ jobs:
     # Run whatever the two found, so its list names every unmet condition.
     if: ${{ !cancelled() }}
     runs-on: [self-hosted, linux, dax-build]
+    outputs:
+      unmet: ${{ steps.unmet.outputs.unmet }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -214,10 +216,16 @@ jobs:
         run: |
           # shellcheck disable=SC1010 # `done` is xtask's instrument, not the loop's keyword
           if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            cargo xtask done --base "$GITHUB_BASE_REF"
+            cargo xtask done --base "$GITHUB_BASE_REF" 2>&1 | tee "$RUNNER_TEMP/done.txt"
           else
-            cargo xtask done
+            cargo xtask done 2>&1 | tee "$RUNNER_TEMP/done.txt"
           fi
+      # The unmet lines, which a red main's ticket quotes (#1156).
+      - name: done's list, for the red-main job
+        id: unmet
+        if: always()
+        run: |
+          { echo 'unmet<<UNMET'; tail -n 40 "$RUNNER_TEMP/done.txt" 2>/dev/null || true; echo UNMET; } >> "$GITHUB_OUTPUT"
       - name: the summary
         if: always()
         run: |
@@ -232,3 +240,29 @@ jobs:
           path: target/harness
           if-no-files-found: warn
 
+  # A red main filed (#1156, adopted on #1151): on a push to main alone, the
+  # run's verdict and the one before it decide. Two red runs in a row file
+  # one `ci:red-main` ticket; a third comments on it; a green run comments
+  # that main is green again and leaves the ticket for its builder to close
+  # through `xtask ticket close`. scripts/ci/red-main.sh says how, and
+  # `DRY_RUN=1` prints what it would write.
+  red-main:
+    name: a red main, filed
+    needs: [regions, per-commit, oracle, done]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, linux, dax-build]
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - name: two red runs in a row, one ticket
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RED: ${{ contains(needs.*.result, 'failure') }}
+          UNMET: ${{ needs.done.outputs.unmet }}
+        run: scripts/ci/red-main.sh
