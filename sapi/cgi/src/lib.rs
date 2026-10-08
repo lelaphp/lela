@@ -523,7 +523,7 @@ fn describe(
     // The body, `sapi_cgi_read_post`'s stdin up to `CONTENT_LENGTH`, where
     // stdin is not the program.
     let mut body = Vec::new();
-    if info.content_length > 0 && !matches!(primary, Primary::Stdin(_)) {
+    if info.content_length > 0 && !matches!(primary, Primary::Stdin) {
         let length = u64::try_from(info.content_length).unwrap_or(0);
         std::io::stdin()
             .lock()
@@ -541,7 +541,11 @@ fn describe(
     let (script_name, source) = match &primary {
         Primary::Info(path) => (path.clone(), Some(b"<?php phpinfo();".to_vec())),
         Primary::Path(path) => (path.clone(), None),
-        Primary::Stdin(source) => (Some(b"Standard input code".to_vec()), Some(source.clone())),
+        Primary::Stdin => {
+            let mut source = Vec::new();
+            std::io::stdin().lock().read_to_end(&mut source).ok();
+            (Some(b"Standard input code".to_vec()), Some(source))
+        }
     };
     Ok((
         RequestDescription {
@@ -595,8 +599,9 @@ enum Primary {
     /// The file `php_fopen_primary_script` opens once the request has
     /// started; a server's request with no path translated has none.
     Path(Option<Vec<u8>>),
-    /// Stdin, read whole, where a shell named no file.
-    Stdin(Vec<u8>),
+    /// Stdin, read whole as the request's source, where a shell named
+    /// no file.
+    Stdin,
 }
 
 impl Primary {
@@ -607,11 +612,7 @@ impl Primary {
             return Primary::Info(path);
         }
         match (path, invocation.origin) {
-            (None, Origin::Shell) => {
-                let mut source = Vec::new();
-                std::io::stdin().lock().read_to_end(&mut source).ok();
-                Primary::Stdin(source)
-            }
+            (None, Origin::Shell) => Primary::Stdin,
             (path, _) => Primary::Path(path),
         }
     }
