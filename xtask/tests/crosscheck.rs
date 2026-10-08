@@ -133,6 +133,12 @@ fn count(reading: &Reading, key: &str) -> i64 {
 /// the harness's own suite green. Raising it is one line beside such a
 /// commit and nothing forces it; a scope in it that stops passing is the
 /// regression this test is here for.
+///
+/// It rises onto one of the six extensions whose columns differ between
+/// the keg and a Linux build (`ext/standard`, `ext/pcre`, `ext/pdo`,
+/// `ext/pdo_sqlite`, `ext/dom`, `ext/iconv`) only under #635's ruling
+/// (harness-design.md §7, revision 102): when the engine renders the
+/// pinned keg's bytes, with no library version or driver list normalised.
 const FLOOR: [&str; 9] = [
     "ext/ctype",
     "ext/ctype/ri",
