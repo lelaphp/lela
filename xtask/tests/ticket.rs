@@ -75,6 +75,20 @@ impl Recorded {
     /// An issue that already blocks the numbered ones at the tracker, as
     /// `gh issue view --json blocking` nests them, each open.
     fn blocking(&self, number: u64, state: &str, body: &str, labels: &[&str], blocking: &[u64]) {
+        self.laid(number, state, body, labels, blocking, &[]);
+    }
+
+    /// Any issue: the ones it blocks, each open, and those blocking it,
+    /// each in the state given.
+    fn laid(
+        &self,
+        number: u64,
+        state: &str,
+        body: &str,
+        labels: &[&str],
+        blocking: &[u64],
+        blocked_by: &[(u64, &str)],
+    ) {
         let issue = serde_json::json!({
             "number": number,
             "title": format!("ticket {number}"),
@@ -83,12 +97,20 @@ impl Recorded {
             "url": format!("https://example.invalid/issues/{number}"),
             "labels": labels.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
             "blocking": {"nodes": blocking.iter().map(|n| serde_json::json!({"number": n, "state": "OPEN"})).collect::<Vec<_>>()},
+            "blockedBy": {"nodes": blocked_by.iter().map(|(n, state)| serde_json::json!({"number": n, "state": state})).collect::<Vec<_>>()},
         });
         fs::write(
             self.dir.join(format!("issues/{number}.json")),
             issue.to_string(),
         )
         .unwrap();
+    }
+
+    /// An open issue with `body` blocked at the tracker by the numbered
+    /// ones, each in the state given, as `gh issue view --json blockedBy`
+    /// nests them.
+    fn blocked(&self, number: u64, body: &str, blockers: &[(u64, &str)]) {
+        self.laid(number, "OPEN", body, &[], &[], blockers);
     }
 
     /// A chart sheet as the tracker answers it: an issue holding `total`
@@ -520,6 +542,80 @@ fn a_merge_into_main_closes_every_ready_ticket_its_subject_names() {
     assert_eq!(closed.status, Status::Pass, "{}", closed.message);
     store.record(&[closed]).unwrap();
     assert!(stranded(&root, &store, &head).unwrap().is_empty());
+}
+
+/// A merge that lands part of a ticket (#2394): the ticket it names with
+/// no ready record has a box unticked and stands blocked by an open one,
+/// as the build skill leaves a ticket whose last box waits on another, so
+/// the merge skips its close, says it is left open and what holds it,
+/// closes nothing, and `done` does not name it. A ticket named with no
+/// record whose blockers are all closed, and one every box of which is
+/// ticked, are still the merge's refusal, named by `done` as before.
+#[test]
+fn a_merge_landing_part_of_a_blocked_ticket_leaves_it_open_and_done_does_not_name_it() {
+    let root = repository("ticket-partial");
+    git(&root, &["checkout", "-q", "-b", "t13"]);
+    git(&root, &["commit", "-q", "--allow-empty", "-m", "part"]);
+    git(&root, &["checkout", "-q", "main"]);
+    git(
+        &root,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t13",
+            "-m",
+            "Merge t13: part of the port (#13, #15, #17)",
+        ],
+    );
+    let recorded = Recorded::lay("partial");
+    recorded.blocked(13, UNTICKED, &[(14, "OPEN"), (16, "CLOSED")]);
+    recorded.blocked(15, UNTICKED, &[(16, "CLOSED")]);
+    recorded.blocked(17, TICKED, &[(14, "OPEN")]);
+    let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    let verdicts: Vec<(&str, Status)> = readings
+        .iter()
+        .map(|r| (r.scope.as_str(), r.status))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            ("13", Status::Skip),
+            ("15", Status::Fail),
+            ("17", Status::Fail)
+        ],
+        "{readings:#?}"
+    );
+    assert!(
+        readings[0].message.contains("waits on #14;")
+            && readings[0].message.contains("left open")
+            && !readings[0].message.contains("#16"),
+        "{}",
+        readings[0].message
+    );
+    let parent = git(&root, &["rev-parse", "--short", "HEAD^1"]);
+    assert!(
+        readings[1]
+            .message
+            .contains("#15 is named by a merge into main and no branch has a ready record of it")
+            && readings[1]
+                .message
+                .contains(&format!("xtask ticket merged --since {parent}")),
+        "{}",
+        readings[1].message
+    );
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+
+    let dir = Tree::new("ticket-partial-store").unwrap();
+    let store = Store::at(dir.to_path_buf());
+    store.record(&readings).unwrap();
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let unmet = stranded(&root, &store, &head).unwrap();
+    assert_eq!(unmet.len(), 2, "{unmet:?}");
+    assert!(
+        unmet[0].contains("#15 is named") && unmet[1].contains("#17 is named"),
+        "{unmet:?}"
+    );
 }
 
 /// Where a close's commit stands against `main` (#2249): `main`'s own

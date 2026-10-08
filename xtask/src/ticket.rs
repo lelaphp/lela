@@ -181,8 +181,8 @@ use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status};
 use crate::steer::STEERABLE;
-use crate::track::{MAIN, Ticket, Track};
-use crate::track_next::{READY, TRACK_LABEL, tracks_of};
+use crate::track::{MAIN, Records, Ticket, Track};
+use crate::track_next::{READY, TRACK_LABEL, tracks_of, waits};
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -891,6 +891,10 @@ pub struct Issue {
     /// tracker has is not set again, since it refuses a second one.
     #[serde(default)]
     pub blocking: BlockedBy,
+    /// The tickets blocking this one, which a merge naming it with no
+    /// ready record reads as a partial landing while one is open (#2394).
+    #[serde(default, rename = "blockedBy")]
+    pub blocked_by: BlockedBy,
     /// How many sub-issues stand under it, which a chart sheet is held to
     /// [`CAP`] by (#448); zero for an issue the tracker answered before
     /// the field was asked for.
@@ -1000,7 +1004,7 @@ impl Gh {
                 "view",
                 &number,
                 "--json",
-                "number,title,body,state,url,labels,blocking,subIssuesSummary",
+                "number,title,body,state,url,labels,blocking,blockedBy,subIssuesSummary",
             ],
         )
         .with_context(|| format!("{ticket} could not be read from the tracker"))?;
@@ -1396,48 +1400,93 @@ fn counted(
 /// lands (#2270, #2311): the hook on a merge commit, and on a fast-forward
 /// of `main`, calls this. An open ticket a subject names as `#n` is
 /// closed through [`run`] with the successors its ready record names,
-/// whichever branch wrote it (#2358); one with no ready record fails,
-/// named, and the merge stands, and `done` names it ([`stranded`]). A
-/// ticket closed already, and a number the tracker answers no issue for,
-/// is passed over. Off `main` nothing is closed: the fast-forward that
-/// brings the merge there calls this again.
+/// whichever branch wrote it (#2358). Those with no ready record are read
+/// after every close, so a blocker the same merge closes holds nothing,
+/// and each is left open as [`left_open`] says. A ticket closed already,
+/// and a number the tracker answers no issue for, is passed over. Off
+/// `main` nothing is closed: the fast-forward that brings the merge there
+/// calls this again.
 pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<Vec<Reading>> {
     if Reach::of(root)? != Reach::Landed {
         return Ok(Vec::new());
     }
+    let open = |ticket| {
+        gh.view(root, ticket)
+            .ok()
+            .filter(|issue| issue.state == State::Open)
+    };
     let mut readings = Vec::new();
+    let mut unready = Vec::new();
     for ticket in named_by_merges(root, &format!("{since}..HEAD"))? {
-        let Ok(issue) = gh.view(root, ticket) else {
-            continue;
-        };
-        if issue.state == State::Closed {
+        if open(ticket).is_none() {
             continue;
         }
-        let Some(successors) = record_of(root, ticket)? else {
-            let mut unready = Reading::stamped_over(
-                INSTRUMENT,
-                &scope(ticket),
-                &Snapshot::disk(root)?,
-                Path::new(STAMPED_OVER),
-            )?;
-            unready.status = Status::Fail;
-            unready.count(UNREADY, 1)?;
-            unready.message = format!(
-                "{ticket} is named by a merge into main and no branch has a ready record of it; not closed: close it with `xtask ticket close {}` naming what it opened",
-                ticket.number()
-            );
-            readings.push(unready);
-            continue;
-        };
-        let act = Act::Close(Verdict::Done, successors, Reach::Landed);
-        readings.push(run(root, manifest, gh, act, ticket, None)?);
+        match record_of(root, ticket)? {
+            Some(successors) => {
+                let act = Act::Close(Verdict::Done, successors, Reach::Landed);
+                readings.push(run(root, manifest, gh, act, ticket, None)?);
+            }
+            None => unready.push(ticket),
+        }
+    }
+    if unready.is_empty() {
+        return Ok(readings);
+    }
+    // The commit `since` names now, for a message read after `HEAD` moves.
+    let parent = crate::git::git(root, &["rev-parse", "--short", since], None)?;
+    let records = Records::read(root)?;
+    for issue in unready.into_iter().filter_map(open) {
+        readings.push(left_open(root, &issue, &records, parent.trim())?);
     }
     Ok(readings)
+}
+
+/// The reading of a ticket a merge names with no ready record, which it
+/// leaves open. It is a partial landing (#2394) while a box stands
+/// unticked and something still blocks it as the frontier reads a
+/// blocker ([`waits`]): the build skill leaves a ticket
+/// whose last box waits on another open and wires that one on, so the
+/// reading skips the close, saying so and what holds it. Otherwise it
+/// fails, named, the merge stands, and `done` names it ([`stranded`])
+/// until a close, or [`merged`] run again once the blocker is wired,
+/// replaces it.
+fn left_open(root: &Path, issue: &Issue, records: &Records, parent: &str) -> Result<Reading> {
+    let ticket = Ticket::new(issue.number);
+    let mut left = Reading::stamped_over(
+        INSTRUMENT,
+        &scope(ticket),
+        &Snapshot::disk(root)?,
+        Path::new(STAMPED_OVER),
+    )?;
+    let blockers: Vec<String> = waits(&issue.blocked_by, records)
+        .map(|wait| Ticket::new(wait.number()).to_string())
+        .collect();
+    if blockers.is_empty() || Criteria::parse(&issue.body).unticked.is_empty() {
+        left.status = Status::Fail;
+        left.count(UNREADY, 1)?;
+        left.message = format!(
+            "{ticket} is named by a merge into main and no branch has a ready record of it; not closed: close it with `xtask ticket close {n}` naming what it opened, or, where the merge lands part of it and a box waits on another ticket, wire that one on with `gh issue edit <blocker> --add-blocking {n}` and run `xtask ticket merged --since {parent}` on main again",
+            n = ticket.number()
+        );
+    } else {
+        left.status = Status::Skip;
+        left.count(PARTIAL, 1)?;
+        left.message = format!(
+            "{ticket} is named by a merge into main with no ready record, a box unticked, and waits on {}; the merge lands part of it, left open",
+            blockers.join(", ")
+        );
+    }
+    Ok(left)
 }
 
 /// The number a reading of [`merged`] counts for a ticket the merge named
 /// and left open for want of a ready record, which [`stranded`] reads.
 const UNREADY: &str = "unready";
+
+/// The number a reading of [`merged`] counts for a ticket the merge
+/// landed part of: named, with no ready record, and blocked by an open
+/// ticket (#2394).
+const PARTIAL: &str = "partial";
 
 /// The tickets the subjects of the merge commits of `range` name as `#n`,
 /// each once, in the order named.
