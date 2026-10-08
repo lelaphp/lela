@@ -10326,6 +10326,27 @@ fn non_static_method_call(req: &mut Request, function: Function) -> Thrown {
     )
 }
 
+/// The opline a handler that is two oplines stands at, and the
+/// `OP_DATA` after it that carries its value (`OP_DATA` in php's
+/// `zend_vm_def.h`, read with `opline + 1`).
+fn data_after(
+    req: &Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Result<(u32, Opline), Fatal> {
+    let at = req.vm().opline(frame);
+    exec::opline_at(code, at.saturating_add(1))
+        .filter(|next| next.opcode == Opcode::OpData)
+        .map(|data| (at, *data))
+        .ok_or_else(|| {
+            Fatal::Error(format!(
+                "InternalError: {} with no OP_DATA after it",
+                op.opcode.name()
+            ))
+        })
+}
+
 /// The `Threw` edge: the throwable left pending where the loop reads it.
 fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Edge {
     req.leave_pending(thrown);
@@ -10678,12 +10699,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1)) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_FRAMELESS_ICALL_3 with no OP_DATA after it",
-        )));
-    };
+    let (_, data) = data_after(req, frame, code, op)?;
     frameless_call(
         req,
         frame,
@@ -11293,14 +11309,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OBJ_REF with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let mut member = exec::Member::default();
     let found = property_place(req, frame, code, op, PropertyRead::Silent, &mut member);
@@ -11619,14 +11628,7 @@ pub(crate) fn assign_obj<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1))
-        .filter(|next| next.opcode == php_unit::Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OBJ with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     // A CV is read through its slot after the value, as php reads
     // `object` after `GET_OP_DATA_ZVAL_PTR`: an undefined value's
     // handler may have replaced it.
@@ -12000,14 +12002,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1))
-        .filter(|next| next.opcode == php_unit::Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let scope = req.executed_scope();
     let (addressed, name) = match static_member(req, frame, code, op) {
@@ -12275,14 +12270,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             op.extended_value
         )));
     };
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_OP with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let placed = match static_place(req, frame, code, op) {
         Ok(placed) => placed,
@@ -12708,14 +12696,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_STATIC_PROP_REF with no OP_DATA after it",
-        )));
-    };
+    let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let placed = match static_place(req, frame, code, op) {
         Ok(placed) => placed,
@@ -13104,15 +13085,7 @@ pub(crate) fn assign_dim<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    let Some(data) = exec::opline_at(code, at.saturating_add(1))
-        .filter(|next| next.opcode == php_unit::Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_DIM with no OP_DATA after it",
-        )));
-    };
-    let data = *data;
+    let (at, data) = data_after(req, frame, code, op)?;
     let Some(place) = write_place(req, frame, code, op.op1_type, op.op1) else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_ASSIGN_DIM over a constant or a temporary, which php compiles no write over",
@@ -13577,15 +13550,7 @@ pub(crate) fn assign_dim_op<T: Tier>(
             op.extended_value
         )));
     };
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_DIM_OP with no OP_DATA after it",
-        )));
-    };
-    let data = *data;
+    let (at, data) = data_after(req, frame, code, op)?;
     let step = Compound {
         op,
         data,
@@ -13968,15 +13933,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
             op.extended_value
         )));
     };
-    let at = req.vm().opline(frame);
-    let Some(data) =
-        exec::opline_at(code, at.saturating_add(1)).filter(|next| next.opcode == Opcode::OpData)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: ZEND_ASSIGN_OBJ_OP with no OP_DATA after it",
-        )));
-    };
-    let data = *data;
+    let (at, data) = data_after(req, frame, code, op)?;
     // The name, and then an undefined CV's warning, before the container
     // is read, whose handler may have replaced it
     // (`Z/Zend/zend_vm_def.h:1023-1026`).
