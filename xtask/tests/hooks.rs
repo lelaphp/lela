@@ -124,9 +124,14 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
         ),
     );
     // The committer's Claude Code and npm, as the declarations step finds
-    // them: `claude -p "/plugin-types <dir>"` writes the header line the
-    // real one writes and records where and under what it ran; `plugin
-    // validate` and `npx` record the call alone.
+    // them. Each `claude` call is recorded with every argument bracketed,
+    // so an empty one shows, and where and under what it ran. `auth
+    // status` answers as the real one does, 0 logged in and 1 not, the
+    // second while a test has written `logged-out`; `-p` extracts the
+    // plugin-authoring skill's files under `CLAUDE_CODE_TMPDIR` as the
+    // real one does when the skill is invoked, the declarations with the
+    // header line the real one writes, unless a test has written
+    // `writes-nothing`; `plugin validate` and `npx` record the call alone.
     let plugin_bin = dir.join("plugin-bin");
     fs::create_dir_all(&plugin_bin).unwrap();
     let log = dir.join("plugin.log");
@@ -134,10 +139,13 @@ fn scratch(name: &str, computed: &Computed) -> Scratch {
         &plugin_bin.join("claude"),
         &format!(
             "#!/bin/sh\n\
-             printf 'claude %s cwd=%s home=%s config=%s gate=%s\\n' \"$*\" \"$PWD\" \"$HOME\" \"${{CLAUDE_CONFIG_DIR:-}}\" \"${{CLAUDE_CODE_ENABLE_FUNCTION_HOOKS:-}}\" >> '{log}'\n\
-             if [ \"$1\" = -p ]; then dir=\"${{2#/plugin-types }}\"; mkdir -p \"$dir\"; printf '// Written by Claude Code 9.9.9.\\n' > \"$dir/claude-code.d.ts\"; fi\n\
+             {{ printf 'claude '; for a in \"$@\"; do printf '[%s]' \"$a\"; done; printf ' cwd=%s home=%s config=%s gate=%s cmux=%s tmp=%s\\n' \"$PWD\" \"$HOME\" \"${{CLAUDE_CONFIG_DIR:-}}\" \"${{CLAUDE_CODE_ENABLE_FUNCTION_HOOKS:-}}\" \"${{CMUX_CLAUDE_HOOKS_DISABLED:-}}\" \"${{CLAUDE_CODE_TMPDIR:-}}\"; }} >> '{log}'\n\
+             if [ \"$1 $2\" = 'auth status' ]; then [ -f '{logged_out}' ] && exit 1; exit 0; fi\n\
+             if [ \"$1\" = -p ] && [ ! -f '{writes_nothing}' ]; then dir=\"$CLAUDE_CODE_TMPDIR/claude-$(id -u)/bundled-skills/9.9.9/0123abcd/plugin-authoring/types\"; mkdir -p \"$dir\"; printf '// Written by Claude Code 9.9.9.\\n' > \"$dir/claude-code.d.ts\"; echo ok; fi\n\
              exit 0\n",
             log = log.display(),
+            logged_out = dir.join("logged-out").display(),
+            writes_nothing = dir.join("writes-nothing").display(),
         ),
     );
     executable(
@@ -236,6 +244,17 @@ impl Scratch {
         fs::write(self.dir.join("refuse"), call).unwrap();
     }
 
+    /// The stand-in `claude` answers `auth status` as one not logged in.
+    fn log_out(&self) {
+        fs::write(self.dir.join("logged-out"), "").unwrap();
+    }
+
+    /// The stand-in `claude -p` runs and extracts nothing, as a build
+    /// whose plugin-authoring skill carries no declarations would.
+    fn write_no_declarations(&self) {
+        fs::write(self.dir.join("writes-nothing"), "").unwrap();
+    }
+
     /// A change under the plugin, staged, and the commit through the hook
     /// by pathspec, the shape AGENTS.md asks for, so the test holds that
     /// what the hook stages reaches such a commit.
@@ -244,6 +263,20 @@ impl Scratch {
         write(&self.root, path, "export const register = () => {};\n");
         self.git(&["add", "--", path], false);
         self.run(&["commit", "-q", "-m", "the module", "--", path], true)
+    }
+
+    /// A change to the module and a hand-written declaration file, both
+    /// staged, and the commit through the hook by pathspec.
+    fn stage_declarations_and_commit(&self) -> (i32, String) {
+        let module = "harness-plugins/hooks/harness.ts";
+        let types = "harness-plugins/types/claude-code.d.ts";
+        write(&self.root, module, "export const register = () => {};\n");
+        write(&self.root, types, "// Written by hand.\n");
+        self.git(&["add", "--", module, types], false);
+        self.run(
+            &["commit", "-q", "-m", "the module", "--", module, types],
+            true,
+        )
     }
 
     /// A change under the crate, staged, and the commit through the hook.
@@ -336,15 +369,28 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
     );
 }
 
-/// The declarations step (#62): with a path under `harness-plugins/`
-/// staged, the committer's own Claude Code rewrites the tracked
-/// declaration file, `claude -p "/plugin-types <root>/harness-plugins/types"`
-/// with the variable that gates the command set, from a directory outside
-/// the clone with `HOME` and `CLAUDE_CONFIG_DIR` pointing at empty ones,
-/// so no settings, plugin or hook of the clone or the committer load;
-/// then `tsc` through the pinned `npx`, then `plugin validate --strict`,
-/// then `plugin test` (#2247); what was written is re-staged, so the commit, by pathspec, carries the
-/// file whose header names the version.
+/// The fields a stand-in `claude` call recorded after its arguments.
+fn fields(call: &str) -> std::collections::BTreeMap<&str, &str> {
+    let at = call.find(" cwd=").unwrap_or_else(|| panic!("{call}"));
+    call[at + 1..]
+        .split(' ')
+        .filter_map(|field| field.split_once('='))
+        .collect()
+}
+
+/// The declarations step (#62, #1736): with a path under
+/// `harness-plugins/` staged, the committer's own Claude Code rewrites the
+/// tracked declaration file. `claude auth status` first, then one `-p`
+/// that invokes the plugin-authoring skill, whose files the build extracts
+/// under `CLAUDE_CODE_TMPDIR`, and its `types/claude-code.d.ts` is what is
+/// copied in. It runs from a directory outside the clone under the
+/// committer's own `HOME` and `CLAUDE_CONFIG_DIR`, where the login is, and
+/// loads none of their settings sources, MCP servers or tools, nor the
+/// hooks a launcher would add, with the variable that gates function
+/// hooks; then `tsc` through the pinned `npx`, then `plugin validate
+/// --strict`, then `plugin test` (#2247); what was written is re-staged,
+/// so the commit, by pathspec, carries the file whose header names the
+/// version.
 #[test]
 fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
     let scratch = scratch("declarations", &Computed::Rendered);
@@ -352,47 +398,64 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
     let (code, out) = scratch.stage_plugin_and_commit();
     assert_eq!(code, 0, "{out}");
     assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
+    assert!(!out.contains("pre-commit: claude"), "{out}");
 
-    let root = scratch.root.display();
+    let root = scratch.root.display().to_string();
     let calls = scratch.calls("plugin");
-    assert_eq!(calls.len(), 4, "{calls:?}");
-    let types = &calls[0];
-    let prefix = format!("claude -p /plugin-types {root}/harness-plugins/types cwd=");
-    assert!(types.starts_with(&prefix), "{types}");
-    let mut fields = types[prefix.len()..].split(' ');
-    let cwd = fields.next().unwrap();
-    let home = fields.next().unwrap().strip_prefix("home=").unwrap();
-    let config = fields.next().unwrap().strip_prefix("config=").unwrap();
-    assert_eq!(fields.next(), Some("gate=1"), "{types}");
-    for (name, dir) in [("cwd", cwd), ("HOME", home), ("CLAUDE_CONFIG_DIR", config)] {
+    assert_eq!(calls.len(), 5, "{calls:?}");
+    assert!(
+        calls[0].starts_with("claude [auth][status] "),
+        "{}",
+        calls[0]
+    );
+    let types = &calls[1];
+    assert!(
+        types.starts_with(
+            "claude [-p][--setting-sources][][--strict-mcp-config][--tools][]\
+             [--model][haiku][--no-session-persistence][/plugin-authoring "
+        ),
+        "{types}"
+    );
+    let at = fields(types);
+    assert_eq!(at["gate"], "1", "{types}");
+    assert_eq!(at["cmux"], "1", "{types}");
+    assert_eq!(
+        Some(at["home"].to_owned()),
+        std::env::var("HOME").ok(),
+        "HOME is the committer's own: {types}"
+    );
+    assert_eq!(
+        at["config"],
+        std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_default(),
+        "CLAUDE_CONFIG_DIR is the committer's own: {types}"
+    );
+    for name in ["cwd", "tmp"] {
+        let dir = at[name];
         assert!(!dir.is_empty(), "{name} is empty: {types}");
         assert!(
-            !dir.starts_with(&format!("{root}/")) && dir != root.to_string(),
+            !dir.starts_with(&format!("{root}/")) && dir != root,
             "{name} is inside the clone: {types}"
-        );
-        assert_ne!(
-            Some(dir.to_owned()),
-            std::env::var("HOME").ok(),
-            "{name} is the committer's own: {types}"
         );
     }
     assert_eq!(
-        calls[1],
+        calls[2],
         "npx -y -p typescript@5.9.3 tsc -p harness-plugins"
     );
     // The validate and the tests run in the clone, under the committer's
     // own environment.
     assert!(
-        calls[2].starts_with(&format!(
-            "claude plugin validate harness-plugins --strict cwd={root} "
+        calls[3].starts_with(&format!(
+            "claude [plugin][validate][harness-plugins][--strict] cwd={root} "
         )),
         "{}",
-        calls[2]
+        calls[3]
     );
     assert!(
-        calls[3].starts_with(&format!("claude plugin test harness-plugins cwd={root} ")),
+        calls[4].starts_with(&format!(
+            "claude [plugin][test][harness-plugins] cwd={root} "
+        )),
         "{}",
-        calls[3]
+        calls[4]
     );
 
     let committed = scratch.git(&["show", "--name-only", "--format=", "HEAD"], false);
@@ -432,6 +495,98 @@ fn pre_commit_without_claude_skips_the_declarations_by_name_and_allows_the_commi
     );
     assert!(out.contains("harness-plugins/types"), "{out}");
     assert_eq!(scratch.calls("plugin"), Vec::<String>::new());
+    let committed = scratch.git(&["show", "--name-only", "--format=", "HEAD"], false);
+    assert!(!committed.contains("harness-plugins/types"), "{committed}");
+}
+
+/// A `claude` that is not logged in writes no declarations, and says so
+/// by name (#1736): no `-p` runs, the commit stages no declaration, so it
+/// is allowed, and `tsc`, `plugin validate` and `plugin test` still hold
+/// the module to the committed file.
+#[test]
+fn pre_commit_not_logged_in_skips_the_declarations_by_name_and_allows_the_commit() {
+    let scratch = scratch("logged-out", &Computed::Rendered);
+    scratch.log_out();
+    let before = scratch.head();
+    let (code, out) = scratch.stage_plugin_and_commit();
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
+    assert!(
+        out.contains("pre-commit: claude is not logged in (`claude auth status`)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("harness-plugins/types was not rewritten"),
+        "{out}"
+    );
+    let calls = scratch.calls("plugin");
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert!(
+        calls[0].starts_with("claude [auth][status] "),
+        "{}",
+        calls[0]
+    );
+    assert_eq!(
+        calls[1],
+        "npx -y -p typescript@5.9.3 tsc -p harness-plugins"
+    );
+    assert!(
+        calls[2].starts_with("claude [plugin][validate]"),
+        "{}",
+        calls[2]
+    );
+    assert!(
+        calls[3].starts_with("claude [plugin][test]"),
+        "{}",
+        calls[3]
+    );
+    let committed = scratch.git(&["show", "--name-only", "--format=", "HEAD"], false);
+    assert!(!committed.contains("harness-plugins/types"), "{committed}");
+}
+
+/// A commit that stages a declaration file of its own is refused while
+/// `claude` is not logged in: no Claude Code here wrote what it carries,
+/// and the hook names why.
+#[test]
+fn pre_commit_not_logged_in_refuses_a_commit_that_stages_the_declarations() {
+    let scratch = scratch("logged-out-types", &Computed::Rendered);
+    scratch.log_out();
+    let before = scratch.head();
+    let (code, out) = scratch.stage_declarations_and_commit();
+    assert_eq!(code, 1, "{out}");
+    assert_eq!(scratch.head(), before, "the commit was refused: {out}");
+    assert!(
+        out.contains("pre-commit: claude is not logged in (`claude auth status`)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("the staged harness-plugins/types was written by no Claude Code here"),
+        "{out}"
+    );
+}
+
+/// A build whose `-p` exits 0 and extracts no declarations, as one without
+/// the plugin-authoring skill's files would, is named as such, and the
+/// commit that stages no declaration goes on, held by `tsc` to the
+/// committed file: an exit alone is never read as the file written.
+#[test]
+fn pre_commit_names_a_build_that_writes_no_declarations_and_allows_the_commit() {
+    let scratch = scratch("no-declarations", &Computed::Rendered);
+    scratch.write_no_declarations();
+    let before = scratch.head();
+    let (code, out) = scratch.stage_plugin_and_commit();
+    assert_eq!(code, 0, "{out}");
+    assert_ne!(scratch.head(), before, "the commit was allowed: {out}");
+    assert!(
+        out.contains("extracted no plugin-authoring/types/claude-code.d.ts"),
+        "{out}"
+    );
+    assert!(
+        out.contains("harness-plugins/types was not rewritten"),
+        "{out}"
+    );
+    let calls = scratch.calls("plugin");
+    assert_eq!(calls.len(), 5, "{calls:?}");
     let committed = scratch.git(&["show", "--name-only", "--format=", "HEAD"], false);
     assert!(!committed.contains("harness-plugins/types"), "{committed}");
 }

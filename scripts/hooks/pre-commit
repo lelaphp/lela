@@ -33,19 +33,20 @@
 # none cuts the rest short. When a path under
 # harness-plugins/ is staged, the function-hook declarations are rewritten
 # first (#62): harness-plugins/types is a tracked generated file, written
-# by the committer's own Claude Code from a directory outside the clone
-# with an empty HOME and CLAUDE_CONFIG_DIR, so no settings, plugin or hook
-# load, under the variable that gates `/plugin-types`; `tsc` then holds
-# the module to it, `plugin validate --strict` reads the manifest,
-# hooks.json and the module, `plugin test` runs its tests (#2247; `tsc`
-# leaves them to the engine, whose kit types them), and what was written
-# is staged. Without
-# `claude` on PATH that step is skipped by name and the commit goes on:
-# CI holds the module to the committed file. Installed per clone by the
-# SessionStart hook, or by hand: `git config core.hooksPath scripts/hooks`.
+# by the committer's own Claude Code as `declarations` below says, and
+# staged; `tsc` then holds the module to it, `plugin validate --strict`
+# reads the manifest, hooks.json and the module, `plugin test` runs its
+# tests (#2247; `tsc` leaves them to the engine, whose kit types them).
+# Without `claude` on PATH that step is skipped by name and the commit
+# goes on: CI holds the module to the committed file. A `claude` that is
+# not logged in, or whose run extracts no declarations, is named the same
+# way, and `tsc`, validate and test still run against the committed file;
+# only a commit that stages harness-plugins/types itself is refused then,
+# since no Claude Code here wrote what it carries (#1736). Installed per
+# clone by the SessionStart hook, or by hand: `git config core.hooksPath
+# scripts/hooks`.
 set -u
 cd "$(git rev-parse --show-toplevel)"
-root=$PWD
 X='cargo xtask'
 status=0
 step() {
@@ -74,26 +75,67 @@ buffered() {
     [ -n "$out" ] && printf '%s\n' "$out"
     return "$exit"
 }
+# The declarations, as the committer's Claude Code writes them (#62,
+# #1736). `/plugin-types` is gone (2.1.294 has no such command); a build writes
+# the declarations into the files of its plugin-authoring skill, which it
+# extracts under `CLAUDE_CODE_TMPDIR` when the skill is invoked, as
+# <tmp>/claude-<uid>/bundled-skills/<version>/<id>/plugin-authoring/types/claude-code.d.ts,
+# core declarations and this build's built-in tools in one file, the
+# first line naming the version. So one `-p` invokes the skill, on the
+# smallest model with no tool, and that one file is copied in; an exit of
+# 0 with no such file is a build that wrote none, never a pass. It runs
+# under the committer's own HOME and CLAUDE_CONFIG_DIR, where the login
+# is (on macOS a keychain entry named for the config directory, so an
+# empty one finds none), from a directory outside the clone, loading none
+# of their settings sources (`--setting-sources ''`: no user, project or
+# local file, so none of their hooks, enabled plugins or env), no MCP
+# server (`--strict-mcp-config`) and no transcript; CMUX_CLAUDE_HOOKS_DISABLED
+# is cmux's opt-out for the hooks its `claude` wrapper adds through
+# `--settings`, which no setting source governs.
 declarations() {
-    local outside exit
+    local outside exit out
     outside=$(mktemp -d) || return 1
-    mkdir -p "$outside/home" "$outside/config"
-    (
-        cd "$outside" && HOME="$outside/home" CLAUDE_CONFIG_DIR="$outside/config" \
-            CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
-            buffered claude -p "/plugin-types $root/harness-plugins/types"
+    mkdir -p "$outside/cwd" "$outside/tmp"
+    out=$(
+        cd "$outside/cwd" && CLAUDE_CODE_TMPDIR="$outside/tmp" \
+            CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 CMUX_CLAUDE_HOOKS_DISABLED=1 \
+            claude -p --setting-sources '' --strict-mcp-config --tools '' \
+            --model haiku --no-session-persistence \
+            '/plugin-authoring Reply with the one word ok.' 2>&1
     )
     exit=$?
+    set -- "$outside"/tmp/*/bundled-skills/*/*/plugin-authoring/types/claude-code.d.ts
+    if [ "$exit" != 0 ]; then
+        printf '%s\n' "$out" >&2
+        echo "pre-commit: claude -p /plugin-authoring exited $exit" >&2
+    elif [ "$#" != 1 ] || ! head -n 1 "$1" | grep -q '^// Written by Claude Code '; then
+        exit=1
+        echo "pre-commit: claude -p /plugin-authoring extracted no plugin-authoring/types/claude-code.d.ts naming its version" >&2
+    else
+        mkdir -p harness-plugins/types && cp "$1" harness-plugins/types/claude-code.d.ts || exit=1
+    fi
     rm -rf "$outside"
     return "$exit"
 }
+# Declarations this commit could not have rewritten: said by name, and a
+# refusal only when the commit stages harness-plugins/types itself.
+unwritten() {
+    if git diff --cached --quiet -- harness-plugins/types; then
+        echo "pre-commit: $1; harness-plugins/types was not rewritten, and tsc holds the module to the committed file" >&2
+    else
+        echo "pre-commit: $1; the staged harness-plugins/types was written by no Claude Code here, so the commit is refused" >&2
+        status=1
+    fi
+}
 if ! git diff --cached --quiet -- harness-plugins; then
     if command -v claude >/dev/null 2>&1; then
-        if declarations; then
+        if ! claude auth status >/dev/null 2>&1; then
+            # shellcheck disable=SC2016 # the backticks are the message's
+            unwritten 'claude is not logged in (`claude auth status`)'
+        elif declarations; then
             stage harness-plugins/types
         else
-            echo "pre-commit: claude -p \"/plugin-types $root/harness-plugins/types\" failed; nothing of harness-plugins/types was staged" >&2
-            status=1
+            unwritten 'claude wrote no declarations'
         fi
         step buffered npx -y -p typescript@5.9.3 tsc -p harness-plugins
         step buffered claude plugin validate harness-plugins --strict
