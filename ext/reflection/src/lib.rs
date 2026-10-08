@@ -4498,10 +4498,46 @@ pub(crate) struct ReflectedState {
     /// method table lists: the reflector's `$name`, `$prop::get` or
     /// `$prop::set`, names it among the hooks of `$class`'s property.
     hook: bool,
-    /// php's `intern->ptr` of a `ReflectionMethod`: the row of the
-    /// engine's function table its constructor or factory found, which
-    /// each accessor reads.
-    method: Option<MethodRow>,
+    /// php's `intern->ptr` of a `ReflectionMethod`: the method its
+    /// constructor or factory found, which each accessor reads.
+    method: Option<HeldMethod>,
+}
+
+/// The function a `ReflectionMethod` holds as php's `intern->ptr`.
+///
+/// A reflector over a closure's `__invoke` holds no owner of the closure,
+/// so the closure is freed while the reflector stands, and its parameters
+/// still answer.
+///
+/// ```php
+/// class D { function __destruct() { echo "dtor\n"; } function m() { return fn (int $n) => $n; } }
+/// $m = new ReflectionMethod((new D)->m(), '__invoke');
+/// echo "after\n";
+/// $p = new ReflectionParameter([(new D)->m(), '__invoke'], 0);
+/// echo "after2\n";
+/// var_dump((string) $m->getParameters()[0]->getType(), $p->getName(), $p->getDeclaringFunction()->getNumberOfParameters());
+/// ```
+/// ```expect
+/// dtor
+/// after
+/// dtor
+/// after2
+/// string(3) "int"
+/// string(1) "n"
+/// int(1)
+/// ```
+#[derive(Clone, Copy)]
+pub(crate) enum HeldMethod {
+    /// A row of the engine's function table.
+    Row(MethodRow),
+    /// The `__invoke` `zend_get_closure_invoke_method` makes for a
+    /// closure, `ZEND_ACC_CALL_VIA_HANDLER`, over the closure's function:
+    /// the trampoline borrows the `arg_info` of the op array, which the
+    /// unit holds for the request, so the reflector holds no owner of
+    /// the closure and its parameters answer once the closure is freed.
+    /// `None` for the closure `object_init_ex(zend_ce_closure)` makes,
+    /// which holds no function.
+    Invoke(Option<Function>),
 }
 
 /// The payload: the reflector's fields, boxed, inside the `sizeof` of
@@ -4805,7 +4841,7 @@ fn kept_closure(req: &Request, this: PhpObject) -> Option<PhpObject> {
 /// `intern->ptr` as `reflection_method_factory` and
 /// `ReflectionMethod::__construct` write it: the method found, held, or
 /// none where nothing was found ([`MethodRow`]).
-fn keep_method(req: &mut Request, this: PhpObject, method: Option<MethodRow>) {
+fn keep_method(req: &mut Request, this: PhpObject, method: Option<HeldMethod>) {
     if let Some(reflected) = this.native_mut::<Reflected>(req) {
         reflected.method = method;
     }
@@ -4813,7 +4849,7 @@ fn keep_method(req: &mut Request, this: PhpObject, method: Option<MethodRow>) {
 
 /// The method a `ReflectionMethod` holds ([`keep_method`]); none for one
 /// whose constructor never ran, and for a hook's.
-fn kept_method(req: &Request, this: PhpObject) -> Option<MethodRow> {
+fn kept_method(req: &Request, this: PhpObject) -> Option<HeldMethod> {
     this.native::<Reflected>(req)?.method
 }
 
@@ -6694,19 +6730,14 @@ fn escaped(bytes: &[u8]) -> String {
 /// One method of a linked class's function table, `zend_function` as
 /// `zend_do_inheritance` left it: the declaration, `common.scope`, the
 /// class that declared it, and the row of the engine's table it was
-/// found at, which `common.prototype` is read off ([`row_prototype`]);
-/// no row for a property's hook and for the `__invoke` php makes for a
-/// `Closure`, which no table holds.
+/// found at, which `common.prototype` is read off ([`row_prototype`]),
+/// or the `__invoke` php makes for a `Closure`, which no table holds;
+/// nothing held for a property's hook.
 #[derive(Clone)]
 struct LinkedMethod {
     decl: MethodDecl,
     scope: ClassId,
-    row: Option<MethodRow>,
-    /// `ZEND_ACC_CALL_VIA_HANDLER`: a function no table holds, made on
-    /// the lookup, which is a closure's `__invoke`
-    /// ([`closure_invoke`]); its `module` is null, so it renders as
-    /// `<internal>` with no extension.
-    via_handler: bool,
+    held: Option<HeldMethod>,
 }
 
 impl LinkedMethod {
@@ -6716,9 +6747,33 @@ impl LinkedMethod {
         Some(LinkedMethod {
             decl: req.row_method(row)?.clone(),
             scope: row.scope(),
-            row: Some(row),
-            via_handler: false,
+            held: Some(HeldMethod::Row(row)),
         })
+    }
+
+    /// The method a reflector holds, read back.
+    fn of_held(req: &mut Request, held: HeldMethod) -> Option<LinkedMethod> {
+        match held {
+            HeldMethod::Row(row) => LinkedMethod::of_row(req, row),
+            HeldMethod::Invoke(function) => closure_invoke(req, function),
+        }
+    }
+
+    /// The row of the function table the method is, none for a hook
+    /// and for a closure's `__invoke`.
+    fn row(&self) -> Option<MethodRow> {
+        match self.held {
+            Some(HeldMethod::Row(row)) => Some(row),
+            Some(HeldMethod::Invoke(_)) | None => None,
+        }
+    }
+
+    /// `ZEND_ACC_CALL_VIA_HANDLER`: a function no table holds, made on
+    /// the lookup, which is a closure's `__invoke`
+    /// ([`closure_invoke`]); its `module` is null, so it renders as
+    /// `<internal>` with no extension.
+    fn via_handler(&self) -> bool {
+        matches!(self.held, Some(HeldMethod::Invoke(_)))
     }
 }
 
@@ -6742,7 +6797,8 @@ fn method_or_invoke(
     if found.is_some() || !is_closure_invoke(req, class, &name.to_ascii_lowercase()) {
         return found;
     }
-    closure_invoke(req, closure)
+    let function = closure.and_then(|closure| closure.closure(req).map(|c| c.function));
+    closure_invoke(req, function)
 }
 
 /// `zend_hash_find_ptr(&ce->function_table, lcname)` alone: the
@@ -6831,7 +6887,7 @@ fn table_methods(req: &Request, class: ClassId) -> Vec<LinkedMethod> {
 /// int(7)
 /// Method Closure::__invoke() does not exist
 /// ```
-fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<LinkedMethod> {
+fn closure_invoke(req: &mut Request, closure: Option<Function>) -> Option<LinkedMethod> {
     let scope = lookup_class(req, b"Closure").ok().flatten()?;
     let empty = || FunctionDecl {
         name: Name::default(),
@@ -6847,7 +6903,7 @@ fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<Linke
         frameless: Vec::new(),
     };
     let mut function = closure
-        .and_then(|closure| signature::closure_decl(req, closure))
+        .and_then(|closure| req.function_decl(closure).cloned())
         .unwrap_or_else(empty);
     function.name = Name(b"__invoke".as_slice().into());
     function.file = Name::default();
@@ -6872,8 +6928,7 @@ fn closure_invoke(req: &mut Request, closure: Option<PhpObject>) -> Option<Linke
             tentative_return: false,
         },
         scope,
-        row: None,
-        via_handler: true,
+        held: Some(HeldMethod::Invoke(closure)),
     })
 }
 
@@ -7352,7 +7407,7 @@ impl ArgInfo {
 /// method of the same name when the method is `ce`'s own and the
 /// parent's is not private; `prototype` names the prototype's scope.
 fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: &str) -> String {
-    let module = if method.via_handler {
+    let module = if method.via_handler() {
         None
     } else {
         req.class_extension_name(method.scope).map(str::to_owned)
@@ -7375,7 +7430,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
             words.push(format!("overwrites {}", String::from_utf8_lossy(&scope)));
         }
     }
-    if let Some(prototype) = method.row.and_then(|row| row_prototype(req, row)) {
+    if let Some(prototype) = method.row().and_then(|row| row_prototype(req, row)) {
         let scope = class_name_of(req, prototype);
         words.push(format!("prototype {}", String::from_utf8_lossy(&scope)));
     }
@@ -7390,7 +7445,7 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
         Header::Method(&method.decl, &words),
         indent,
     );
-    let arg_info = if method.via_handler {
+    let arg_info = if method.via_handler() {
         ArgInfo::User
     } else {
         ArgInfo::of(&method.decl.function)

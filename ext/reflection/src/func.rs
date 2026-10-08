@@ -24,7 +24,7 @@ use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use super::signature::{FunctionRef, parameter_factory, this_function, type_factory};
 use super::{
-    at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
+    HeldMethod, at_most_arguments, class_name_of, class_named, closure_string, exactly_arguments,
     function_string, is_constructor, keep, keep_closure, keep_method, kept_class, kept_closure,
     kept_method, kept_object, method_or_invoke, method_string, namespace_end, new_object,
     reflection_class_factory, required_parameters, row_prototype, set_name, set_string_prop,
@@ -65,9 +65,9 @@ fn this_method(
     this: PhpObject,
 ) -> Result<(ClassId, MethodDecl, ClassId), Thrown> {
     if let Some(held) = kept_method(req, this)
-        && let Some(method) = req.row_method(held)
+        && let Some(method) = super::LinkedMethod::of_held(req, held)
     {
-        return Ok((held.scope(), method.clone(), held.scope()));
+        return Ok((method.scope, method.decl, method.scope));
     }
     let name = this_name(req, this, "ReflectionMethod")?;
     let Some(class) = req
@@ -177,8 +177,11 @@ fn prototype_of(
     this: PhpObject,
     name: &[u8],
 ) -> Result<Option<ClassId>, Thrown> {
-    if let Some(held) = kept_method(req, this) {
-        return Ok(row_prototype(req, held));
+    match kept_method(req, this) {
+        Some(HeldMethod::Row(held)) => return Ok(row_prototype(req, held)),
+        // The trampoline php makes for a closure's `__invoke` has none.
+        Some(HeldMethod::Invoke(_)) => return Ok(None),
+        None => {}
     }
     let named = (this.prop(req, b"class")).and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec));
     let class = match (super::kept_class(req, this), named) {
@@ -1888,7 +1891,7 @@ impl ReflectionGenerator {
                 object
             }
             (None, Some(scope)) => {
-                let held = req.method_row(scope, &name);
+                let held = req.method_row(scope, &name).map(HeldMethod::Row);
                 crate::class::method_factory(req, &name, scope, scope, held)?
             }
             (None, None) => {
@@ -2126,8 +2129,7 @@ impl ReflectionMethod {
             Union::A(object) => Some(object).filter(|o| o.closure(req).is_some()),
             Union::B(_) => None,
         };
-        let held = req.method_row(class, &method_name);
-        let found = match (closure, held) {
+        let found = match (closure, req.method_row(class, &method_name)) {
             (_, Some(held)) => super::LinkedMethod::of_row(req, held),
             (Some(closure), None) => method_or_invoke(req, class, &method_name, Some(closure)),
             (None, None) => None,
@@ -2150,11 +2152,11 @@ impl ReflectionMethod {
         set_string_prop(req, this, b"class", &scope)?;
         // `intern->ce = ce`: the class the reflector was asked about,
         // which `_function_string` takes as the method's scope, where
-        // `$class` is the class that declared the method; and for a
-        // closure's `__invoke`, the closure the method was made over.
-        let kept = closure.filter(|_| found.via_handler);
-        keep(req, this, class, kept);
-        keep_method(req, this, held);
+        // `$class` is the class that declared the method. A closure's
+        // `__invoke` leaves `intern->obj` unset, the trampoline holding
+        // the closure's function and no owner of the closure.
+        keep(req, this, class, None);
+        keep_method(req, this, found.held);
         Ok(())
     }
 
@@ -2196,8 +2198,8 @@ impl ReflectionMethod {
         };
         let class = class_named(req, &given[..at])?;
         let name = given[at + 2..].to_vec();
-        let held = req.method_row(class, &name);
-        let Some(found) = held.and_then(|held| super::LinkedMethod::of_row(req, held)) else {
+        let held = req.method_row(class, &name).map(HeldMethod::Row);
+        let Some(found) = held.and_then(|held| super::LinkedMethod::of_held(req, held)) else {
             let named = class_name_of(req, class);
             return Err(throw(
                 req,
@@ -2324,14 +2326,13 @@ impl ReflectionMethod {
             super::LinkedMethod {
                 decl,
                 scope,
-                row: None,
-                via_handler: false,
+                held: None,
             }
         });
         let held = kept_method(req, this.object());
         let kept = kept_closure(req, this.object());
         let Some(found) = hook
-            .or_else(|| super::LinkedMethod::of_row(req, held?))
+            .or_else(|| super::LinkedMethod::of_held(req, held?))
             .or_else(|| method_or_invoke(req, class, &name, kept))
         else {
             let class = class_name_of(req, class);

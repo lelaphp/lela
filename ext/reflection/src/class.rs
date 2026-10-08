@@ -20,8 +20,8 @@ use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value
 
 use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
-    Reference, answer, attr, class_chain, class_constant_named, class_extension_name, class_is,
-    class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
+    HeldMethod, Reference, answer, attr, class_chain, class_constant_named, class_extension_name,
+    class_is, class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
     dynamic_properties, is_closure_invoke, is_internal, keep, keep_method, keep_reference,
     kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties,
     lookup_class, method_or_invoke, namespace_end, new_object, property_named,
@@ -95,7 +95,7 @@ pub(super) fn method_factory(
     name: &[u8],
     scope: ClassId,
     ce: ClassId,
-    held: Option<MethodRow>,
+    held: Option<HeldMethod>,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let class = class_named(req, b"ReflectionMethod")?;
     let object = new_object(req, class)?;
@@ -1008,7 +1008,13 @@ impl ReflectionClass {
         let Some((decl, row)) = constructor_of(req, class) else {
             return Ok(None);
         };
-        let object = method_factory(req, &decl.function.name.0, row.scope(), class, Some(row))?;
+        let object = method_factory(
+            req,
+            &decl.function.name.0,
+            row.scope(),
+            class,
+            Some(HeldMethod::Row(row)),
+        )?;
         Ok(Some(object.into_instance()))
     }
 
@@ -1080,14 +1086,8 @@ impl ReflectionClass {
             &found.decl.function.name.0,
             found.scope,
             class,
-            found.row,
+            found.held,
         )?;
-        // The `__invoke` php makes keeps the closure it was made over.
-        if found.via_handler
-            && let Some(kept) = kept
-        {
-            keep(req, *object, class, Some(kept));
-        }
         Ok(object.into_instance())
     }
 
@@ -1122,22 +1122,26 @@ impl ReflectionClass {
             })
             .collect();
         for (row, name) in rows {
-            let object = method_factory(req, &name.0, row.scope(), class, Some(row))?;
+            let object =
+                method_factory(req, &name.0, row.scope(), class, Some(HeldMethod::Row(row)))?;
             methods.append(req, object.into_value())?;
         }
         // `zend_get_closure_invoke_method` over the kept closure, or a fresh
         // one, appended where the filter keeps a public instance method.
         let is_closure = lookup_class(req, b"Closure")?.is_some_and(|c| c == class);
-        let kept = kept_closure(req, this.object());
+        let kept = kept_closure(req, this.object())
+            .and_then(|closure| closure.closure(req).map(|c| c.function));
         if is_closure
             && filter & 1 != 0
             && let Some(invoke) = closure_invoke(req, kept)
         {
-            let object =
-                method_factory(req, &invoke.decl.function.name.0, invoke.scope, class, None)?;
-            if let Some(kept) = kept {
-                keep(req, *object, class, Some(kept));
-            }
+            let object = method_factory(
+                req,
+                &invoke.decl.function.name.0,
+                invoke.scope,
+                class,
+                invoke.held,
+            )?;
             methods.append(req, object.into_value())?;
         }
         Ok(methods)
