@@ -107,8 +107,9 @@ impl Variant {
     }
 
     /// Hold each platform's table to what the platform's build is: a Linux
-    /// build names the image it was made in, and the macOS one, made on no
-    /// image, names none. `name` is the variant's, for the refusal.
+    /// build names the base image's manifest digest, which the recipe pins
+    /// and rebuilds from (#1948), and the macOS one, made on no image,
+    /// names none. `name` is the variant's, for the refusal.
     pub(super) fn held(&self, name: &str) -> Result<()> {
         for platform in Platform::ALL {
             let Some(build) = self.build(platform) else {
@@ -116,7 +117,7 @@ impl Variant {
             };
             match (platform.imaged(), &build.image) {
                 (true, None) => bail!(
-                    "[variant.{name}.{}] names no image; a Linux build is pinned by the digest of the image it was made in beside its md5 (#1782)",
+                    "[variant.{name}.{}] names no image; a Linux build is pinned by its base image's manifest digest beside its md5 (#1782, #1948)",
                     platform.key()
                 ),
                 (false, Some(image)) => bail!(
@@ -145,11 +146,11 @@ impl Variant {
 
 /// One platform's build of a variant: where its binary is on a machine of
 /// that platform, the binary's md5, which is its identity as `[oracle]`'s
-/// md5 is the main oracle's, and for a Linux build the digest of the image
-/// it was made in. The path is where a machine finds the binary: on Linux,
-/// where the runner lays the binary it takes out of that image, which is
-/// the install prefix the recipe built it for; a relative path is the
-/// pin's directory's.
+/// md5 is the main oracle's, and for a Linux build the base image's
+/// manifest digest, which the recipe pins and rebuilds from, the md5
+/// holding the binary it rebuilt (#1948). The path is where a machine
+/// finds the binary: on Linux, the install prefix the recipe builds it to;
+/// a relative path is the pin's directory's.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Build {
