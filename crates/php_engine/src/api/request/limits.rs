@@ -1,10 +1,10 @@
-//! The limits of a request: its interrupt (design §5.8), the timer
-//! that raises it for `max_execution_time` and for every periodic
-//! interrupt an extension started, `set_time_limit()`, the interrupt
-//! hooks the bundle supplied, the thread's stack limit, and `fork(2)`,
-//! which joins the timer's thread around it. The interrupt, the timer
-//! and the stack limit are [`Limits`]'s, whose fields no file but this
-//! one reads.
+//! The limits of a request: its interrupt (design §5.8), its deadlines
+//! on the engine's timer, which raises it for `max_execution_time` and
+//! for every periodic interrupt an extension started, `set_time_limit()`,
+//! the interrupt hooks the bundle supplied, the thread's stack limit,
+//! and `fork(2)`, which joins the timer's thread around it. The
+//! interrupt, the deadlines and the stack limit are [`Limits`]'s, whose
+//! fields no file but this one reads.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use super::{Forked, Periodic, Receiving, Request};
 
 /// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
-/// that the engine's execution timer and the thread serving the request
-/// share one. Raising is all a setter does; acting on it is the loop's,
+/// that the engine's timer and the thread serving the request share
+/// one. Raising is all a setter does; acting on it is the loop's,
 /// at a back-edge, at a frame's activation, after every `Flow::Resume`
 /// and after an internal call returns (design §5.8), and nothing else
 /// touches it.
@@ -67,8 +67,9 @@ impl Interrupt {
         self.0.timed_out.store(false, Ordering::Relaxed);
     }
 
-    /// How many hold this interrupt: its request, the request's timer,
-    /// the timer's thread while one runs, and whoever else cloned it.
+    /// How many hold this interrupt: its request, the request's
+    /// deadlines, the engine's schedule while the request has a deadline
+    /// there, and whoever else cloned it.
     #[cfg(test)]
     pub(crate) fn holders(&self) -> usize {
         Arc::strong_count(&self.0)
@@ -135,7 +136,7 @@ impl<'a, T: AsMut<Request>> TimeLimitSuspended<'a, T> {
     /// The time limit of the request `held` reaches suspended, until the
     /// guard is dropped.
     pub(crate) fn over(held: &'a mut T) -> Self {
-        held.as_mut().limits.timer.suspend();
+        held.as_mut().limits.deadlines.suspend();
         TimeLimitSuspended { held }
     }
 }
@@ -156,7 +157,7 @@ impl<T: AsMut<Request>> DerefMut for TimeLimitSuspended<'_, T> {
 impl<T: AsMut<Request>> Drop for TimeLimitSuspended<'_, T> {
     /// The resume: the time the limit had left counts on from here.
     fn drop(&mut self) {
-        self.held.as_mut().limits.timer.resume();
+        self.held.as_mut().limits.deadlines.resume();
     }
 }
 
@@ -167,16 +168,16 @@ impl AsMut<Request> for Request {
     }
 }
 
-/// The interrupt, the timer and the stack limit, whose fields no file
-/// but this one reads.
+/// The interrupt, the deadlines and the stack limit, whose fields no
+/// file but this one reads.
 pub(super) struct Limits {
     /// The interrupt, shared with whatever thread sets it (design §5.8).
     interrupt: Interrupt,
-    /// The request's timer: the execution timer's deadline while
-    /// `max_execution_time` is not zero, every periodic interrupt an
-    /// extension started, and the one thread that waits for them;
-    /// dropping the request joins the thread.
-    timer: crate::interrupt::Timer,
+    /// The request's deadlines on the engine's timer: the execution
+    /// timer's while `max_execution_time` is not zero and every periodic
+    /// interrupt's an extension started; dropping the request takes them
+    /// out of the engine's schedule.
+    deadlines: crate::interrupt::Deadlines,
     /// The thread's stack limit, php's `EG(stack_limit)`, worked out
     /// once at request start on the thread the request runs on
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
@@ -185,13 +186,13 @@ pub(super) struct Limits {
 }
 
 impl Limits {
-    /// The limits as a request is laid: a fresh interrupt, the timer
-    /// that raises it with no deadline yet, and no stack limit until
-    /// the request starts on its thread.
-    pub(super) fn new() -> Limits {
+    /// The limits as a request is laid on an engine whose timer is
+    /// `timer`: a fresh interrupt, no deadline yet, and no stack limit
+    /// until the request starts on its thread.
+    pub(super) fn new(timer: &crate::interrupt::Timer) -> Limits {
         let interrupt = Interrupt::default();
         Limits {
-            timer: crate::interrupt::Timer::new(&interrupt),
+            deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
         }
@@ -237,18 +238,18 @@ impl Request {
     /// so the seconds count from here.
     pub(super) fn arm_timer(&mut self) {
         let (seconds, hard) = (self.max_execution_time(), self.hard_timeout());
-        self.limits.timer.arm(seconds, hard);
+        self.limits.deadlines.arm(seconds, hard);
     }
 
     /// `zend_unset_timeout` at `php_request_shutdown`'s fourth step,
     /// once the program's shutdown functions, destructors and buffer
     /// handlers are done: nothing the request does after it is timed,
     /// and every periodic interrupt's deadline goes with the execution
-    /// timer's, so the request's timer thread is joined here, before any
-    /// extension's `rshutdown`, whatever a host does with the request
-    /// after it.
+    /// timer's, so the engine's timer raises nothing more for the request
+    /// from here, before any extension's `rshutdown`, whatever a host
+    /// does with the request after it.
     pub(crate) fn unset_timer(&mut self) {
-        self.limits.timer.unset();
+        self.limits.deadlines.unset();
     }
 
     /// A periodic interrupt (#1806): this request's interrupt raised
@@ -260,10 +261,10 @@ impl Request {
     /// a sampling profiler's own timer thread does under php,
     /// Excimer's `timer_create` and its handler storing
     /// `EG(vm_interrupt)`, is the engine's here, since an extension owns
-    /// no thread (ADR-0005, ADR-0010): one thread per request serves the
-    /// execution timer and every periodic interrupt alike, and is joined
-    /// once a change leaves no deadline, around a fork
-    /// ([`Request::fork`]) and at the request's end.
+    /// no thread (ADR-0005, ADR-0010): one thread per engine serves every
+    /// request's execution timer and periodic interrupts alike, and is
+    /// joined once a change leaves the engine no deadline, around a fork
+    /// ([`Request::fork`]) and at the engine's end.
     ///
     /// It is served through the interrupt hook the extension supplies
     /// ([`ExtensionBuilder::interrupt`]): at the loop's next check, every
@@ -281,7 +282,7 @@ impl Request {
         first: std::time::Duration,
         every: Option<std::time::Duration>,
     ) -> Option<Periodic> {
-        self.limits.timer.start_periodic(first, every)
+        self.limits.deadlines.start_periodic(first, every)
     }
 
     /// The time limit suspended (#1814) for as long as the guard this
@@ -307,7 +308,7 @@ impl Request {
     /// handed to `mem::forget` leaves the request untimed to its end.
     /// Guards nest, and the outermost one's drop is the resume.
     ///
-    /// The deadline is taken out of the request's timer and its time
+    /// The deadline is taken out of the engine's schedule and its time
     /// left kept, so with nothing else scheduled the timer's thread is
     /// joined until the resume, and a periodic interrupt an extension
     /// started counts on through it: a profiler's clock is its own. A
@@ -331,20 +332,20 @@ impl Request {
     /// among them, as Excimer hands its callback the event count, POSIX's
     /// overruns plus one; zero for one stopped.
     pub fn periods_elapsed(&mut self, periodic: Periodic) -> u64 {
-        self.limits.timer.periods_elapsed(periodic)
+        self.limits.deadlines.periods_elapsed(periodic)
     }
 
     /// `periodic` stopped, with the periods it had not been asked for,
     /// as Excimer's `excimer_timer_stop` deletes its timer.
     pub fn stop_periodic(&mut self, periodic: Periodic) {
-        self.limits.timer.stop_periodic(periodic);
+        self.limits.deadlines.stop_periodic(periodic);
     }
 
     /// `fork(2)` from this request, the engine's one home for it (#1807,
     /// as #1779 ruled), which `pcntl_fork` asks: the process copied with
     /// this request alone inside the engine and no thread of the engine's
     /// alive (ADR-0010, Threads), returning in both as [`Forked::Parent`]
-    /// with the child's id and as [`Forked::Child`]. The request's timer
+    /// with the child's id and as [`Forked::Child`]. The engine's timer
     /// thread is joined before it, and after it started again in the
     /// parent over the same deadlines, which loses none of them, as php's
     /// interval timer counts on across the fork; in the child what php's
@@ -381,7 +382,7 @@ impl Request {
     /// child what they held; otherwise the OS error `fork(2)` failed with,
     /// `EAGAIN` and `ENOMEM` among them, and no process was made.
     pub fn fork(&mut self) -> std::io::Result<Forked> {
-        self.limits.timer.forked(crate::fork::fork_request)
+        self.limits.deadlines.forked(crate::fork::fork_request)
     }
 
     /// This request's interrupt (design §5.8): what the loop tests at a

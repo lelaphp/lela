@@ -16,7 +16,7 @@ use crate::test::Capture;
 const PERIOD: Duration = Duration::from_millis(10);
 
 /// A program that keeps the loop busy until the execution timer stops
-/// it, a second in, so the request's one timer thread serves both.
+/// it, a second in, so the engine's one timer thread serves both.
 const BUSY: &str = "<?php for (;;) {}";
 
 /// The sampler's request state: the periodic interrupt its `rinit`
@@ -108,12 +108,13 @@ fn an_extension_is_interrupted_at_the_period_it_asked_for() {
     );
 }
 
-/// ADR-0010: the engine joins every thread it runs, and the periodic
-/// interrupt's does not outlive the request that asked, though the
-/// extension never stopped it: by the time `rshutdown` is served the
-/// thread has let go of the request's interrupt, leaving the request,
-/// its timer and the sampler's own clone, and once the request is gone
-/// the sampler's clone is the only one left.
+/// ADR-0010: the engine joins every thread it runs, and the timer's
+/// does not outlive the request that asked for a periodic interrupt,
+/// though the extension never stopped it: by the time `rshutdown` is
+/// served the engine's schedule has let go of the request's interrupt,
+/// leaving the request, its deadlines and the sampler's own clone; once
+/// the request is gone the sampler's clone is the only one left, and
+/// with no other request timed the engine runs no timer thread.
 #[test]
 fn no_thread_outlives_the_request_that_asked() {
     static SEEN: Mutex<Seen> = Mutex::new(Seen::NONE);
@@ -121,7 +122,14 @@ fn no_thread_outlives_the_request_that_asked() {
     engine.serve_capture(BUSY, Capture::default());
     let mut seen = noted(&SEEN);
     assert!(!seen.periods.is_empty(), "the sampler was served");
-    assert_eq!(seen.at_rshutdown, 3, "the request, its timer, the sampler");
+    assert_eq!(
+        seen.at_rshutdown, 3,
+        "the request, its deadlines, the sampler"
+    );
     let holders = seen.interrupt.take().map(|interrupt| interrupt.holders());
     assert_eq!(holders, Some(1), "the sampler's clone alone");
+    assert!(
+        !engine.shared.timer.runs_thread(),
+        "the timer's thread joined"
+    );
 }

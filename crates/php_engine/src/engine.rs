@@ -765,6 +765,11 @@ pub(crate) struct Shared {
     /// open, each lent to one request at a time
     /// ([`Request::persistent_list`](crate::api::request::Request::persistent_list)).
     pub(crate) persistent: Arc<crate::api::abi::PersistentList>,
+    /// The engine's execution timer (design §5.14, **Threads**): the one
+    /// thread that raises every request's interrupt at its deadlines,
+    /// started by the first deadline a request sets and joined once none
+    /// is left, around a fork and at the engine's end.
+    pub(crate) timer: crate::interrupt::Timer,
     /// The engine's interned strings (design §5.2, §5.14): what a unit's
     /// constant strings enter as it is published, grown here alone and
     /// read by every request thread with nothing taken.
@@ -3087,6 +3092,7 @@ impl EngineBuilder {
                 units,
                 arena,
                 persistent: Arc::new(crate::api::abi::Pool::new(PERSISTENT_ENTRIES)),
+                timer: crate::interrupt::Timer::default(),
                 strings: Mutex::new(strings),
                 names,
                 default_strings,
