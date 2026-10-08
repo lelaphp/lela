@@ -68,6 +68,13 @@ fn jit(library: &pkg_config::Library) -> Result<bool, String> {
     let program = out.join("pcre2_jit");
     fs::write(&source, PROGRAM).map_err(|error| format!("{}: {error}", source.display()))?;
     let mut build = cc::Build::new();
+    // php compiles C and C++ with -DNDEBUG unless it is built with
+    // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
+    // two builds that set ZEND_DEBUG, as debug assertions are this build's:
+    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
+        build.define("NDEBUG", None);
+    }
     build.cargo_metadata(false);
     for include in &library.include_paths {
         build.include(include);
