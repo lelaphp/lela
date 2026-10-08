@@ -41,7 +41,6 @@ fn quantity(value: &[u8], signedness: Signedness) -> (u64, Option<String>) {
     if start == end {
         return (0, None);
     }
-    let str_start = start;
     let at = |i: usize| if i < end { value[i] } else { 0 };
     let negative = match value[start] {
         b'+' => {
@@ -133,7 +132,9 @@ fn quantity(value: &[u8], signedness: Signedness) -> (u64, Option<String>) {
     let signed = |n: u64| i64::from_ne_bytes(n.to_ne_bytes());
     if digits_end < end {
         let last = value[end - 1];
-        let interpreted = escaped(&value[str_start..digits_end]);
+        // php's `str`, the value from its first byte, its leading
+        // whitespace with it.
+        let interpreted = escaped(&value[..digits_end]);
         let chr = escaped(&[last]);
         let factor: u64 = match last {
             b'g' | b'G' => 1 << 30,
