@@ -52,6 +52,10 @@ fn walks() -> Extension {
 fn a_foreach_walk_holds_the_table_a_class_keeps() {
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_libxml::extension(),
             php_ext_simplexml::extension(),

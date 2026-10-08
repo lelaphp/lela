@@ -7,7 +7,12 @@ use php_ext::test::{Capture, Engine};
 #[test]
 fn the_extension_is_loaded() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_pdo::extension(), php_ext_pdo_sqlite::extension()])
+        .extensions(&[
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+            php_ext_pdo_sqlite::extension(),
+        ])
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture(
@@ -23,7 +28,12 @@ fn the_extension_is_loaded() {
 #[test]
 fn a_persistent_connection_serves_the_next_request() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_pdo::extension(), php_ext_pdo_sqlite::extension()])
+        .extensions(&[
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+            php_ext_pdo_sqlite::extension(),
+        ])
         .build();
     let open = "$db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);";
     let first = format!(
@@ -49,6 +59,10 @@ fn a_persistent_connection_serves_the_next_request() {
 fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_session::extension(),
             php_ext_pdo::extension(),
@@ -101,7 +115,12 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
 #[test]
 fn a_persistent_connection_s_open_transaction_is_rolled_back_at_the_request_end() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_pdo::extension(), php_ext_pdo_sqlite::extension()])
+        .extensions(&[
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+            php_ext_pdo_sqlite::extension(),
+        ])
         .build();
     let open = "function db() { static $db; return $db ??= new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]); } $db = db();";
     let first = format!(

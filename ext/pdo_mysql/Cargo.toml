@@ -30,3 +30,9 @@ php_ext_standard = { path = "../standard" }
 # spl, which php always has and pdo requires (`ZEND_MOD_REQUIRED("spl")`),
 # for the engines that carry pdo (tests/capture.rs says why; #1867).
 php_ext_spl = { path = "../spl" }
+# What the extensions of the test engines require, transitively, as
+# `zend_startup_module_ex` refuses an extension whose required one is not
+# started (#1925).
+php_ext_json = { path = "../json" }
+php_ext_lexbor = { path = "../lexbor" }
+php_ext_uri = { path = "../uri" }

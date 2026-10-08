@@ -17,6 +17,9 @@ fn armed(body: &str) -> Option<String> {
     }
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),

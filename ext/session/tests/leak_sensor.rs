@@ -38,7 +38,12 @@ $m = memory_get_usage(); session_set_cookie_params(['path' => 123456, 'PATH' => 
 #[test]
 fn a_read_that_throws_in_a_session_decode_makes_no_delayed_call() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension(), php_ext_session::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            php_ext_session::extension(),
+        ])
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(
@@ -65,7 +70,12 @@ ob_end_flush();
 #[test]
 fn a_delayed_throw_after_a_good_php_serialize_read_binds_the_value() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension(), php_ext_session::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            php_ext_session::extension(),
+        ])
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(

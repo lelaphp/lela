@@ -106,6 +106,7 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed_with_the_ending_reque
     std::fs::remove_file(&log).ok();
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_json::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),
             counted(),
@@ -138,6 +139,7 @@ fn a_persistent_connection_found_dead_is_closed() {
     std::fs::remove_file(&log).ok();
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_json::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),
             counted(),
@@ -171,6 +173,7 @@ fn a_pooled_persistent_connection_is_closed_as_the_engine_ends() {
     std::fs::remove_file(&log).ok();
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_json::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),
             counted(),

@@ -5,7 +5,7 @@ use php_ext::test::{Capture, Engine};
 
 fn serve(code: &str) -> Vec<u8> {
     let engine = Engine::builder()
-        .extensions(&[php_ext_zip::extension()])
+        .extensions(&[php_ext_pcre::extension(), php_ext_zip::extension()])
         .build();
     engine.serve_capture(code, Capture::default()).stdout
 }

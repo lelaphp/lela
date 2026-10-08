@@ -29,3 +29,10 @@ php_ext_standard = { path = "../standard" }
 # `caching_sha2_password` encrypt the password with over a plain socket
 # (#2092).
 php_ext_openssl = { path = "../openssl" }
+# What the extensions of the test engines require, transitively, as
+# `zend_startup_module_ex` refuses an extension whose required one is not
+# started (#1925).
+php_ext_json = { path = "../json" }
+php_ext_lexbor = { path = "../lexbor" }
+php_ext_spl = { path = "../spl" }
+php_ext_uri = { path = "../uri" }
