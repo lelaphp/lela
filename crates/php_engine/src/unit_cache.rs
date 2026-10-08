@@ -5,16 +5,18 @@
 //! with the counters opcache keeps beside its shared hash. php's
 //! `zend_persistent_script` is [`Held`], its `dynamic_members` the hits,
 //! the last use and the next revalidation on it; `ZCSG(hits)`,
-//! `ZCSG(misses)`, `ZCSG(blacklist_misses)`, the restart counters and
-//! `ZCSG(restart_pending)` are [`UnitCache`]'s. What reads them is the
-//! request's face, [`crate::api::request::UnitCache`], which `opcache_*`
-//! answer from.
+//! `ZCSG(misses)`, `ZCSG(blacklist_misses)` and the restart counters are
+//! [`UnitCache`]'s, and `ZCSG(hash)`, what is counted of the memory under
+//! it and `ZCSG(restart_pending)` are each epoch's [`Files`], which a
+//! restart replaces with the epoch's arena (design §5.14). What reads
+//! them is the request's face, [`crate::api::request::UnitCache`], which
+//! `opcache_*` answer from, over the files of the request's epoch.
 
 mod disk;
 mod wire;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -149,7 +151,9 @@ pub(crate) struct Held {
     /// `dynamic_members.revalidate`: the request time up to which a hit
     /// under a window is served without a stat.
     revalidate: AtomicI64,
-    /// `corrupted`: discarded, its weight counted as wasted once.
+    /// `corrupted`: discarded, its weight counted as wasted once. It
+    /// stays filed and listed, a miss to every lookup, until a compile
+    /// of its path replaces it or the epoch goes.
     discarded: AtomicBool,
 }
 
@@ -212,6 +216,11 @@ impl Held {
         }
     }
 
+    /// Whether it was discarded, which every lookup takes for a miss.
+    fn discarded(&self) -> bool {
+        self.discarded.load(Ordering::Relaxed)
+    }
+
     /// Whether a hit under `validation` at `now` is served without a
     /// stat.
     pub(crate) fn trusted(&self, validation: Validation, now: i64) -> bool {
@@ -241,7 +250,6 @@ impl Held {
 /// `ZCSG(oom_restarts)`, `ZCSG(hash_restarts)` and
 /// `ZCSG(manual_restarts)` it counts under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 enum Reason {
     /// `ACCEL_RESTART_OOM`: the memory exhausted.
     Oom,
@@ -251,19 +259,9 @@ enum Reason {
     User,
 }
 
-impl Reason {
-    fn of(byte: u8) -> Reason {
-        match byte {
-            0 => Reason::Oom,
-            1 => Reason::Hash,
-            _ => Reason::User,
-        }
-    }
-}
-
-/// The unit cache and opcache's counters over it.
+/// The unit cache's counters, which outlive a restart; the files it
+/// holds are the arena's of each epoch ([`Files`]).
 pub(crate) struct UnitCache {
-    held: Cache<UnitKey, Held>,
     taken: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -274,19 +272,6 @@ pub(crate) struct UnitCache {
     manual_restarts: AtomicU64,
     oom_restarts: AtomicU64,
     hash_restarts: AtomicU64,
-    restart_pending: AtomicBool,
-    /// `ZCSG(restart_reason)`: why the pending restart was scheduled,
-    /// the first schedule's ([`Reason`]).
-    restart_reason: AtomicU8,
-    /// What the files held weigh, the preload's not among them.
-    used: AtomicU64,
-    /// `ZSMMG(wasted_shared_memory)`: what the files discarded since the
-    /// last restart weighed, whose rows (the arena's among them) stand
-    /// unused until a restart takes them back.
-    wasted: AtomicU64,
-    /// `ZSMMG(memory_exhausted)`: a file found no room since the last
-    /// restart, the memory or the names it is filed under full.
-    exhausted: AtomicBool,
     /// The bounds `opcache.memory_consumption`,
     /// `opcache.max_wasted_percentage` and `opcache.max_accelerated_files`
     /// set, once the extension has told them; none bounds nothing.
@@ -297,6 +282,70 @@ pub(crate) struct UnitCache {
     /// The build's identity, php's `zend_system_id`, which every unit
     /// the second level keeps carries and is read back by ([`Disk`]).
     pub(crate) build: [u8; BUILD],
+}
+
+/// The files one epoch of the cache holds (design §5.14), what an
+/// opcache restart empties by handing the next request a new epoch:
+/// php's `ZCSG(hash)`, what `ZSMMG` counts of the memory under it, and
+/// `ZCSG(restart_pending)`. A file's early-bound classes are rows of its
+/// epoch's arena, so a request finds only the files its own epoch held.
+pub(crate) struct Files {
+    held: Cache<UnitKey, Held>,
+    /// How many names the files may be held under.
+    capacity: usize,
+    /// What the files held weigh, the preload's not among them.
+    used: AtomicU64,
+    /// `ZSMMG(wasted_shared_memory)`: what the files discarded in this
+    /// epoch weighed, whose rows (the arena's among them) stand unused
+    /// until the epoch is dropped.
+    wasted: AtomicU64,
+    /// `ZSMMG(memory_exhausted)`: a file found no room in this epoch, the
+    /// memory or the names it is filed under full.
+    exhausted: AtomicBool,
+    /// `ZCSG(restart_pending)` with `ZCSG(restart_reason)`: the restart
+    /// scheduled to replace this epoch, under the first schedule's reason.
+    restart: OnceLock<Reason>,
+}
+
+impl Files {
+    /// No file held, under at most `capacity` names.
+    pub(crate) fn new(capacity: usize) -> Files {
+        Files {
+            held: Cache::new(capacity),
+            capacity,
+            used: AtomicU64::new(0),
+            wasted: AtomicU64::new(0),
+            exhausted: AtomicBool::new(false),
+            restart: OnceLock::new(),
+        }
+    }
+
+    /// The files the next epoch starts with: none, under as many names.
+    pub(crate) fn emptied(&self) -> Files {
+        Files::new(self.capacity)
+    }
+
+    /// `ZCSG(restart_pending)`.
+    pub(crate) fn restart_pending(&self) -> bool {
+        self.restart.get().is_some()
+    }
+
+    /// `zend_accel_schedule_restart(ACCEL_RESTART_USER)`: this epoch
+    /// replaced at the next request's start, and until then nothing new
+    /// held in it; a second call while one is pending schedules nothing.
+    pub(crate) fn schedule_restart(&self) -> Restart {
+        self.schedule(Reason::User)
+    }
+
+    /// `zend_accel_schedule_restart` for `reason`, which a restart
+    /// already pending keeps its own reason over. One scheduled for an
+    /// epoch a restart has replaced already replaces nothing more.
+    fn schedule(&self, reason: Reason) -> Restart {
+        match self.restart.set(reason) {
+            Ok(()) => Restart::Scheduled,
+            Err(_) => Restart::Pending,
+        }
+    }
 }
 
 /// Where a file is looked for and kept, the extension's answer in the
@@ -343,6 +392,13 @@ pub(crate) enum Filed {
 /// `CG(compiled_filename)` in `accel_preload`).
 pub(crate) const PRELOAD_SCRIPT: &[u8] = b"$PRELOAD$";
 
+/// What the preload weighs in the cache: its pseudo-file and each file
+/// it saved.
+fn preload_weight(preloaded: &Preloaded) -> u64 {
+    let saved = preloaded.scripts.iter().map(|held| held.size);
+    saved.fold(preloaded.statistics.memory_consumption, u64::saturating_add)
+}
+
 /// Now, in whole seconds since the epoch, php's `time_t`.
 pub(crate) fn now() -> i64 {
     SystemTime::now()
@@ -353,11 +409,10 @@ pub(crate) fn now() -> i64 {
 }
 
 impl UnitCache {
-    /// An empty cache holding at most `capacity` names, for this build
-    /// over a bundle that declares `functions` and `classes`, under the
-    /// tier's `hooked` and the host's `extended_info` ([`build_identity`]).
+    /// The counters of a cache for this build over a bundle that
+    /// declares `functions` and `classes`, under the tier's `hooked` and
+    /// the host's `extended_info` ([`build_identity`]).
     pub(crate) fn new(
-        capacity: usize,
         hooked: php_compile::Hooked,
         extended_info: bool,
         functions: &[php_unit::decl::FunctionDecl],
@@ -370,7 +425,6 @@ impl UnitCache {
             names.chain(classes.iter().map(|decl| &*decl.name.0)),
         );
         UnitCache {
-            held: Cache::new(capacity),
             taken: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -380,11 +434,6 @@ impl UnitCache {
             manual_restarts: AtomicU64::new(0),
             oom_restarts: AtomicU64::new(0),
             hash_restarts: AtomicU64::new(0),
-            restart_pending: AtomicBool::new(false),
-            restart_reason: AtomicU8::new(Reason::User as u8),
-            used: AtomicU64::new(0),
-            wasted: AtomicU64::new(0),
-            exhausted: AtomicBool::new(false),
             budget: OnceLock::new(),
             preloaded: OnceLock::new(),
             build,
@@ -402,32 +451,34 @@ impl UnitCache {
         self.preloaded.set(preloaded).ok();
     }
 
-    /// The file held under `key`, a full path or a path as written: a
-    /// saved file of the preload first, as php's hash holds them.
-    pub(crate) fn find(&self, key: &UnitKey) -> Option<Arc<Held>> {
+    /// The file `files` holds under `key`, a full path or a path as
+    /// written: a saved file of the preload first, as php's hash holds
+    /// them; none for a discarded one, which php's lookups pass over
+    /// (`!persistent_script->corrupted`).
+    pub(crate) fn find(&self, files: &Files, key: &UnitKey) -> Option<Arc<Held>> {
         if let Some(held) = self
             .preloaded()
             .and_then(|preloaded| preloaded.script(&key.0))
         {
             return Some(Arc::clone(held));
         }
-        self.held.get(key)
+        files.held.get(key).filter(|held| !held.discarded())
     }
 
     /// `zend_accel_add_key`: `key` filed beside the names `held` is held
-    /// under.
-    pub(crate) fn add_key(&self, key: UnitKey, held: &Arc<Held>) {
-        if self
+    /// under in `files`.
+    pub(crate) fn add_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
+        if files
             .held
             .get(&key)
             .is_some_and(|found| Arc::ptr_eq(&found, held))
         {
             return;
         }
-        if self.hash_full() {
+        if self.hash_full(files) {
             return;
         }
-        self.held.alias(key, held);
+        files.held.alias(key, held);
     }
 
     /// The bounds the extension set, once: the first stands.
@@ -437,15 +488,15 @@ impl UnitCache {
 
     /// `zend_accel_hash_is_full`, which marks the memory exhausted and
     /// schedules a restart where enough is wasted.
-    fn hash_full(&self) -> bool {
+    fn hash_full(&self, files: &Files) -> bool {
         let Some(budget) = self.budget.get() else {
             return false;
         };
-        if self.held.len() < usize::try_from(budget.keys).unwrap_or(usize::MAX) {
+        if files.held.len() < usize::try_from(budget.keys).unwrap_or(usize::MAX) {
             return false;
         }
-        self.exhausted.store(true, Ordering::Relaxed);
-        self.schedule_restart_if_necessary(Reason::Hash);
+        files.exhausted.store(true, Ordering::Relaxed);
+        self.schedule_restart_if_necessary(files, Reason::Hash);
         true
     }
 
@@ -454,49 +505,46 @@ impl UnitCache {
     /// `zend_shared_alloc_aligned` finds it; else the memory exhausted
     /// and a restart scheduled where enough is wasted, and the file is
     /// held nowhere.
-    fn room_for(&self, size: u64) -> bool {
-        if self.hash_full() {
+    fn room_for(&self, files: &Files, size: u64) -> bool {
+        if self.hash_full(files) {
             return false;
         }
         let Some(budget) = self.budget.get() else {
             return true;
         };
-        let preload = self.preloaded().map_or(0, |preloaded| {
-            let scripts = preloaded.scripts.iter().map(|held| held.size);
-            scripts.fold(preloaded.statistics.memory_consumption, u64::saturating_add)
-        });
-        let taken = (self.used.load(Ordering::Relaxed))
-            .saturating_add(self.wasted.load(Ordering::Relaxed))
+        let preload = self.preloaded().map_or(0, preload_weight);
+        let taken = (files.used.load(Ordering::Relaxed))
+            .saturating_add(files.wasted.load(Ordering::Relaxed))
             .saturating_add(preload);
         if budget.memory.saturating_sub(taken) >= size {
             return true;
         }
-        self.exhausted.store(true, Ordering::Relaxed);
-        self.schedule_restart_if_necessary(Reason::Oom);
+        files.exhausted.store(true, Ordering::Relaxed);
+        self.schedule_restart_if_necessary(files, Reason::Oom);
         false
     }
 
-    /// `zend_accel_discard_script`: `held` dropped under every name it is
-    /// filed under, its weight counted as wasted once however many
-    /// requests discard it, and where the memory is exhausted a restart
-    /// scheduled if enough is now wasted.
-    fn discard_held(&self, held: &Arc<Held>) {
-        self.held.remove_all(held);
+    /// `zend_accel_discard_script`: `held` marked discarded where it is
+    /// filed, as php marks it `corrupted` and leaves it in the hash, its
+    /// weight counted as wasted once however many requests discard it,
+    /// and where the memory is exhausted a restart scheduled if enough is
+    /// now wasted.
+    fn discard_held(&self, files: &Files, held: &Held) {
         if held.discarded.swap(true, Ordering::Relaxed) {
             return;
         }
-        self.used.fetch_sub(
-            held.size.min(self.used.load(Ordering::Relaxed)),
+        files.used.fetch_sub(
+            held.size.min(files.used.load(Ordering::Relaxed)),
             Ordering::Relaxed,
         );
-        self.wasted.fetch_add(held.size, Ordering::Relaxed);
-        if self.exhausted.load(Ordering::Relaxed) {
-            let reason = if self.hash_full() {
+        files.wasted.fetch_add(held.size, Ordering::Relaxed);
+        if files.exhausted.load(Ordering::Relaxed) {
+            let reason = if self.hash_full(files) {
                 Reason::Hash
             } else {
                 Reason::Oom
             };
-            self.schedule_restart_if_necessary(reason);
+            self.schedule_restart_if_necessary(files, reason);
         }
     }
 
@@ -514,12 +562,13 @@ impl UnitCache {
 
     /// `persistent_compile_file` by the file's full path: the file held
     /// under `path` where `validation` finds it fresh at the request time
-    /// `now`, a hit; else the stale copy discarded under every name it
-    /// was filed under, the file cache asked where there is one, a hit
+    /// `now`, a hit; else the stale copy discarded, the file cache asked
+    /// where there is one, a hit
     /// where it keeps the file as it stands, `decode`d and held under the
     /// full path alone; else a
-    /// miss, the file read and `compile`d, and what it compiled to held,
-    /// or what another request held for the path meanwhile, filed under
+    /// miss, the file read and `compile`d, and what it compiled to held
+    /// in place of a discarded copy, or what another request held for the
+    /// path meanwhile, filed under
     /// `written` too where given, and kept in the file cache. A file
     /// whose stamp the validation or the `protection` needs and the
     /// system does not give, and one written within `protection` seconds
@@ -530,6 +579,7 @@ impl UnitCache {
     /// read.
     pub(crate) fn file(
         &self,
+        files: &Files,
         asked: Asked<'_>,
         compile: impl FnOnce(&[u8]) -> Result<Arc<Unit>, CompileError>,
         decode: impl FnOnce(&[u8]) -> Option<Arc<Unit>>,
@@ -548,7 +598,7 @@ impl UnitCache {
             Levels::Both(disk) => (true, Some(disk)),
             Levels::Disk(disk) => (false, Some(disk)),
         };
-        if memory && let Some(hit) = self.held_hit(path, written.as_ref(), validation, now) {
+        if memory && let Some(hit) = self.held_hit(files, path, written.as_ref(), validation, now) {
             return (
                 Some(hit.unit.clone()),
                 Filed::Hit,
@@ -571,7 +621,7 @@ impl UnitCache {
             if !memory {
                 return (Some(Ok(unit)), Filed::Unheld, None);
             }
-            if self.restart_pending.load(Ordering::Relaxed) || !self.room_for(kept.size) {
+            if files.restart_pending() || !self.room_for(files, kept.size) {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 return (Some(Ok(unit)), Filed::Unheld, None);
             }
@@ -584,7 +634,7 @@ impl UnitCache {
                 size: kept.size,
                 observed,
             };
-            let held = self.hold(path, validation, now, read);
+            let held = self.hold(files, path, validation, now, read);
             self.hit(&held, validation, now);
             return (
                 Some(held.unit.clone()),
@@ -613,7 +663,7 @@ impl UnitCache {
             let stamp = observed.filter(|_| validated).map_or(0, Stamp::seconds);
             disk.store(path, stamp, size, &body);
         }
-        if !memory || self.restart_pending.load(Ordering::Relaxed) || !self.room_for(size) {
+        if !memory || files.restart_pending() || !self.room_for(files, size) {
             return (
                 Some(unit),
                 disk.map_or(Filed::Compiled, |_| Filed::Unheld),
@@ -630,9 +680,9 @@ impl UnitCache {
             size,
             observed,
         };
-        let held = self.hold(path, validation, now, read);
+        let held = self.hold(files, path, validation, now, read);
         if let Some(written) = written {
-            self.add_key(written, &held);
+            self.add_key(files, written, &held);
         }
         (
             Some(held.unit.clone()),
@@ -645,9 +695,10 @@ impl UnitCache {
     /// whose timestamp php keeps at zero, served as held without the
     /// file looked at, whatever the window, and a held file `validation`
     /// finds fresh at `now`; each filed under `written` too. A stale copy
-    /// is discarded under every name it was filed under.
+    /// is discarded, and a discarded one is a miss.
     fn held_hit(
         &self,
+        files: &Files,
         path: &[u8],
         written: Option<&UnitKey>,
         validation: Validation,
@@ -661,25 +712,38 @@ impl UnitCache {
         {
             self.hit(held, validation, now);
             if let Some(written) = written {
-                self.add_key(written.clone(), held);
+                self.add_key(files, written.clone(), held);
             }
             return Some(Arc::clone(held));
         }
-        let stale = self.held.get(&UnitKey::full(path))?;
+        let stale = files
+            .held
+            .get(&UnitKey::full(path))
+            .filter(|held| !held.discarded())?;
         if stale.validated(validation, now) {
             self.hit(&stale, validation, now);
             if let Some(written) = written {
-                self.add_key(written.clone(), &stale);
+                self.add_key(files, written.clone(), &stale);
             }
             return Some(stale);
         }
-        self.discard_held(&stale);
+        self.discard_held(files, &stale);
         None
     }
 
-    /// What `read` compiled from the file at `path`, held under its full
-    /// path; what another request held for it meanwhile where it did.
-    fn hold(&self, path: &[u8], validation: Validation, now: i64, read: Read) -> Arc<Held> {
+    /// What `read` compiled from the file at `path`, held in `files`
+    /// under its full path, in place of a discarded copy under every name
+    /// that copy was filed under, as `cache_script_in_shared_memory`
+    /// updates the bucket every key of it points to; what another request
+    /// held for it meanwhile where it did.
+    fn hold(
+        &self,
+        files: &Files,
+        path: &[u8],
+        validation: Validation,
+        now: i64,
+        read: Read,
+    ) -> Arc<Held> {
         let Read {
             unit,
             early,
@@ -695,8 +759,9 @@ impl UnitCache {
             Validation::Never | Validation::EveryHit => 0,
         };
         let order = self.taken.fetch_add(1, Ordering::Relaxed);
-        let held = self.held.insert(
+        let held = files.held.insert_over(
             UnitKey::full(path),
+            Held::discarded,
             Held {
                 unit,
                 early,
@@ -711,7 +776,7 @@ impl UnitCache {
             },
         );
         if held.order == order {
-            self.used.fetch_add(size, Ordering::Relaxed);
+            files.used.fetch_add(size, Ordering::Relaxed);
         }
         held
     }
@@ -722,14 +787,14 @@ impl UnitCache {
         self.blacklist_misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// `zend_accel_invalidate`'s discard of the file held under `key`,
-    /// with every name it is filed under: where `force`, and otherwise
-    /// where it changed since, `do_validate_timestamps` finding it filed
-    /// under another full path, held with no stamp, or written at
-    /// another second. Whether a unit was held under the name at all; a
-    /// refusal is none, as php persists none.
-    pub(crate) fn discard(&self, key: &UnitKey, force: bool) -> bool {
-        let Some(held) = self.held.get(key) else {
+    /// `zend_accel_invalidate`'s discard of the file held under `key`:
+    /// where `force`, and otherwise where it changed since,
+    /// `do_validate_timestamps` finding it filed under another full path,
+    /// held with no stamp, or written at another second. Whether a unit
+    /// was held under the name at all; a refusal is none, as php
+    /// persists none, and so is a copy discarded already.
+    pub(crate) fn discard(&self, files: &Files, key: &UnitKey, force: bool) -> bool {
+        let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
             return false;
         };
         if held.unit.is_err() {
@@ -741,69 +806,43 @@ impl UnitCache {
                 Stamp::of(&held.path).is_none_or(|stamp| stamp.seconds() != was.seconds())
             });
         if changed {
-            self.discard_held(&held);
+            self.discard_held(files, &held);
         }
         true
     }
 
-    /// `zend_accel_schedule_restart(ACCEL_RESTART_USER)`: the cache is
-    /// emptied at the start of the first request no other request runs
-    /// beside, and until then nothing new is held; a second call while
-    /// one is pending schedules nothing.
-    pub(crate) fn schedule_restart(&self) -> Restart {
-        self.schedule(Reason::User)
-    }
-
-    /// `zend_accel_schedule_restart` for `reason`, which a restart
-    /// already pending keeps its own reason over.
-    fn schedule(&self, reason: Reason) -> Restart {
-        if self.restart_pending.swap(true, Ordering::Relaxed) {
-            return Restart::Pending;
-        }
-        self.restart_reason.store(reason as u8, Ordering::Relaxed);
-        Restart::Scheduled
-    }
-
     /// `zend_accel_schedule_restart_if_necessary`: a restart for `reason`
-    /// where what is wasted reaches `opcache.max_wasted_percentage` of
-    /// `opcache.memory_consumption`.
-    fn schedule_restart_if_necessary(&self, reason: Reason) {
+    /// where what is wasted in `files` reaches
+    /// `opcache.max_wasted_percentage` of `opcache.memory_consumption`.
+    fn schedule_restart_if_necessary(&self, files: &Files, reason: Reason) {
         let Some(budget) = self.budget.get() else {
             return;
         };
-        let wasted = self.wasted.load(Ordering::Relaxed);
+        let wasted = files.wasted.load(Ordering::Relaxed);
         let reached = u128::from(wasted).saturating_mul(100)
             >= u128::from(budget.memory).saturating_mul(u128::from(budget.max_wasted));
         if reached {
-            self.schedule(reason);
+            files.schedule(reason);
         }
     }
 
-    /// `ZCSG(restart_pending)`.
-    pub(crate) fn restart_pending(&self) -> bool {
-        self.restart_pending.load(Ordering::Relaxed)
-    }
-
-    /// `accel_activate`'s restart, made where one is pending and no
-    /// request runs ([`crate::arena::Epochs::enter`]): the restart counted
-    /// under its reason, the cache emptied, nothing wasted or exhausted
-    /// any more (`zend_shared_alloc_restore_state`), and the time stamped,
-    /// one second past the last where two fall in one second. The
-    /// preload's scripts stay, as php keeps them.
-    pub(crate) fn restart(&self) {
-        if !self.restart_pending.swap(false, Ordering::Relaxed) {
-            return;
-        }
-        let counted = match Reason::of(self.restart_reason.load(Ordering::Relaxed)) {
+    /// `accel_activate`'s restart, where one is pending for the epoch
+    /// `files` are held in: counted under its reason and the time
+    /// stamped, one second past the last where two fall in one second.
+    /// Whether one was; the caller replaces the epoch, which empties the
+    /// cache with nothing wasted or exhausted any more
+    /// (`zend_shared_alloc_restore_state`), the preload's scripts kept as
+    /// php keeps them ([`crate::arena::Epochs::enter`]).
+    pub(crate) fn restart(&self, files: &Files) -> bool {
+        let Some(reason) = files.restart.get() else {
+            return false;
+        };
+        let counted = match reason {
             Reason::Oom => &self.oom_restarts,
             Reason::Hash => &self.hash_restarts,
             Reason::User => &self.manual_restarts,
         };
         counted.fetch_add(1, Ordering::Relaxed);
-        self.held.retain(|_, _| false);
-        self.used.store(0, Ordering::Relaxed);
-        self.wasted.store(0, Ordering::Relaxed);
-        self.exhausted.store(false, Ordering::Relaxed);
         let now = now();
         let last = self.last_restart_time.load(Ordering::Relaxed);
         let stamped = if last < now {
@@ -812,13 +851,15 @@ impl UnitCache {
             last.saturating_add(1)
         };
         self.last_restart_time.store(stamped, Ordering::Relaxed);
+        true
     }
 
-    /// What `opcache_get_status()` reads: the counters, the names held,
-    /// and every file held under its full path, in the order the cache
-    /// took them; a refusal is none of either.
-    pub(crate) fn status(&self, interned_strings: usize) -> CacheStatus {
-        let mut held = self.held.held();
+    /// What `opcache_get_status()` reads in the epoch `files` are held
+    /// in: the counters, the names held, and every file held under its
+    /// full path, in the order the cache took them; a refusal is none of
+    /// either.
+    pub(crate) fn status(&self, files: &Files, interned_strings: usize) -> CacheStatus {
+        let mut held = files.held.held();
         held.retain(|(_, held)| held.unit.is_ok());
         held.retain(|(_, held)| {
             self.preloaded()
@@ -832,14 +873,17 @@ impl UnitCache {
             hits: held.hits.load(Ordering::Relaxed),
             size: held.size,
             last_used: held.last_used.load(Ordering::Relaxed),
-            timestamp: held.stamp.map_or(0, Stamp::seconds),
+            // `zend_accel_discard_script` zeroes a discarded one's.
+            timestamp: (held.stamp)
+                .filter(|_| !held.discarded())
+                .map_or(0, Stamp::seconds),
             revalidate: held.revalidate.load(Ordering::Relaxed),
         };
         // The preload's pseudo-file and its saved scripts stand in the
         // hash beside what the requests cached, never validated.
-        let mut files = Vec::new();
+        let mut listed_files = Vec::new();
         if let Some(preloaded) = self.preloaded() {
-            files.push(CachedFile {
+            listed_files.push(CachedFile {
                 path: PRELOAD_SCRIPT.to_vec(),
                 hits: 0,
                 size: preloaded.statistics.memory_consumption,
@@ -847,13 +891,18 @@ impl UnitCache {
                 timestamp: 0,
                 revalidate: 0,
             });
-            files.extend(preloaded.scripts.iter().map(|held| listed(held)));
-            let preloaded = u64::try_from(files.len()).unwrap_or(u64::MAX);
+            listed_files.extend(preloaded.scripts.iter().map(|held| listed(held)));
+            let preloaded = u64::try_from(listed_files.len()).unwrap_or(u64::MAX);
             keys = keys.saturating_add(preloaded);
         }
-        files.extend(held.into_iter().map(|(_, held)| listed(&held)));
+        let live = held.iter().filter(|(_, held)| !held.discarded());
+        let used = (live.map(|(_, held)| held.size)).fold(
+            self.preloaded().map_or(0, preload_weight),
+            u64::saturating_add,
+        );
+        listed_files.extend(held.into_iter().map(|(_, held)| listed(&held)));
         CacheStatus {
-            restart_pending: self.restart_pending.load(Ordering::Relaxed),
+            restart_pending: files.restart_pending(),
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             blacklist_misses: self.blacklist_misses.load(Ordering::Relaxed),
@@ -862,11 +911,12 @@ impl UnitCache {
             manual_restarts: self.manual_restarts.load(Ordering::Relaxed),
             oom_restarts: self.oom_restarts.load(Ordering::Relaxed),
             hash_restarts: self.hash_restarts.load(Ordering::Relaxed),
-            wasted: self.wasted.load(Ordering::Relaxed),
-            cache_full: self.exhausted.load(Ordering::Relaxed),
+            used,
+            wasted: files.wasted.load(Ordering::Relaxed),
+            cache_full: files.exhausted.load(Ordering::Relaxed),
             interned_strings: u64::try_from(interned_strings).unwrap_or(u64::MAX),
             keys,
-            files,
+            files: listed_files,
             preload: self
                 .preloaded()
                 .map(|preloaded| preloaded.statistics.clone()),

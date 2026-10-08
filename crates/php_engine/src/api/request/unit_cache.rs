@@ -2,7 +2,8 @@
 //! `opcache_get_status`, `opcache_reset`, `opcache_invalidate`,
 //! `opcache_compile_file` and `opcache_is_script_cached` answer from,
 //! since 8.5 makes opcache always present. The cache is the engine's and
-//! shared by every request (`crate::unit_cache`); an extension reaches it
+//! shared by every request of an epoch (`crate::unit_cache`,
+//! `crate::arena::Epochs`); an extension reaches it
 //! through [`Request::unit_cache`] and nothing else, and decides for
 //! itself whether its configuration lets it answer, as opcache's
 //! `accelerator_enabled` does.
@@ -64,6 +65,9 @@ pub struct CacheStatus {
     pub oom_restarts: u64,
     /// `ZCSG(hash_restarts)`: restarts the names running out scheduled.
     pub hash_restarts: u64,
+    /// What the files held weigh, in bytes: the preload's and every file
+    /// listed but a discarded one, whose weight is wasted.
+    pub used: u64,
     /// `ZSMMG(wasted_shared_memory)`: what the files discarded since the
     /// last restart weighed, in bytes.
     pub wasted: u64,
@@ -222,7 +226,7 @@ impl Request {
     pub(crate) fn held_as_written(&mut self, written: &[u8]) -> Option<Arc<Held>> {
         let key = self.written_key(written)?;
         let shared = Arc::clone(&self.shared);
-        let held = shared.units.find(&key)?;
+        let held = shared.units.find(&self.arena.files, &key)?;
         let Admission::Held {
             validation,
             lookup: Lookup::AsWritten,
@@ -295,9 +299,9 @@ impl Request {
         let shared = Arc::clone(&self.shared);
         if as_written
             && let Some(key) = self.written_key(written)
-            && let Some(held) = shared.units.find(&UnitKey::full(&full))
+            && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
         {
-            shared.units.add_key(key, &held);
+            shared.units.add_key(&self.arena.files, key, &held);
         }
     }
 
@@ -327,6 +331,26 @@ impl Request {
     /// ```expect regime=jit-off process
     /// 5 1 7 1 8 1 9
     /// 5 1 7 1 9 1 10
+    /// ```
+    ///
+    /// After `opcache_reset()` nothing new is held, so each include is a
+    /// miss by the key that opens the file: compiled in the first child,
+    /// and in the second read back from the file cache, which kept the
+    /// first child's copy (the file changed since at the same `mtime`):
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/reset' . getmypid(); @mkdir($dir); $t = time() - 10;
+    /// $code = 'function r() { return get_resource_id(fopen("php://memory", "r")); } echo implode(" ", [r(), opcache_reset() ? 1 : 0, r(), include $argv[1], r(), include $argv[1], r()]), "\n";';
+    /// foreach ([1, 2] as $run) {
+    ///     file_put_contents("$dir/a.inc", "<?php return $run;"); touch("$dir/a.inc", $t);
+    ///     $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', "opcache.file_cache=$dir", '-r', $code, "$dir/a.inc"], [1 => ['pipe', 'w']], $pipes);
+    ///     echo stream_get_contents($pipes[1]); proc_close($p);
+    /// }
+    /// exec('rm -rf ' . escapeshellarg($dir));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// 5 1 6 1 8 1 10
+    /// 5 1 6 1 8 1 10
     /// ```
     pub(crate) fn cached_file(
         &mut self,
@@ -369,7 +393,7 @@ impl Request {
         let now = self.request_time();
         if memory
             && handle == HandlePath::Filename
-            && let Some(held) = shared.units.find(&UnitKey::full(&full))
+            && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
             && !held.trusted(validation, now)
         {
             self.revalidated_path(written.unwrap_or(path), &full);
@@ -391,7 +415,7 @@ impl Request {
         // wherever the lookup by the key misses.
         let by_key = written
             .as_ref()
-            .is_some_and(|key| shared.units.find(key).is_some());
+            .is_some_and(|key| shared.units.find(&self.arena.files, key).is_some());
         let asked = Asked {
             path: &full,
             written,
@@ -405,7 +429,9 @@ impl Request {
         let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
         let holds = |name: &[u8]| self.class_named(name).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
+        let arena = Arc::clone(&self.arena);
         let (cached, filed, early) = shared.units.file(
+            &arena.files,
             asked,
             |source| {
                 shared.publish_file(source, path, &self.cwd, stack, request_classes, multibyte)
@@ -548,8 +574,8 @@ impl UnitCache<'_> {
     /// The cache's counters and scripts.
     #[must_use]
     pub fn status(&self) -> CacheStatus {
-        let shared = &self.req.shared;
-        shared.units.status(shared.interned_strings())
+        let req = &self.req;
+        (req.shared.units).status(&req.arena.files, req.shared.interned_strings())
     }
 
     /// `filename_is_in_cache`: whether a unit is held under the name
@@ -569,7 +595,7 @@ impl UnitCache<'_> {
         }
         let Some(held) = req
             .written_key(written)
-            .and_then(|key| req.shared.units.find(&key))
+            .and_then(|key| req.shared.units.find(&req.arena.files, &key))
         else {
             return Ok(false);
         };
@@ -598,6 +624,40 @@ impl UnitCache<'_> {
     /// so a deleted file is invalidated still, and whatever a wrapper's
     /// `url_stat` throws thrown. Whether the file was found, on disk or
     /// in the cache.
+    ///
+    /// A discarded copy stays filed, as php's `corrupted` entry stays in
+    /// its hash: listed with its timestamp zeroed and counted, but cached
+    /// no more, until an include compiles the file again in its place.
+    /// The count is read past what the cache held before the include,
+    /// which leaves out the primary file whether or not it is held:
+    ///
+    /// ```php
+    /// $count = fn() => opcache_get_status()['opcache_statistics']['num_cached_scripts'];
+    /// $f = realpath(sys_get_temp_dir()) . '/inv' . getmypid() . '.inc';
+    /// file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// $before = $count();
+    /// include $f;
+    /// var_dump(opcache_invalidate($f, true), opcache_invalidate($f, true));
+    /// $s = opcache_get_status();
+    /// var_dump(isset($s['scripts'][$f]), $s['scripts'][$f]['timestamp'], $count() - $before, opcache_is_script_cached($f));
+    /// var_dump(include $f, opcache_is_script_cached($f));
+    /// $s = opcache_get_status();
+    /// var_dump($count() - $before, $s['scripts'][$f]['hits'], $s['scripts'][$f]['timestamp'] > 0);
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// int(0)
+    /// int(1)
+    /// bool(false)
+    /// int(1)
+    /// bool(true)
+    /// int(1)
+    /// int(0)
+    /// bool(true)
+    /// ```
     pub fn invalidate(&mut self, written: &[u8], how: Invalidation) -> Result<bool, Thrown> {
         let (path, on_disk) = match self.req.resolve_path(written) {
             Ok(path) => (path, true),
@@ -607,11 +667,9 @@ impl UnitCache<'_> {
         if let Some(file_cache) = self.req.file_cache_of(&path) {
             disk(&file_cache, &self.req.shared.units.build).invalidate(&path);
         }
-        let held = self
-            .req
-            .shared
-            .units
-            .discard(&UnitKey::full(&path), how == Invalidation::Forced);
+        let req = &self.req;
+        let forced = how == Invalidation::Forced;
+        let held = (req.shared.units).discard(&req.arena.files, &UnitKey::full(&path), forced);
         Ok(on_disk || held)
     }
 
@@ -689,11 +747,12 @@ impl UnitCache<'_> {
     }
 
     /// `zend_accel_schedule_restart(ACCEL_RESTART_USER)`, what
-    /// `opcache_reset` asks: the cache and the published arena empty at
-    /// the start of the first request no other request runs beside
-    /// (design §5.14), and until then what is compiled is held nowhere.
+    /// `opcache_reset` asks: the request's epoch replaced at the next
+    /// request's start, which is handed an empty cache and an empty
+    /// published arena (design §5.14), and until then what is compiled
+    /// is held nowhere.
     pub fn reset(&self) -> Restart {
-        self.req.shared.units.schedule_restart()
+        self.req.arena.files.schedule_restart()
     }
 
     /// The cache's bounds, told once as the cache starts
@@ -716,39 +775,61 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, mpsc};
 
-    use super::Request;
+    use super::{Request, Restart};
     use crate::engine::{Engine, RequestDescription};
 
-    /// `accel_activate`'s restart under `accel_is_inactive`: a reset
-    /// waits while a request of the arena's epoch runs, so a request
-    /// starting beside it is handed the same arena with its rows; the
-    /// first request to start once none runs empties the cache and the
-    /// arena, whose numbers are reserved from the first again.
+    /// `accel_activate`'s restart with no wait for `accel_is_inactive`: a
+    /// chain of requests on two threads, each started before the one
+    /// before it ends, so no instant has none running. A restart
+    /// scheduled in the middle hands the next request a new epoch, its
+    /// arena empty, while the request that scheduled it keeps its own
+    /// arena and sees the restart pending; the old arena is dropped when
+    /// that last holder ends.
     #[test]
-    fn a_restart_waits_for_the_epochs_requests_and_empties_the_arena() {
+    fn a_restart_hands_the_next_request_a_new_epoch_while_the_old_one_runs() {
         let engine = Engine::builder().build();
-        let start = || Request::new(Arc::clone(&engine.shared), RequestDescription::default());
-        let first = start();
-        assert!(first.arena.reserve_class().is_some());
-        assert_eq!(first.arena.counts(), [1, 0, 0]);
+        let start = &|| Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+        let units = &engine.shared.units;
+        let (to_second, at_second) = mpsc::channel::<()>();
+        let (to_first, at_first) = mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let first = start();
+                assert!(first.arena.reserve_class().is_some());
+                to_second.send(()).ok();
+                at_first.recv().ok();
+                drop(first);
+                let third = start();
+                assert_eq!(third.arena.counts(), [0, 0, 0], "an empty arena");
+                assert!(!third.arena.files.restart_pending());
+                assert_eq!(units.status(&third.arena.files, 0).manual_restarts, 1);
+                to_second.send(()).ok();
+                at_first.recv().ok();
+                drop(third);
+            });
+            scope.spawn(move || {
+                at_second.recv().ok();
+                let second = start();
+                assert_eq!(second.arena.counts(), [1, 0, 0], "the first's epoch");
+                assert_eq!(second.arena.files.schedule_restart(), Restart::Scheduled);
+                assert_eq!(second.arena.files.schedule_restart(), Restart::Pending);
+                to_first.send(()).ok();
+                at_second.recv().ok();
+                assert_eq!(second.arena.counts(), [1, 0, 0], "its rows stand");
+                assert!(second.arena.files.restart_pending());
+                let held = Arc::downgrade(&second.arena);
+                drop(second);
+                assert!(held.upgrade().is_none(), "dropped with its last holder");
+                to_first.send(()).ok();
+            });
+        });
         assert_eq!(
-            engine.shared.units.schedule_restart(),
-            super::Restart::Scheduled
+            units
+                .status(&engine.shared.arena.current().files, 0)
+                .manual_restarts,
+            1
         );
-        let beside = start();
-        assert!(
-            Arc::ptr_eq(&first.arena, &beside.arena),
-            "the epoch is still held"
-        );
-        assert!(engine.shared.units.restart_pending());
-        assert_eq!(beside.arena.counts(), [1, 0, 0]);
-        drop(first);
-        drop(beside);
-        let after = start();
-        assert!(!engine.shared.units.restart_pending());
-        assert_eq!(after.arena.counts(), [0, 0, 0], "an empty arena");
-        assert_eq!(engine.shared.units.status(0).manual_restarts, 1);
     }
 }

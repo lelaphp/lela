@@ -13,10 +13,11 @@
 //! entries of one declaration are a chain, newest last, as php's
 //! `ce->inheritance_cache` is a list on the unlinked `ce`.
 //!
-//! The map is engine-wide and lives in the arena it publishes into, so an
-//! opcache restart that replaces the arena drops it with the classes it
-//! names (#2184), and [`InheritanceCache::clear`] empties it where the
-//! arena is kept. It is read on every link the program makes and written once per
+//! The map is engine-wide and lives in the arena of the epoch it
+//! publishes into, so an opcache restart, which hands the next request a
+//! new epoch, leaves it behind and it is dropped with the classes it
+//! names once no request of its epoch runs (#2184, #2215). It is read on
+//! every link the program makes and written once per
 //! declaration and dependency set, so it is sharded by declaration, each
 //! shard an `RwLock` that readers share: two requests linking at once
 //! read side by side, and a publisher holds one shard of the 64 for one
@@ -140,19 +141,6 @@ impl InheritanceCache {
         entry
     }
 
-    /// Every entry given up, as an opcache restart gives up the shared
-    /// memory they stand in: what a restart that empties the arena back
-    /// to the preload's rows does ([`crate::arena::Epochs::enter`]); one
-    /// that replaces the arena drops the map with it.
-    pub(crate) fn clear(&mut self) {
-        for shard in &mut self.shards {
-            shard
-                .get_mut()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clear();
-        }
-    }
-
     /// How many declarations have a chain.
     #[cfg(test)]
     fn declarations(&self) -> usize {
@@ -184,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_link_is_found_by_its_declaration_and_added_once() {
-        let mut cache = InheritanceCache::default();
+        let cache = InheritanceCache::default();
         let unit = Unit::default().published();
         assert!(cache.find(&unit, 0).is_none());
         let first = cache.add(&unit, 0, entry(1, 10));
@@ -196,27 +184,23 @@ mod tests {
         assert_eq!(classes, [10, 12]);
         assert!(cache.find(&unit, 1).is_none());
         assert_eq!(cache.declarations(), 1);
-        cache.clear();
-        assert!(cache.find(&unit, 0).is_none());
     }
 
-    /// A restart, made once no request holds the arena, empties the map
-    /// with the rows its entries name.
+    /// A restart hands the next request a new epoch whose map is empty,
+    /// while a request of the old one keeps reading the old map.
     #[test]
     fn a_restart_empties_the_map() {
-        let epochs = crate::arena::Epochs::of(crate::arena::Arena::past(0, 0));
+        let files = crate::unit_cache::Files::new(16);
+        let epochs = crate::arena::Epochs::of(crate::arena::Arena::past(0, 0, files));
         let unit = Unit::default().published();
-        let arena = epochs.enter(|| false, || {});
+        let arena = epochs.enter(|_| false);
         arena.inheritance.add(&unit, 0, entry(1, 10));
-        assert!(arena.inheritance.find(&unit, 0).is_some());
-        let held = epochs.enter(|| true, || {});
-        assert!(
-            held.inheritance.find(&unit, 0).is_some(),
-            "held by a request: no restart"
-        );
-        drop((arena, held));
-        let restarted = epochs.enter(|| true, || {});
+        let restarted = epochs.enter(|_| true);
         assert!(restarted.inheritance.find(&unit, 0).is_none());
+        assert!(
+            arena.inheritance.find(&unit, 0).is_some(),
+            "the old epoch's request reads its own"
+        );
     }
 
     /// Readers on many threads while one writes: each sees a chain whole,

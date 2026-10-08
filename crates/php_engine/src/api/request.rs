@@ -391,9 +391,10 @@ pub struct Request {
     /// into (design §5.14, *Identities*), dropped with the request. A
     /// published class's row is the engine's arena's.
     own_classes: Vec<Declared>,
-    /// The engine's published arena as the request started (design
-    /// §5.14), which every `ClassId` and `Function` of the published
-    /// space this request holds names a row of, the preload's first.
+    /// The engine's published arena of the epoch the request started in
+    /// (design §5.14), which every `ClassId` and `Function` of the
+    /// published space this request holds names a row of, the preload's
+    /// below its own, and whose unit cache files it reads and fills.
     arena: Arc<crate::arena::Arena>,
     /// The classes a load bound early ([`classes::Classes`]).
     classes: classes::Classes,
@@ -688,11 +689,12 @@ impl Request {
         let _laid = stack.open(&mut heap);
         let tables = preload::Tables::of(shared.units.preloaded());
         let buckets = preload::Buckets::past(tables.classes.len() + tables.aliases.len());
-        // `accel_activate`'s restart, where one is pending and no request
-        // holds the arena: the unit cache and the arena emptied together.
+        // `accel_activate`'s restart, where one is pending: a new epoch,
+        // its arena and the unit cache's files empty, handed to this
+        // request whatever requests of the old one still run.
         let arena = shared
             .arena
-            .enter(|| shared.units.restart_pending(), || shared.units.restart());
+            .enter(|arena| shared.units.restart(&arena.files));
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             paths: paths::Paths::startup(&shared),

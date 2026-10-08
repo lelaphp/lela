@@ -245,15 +245,27 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     /// `value` held for `key`, or what another thread put there while
-    /// this one built it, which is kept: the one both are answered.
-    pub(crate) fn insert(&self, key: K, value: V) -> Arc<V> {
+    /// this one built it, which is kept: the one both are answered. A
+    /// value held there that `stale` answers true for is replaced, under
+    /// every key that held it, as one bucket of php's hash that several
+    /// keys point to is updated in place.
+    pub(crate) fn insert_over(&self, key: K, stale: impl Fn(&V) -> bool, value: V) -> Arc<V> {
         let mut entries = self.entries();
-        if let Some(found) = entries.get(&key) {
-            return Arc::clone(found);
-        }
-        self.make_room(&mut entries);
+        let replaced = match entries.get(&key) {
+            Some(found) if !stale(found) => return Arc::clone(found),
+            found => found.map(Arc::clone),
+        };
         let value = Arc::new(value);
-        entries.insert(key, Arc::clone(&value));
+        let Some(replaced) = replaced else {
+            self.make_room(&mut entries);
+            entries.insert(key, Arc::clone(&value));
+            return value;
+        };
+        for held in entries.values_mut() {
+            if Arc::ptr_eq(held, &replaced) {
+                *held = Arc::clone(&value);
+            }
+        }
         value
     }
 
@@ -271,23 +283,12 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         entries.insert(key, Arc::clone(value));
     }
 
-    /// `value` dropped under every key it is held under.
-    pub(crate) fn remove_all(&self, value: &Arc<V>) {
-        self.entries().retain(|_, held| !Arc::ptr_eq(held, value));
-    }
-
     /// Every value held, with its key, in no order.
     pub(crate) fn held(&self) -> Vec<(K, Arc<V>)> {
         self.entries()
             .iter()
             .map(|(key, value)| (key.clone(), Arc::clone(value)))
             .collect()
-    }
-
-    /// The values `keep` answers false for, dropped: a value a caller
-    /// still holds lives until it lets go.
-    pub(crate) fn retain(&self, mut keep: impl FnMut(&K, &V) -> bool) {
-        self.entries().retain(|key, value| keep(key, value));
     }
 }
 

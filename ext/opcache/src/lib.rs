@@ -638,20 +638,11 @@ fn assoc(req: &mut Request, rows: Vec<(&str, Value)>) -> Result<Owner<PhpArray>,
     Ok(array)
 }
 
-/// The bytes the files held weigh, what the status calls used memory.
-fn used_memory(status: &CacheStatus) -> i64 {
-    status
-        .files
-        .iter()
-        .map(|file| i64::try_from(file.size).unwrap_or(i64::MAX))
-        .fold(0, i64::saturating_add)
-}
-
 /// `memory_usage`: what the files held weigh, the configured memory
 /// less that and what is wasted, `ZSMMG(wasted_shared_memory)`, and
 /// the wasted part of the configured memory as a percentage.
 fn memory_usage(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, Thrown> {
-    let used = used_memory(status);
+    let used = i64::try_from(status.used).unwrap_or(i64::MAX);
     let total = consumption(req);
     let wasted = i64::try_from(status.wasted).unwrap_or(i64::MAX);
     let free = total.saturating_sub(used).saturating_sub(wasted);
@@ -1325,7 +1316,7 @@ fn info_rows(req: &mut Request) -> Result<(), Thrown> {
     if started && !file_cache_only {
         let status = req.unit_cache().status();
         let consumption = consumption(req);
-        let used = used_memory(&status);
+        let used = i64::try_from(status.used).unwrap_or(i64::MAX);
         let buffer = long(req, "opcache.interned_strings_buffer").saturating_mul(1 << 20);
         let scripts = status.files.len().to_string();
         let since = formatted(req, "Y-m-d\\TH:i:sO", status.start_time)?;

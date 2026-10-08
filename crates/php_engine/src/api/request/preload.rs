@@ -683,9 +683,6 @@ impl Request {
             }
             published.push(function);
         }
-        // `zend_shared_alloc_save_state`: a restart keeps what the
-        // preload published.
-        self.arena.keep();
         self.declared.clear_own();
         self.aliases.clear_own();
         self.own_classes.clear();
@@ -695,6 +692,14 @@ impl Request {
             aliases: Rows::of(aliases),
             functions: published.into(),
         })
+    }
+
+    /// `zend_shared_alloc_save_state` after preloading: the arena the
+    /// preload published into laid below every epoch from now on, so a
+    /// restart keeps its rows at their numbers
+    /// ([`crate::arena::Epochs::lay_base`]).
+    pub(crate) fn save_preload_state(&self) {
+        self.shared.arena.lay_base(&self.arena);
     }
 
     /// The order the preload's classes are published in: each in the
