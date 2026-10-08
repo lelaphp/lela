@@ -24,6 +24,15 @@ OpArray
 OpArray::dimension_written
 OpArray::dump_lines
 Opcode
+Opcode::COUNT
+Opcode::effects
+Opcode::from_u8
+Opcode::is_commutative
+Opcode::is_frameless_icall
+Opcode::is_safepoint_site
+Opcode::name
+Opcode::num
+Opcode::out_used
 OperandKind
 Opline
 Opline::jump_target

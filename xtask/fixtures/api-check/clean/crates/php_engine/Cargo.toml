@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 php_heap = { path = "../php_heap" }
+
+[lints]
+workspace = true

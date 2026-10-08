@@ -10,3 +10,6 @@ php_ext_pcre = { path = "../pcre" }
 # On no row either, and a dev-dependency links nothing, so it is not held.
 [dev-dependencies]
 php_ext_spl = { path = "../spl" }
+
+[lints]
+workspace = true

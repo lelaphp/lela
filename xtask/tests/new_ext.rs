@@ -388,8 +388,12 @@ fn a_name_without_a_crate_row_refuses_naming_the_manifest() {
     assert!(err.contains("Demo"), "a name is lowercase: {err}");
 }
 
+/// A second crate is registered after the first; under `order =
+/// "registration"`, the one order api-check serves (#1778, #2255), the
+/// order written is php's and free, so the two reordered by hand still
+/// pass.
 #[test]
-fn a_second_crate_is_appended_last_and_a_hand_reordering_fails_api_check_naming_both() {
+fn a_second_crate_is_appended_last_and_a_hand_reordering_passes_api_check() {
     let root = scratch("order");
     let manifest = Manifest::load(&root).unwrap();
     new_ext::run(&root, &manifest, "demo").unwrap();
@@ -405,18 +409,6 @@ fn a_second_crate_is_appended_last_and_a_hand_reordering_fails_api_check_naming_
         "{bundle:?}"
     );
 
-    // `other` comes to depend on `demo`, as standard does on random: the
-    // order written, demo first, is still topological.
-    let cargo = root.join("ext/other/Cargo.toml");
-    let mut text = std::fs::read_to_string(&cargo).unwrap();
-    text.push_str("php_ext_demo = { path = \"../demo\" }\n");
-    std::fs::write(&cargo, text).unwrap();
-    let readings = api_check::hold(&manifest, &root, false).unwrap();
-    let bundle = of(&readings, "php_bundle");
-    assert_eq!(bundle.status, Status::Pass, "{}", bundle.message);
-    assert_eq!(bundle.numbers["extensions"], 2.into());
-
-    // Reordered by hand, dependant first: api-check names both crates.
     let demo_block = "        #[cfg(feature = \"demo\")]\n        php_ext_demo::extension,\n";
     let other_block = "        #[cfg(feature = \"other\")]\n        php_ext_other::extension,\n";
     assert!(lib.contains(&format!("{demo_block}{other_block}")), "{lib}");
@@ -430,14 +422,8 @@ fn a_second_crate_is_appended_last_and_a_hand_reordering_fails_api_check_naming_
     .unwrap();
     let readings = api_check::hold(&manifest, &root, false).unwrap();
     let bundle = of(&readings, "php_bundle");
-    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
-    assert!(bundle.message.contains("ext/other"), "{}", bundle.message);
-    assert!(bundle.message.contains("ext/demo"), "{}", bundle.message);
-    assert!(
-        bundle.message.contains("not topological"),
-        "{}",
-        bundle.message
-    );
+    assert_eq!(bundle.status, Status::Pass, "{}", bundle.message);
+    assert_eq!(bundle.numbers["extensions"], 2.into());
 }
 
 #[test]

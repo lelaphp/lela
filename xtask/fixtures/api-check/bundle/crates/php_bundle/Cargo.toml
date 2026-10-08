@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 php_ext_random = { path = "../../ext/random" }
 php_ext_standard = { path = "../../ext/standard" }
+
+[lints]
+workspace = true
