@@ -5,6 +5,14 @@
 //! `--EXPECTREGEX--` is one already, and both are matched anchored under
 //! the `s` flag (run-tests.php:2584-2600).
 //!
+//! All three are bytes, as run-tests.php holds them: its `preg_match` has
+//! no `u` modifier, so PCRE reads the pattern and what ran a byte at a
+//! time, and `.`, `%c` and `\xF2` are each one byte. This module matches
+//! so by reading every byte as the character of the same value
+//! ([`bytewise`]) on both sides, which the engine here, matching code
+//! point by code point with ASCII classes, then matches as PCRE does; a
+//! test whose expectation is not UTF-8 is held to its bytes (#1937).
+//!
 //! The engine behind an `--EXPECTF--` has RE2 semantics (design §8), since
 //! `expectf_to_regex` writes nothing past them but `%f`'s lookahead, which
 //! is written here as the same language. An `--EXPECTREGEX--` is the
@@ -14,6 +22,7 @@
 //! `preg_match` ([`Expectation::met_under`], design §8, revision 73,
 //! #1543); the RE2 engine reads it only where no oracle runs.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result, bail};
@@ -35,18 +44,16 @@ if ($met === false) {
 exit($met === 1 ? 0 : 1);
 "#;
 
-/// The one expectation a test carries. `--EXPECT--` is bytes, as the
-/// program's stdout is; the two pattern forms are words, and a byte of
-/// that stdout that is no character reaches the match as the replacement
-/// character.
+/// The one expectation a test carries, the section's bytes as the
+/// program's stdout is bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expectation {
     /// `--EXPECT--`: the bytes, exactly.
     Exact(Vec<u8>),
     /// `--EXPECTF--`: the bytes with php's wildcards in them.
-    Format(String),
+    Format(Vec<u8>),
     /// `--EXPECTREGEX--`: a pattern the test wrote itself.
-    Pattern(String),
+    Pattern(Vec<u8>),
 }
 
 impl Expectation {
@@ -63,17 +70,16 @@ impl Expectation {
     /// shown against.
     pub fn text(&self) -> &[u8] {
         match self {
-            Expectation::Exact(body) => body,
-            Expectation::Format(body) | Expectation::Pattern(body) => body.as_bytes(),
+            Expectation::Exact(body) | Expectation::Format(body) | Expectation::Pattern(body) => {
+                body
+            }
         }
     }
 
     /// Whether `actual`, already normalised, meets the expectation.
     pub fn met(&self, actual: &[u8]) -> Result<bool> {
-        let pattern = match self {
-            Expectation::Exact(body) => return Ok(actual == body),
-            Expectation::Format(body) => expectf_to_regex(body),
-            Expectation::Pattern(body) => body.clone(),
+        let Some(pattern) = self.pattern(self.text()) else {
+            return Ok(actual == self.text());
         };
         let anchored = format!("(?s)^{}$", pcre_literals(&pattern));
         let regex = Regex::new(&anchored).with_context(|| {
@@ -82,8 +88,34 @@ impl Expectation {
                 self.section()
             )
         })?;
-        Ok(regex.is_match(&String::from_utf8_lossy(actual)))
+        Ok(regex.is_match(&bytewise(actual)))
     }
+
+    /// `text`, a section or a line of one, as the pattern this engine
+    /// matches, read [`bytewise`]; none for an `--EXPECT--`.
+    fn pattern(&self, text: &[u8]) -> Option<String> {
+        match self {
+            Expectation::Exact(_) => None,
+            Expectation::Format(_) => Some(expectf_to_regex(&bytewise(text))),
+            Expectation::Pattern(_) => Some(bytewise(text)),
+        }
+    }
+}
+
+/// Bytes as the characters of the same values, U+0000 to U+00FF, which is
+/// how PCRE without the `u` modifier reads a pattern and its subject: a
+/// character of either is one byte.
+fn bytewise(bytes: &[u8]) -> String {
+    bytes.iter().copied().map(char::from).collect()
+}
+
+/// `text` line by line, as `str::lines` splits: at each `\n`, a `\r`
+/// before it dropped, and no empty line after the last.
+pub(crate) fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
+    text.split_inclusive(|&b| b == b'\n').map(|line| {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        line.strip_suffix(b"\r").unwrap_or(line)
+    })
 }
 
 impl Expectation {
@@ -113,8 +145,9 @@ impl Expectation {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
             _ => bail!(
-                "the EXPECTREGEX section is not a pattern PCRE takes: {}: {body}",
-                String::from_utf8_lossy(&seen.stdout).trim()
+                "the EXPECTREGEX section is not a pattern PCRE takes: {}: {}",
+                String::from_utf8_lossy(&seen.stdout).trim(),
+                String::from_utf8_lossy(body)
             ),
         }
     }
@@ -129,22 +162,22 @@ impl Expectation {
 /// two runs part and never whether a test passes.
 #[derive(Debug)]
 pub(crate) struct Line {
-    text: String,
+    bytes: Vec<u8>,
     pattern: Option<Regex>,
     spans: bool,
 }
 
 impl Line {
-    /// The line as the section wrote it.
-    pub(crate) fn text(&self) -> &str {
-        &self.text
+    /// The line as the section wrote it, as words to show.
+    pub(crate) fn text(&self) -> Cow<'_, str> {
+        String::from_utf8_lossy(&self.bytes)
     }
 
     /// Whether `actual`, one line of what ran, is what this line asks for.
-    pub(crate) fn meets(&self, actual: &str) -> bool {
+    pub(crate) fn meets(&self, actual: &[u8]) -> bool {
         match &self.pattern {
-            Some(pattern) => pattern.is_match(actual),
-            None => self.text == actual,
+            Some(pattern) => pattern.is_match(&bytewise(actual)),
+            None => self.bytes == actual,
         }
     }
 
@@ -159,25 +192,26 @@ impl Line {
 impl Expectation {
     /// The expectation line by line, each held to one line of what ran.
     pub(crate) fn lines(&self) -> Vec<Line> {
-        let text = String::from_utf8_lossy(self.text());
-        text.lines()
+        lines(self.text())
             .map(|line| {
+                let has = |words: &[&[u8]]| {
+                    words
+                        .iter()
+                        .any(|w| line.windows(w.len()).any(|at| at == *w))
+                };
                 let (source, spans) = match self {
                     Expectation::Exact(_) => (None, false),
                     Expectation::Format(_) => (
-                        line.contains('%').then(|| expectf_to_regex(line)),
-                        ["%a", "%A", "%r"].iter().any(|w| line.contains(w)),
+                        has(&[b"%"]).then(|| self.pattern(line)).flatten(),
+                        has(&[b"%a", b"%A", b"%r"]),
                     ),
-                    Expectation::Pattern(_) => (
-                        Some(line.to_owned()),
-                        line.contains(".*") || line.contains(".+"),
-                    ),
+                    Expectation::Pattern(_) => (self.pattern(line), has(&[b".*", b".+"])),
                 };
                 let pattern = source.and_then(|source| {
                     Regex::new(&format!("^(?:{})$", pcre_literals(&source))).ok()
                 });
                 Line {
-                    text: line.to_owned(),
+                    bytes: line.to_vec(),
                     pattern,
                     spans,
                 }
@@ -372,6 +406,39 @@ mod tests {
     }
 
     #[test]
+    fn a_pattern_is_matched_over_bytes_as_pcre_without_the_u_modifier_matches() {
+        // Windows-1251 bytes are not passed by the replacement characters
+        // a lossy reading of either side would make of them.
+        let cyrillic = Expectation::Format(b"\xF2\xE5".to_vec());
+        assert!(!cyrillic.met(b"\xEF\xBF\xBD\xEF\xBF\xBD").unwrap());
+        assert!(cyrillic.met(b"\xF2\xE5").unwrap());
+        // `%c` is one byte, so a two-byte character is two of them.
+        let two = Expectation::Format(b"%c%c".to_vec());
+        assert!(two.met("\u{e9}".as_bytes()).unwrap());
+        assert!(
+            !Expectation::Format(b"%c".to_vec())
+                .met("\u{e9}".as_bytes())
+                .unwrap()
+        );
+        // A pattern's `\xF2` is the byte, and a UTF-8 literal its bytes.
+        assert!(
+            Expectation::Pattern(br"\xF2.".to_vec())
+                .met(b"\xF2\xE5")
+                .unwrap()
+        );
+        assert!(
+            Expectation::Pattern("\u{e9}%".into())
+                .met("\u{e9}%".as_bytes())
+                .unwrap()
+        );
+        // Lines split as `str::lines` splits them.
+        let split = |text: &'static [u8]| lines(text).collect::<Vec<_>>();
+        assert_eq!(split(b"a\r\n\nb\n"), [&b"a"[..], b"", b"b"]);
+        assert_eq!(split(b"\n"), [&b""[..]]);
+        assert!(split(b"").is_empty());
+    }
+
+    #[test]
     fn the_wildcards_are_php_s() {
         assert_eq!(expectf_to_regex("%s"), r"[^\r\n]+");
         assert_eq!(expectf_to_regex("%d"), r"\d+");
@@ -409,7 +476,7 @@ mod tests {
             ("%e", "/", true),
         ];
         for (wanted, actual, met) in cases {
-            let expectation = Expectation::Format(wanted.to_owned());
+            let expectation = Expectation::Format(wanted.into());
             assert_eq!(
                 expectation.met(actual.as_bytes()).unwrap(),
                 met,
@@ -420,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_format_expectation_is_anchored_and_dots_span_lines() {
-        let expectation = Expectation::Format("Fatal error: %s in %s on line %d".to_owned());
+        let expectation = Expectation::Format("Fatal error: %s in %s on line %d".into());
         assert!(
             expectation
                 .met(b"Fatal error: nope in /tmp/x.php on line 3")
@@ -431,23 +498,19 @@ mod tests {
                 .met(b"before\nFatal error: nope in /tmp/x.php on line 3")
                 .unwrap()
         );
-        assert!(
-            Expectation::Format("a%Ab".to_owned())
-                .met(b"a\n\nb")
-                .unwrap()
-        );
+        assert!(Expectation::Format("a%Ab".into()).met(b"a\n\nb").unwrap());
     }
 
     #[test]
     fn a_pattern_expectation_is_the_test_s_own() {
-        let expectation = Expectation::Pattern("int\\([0-9]+\\)".to_owned());
+        let expectation = Expectation::Pattern("int\\([0-9]+\\)".into());
         assert!(expectation.met(b"int(12)").unwrap());
         assert!(!expectation.met(b"int(x)").unwrap());
     }
 
     #[test]
     fn a_pattern_this_engine_cannot_take_is_an_error_naming_the_section() {
-        let error = Expectation::Pattern(r"(a)\1".to_owned())
+        let error = Expectation::Pattern(r"(a)\1".into())
             .met(b"aa")
             .unwrap_err()
             .to_string();
@@ -458,7 +521,7 @@ mod tests {
     fn the_two_escapes_an_re2_engine_reads_as_assertions_are_written_as_classes() {
         assert_eq!(quoted_for_the_engine("[1]=>"), r"\[1\]\=[>]");
         assert_eq!(quoted_for_the_engine("<a>"), "[<]a[>]");
-        let arrow = Expectation::Format("  [1]=>\n  string(3) \"abc\"".to_owned());
+        let arrow = Expectation::Format("  [1]=>\n  string(3) \"abc\"".into());
         assert!(arrow.met(b"  [1]=>\n  string(3) \"abc\"").unwrap());
     }
 
@@ -469,15 +532,15 @@ mod tests {
         assert_eq!(pcre_literals(r"array\(2\) {"), r"array\(2\) \{");
         assert_eq!(pcre_literals(r"a{2}b{1,}c{1,3}\{"), r"a{2}b{1,}c{1,3}\{");
         assert!(
-            Expectation::Pattern("array\\(2\\) {\n}".to_owned())
+            Expectation::Pattern("array\\(2\\) {\n}".into())
                 .met(b"array(2) {\n}")
                 .unwrap()
         );
-        let format = Expectation::Format("string(9) \"%r\\0%rA%r\\0%rb\"".to_owned());
+        let format = Expectation::Format("string(9) \"%r\\0%rA%r\\0%rb\"".into());
         assert!(format.met(b"string(9) \"\0A\0b\"").unwrap());
-        let pattern = Expectation::Pattern(r#"string\([0-9]*\) "[#\0]*""#.to_owned());
+        let pattern = Expectation::Pattern(r#"string\([0-9]*\) "[#\0]*""#.into());
         assert!(pattern.met(b"string(1) \"\0\"").unwrap());
-        assert!(Expectation::Format("a\0b".to_owned()).met(b"a\0b").unwrap());
+        assert!(Expectation::Format("a\0b".into()).met(b"a\0b").unwrap());
     }
 
     #[test]

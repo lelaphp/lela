@@ -1170,14 +1170,14 @@ fn every_expectf_section_of_the_pinned_pcre_subset_compiles() {
             continue;
         };
         for (section, expectation) in [
-            ("EXPECTF", Expectation::Format as fn(String) -> _),
+            ("EXPECTF", Expectation::Format as fn(Vec<u8>) -> _),
             ("EXPECTREGEX", Expectation::Pattern),
         ] {
             let Some(body) = phpt.section(section) else {
                 continue;
             };
             seen += 1;
-            let expectation = expectation(String::from_utf8_lossy(body).trim().to_owned());
+            let expectation = expectation(body.trim_ascii().to_vec());
             // The one corpus body that needs PCRE-only syntax is a
             // divergence row, not a reason to carry a backtracker (§8);
             // every other one must compile here.
@@ -2078,7 +2078,7 @@ fn an_expectregex_is_matched_as_pcre_matches_it() {
     }
     let manifest = manifest();
     let oracle = manifest.pin.oracle();
-    let leak = Expectation::Pattern("ok((?!memory leaks detected).)*".to_owned());
+    let leak = Expectation::Pattern("ok((?!memory leaks detected).)*".into());
     assert!(leak.met(b"ok").is_err(), "the RE2 engine took a lookahead");
     assert!(leak.met_under(&oracle, b"ok").unwrap());
     assert!(
@@ -2093,12 +2093,12 @@ fn an_expectregex_is_matched_as_pcre_matches_it() {
             )
             .unwrap()
     );
-    let anchored = Expectation::Pattern("o.".to_owned());
+    let anchored = Expectation::Pattern("o.".into());
     assert!(!anchored.met_under(&oracle, b"xok").unwrap(), "unanchored");
     assert!(anchored.met_under(&oracle, b"o\n").unwrap(), "no s flag");
-    let backref = Expectation::Pattern(r"(a)\1".to_owned());
+    let backref = Expectation::Pattern(r"(a)\1".into());
     assert!(backref.met_under(&oracle, b"aa").unwrap());
-    let broken = Expectation::Pattern("(".to_owned());
+    let broken = Expectation::Pattern("(".into());
     let error = broken.met_under(&oracle, b"(").unwrap_err().to_string();
     assert!(error.contains("EXPECTREGEX"), "{error}");
     let exact = Expectation::Exact(b"ok".to_vec());

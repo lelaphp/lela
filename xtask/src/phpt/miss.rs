@@ -29,7 +29,7 @@ use std::sync::LazyLock;
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::oracle::expect::Expectation;
+use crate::oracle::expect::{self, Expectation};
 use crate::oracle::{self, Step};
 
 /// The longest a masked line is kept, in characters.
@@ -144,8 +144,13 @@ impl Miss {
     /// not, and the signature they come to.
     pub(crate) fn of(expectation: &Expectation, actual: &[u8]) -> Miss {
         let lines = expectation.lines();
-        let ran = String::from_utf8_lossy(actual);
-        let ran: Vec<&str> = ran.lines().collect();
+        let ran: Vec<&[u8]> = expect::lines(actual).collect();
+        let (texts, shown): (Vec<_>, Vec<_>) = (
+            lines.iter().map(expect::Line::text).collect(),
+            ran.iter()
+                .map(|line| String::from_utf8_lossy(line))
+                .collect(),
+        );
         let mut expected: Vec<&str> = Vec::new();
         let mut written: Vec<&str> = Vec::new();
         let mut spanning = false;
@@ -155,10 +160,10 @@ impl Miss {
                 Step::Expected(i) => {
                     spanning = lines[i].spans();
                     if !spanning {
-                        expected.push(lines[i].text());
+                        expected.push(&texts[i]);
                     }
                 }
-                Step::Actual(j) if !spanning => written.push(ran[j]),
+                Step::Actual(j) if !spanning => written.push(&shown[j]),
                 Step::Actual(_) => {}
             }
         }
