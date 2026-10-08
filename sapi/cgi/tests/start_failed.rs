@@ -39,14 +39,18 @@ fn tree(name: &str) -> PathBuf {
 /// php-cgi over `dir`'s program with the session started automatically
 /// from `dir`, the cookie naming the file, and `flags` before the file.
 fn served(dir: &Path, flags: &[&str]) -> Output {
-    let program = dir.join("t.php");
+    served_file(dir, "t.php", flags)
+}
+
+/// [`served`] over `dir`'s file `name`, which need not exist.
+fn served_file(dir: &Path, name: &str, flags: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_php-cgi"))
         .env_clear()
         .env("HTTP_COOKIE", "PHPSESSID=t1879")
         .args(["-n", "-d", "session.auto_start=1", "-d"])
         .arg(format!("session.save_path={}", dir.display()))
         .args(flags)
-        .arg(&program)
+        .arg(dir.join(name))
         .output()
         .unwrap()
 }
@@ -97,5 +101,47 @@ fn a_buffered_failure_writes_nothing() {
     let out = served(&dir, &["-d", "output_buffering=4096"]);
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    assert_eq!(out.status.code(), Some(255));
+}
+
+/// php-cgi opens the primary script only once `php_request_startup` has
+/// returned (`Z/sapi/cgi/cgi_main.c:2460-2487`), so a start that fails
+/// over a missing script writes what the failure wrote under a head with
+/// no `Status:` line, and never `No input file specified.`; a server's
+/// request with no path translated carries the 404 `init_request_info`
+/// set before the start, and nothing more (#2272).
+#[test]
+fn a_failed_start_over_a_missing_script_writes_no_refusal() {
+    let dir = tree("missing");
+    let out = served_file(&dir, "missing.php", &[]);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{HEAD}{FAILED}")
+    );
+    assert_eq!(out.status.code(), Some(255));
+    std::fs::write(dir.join("sess_t1879"), DATA).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_php-cgi"))
+        .env_clear()
+        .env("HTTP_COOKIE", "PHPSESSID=t1879")
+        .env("GATEWAY_INTERFACE", "CGI/1.1")
+        .env("REDIRECT_STATUS", "200")
+        .env("REQUEST_METHOD", "GET")
+        .env("SCRIPT_FILENAME", dir.join("missing.php"))
+        .args([
+            "-n",
+            "-d",
+            "cgi.fix_pathinfo=0",
+            "-d",
+            "session.auto_start=1",
+            "-d",
+        ])
+        .arg(format!("session.save_path={}", dir.display()))
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("{HEAD}{FAILED}")
+    );
     assert_eq!(out.status.code(), Some(255));
 }

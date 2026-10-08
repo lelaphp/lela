@@ -36,3 +36,9 @@ Routed
 Uncaught
 WebRequest
 fork
+getopt::Getopt
+getopt::Need
+getopt::Opt
+getopt::OptError
+getopt::Stopped
+getopt::Taken

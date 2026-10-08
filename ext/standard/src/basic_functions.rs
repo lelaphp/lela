@@ -344,7 +344,7 @@ fn getopt(
     #[php(default = [])] long_options: PhpArray,
     #[php(default = null)] rest_index: Ref<Untyped<Value>>,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    use crate::getopt::{Getopt, Got, Named, long_option};
+    use php_ext::syntax::{Getopt, Opt, Taken};
     let spec = short_options;
     rest_index.set(req, Untyped(Value::int(1)))?;
     // `$_SERVER['argv']` as `php_build_argv` wrote it, each argument a C
@@ -353,27 +353,38 @@ fn getopt(
     if argv.is_empty() {
         return Ok(OrFalse::False);
     }
-    let mut opts = crate::getopt::short_options(c_string(spec.as_bytes()));
     // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(p_longopts), entry)`
     // (`Z/ext/standard/basic_functions.c:1012`), no owner of the table
     // taken: the argument holds it while `__toString` runs.
+    let mut longs = Vec::new();
     walk::foreach(req, long_options, Hold::None, |req, row| -> walk::Step {
-        let option = with_string(req, row.value(), |text| long_option(c_string(text)))?;
-        opts.push(option);
+        let option = with_string(req, row.value(), |text| {
+            crate::getopt::long_option(c_string(text))
+        })?;
+        longs.push(option);
         Ok(ControlFlow::Continue(()))
     })?;
-    let mut walk = Getopt::new(&argv, &opts);
+    let mut opts: Vec<Opt<'_>> = crate::getopt::short_options(c_string(spec.as_bytes()));
+    opts.extend(longs.iter().map(|(name, need)| Opt {
+        code: 0,
+        need: *need,
+        name: Some(name),
+    }));
+    // `php_getopt(argc, argv, opts, &php_optarg, &php_optind, 0, 1)`,
+    // php's unknown switches passed over.
+    let mut walk = Getopt::new(&opts, 1);
     // Each option found, by name in the order first found, with each
     // value it was given.
     let mut found: Vec<Found> = Vec::new();
     loop {
-        match walk.next() {
-            Got::End => break,
-            Got::Invalid => {}
-            Got::Found(at, value) => {
-                let name = match &opts[at].named {
-                    Named::Short(letter) => vec![*letter],
-                    Named::Long(name) => name.clone(),
+        match walk.next(&argv) {
+            Ok(Taken::End) => break,
+            Err(_) => {}
+            Ok(Taken::Switch { code, row, value }) => {
+                // A long option's code is `0`, and its name is its row's.
+                let name = match code {
+                    0 => opts[row].name.unwrap_or_default().to_vec(),
+                    letter => vec![letter],
                 };
                 match found.iter_mut().find(|(n, _)| *n == name) {
                     Some((_, values)) => values.push(value),

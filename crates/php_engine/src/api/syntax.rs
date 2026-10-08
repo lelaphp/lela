@@ -7,6 +7,8 @@
 //! What `ext/tokenizer` decides on its own, the `(set)` fusion, `yield
 //! from`, `T_BAD_CHARACTER`, the undedented heredoc and which of the
 //! tree's names php's grammar takes as an identifier, stays with it.
+//! `php_getopt`, which `getopt()` reads the program's `argv` with, is the
+//! one walk every host reads its own command line with (`main/getopt.c`).
 
 pub use php_compile::syntax::{
     Diagnostic, Element, FileId, Level, LexOptions, Lexed, Options, Parsed, ScannedToken,
@@ -14,6 +16,7 @@ pub use php_compile::syntax::{
     operator_name, parse, scanned,
 };
 
+pub use crate::getopt::{Getopt, Need, Opt, Taken};
 pub use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 
 use crate::api::call::constant;

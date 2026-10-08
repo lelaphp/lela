@@ -45,7 +45,8 @@ use crate::session::{Session, Stop};
 /// `sapi_module.name`: what `php_sapi_name()` answers.
 pub const NAME: &str = "phpdbg";
 
-/// `OPTIONS` (`Z/sapi/phpdbg/phpdbg.c:960-981`).
+/// `OPTIONS` (`Z/sapi/phpdbg/phpdbg.c:960-981`); the `-` row that ends
+/// php's table is the slice's end.
 static OPTIONS: &[Opt] = &[
     opt(b'c', 1, "ini path override"),
     opt(b'd', 1, "define ini entry on command line"),
@@ -65,7 +66,6 @@ static OPTIONS: &[Opt] = &[
     opt(b'p', 2, "show opcodes"),
     opt(b'h', 0, "help"),
     opt(b'V', 0, "version"),
-    opt(b'-', 0, ""),
 ];
 
 /// `phpdbg_ini_hardcoded`, the entries phpdbg sets under the line's.
@@ -113,13 +113,12 @@ fn read_line(argv: &[Vec<u8>]) -> Line {
         init_default: true,
         ..Line::default()
     };
-    let mut getopt = Getopt::new(OPTIONS);
-    getopt.optind = 1;
+    let mut getopt = Getopt::new(OPTIONS, 1);
     loop {
         let before = getopt.optind;
         match getopt.next(argv) {
             Ok(Taken::End) => break,
-            Ok(Taken::Switch(code, value)) => {
+            Ok(Taken::Switch { code, value, .. }) => {
                 let value = value.unwrap_or_default();
                 match code {
                     b'r' => line.run += 1,
