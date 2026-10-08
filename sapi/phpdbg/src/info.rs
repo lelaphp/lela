@@ -434,25 +434,32 @@ pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<Stri
         return None;
     };
     let position = tier::position(req, frame)?;
-    // `op_array->num_args`: the parameters before a variadic one.
-    let declared = tier::frame_code(req, frame).map_or(0, |code| {
-        let variadic = code
-            .params
-            .checked_sub(1)
-            .and_then(|last| code.ops.get(last as usize))
-            .is_some_and(|(opcode, _)| *opcode == tier::Opcode::RecvVariadic);
-        code.params - u32::from(variadic)
-    });
-    let names: Vec<Vec<u8>> = tier::variables(req, frame)
-        .into_iter()
-        .take(declared as usize)
-        .map(|(name, _)| name)
-        .collect();
     let args = trace_from(req, above, 1)
         .into_iter()
         .next()
         .map(|row| row.args)
         .unwrap_or_default();
+    // `op_array->num_args`, the parameters before a variadic one, named
+    // as the frame's first compiled variables are, read only where an
+    // argument was passed, since the read builds the frame's table.
+    let declared = tier::frame_code(req, frame)
+        .filter(|_| !args.is_empty())
+        .map_or(0, |code| {
+            let variadic = code
+                .params
+                .checked_sub(1)
+                .and_then(|last| code.ops.get(last as usize))
+                .is_some_and(|(opcode, _)| *opcode == tier::Opcode::RecvVariadic);
+            code.params - u32::from(variadic)
+        });
+    let names: Vec<Vec<u8>> = match declared {
+        0 => Vec::new(),
+        declared => tier::variables(req, frame)
+            .into_iter()
+            .take(declared as usize)
+            .map(|(name, _)| name)
+            .collect(),
+    };
     let args: Vec<String> = args
         .iter()
         .enumerate()
