@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::divergence::Registry;
-use xtask::manifest::Manifest;
+use xtask::manifest::{Crate, Manifest};
 use xtask::oracle::Promise;
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
@@ -173,6 +173,66 @@ fn a_witness_whose_bytes_are_the_oracle_s_passes() {
     assert_eq!(count(&reading, "passed"), 1);
     assert_eq!(count(&reading, "failed"), 0);
     assert_eq!(count(&reading, "missing"), 0);
+}
+
+/// Every crate's fences are served on one pool (#2212), and each crate's
+/// reading is the one a run over it alone gives: of two crates, one whose
+/// fence the oracle meets and one whose fence it does not, a run over
+/// both reads each as the run over each alone does, in the manifest's
+/// order.
+#[test]
+fn one_pool_over_two_crates_reads_each_as_a_run_over_it_alone() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = scratch("two-crates", &block("/// ```expect\n/// 1\n/// ```\n"));
+    fs::create_dir_all(root.join("ext/second/src")).unwrap();
+    fs::write(
+        root.join("ext/second/Cargo.toml"),
+        "[package]\nname = \"php_ext_second\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("ext/second/src/lib.rs"),
+        block("/// ```expect\n/// 2\n/// ```\n"),
+    )
+    .unwrap();
+    let mut manifest = fixture_manifest();
+    manifest.crates.push(Crate::named("ext/second"));
+    let over = |crates: &[&str]| {
+        witness::run(
+            &root,
+            &manifest,
+            &Registry::default(),
+            &Ask {
+                crates: crates.iter().map(|c| (*c).to_owned()).collect(),
+                ..Ask::default()
+            },
+        )
+        .unwrap()
+    };
+    let verdict = |r: &Reading| {
+        (
+            r.scope.clone(),
+            r.status,
+            r.numbers.clone(),
+            r.message.clone(),
+        )
+    };
+    let both: Vec<_> = over(&["ext/fixture", "ext/second"])
+        .iter()
+        .map(verdict)
+        .collect();
+    let alone: Vec<_> = ["ext/fixture", "ext/second"]
+        .iter()
+        .flat_map(|c| over(&[c]))
+        .map(|r| verdict(&r))
+        .collect();
+    assert_eq!(both, alone);
+    assert_eq!(both[0].0, "ext/fixture");
+    assert_eq!(both[0].1, Status::Pass, "{both:#?}");
+    assert_eq!(both[1].0, "ext/second");
+    assert_eq!(both[1].1, Status::Fail, "{both:#?}");
 }
 
 /// A fence that prints `1` on `name`, opted in to the status `--accept`

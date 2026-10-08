@@ -567,29 +567,84 @@ fn run_in(
     let oracles = Oracles::new(&manifest.pin, &variants);
     // One binary for the fences marked `process`, built at the first.
     let binary = Binary::of(root);
+    // Each crate is read in three steps (#2212): found and prepared in the
+    // manifest's order, its fences served on one pool with every other
+    // crate's, so no crate's last fences leave a thread idle while the
+    // next crate's wait, and finished in the manifest's order again.
+    let (slots, ready, served) = find(root, manifest, &crates, &oracles, ask, journal);
+    let mut finished: Vec<Option<Tally>> = serve_all(&ready, &binary, registry, ask)?
+        .into_iter()
+        .map(Some)
+        .collect();
     // The tree before any witness runs, taken again after each `--accept`
     // that wrote a fence line: what each crate's reading is stamped with.
     let mut snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
+    for slot in slots {
+        let (one, tally) = match slot {
+            Slot::Unrun(krate, why, failed) => {
+                let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
+                    .under(&manifest.pin);
+                unrun.message = format!("{}: {why}", krate.name);
+                if failed {
+                    unrun.status = Status::Fail;
+                }
+                readings.push(unrun);
+                continue;
+            }
+            Slot::Ready(at) => (&ready[at], finished[at].take()),
+        };
+        let Some(tally) = tally else { continue };
+        let reading = finished_reading(root, manifest, rule, one, &tally, &mut snapshot, ask)?;
+        if let Some(journal) = journal {
+            journal.judged(&reading)?;
+        }
+        readings.push(reading);
+    }
+    if ask.scope != Scope::Crate && served == 0 {
+        bail!(
+            "witness: no fence stands {} in the crates asked for",
+            ask.scope
+        );
+    }
+    Ok(readings)
+}
+
+/// The crates `run` reads, in the manifest's order: those whose reading
+/// is said without running anything, and those it serves, each found as
+/// the source stands, its borks printed; and how many fences were found.
+fn find<'a>(
+    root: &Path,
+    manifest: &'a Manifest,
+    crates: &[String],
+    oracles: &'a Oracles<'a>,
+    ask: &Ask,
+    journal: Option<&'a Journal>,
+) -> (Vec<Slot<'a>>, Vec<Ready<'a>>, usize) {
+    let rule = coverage_rule(manifest);
+    let mut slots = Vec::new();
+    let mut ready: Vec<Ready<'_>> = Vec::new();
     let mut served = 0;
     for krate in &manifest.crates {
         if !crates.is_empty() && !crates.iter().any(|n| n == &krate.name) {
             continue;
         }
-        // The reading of a crate no witness runs for: the harness's, or
-        // one not yet created, which carries no stamp.
-        let mut unrun = under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
-            .under(&manifest.pin);
         if krate.name == crate::done::HARNESS {
             // The harness measures the engine and carries no witness of its
             // own; `done` asks it for none either (§4.5).
-            unrun.message = format!("{}: the harness carries no witness", krate.name);
-            readings.push(unrun);
+            slots.push(Slot::Unrun(
+                krate,
+                String::from("the harness carries no witness"),
+                false,
+            ));
             continue;
         }
         if !sources::exists(root, krate) {
-            unrun.message = format!("{}: {}", krate.name, sources::NOT_YET_CREATED);
-            readings.push(unrun);
+            slots.push(Slot::Unrun(
+                krate,
+                sources::NOT_YET_CREATED.to_owned(),
+                false,
+            ));
             continue;
         }
         let picked = oracles
@@ -603,12 +658,7 @@ fn run_in(
             // pass over sources never seen, or never held to an oracle,
             // would say the crate was measured when it was not.
             Err(unread) => {
-                let mut failed =
-                    under_rule(Reading::for_crate(INSTRUMENT, krate, &snapshot)?, rule)
-                        .under(&manifest.pin);
-                failed.status = Status::Fail;
-                failed.message = format!("{}: {unread:#}", krate.name);
-                readings.push(failed);
+                slots.push(Slot::Unrun(krate, format!("{unread:#}"), true));
                 continue;
             }
         };
@@ -616,57 +666,138 @@ fn run_in(
             println!("bork {}", problem.at_line());
         }
         served += found.witnesses.len();
-        let watch = journal.map(|j| j.over(&krate.name));
-        let tally = judge(oracle, &binary, registry, ask, &found, watch)?;
-        for missing in &tally.missing {
-            println!("missing {missing}");
-        }
-        for unserved in &tally.unserved {
-            println!("unserved {unserved}");
-        }
-        if let (Some(why), n) = (&tally.oracle_absent, tally.witnesses.not_run())
-            && n > 0
-        {
-            println!("witness: {n} of {} did not run; {why}", krate.name);
-        }
-        if ask.accept && !tally.captured.is_empty() {
-            capture(root, &tally.captured)?;
-            snapshot = Snapshot::disk(root)?;
-        }
-        for captured in &tally.captured {
-            println!(
-                "accepted {}:{}: {}",
-                captured.file.display(),
-                captured.line,
-                captured.now.trim()
-            );
-        }
-        // `wall=D` is disclosure and gates nothing; the budget line is
-        // where the declared durations are summed (design §8).
-        if !tally.wall.is_zero() {
-            println!(
-                "witness: {} declares {:.3} s of wall over {} witnesses",
-                krate.name,
-                tally.wall.as_secs_f64(),
-                tally.witnesses.judged.len()
-            );
-        }
-        let mut judged = reading(&tally, &snapshot, krate, rule)?.under(&manifest.pin);
-        if let Some(under) = oracle.pin().oracle.read_under() {
-            judged.message = format!("{}; {under}", judged.message);
-        }
-        if let Some(journal) = journal {
-            journal.judged(&judged)?;
-        }
-        readings.push(judged);
+        slots.push(Slot::Ready(ready.len()));
+        ready.push(Ready {
+            krate,
+            oracle,
+            found,
+            watch: journal.map(|j| j.over(&krate.name)),
+        });
     }
-    if ask.scope != Scope::Crate && served == 0 {
-        bail!(
-            "witness: no fence stands {} in the crates asked for",
-            ask.scope
+    (slots, ready, served)
+}
+
+/// Every crate's fences on one pool (#2212), in the order the crates
+/// stand, and each crate's tally finished: a crate where the oracle is
+/// absent served for its trace alone, as [`judge`] serves it.
+fn serve_all(
+    ready: &[Ready<'_>],
+    binary: &Binary,
+    registry: &Registry,
+    ask: &Ask,
+) -> Result<Vec<Tally>> {
+    let prepared = ready
+        .iter()
+        .map(|one| prepare(one.oracle, &one.found))
+        .collect::<Result<Vec<_>>>()?;
+    let gathered: Vec<Gathered> = ready.iter().map(|_| Gathered::default()).collect();
+    let items: Vec<(usize, &fence::Witness, Option<&Regime>)> = prepared
+        .iter()
+        .enumerate()
+        .filter(|(_, crate_)| crate_.oracle_absent.is_none())
+        .flat_map(|(at, crate_)| crate_.runnable.iter().map(move |(w, r)| (at, *w, *r)))
+        .collect();
+    let pooled = tally::Tally::judge_beside(&items, |(at, witness, regime)| {
+        let one = &ready[*at];
+        serve(
+            one.oracle,
+            binary,
+            registry,
+            ask,
+            (witness, *regime),
+            one.watch,
+            &gathered[*at],
+        )
+    })?;
+    let mut pooled = pooled.judged.into_iter();
+    let mut finished = Vec::new();
+    for ((one, crate_), gathered) in ready.iter().zip(prepared).zip(gathered) {
+        let found_ = crate_.runnable.len();
+        let (witnesses, unserved) = if crate_.oracle_absent.is_some() {
+            let unserved = serve_absent(one.oracle, binary, &one.found, &crate_, &gathered);
+            (tally::Tally::found(found_), unserved)
+        } else {
+            let judged = pooled.by_ref().take(found_).collect();
+            (
+                tally::Tally {
+                    judged,
+                    found: found_,
+                },
+                Vec::new(),
+            )
+        };
+        finished.push(finish(&one.found, crate_, witnesses, gathered, unserved));
+    }
+    Ok(finished)
+}
+
+/// A crate the lane serves, as it was found before anything ran.
+struct Ready<'a> {
+    krate: &'a Crate,
+    oracle: &'a Oracle<'a>,
+    found: Extracted,
+    watch: Option<Watch<'a>>,
+}
+
+/// A crate's place in the manifest's order: one whose reading is said
+/// without running anything, with its reason and whether it fails, or one
+/// the lane serves, by its place among those.
+enum Slot<'a> {
+    Unrun(&'a Crate, String, bool),
+    Ready(usize),
+}
+
+/// What one crate's finished tally prints, captures and reads as: the
+/// missing and unserved, what did not run, the lines `--accept` writes
+/// before the reading is stamped, and the declared wall.
+fn finished_reading(
+    root: &Path,
+    manifest: &Manifest,
+    rule: Option<&Rule>,
+    one: &Ready<'_>,
+    tally: &Tally,
+    snapshot: &mut Snapshot,
+    ask: &Ask,
+) -> Result<Reading> {
+    let krate = one.krate;
+    for missing in &tally.missing {
+        println!("missing {missing}");
+    }
+    for unserved in &tally.unserved {
+        println!("unserved {unserved}");
+    }
+    if let (Some(why), n) = (&tally.oracle_absent, tally.witnesses.not_run())
+        && n > 0
+    {
+        println!("witness: {n} of {} did not run; {why}", krate.name);
+    }
+    if ask.accept && !tally.captured.is_empty() {
+        capture(root, &tally.captured)?;
+        *snapshot = Snapshot::disk(root)?;
+    }
+    for captured in &tally.captured {
+        println!(
+            "accepted {}:{}: {}",
+            captured.file.display(),
+            captured.line,
+            captured.now.trim()
         );
     }
-    Ok(readings)
+    // `wall=D` is disclosure and gates nothing; the budget line is
+    // where the declared durations are summed (design §8).
+    if !tally.wall.is_zero() {
+        println!(
+            "witness: {} declares {:.3} s of wall over {} witnesses",
+            krate.name,
+            tally.wall.as_secs_f64(),
+            tally.witnesses.judged.len()
+        );
+    }
+    let mut judged = reading(tally, snapshot, krate, rule)?.under(&manifest.pin);
+    if let Some(under) = one.oracle.pin().oracle.read_under() {
+        judged.message = format!("{}; {under}", judged.message);
+    }
+    Ok(judged)
 }
 
 /// The manifest rule whose `check` predicate names this instrument's
@@ -738,7 +869,10 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 }
 
 /// Judge every witness of one crate, and count the kernels and natives
-/// without one.
+/// without one: [`prepare`], the crate's fences on a pool of their own,
+/// and [`finish`]. `run` serves every crate's fences on one pool instead
+/// (#2212); a crate's tally is the same either way.
+#[cfg(test)]
 pub(crate) fn judge(
     oracle: &Oracle<'_>,
     binary: &Binary,
@@ -747,11 +881,52 @@ pub(crate) fn judge(
     found: &Extracted,
     watch: Option<Watch<'_>>,
 ) -> Result<Tally> {
-    // Coverage is a count over the source and needs no php; the digest is
-    // asserted once, here, before the first snippet, and a mismatch refuses
-    // the whole run (§4.3), never caught per witness as a bork. A binary
-    // that is not at the path is no refusal: nothing runs, each witness is
-    // a snippet that did not run, and the reading says why (#65).
+    let prepared = prepare(oracle, found)?;
+    let gathered = Gathered::default();
+    let (witnesses, unserved) = if prepared.oracle_absent.is_some() {
+        let unserved = serve_absent(oracle, binary, found, &prepared, &gathered);
+        (tally::Tally::found(prepared.runnable.len()), unserved)
+    } else {
+        let served = tally::Tally::judge_beside(&prepared.runnable, |(witness, regime)| {
+            serve(
+                oracle,
+                binary,
+                registry,
+                ask,
+                (witness, *regime),
+                watch,
+                &gathered,
+            )
+        })?;
+        (served, Vec::new())
+    };
+    Ok(finish(found, prepared, witnesses, gathered, unserved))
+}
+
+/// One crate's fences as they stand before any runs: the oracle's digest
+/// asserted, each fence's regime read off the pin, and the blocks that
+/// cannot run named.
+pub(crate) struct Prepared<'a> {
+    problems: Vec<String>,
+    runnable: Vec<(&'a fence::Witness, Option<&'a Regime>)>,
+    oracle_absent: Option<String>,
+}
+
+/// What serving one crate's fences kept beside their verdicts: the fence
+/// lines `--accept` captured, and what each fence's run entered, by its id.
+#[derive(Default)]
+pub(crate) struct Gathered {
+    captured: Mutex<Vec<Captured>>,
+    entered: Mutex<HashMap<String, Record>>,
+}
+
+/// One crate made ready to serve. Coverage is a count over the source and
+/// needs no php; the digest is asserted once, here, before the first
+/// snippet, and a mismatch refuses the whole run (§4.3), never caught per
+/// witness as a bork. A binary that is not at the path is no refusal:
+/// nothing runs, each witness is a snippet that did not run, and the
+/// reading says why (#65).
+fn prepare<'a>(oracle: &'a Oracle<'_>, found: &'a Extracted) -> Result<Prepared<'a>> {
     let oracle_absent = oracle.pin().oracle.absent();
     if oracle_absent.is_none() {
         oracle.asserted()?;
@@ -764,65 +939,105 @@ pub(crate) fn judge(
     // and the values are the pin's, so a name the pin does not carry is a
     // block the lane cannot run, whether or not the oracle is here.
     let mut problems: Vec<String> = found.problems.iter().map(fence::Problem::at_line).collect();
-    let mut runnable: Vec<(&fence::Witness, Option<&Regime>)> = Vec::new();
+    let mut runnable = Vec::new();
     for witness in &found.witnesses {
         match under(oracle.pin(), witness) {
             Ok(regime) => runnable.push((witness, regime)),
             Err(unknown) => problems.push(unknown),
         }
     }
-    let mut wall = Duration::ZERO;
-    let captured = Mutex::new(Vec::new());
-    // What each fence's run through the linked engine entered, by its id.
-    let entered: Mutex<HashMap<String, Record>> = Mutex::new(HashMap::new());
+    Ok(Prepared {
+        problems,
+        runnable,
+        oracle_absent,
+    })
+}
+
+/// One fence judged beside the oracle, what its run left gathered for
+/// its crate and its start and end on the watch journal.
+fn serve(
+    oracle: &Oracle<'_>,
+    binary: &Binary,
+    registry: &Registry,
+    ask: &Ask,
+    (witness, regime): (&fence::Witness, Option<&Regime>),
+    watch: Option<Watch<'_>>,
+    gathered: &Gathered,
+) -> Result<Judged> {
+    if let Some(watch) = watch {
+        watch.serving(witness)?;
+    }
+    let mut kept = judge::Kept::default();
+    let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept);
+    gathered
+        .captured
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .extend(kept.captured);
+    gathered
+        .entered
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(witness.id(), kept.entered);
+    if let Some(watch) = watch {
+        watch.served(witness)?;
+    }
+    Ok(judged)
+}
+
+/// Coverage is what a fence ran, and neither the linked engine nor the
+/// binary needs php: where the oracle is absent and the attributes declare
+/// natives, each fence is still served, for its trace alone, though
+/// nothing is judged. A serve that fails is `Unserved`, as it is beside
+/// the oracle, and named, never a fence that entered nothing (#1535).
+fn serve_absent(
+    oracle: &Oracle<'_>,
+    binary: &Binary,
+    found: &Extracted,
+    prepared: &Prepared<'_>,
+    gathered: &Gathered,
+) -> Vec<String> {
     let mut unserved = Vec::new();
-    let witnesses = if oracle_absent.is_some() {
-        // Coverage is what a fence ran, and neither the linked engine nor
-        // the binary needs php: where the attributes declare natives each
-        // fence is still served, for its trace alone, though nothing is
-        // judged. A serve that fails is `Unserved`, as it is beside the
-        // oracle, and named, never a fence that entered nothing (#1535).
-        if found.anchored.is_some() {
-            for (witness, regime) in &runnable {
-                let record = match judge::serve(oracle, binary, witness, *regime) {
-                    Ok((_, natives)) => Record::Entered(natives),
-                    Err(trouble) => {
-                        unserved.push(format!("{}: {trouble}", witness.at()));
-                        Record::Unserved
-                    }
-                };
-                entered
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(witness.id(), record);
+    if found.anchored.is_none() {
+        return unserved;
+    }
+    for (witness, regime) in &prepared.runnable {
+        let record = match judge::serve(oracle, binary, witness, *regime) {
+            Ok((_, natives)) => Record::Entered(natives),
+            Err(trouble) => {
+                unserved.push(format!("{}: {trouble}", witness.at()));
+                Record::Unserved
             }
-        }
-        tally::Tally::found(runnable.len())
+        };
+        gathered
+            .entered
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(witness.id(), record);
+    }
+    unserved
+}
+
+/// One crate's tally once its fences are judged: an anchored crate's
+/// natives by what the fences entered and its kernels by the witness in
+/// their own doc block ([`extract`]), and the captured lines in the order
+/// the fences stand.
+fn finish(
+    found: &Extracted,
+    prepared: Prepared<'_>,
+    witnesses: tally::Tally<Judgement>,
+    gathered: Gathered,
+    unserved: Vec<String>,
+) -> Tally {
+    let wall = if prepared.oracle_absent.is_some() {
+        Duration::ZERO
     } else {
-        wall = runnable.iter().filter_map(|(w, _)| w.wall).sum();
-        tally::Tally::judge_beside(&runnable, |(witness, regime)| {
-            if let Some(watch) = watch {
-                watch.serving(witness)?;
-            }
-            let mut kept = judge::Kept::default();
-            let judged = judge::one(oracle, registry, ask, witness, *regime, binary, &mut kept);
-            captured
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend(kept.captured);
-            entered
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(witness.id(), kept.entered);
-            if let Some(watch) = watch {
-                watch.served(witness)?;
-            }
-            Ok(judged)
-        })?
+        prepared.runnable.iter().filter_map(|(w, _)| w.wall).sum()
     };
-    let entered = entered.into_inner().unwrap_or_else(PoisonError::into_inner);
-    // An anchored crate's natives, by what the fences entered, and its
-    // kernels, by the witness in their own doc block ([`extract`]).
+    let entered = gathered
+        .entered
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
     let subjects: Vec<fence::Subject> = match &found.anchored {
         Some(coverage) => coverage
             .subjects(&entered)
@@ -833,11 +1048,12 @@ pub(crate) fn judge(
     };
     // Captured in the order the threads finished; written and printed in
     // the order the fences stand.
-    let mut captured = captured
+    let mut captured = gathered
+        .captured
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner);
     captured.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
-    Ok(Tally {
+    Tally {
         witnesses,
         subjects: subjects.len(),
         missing: subjects
@@ -845,12 +1061,12 @@ pub(crate) fn judge(
             .filter(|s| !s.witnessed)
             .map(fence::Subject::at)
             .collect(),
-        problems,
+        problems: prepared.problems,
         wall,
         captured,
-        oracle_absent,
+        oracle_absent: prepared.oracle_absent,
         unserved,
-    })
+    }
 }
 
 /// The regime one witness stands under, by the name its fence carries;
