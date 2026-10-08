@@ -206,6 +206,9 @@ impl<'a> Adapter<'a> {
         };
         let (met, trouble) = match expectation.met_under(self.oracle, &actual) {
             Ok(met) => (met, String::new()),
+            // No room for the oracle's scratch: the run was not measured,
+            // which the subset's reading says, and no verdict on the test.
+            Err(e) if crate::scratch::Full::of(&e).is_some() => return Err(e),
             Err(e) => (false, format!("{e:#}\n")),
         };
         let (met, wanted, actual) = cgi::with_headers(
@@ -810,7 +813,7 @@ pub(super) struct Written {
 
 impl Written {
     pub(super) fn new(path: &Path, body: &[u8]) -> Result<Written> {
-        fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+        fs::write(path, body).map_err(|err| crate::scratch::made(err, path, "writing"))?;
         Ok(Written {
             path: path.to_path_buf(),
         })
