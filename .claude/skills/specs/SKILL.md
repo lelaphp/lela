@@ -29,9 +29,9 @@ Until [each run works in its own copy of the pinned tree](https://github.com/mit
 
 ## 2. Cut a spec
 
-1. On a fresh release build at `main`'s tip, take the per-commit lane with its census and `Zend/tests`, each into `$S`. The merge check's head runs are these runs; reuse them while the tip is unchanged.
+1. On a fresh build of the lanes' profile, `release-da`, at `main`'s tip, take the per-commit lane with its census and `Zend/tests`, each into `$S`. The merge check's head runs are these runs; reuse them while the tip is unchanged.
    ```
-   cargo build --release -p php_sapi_cli -p php_sapi_cgi
+   cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi
    cargo xtask phpt --census > $S/lane-<tip>.out
    cargo xtask phpt --subset Zend/tests > $S/zend-<tip>.out
    cargo xtask phpt --subset tests > $S/tests-<tip>.out
@@ -82,9 +82,10 @@ After the last merge of a batch, before any push, and never while a merge commit
 
 1. `cargo xtask port-map` when `crates/php_ext` changed.
 2. `cargo xtask witness --unmeasured`: every crate without a passing reading over its tree now. The hook runs only staged crates' witnesses, which is how #681 broke ext/reflection unseen until #733; the ones it measured over the tree that landed stand and are not run again (#1312).
-3. On a fresh release build, the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
+3. On a fresh `release-da` build, the profile CI's lanes run (harness revision 82), the lane and `Zend/tests`, each held test by test against the merge base, the tip before the batch, whose runs the cut's first step kept (#664). `xtask phpt` runs `target/release-da/php` ahead of a fresh `release` one, so a base kept on `release` compares across profiles: a test met there and missed here is an overflow check or a debug assertion firing, a bug to file and not the batch's regression. `target/release/xtask` is the command hook's harness, not a lane's, and stays a release build. The witness and the four runs read the tree and not each other, and each run works in its own copy of the pinned tree (#1183), so they run at once; the lane is the longest:
    ```
-   cargo build --release -p php_sapi_cli -p php_sapi_cgi -p xtask
+   cargo build --profile release-da -p php_sapi_cli -p php_sapi_cgi
+   cargo build --release -p xtask
    cargo xtask witness --unmeasured > $S/witness-<head>.out 2>&1 &
    cargo xtask phpt --census --against <base> > $S/lane-<head>.out &
    cargo xtask phpt --subset Zend/tests --against <base> > $S/zend-<head>.out &
