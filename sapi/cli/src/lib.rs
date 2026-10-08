@@ -62,13 +62,16 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
+use std::cell::OnceCell;
 use std::sync::OnceLock;
 
-use php_sapi::{Engine, EngineBuilder, IniFiles, OutputSink};
+use php_sapi::{Engine, EngineBuilder, OutputSink};
 
 use crate::natives::ProcessTitle;
 
-pub use options::{Ask, Each, Lines, Options, Program, Refused, Report, Server, usage_text};
+pub use options::{
+    Ask, Each, Lines, Options, Program, Refused, Report, Server, Startup, usage_text,
+};
 pub use request::Process;
 
 /// `sapi_module.name` for the CLI: what `php_sapi_name()` answers and
@@ -107,15 +110,18 @@ pub fn version(engine: &Engine) -> String {
 /// and the process ending with the code the request ended with. The ini
 /// the line carries is laid over the engine's defaults before it is
 /// built, as php's `-d` reaches `php_ini_builder` before
-/// `php_module_startup`.
+/// `php_module_startup`. The engine is started once per process, as
+/// `main` runs `php_module_startup` once: where `do_cli` reads the line,
+/// [`Options::parse`] starts it and asks it whether it has a shell, and
+/// the line is then served on it.
 pub fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`); the arguments were copied above.
     TITLE.set(ffi::save_ps_args().map(ProcessTitle::new)).ok();
-    let options = match Options::parse(&argv, &|ini| {
-        engine(ini, IniFiles::default(), false).has_shell()
-    }) {
+    let started = OnceCell::new();
+    let cli = |startup: &Startup| started.get_or_init(|| engine(startup));
+    let options = match Options::parse(&argv, &|startup| cli(startup).has_shell()) {
         Ok(options) => options,
         Err(refused) => {
             std::io::stderr()
@@ -129,16 +135,15 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(refused.exit_code);
         }
     };
-    let found = |sapi| php_sapi::ini::search(sapi, &options.ini_search, true);
-    let engine = |ini: &[(Vec<u8>, Vec<u8>)]| engine(ini, found(NAME), options.extended_info);
+    let startup = &options.startup;
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
-        Ask::Version => started(&options.ini, found(NAME), version),
-        Ask::Info => request::info(&engine(&options.ini)),
-        Ask::Extensions => started(&options.ini, found(NAME), php_sapi::modules),
+        Ask::Version => answered(cli(startup), |e| request::start_up(e, NAME), version),
+        Ask::Info => request::info(cli(startup)),
+        Ask::Extensions => answered(cli(startup), request::started, php_sapi::modules),
         Ask::Server(server) => {
-            let engine = server_engine(&options.ini, found(server::NAME), options.extended_info);
-            match request::started(&engine, server::NAME) {
+            let engine = server_engine(startup);
+            match request::start_up(&engine, server::NAME) {
                 0 => {
                     let color = php_sapi::ini::enabled(&engine, "cli_server.color");
                     server::run(engine, server, color)
@@ -150,7 +155,7 @@ pub fn main() -> ExitCode {
             if options.interactive {
                 print("Interactive shell\n\n");
             }
-            repeated(&engine(&options.ini), ask, options.repeat)
+            repeated(cli(startup), ask, options.repeat)
         }
     };
     php_sapi::exit_code(status)
@@ -207,15 +212,18 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 }
 
 /// `-v` and `-m` (`php_cli.c:638-655`), which print once
-/// `php_module_startup` has run: what the startup raised is displayed
-/// first ([`request::started`]), and where it failed nothing is printed
-/// and the status is 1.
+/// `php_module_startup` has run: `-v` with no request and `-m` in one of
+/// its own (`start`, [`request::start_up`] and [`request::started`]), what
+/// the startup raised displayed first either way, and where it failed
+/// nothing printed and its status the answer.
 ///
 /// ```php
-/// foreach ([['-d', 'magic_quotes_gpc=1'], ['-d', 'extension_dir=/nope', '-d', 'extension=x']] as $d) {
-///     $p = proc_open([PHP_BINARY, '-n', ...$d, '-m'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-///     $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
-///     echo preg_replace('/ \(tried: .*\)\)/', '', strstr($out, "\n[PHP Modules]\n", true) ?: $out), "\n";
+/// foreach (['-v', '-m'] as $ask) {
+///     foreach ([['-d', 'magic_quotes_gpc=1'], ['-d', 'extension_dir=/nope', '-d', 'extension=x']] as $d) {
+///         $p = proc_open([PHP_BINARY, '-n', ...$d, $ask], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///         $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
+///         echo preg_replace(['/ \(tried: .*\)\)/', '/(PHP \d|\[PHP Modules\]).*/s'], ['', '$1'], $out), "\n";
+///     }
 /// }
 /// ```
 /// ```expect process
@@ -228,11 +236,21 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 /// 0
 ///
 /// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
+/// PHP 8
+/// 1
+///
+/// Fatal error: Directive 'magic_quotes_gpc' is no longer available in PHP in Unknown on line 0
+/// Stack trace:
+/// #0 {main}
+///
+/// 0
+///
+/// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
+/// [PHP Modules]
 /// ```
-fn started(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, text: fn(&Engine) -> String) -> i32 {
-    let engine = engine(ini, files, false);
-    match request::started(&engine, NAME) {
-        0 => print(&text(&engine)),
+fn answered(engine: &Engine, start: impl Fn(&Engine) -> i32, text: fn(&Engine) -> String) -> i32 {
+    match start(engine) {
+        0 => print(&text(engine)),
         failed => failed,
     }
 }
@@ -247,24 +265,25 @@ fn print(text: &str) -> i32 {
 /// order and `php_bundle::Tier` bound, the CLI's `additional_functions`
 /// under `standard` ([`natives::cli`]), the shebang line of every file
 /// passed over as `do_cli` sets `CG(skip_shebang)`, php's shell callbacks
-/// carried, started over the CLI's defaults, the `files` found, its
-/// `HARDCODED_INI` and the line's `ini` ([`php_sapi::start`]); with
-/// extended info where the line carried `-e`.
-fn engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, extended_info: bool) -> Engine {
+/// carried, started over the CLI's defaults, the php.ini files found
+/// under the line's `-c` and `-n`, its `HARDCODED_INI` and the line's
+/// `-d`s ([`php_sapi::start`]); with extended info where the line carried
+/// `-e`.
+fn engine(startup: &Startup) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())
-        .ini_files(files)
+        .ini_files(php_sapi::ini::search(NAME, &startup.ini_search, true))
         .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang()
         .cli_shell()
-        .extended_info(extended_info);
+        .extended_info(startup.extended_info);
     let builder = php_sapi::ini::CLI_HARDCODED
         .iter()
         .fold(builder, |builder, (name, value)| builder.ini(name, value));
-    php_sapi::start(natives::cli(builder), ini, |entry| {
+    php_sapi::start(natives::cli(builder), &startup.ini, |entry| {
         request::Process.log(entry);
     })
 }
@@ -283,15 +302,19 @@ fn cli_defaults(builder: EngineBuilder) -> EngineBuilder {
 /// CLI's module (`php_cli.c:1336`), and the `cli_server` module and its
 /// natives after the bundle; with extended info where the line carried
 /// `-e`.
-fn server_engine(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, extended_info: bool) -> Engine {
+fn server_engine(startup: &Startup) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = cli_defaults(Engine::builder())
-        .ini_files(files)
+        .ini_files(php_sapi::ini::search(
+            server::NAME,
+            &startup.ini_search,
+            true,
+        ))
         .sapi_name(server::NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang()
-        .extended_info(extended_info);
-    php_sapi::start(natives::server(builder), ini, server::log_message)
+        .extended_info(startup.extended_info);
+    php_sapi::start(natives::server(builder), &startup.ini, server::log_message)
 }

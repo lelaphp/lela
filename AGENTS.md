@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=0c39b75353cca3b109dd8db53225063651dbff0069d625f60740a750cf654333 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=32ff41de811d2740ece5113c3055a47a288ba7e2d9639f71517a94a1d10e5b24 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -113,8 +113,9 @@ third-engine-design.md
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 - ADR-0011 (accepted, 2026-10-06): A reading's key covers its crate's whole dependency closure, not the locks of the crates it depends on
 - ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
+- ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 
-<!-- /computed in=cdde5a55c0d2e56a5af707bbc3e086f4e00eefcc15e5bece29d9686f5ed4e362 out=fae392bd0f8f57b71c3f942b943934350316907e133b235a4b1f431a8bfc99ed -->
+<!-- /computed in=be732ccd1dbc5db7915cd76ee094197e6b019cd74819350d09b5e51700caf1d0 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -129,7 +130,7 @@ third-engine-design.md
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 373 |  | pass |
 
-<!-- /computed in=34a553211677c1725e497058667e6bc6ae2db8599e497c5f72cf75e1fce043ba out=5ec5a26dd7ca76c237e367a7c04acfd877809f40f7a03a4c6716b7717fb6b069 -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -217,9 +218,10 @@ Options:
 ├── php_sapi
 ├── php_streams
 ├── php_syntax
-└── php_unit
+├── php_unit
+└── timelib_sys
 ```
-<!-- /computed in=a6ae36102f3fb2438f430e76078d6bc209005a653df755e1364367643b4e3fd2 out=2aea06da2e5135b2c82210bff019bf591f30d1a7eb6d65c5346cbb72921b7485 -->
+<!-- /computed in=129a4d8e5520714a7cc6807e8d7dd8caaa431f1baf4d52f57918ea3246412329 out=856944cd342d0768a3ccd8ae41a3590292f0392fadf6f3b507505951bfc8917e -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .

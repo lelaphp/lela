@@ -11,11 +11,12 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::datetime::restore_properties;
-use crate::ffi::{self, RelTime, Time, UNSET};
+use crate::ffi::{self, RelTime, Time, UNSET, Zones};
 use crate::obj::{
     CIVIL, INTERVAL, IntervalObj, WALL, class_id, hold_diff, interval_fields, interval_of,
     new_interval, rows_array, std_rows,
 };
+use crate::zone::zones;
 
 /// `date_interval_initialize(&rt, format, len)`: the period of an ISO
 /// 8601 duration, or the difference of its two dates, or php's
@@ -46,8 +47,11 @@ fn initialize(req: &mut Request, text: &[u8]) -> Result<RelTime, Thrown> {
 }
 
 /// The relative part of a parse of `text`, or its first error.
-fn from_date_string(text: &[u8]) -> Result<(RelTime, bool), (i32, char, String)> {
-    let (t, errors) = Time::strtotime(text);
+fn from_date_string(
+    zones: &mut Zones,
+    text: &[u8],
+) -> Result<(RelTime, bool), (i32, char, String)> {
+    let (t, errors) = Time::strtotime(zones, text);
     if let Some(e) = errors.errors.first() {
         let c = if e.character == 0 {
             ' '
@@ -95,7 +99,7 @@ fn date_interval_create_from_date_string(
 ) -> Result<OrFalse<Owner<Instance<DateInterval>>>, Thrown> {
     let text = datetime.as_bytes();
     let shown = String::from_utf8_lossy(text).into_owned();
-    match from_date_string(text) {
+    match from_date_string(zones(req), text) {
         Err((at, c, message)) => {
             docref(
                 req,
@@ -263,7 +267,7 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     if let Some(text) =
         find(hash, b"date_string").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     {
-        let (t, errors) = Time::strtotime(&text);
+        let (t, errors) = Time::strtotime(zones(req), &text);
         if let Some(e) = errors.errors.first() {
             let c = if e.character == 0 {
                 ' '
@@ -461,7 +465,7 @@ impl DateInterval {
     ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         let text = datetime.as_bytes();
         let shown = String::from_utf8_lossy(text).into_owned();
-        match from_date_string(text) {
+        match from_date_string(zones(req), text) {
             Err((at, c, message)) => Err(throw_error(
                 req,
                 "DateMalformedIntervalStringException",

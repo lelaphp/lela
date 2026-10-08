@@ -35,7 +35,7 @@ use crate::obj::{
 };
 use crate::parse::keep_errors;
 use crate::timezone::DateTimeZone;
-use crate::zone::{default_zone, parse_tzfile};
+use crate::zone::{default_zone, parse_tzfile, zones};
 
 /// `php_date_get_current_time_with_fraction`: `gettimeofday`.
 fn now_with_fraction() -> (i64, i64) {
@@ -91,8 +91,8 @@ pub(super) fn initialize(
         text
     };
     let (mut parsed, errors) = match format {
-        Some(format) => Time::parse_from_format(format, text),
-        None => Time::strtotime(text),
+        Some(format) => Time::parse_from_format(zones(req), format, text),
+        None => Time::strtotime(zones(req), text),
     };
     keep_errors(req, &errors);
     if !errors.errors.is_empty() {
@@ -396,7 +396,7 @@ fn modify(
     method: Option<&str>,
 ) -> Result<bool, Thrown> {
     let mut time = time_of(req, object)?;
-    let (tmp, errors) = Time::strtotime(text);
+    let (tmp, errors) = Time::strtotime(zones(req), text);
     keep_errors(req, &errors);
     if !errors.errors.is_empty() {
         let (at, c, message) = first_error(&errors);

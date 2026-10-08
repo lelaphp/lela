@@ -8,18 +8,24 @@
 //! arguments from there; `argv[1..]` are pointed at the NUL that ends the
 //! area. The host reads its arguments before this, so what it parses is
 //! never the title. Where the strings are not contiguous, or the system
-//! is neither, there is no area, as php's `clobber_error` leaves none.
+//! is neither, there is no area, as php's `clobber_error` leaves none. On
+//! Linux the area is found through glibc alone, which hands every
+//! `.init_array` function `argc`, `argv` and `envp`, as the standard
+//! library's own hook is gated (`library/std/src/sys/args/unix.rs`);
+//! musl calls them with nothing, so a Linux C library other than glibc
+//! leaves no area (#1923).
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 use std::ffi::{CStr, c_char, c_int};
 use std::sync::atomic::AtomicU8;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 use std::sync::atomic::Ordering;
 
 /// The area, `ps_buffer` for `ps_buffer_size` bytes; `None` where there
 /// is none. Called once, first in `main`, before any thread starts and
 /// before anything but the host's own copy of its arguments has read the
 /// environment or `argv`.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 pub(crate) fn save_ps_args() -> Option<&'static [AtomicU8]> {
     let (count, vector, environment) = process_args()?;
     let count = usize::try_from(count).ok().filter(|&count| count > 0)?;
@@ -67,11 +73,12 @@ pub(crate) fn save_ps_args() -> Option<&'static [AtomicU8]> {
 }
 
 /// No area on a system php builds `PS_USE_CLOBBER_ARGV` for not.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
 pub(crate) fn save_ps_args() -> Option<&'static [AtomicU8]> {
     None
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 /// `strlen`.
 fn length(string: *const c_char) -> usize {
     // SAFETY: every pointer this reads is an argv or environment string,
@@ -79,6 +86,7 @@ fn length(string: *const c_char) -> usize {
     unsafe { CStr::from_ptr(string) }.count_bytes()
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 /// How many pointers stand in a NULL-ended array.
 fn count_of(array: *mut *mut c_char) -> usize {
     let mut count = 0;
@@ -93,6 +101,7 @@ fn count_of(array: *mut *mut c_char) -> usize {
     }
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 /// A NULL-ended array of copies of `strings`, leaked: the process holds
 /// them for the rest of its life, as php's `new_environ` and `new_argv`.
 fn copies(strings: &[*mut c_char]) -> *mut *mut c_char {
@@ -108,6 +117,7 @@ fn copies(strings: &[*mut c_char]) -> *mut *mut c_char {
     Box::leak(copied.into_boxed_slice()).as_mut_ptr()
 }
 
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 /// `environ = new_environ`: the environment's strings copied out of the
 /// area before it is written over.
 fn move_environ(env: &[*mut c_char]) {
@@ -146,7 +156,7 @@ fn point_argv_at_copy(args: &[*mut c_char]) {
     unsafe { *libc::_NSGetArgv() = copied };
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 unsafe extern "C" {
     static mut environ: *mut *mut c_char;
 }
@@ -159,26 +169,26 @@ unsafe extern "C" {
 /// `capture`, and read once, by `process_args`, on the main thread before
 /// any other starts, so `Relaxed` orders nothing that program order does
 /// not; a null `ARGV` is a process glibc never called `capture` in.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 static ARGC: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// `argv`, as [`ARGC`] says.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 static ARGV: std::sync::atomic::AtomicPtr<*mut c_char> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[used]
 #[unsafe(link_section = ".init_array")]
 static CAPTURE: extern "C" fn(c_int, *mut *mut c_char, *mut *mut c_char) = capture;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 extern "C" fn capture(count: c_int, vector: *mut *mut c_char, _environment: *mut *mut c_char) {
     ARGC.store(count, Ordering::Relaxed);
     ARGV.store(vector, Ordering::Relaxed);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
     let vector = ARGV.load(Ordering::Relaxed);
     if vector.is_null() {
@@ -191,7 +201,7 @@ fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
     Some((count, vector, environment))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn set_environ(moved: *mut *mut c_char) {
     // SAFETY: as above.
     unsafe { environ = moved };
@@ -199,5 +209,5 @@ fn set_environ(moved: *mut *mut c_char) {
 
 /// On Linux the standard library keeps its own copy of the arguments'
 /// pointers, which point into the area; the host has read them already.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn point_argv_at_copy(_args: &[*mut c_char]) {}

@@ -75,3 +75,15 @@ fn the_prompt_s_code_is_served_for_each_prompt() {
         (String::from("Interactive shell\n\nxxp\n"), 0)
     );
 }
+
+/// php starts its modules once and asks that one startup whether it has a
+/// shell (`do_cli`), so what the start wrote, the line `ini_error` writes
+/// for a `-d` that does not read, is written once, as the oracle writes
+/// it, and not again by a second engine (#1947).
+#[test]
+fn the_shell_is_asked_of_the_one_engine_the_process_starts() {
+    let (text, status) = shell("echo 1;\n", &["-d", "x=\"abc"]);
+    assert_eq!(text.matches("PHP:  syntax error").count(), 1, "{text}");
+    assert!(text.contains("Interactive shell\n\n1\n"), "{text}");
+    assert_eq!(status, 0);
+}

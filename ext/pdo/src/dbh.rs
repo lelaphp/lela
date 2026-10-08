@@ -185,7 +185,7 @@ pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Box<DbhState>>);
 pub(crate) const POOLED: usize = 1024;
 
 /// The persistent connections the request took out of the pool or
-/// opened, each held under its key until `deactivate` gives it back.
+/// opened, each held under its key until `post_deactivate` gives it back.
 #[derive(Default)]
 pub(crate) struct Persistent {
     lent: Lent<Vec<u8>, Box<DbhState>>,
@@ -226,28 +226,18 @@ fn roll_back_open(req: &mut Request, conn: &mut dyn Connection, in_txn: bool) ->
     )
 }
 
-/// What php's `shutdown_executor` does to pdo's persistent connections,
-/// after every extension's `RSHUTDOWN`, so a session save handler's
-/// `write` still has them: every persistent connection the request holds
-/// given back to the engine's pool, nothing of the request's left on it;
-/// one past the pool's bound is closed with this request, the
-/// connector's `closer` as `dbh_free` calls it (ADR-0010's amendment of
-/// ADR-0005).
-///
-/// php frees each `PDO` there, and `pdo_dbh_free_storage` rolls back the
-/// transaction it left open before the connection waits in
-/// `EG(persistent_list)` for the next request. Here this runs before the
-/// request's objects are freed, so the rollback is taken here, before the
-/// connection is given back, and `free_obj` finds the connection gone.
-pub(crate) fn deactivate(req: &mut Request) {
+/// Every persistent connection the request holds given back to the
+/// engine's pool, after the request's objects are freed, where php's
+/// connection simply stays in `EG(persistent_list)`: each `PDO` sharing
+/// it was freed in `shutdown_executor`, after every extension's
+/// `RSHUTDOWN` (so a session save handler's `write` still had it), and
+/// its `pdo_dbh_free_storage` rolled back the transaction it left open
+/// and ran `persistent_shutdown` (`free_obj`), so nothing of the
+/// request's is left on it. One past the pool's bound is closed with
+/// this request, the connector's `closer` as `dbh_free` calls it
+/// (ADR-0010's amendment of ADR-0005).
+pub(crate) fn post_deactivate(req: &mut Request) {
     for (key, mut dbh) in req.state::<Persistent>().lent.drain() {
-        let in_txn = dbh.in_txn;
-        if let Conn::Open(conn) = &mut dbh.conn
-            && roll_back_open(req, &mut **conn, in_txn)
-        {
-            dbh.in_txn = false;
-        }
-        persistent_shutdown(req, &mut dbh);
         if let Conn::Open(conn) = &mut dbh.conn {
             conn.give_back(req);
         }

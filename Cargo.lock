@@ -819,9 +819,9 @@ dependencies = [
 name = "php_ext_date"
 version = "0.0.0"
 dependencies = [
- "cc",
  "libc",
  "php_ext",
+ "timelib_sys",
 ]
 
 [[package]]
@@ -1419,6 +1419,7 @@ name = "php_syntax"
 version = "0.0.0"
 dependencies = [
  "expect-test",
+ "nix",
 ]
 
 [[package]]
@@ -1654,6 +1655,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "timelib_sys"
+version = "0.0.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

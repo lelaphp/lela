@@ -1,8 +1,26 @@
-//! timelib's C interface as `lib/timelib.h` and `lib/timelib_private.h`
-//! declare it at the tag: the structs this crate reads laid out as C lays
-//! them out, and the functions it calls. Nothing here is called outside
-//! [`super`]; the arithmetic that touches no memory is declared `safe`.
-#![allow(non_camel_case_types, dead_code)]
+//! timelib, the date library php-src vendors at `ext/date/lib`, as this
+//! crate vendors it at `lib/`: byte for byte at the tag `oracle.toml` pins,
+//! with its `LICENSE.rst` and its bundled timezone database, compiled by
+//! `build.rs` (design §7.2, #711). What follows is its C interface as
+//! `lib/timelib.h` and `lib/timelib_private.h` declare it at the tag: the
+//! structs laid out as C lays them out, and the functions. The arithmetic
+//! that touches no memory is declared `safe`; every other function is the
+//! caller's to call under timelib's contract, which `ext/date`'s `src/ffi/`
+//! keeps behind owned values that free themselves.
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
+// The denials seams.toml's lints.no-panic holds the engine's crates to,
+// declared here as php_process declares them.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
 use std::ffi::{c_char, c_double, c_float, c_int, c_uint};
 
@@ -28,9 +46,10 @@ pub struct RelTime {
     pub have_special_relative: c_uint,
 }
 
-/// `timelib_time`. The two pointers are timelib's to manage and this
-/// binding's to read, so they are private to it; every other field is a
-/// number any code may read and write.
+/// `timelib_time`. The two pointers are timelib's to manage, so they are
+/// private: [`TimeFields::tz_abbr`] and [`TimeFields::tz_info`] read them,
+/// and [`TimeFields::set_tz_info`], an `unsafe fn`, is the one door that
+/// writes one. Every other field is a number any code may read and write.
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeFields {
@@ -42,8 +61,8 @@ pub struct TimeFields {
     pub s: i64,
     pub us: i64,
     pub z: c_int,
-    pub(super) tz_abbr: *mut c_char,
-    pub(super) tz_info: *mut TzInfo,
+    tz_abbr: *mut c_char,
+    tz_info: *mut TzInfo,
     pub dst: c_int,
     pub relative: RelTime,
     pub sse: i64,
@@ -56,6 +75,31 @@ pub struct TimeFields {
     pub tim_uptodate: c_uint,
     pub is_localtime: c_uint,
     pub zone_type: c_uint,
+}
+
+impl TimeFields {
+    /// `t->tz_abbr`: a NUL-terminated string timelib owns, or null.
+    #[must_use]
+    pub fn tz_abbr(&self) -> *const c_char {
+        self.tz_abbr
+    }
+
+    /// `t->tz_info`: the zone timelib reads the time under, or null.
+    #[must_use]
+    pub fn tz_info(&self) -> *mut TzInfo {
+        self.tz_info
+    }
+
+    /// `t->tz_info = tz`, as php writes it before `timelib_unixtime2local`.
+    ///
+    /// # Safety
+    ///
+    /// `tz` is null or a zone `timelib_parse_tzfile` made that outlives
+    /// every timelib call made on this time while it points there; timelib
+    /// reads it and never frees it.
+    pub unsafe fn set_tz_info(&mut self, tz: *mut TzInfo) {
+        self.tz_info = tz;
+    }
 }
 
 #[repr(C)]

@@ -4200,6 +4200,22 @@ impl Engine {
         }
     }
 
+    /// What the extensions' `MINIT`s raised, noted in `req` past the
+    /// `php_output` layer, as php displays it before `php_output_activate`,
+    /// so no header is sent by it and a session may still start; and once,
+    /// as php writes it to the process's `stdout` as its modules start, so
+    /// a later request of a long-lived host carries none of it. Whether an
+    /// `E_CORE_ERROR` among it bailed out of `php_module_startup`, which
+    /// then failed.
+    pub(crate) fn show_startup_raised(&self, req: &mut Request) -> bool {
+        if !self.shared.startup_shown.swap(true, Ordering::Relaxed) {
+            for (level, message) in &self.shared.startup_raised {
+                req.note_startup_error(*level, message);
+            }
+        }
+        (self.shared.startup_raised.iter()).any(|(level, _)| *level == Level::CoreError)
+    }
+
     /// [`Engine::begin`] with a failed start handed back as the request
     /// it failed in, for the built-in server, which shuts it down.
     fn start_request(
@@ -4244,19 +4260,9 @@ impl Engine {
         }
         crate::output::start_at_request(&mut req).ok();
         req.hash_environment().ok();
-        // Displayed past the `php_output` layer, as php displays what
-        // `MINIT` raised before `php_output_activate`, so no header is
-        // sent by it and a session may still start; and once, as php
-        // writes it to the process's `stdout` as its modules start, so a
-        // later request of a long-lived host carries none of it.
-        if !self.shared.startup_shown.swap(true, Ordering::Relaxed) {
-            for (level, message) in &self.shared.startup_raised {
-                req.note_startup_error(*level, message);
-            }
-        }
         // An `E_CORE_ERROR` bailed out of `php_module_startup`, which
         // failed, and the host ends with status 1 before any request.
-        if (self.shared.startup_raised.iter()).any(|(level, _)| *level == Level::CoreError) {
+        if self.show_startup_raised(&mut req) {
             crate::preload::hand_over(&mut req, sink);
             return Begun::Refused(Observables {
                 exit_code: 1,

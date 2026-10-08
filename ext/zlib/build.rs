@@ -29,6 +29,13 @@ fn run() -> Result<(), String> {
     let source = out.join("zlib_h.c");
     fs::write(&source, SOURCE).map_err(|error| format!("zlib_h.c: {error}"))?;
     let mut build = cc::Build::new();
+    // php compiles C and C++ with -DNDEBUG unless it is built with
+    // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
+    // two builds that set ZEND_DEBUG, as debug assertions are this build's:
+    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
+        build.define("NDEBUG", None);
+    }
     build.file(&source).cargo_metadata(false);
     let includes = env::var("DEP_Z_INCLUDE").unwrap_or_default();
     for include in includes.split(',').filter(|dir| !dir.is_empty()) {

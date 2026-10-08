@@ -238,11 +238,14 @@ fn evaluate(
     } else if p.deny == Some(true) {
         true
     } else if let Some(types) = &p.deny_types {
+        // The file before and after the write, each read whole, since a
+        // fragment of an edit cannot say whether it stands in a comment
+        // or a string.
         let macros = p.deny_macros.as_deref().unwrap_or_default();
         source
             && call
-                .written()
-                .is_some_and(|t| mentions_a_type(t, types) || invokes_a_macro(t, macros))
+                .rewrite(root, path)
+                .is_some_and(|(before, after)| adds_a_denied_use(&after, &before, types, macros))
     } else if let Some(homes) = &p.allow {
         source
             && call.written().is_some_and(has_unsafe)
@@ -351,33 +354,47 @@ pub(super) fn adds(regex: &Regex, after: &str, before: &str) -> bool {
     )
 }
 
-/// A `deny_types` entry in the text: the full path, or its last segment as
-/// a word; `a::b::*` is the prefix or `b::`.
-fn mentions_a_type(text: &str, types: &[String]) -> bool {
-    types.iter().any(|ty| {
-        let (whole, tail) = match ty.strip_suffix("::*") {
-            Some(prefix) => (prefix, "::"),
-            None => (ty.as_str(), r"\b"),
-        };
-        let last = whole.rsplit("::").next().unwrap_or(whole);
-        let pattern = format!(
-            r"\b{}\b|\b{}{tail}",
-            regex_lite::escape(whole),
-            regex_lite::escape(last)
-        );
-        regex(&pattern).is_match(text)
-    })
+/// Whether a write adds a use of a `deny_types` type or an invocation of
+/// a `deny_macros` macro: more hits of one in the code `after` leaves than
+/// in the code `before` held, as a `deny_pattern` over a write is read
+/// ([`adds`], #510), so a use the file already carries is clippy's to
+/// hold and not this call's. A use is what clippy's `disallowed-types` and
+/// `disallowed-macros`, which the rule renders to, count: a path in code,
+/// so the word in a comment, in rustdoc prose or inside a string literal
+/// is none (#2026), as an unsafe site is not
+/// ([`rust::without_comments_or_literals`]).
+fn adds_a_denied_use(after: &str, before: &str, types: &[String], macros: &[String]) -> bool {
+    let after = rust::without_comments_or_literals(after);
+    let before = rust::without_comments_or_literals(before);
+    types
+        .iter()
+        .map(|ty| type_pattern(ty))
+        .chain(macros.iter().map(|path| macro_pattern(path)))
+        .any(|pattern| adds(&pattern, &after, &before))
 }
 
-/// A `deny_macros` entry invoked in the text: its last segment, bare or
-/// behind any path, then `!` and the opening delimiter, so
+/// A `deny_types` entry as a pattern: the full path, or its last segment
+/// as a word; `a::b::*` is the prefix or `b::`.
+fn type_pattern(ty: &str) -> Regex {
+    let (whole, tail) = match ty.strip_suffix("::*") {
+        Some(prefix) => (prefix, "::"),
+        None => (ty, r"\b"),
+    };
+    let last = whole.rsplit("::").next().unwrap_or(whole);
+    regex(&format!(
+        r"\b{}\b|\b{}{tail}",
+        regex_lite::escape(whole),
+        regex_lite::escape(last)
+    ))
+}
+
+/// A `deny_macros` entry's invocation as a pattern: its last segment, bare
+/// or behind any path, then `!` and the opening delimiter, so
 /// `thread_local! {` and `std::thread_local!(` are both the invocation of
 /// `std::thread_local` and a mention of the word in prose is not.
-fn invokes_a_macro(text: &str, macros: &[String]) -> bool {
-    macros.iter().any(|path| {
-        let last = path.rsplit("::").next().unwrap_or(path);
-        regex(&format!(r"\b{}\s*!\s*[(\[{{]", regex_lite::escape(last))).is_match(text)
-    })
+fn macro_pattern(path: &str) -> Regex {
+    let last = path.rsplit("::").next().unwrap_or(path);
+    regex(&format!(r"\b{}\s*!\s*[(\[{{]", regex_lite::escape(last)))
 }
 
 /// A pattern permit writes itself; one that does not compile is a bug
@@ -456,10 +473,9 @@ mod tests {
 
     #[test]
     fn types_are_found_by_full_path_last_segment_or_wildcard_prefix() {
-        let types = [
-            "std::sync::Mutex".to_owned(),
-            "std::sync::atomic::*".to_owned(),
-        ];
+        let types = ["std::sync::Mutex", "std::sync::atomic::*"];
+        let mentions_a_type =
+            |text: &str, types: &[&str]| types.iter().any(|ty| type_pattern(ty).is_match(text));
         assert!(mentions_a_type("use std::sync::Mutex;", &types));
         assert!(mentions_a_type("static X: Mutex<u8>", &types));
         assert!(mentions_a_type(
@@ -470,6 +486,35 @@ mod tests {
         assert!(!mentions_a_type(
             "let mutex_free = 1; // Mutexes are elsewhere",
             &types
+        ));
+    }
+
+    /// A use is what clippy's `disallowed-types` and `disallowed-macros`
+    /// count, a path in code: the word in a comment, in rustdoc prose or
+    /// inside a string literal is none (#2026); and a write is judged by
+    /// the uses it adds, so one the file already carries is not the call's.
+    #[test]
+    fn a_type_or_macro_named_in_prose_or_a_literal_is_no_use() {
+        let types = ["std::sync::Once".to_owned(), "std::cell::Cell".to_owned()];
+        let macros = ["std::thread_local".to_owned()];
+        let uses = |text: &str| adds_a_denied_use(text, "", &types, &macros);
+        assert!(!uses(
+            "/// Once per process, whoever asks.\npub fn init() {}"
+        ));
+        assert!(!uses("//! Once a byte reached the host, a Cell held it."));
+        assert!(!uses(
+            "/* thread_local! { } */ let s = \"std::sync::Once\";"
+        ));
+        assert!(!uses("let s = r#\"Once::new() and thread_local!(x)\"#;"));
+        assert!(uses("use std::sync::Once;"));
+        assert!(uses("/// Once.\nstatic X: Once = Once::new();"));
+        assert!(uses("let c = std::cell::Cell::new(1); // Once"));
+        assert!(uses("thread_local! { static K: u8 = 0; }"));
+        let carried = "use std::sync::Once;\n";
+        let adds = |after: &str| adds_a_denied_use(after, carried, &types, &macros);
+        assert!(!adds("/// Once more.\nuse std::sync::Once;\nfn a() {}\n"));
+        assert!(adds(
+            "use std::sync::Once;\nstatic X: Once = Once::new();\n"
         ));
     }
 }

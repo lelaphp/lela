@@ -540,18 +540,26 @@ fn left_nested_chains_are_not_grammar_depth() {
 /// build. Held by growth, not by a clock: eight times the links costs
 /// about eight times the time linearly and sixty-four times
 /// quadratically, measured at 61× before the fix, and the bound sits
-/// between, each size's best of three runs so a busy machine does not
-/// decide it.
+/// between. The time is the thread's CPU time, best of three: a wall
+/// clock on a loaded machine charges the parse for the time it waited
+/// to be scheduled, which a 40,000-link parse waits more often than a
+/// 5,000-link one fits in between (#2205).
 #[test]
 fn a_left_nested_chain_parses_in_linear_time() {
-    use std::time::{Duration, Instant};
+    use nix::time::{ClockId, clock_gettime};
+    use std::time::Duration;
+    let cpu = || -> Duration {
+        clock_gettime(ClockId::CLOCK_THREAD_CPUTIME_ID)
+            .expect("the thread's CPU clock reads")
+            .into()
+    };
     let best = |n: usize| -> Duration {
         let src = format!("<?php $y = 1{};", "+1".repeat(n));
         (0..3)
             .map(|_| {
-                let at = Instant::now();
+                let at = cpu();
                 let parsed = php_syntax::parse(src.as_bytes(), &php_syntax::Options::default());
-                let took = at.elapsed();
+                let took = cpu().saturating_sub(at);
                 assert!(parsed.diagnostics.is_empty() && parsed.missing.is_empty());
                 took
             })
@@ -562,7 +570,7 @@ fn a_left_nested_chain_parses_in_linear_time() {
     let ratio = long.as_secs_f64() / short.as_secs_f64().max(f64::EPSILON);
     assert!(
         ratio < 24.0,
-        "8× the links took {ratio:.1}× the time ({short:?} for 5,000, {long:?} for 40,000); linear is 8×, quadratic 64×"
+        "8× the links took {ratio:.1}× the thread's CPU time ({short:?} for 5,000, {long:?} for 40,000); linear is 8×, quadratic 64×"
     );
 }
 

@@ -218,8 +218,8 @@ pub(crate) struct Plinks {
     free: Vec<Mysqlnd>,
 }
 
-/// The request's [`Plinks`] under `key`, held from here to `deactivate`;
-/// `None` once given back.
+/// The request's [`Plinks`] under `key`, held from here to
+/// `post_deactivate`.
 fn plinks<'r>(req: &'r mut Request, key: &[u8]) -> Option<&'r mut Plinks> {
     let plinks = &mut req.state::<State>().plinks;
     let key = key.to_vec();
@@ -273,25 +273,19 @@ fn reuse(req: &mut Request, mysql: &mut Conn, target: &Target, key: &[u8]) -> Re
     Ok(true)
 }
 
-/// What php's `shutdown_executor` does to mysqli's links, after every
-/// extension's `RSHUTDOWN`, so a session save handler's `write` still has
-/// them: a link `mysqli_init` made and connected without `p:` freed, as
-/// php's free of the link closes its stream, before the engine's end
-/// would keep that stream in its pool; then every persistent connection
-/// the request holds given back to the engine's pool, one still open on
-/// a link first given back as `php_mysqli_close` gives it; one past the
-/// pool's bound closed.
-pub(crate) fn deactivate(req: &mut Request) {
-    for object in std::mem::take(&mut req.state::<State>().unkeyed) {
-        free_link(req, object);
-    }
+/// Every persistent connection the request holds given back to the
+/// engine's pool after the request's objects are freed, where php's
+/// stays in its `EG(persistent_list)` entry's `free_links`: each link was
+/// freed in `shutdown_executor`, after every extension's `RSHUTDOWN` (so
+/// a session save handler's `write` still had it), and its
+/// `php_mysqli_close` put its connection among the free ones. One past
+/// the pool's bound is closed, and one still open on no link, which
+/// php's order leaves none of, closed as a failed `end_psession` closes
+/// it.
+pub(crate) fn post_deactivate(req: &mut Request) {
     for (key, plinks) in req.state::<State>().plinks.drain() {
         for handle in plinks.open {
-            if !matches!(end_psession(req, handle), Ok(true)) {
-                handle.close(req, CloseType::Explicit).ok();
-                continue;
-            }
-            give_to_pool(req, &key, handle);
+            handle.close(req, CloseType::Explicit).ok();
         }
         for handle in plinks.free {
             give_to_pool(req, &key, handle);
@@ -470,12 +464,6 @@ pub(crate) fn common_connect(
             return Ok(None);
         }
         connected(req, handle);
-        if !new_connection
-            && mysql.hash_key.is_none()
-            && let Some(object) = object
-        {
-            req.state::<State>().unkeyed.push(object);
-        }
         if let Some(key) = &mysql.hash_key
             && let Some(held) = plinks(req, key)
         {
@@ -557,10 +545,6 @@ fn close_conn(
         }
         Some(key) => {
             req.state::<State>().num_active_persistent -= 1;
-            // A link freed after `deactivate` gave its connection back.
-            if req.state::<State>().plinks.find(&key).is_none() {
-                return Ok(());
-            }
             let ended = end_psession(req, handle)?;
             if let Some(held) = plinks(req, &key) {
                 held.open.retain(|open| *open != handle);
@@ -623,7 +607,6 @@ pub(crate) fn close(req: &mut Request, on: On) -> Result<True, Thrown> {
 
 /// `mysqli_link_free_storage`.
 fn free_link(req: &mut Request, object: PhpObject) {
-    req.state::<State>().unkeyed.retain(|o| *o != object);
     let link = crate::payload::<Link>(req, object)
         .map(std::mem::take)
         .unwrap_or_default();

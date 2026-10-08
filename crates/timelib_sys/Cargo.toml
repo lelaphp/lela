@@ -1,0 +1,21 @@
+# timelib_sys: timelib, vendored byte for byte from php-src's `ext/date/lib`
+# at the tag `oracle.toml` pins, compiled by `build.rs`, and its C interface
+# declared in Rust (design §7.2, #711; seams.toml crate row, the `ext/*`
+# edge and `unsafe.homes`). `ext/date` is its one caller, and wraps it in
+# safe owned values in its `src/ffi/`.
+[package]
+name = "timelib_sys"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "timelib, php-src's ext/date/lib, vendored and declared"
+links = "timelib"
+
+[lints]
+workspace = true
+
+# Compiles `lib/`; no system library is discovered.
+[build-dependencies]
+cc = { workspace = true }

@@ -24,6 +24,36 @@ pub(crate) enum Started {
 }
 
 impl Engine {
+    /// `php_module_startup` finished for a host that serves no request
+    /// after it, as php's CLI answers `-v` and its built-in server waits
+    /// for its first client (`Z/sapi/cli/php_cli.c:638-641`,
+    /// `do_cli_server`): what the extensions' `MINIT`s raised, displayed
+    /// to `sink` as `php_error_cb` displays a startup error and once, then
+    /// `zend_post_startup_cb`'s chain on `host`'s environment, the request
+    /// `opcache.preload` serves among it. No extension's `rinit` runs.
+    /// The status the process ends with where the startup failed, 1 where
+    /// an `E_CORE_ERROR` bailed out of it, or the chain's refusal; `None`
+    /// where it started.
+    pub fn start_up(&self, host: &RequestDescription, sink: &mut dyn OutputSink) -> Option<i32> {
+        let description = RequestDescription {
+            sapi_name: host.sapi_name.clone(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(&self.shared), description);
+        if let Some(held) = sink.held() {
+            req.hold(held);
+        }
+        let failed = self.show_startup_raised(&mut req);
+        hand_over(&mut req, sink);
+        if failed {
+            return Some(1);
+        }
+        match self.started(host, sink) {
+            Started::Serving => None,
+            Started::Refused(status) => Some(status),
+        }
+    }
+
     /// How the engine's startup finished, which the first request's host
     /// finishes: each link of `zend_post_startup_cb` (`php_module_startup`)
     /// asked from the bottom of the chain, as opcache's calls the one it

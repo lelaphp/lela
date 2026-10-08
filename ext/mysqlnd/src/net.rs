@@ -96,8 +96,9 @@ pub(crate) struct Net {
     /// `pfc->data->sha256_server_public_key`.
     pub(crate) sha256_server_public_key: Option<Vec<u8>>,
     /// The `persistent_id` a persistent connection's stream is opened
-    /// under, php's `"%p"` of the `MYSQLND_VIO`: the key the engine keeps
-    /// the socket by between the requests that take the connection up.
+    /// under, php's `"%p"` of the `MYSQLND_VIO`, which makes the stream a
+    /// persistent one; the stream leaves the persistent list as it opens,
+    /// so nothing is ever held under it.
     pub(crate) persistent_id: Option<Vec<u8>>,
 }
 
@@ -136,6 +137,24 @@ impl Net {
     /// ```expect mysql
     /// Warning: PDO::query(): SQLSTATE[HY000]: General error: 2006 MySQL server has gone away in %s on line 6
     /// bool(false)
+    /// ```
+    ///
+    /// The stream is the connection's alone from its open, persistent or
+    /// not: `get_resources()` lists none of the three, and the id each
+    /// took stays spent.
+    ///
+    /// ```php
+    /// $n = count(get_resources());
+    /// $l = mysqli_connect('p:127.0.0.1', 'root', '', 'test');
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
+    /// $q = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// var_dump(count(get_resources()) - $n);
+    /// $f = fopen('php://memory', 'r');
+    /// var_dump(get_resource_id($f));
+    /// ```
+    /// ```expect mysql
+    /// int(0)
+    /// int(8)
     /// ```
     pub(crate) fn connect(
         &mut self,
@@ -179,6 +198,9 @@ impl Net {
                 return Ok(false);
             }
         };
+        // `open_tcp_or_unix`'s delete from `EG(persistent_list)` and
+        // `mysqlnd_fixup_regular_list`: the stream is the connection's.
+        stream.unlist(req);
         self.post_connect(req, *stream);
         self.stream = Some(stream);
         self.unix = unix;
@@ -186,16 +208,16 @@ impl Net {
     }
 
     /// The stream of a persistent connection taken up by a request: the
-    /// socket the connection kept, lent to the request under its
-    /// `persistent_id`, with the options `post_connect_set_opt` gave it; a
+    /// socket the connection kept, lent to the request in neither of its
+    /// lists, with the options `post_connect_set_opt` gave it; a
     /// connection that kept none takes up holding no stream, over which
     /// every command fails as one over a dead link does.
     pub(crate) fn take_up(&mut self, req: &mut Request) -> Result<(), Thrown> {
         self.stream = None;
-        let (Some(kept), Some(key)) = (self.kept.take(), self.persistent_id.clone()) else {
+        let Some(kept) = self.kept.take() else {
             return Ok(());
         };
-        let stream = req.stream_lend(key, kept)?;
+        let stream = req.stream_lend(kept)?;
         self.post_connect(req, *stream);
         self.stream = Some(stream);
         Ok(())
@@ -204,8 +226,7 @@ impl Net {
     /// The stream of a persistent connection let go as the request gives
     /// the connection back, nothing of the request's left on it: its
     /// socket kept by the connection ([`OwnedStream::keep`](php_ext::request::OwnedStream::keep)), out of the
-    /// request and out of the engine's persistent list, so the one list
-    /// the connection waits in is its owner's.
+    /// request, so the one list the connection waits in is its owner's.
     pub(crate) fn give_back(&mut self, req: &mut Request) {
         self.kept = self.stream.take().and_then(|stream| stream.keep(req));
     }

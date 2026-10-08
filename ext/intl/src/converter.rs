@@ -12,7 +12,9 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
 
 use crate::error::{self, Carrier, IntlError};
-use crate::ffi::converter::{self as ucnv, Callbacks, Converter, Reason, Target};
+use crate::ffi::converter::{
+    self as ucnv, Callbacks, Converter, ConverterId, Live, Reason, Target,
+};
 use crate::ffi::{Code, c_string};
 use crate::utf8;
 
@@ -53,12 +55,17 @@ impl ConverterObject {
     }
 }
 
-/// A share of the object's source and destination converters, each held
-/// for a call that lends their callbacks to PHP code.
-fn shares(req: &mut Request, object: PhpObject) -> (Option<Converter>, Option<Converter>) {
+/// The names of the object's source and destination converters, which a
+/// call that lends their callbacks to PHP code holds them by.
+fn converters(req: &mut Request, object: PhpObject) -> (Option<ConverterId>, Option<ConverterId>) {
     object
         .native_mut::<ConverterObject>(req)
-        .map_or((None, None), |o| (o.src.clone(), o.dest.clone()))
+        .map_or((None, None), |o| {
+            (
+                o.src.as_ref().map(Converter::id),
+                o.dest.as_ref().map(Converter::id),
+            )
+        })
 }
 
 /// What PHP code and failures left pending across one native's steps,
@@ -121,17 +128,19 @@ impl ObjectHandlers for Handlers {
     /// `php_converter_free_object`: each converter closed, a subclass's
     /// callbacks told (`UCNV_CLOSE`) while the object still holds it.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let (src, dest) = shares(req, object);
+        let (src, dest) = converters(req, object);
         let mut pending = Pending::default();
         for converter in [&src, &dest] {
             if converter.is_some() {
                 told(req, object, &mut pending, Reason::Close);
             }
         }
-        if let Some(o) = object.native_mut::<ConverterObject>(req) {
-            (o.src, o.dest) = (None, None);
+        let given_up = object
+            .native_mut::<ConverterObject>(req)
+            .map(|o| [o.src.take(), o.dest.take()]);
+        for converter in given_up.into_iter().flatten().flatten() {
+            converter.close(req);
         }
-        drop((src, dest));
         // php leaves what a callback threw in `EG(exception)`, raised after
         // the free; a free here has no way to, so it is given up (#2275).
         pending.give_up(req);
@@ -308,7 +317,7 @@ impl UConverter {
     ) -> Answer<OrFalse<Owner<PhpString>>> {
         let object = this.object();
         error::errors_reset::<ConverterObject>(req, object);
-        let (src, dest) = shares(req, object);
+        let (src, dest) = converters(req, object);
         let (src, dest) = if reverse { (dest, src) } else { (src, dest) };
         match convert(req, Some(object), dest, src, str.as_bytes())? {
             Some(bytes) => PhpString::new(req, &bytes).map(OrFalse::Value),
@@ -473,10 +482,13 @@ impl UConverter {
     ) -> Answer<Option<OrFalse<Owner<PhpString>>>> {
         let object = this.object();
         error::errors_reset::<ConverterObject>(req, object);
-        let Some(src) = this.payload_mut(req)?.src.clone() else {
+        let Some(src) = this.payload_mut(req)?.src.as_ref().map(Converter::id) else {
             return Ok(None);
         };
-        match src.subst_chars() {
+        let Some(chars) = src.get(req).map(|src| src.subst_chars()) else {
+            return Ok(None);
+        };
+        match chars {
             Ok(chars) => PhpString::new(req, &chars).map(|s| Some(OrFalse::Value(s))),
             Err(code) => {
                 failure(req, Some(object), code)?;
@@ -523,6 +535,10 @@ impl UConverter {
         pending.answer(req, Ok(set))
     }
 
+    /// A converter replaced while ICU is converting with it is closed
+    /// only as the conversion ends (ADR-0013), so the conversion goes on
+    /// with it and the next one uses the new one, which `convert`'s
+    /// witness holds.
     #[php(tentative)]
     fn setSourceEncoding(req: &mut Request, this: This<Self>, encoding: PhpString) -> Answer<bool> {
         let object = this.object();
@@ -536,11 +552,12 @@ impl UConverter {
     fn setSubstChars(req: &mut Request, this: This<Self>, chars: PhpString) -> Answer<bool> {
         let object = this.object();
         error::errors_reset::<ConverterObject>(req, object);
-        let (src, dest) = shares(req, object);
+        let (src, dest) = converters(req, object);
         let (mut set, mut pending) = (true, Pending::default());
         for (converter, which) in [(src, "Source"), (dest, "Destination")] {
-            let raised = if let Some(converter) = converter {
-                let code = converter.set_subst_chars(chars.as_bytes());
+            let code =
+                converter.and_then(|c| c.get(req).map(|c| c.set_subst_chars(chars.as_bytes())));
+            let raised = if let Some(code) = code {
                 if !code.is_failure() {
                     continue;
                 }
@@ -603,11 +620,17 @@ impl UConverter {
             Some(_) => open(req, None, toEncoding.as_bytes(), &mut pending),
             None => None,
         };
-        let (Some(src), Some(dest)) = (src, dest) else {
-            return pending.answer(req, Ok(OrFalse::False));
+        let (src, dest) = match (src, dest) {
+            (Some(src), Some(dest)) => (src, dest),
+            (src, dest) => {
+                for converter in [src, dest].into_iter().flatten() {
+                    converter.close(req);
+                }
+                return pending.answer(req, Ok(OrFalse::False));
+            }
         };
         let mut code = Code::ZERO;
-        for (key, converter) in [(&b"from_subst"[..], &src), (b"to_subst", &dest)] {
+        for (key, converter) in [(&b"from_subst"[..], src.id()), (b"to_subst", dest.id())] {
             let found = options
                 .as_ref()
                 .and_then(|o| o.find(key))
@@ -616,7 +639,10 @@ impl UConverter {
                 && !code.is_failure()
             {
                 let chars = chars.as_bytes();
-                code = converter.set_subst_chars(&chars[..chars.len() & 0x7F]);
+                let chars = &chars[..chars.len() & 0x7F];
+                code = converter
+                    .get(req)
+                    .map_or(Code::INVALID_STATE, |c| c.set_subst_chars(chars));
             }
         }
         let answer = if code.is_failure() {
@@ -624,8 +650,10 @@ impl UConverter {
         } else {
             // php leaves `return_value` null where the conversion fails;
             // with ICU's substituting callbacks on both it does not.
-            convert(req, None, Some(dest), Some(src), str.as_bytes())
+            convert(req, None, Some(dest.id()), Some(src.id()), str.as_bytes())
         };
+        src.close(req);
+        dest.close(req);
         match pending.answer(req, answer)? {
             Some(bytes) => PhpString::new(req, &bytes).map(OrFalse::Value),
             None => Ok(OrFalse::False),
@@ -658,9 +686,10 @@ fn open(
     name: &[u8],
     pending: &mut Pending,
 ) -> Option<Converter> {
-    let (converter, code) = Converter::open(&c_string(name));
+    let (converter, code) = Converter::open(req, &c_string(name));
     if code == Code::AMBIGUOUS_ALIAS {
-        let actual = converter.as_ref().map(Converter::name);
+        let id = converter.as_ref().map(Converter::id);
+        let actual = id.and_then(|id| id.get(req)).map(|c| c.name());
         let actual = match &actual {
             Some(Ok(actual)) => String::from_utf8_lossy(actual),
             _ => "(unknown)".into(),
@@ -676,6 +705,9 @@ fn open(
             error::set(req, code, &message)
         };
         pending.raised(req, raised);
+        if let Some(converter) = converter {
+            converter.close(req);
+        }
         return None;
     }
     converter
@@ -701,8 +733,12 @@ fn set_encoding(
     if held {
         told(req, object, pending, Reason::Close);
     }
-    if let Some(o) = object.native_mut::<ConverterObject>(req) {
-        *o.side(side) = Some(converter);
+    let old = match object.native_mut::<ConverterObject>(req) {
+        Some(o) => o.side(side).replace(converter),
+        None => Some(converter),
+    };
+    if let Some(old) = old {
+        old.close(req);
     }
     true
 }
@@ -715,13 +751,13 @@ fn encoding(
     side: Side,
 ) -> Answer<Option<OrFalse<Owner<PhpString>>>> {
     error::errors_reset::<ConverterObject>(req, object);
-    let Some(converter) = object
+    let id = object
         .native_mut::<ConverterObject>(req)
-        .and_then(|o| o.side(side).clone())
-    else {
+        .and_then(|o| o.side(side).as_ref().map(Converter::id));
+    let Some(name) = id.and_then(|id| id.get(req)).map(|c| c.name()) else {
         return Ok(None);
     };
-    match converter.name() {
+    match name {
         Ok(name) => PhpString::new(req, &name).map(|s| Some(OrFalse::Value(s))),
         Err(code) => {
             failure(req, Some(object), code)?;
@@ -734,10 +770,12 @@ fn encoding(
 /// converter.
 fn kind(req: &mut Request, object: PhpObject, side: Side) -> Option<OrFalse<i64>> {
     error::errors_reset::<ConverterObject>(req, object);
-    let o = object.native_mut::<ConverterObject>(req)?;
-    o.side(side)
-        .as_ref()
-        .map(|c| OrFalse::Value(i64::from(c.kind())))
+    let id = object
+        .native_mut::<ConverterObject>(req)?
+        .side(side)
+        .as_ref()?
+        .id();
+    id.get(req).map(|c| OrFalse::Value(i64::from(c.kind())))
 }
 
 /// `php_converter_default_callback`, what `parent::toUCallback()` and
@@ -752,9 +790,9 @@ fn default_callback(
     if !Reason::of(reason).is_some_and(Reason::is_error) {
         return Ok(None);
     }
-    let (src, _) = shares(req, object);
+    let (src, _) = converters(req, object);
     let mut pending = Pending::default();
-    let (chars, code) = match src.map(|src| src.subst_chars()) {
+    let (chars, code) = match src.and_then(|src| src.get(req).map(|src| src.subst_chars())) {
         None => {
             let message = "Source Converter has not been initialized yet";
             let raised = fail(req, Some(object), Code::INVALID_STATE, message);
@@ -785,17 +823,28 @@ fn default_callback(
 fn convert(
     req: &mut Request,
     object: Option<PhpObject>,
-    dest: Option<Converter>,
-    src: Option<Converter>,
+    dest: Option<ConverterId>,
+    src: Option<ConverterId>,
     text: &[u8],
 ) -> Answer<Option<Vec<u8>>> {
-    let (Some(src), Some(dest)) = (src, dest) else {
+    let mut pending = Pending::default();
+    // Each converter held for the whole conversion, so a callback that
+    // replaces or frees it leaves its close to the conversion's end.
+    let answer = match (src, dest) {
+        (Some(src), Some(dest)) => src
+            .held(req, |req, src| {
+                dest.held(req, |req, dest| {
+                    convert_with(req, object, &mut pending, dest, src, text)
+                })
+            })
+            .flatten(),
+        _ => None,
+    };
+    let Some(answer) = answer else {
         let message = "Internal converters not initialized";
         fail(req, object, Code::INVALID_STATE, message)?;
         return Ok(None);
     };
-    let mut pending = Pending::default();
-    let answer = convert_with(req, object, &mut pending, &dest, &src, text);
     pending.answer(req, answer)
 }
 
@@ -804,8 +853,8 @@ fn convert_with(
     req: &mut Request,
     object: Option<PhpObject>,
     pending: &mut Pending,
-    dest: &Converter,
-    src: &Converter,
+    dest: &Live<'_>,
+    src: &Live<'_>,
     text: &[u8],
 ) -> Answer<Option<Vec<u8>>> {
     let (needed, code) = lend(req, object, pending, |cb| src.decode(&mut [], text, cb));
@@ -1082,19 +1131,33 @@ impl Callbacks for Served<'_> {
 /// callbacks told of each after (`UCNV_CLONE`), and the clone's error its
 /// own.
 fn clone_converter(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
-    let (src, dest) = shares(req, object);
+    let (src, dest) = converters(req, object);
     let mut pending = Pending::default();
-    let mut cloned = |req: &mut Request, converter: Option<Converter>| {
-        let copy = converter.ok_or(Code::ILLEGAL_ARGUMENT)?.try_clone()?;
+    let mut cloned = |req: &mut Request, converter: Option<ConverterId>| {
+        let copy = converter.ok_or(Code::ILLEGAL_ARGUMENT)?.try_clone(req)?;
         told(req, object, &mut pending, Reason::Clone);
         Ok::<_, Code>(copy)
     };
-    let copies = cloned(req, src).and_then(|src| Ok((src, cloned(req, dest)?)));
-    let Ok((src, dest)) = copies else {
-        let thrown = throw_error(req, "Error", "Failed to clone UConverter");
-        return pending.answer(req, Err(thrown));
+    let src = cloned(req, src).ok();
+    let dest = match src {
+        Some(_) => cloned(req, dest).ok(),
+        None => None,
     };
-    pending.answer(req, Ok(()))?;
+    let (src, dest) = match (src, dest) {
+        (Some(src), Some(dest)) => (src, dest),
+        (src, dest) => {
+            for copy in [src, dest].into_iter().flatten() {
+                copy.close(req);
+            }
+            let thrown = throw_error(req, "Error", "Failed to clone UConverter");
+            return pending.answer(req, Err(thrown));
+        }
+    };
+    if let Err(thrown) = pending.answer(req, Ok(())) {
+        src.close(req);
+        dest.close(req);
+        return Err(thrown);
+    }
     let payload = ConverterObject {
         src: Some(src),
         dest: Some(dest),

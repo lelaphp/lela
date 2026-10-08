@@ -66,6 +66,8 @@ mod environment;
 mod execution;
 mod extensions;
 pub use extensions::InfoRow;
+mod foreign;
+pub use foreign::{Foreign, ForeignId, Held};
 mod frame_reads;
 mod frame_writes;
 pub(crate) use frame_reads::Identity;
@@ -374,6 +376,10 @@ pub struct Request {
     frames: frames::Frames,
     /// The table the last `FETCH_DIM_W` laid its `IS_INDIRECT` into ([`hold::Holding`]).
     hold: hold::Holding,
+    /// The objects of foreign libraries the request keeps for the
+    /// extensions, dropped with it where no owner gave them up before
+    /// ([`foreign::Table`]).
+    foreign: foreign::Table,
     /// php's `EG(class_table)` past what the engine registered at
     /// startup, the aliases aside: each class under its lowered name,
     /// in the order declared, the preload's first and then the
@@ -758,6 +764,7 @@ impl Request {
             #[cfg(debug_assertions)]
             frames: frames::Frames::default(),
             hold: hold::Holding::default(),
+            foreign: foreign::Table::default(),
         };
         req.activate();
         req

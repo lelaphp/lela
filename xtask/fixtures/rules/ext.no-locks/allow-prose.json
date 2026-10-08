@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/openssl/src/ffi/mod.rs","content":"//! The library's one initialisation.\n\n/// Once per process, whoever asks. A `Mutex` is not taken, nor a\n/// `thread_local! {}` key, and no Cell or Lazy is held.\npub fn init() -> &'static str {\n    \"Once a byte reached the host, std::sync::Once was not used\"\n}\n"}}
