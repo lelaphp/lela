@@ -4,8 +4,8 @@
 //! three ways php makes an instance. Each reads the linked tables the
 //! reflector's `$name` looks up again, the same `_class_string`
 //! renders: the engine's function table (`Request::method_rows`,
-//! `Request::method_row`), and `linked_interfaces`,
-//! `linked_constants` and `linked_properties`.
+//! `Request::method_row`) and interface list (`Request::interfaces`),
+//! and `linked_constants` and `linked_properties`.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
@@ -21,11 +21,11 @@ use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value
 use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
     HeldMethod, Reference, answer, attr, class_chain, class_constant_named, class_extension_name,
-    class_is, class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
+    class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
     dynamic_properties, is_closure_invoke, is_internal, keep, keep_method, keep_reference,
-    kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties,
-    lookup_class, method_or_invoke, namespace_end, new_object, property_named,
-    reflection_class_factory, set_name, set_string_prop, string_value, this_class, user_line,
+    kept_closure, kept_object, linked_constants, linked_properties, lookup_class, method_or_invoke,
+    namespace_end, new_object, property_named, reflection_class_factory, set_name, set_string_prop,
+    string_value, this_class, user_line,
 };
 
 /// The name of the first of `traits` whose function table has `method`,
@@ -1249,7 +1249,7 @@ impl ReflectionClass {
         if let Some(at) = name.windows(2).position(|pair| pair == b"::") {
             short = name[at + 2..].to_vec();
             let base = class_named(req, &name[..at])?;
-            if !class_is(req, class, base, 0) {
+            if !req.instance_of(class, base) {
                 let (base, named) = (class_name_of(req, base), class_name_of(req, class));
                 return Err(throw(
                     req,
@@ -1508,7 +1508,7 @@ impl ReflectionClass {
     #[php(tentative)]
     fn getInterfaces(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = linked_interfaces(req, class);
+        let linked = req.interfaces(class).to_vec();
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -1536,10 +1536,31 @@ impl ReflectionClass {
     ///   string(10) "Stringable"
     /// }
     /// ```
+    ///
+    /// The list is the linked record's (`Request::interfaces`), in php's
+    /// order for a user class (the parent's, its own, then their
+    /// parents) and for an internal one (the parent's, then each of its
+    /// own followed by that one's parents).
+    ///
+    /// ```php
+    /// interface I0 {} interface I1 extends I0 {} interface J {}
+    /// class P implements J {} class C extends P implements I1, Countable { function count(): int { return 0; } function __toString(): string { return ''; } }
+    /// echo implode(', ', (new ReflectionClass('C'))->getInterfaceNames()), "\n";
+    /// echo implode(', ', (new ReflectionClass('ArrayIterator'))->getInterfaceNames()), "\n";
+    /// echo implode(', ', (new ReflectionClass('RecursiveCachingIterator'))->getInterfaceNames()), "\n";
+    /// var_dump((new ReflectionClass('C'))->implementsInterface('I0'), (new ReflectionClass('C'))->isSubclassOf('J'));
+    /// ```
+    /// ```expect
+    /// J, I1, Countable, Stringable, I0
+    /// SeekableIterator, Traversable, Iterator, ArrayAccess, Serializable, Countable
+    /// Countable, ArrayAccess, OuterIterator, Traversable, Iterator, Stringable, RecursiveIterator
+    /// bool(true)
+    /// bool(true)
+    /// ```
     #[php(tentative)]
     fn getInterfaceNames(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let class = this_class(req, this.object())?;
-        let linked = linked_interfaces(req, class);
+        let linked = req.interfaces(class).to_vec();
         if linked.is_empty() {
             return Ok(Owner::take(req, PhpArray::empty()));
         }
@@ -1824,7 +1845,7 @@ impl ReflectionClass {
     fn isInstance(req: &mut Request, this: This<Self>, object: PhpObject) -> Result<bool, Thrown> {
         let of = object.class();
         let class = this_class(req, this.object())?;
-        Ok(class_is(req, of, class, 0))
+        Ok(req.instance_of(of, class))
     }
 
     /// `ReflectionClass::newInstance(mixed ...$args)`: `object_init_ex`
@@ -2313,7 +2334,7 @@ impl ReflectionClass {
     ) -> Result<bool, Thrown> {
         let this = this_class(req, this.object())?;
         let of = reflector_class(req, class, "Class")?;
-        Ok(this != of && class_is(req, this, of, 0))
+        Ok(this != of && req.instance_of(this, of))
     }
 
     /// `ReflectionClass::getStaticProperties()`: `CE_STATIC_MEMBERS(ce)` as
@@ -2709,7 +2730,7 @@ impl ReflectionClass {
         let Some(traversable) = lookup_class(req, b"Traversable")? else {
             return Ok(false);
         };
-        Ok(class_is(req, class, traversable, 0))
+        Ok(req.instance_of(class, traversable))
     }
 
     #[php(tentative, implementation = ReflectionClass::isIterable)]
@@ -2752,7 +2773,7 @@ impl ReflectionClass {
             ));
         }
         let class = this_class(req, this.object())?;
-        Ok(class_is(req, class, interface, 0))
+        Ok(req.instance_of(class, interface))
     }
 
     /// `ReflectionClass::getExtension()`: `ce->info.internal.module` as a

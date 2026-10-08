@@ -27,8 +27,8 @@ use php_ext::request::Request;
 use php_ext::values::{ClassId, FreshString, Owner, PhpArray, PhpObject, PhpString};
 
 use super::{
-    class_is, class_name_of, class_named, default_value_string, is_internal, keep_attribute,
-    new_object, set_name, this_attribute,
+    class_name_of, class_named, default_value_string, is_internal, keep_attribute, new_object,
+    set_name, this_attribute,
 };
 
 /// `ZEND_ATTRIBUTE_TARGET_*` (`Z/Zend/zend_attributes.h:26-33`), the
@@ -277,7 +277,7 @@ fn matches(
 ) -> Result<bool, Thrown> {
     let written = bare_name(&attribute.name.0);
     if let Some(base) = base {
-        return Ok(autoload(req, written)?.is_some_and(|class| class_is(req, class, base, 0)));
+        return Ok(autoload(req, written)?.is_some_and(|class| req.instance_of(class, base)));
     }
     Ok(match wanted {
         Some(asked) => written.eq_ignore_ascii_case(bare_name(asked)),

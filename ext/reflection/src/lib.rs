@@ -32,11 +32,11 @@
 //! `zend_do_implement_interfaces` ran is the engine's where the engine
 //! keeps it: the function table is the class's linked record, its rows
 //! read through `api` (`Request::method_rows`, `Request::method_row`)
-//! and held as a `MethodRow`. Each method's prototype, the interface
-//! list in its order, and the constants and the properties with their
-//! shadows are computed here by the same rules over the declarations
-//! (`row_prototype`, `linked_interfaces`, `linked_constants`,
-//! `linked_properties`), so the words `inherits`, `overwrites`,
+//! and held as a `MethodRow`, and the interface list in its order is
+//! the record's (`Request::interfaces`). Each method's prototype, and
+//! the constants and the properties with their shadows are computed
+//! here by the same rules over the declarations (`row_prototype`,
+//! `linked_constants`, `linked_properties`), so the words `inherits`, `overwrites`,
 //! `prototype` and `ctor` are php's.
 //! Reflection's own twenty-six classes are declared by `#[php_class]`
 //! beside the bodies that serve them, every method the stub has, so
@@ -5199,33 +5199,6 @@ fn class_chain(req: &mut Request, class: ClassId) -> Vec<ClassId> {
     chain
 }
 
-/// `instanceof_function(ce, of)` over identities: `ce` is `of`,
-/// extends it, or implements it, each class of the chain's interfaces
-/// walked with it.
-fn class_is(req: &mut Request, class: ClassId, of: ClassId, depth: u32) -> bool {
-    if class == of {
-        return true;
-    }
-    if depth > 64 {
-        return false;
-    }
-    let Some(decl) = req.class_decl(class) else {
-        return false;
-    };
-    let names: Vec<Name> = decl
-        .interfaces
-        .iter()
-        .chain(decl.parent.iter())
-        .cloned()
-        .collect();
-    names.iter().any(|name| {
-        lookup_class(req, &name.0)
-            .ok()
-            .flatten()
-            .is_some_and(|linked| class_is(req, linked, of, depth + 1))
-    })
-}
-
 /// `zend_memrchr(name, '\\')`: where the namespace ends, if the name
 /// has one.
 fn namespace_end(name: &[u8]) -> Option<usize> {
@@ -5954,7 +5927,7 @@ fn class_header(
         && lookup_class(req, b"Traversable")
             .ok()
             .flatten()
-            .is_some_and(|traversable| class_is(req, class, traversable, 0));
+            .is_some_and(|traversable| req.instance_of(class, traversable));
     let iterable = traversable
         || req.class_own_iterator(class)
         || linked_properties(req, class)
@@ -5993,7 +5966,7 @@ fn class_header(
             EnumBacking::Pure => {}
         }
     }
-    let interfaces = linked_interfaces(req, class);
+    let interfaces = req.interfaces(class).to_vec();
     for (i, interface) in interfaces.iter().enumerate() {
         let name = class_name_of(req, *interface);
         let name = String::from_utf8_lossy(&name);
@@ -7024,7 +6997,7 @@ fn prototype_at(req: &mut Request, row: MethodRow, depth: u32) -> Option<ClassId
 }
 
 /// The interfaces `class` implements that `parent` does not, in
-/// [`linked_interfaces`]'s order: none, with nothing walked, for a
+/// `ce->interfaces`' order ([`Request::interfaces`]): none, with nothing walked, for a
 /// class that names no interface and declares no `__toString`, which
 /// is what adds `Stringable`.
 fn new_interfaces(req: &mut Request, class: ClassId, parent: Option<ClassId>) -> Vec<ClassId> {
@@ -7038,8 +7011,8 @@ fn new_interfaces(req: &mut Request, class: ClassId, parent: Option<ClassId>) ->
     if !names_one {
         return Vec::new();
     }
-    let inherited = parent.map_or_else(Vec::new, |p| linked_interfaces(req, p));
-    let mut own = linked_interfaces(req, class);
+    let inherited = parent.map_or_else(Vec::new, |p| req.interfaces(p).to_vec());
+    let mut own = req.interfaces(class).to_vec();
     own.retain(|interface| !inherited.contains(interface));
     own
 }
@@ -7060,104 +7033,6 @@ fn prototype_over(req: &mut Request, above: MethodRow, depth: u32) -> Option<Cla
         return None;
     }
     Some(inherited.unwrap_or(above.scope()))
-}
-
-/// `ce->interfaces` after linking, in php's order. An internal class
-/// that declares `__toString` has `Stringable` first, added by
-/// `zend_register_functions` before `zend_class_implements` runs; a
-/// user class has it last among its own, where the compiler appends
-/// it. A class with no interfaces of its own takes its parent's in
-/// reverse (`zend_do_inherit_interfaces` walks `if_num--`), which is
-/// why `JsonException` implements `Throwable, Stringable` where
-/// `Exception` implements `Stringable, Throwable`. An internal class
-/// with interfaces of its own appends each after the parent's, followed
-/// by that interface's own parents in reverse
-/// (`zend_do_implement_interface`); a user class appends its own first
-/// and their parents after all of them
-/// (`zend_do_implement_interfaces`).
-fn linked_interfaces(req: &mut Request, class: ClassId) -> Vec<ClassId> {
-    linked_interfaces_at(req, class, 0)
-}
-
-fn linked_interfaces_at(req: &mut Request, class: ClassId, depth: u32) -> Vec<ClassId> {
-    // What the walk reads of the declaration, copied out of it rather
-    // than the declaration whole, which a prototype reads at every row.
-    let Some((internal, maybe_to_string, interfaces, parent)) = req.class_decl(class).map(|decl| {
-        (
-            decl.file.0.is_empty(),
-            decl.kind != ClassKind::Trait
-                && decl
-                    .methods
-                    .iter()
-                    .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__toString")),
-            decl.interfaces.clone(),
-            decl.parent.clone(),
-        )
-    }) else {
-        return Vec::new();
-    };
-    let mut list: Vec<ClassId> = Vec::new();
-    if depth > 64 {
-        return list;
-    }
-    let stringable = lookup_class(req, b"Stringable").ok().flatten();
-    let declares_to_string = maybe_to_string && stringable != Some(class);
-    let mut own: Vec<ClassId> = interfaces
-        .iter()
-        .filter_map(|name| lookup_class(req, &name.0).ok().flatten())
-        .collect();
-    if declares_to_string && let Some(stringable) = stringable {
-        if internal {
-            list.push(stringable);
-        } else if !own.contains(&stringable) {
-            own.push(stringable);
-        }
-    }
-    let parent = parent.and_then(|name| lookup_class(req, &name.0).ok().flatten());
-    let inherited = parent.map_or_else(Vec::new, |p| linked_interfaces_at(req, p, depth + 1));
-    let push = |list: &mut Vec<ClassId>, id: ClassId| {
-        if !list.contains(&id) {
-            list.push(id);
-        }
-    };
-    if internal {
-        for id in inherited.into_iter().rev() {
-            push(&mut list, id);
-        }
-        for interface in own {
-            push(&mut list, interface);
-            for id in linked_interfaces_at(req, interface, depth + 1)
-                .into_iter()
-                .rev()
-            {
-                push(&mut list, id);
-            }
-        }
-    } else if own.is_empty() {
-        for id in inherited.into_iter().rev() {
-            push(&mut list, id);
-        }
-    } else {
-        let mut added: Vec<ClassId> = Vec::new();
-        for id in inherited {
-            push(&mut list, id);
-        }
-        for interface in own {
-            if !list.contains(&interface) {
-                list.push(interface);
-                added.push(interface);
-            }
-        }
-        for interface in added {
-            for id in linked_interfaces_at(req, interface, depth + 1)
-                .into_iter()
-                .rev()
-            {
-                push(&mut list, id);
-            }
-        }
-    }
-    list
 }
 
 /// `ce->constants_table` after linking: the class's own constants, then
@@ -7191,9 +7066,10 @@ fn linked_constants_at(
         .as_ref()
         .and_then(|name| lookup_class(req, &name.0).ok().flatten());
     let mut sources: Vec<ClassId> = parent.into_iter().collect();
-    let parent_interfaces = parent.map_or_else(Vec::new, |p| linked_interfaces(req, p));
+    let parent_interfaces = parent.map_or_else(Vec::new, |p| req.interfaces(p).to_vec());
     sources.extend(
-        linked_interfaces(req, class)
+        req.interfaces(class)
+            .to_vec()
             .into_iter()
             .filter(|i| !parent_interfaces.contains(i)),
     );
