@@ -10,7 +10,7 @@
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::{
-    call_named, eval_declared, initialize_lazy, known_method, mark_lazy_initialized,
+    autoload, call_named, eval_declared, initialize_lazy, known_method, mark_lazy_initialized,
     read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
@@ -23,7 +23,7 @@ use super::{
     Reference, answer, attr, class_chain, class_constant_named, class_extension_name, class_is,
     class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
     dynamic_properties, is_closure_invoke, is_internal, keep, keep_method, keep_reference,
-    kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties, looked_up,
+    kept_closure, kept_object, linked_constants, linked_interfaces, linked_properties,
     lookup_class, method_or_invoke, namespace_end, new_object, property_named,
     reflection_class_factory, set_name, set_string_prop, string_value, this_class, user_line,
 };
@@ -168,7 +168,7 @@ fn reflector_class(
         }
         Union::B(name) => name.as_bytes().to_vec(),
     };
-    match looked_up(req, &name)? {
+    match autoload(req, &name)? {
         Some(class) => Ok(class),
         None => Err(throw(
             req,
