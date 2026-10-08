@@ -1278,7 +1278,7 @@ fn a_denial_is_a_reading_with_instrument_permit_and_the_rule_id() {
         reading.message
     );
     assert!(reading.message.starts_with("Edit "), "{}", reading.message);
-    assert_eq!(reading.tree().len(), 40);
+    assert_eq!(reading.key().len(), 40);
 }
 
 #[test]
@@ -1388,7 +1388,7 @@ fn bench_measures_p99_against_the_bar_and_writes_a_reading() {
         .unwrap()
         .expect("the bench is a reading");
     assert_eq!(reading.numbers["runs"], 6.into());
-    assert_eq!(reading.tree().len(), 40, "stamped over the harness crate");
+    assert_eq!(reading.key().len(), 40, "stamped over the harness crate");
     assert!(
         reading.numbers.contains_key("p99_ms"),
         "{:?}",
@@ -1996,7 +1996,7 @@ fn the_refusal_that_hands_the_call_on_is_a_skip_that_names_the_next_candidate() 
         "{}",
         reading.message
     );
-    assert_eq!(reading.tree().len(), 40);
+    assert_eq!(reading.key().len(), 40);
     assert!(
         Store::of_workspace(&root)
             .read("permit", "permit.unjudged-call")

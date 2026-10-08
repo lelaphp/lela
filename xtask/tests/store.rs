@@ -203,7 +203,7 @@ fn a_crate_not_yet_created_gets_a_reading_without_a_stamp() {
         &xtask::key::Snapshot::disk(workspace()).unwrap(),
     )
     .unwrap();
-    assert_eq!(reading.tree(), "");
+    assert_eq!(reading.key(), "");
     assert_eq!(reading.commit, "");
     assert_eq!(reading.at.to_string(), "1970-01-01T00:00:00Z");
     let existing = Crate::named("xtask");
@@ -213,7 +213,7 @@ fn a_crate_not_yet_created_gets_a_reading_without_a_stamp() {
         &xtask::key::Snapshot::disk(workspace()).unwrap(),
     )
     .unwrap();
-    assert_eq!(stamped.tree().len(), 40);
+    assert_eq!(stamped.key().len(), 40);
     assert!(stamped.at.to_string().ends_with('Z'));
 }
 
@@ -354,7 +354,7 @@ fn another_stores_log_is_landed_and_emptied() {
         .root()
         .join("permit")
         .join(&landed.scope)
-        .join(format!("{}.toml", landed.tree()));
+        .join(format!("{}.toml", landed.key()));
     assert!(
         entry.is_file(),
         "the landed reading is in the index: {}",
@@ -394,6 +394,109 @@ fn a_reading_is_written_beside_its_file_and_renamed_over_it() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(beside, ["pcre.toml"], "nothing is left beside the file");
+}
+
+/// A reading is written under the reading's version, `v = 2`, with the
+/// scope's key spelled `key` (harness-design.md §4.2, #1719): in the
+/// scope's file, its index entry and its line of the log alike.
+#[test]
+fn a_reading_is_written_under_its_version_with_its_key() {
+    let dir = scratch("v2");
+    let store = Store::at(dir.path());
+    let written = reading(Status::Pass, 0);
+    store.record(std::slice::from_ref(&written)).unwrap();
+    assert_eq!(written.key().len(), 40);
+
+    let file = store.root().join("witness/ext/pcre.toml");
+    let entry = store
+        .root()
+        .join("witness/ext/pcre")
+        .join(format!("{}.toml", written.key()));
+    for path in [&file, &entry] {
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains(&format!("v = {}\n", reading::V)), "{text}");
+        assert!(
+            text.contains(&format!("key = \"{}\"\n", written.key())),
+            "{text}"
+        );
+        assert!(!text.contains("tree"), "{text}");
+    }
+    let log = std::fs::read_to_string(store.root().join("log/witness.jsonl")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(log.trim_end()).unwrap();
+    assert_eq!(line["v"], reading::V);
+    assert_eq!(line["key"], written.key());
+    assert_eq!(line.get("tree"), None);
+    assert_eq!(store.read("witness", "ext/pcre").unwrap(), Some(written));
+}
+
+/// A reading written before #1719 carries no `v` and spells its key
+/// `tree`. The store reads it as version 1 wherever it stands: a scope's
+/// file, a line of the log, and a log another store landed here, whose
+/// reading the index then keeps under its key, written again as version 2.
+#[test]
+fn a_reading_of_the_first_version_spelling_its_key_tree_still_reads() {
+    const KEY: &str = "dd29800cbb457eb99968a70299edce74213a45b1";
+    let dir = scratch("v1");
+    let store = Store::at(dir.path());
+    let file = store.root().join("budget/xtask.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        format!(
+            "instrument = \"budget\"\nscope = \"xtask\"\nrule = \"\"\nstatus = \"pass\"\nmessage = \"\"\nadr = \"\"\ntree = \"{KEY}\"\ncommit = \"2ebc652\"\nat = 2026-10-03T11:57:08Z\nsession = \"\"\n\n[numbers]\nlines = 30050\n"
+        ),
+    )
+    .unwrap();
+    let read = store.read("budget", "xtask").unwrap().unwrap();
+    assert_eq!(read.key(), KEY);
+    assert_eq!(read.numbers["lines"], 30050.into());
+
+    let line = format!(
+        r#"{{"adr":"","at":"2026-10-03T11:57:08Z","commit":"2ebc652","instrument":"budget","message":"","numbers":{{"lines":30050}},"rule":"","scope":"xtask","session":"","status":"pass","tree":"{KEY}"}}"#
+    );
+    assert_eq!(Reading::from_json(&line).unwrap(), read);
+
+    let from_dir = scratch("v1-from");
+    let from = Store::at(from_dir.path());
+    std::fs::create_dir_all(from.root().join(reading::LOG)).unwrap();
+    std::fs::write(from.root().join("log/budget.jsonl"), format!("{line}\n")).unwrap();
+    let other = scratch("v1-into");
+    let into = Store::at(other.path());
+    assert_eq!(into.land(&from).unwrap(), 1);
+    assert_eq!(into.history("budget").unwrap().readings, [read]);
+    let entry = into.root().join(format!("budget/xtask/{KEY}.toml"));
+    let text = std::fs::read_to_string(&entry).unwrap();
+    assert!(
+        text.contains(&format!("v = {}\n", reading::V))
+            && text.contains(&format!("key = \"{KEY}\"")),
+        "{text}"
+    );
+}
+
+/// A reading whose `v` this harness does not know is refused, from a file
+/// and from a line of the log alike, as a `--format jsonl` row's reader
+/// refuses one (harness-design.md §4.6): its fields may mean what this
+/// build cannot say.
+#[test]
+fn a_reading_of_a_version_this_harness_does_not_know_is_refused() {
+    let dir = scratch("v-unknown");
+    let store = Store::at(dir.path());
+    let written = reading(Status::Pass, 0);
+    let mut line = written.to_json().unwrap();
+    line["v"] = (reading::V + 1).into();
+    let refused = Reading::from_json(&line.to_string()).unwrap_err();
+    assert!(
+        format!("{refused:#}").contains(&format!("v = {}", reading::V + 1)),
+        "{refused:#}"
+    );
+    store.record(std::slice::from_ref(&written)).unwrap();
+    let file = store.root().join("witness/ext/pcre.toml");
+    let text = std::fs::read_to_string(&file).unwrap().replace(
+        &format!("v = {}\n", reading::V),
+        &format!("v = {}\n", reading::V + 1),
+    );
+    std::fs::write(&file, text).unwrap();
+    assert!(store.read("witness", "ext/pcre").is_err());
 }
 
 /// A file of the store that is no reading, one a crash left empty or cut

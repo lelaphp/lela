@@ -274,7 +274,7 @@ fn read_counts_the_boxes_and_names_the_unticked() {
         "{}",
         reading.message
     );
-    assert!(!reading.tree().is_empty(), "stamped over the workspace");
+    assert!(!reading.key().is_empty(), "stamped over the workspace");
     assert!(
         recorded.calls().is_empty(),
         "read asks the tracker nothing else"

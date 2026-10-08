@@ -14,9 +14,11 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
+/// What a reading is stamped with: the scope's key
+/// ([`crate::key::Snapshot::key`]) and the commit it was taken at.
 #[derive(Debug, Clone)]
 pub struct Stamp {
-    pub tree: String,
+    pub key: String,
     pub commit: String,
 }
 
@@ -393,8 +395,8 @@ mod tests {
             .unwrap()
             .stamp(Path::new("xtask"))
             .unwrap();
-        assert_eq!(stamp.tree.len(), 40, "{}", stamp.tree);
-        assert!(stamp.tree.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(stamp.key.len(), 40, "{}", stamp.key);
+        assert!(stamp.key.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(!stamp.commit.is_empty());
     }
 
@@ -403,8 +405,8 @@ mod tests {
         let now = Snapshot::disk(&built_root()).unwrap();
         let a = now.stamp(Path::new("xtask")).unwrap();
         let b = now.stamp(Path::new("docs")).unwrap();
-        assert_ne!(a.tree, b.tree);
-        assert_eq!(a.tree, now.stamp(Path::new("xtask")).unwrap().tree);
+        assert_ne!(a.key, b.key);
+        assert_eq!(a.key, now.stamp(Path::new("xtask")).unwrap().key);
     }
 
     /// The stamp computed in process is the one git would compute: the
@@ -495,12 +497,12 @@ mod tests {
         .unwrap();
         reading.status = Status::Pass;
         assert_eq!(
-            reading.tree(),
+            reading.key(),
             Snapshot::disk(&workspace)
                 .unwrap()
                 .stamp(&manifest.scope_path("xtask").unwrap())
                 .unwrap()
-                .tree
+                .key
         );
         let store = Store::at(root.path());
         assert_eq!(

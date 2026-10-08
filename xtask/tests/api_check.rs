@@ -79,7 +79,7 @@ fn the_clean_fixture_passes_every_rule() {
     assert_eq!(of(&readings, "ext/standard").status, Status::Pass);
     for reading in &readings {
         assert_eq!(reading.instrument, "api-check");
-        assert_eq!(reading.tree().len(), 40, "{}", reading.scope);
+        assert_eq!(reading.key().len(), 40, "{}", reading.scope);
     }
 }
 
@@ -210,7 +210,7 @@ fn a_rewritten_lock_is_stamped_over_what_write_left() {
     let readings = api_check::hold(&manifest, &root, true).unwrap();
     let after = Snapshot::disk(&root).unwrap().key(&home).unwrap();
     assert_ne!(before, after, "--write rewrote the lock out of order");
-    assert_eq!(of(&readings, "heap").tree(), after);
+    assert_eq!(of(&readings, "heap").key(), after);
 }
 
 /// The api seam's ceilings as the tracked manifest carries them.
@@ -758,8 +758,8 @@ fn the_harness_lock_is_current_over_the_tracked_workspace() {
     );
     assert_eq!(harness.rule, "xtask.lock-line");
     assert_eq!(
-        harness.tree(),
-        of(&readings, "xtask").tree(),
+        harness.key(),
+        of(&readings, "xtask").key(),
         "the lock's reading is stamped over its home, the harness"
     );
     let failed: Vec<String> = failures(&readings)

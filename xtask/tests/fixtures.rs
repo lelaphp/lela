@@ -123,7 +123,7 @@ fn scripts_over_their_ceiling_fail_naming_each_counted_file_and_the_generator_le
         "{}",
         scripts.message
     );
-    assert!(!scripts.tree().is_empty(), "stamped over scripts/");
+    assert!(!scripts.key().is_empty(), "stamped over scripts/");
 }
 
 #[test]

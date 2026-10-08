@@ -166,7 +166,7 @@ fn assert_denied(root: &Path, out: &str, path: &str, written: &str) {
     // Stamped over the file as it was put back: a snapshot taken after
     // the put-back, not one from before the call ran (#2163).
     let now = xtask::key::Snapshot::disk(root).unwrap();
-    assert_eq!(reading.tree(), now.key(Path::new(path)).unwrap());
+    assert_eq!(reading.key(), now.key(Path::new(path)).unwrap());
     let kept = reason
         .split("what the call wrote is blob ")
         .nth(1)

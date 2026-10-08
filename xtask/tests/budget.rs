@@ -72,7 +72,7 @@ fn the_tracked_workspace_passes_with_the_manifests_numbers() {
         i64::try_from(ceiling).unwrap().into()
     );
     assert!(int(&xtask.numbers["lines"]) < int(&xtask.numbers["ceiling"]));
-    assert!(!xtask.tree().is_empty(), "stamped");
+    assert!(!xtask.key().is_empty(), "stamped");
 
     let ws = readings.iter().find(|r| r.scope == "workspace").unwrap();
     assert_eq!(ws.status, Status::Pass, "{}", ws.message);
@@ -132,7 +132,7 @@ fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
         "{}",
         scripts.message
     );
-    assert!(!scripts.tree().is_empty(), "stamped over scripts/");
+    assert!(!scripts.key().is_empty(), "stamped over scripts/");
 }
 
 /// The mechanism, held without the row in the tracked manifest: a scratch

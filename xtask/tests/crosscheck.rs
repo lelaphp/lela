@@ -348,8 +348,8 @@ fn ext_names_one_extension_rendered_through_the_linked_adapter_and_writes_two_re
     assert!(ri.message.contains("php -n --ri ctype"), "{}", ri.message);
     assert_eq!(count(&ri, "bytes"), 33, "{ri:#?}");
     assert_eq!(
-        re.tree(),
-        ri.tree(),
+        re.key(),
+        ri.key(),
         "both columns are stamped over ext/ctype"
     );
     for scope in ["ext/ctype", "ext/ctype/ri"] {
