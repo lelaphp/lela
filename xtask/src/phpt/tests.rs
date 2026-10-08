@@ -1707,11 +1707,11 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
 /// judged them at once. On a pool of eight the three tests are cut into
 /// batches of two, as run-tests.php cuts them (run-tests.php:1537-1541),
 /// so the pair is judged one after the other and both pass, run after run;
-/// the third, in a batch of its own, runs beside the pair's first on some
-/// run, the negative control that shows the pool runs anything at once
-/// at all. The control is held on every run: the first and the third each
-/// wait, bounded, for the other's `.here` file, so they meet however long
-/// the load holds one up, where a race against the clock lost under load
+/// the third, in a batch of its own, runs beside the pair's first, the
+/// negative control that shows the pool runs anything at once at all.
+/// The control is held on every run: the first and the third each wait,
+/// bounded, for the other's `.here` file, so they meet however long the
+/// load holds one up, where a race against the clock lost under load
 /// (#1152, #1105).
 #[test]
 fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
