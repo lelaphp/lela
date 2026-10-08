@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=e7f0c740add1a1288f7cef1ca93a8e58178d447742b4912ffdfa747ddd2d8a7c out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=27f40fe2c48d046bceac83520bb495e230da0e76b7337e3b8dfc611d8f411ace out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -130,7 +130,7 @@ third-engine-design.md
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 377 |  | pass |
 
-<!-- /computed in=db16be0b927d29be31060fbaf9ea53ad406e70e1dcd0f6e9ef406a0d8ec9acb6 out=f15a512d50787e49d1bcb5cd81605c3418d8aa64ce667b22ae0da0a06fc4de82 -->
+<!-- /computed in=a66131104809c6c4882ad672cdc44d754cf6dbdf4395ec613e633da81eb83392 out=f15a512d50787e49d1bcb5cd81605c3418d8aa64ce667b22ae0da0a06fc4de82 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -159,13 +159,13 @@ third-engine-design.md
 | lanes.nightly-flags |  | deny_argv | no reading |
 | lanes.builder-subset |  | require_argv | fail |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | pass |
+| harness.self |  | deny | fail |
 | harness.self-shell |  | deny_pattern | fail |
 | harness.transcript |  | deny_pattern | no reading |
 | divergence.reason |  | check | pass |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=70dd5e4e22227e3288fa541bb0d1ce646b71b22f2d49555ac37327f5b442108b out=81360bf66e85a7c7c228557dc5beeb7dbea8b0c19066e6ac6fb24d0401ca310b -->
+<!-- /computed in=3db45df6dd597c017466fc053673e7d321ccdc3fc9301473eecdd4b6495e1653 out=47444399d029cf7085b79987f3be236d8131f5378a1ee473a0d1e8b51eee8f36 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
