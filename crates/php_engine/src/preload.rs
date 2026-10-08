@@ -160,6 +160,7 @@ impl Engine {
                     .map(|held| held.path.clone())
                     .collect();
                 self.shared.units.publish_preload(preloaded);
+                req.save_preload_state();
                 // `preload_script_in_shared_memory`, for the preload's
                 // own pseudo-file and then each saved script.
                 req.tell_cached(PRELOAD_SCRIPT);

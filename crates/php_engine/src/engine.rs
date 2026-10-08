@@ -755,9 +755,11 @@ pub(crate) struct Shared {
     /// The engine's published arena (design §5.14, *Identities*): the
     /// rows of the classes and functions published past the engine's
     /// own, which every request reads with nothing taken and which no row is
-    /// written in after it is published. The preload is its first
-    /// publisher. Each request holds the arena it started with, and an
-    /// opcache restart empties it once none does ([`crate::arena::Epochs`]).
+    /// written in after it is published, laid over the preload's once
+    /// that has published. Each request holds the arena of the epoch it
+    /// started in, and an opcache restart hands the requests after it a
+    /// new one, the old dropped with its last holder
+    /// ([`crate::arena::Epochs`]).
     pub(crate) arena: crate::arena::Epochs,
     /// The persistent pool (design §4.10, #1172), php's
     /// `EG(persistent_list)`: what the stream layer keeps between
@@ -1459,8 +1461,10 @@ impl Shared {
             now: crate::unit_cache::now(),
             levels: crate::unit_cache::Levels::Memory,
         };
+        let arena = self.arena.current();
         self.units
             .file(
+                &arena.files,
                 asked,
                 |source| {
                     let multibyte = self.unbound();
@@ -3032,16 +3036,11 @@ impl EngineBuilder {
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
-        let units = UnitCache::new(
-            MAX_ACCELERATED_FILES,
-            self.hooked,
-            self.extended_info,
-            &functions,
-            &classes,
-        );
+        let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
         let arena = crate::arena::Epochs::of(crate::arena::Arena::past(
             classes.len(),
             functions.len().saturating_add(methods.len()),
+            crate::unit_cache::Files::new(MAX_ACCELERATED_FILES),
         ));
         let mut engine = Engine {
             shared: Arc::new(Shared {
@@ -5465,6 +5464,44 @@ mod tests {
             String::from_utf8_lossy(&second.stdout),
             "fmyn\npreloading\nagain\n"
         );
+    }
+
+    /// An opcache restart past the preload (design §5.14): the next
+    /// request is handed a new epoch, and the preload's classes and
+    /// functions stand in it at the numbers they had, the very rows.
+    #[test]
+    fn a_restart_keeps_the_preloads_rows_at_their_numbers() {
+        let dir =
+            std::env::temp_dir().join(format!("engine-preload-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let script = dir.join("preload.inc");
+        std::fs::write(
+            &script,
+            "<?php\nfunction pre_g() { return 'g'; }\nclass PreD { function m() { return 'd'; } }\n",
+        )
+        .ok();
+        let engine = Engine::cli_builder()
+            .extensions(&[preloading(&script)])
+            .ini("t.preload", script.as_os_str().as_encoded_bytes())
+            .build();
+        let program = "<?php echo pre_g(), (new PreD)->m();";
+        let first = engine.serve_capture(program, crate::test::Capture::default());
+        let before = engine.shared.arena.current();
+        let scheduled = before.files.schedule_restart();
+        let second = engine.serve_capture(program, crate::test::Capture::default());
+        let after = engine.shared.arena.current();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(scheduled, crate::api::request::Restart::Scheduled);
+        assert_eq!(String::from_utf8_lossy(&first.stdout), "gd");
+        assert_eq!(String::from_utf8_lossy(&second.stdout), "gd");
+        assert!(!Arc::ptr_eq(&before, &after), "a new epoch");
+        let preloaded = engine.shared.units.preloaded();
+        let functions = preloaded.map_or_else(Vec::new, |preloaded| preloaded.functions.to_vec());
+        assert!(!functions.is_empty());
+        for function in functions {
+            let (was, is) = (before.function(function), after.function(function));
+            assert!(was.zip(is).is_some_and(|(was, is)| std::ptr::eq(was, is)));
+        }
     }
 
     /// An extension that keeps every file in the cache, never validated,

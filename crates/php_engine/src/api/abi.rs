@@ -283,12 +283,6 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
             .map(|(key, value)| (key.clone(), Arc::clone(value)))
             .collect()
     }
-
-    /// The values `keep` answers false for, dropped: a value a caller
-    /// still holds lives until it lets go.
-    pub(crate) fn retain(&self, mut keep: impl FnMut(&K, &V) -> bool) {
-        self.entries().retain(|key, value| keep(key, value));
-    }
 }
 
 /// The engine-owned pool of persistent resources (ADR-0005's amendment of
