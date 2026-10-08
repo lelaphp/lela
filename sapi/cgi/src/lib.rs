@@ -46,8 +46,8 @@ use php_sapi::cgi::{Disk, path_of};
 use php_sapi::getopt::{Getopt, Opt, Taken, getopt_line, opt};
 use php_sapi::ini::{Search, define, enabled};
 use php_sapi::{
-    Aborted, Engine, IniFiles, IniOrigin, Observables, OutputSink, RequestDescription,
-    ResponseHead, WebRequest,
+    Aborted, Engine, HostPage, HostServes, IniFiles, IniOrigin, Observables, OutputSink,
+    RequestDescription, ResponseHead, WebRequest,
 };
 
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
@@ -469,10 +469,9 @@ consult the installation file that came with this distribution, or visit \n\
 /// alone; the query string, the cookie header, the content type and its
 /// length, and the body read from stdin up to that length; `PHP_SELF`
 /// from `SCRIPT_NAME` and `PATH_INFO`, and the `Basic` credentials; the
-/// working directory the file's own unless `-C`. A file that cannot be
-/// opened is php's `No input file specified.` under a 404, or `Access
-/// denied.` under a 403, the request served with that as its body and
-/// the exit php's 255. Where the request has a path translated,
+/// working directory the file's own unless `-C`. The file is opened once
+/// the request has started ([`serve`]), as `main` opens it after
+/// `php_request_startup`. Where the request has a path translated,
 /// `sapi_cgi_activate` sets the php.ini's `[HOST=]` table of its
 /// `SERVER_NAME` and its `[PATH=]` tables along the path's directory
 /// ([`Engine::activated_ini`]), then each `.user.ini` from
@@ -481,7 +480,7 @@ fn describe(
     engine: &Engine,
     invocation: &Invocation,
     mut env: Environment,
-) -> Result<(RequestDescription, bool), Refusal> {
+) -> Result<(RequestDescription, Primary), Refusal> {
     let server = invocation.origin == Origin::Server;
     let settings = php_sapi::cgi::settings(engine);
     if server && enabled(engine, "cgi.force_redirect") {
@@ -509,10 +508,10 @@ fn describe(
         let user = php_sapi::cgi::user_ini(engine, &dir, doc_root);
         activated.extend(user.into_iter().map(|(k, v)| (k, v, IniOrigin::PerDir)));
     }
-    let program = Program::of(path.as_deref(), invocation.origin);
+    let primary = Primary::of(path, invocation);
     let process_cwd = std::env::current_dir().unwrap_or_default();
-    let cwd = match (&program, invocation.no_chdir) {
-        (Program::File(path), false) => {
+    let cwd = match (&primary, invocation.no_chdir) {
+        (Primary::Path(Some(path)), false) => {
             let file = process_cwd.join(path_of(path));
             file.parent().map_or(process_cwd.clone(), Path::to_path_buf)
         }
@@ -522,7 +521,7 @@ fn describe(
     // The body, `sapi_cgi_read_post`'s stdin up to `CONTENT_LENGTH`, where
     // stdin is not the program.
     let mut body = Vec::new();
-    if info.content_length > 0 && !matches!(program, Program::Stdin(_)) {
+    if info.content_length > 0 && !matches!(primary, Primary::Stdin(_)) {
         let length = u64::try_from(info.content_length).unwrap_or(0);
         std::io::stdin()
             .lock()
@@ -530,24 +529,17 @@ fn describe(
             .read_to_end(&mut body)
             .ok();
     }
-    let (response_code, failed) = match &program {
-        Program::Refused { code, .. } => (*code, true),
-        _ => (info.response_code, false),
-    };
     let web = WebRequest {
         query,
         body: php_sapi::Body::Read(body),
         no_headers: invocation.head == Head::Quiet,
-        response_code,
+        response_code: info.response_code,
         ..php_sapi::cgi::web(&env, &info)
     };
-    let (script_name, source) = match program {
-        Program::File(path) if invocation.behavior == Behavior::Info => {
-            (Some(path), Some(b"<?php phpinfo();".to_vec()))
-        }
-        Program::File(path) => (Some(path), None),
-        Program::Stdin(source) => (Some(b"Standard input code".to_vec()), Some(source)),
-        Program::Refused { path, text, .. } => (path, Some(text.as_bytes().to_vec())),
+    let (script_name, source) = match &primary {
+        Primary::Info(path) => (path.clone(), Some(b"<?php phpinfo();".to_vec())),
+        Primary::Path(path) => (path.clone(), None),
+        Primary::Stdin(source) => (Some(b"Standard input code".to_vec()), Some(source.clone())),
     };
     Ok((
         RequestDescription {
@@ -562,7 +554,7 @@ fn describe(
             ini: activated,
             ..RequestDescription::default()
         },
-        failed,
+        primary,
     ))
 }
 
@@ -594,55 +586,56 @@ fn from_shell(engine: &Engine, invocation: &Invocation, info: &RequestInfo) -> S
     (path, argv, query)
 }
 
-/// The program a request serves, as `php_fopen_primary_script` finds it.
-enum Program {
-    /// A file that opens.
-    File(Vec<u8>),
+/// What a request serves, as `main` settles it.
+enum Primary {
+    /// `-i`: `php_print_info`, no file opened, whatever the line named.
+    Info(Option<Vec<u8>>),
+    /// The file `php_fopen_primary_script` opens once the request has
+    /// started; a server's request with no path translated has none.
+    Path(Option<Vec<u8>>),
     /// Stdin, read whole, where a shell named no file.
     Stdin(Vec<u8>),
-    /// No file, or one that does not open: php's sentence as the body,
-    /// under its code, and the exit 255.
-    Refused {
-        path: Option<Vec<u8>>,
-        code: i64,
-        text: &'static str,
-    },
 }
 
-impl Program {
-    /// `path` opened; a server's request with none is refused, and a
-    /// shell's reads stdin.
-    fn of(path: Option<&[u8]>, origin: Origin) -> Program {
-        let Some(path) = path else {
-            return match origin {
-                Origin::Server => Program::Refused {
-                    path: None,
-                    code: 404,
-                    text: "No input file specified.\n",
-                },
-                Origin::Shell => {
-                    let mut source = Vec::new();
-                    std::io::stdin().lock().read_to_end(&mut source).ok();
-                    Program::Stdin(source)
-                }
-            };
-        };
-        match std::fs::File::open(path_of(path)) {
-            Ok(_) => Program::File(path.to_vec()),
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                Program::Refused {
-                    path: Some(path.to_vec()),
-                    code: 403,
-                    text: "Access denied.\n",
-                }
+impl Primary {
+    /// The primary of `invocation` with `path` translated: a server never
+    /// takes stdin, and a shell that named no file reads it.
+    fn of(path: Option<Vec<u8>>, invocation: &Invocation) -> Primary {
+        if invocation.behavior == Behavior::Info {
+            return Primary::Info(path);
+        }
+        match (path, invocation.origin) {
+            (None, Origin::Shell) => {
+                let mut source = Vec::new();
+                std::io::stdin().lock().read_to_end(&mut source).ok();
+                Primary::Stdin(source)
             }
-            Err(_) => Program::Refused {
-                path: Some(path.to_vec()),
-                code: 404,
-                text: "No input file specified.\n",
-            },
+            (path, _) => Primary::Path(path),
         }
     }
+}
+
+/// `php_fopen_primary_script` failing over `path`, as `main` answers it
+/// once the request has started (`Z/sapi/cgi/cgi_main.c:2478-2487`):
+/// `Access denied.` under a 403 where the open met `EACCES`, and `No
+/// input file specified.` under a 404 otherwise, a request with no path
+/// among them; `None` where the file opens.
+fn refusal(path: Option<&[u8]>) -> Option<HostPage> {
+    let denied = match path.map(|path| std::fs::File::open(path_of(path))) {
+        Some(Ok(_)) => return None,
+        Some(Err(error)) => error.kind() == std::io::ErrorKind::PermissionDenied,
+        None => false,
+    };
+    let (code, body): (i64, &[u8]) = if denied {
+        (403, b"Access denied.\n")
+    } else {
+        (404, b"No input file specified.\n")
+    };
+    Some(HostPage {
+        code,
+        headers: Vec::new(),
+        body: body.to_vec(),
+    })
 }
 
 /// The process's environment, `environ`.
@@ -708,7 +701,7 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
     if invocation.behavior == Behavior::Lint {
         return lint(engine, invocation, &env);
     }
-    let (description, failed) = match describe(engine, invocation, env) {
+    let (description, primary) = match describe(engine, invocation, env) {
         Ok(described) => described,
         Err(Refusal::Redirect) => {
             Process.write(SECURITY_ALERT.as_bytes()).ok();
@@ -716,15 +709,28 @@ pub fn serve(engine: &Engine, invocation: &Invocation, env: Environment) -> i32 
         }
     };
     let mut sink = Process;
-    let served: Observables = match invocation.behavior {
-        Behavior::Highlight if !failed => engine.highlight(description, &mut sink),
-        Behavior::Strip if !failed => engine.strip(description, &mut sink),
+    let mut refused = false;
+    let served: Observables = match (&primary, invocation.behavior) {
+        (Primary::Path(path), Behavior::Standard) => {
+            engine.serve_started(description, &mut sink, || {
+                refusal(path.as_deref()).map_or(HostServes::Program, |page| {
+                    refused = true;
+                    HostServes::Page(page)
+                })
+            })
+        }
+        (Primary::Path(path), _) if let Some(page) = refusal(path.as_deref()) => {
+            refused = true;
+            engine.serve_started(description, &mut sink, || HostServes::Page(page))
+        }
+        (_, Behavior::Highlight) => engine.highlight(description, &mut sink),
+        (_, Behavior::Strip) => engine.strip(description, &mut sink),
         _ => engine.serve(description, &mut sink),
     };
     // `main` returns `FAILURE` where `php_request_startup` failed, an
     // extension's `rinit` having raised (#1775), and php-cgi ends there
-    // (`Z/sapi/cgi/cgi_main.c:2460-2467`).
-    if failed || served.start_failed {
+    // (`Z/sapi/cgi/cgi_main.c:2460-2467`), or where the file did not open.
+    if refused || served.start_failed {
         255
     } else {
         served.exit_code
@@ -740,15 +746,17 @@ fn lint(engine: &Engine, invocation: &Invocation, env: &Environment) -> i32 {
     let mut this = invocation.clone();
     let mut exit_code = 0;
     loop {
-        let (description, failed) = match describe(engine, &this, env.clone()) {
+        let (description, primary) = match describe(engine, &this, env.clone()) {
             Ok(described) => described,
             Err(Refusal::Redirect) => {
                 Process.write(SECURITY_ALERT.as_bytes()).ok();
                 return 255;
             }
         };
-        if failed {
-            engine.serve(description, &mut Process);
+        if let Primary::Path(path) = &primary
+            && let Some(page) = refusal(path.as_deref())
+        {
+            engine.serve_started(description, &mut Process, || HostServes::Page(page));
             return 255;
         }
         let name = description.script_name.clone().unwrap_or_default();
