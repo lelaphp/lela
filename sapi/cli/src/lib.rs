@@ -133,12 +133,16 @@ pub fn main() -> ExitCode {
     let engine = |ini: &[(Vec<u8>, Vec<u8>)]| engine(ini, found(NAME), options.extended_info);
     let status = match &options.ask {
         Ask::Usage => print(&usage_text()),
-        Ask::Version => started(&options.ini, found(NAME), version),
+        Ask::Version => answered(
+            &engine(&options.ini),
+            |e| request::start_up(e, NAME),
+            version,
+        ),
         Ask::Info => request::info(&engine(&options.ini)),
-        Ask::Extensions => started(&options.ini, found(NAME), php_sapi::modules),
+        Ask::Extensions => answered(&engine(&options.ini), request::started, php_sapi::modules),
         Ask::Server(server) => {
             let engine = server_engine(&options.ini, found(server::NAME), options.extended_info);
-            match request::started(&engine, server::NAME) {
+            match request::start_up(&engine, server::NAME) {
                 0 => {
                     let color = php_sapi::ini::enabled(&engine, "cli_server.color");
                     server::run(engine, server, color)
@@ -207,15 +211,18 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 }
 
 /// `-v` and `-m` (`php_cli.c:638-655`), which print once
-/// `php_module_startup` has run: what the startup raised is displayed
-/// first ([`request::started`]), and where it failed nothing is printed
-/// and the status is 1.
+/// `php_module_startup` has run: `-v` with no request and `-m` in one of
+/// its own (`start`, [`request::start_up`] and [`request::started`]), what
+/// the startup raised displayed first either way, and where it failed
+/// nothing printed and its status the answer.
 ///
 /// ```php
-/// foreach ([['-d', 'magic_quotes_gpc=1'], ['-d', 'extension_dir=/nope', '-d', 'extension=x']] as $d) {
-///     $p = proc_open([PHP_BINARY, '-n', ...$d, '-m'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-///     $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
-///     echo preg_replace('/ \(tried: .*\)\)/', '', strstr($out, "\n[PHP Modules]\n", true) ?: $out), "\n";
+/// foreach (['-v', '-m'] as $ask) {
+///     foreach ([['-d', 'magic_quotes_gpc=1'], ['-d', 'extension_dir=/nope', '-d', 'extension=x']] as $d) {
+///         $p = proc_open([PHP_BINARY, '-n', ...$d, $ask], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///         $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
+///         echo preg_replace(['/ \(tried: .*\)\)/', '/(PHP \d|\[PHP Modules\]).*/s'], ['', '$1'], $out), "\n";
+///     }
 /// }
 /// ```
 /// ```expect process
@@ -228,11 +235,21 @@ fn once(engine: &Engine, ask: &Ask) -> i32 {
 /// 0
 ///
 /// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
+/// PHP 8
+/// 1
+///
+/// Fatal error: Directive 'magic_quotes_gpc' is no longer available in PHP in Unknown on line 0
+/// Stack trace:
+/// #0 {main}
+///
+/// 0
+///
+/// Warning: PHP Startup: Unable to load dynamic library 'x' in Unknown on line 0
+/// [PHP Modules]
 /// ```
-fn started(ini: &[(Vec<u8>, Vec<u8>)], files: IniFiles, text: fn(&Engine) -> String) -> i32 {
-    let engine = engine(ini, files, false);
-    match request::started(&engine, NAME) {
-        0 => print(&text(&engine)),
+fn answered(engine: &Engine, start: impl Fn(&Engine) -> i32, text: fn(&Engine) -> String) -> i32 {
+    match start(engine) {
+        0 => print(&text(engine)),
         failed => failed,
     }
 }

@@ -379,14 +379,14 @@ pub fn info(engine: &Engine) -> i32 {
     i32::from(in_request(engine, unnamed(), code).start_failed)
 }
 
-/// `php_module_startup` as `main` runs it before `-v`, `-m` and `-S`
-/// (`php_cli.c:1341`), which php serves with no request: what the
-/// startup raised is displayed at a request's first moment here, so an
-/// empty one under the host's `name` is served first, on `stdout`, and
-/// its status 1 where the startup failed is the answer. The built-in
-/// server's responses carry none of it, since php wrote it to the
-/// process's `stdout` before any client connected; a startup that failed
-/// leaves no server.
+/// `php_module_startup` as `main` runs it before `-v` and `-S`
+/// (`php_cli.c:1341`), which php answers with no request
+/// ([`Engine::start_up`]): what the startup raised displayed on `stdout`
+/// under the host's `name`, no extension's `rinit` run, and the status
+/// where the startup failed, 0 where it started. The built-in server's
+/// responses carry none of it, since php wrote it to the process's
+/// `stdout` before any client connected; a startup that failed leaves no
+/// server.
 ///
 /// ```php
 /// $dir = sys_get_temp_dir() . '/srv' . bin2hex(random_bytes(8));
@@ -411,14 +411,21 @@ pub fn info(engine: &Engine) -> i32 {
 /// #0 {main}
 /// 1
 /// ```
-pub(crate) fn started(engine: &Engine, name: &str) -> i32 {
-    let description = RequestDescription {
+pub(crate) fn start_up(engine: &Engine, name: &str) -> i32 {
+    let host = RequestDescription {
         sapi_name: String::from(name),
         ..unnamed()
     };
-    let served = in_request(engine, description, Vec::new());
-    // `-m`'s `php_request_startup` failing is `goto err`, 1 with
-    // nothing more written (`php_cli.c:643-646`).
+    engine.start_up(&host, &mut Process).unwrap_or(0)
+}
+
+/// `-m`'s `php_request_startup` (`php_cli.c:643-655`): an empty request,
+/// which displays what the startup raised at its first moment, every
+/// extension's `rinit` and `rshutdown` served as php serves them around
+/// the listing; 1 with nothing more written where its start failed
+/// (`goto err`), and otherwise the request's status.
+pub(crate) fn started(engine: &Engine) -> i32 {
+    let served = in_request(engine, unnamed(), Vec::new());
     if served.start_failed {
         1
     } else {
