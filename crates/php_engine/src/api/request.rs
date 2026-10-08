@@ -22,7 +22,7 @@ use php_heap::{
 };
 use php_link::LinkedClass;
 use php_unit::Unit;
-use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, PropertyDecl, Visibility};
+use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -593,10 +593,26 @@ pub(crate) struct Bound {
     placed: Placed,
 }
 
-/// A class's declared instance properties in slot order, each beside the
-/// class that declared it: `ce->properties_info_table` over
+/// A class's declared instance properties in slot order, each the row of
+/// the class that declared it: `ce->properties_info_table` over
 /// `ce->default_properties_table` ([`Request::placed_properties`]).
-pub(crate) type Placed = Box<[(ClassId, PropertyDecl)]>;
+pub(crate) type Placed = Box<[PropertyInfo]>;
+
+/// `zend_property_info *`: a declared property named by the class that
+/// declared it, its `ce`, and its place among that class's declared
+/// properties, where its declaration is read
+/// ([`Request::property_decl`]). Two words, so a class's slots hold
+/// what php's `properties_info_table` holds, pointers into the declaring
+/// class, and no copy of a declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PropertyInfo {
+    /// `prop_info->ce`: the class whose declaration it is, the scope its
+    /// visibility is measured against and, for a `static` one, the class
+    /// whose slot holds it.
+    pub(crate) declaring: ClassId,
+    /// Its index among `declaring`'s declared properties.
+    pub(crate) at: u32,
+}
 
 /// `zend_string_tolower` for a lookup: `find` over `name` lowered, on the
 /// stack where it fits, since the key is only read, and over `name`

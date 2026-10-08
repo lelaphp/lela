@@ -570,7 +570,7 @@ impl Request {
         parent: Option<ClassId>,
     ) -> super::Placed {
         let above = parent.map_or(&[][..], |parent| self.placed_properties(parent));
-        super::placed_of(class, decl, record, above)
+        super::placed_of(class, decl, record, above, |info| self.property_decl(info))
     }
 
     /// The members the class `row` declares binding settles under the

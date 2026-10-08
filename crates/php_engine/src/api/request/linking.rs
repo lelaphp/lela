@@ -43,9 +43,12 @@ pub(crate) struct Links {
 }
 
 /// What a link read of the table beside what it linked: each class a
-/// check looked up by name, lowered, with the class it found; whether a
-/// check read a class whose link is under way; and whether the traits'
-/// composition compared values the request evaluated.
+/// check looked up by name, under the name as the declaration wrote it,
+/// which is the key `track_class_dependency` files it under and the name
+/// an inheritance cache's autoload hands the autoloader, with the class
+/// it found; whether a check read a class whose link is under way; and
+/// whether the traits' composition compared values the request
+/// evaluated.
 #[derive(Default)]
 pub(super) struct Read {
     names: Vec<(Box<[u8]>, Option<ClassId>)>,
@@ -210,16 +213,16 @@ impl Request {
             let lookup = |name: &[u8]| {
                 let bare = name.strip_prefix(b"\\").unwrap_or(name);
                 let own = bare.eq_ignore_ascii_case(&decl.name.0);
-                let lowered = bare.to_ascii_lowercase().into_boxed_slice();
+                let written: Box<[u8]> = bare.into();
                 if let Some(held) = self.held_class(name) {
                     let found = held.record.as_ref().map(|(class, _)| *class);
                     if !own {
-                        names.borrow_mut().push((lowered, found));
+                        names.borrow_mut().push((written, found));
                     }
                     return Some(held);
                 }
                 if !own {
-                    names.borrow_mut().push((lowered, None));
+                    names.borrow_mut().push((written, None));
                 }
                 let at = self.unlinked_named(name)?;
                 let unlinked = self.links.unlinked.get(at)?;
@@ -656,6 +659,58 @@ impl Request {
     /// Stack trace:
     /// #0 %s(1): require()
     /// #1 {main}
+    /// ```
+    ///
+    /// The `needs_autoload` path: the first request publishes `B`'s link
+    /// with `D` loaded; a later one names `D` to nothing before `B`
+    /// links, so the entry's dependency is autoloaded, under the name
+    /// `f(): D` wrote, and the link served where the autoloader loads
+    /// the `D` it was linked against. An autoloader that loads another
+    /// `D` leaves the entry missed and the class linked afresh, refused;
+    /// one that declares nothing ends the cache's lookup, and the fresh
+    /// link asks the autoloader again and is refused for the class it
+    /// cannot find:
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/needs' . bin2hex(random_bytes(8));
+    /// mkdir($dir);
+    /// file_put_contents("$dir/base.php", '<?php class Base {} interface I {} class A { function f(): Base { return new Base; } }');
+    /// file_put_contents("$dir/d1.php", '<?php class D extends Base {}');
+    /// file_put_contents("$dir/d2.php", '<?php class D {}');
+    /// file_put_contents("$dir/b.php", '<?php class B extends A implements I { function f(): D { return new D; } }');
+    /// file_put_contents("$dir/index.php", '<?php $m = $_GET["m"]; require __DIR__ . "/base.php"; spl_autoload_register(function ($c) use ($m) { echo "autoload $c\n"; if ($m === "own") require __DIR__ . "/d1.php"; if ($m === "other") require __DIR__ . "/d2.php"; }); if ($m === "first") require __DIR__ . "/d1.php"; require __DIR__ . "/b.php"; echo get_class((new B)->f()), "\n";');
+    /// foreach (glob("$dir/*.php") as $file) { touch($file, time() - 10); }
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable=1', '-d', 'opcache.jit=off', '-d', 'html_errors=0', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['file', '/dev/null', 'w'], 2 => ['file', "$dir/log", 'w']], $pipes);
+    /// for ($i = 0, $line = ''; $i < 300 && !str_contains($line, 'started'); $i++) { usleep(100000); $line = (string) @file("$dir/log")[0]; }
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// foreach (['first', 'own', 'other', 'none', 'own'] as $m) { echo "-- $m\n", preg_replace('/ in \S+ on/', ' in %s on', file_get_contents("http://127.0.0.1:$port/?m=$m")); }
+    /// proc_terminate($p); proc_close($p);
+    /// array_map('unlink', glob("$dir/*")); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// -- first
+    /// D
+    /// -- own
+    /// autoload D
+    /// D
+    /// -- other
+    /// autoload D
+    ///
+    /// Fatal error: Declaration of B::f(): D must be compatible with A::f(): Base in %s on line 1
+    /// Stack trace:
+    /// #0 %s(1): require()
+    /// #1 {main}
+    /// -- none
+    /// autoload D
+    /// autoload D
+    ///
+    /// Fatal error: Could not check compatibility between B::f(): D and A::f(): Base, because class D is not available in %s on line 1
+    /// Stack trace:
+    /// #0 %s(1): require()
+    /// #1 {main}
+    /// -- own
+    /// autoload D
+    /// D
     /// ```
     pub(super) fn cached_link(
         &mut self,
