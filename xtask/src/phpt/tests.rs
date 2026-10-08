@@ -2283,7 +2283,7 @@ fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
     let full = crate::scratch::made(
         std::io::Error::from_raw_os_error(nix::errno::Errno::ENOSPC as i32),
         &tree.join("oracle.lock-taking"),
-        "opening the scratch lock".to_owned(),
+        "opening the scratch lock",
     )
     .context("running ext/ctype/tests/ctype_alnum_basic.phpt");
     let reading = super::refused(&snapshot, &manifest, "ext/ctype", &full).unwrap();

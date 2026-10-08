@@ -497,16 +497,16 @@ fn an_add_seeds_the_worktrees_target_from_the_clones_and_builds_the_workspace_al
 fn warm_clone(root: &Path) -> bool {
     let target = root.join("target");
     fs::create_dir_all(&target).unwrap();
-    let probe = target.join("clones");
+    let sample = target.join("clones");
     let clones = Command::new("cp")
         .arg("-c")
         .arg(root.join("Cargo.toml"))
-        .arg(&probe)
+        .arg(&sample)
         .output()
         .unwrap()
         .status
         .success();
-    fs::remove_file(&probe).ok();
+    fs::remove_file(&sample).ok();
     if !clones {
         return false;
     }

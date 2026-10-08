@@ -172,9 +172,7 @@ pub(crate) fn served_as_fpm(
 ) -> Result<Observation> {
     let recipe = &oracle.pin().recipe;
     let own = Tree::new("witness-fpm")?;
-    let program = own.join(&recipe.script_name);
-    fs::write(&program, format!("{}{snippet}", recipe.preamble))
-        .with_context(|| format!("writing {}", program.display()))?;
+    let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
     let path = own.join("witness.phpt");
     let phpt = Phpt::parse(&path, test.as_bytes())
@@ -209,16 +207,14 @@ pub(crate) fn served_as_fpm(
         )
     })?;
     let log = own.join("php-fpm.log");
-    let conf = own.join("php-fpm.conf");
-    fs::write(
-        &conf,
+    let conf = own.write(
+        "php-fpm.conf",
         format!(
             "[global]\nerror_log = {}\n[witness]\nlisten = {}\npm = static\npm.max_children = 1\nclear_env = no\nping.path = {PING}\n",
             log.display(),
             socket.display()
         ),
-    )
-    .context("writing the php-fpm configuration")?;
+    )?;
     // `-O` keeps the master's log on its stderr, so the stderr is the log.
     let logged = fs::File::options()
         .create(true)

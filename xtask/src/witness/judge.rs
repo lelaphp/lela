@@ -36,9 +36,8 @@ use super::{Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
-use anyhow::{Context, Result};
-
 use crate::scratch::Full;
+use anyhow::{Context, Result};
 
 /// A verdict on one witness, placed where it stands and at the item it
 /// documents, which is what the printed line says after the id.

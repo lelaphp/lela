@@ -1050,7 +1050,7 @@ fn a_witness_the_volume_had_no_room_for_is_no_bork() {
     let full = crate::scratch::made(
         std::io::Error::from_raw_os_error(nix::errno::Errno::ENOSPC as i32),
         &tree.join("oracle.lock-taking"),
-        "opening the scratch lock".to_owned(),
+        "opening the scratch lock",
     )
     .context("the oracle did not run it");
     let full = judge::borked(witness, full).expect_err("a full volume is not a verdict");

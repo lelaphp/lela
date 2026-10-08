@@ -1048,7 +1048,9 @@ pub fn run(
     // refused as any other subset the lane could not run, naming it.
     for (subset, side) in todo {
         let scope = subset.scope(side.as_ref().map_or(runner, |side| side.runner), ask.lane);
-        if let Err(full) = &copy {
+        if let (Err(full), Ok(side)) = (&copy, side)
+            && side.runs()
+        {
             readings.push(refused(
                 runs.snapshot(),
                 manifest,
@@ -1081,13 +1083,13 @@ pub fn run(
 /// One subset's census under `--census`: printed under `scope`, and the
 /// rows its compiler did not read grouped on `reading`.
 fn counted(tally: &Tally, scope: &str, reading: &mut Reading) -> Result<()> {
-    let mut counted = census::Census::default();
-    counted.add(census::misses(tally));
-    counted
+    let mut counts = census::Census::default();
+    counts.add(census::misses(tally));
+    counts
         .accounts_for(census::verdicts(tally))
         .map_err(|why| anyhow::anyhow!("{scope}: {why}"))?;
-    counted.print(scope);
-    for row in counted.unread_rows() {
+    counts.print(scope);
+    for row in counts.unread_rows() {
         reading.group(&row.signature.to_string(), row.tests.len() as u64)?;
     }
     Ok(())
@@ -1483,8 +1485,7 @@ fn copy_one(from: &Path, to: &Path) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", from.display())),
     };
     if let Some(dir) = to.parent() {
-        fs::create_dir_all(dir)
-            .map_err(|err| scratch::made(err, dir, format!("creating {}", dir.display())))?;
+        fs::create_dir_all(dir).map_err(|err| scratch::made(err, dir, "creating"))?;
     }
     let copied = if kind.is_symlink() {
         fs::read_link(from).and_then(|target| std::os::unix::fs::symlink(target, to))
@@ -1493,13 +1494,7 @@ fn copy_one(from: &Path, to: &Path) -> Result<()> {
     } else {
         fs::copy(from, to).map(drop)
     };
-    copied.map_err(|err| {
-        scratch::made(
-            err,
-            to,
-            format!("copying {} to {}", from.display(), to.display()),
-        )
-    })
+    copied.map_err(|err| scratch::made(err, to, &format!("copying {} to", from.display())))
 }
 
 /// Run one subset: every test through the runner, each verdict printed as

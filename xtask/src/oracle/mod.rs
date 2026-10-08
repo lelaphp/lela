@@ -46,7 +46,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::divergence::{Divergence, Registry};
-use crate::scratch::Tree;
+use crate::scratch::{self, Tree};
 
 /// The environment variable that names the pinned php-src tree on this
 /// machine, consulted ahead of the pin's `[source].path` (#36). The name
@@ -899,8 +899,10 @@ impl Taken {
         match how {
             Streams::Files => {
                 let (out, err) = (streams.join("stdout"), streams.join("stderr"));
-                cmd.stdout(File::create(&out).context("creating the stdout file")?)
-                    .stderr(File::create(&err).context("creating the stderr file")?);
+                let create = |path: &Path| {
+                    File::create(path).map_err(|e| scratch::made(e, path, "creating"))
+                };
+                cmd.stdout(create(&out)?).stderr(create(&err)?);
                 Ok(Taken::Files { out, err })
             }
             Streams::Pipes { merged } => {
@@ -1574,8 +1576,7 @@ fn stdin_of(streams: &Tree, stdin: Stdin<'_>) -> Result<Stdio> {
         Stdin::Null => Ok(Stdio::null()),
         Stdin::Pipe(_) => Ok(Stdio::piped()),
         Stdin::File(bytes) => {
-            let path = streams.join("stdin");
-            fs::write(&path, bytes).context("writing the program's stdin")?;
+            let path = streams.write("stdin", bytes)?;
             Ok(Stdio::from(
                 File::open(&path).context("opening the program's stdin")?,
             ))
@@ -1669,10 +1670,7 @@ impl Scratch {
             Program::Snippet(code) => {
                 let own = Tree::new("oracle")?;
                 let script = PathBuf::from(&recipe.script_name);
-                let path = own.join(&script);
-                fs::write(&path, format!("{}{code}", recipe.preamble)).map_err(|err| {
-                    crate::scratch::made(err, &path, format!("writing {}", recipe.script_name))
-                })?;
+                own.write(&script, format!("{}{code}", recipe.preamble))?;
                 Scratch {
                     dir: own.path().to_path_buf(),
                     script,

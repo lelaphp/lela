@@ -125,13 +125,8 @@ impl Tree {
         let held = if keep { None } else { Some(hold(&named)?) };
 
         std::fs::remove_dir_all(&named).ok();
-        std::fs::create_dir_all(&named).map_err(|err| {
-            made(
-                err,
-                &named,
-                format!("creating the scratch tree {}", named.display()),
-            )
-        })?;
+        std::fs::create_dir_all(&named)
+            .map_err(|err| made(err, &named, "creating the scratch tree"))?;
         let path = std::fs::canonicalize(&named)
             .with_context(|| format!("resolving the scratch tree {}", named.display()))?;
         if keep {
@@ -143,6 +138,18 @@ impl Tree {
     /// The directory itself, where a caller needs the `&Path` by name.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// `contents` written to `name` in this tree, and the path it stands
+    /// at: a [`Full`] where the volume had no room for it ([`made`]).
+    pub(crate) fn write(
+        &self,
+        name: impl AsRef<Path>,
+        contents: impl AsRef<[u8]>,
+    ) -> Result<PathBuf> {
+        let path = self.path.join(name);
+        std::fs::write(&path, contents).map_err(|err| made(err, &path, "writing"))?;
+        Ok(path)
     }
 }
 
@@ -163,8 +170,8 @@ pub(crate) struct Full {
 }
 
 impl Full {
-    /// The number a reading of a run this kept from being measured counts,
-    /// one, so the store is read for such a reading by it.
+    /// The number [`Full::skipped`] counts, one, on the reading of a run
+    /// this kept from being measured.
     pub(crate) const NUMBER: &str = "full";
 
     /// The `Full` somewhere in `err`, under whatever context was added.
@@ -200,17 +207,18 @@ impl std::fmt::Display for Full {
 
 impl std::error::Error for Full {}
 
-/// `err`, met making `path` in a scratch tree, with `doing` as its
-/// context: a [`Full`] where the volume had no room for it, so a lane can
+/// `err`, met making `path` in a scratch tree, under the context `<doing>
+/// <path>`: a [`Full`] where the volume had no room for it, so a lane can
 /// tell the disk from its own trouble, and the error as it came otherwise.
-pub(crate) fn made(err: std::io::Error, path: &Path, doing: String) -> anyhow::Error {
+pub(crate) fn made(err: std::io::Error, path: &Path, doing: &str) -> anyhow::Error {
     use std::io::ErrorKind::{QuotaExceeded, StorageFull};
+    let context = format!("{doing} {}", path.display());
     if matches!(err.kind(), StorageFull | QuotaExceeded) {
         let volume = volume(path);
         let path = path.to_path_buf();
-        anyhow::Error::new(Full { path, volume }).context(doing)
+        anyhow::Error::new(Full { path, volume }).context(context)
     } else {
-        anyhow::Error::new(err).context(doing)
+        anyhow::Error::new(err).context(context)
     }
 }
 
@@ -314,9 +322,11 @@ pub fn cargo(dir: &Path, xtask: &Path) -> Result<std::ffi::OsString> {
 /// alternate, so `git add` writes only the blobs of what the workspace has
 /// not committed, and the trees and the commit above them. Written out,
 /// they were a scratch's real cost on disk, 36 MB of loose objects each,
-/// and a suite lays a dozen at once (#644). A scratch lives for one test,
-/// well inside the two weeks git keeps an unreachable object, so nothing
-/// it borrows is pruned from under it.
+/// and a suite lays a dozen at once (#644). What it borrows is reachable
+/// in the workspace, or a loose object `git add` found there and freshened,
+/// which `gc` keeps for two weeks from then; a scratch lives for one test,
+/// so only a `git gc --prune=now` in the workspace during it can take a
+/// borrowed object away.
 pub fn repository(workspace: &Path, to: &Path) -> Result<()> {
     std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
     for file in crate::git::files(workspace, Path::new("."))? {
@@ -406,26 +416,14 @@ fn hold(tree: &Path) -> Result<(PathBuf, File)> {
         .create(true)
         .truncate(false)
         .open(&taking)
-        .map_err(|err| {
-            made(
-                err,
-                &taking,
-                format!("opening the scratch lock {}", taking.display()),
-            )
-        })?;
+        .map_err(|err| made(err, &taking, "opening the scratch lock"))?;
     if file.try_lock().is_err() {
         anyhow::bail!(
             "the scratch lock {} is held: another run is working there",
             taking.display()
         );
     }
-    std::fs::rename(&taking, &lock).map_err(|err| {
-        made(
-            err,
-            &lock,
-            format!("naming the scratch lock {}", lock.display()),
-        )
-    })?;
+    std::fs::rename(&taking, &lock).map_err(|err| made(err, &lock, "naming the scratch lock"))?;
     Ok((lock, file))
 }
 
@@ -524,6 +522,8 @@ impl Drop for Tree {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use std::os::unix::fs::MetadataExt;
+
     use super::{Full, Tree, hold, made, reap};
     use crate::reading::{Reading, Status};
 
@@ -569,21 +569,20 @@ mod tests {
         let tree = Tree::new("full").unwrap();
         let path = tree.join("lock-taking");
         let enospc = std::io::Error::from_raw_os_error(nix::errno::Errno::ENOSPC as i32);
-        let err = made(enospc, &path, "opening the scratch lock".to_owned())
+        let err = made(enospc, &path, "opening the scratch lock")
             .context("running ext/fixture/tests/one.phpt");
         let full = Full::of(&err).expect("ENOSPC is the volume's");
         assert_eq!(full.path, path);
-        let df = std::process::Command::new("df")
-            .arg("-P")
-            .arg(tree.path())
-            .output()
-            .unwrap();
-        let df = String::from_utf8(df.stdout).unwrap();
-        let mounted = df.lines().last().unwrap().split_whitespace().skip(5);
+        // The volume `df` names, not the directory the fallback would: the
+        // tree's own device, at a path that is not the tree's.
+        let dev = |path: &std::path::Path| std::fs::metadata(path).unwrap().dev();
         assert_eq!(
-            full.volume.to_str().unwrap(),
-            mounted.collect::<Vec<_>>().join(" ")
+            dev(&full.volume),
+            dev(tree.path()),
+            "{}",
+            full.volume.display()
         );
+        assert_ne!(full.volume, tree.path());
 
         let mut reading = Reading::new("phpt", "ext/fixture");
         reading.status = Status::Fail;
@@ -607,6 +606,6 @@ mod tests {
         );
 
         let denied = std::io::Error::from_raw_os_error(nix::errno::Errno::EACCES as i32);
-        assert!(Full::of(&made(denied, &path, "opening".to_owned())).is_none());
+        assert!(Full::of(&made(denied, &path, "opening")).is_none());
     }
 }

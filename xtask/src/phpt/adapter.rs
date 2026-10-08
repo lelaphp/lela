@@ -813,9 +813,7 @@ pub(super) struct Written {
 
 impl Written {
     pub(super) fn new(path: &Path, body: &[u8]) -> Result<Written> {
-        fs::write(path, body).map_err(|err| {
-            crate::scratch::made(err, path, format!("writing {}", path.display()))
-        })?;
+        fs::write(path, body).map_err(|err| crate::scratch::made(err, path, "writing"))?;
         Ok(Written {
             path: path.to_path_buf(),
         })
