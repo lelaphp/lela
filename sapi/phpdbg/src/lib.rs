@@ -36,6 +36,7 @@ use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::process::ExitCode;
 
+use php_ext::abi::Extension;
 use php_sapi::Engine;
 use php_sapi::getopt::{Getopt, Opt, Taken, opt};
 
@@ -162,8 +163,18 @@ pub fn main() -> ExitCode {
     let argv: Vec<Vec<u8>> = std::env::args_os()
         .map(|arg: OsString| arg.as_encoded_bytes().to_vec())
         .collect();
-    let line = read_line(&argv);
-    let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
+    main_with(&argv, &[])
+}
+
+/// The host's `main` over the line `argv`, with `beside` loaded after
+/// the bundle's extensions, as php's phpdbg loads one a build carries
+/// beside its own (`-z`, a Zend extension): what a test binary that
+/// declares an extension of its own, an observer, runs to be phpdbg
+/// with it.
+pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
+    let line = read_line(argv);
+    let mut extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
+    extensions.extend(beside.iter().cloned());
     let builder = Engine::builder()
         .ini_files(php_sapi::ini::search(NAME, &line.search, true))
         .sapi_name(NAME)
