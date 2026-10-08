@@ -953,8 +953,10 @@ impl HeapHooks for Hooks<'_> {
     /// resource with the type it had, as php hands it a copy of the
     /// struct; a type with no destructor closes silently.
     fn free_resource(&mut self, res: Res, kind: ResourceType) {
-        if let Some(dtor) = self.0.resources.dtor(kind) {
-            dtor(self.0, Resource::of(res));
+        if let Some(dtor) = self.0.resources.dtor(kind)
+            && let Err(thrown) = dtor(self.0, Resource::of(res))
+        {
+            self.0.leave_pending(&thrown);
         }
         // `zend_close_rsrc_list`'s `zend_catch`: what a destructor bailed
         // out of is caught behind it, and the walk goes on.

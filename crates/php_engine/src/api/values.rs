@@ -3255,10 +3255,15 @@ mod tests {
     /// release frees it.
     #[test]
     fn a_resource_is_a_list_entry_closed_once_and_freed_at_the_last_release() {
-        fn dtor(req: &mut Request, r: Resource) {
+        #[expect(
+            clippy::unnecessary_wraps,
+            reason = "the resource destructor's shape, which a destructor that throws needs"
+        )]
+        fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
             let seen = r.native::<u32>(req).copied().unwrap_or(0);
             let seen = Owner::take(req, Value::int(i64::from(seen)));
             req.define_constant(b"dtor", seen);
+            Ok(())
         }
         let mut req = crate::test::request();
         let start = req.memory_usage(false);

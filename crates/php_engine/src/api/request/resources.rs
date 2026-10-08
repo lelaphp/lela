@@ -12,8 +12,11 @@ use super::{Hooks, Phase, Request};
 
 /// A resource's per-type destructor, php's `list_dtor_ex`: served once,
 /// by [`Resource::close`] or by the release that reaches zero, with the
-/// resource already closed and its payload still readable.
-pub type ResourceDtor = fn(&mut Request, Resource);
+/// resource already closed and its payload still readable. What it
+/// throws is left pending where the release stood, as a destructor's
+/// `EG(exception)` is, which `zend_test`'s throwing resource is there
+/// to test.
+pub type ResourceDtor = fn(&mut Request, Resource) -> Result<(), Thrown>;
 
 /// The resource types this request knows, php's `list_destructors`
 /// (`zend_register_list_destructors_ex`): a name and a destructor per
