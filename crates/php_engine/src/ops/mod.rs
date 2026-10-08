@@ -5429,22 +5429,14 @@ pub(crate) fn double_to_long_strict(req: &mut Request, d: f64) -> i64 {
 /// for one past the range. What `(int)` reads a float as, and the first
 /// half of [`double_to_long`].
 fn dval_to_lval(req: &mut Request, d: f64) -> i64 {
-    let oob = |req: &mut Request| {
+    if !d.is_finite() || !fits_long(d) {
         let text = rendered(d);
         warning(
             req,
             &format!("The float {text} is not representable as an int, cast occurred"),
         );
-    };
-    if !d.is_finite() {
-        oob(req);
-        0
-    } else if !fits_long(d) {
-        oob(req);
-        modular(d)
-    } else {
-        truncated(d)
     }
+    dval_to_lval_silent(d)
 }
 
 /// `zend_dval_to_lval_silent` (`Z/Zend/zend_operators.h:138`):
