@@ -67,7 +67,11 @@
 //! quoting with a comment, the ticket or the commit message as its place,
 //! #1516's "the `.claude/settings.json` `PostToolUse` entry is drafted in a
 //! comment on the person's ticket", asks for a comment an agent posts. A
-//! verb of writing in the same clause still asks for the write.
+//! verb of writing in the same clause still asks for the write. Nor does
+//! a clause whose subject stays as it is (#2391): #630's
+//! "`.claude/harness.local.md` still renders this machine's live numbers"
+//! asks that nothing regress, where "`oracle.toml` carries" asks for new
+//! content.
 //!
 //! Ticked boxes are not enough (#29): work that found a thing it did not
 //! do has three homes, a ticket of its own, a divergence row, or a rule
@@ -177,8 +181,8 @@ use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status};
 use crate::steer::STEERABLE;
-use crate::track::{MAIN, Ticket, Track};
-use crate::track_next::{READY, TRACK_LABEL, tracks_of};
+use crate::track::{MAIN, Records, Ticket, Track};
+use crate::track_next::{READY, TRACK_LABEL, tracks_of, waits};
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -702,10 +706,11 @@ pub fn denied(manifest: &Manifest, labels: &[Label], criteria: &Criteria) -> Vec
         if !writing && elsewhere(clause) {
             continue;
         }
-        // The path is the thing asked for while the clause is about it.
-        let asked = paths(clause)
-            .into_iter()
-            .filter(|(at, _)| writing || subject(clause, *at));
+        // The path is the thing asked for while the clause is about it,
+        // and not where the clause says it stays as it is (#2391).
+        let asked = paths(clause).into_iter().filter(|(at, named)| {
+            writing || (subject(clause, *at) && !kept(&clause[at + named.len()..]))
+        });
         for (_, named) in asked {
             let path = Path::new(named);
             if let Some(rule) = rules
@@ -804,6 +809,31 @@ fn elsewhere(clause: &str) -> bool {
     landing && placed
 }
 
+/// The words that say a file stays as it is: a criterion asking that
+/// nothing regress, which asks for no write.
+const STAYING: [&str; 9] = [
+    "still",
+    "keeps",
+    "keep",
+    "stays",
+    "stay",
+    "remains",
+    "remain",
+    "unchanged",
+    "untouched",
+];
+
+/// Whether what follows a clause's subject says the subject stays as it
+/// is (#2391): one of [`STAYING`] among its first two words, as #630's
+/// "`.claude/harness.local.md` still renders this machine's live numbers"
+/// or "`seams.toml` is unchanged" says. A word of staying further on is
+/// about something else the clause names.
+fn kept(after: &str) -> bool {
+    words(after)
+        .take(2)
+        .any(|word| STAYING.contains(&word.as_str()))
+}
+
 /// Whether a path is a path character: what a token naming one is made of.
 fn of_a_path(c: char) -> bool {
     c.is_ascii_alphanumeric() || "._-/*".contains(c)
@@ -861,6 +891,10 @@ pub struct Issue {
     /// tracker has is not set again, since it refuses a second one.
     #[serde(default)]
     pub blocking: BlockedBy,
+    /// The tickets blocking this one, which a merge naming it with no
+    /// ready record reads as a partial landing while one is open (#2394).
+    #[serde(default, rename = "blockedBy")]
+    pub blocked_by: BlockedBy,
     /// How many sub-issues stand under it, which a chart sheet is held to
     /// [`CAP`] by (#448); zero for an issue the tracker answered before
     /// the field was asked for.
@@ -970,7 +1004,7 @@ impl Gh {
                 "view",
                 &number,
                 "--json",
-                "number,title,body,state,url,labels,blocking,subIssuesSummary",
+                "number,title,body,state,url,labels,blocking,blockedBy,subIssuesSummary",
             ],
         )
         .with_context(|| format!("{ticket} could not be read from the tracker"))?;
@@ -1366,48 +1400,93 @@ fn counted(
 /// lands (#2270, #2311): the hook on a merge commit, and on a fast-forward
 /// of `main`, calls this. An open ticket a subject names as `#n` is
 /// closed through [`run`] with the successors its ready record names,
-/// whichever branch wrote it (#2358); one with no ready record fails,
-/// named, and the merge stands, and `done` names it ([`stranded`]). A
-/// ticket closed already, and a number the tracker answers no issue for,
-/// is passed over. Off `main` nothing is closed: the fast-forward that
-/// brings the merge there calls this again.
+/// whichever branch wrote it (#2358). Those with no ready record are read
+/// after every close, so a blocker the same merge closes holds nothing,
+/// and each is left open as [`left_open`] says. A ticket closed already,
+/// and a number the tracker answers no issue for, is passed over. Off
+/// `main` nothing is closed: the fast-forward that brings the merge there
+/// calls this again.
 pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<Vec<Reading>> {
     if Reach::of(root)? != Reach::Landed {
         return Ok(Vec::new());
     }
+    let open = |ticket| {
+        gh.view(root, ticket)
+            .ok()
+            .filter(|issue| issue.state == State::Open)
+    };
     let mut readings = Vec::new();
+    let mut unready = Vec::new();
     for ticket in named_by_merges(root, &format!("{since}..HEAD"))? {
-        let Ok(issue) = gh.view(root, ticket) else {
-            continue;
-        };
-        if issue.state == State::Closed {
+        if open(ticket).is_none() {
             continue;
         }
-        let Some(successors) = record_of(root, ticket)? else {
-            let mut unready = Reading::stamped_over(
-                INSTRUMENT,
-                &scope(ticket),
-                &Snapshot::disk(root)?,
-                Path::new(STAMPED_OVER),
-            )?;
-            unready.status = Status::Fail;
-            unready.count(UNREADY, 1)?;
-            unready.message = format!(
-                "{ticket} is named by a merge into main and no branch has a ready record of it; not closed: close it with `xtask ticket close {}` naming what it opened",
-                ticket.number()
-            );
-            readings.push(unready);
-            continue;
-        };
-        let act = Act::Close(Verdict::Done, successors, Reach::Landed);
-        readings.push(run(root, manifest, gh, act, ticket, None)?);
+        match record_of(root, ticket)? {
+            Some(successors) => {
+                let act = Act::Close(Verdict::Done, successors, Reach::Landed);
+                readings.push(run(root, manifest, gh, act, ticket, None)?);
+            }
+            None => unready.push(ticket),
+        }
+    }
+    if unready.is_empty() {
+        return Ok(readings);
+    }
+    // The commit `since` names now, for a message read after `HEAD` moves.
+    let parent = crate::git::git(root, &["rev-parse", "--short", since], None)?;
+    let records = Records::read(root)?;
+    for issue in unready.into_iter().filter_map(open) {
+        readings.push(left_open(root, &issue, &records, parent.trim())?);
     }
     Ok(readings)
+}
+
+/// The reading of a ticket a merge names with no ready record, which it
+/// leaves open. It is a partial landing (#2394) while a box stands
+/// unticked and something still blocks it as the frontier reads a
+/// blocker ([`waits`]): the build skill leaves a ticket
+/// whose last box waits on another open and wires that one on, so the
+/// reading skips the close, saying so and what holds it. Otherwise it
+/// fails, named, the merge stands, and `done` names it ([`stranded`])
+/// until a close, or [`merged`] run again once the blocker is wired,
+/// replaces it.
+fn left_open(root: &Path, issue: &Issue, records: &Records, parent: &str) -> Result<Reading> {
+    let ticket = Ticket::new(issue.number);
+    let mut left = Reading::stamped_over(
+        INSTRUMENT,
+        &scope(ticket),
+        &Snapshot::disk(root)?,
+        Path::new(STAMPED_OVER),
+    )?;
+    let blockers: Vec<String> = waits(&issue.blocked_by, records)
+        .map(|wait| Ticket::new(wait.number()).to_string())
+        .collect();
+    if blockers.is_empty() || Criteria::parse(&issue.body).unticked.is_empty() {
+        left.status = Status::Fail;
+        left.count(UNREADY, 1)?;
+        left.message = format!(
+            "{ticket} is named by a merge into main and no branch has a ready record of it; not closed: close it with `xtask ticket close {n}` naming what it opened, or, where the merge lands part of it and a box waits on another ticket, wire that one on with `gh issue edit <blocker> --add-blocking {n}` and run `xtask ticket merged --since {parent}` on main again",
+            n = ticket.number()
+        );
+    } else {
+        left.status = Status::Skip;
+        left.count(PARTIAL, 1)?;
+        left.message = format!(
+            "{ticket} is named by a merge into main with no ready record, a box unticked, and waits on {}; the merge lands part of it, left open",
+            blockers.join(", ")
+        );
+    }
+    Ok(left)
 }
 
 /// The number a reading of [`merged`] counts for a ticket the merge named
 /// and left open for want of a ready record, which [`stranded`] reads.
 const UNREADY: &str = "unready";
+
+/// The number a reading of [`merged`] counts for a ticket the merge
+/// landed part of: named, with no ready record, and blocked by an open
+/// ticket (#2394).
+const PARTIAL: &str = "partial";
 
 /// The tickets the subjects of the merge commits of `range` name as `#n`,
 /// each once, in the order named.
@@ -1661,6 +1740,27 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    /// A subject said to stay as it is asks for no write (#2391), and a
+    /// word of staying past the two after the subject is about something
+    /// else the clause names, so the write stands.
+    #[test]
+    fn a_criterion_whose_denied_subject_stays_as_it_is_asks_for_no_write() {
+        for kept in [
+            "`.claude/harness.local.md` still renders this machine's live numbers",
+            "`seams.toml` keeps its ceilings",
+            "`oracle.toml` stays as it is",
+            "`seams.toml` is unchanged",
+        ] {
+            assert!(read("ready-for-agent", kept).is_empty(), "{kept}");
+        }
+        for written in [
+            "`oracle.toml` carries a `[regime.dump]` the lane still reads",
+            "`.claude/settings.json` still gains a hook",
+        ] {
+            assert_eq!(read("ready-for-agent", written).len(), 1, "{written}");
+        }
     }
 
     /// The label says whose the act is, and the rule's `exempt` says which
