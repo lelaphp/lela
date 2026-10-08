@@ -2270,3 +2270,34 @@ fn a_run_counts_the_targets_misses_the_engine_skipped() {
         "{reading:#?}"
     );
 }
+
+/// A subset the lane could not run is refused, a fail whose message is
+/// the cause; one a full volume kept from running is not refused but not
+/// measured, a skip naming the volume, so the session reads the disk and
+/// not a red subset (#644).
+#[test]
+fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
+    let snapshot = crate::key::Snapshot::disk(&workspace()).unwrap();
+    let manifest = manifest();
+    let tree = Tree::new("phpt-full").unwrap();
+    let full = crate::scratch::made(
+        std::io::Error::from_raw_os_error(nix::errno::Errno::ENOSPC as i32),
+        &tree.join("oracle.lock-taking"),
+        "opening the scratch lock",
+    )
+    .context("running ext/ctype/tests/ctype_alnum_basic.phpt");
+    let reading = super::refused(&snapshot, &manifest, "ext/ctype", &full).unwrap();
+    assert_eq!(reading.status, Status::Skip, "{}", reading.message);
+    let volume = crate::scratch::Full::of(&full)
+        .unwrap()
+        .volume
+        .display()
+        .to_string();
+    assert!(reading.message.contains(&volume), "{}", reading.message);
+    assert!(!reading.numbers.contains_key("refused"), "{reading:?}");
+
+    let other = anyhow::anyhow!("the server did not answer");
+    let reading = super::refused(&snapshot, &manifest, "ext/ctype", &other).unwrap();
+    assert_eq!(reading.status, Status::Fail);
+    assert_eq!(reading.message, "the server did not answer");
+}

@@ -77,9 +77,14 @@ impl Request {
     /// whether it has hooks or, as an internal class's property may,
     /// none, its class's handlers serving it (`DatePeriod`'s seven).
     pub(crate) fn property_virtual(&self, class: ClassId, name: &[u8]) -> bool {
-        let Some(decl) = self.class_decl(class) else {
-            return false;
-        };
+        self.resolved_property(class, name)
+            .is_some_and(|resolved| resolved.property.is_instance && resolved.is_virtual)
+    }
+
+    /// `name` as `class`'s chain declares it, read off the declarations
+    /// with every class taken as linked (`zend_get_property_info`'s
+    /// row before access is read).
+    fn resolved_property(&self, class: ClassId, name: &[u8]) -> Option<Resolved<'_>> {
         let lookup = |wanted: &[u8]| {
             self.class_named(wanted)
                 .and_then(|id| self.class_decl(id))
@@ -90,8 +95,7 @@ impl Request {
                     record: None,
                 })
         };
-        resolve_property(decl, name, &lookup)
-            .is_some_and(|resolved| resolved.property.is_instance && resolved.is_virtual)
+        resolve_property(self.class_decl(class)?, name, &lookup)
     }
 
     /// `zend_get_property_offset`'s `property_info->hooks` arm: the
@@ -109,17 +113,7 @@ impl Request {
     /// rows reads each row by, as php holds the row's `prop_info` in
     /// hand, and what `parent::$p::get()` names on the parent.
     pub(crate) fn row_hooked(&self, class: ClassId, name: &[u8]) -> Option<Hooked> {
-        let lookup = |wanted: &[u8]| {
-            self.class_named(wanted)
-                .and_then(|id| self.class_decl(id))
-                .map(|decl| Held {
-                    decl,
-                    bodies: None,
-                    linked: true,
-                    record: None,
-                })
-        };
-        let resolved = resolve_property(self.class_decl(class)?, name, &lookup)?;
+        let resolved = self.resolved_property(class, name)?;
         self.hooked_of(class, &resolved)
     }
 
@@ -150,21 +144,11 @@ impl Request {
     /// instance property. [`Request::declared_slot`] places a slot by
     /// the same rule.
     fn scoped_property(&self, class: ClassId, name: &[u8]) -> Option<(ClassId, Resolved<'_>)> {
-        let lookup = |wanted: &[u8]| {
-            self.class_named(wanted)
-                .and_then(|id| self.class_decl(id))
-                .map(|decl| Held {
-                    decl,
-                    bodies: None,
-                    linked: true,
-                    record: None,
-                })
-        };
-        let resolved = resolve_property(self.class_decl(class)?, name, &lookup)?;
+        let resolved = self.resolved_property(class, name)?;
         let declaring = self.class_of_decl(class, resolved.class)?;
         if self.property_scope() != Some(declaring) {
             if let Some(own) = self.parent_private(class, name) {
-                let resolved = resolve_property(self.class_decl(own)?, name, &lookup)?;
+                let resolved = self.resolved_property(own, name)?;
                 return resolved.property.is_instance.then_some((own, resolved));
             }
             if resolved.property.visibility == Visibility::Private && declaring != class {
@@ -1307,13 +1291,7 @@ impl Request {
                 out.push((key, value));
                 continue;
             };
-            let prefix = match declared {
-                Some((_, Visibility::Protected)) => Some(b"\0*\0".to_vec()),
-                Some((declaring, Visibility::Private)) => self
-                    .class_decl(declaring)
-                    .map(|decl| [&b"\0"[..], &decl.name.0, &b"\0"[..]].concat()),
-                Some((_, Visibility::Public)) | None => None,
-            };
+            let prefix = declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
             held.push(Value::string(name));
             let key = if let Some(prefix) = prefix {
                 self.interned(&[prefix.as_slice(), name.as_bytes()].concat())?
@@ -1345,18 +1323,7 @@ impl Request {
         name: &[u8],
         kind: HookKind,
     ) -> Option<(ClassId, MethodDecl)> {
-        let decl = self.class_decl(class)?;
-        let lookup = |wanted: &[u8]| {
-            self.class_named(wanted)
-                .and_then(|id| self.class_decl(id))
-                .map(|decl| Held {
-                    decl,
-                    bodies: None,
-                    linked: true,
-                    record: None,
-                })
-        };
-        let resolved = resolve_property(decl, name, &lookup)?;
+        let resolved = self.resolved_property(class, name)?;
         let hook = resolved.hook(kind)?;
         Some((self.class_of_decl(class, hook.class)?, hook.method.clone()))
     }

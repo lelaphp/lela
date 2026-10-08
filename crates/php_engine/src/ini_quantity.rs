@@ -5,8 +5,6 @@
 //! [`Request::ini_parse_quantity`](crate::api::request::Request::ini_parse_quantity)
 //! is its face, and the witnesses stand there.
 
-use std::fmt::Write;
-
 /// The value, and the sentence where php writes one.
 #[allow(clippy::too_many_lines)] // one C function, kept whole
 pub(crate) fn parse(value: &[u8]) -> (i64, Option<String>) {
@@ -154,30 +152,10 @@ fn is_ini_whitespace(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
-/// `smart_str_append_escaped`: a byte below 32, above 126 or a
-/// backslash written as its C escape, `\x` and two upper-case hex
-/// digits where it has no letter.
+/// `smart_str_append_escaped` over `bytes`, into a string of its own.
 fn escaped(bytes: &[u8]) -> String {
     let mut out = String::new();
-    for &c in bytes {
-        if c < 32 || c == b'\\' || c > 126 {
-            out.push('\\');
-            match c {
-                b'\n' => out.push('n'),
-                b'\r' => out.push('r'),
-                b'\t' => out.push('t'),
-                0x0c => out.push('f'),
-                0x0b => out.push('v'),
-                b'\\' => out.push('\\'),
-                0x1b => out.push('e'),
-                _ => {
-                    write!(out, "x{c:02X}").ok();
-                }
-            }
-        } else {
-            out.push(char::from(c));
-        }
-    }
+    crate::api::request::append_escaped(&mut out, bytes);
     out
 }
 

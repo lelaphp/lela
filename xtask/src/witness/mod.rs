@@ -126,6 +126,7 @@ use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
 use crate::oracle::{Linked, Oracle, Oracles, Pin, Regime, Runner};
 use crate::reading::{Reading, Status, Store, listed};
+use crate::scratch::Full;
 use crate::sources;
 use crate::tally::{self, Outcome};
 use anchor::Record;
@@ -572,10 +573,17 @@ fn run_in(
     // crate's, so no crate's last fences leave a thread idle while the
     // next crate's wait, and finished in the manifest's order again.
     let (slots, ready, served) = find(root, manifest, &crates, &oracles, ask, journal);
-    let mut finished: Vec<Option<Tally>> = serve_all(&ready, &binary, registry, ask)?
-        .into_iter()
-        .map(Some)
-        .collect();
+    // No room for a scratch tree (#644): the volume is full for every
+    // crate the pool serves, so none was measured, and each one's reading
+    // is a skip naming the volume rather than a bork or a refusal.
+    let (mut finished, full): (Vec<Option<Tally>>, Option<anyhow::Error>) =
+        match serve_all(&ready, &binary, registry, ask) {
+            Ok(tallies) => (tallies.into_iter().map(Some).collect(), None),
+            Err(why) if Full::of(&why).is_some() => {
+                (ready.iter().map(|_| None).collect(), Some(why))
+            }
+            Err(why) => return Err(why),
+        };
     // The tree before any witness runs, taken again after each `--accept`
     // that wrote a fence line: what each crate's reading is stamped with.
     let mut snapshot = Snapshot::disk(root)?;
@@ -594,6 +602,12 @@ fn run_in(
             }
             Slot::Ready(at) => (&ready[at], finished[at].take()),
         };
+        if let Some(why) = &full {
+            let unrun = under_rule(Reading::for_crate(INSTRUMENT, one.krate, &snapshot)?, rule)
+                .under(&manifest.pin);
+            readings.push(Full::skipped(unrun, &one.krate.name, why)?);
+            continue;
+        }
         let Some(tally) = tally else { continue };
         let reading = finished_reading(root, manifest, rule, one, &tally, &mut snapshot, ask)?;
         if let Some(journal) = journal {
@@ -968,7 +982,7 @@ fn serve(
         watch.serving(witness)?;
     }
     let mut kept = judge::Kept::default();
-    let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept);
+    let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept)?;
     gathered
         .captured
         .lock()
@@ -1005,7 +1019,7 @@ fn serve_absent(
         let record = match judge::serve(oracle, binary, witness, *regime) {
             Ok((_, natives)) => Record::Entered(natives),
             Err(trouble) => {
-                unserved.push(format!("{}: {trouble}", witness.at()));
+                unserved.push(format!("{}: {trouble:#}", witness.at()));
                 Record::Unserved
             }
         };

@@ -1120,16 +1120,7 @@ impl Request {
         } = self.diagnostics.last_error?;
         let message = String::from_utf8_lossy(message.as_bytes()).into_owned();
         let file = file.as_bytes().to_vec();
-        matches!(
-            level,
-            Level::Error
-                | Level::CoreError
-                | Level::CompileError
-                | Level::UserError
-                | Level::RecoverableError
-                | Level::Parse
-        )
-        .then_some((message, file, line))
+        fatal_errors(level).then_some((message, file, line))
     }
 
     /// `error_clear_last()`.
@@ -1519,15 +1510,7 @@ const E_ALL: i64 = 32767 & !Level::Strict.bit();
 /// `php_error_cb` bails out of, and the ones `zend_error_impl` fetches a
 /// trace for under `fatal_error_backtraces`.
 pub(super) fn fatal_errors(level: Level) -> bool {
-    matches!(
-        level,
-        Level::Error
-            | Level::CoreError
-            | Level::CompileError
-            | Level::UserError
-            | Level::RecoverableError
-            | Level::Parse
-    )
+    level.bit() & crate::exec::E_FATAL_ERRORS != 0
 }
 
 fn level_name(level: Level) -> &'static str {
