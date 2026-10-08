@@ -1,9 +1,9 @@
-# php_process: the process-wide mechanisms, `fork`, the signal pool and the
-# process's `LC_CTYPE`, an `unsafe` home of its own below `php_engine`
-# (design §4.1, #1779; seams.toml crate row, the `process` seam,
-# `unsafe.homes` and `fork.home`). Depends on nothing in the workspace;
-# `libc` is the platform's own headers, which `fork(2)` and `setlocale(3)`
-# are declared in.
+# php_process: the process-wide mechanisms, `fork`, the signal pool, the
+# process's `LC_CTYPE`, its identity and its file descriptors, an `unsafe`
+# home of its own below `php_engine` (design §4.1, #1779, #1935; seams.toml
+# crate row, the `process` seam, `unsafe.homes` and `fork.home`). Depends
+# on nothing in the workspace; `libc` is the platform's own headers, which
+# `fork(2)`, `setlocale(3)`, `getuid(2)` and the fd calls are declared in.
 [package]
 name = "php_process"
 version = "0.0.0"
@@ -11,7 +11,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
-description = "The process-wide mechanisms: fork, the signal pool and LC_CTYPE"
+description = "The process-wide mechanisms: fork, the signal pool, LC_CTYPE, the process identity and its file descriptors"
 
 [lints]
 workspace = true
