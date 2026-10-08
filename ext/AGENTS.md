@@ -3,7 +3,7 @@
 One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <name>`. The template's rules:
 
 - One dependency, `php_ext`; the engine is out of reach (`[[edge]]` `ext/* → php_ext only`).
-- One entry, `extension()`; anything `pub` beyond it is printed by `api-check` and is a row of the design's list of surfaces (§4.10): what the php header a dependent extension includes declares `PHPAPI`, item by item, and nothing more.
+- One entry, `extension()`; anything `pub` beyond it is what the php header a dependent extension includes declares `PHPAPI`, and nothing more. The edge to that dependent is a row of the design's list of surfaces (§4.10), a person's; the items are `ext/<name>/surface.lock`, which `api-check --write` rewrites and you land in the same diff as the code.
 - State is on the value: request-scoped or immutable; no lock or cell (ADR-0005, `ext.no-locks`). Cross-request caching is `api::Cache`.
 - Tests go through `Capture`; every native carries its witness in rustdoc, with `exit=` written by `xtask witness --accept` only.
 - The phpt subset is every `.phpt` under `php-src/ext/<name>`, as run-tests.php walks the directory (`ext/intl/uchar/tests` is `ext/intl`'s), run with `xtask phpt --subset`.

@@ -1,0 +1,4 @@
+# The fixture's surface of ext/pcre: two items, and a line naming none.
+Regex
+Regex::compile
+gone

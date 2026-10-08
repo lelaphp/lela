@@ -1,4 +1,4 @@
-# The design of the `surfaces` fixture
+# The design of the `surface-lock` fixture
 
 ### 4.10 Extension crates
 

@@ -1,0 +1,7 @@
+# The pub items of ext/uri beyond extension(), its surface: design §4.10's rows hold its edges, this file its items, and `xtask api-check --write` rewrites it.
+Parser
+Parser::name
+Parser::named
+Parser::parse_to_struct
+ReadAs
+UriStruct

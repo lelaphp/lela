@@ -1,0 +1,12 @@
+# The pub items of ext/date beyond extension(), its surface: design §4.10's rows hold its edges, this file its items, and `xtask api-check --write` rewrites it.
+DateParts
+Offset
+TzKind
+Zone
+Zone::name
+Zone::offset_at
+date_obj
+get_timezone_info
+new_timezone
+php_format_date_obj
+timezone_obj

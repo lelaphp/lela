@@ -22,4 +22,5 @@ built; the instrument reads manifests and sources.
 | `ops-lock`  | a hand-edited line of `ops.lock`, the lock rendered from `ops.toml` | fail |
 | `tier-face` | a sectioned lock (#1369): php_sapi importing a `tier::*` item `tier.lock`'s `[face]` does not list, which `sapi.lock` does not hold either | fail |
 | `same-name` | two `pub` types of one name in two modules, each listing its own methods alone (#79); read by the unit test beside `Inventory::assoc`, not by `hold` | pass |
-| `surfaces` | an `ext/*` export on no row of the fixture's own design §4.10 list of surfaces (#1781, #1826): a member a `` `Regex`, with `compile` `` row does not write, and a function no row writes; `clean` carries a design listing its one export | fail |
+| `surface-edge` | an `ext/*` crate's library dependency on another that no row of the fixture's design §4.10 names with both crates (#2020, #2251): ext/zip linking ext/pcre beside ext/spl's link on the `pcre` → `spl` row, and a dev-dependency on no row, which links nothing and is not held | fail |
+| `surface-lock` | an extension's `pub` item beyond `extension()` with no line in its `surface.lock`, and a line naming no item (#2251); `clean` carries the lock of its one export | fail |

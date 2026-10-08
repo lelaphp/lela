@@ -66,8 +66,14 @@ fn the_clean_fixture_passes_every_rule() {
     assert!(
         of(&readings, "ext/random")
             .message
-            .contains("Handle, each on design §4.10's list of surfaces"),
-        "the pub surface beyond extension() is printed, held to the fixture's design"
+            .contains("1 pub items of ext/random beyond extension() match ext/random/surface.lock"),
+        "the pub surface beyond extension() is held to its surface.lock"
+    );
+    assert!(
+        of(&readings, "ext/standard")
+            .message
+            .contains("1 link to an extension stands on a row of design §4.10's list of surfaces"),
+        "ext/standard's link to ext/random is on the fixture's row"
     );
     assert_eq!(of(&readings, "sapi").status, Status::Pass);
     assert_eq!(
@@ -83,31 +89,74 @@ fn the_clean_fixture_passes_every_rule() {
     }
 }
 
-/// An `ext/*` export on no row of design §4.10's list of surfaces fails
-/// its crate's reading, which names every one (#1826): the `surfaces`
-/// fixture's `Regex::study`, a member the row's `with` list does not
-/// write, and `unlisted`, which no row writes, beside `Regex` and
-/// `Regex::compile`, which the row lists. The `clean` fixture's design
-/// lists its one export, and passes.
+/// An `ext/*` crate's library dependency on another that no row of
+/// design §4.10's list of surfaces names with both crates fails the
+/// consumer's reading (#2251): the `surface-edge` fixture's ext/zip links
+/// ext/pcre, which the one row, `pcre` → `spl`, does not name, while
+/// ext/spl's link stands on it and ext/zip's dev-dependency on ext/spl
+/// links nothing and is not held.
 #[test]
-fn an_export_on_no_row_of_the_list_of_surfaces_fails() {
-    let readings = readings("surfaces");
+fn an_extension_link_on_no_row_of_the_list_of_surfaces_fails() {
+    let readings = readings("surface-edge");
+    let zip = of(&readings, "ext/zip");
+    assert_eq!(zip.status, Status::Fail, "{}", zip.message);
+    assert_eq!(zip.rule, "ext.pub-beyond-extension");
+    assert!(
+        zip.message.starts_with(
+            "ext/zip links ext/pcre, and no row of design §4.10's list of surfaces names `pcre` → `zip`"
+        ),
+        "{}",
+        zip.message
+    );
+    assert!(!zip.message.contains("ext/spl"), "{}", zip.message);
+    let spl = of(&readings, "ext/spl");
+    assert_eq!(spl.status, Status::Pass, "{}", spl.message);
+    assert_eq!(of(&readings, "ext/pcre").status, Status::Pass);
+}
+
+/// An extension's `pub` items beyond `extension()` are its
+/// `surface.lock`, diffed as an item lock is (#2251): the `surface-lock`
+/// fixture's lock lists `Regex` and `Regex::compile` and a line naming
+/// nothing, and not `Regex::study` or `unlisted`.
+#[test]
+fn a_surface_item_without_its_surface_lock_line_fails() {
+    let readings = readings("surface-lock");
     let pcre = of(&readings, "ext/pcre");
     assert_eq!(pcre.status, Status::Fail, "{}", pcre.message);
     assert_eq!(pcre.rule, "ext.pub-beyond-extension");
+    assert_eq!(
+        pcre.message,
+        "2 pub items of ext/pcre beyond extension() have no line in ext/pcre/surface.lock: \
+         Regex::study, unlisted; 1 lines of ext/pcre/surface.lock name no public item: gone"
+    );
+}
+
+/// `--write` writes an extension's `surface.lock` with a header before the
+/// run's snapshot, so the reading taken after it passes over what it wrote
+/// and is stamped over it.
+#[test]
+fn write_lays_down_a_surface_lock_the_reading_then_holds() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let root = Tree::new("api-check-surface-write").unwrap();
+    xtask::scratch::repository(&fixture("surface-lock"), &root).unwrap();
+    let lock = root.join("ext/pcre/surface.lock");
+    fs::remove_file(&lock).unwrap();
+    let readings = api_check::hold(&manifest, &root, true).unwrap();
+    let pcre = of(&readings, "ext/pcre");
+    assert_eq!(pcre.status, Status::Pass, "{}", pcre.message);
+    let home = manifest.scope_path("ext/pcre").unwrap();
+    assert_eq!(
+        pcre.key(),
+        Snapshot::disk(&root).unwrap().key(&home).unwrap()
+    );
+    let written = fs::read_to_string(&lock).unwrap();
     assert!(
-        pcre.message.starts_with(
-            "pub beyond extension() and on no row of design §4.10's list of surfaces, \
-             2 of 4: Regex::study, unlisted"
-        ),
-        "{}",
-        pcre.message
+        written.starts_with("# The pub items of ext/pcre beyond extension()"),
+        "{written}"
     );
     assert!(
-        pcre.message
-            .contains("pub beyond extension(): Regex, Regex::compile, each on design §4.10's list"),
-        "{}",
-        pcre.message
+        written.ends_with("\nRegex\nRegex::compile\nRegex::study\nunlisted\n"),
+        "{written}"
     );
 }
 

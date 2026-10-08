@@ -1,0 +1,12 @@
+# The pub items of ext/dom beyond extension(), its surface: design §4.10's rows hold its edges, this file its items, and `xtask api-check --write` rewrites it.
+Proxy
+XPathCallbacks
+XPathCallbacks::call
+XPathCallbacks::clean_node_list
+XPathCallbacks::register_ns
+XPathCallbacks::register_php
+XPathCallbacks::registered
+XPathCallbacks::release
+XPathCallbacks::visit
+create_object
+create_object_in
