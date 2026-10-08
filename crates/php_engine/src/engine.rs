@@ -707,10 +707,14 @@ pub(crate) struct Shared {
     startup_raised: Vec<(Level, Vec<u8>)>,
     /// Whether a request has raised [`Shared::startup_raised`].
     startup_shown: AtomicBool,
-    /// Where an extension's engine start refused: the host's name and
-    /// the [`Refusal`] with `Unable to start %s module` raised after what
-    /// the extension raised ([`Engine::refused`]).
-    refused: Option<(&'static str, Refusal)>,
+    /// Where an extension's engine start refused: the [`Refusal`] with
+    /// `Unable to start %s module` raised after what the extension
+    /// raised ([`Engine::refused`]).
+    refused: Option<Refusal>,
+    /// `sapi_module.name`, the host's name the engine was built under
+    /// ([`EngineBuilder::sapi_name`]): what the requests the engine makes
+    /// for itself, its startup, its refusal and its end, are made under.
+    pub(crate) host: &'static str,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
@@ -3076,6 +3080,7 @@ impl EngineBuilder {
                 startup_raised: Vec::new(),
                 startup_shown: AtomicBool::new(false),
                 refused: None,
+                host: self.sapi_name,
                 configuration: configuration.table,
                 sections: configuration.sections,
                 ini_files,
@@ -3106,10 +3111,9 @@ impl EngineBuilder {
                 unloaded,
                 suppliers,
             },
-            self.sapi_name,
             self.bind_loops,
         );
-        engine.end.arm(&engine.shared, self.sapi_name);
+        engine.end.arm(&engine.shared);
         engine
     }
 }
@@ -3559,13 +3563,12 @@ pub struct Engine {
 /// master's to end. Armed once the engine has started; an engine whose
 /// start was refused is not ended.
 #[derive(Default)]
-struct EngineEnd(OnceLock<(Arc<Shared>, &'static str)>);
+struct EngineEnd(OnceLock<Arc<Shared>>);
 
 impl EngineEnd {
-    /// From here the drop of the engine's last clone ends `shared`, on a
-    /// request under the host's name `sapi_name`.
-    fn arm(&self, shared: &Arc<Shared>, sapi_name: &'static str) {
-        self.0.set((Arc::clone(shared), sapi_name)).ok();
+    /// From here the drop of the engine's last clone ends `shared`.
+    fn arm(&self, shared: &Arc<Shared>) {
+        self.0.set(Arc::clone(shared)).ok();
     }
 }
 
@@ -3584,7 +3587,7 @@ impl Drop for EngineEnd {
     /// host of php's calls `php_module_shutdown` once
     /// `php_module_startup` failed.
     fn drop(&mut self) {
-        let Some((shared, sapi_name)) = self.0.take() else {
+        let Some(shared) = self.0.take() else {
             return;
         };
         if shared.refused.is_some()
@@ -3597,7 +3600,7 @@ impl Drop for EngineEnd {
         }
         drop(shared.persistent.drain());
         let description = RequestDescription {
-            sapi_name: sapi_name.to_owned(),
+            sapi_name: shared.host.to_owned(),
             ..RequestDescription::default()
         };
         let mut req = Request::new(Arc::clone(&shared), description);
@@ -3697,7 +3700,6 @@ impl Engine {
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
         mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
         registry: Registry<'_>,
-        sapi_name: &'static str,
         bind_loops: BindLoops,
     ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
@@ -3719,6 +3721,7 @@ impl Engine {
         // A host's own entries after, at `ZEND_INI_STAGE_ACTIVATE`, as
         // php-fpm's child applies its pool's once php has started.
         held.sort_by_key(|(name, _, activate)| (*activate, declared_at(name)));
+        let sapi_name = self.shared.host;
         let description = RequestDescription {
             sapi_name: sapi_name.to_owned(),
             ..RequestDescription::default()
@@ -3804,7 +3807,7 @@ impl Engine {
             shown.raised = before.chain(encoding).cloned().collect();
             shown.raised.extend(refusal.raised);
             let failed = format!("Unable to start {} module", extension.name);
-            shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
+            shared.refused = Some(shown.raise(Level::CoreError, failed));
             if let Ok(at) = u32::try_from(at) {
                 shared.supplied = suppliers.refused_at(ExtensionId(at));
             }
@@ -3828,9 +3831,9 @@ impl Engine {
     /// `None` for an engine that started. Every request a refused engine
     /// is asked for is refused so.
     pub fn refused(&self, sink: &mut dyn OutputSink) -> Option<i32> {
-        let (host, refused) = self.shared.refused.as_ref()?;
+        let refused = self.shared.refused.as_ref()?;
         let description = RequestDescription {
-            sapi_name: (*host).to_owned(),
+            sapi_name: self.shared.host.to_owned(),
             ..RequestDescription::default()
         };
         let mut req = Request::new(Arc::clone(&self.shared), description);
