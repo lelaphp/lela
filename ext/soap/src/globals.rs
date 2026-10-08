@@ -98,7 +98,7 @@ pub(crate) enum Error {
     Thrown(Thrown),
     /// The message, `SOAP-ERROR: ` and what php formats after it, and
     /// the throwable php had pending when it raised it, which a stream
-    /// wrapper threw while a WSDL or a schema was read.
+    /// wrapper threw while a WSDL or a schema was read ([`Error::after`]).
     Fatal {
         message: String,
         pending: Option<Thrown>,
@@ -111,6 +111,14 @@ impl Error {
         Error::Fatal {
             message,
             pending: None,
+        }
+    }
+
+    /// The fatal as raised while `pending` stood in `EG(exception)`.
+    pub(crate) fn after(self, pending: Option<Thrown>) -> Error {
+        match self {
+            Error::Fatal { message, .. } => Error::Fatal { message, pending },
+            thrown @ Error::Thrown(_) => thrown,
         }
     }
 

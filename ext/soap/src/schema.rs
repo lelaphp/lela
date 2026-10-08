@@ -249,8 +249,9 @@ fn schema_load_file(
     let parsed = parse_file_before_fatal(req, &location);
     sdl_restore_uri_credentials(req, ctx)?;
     let loc = lossy(&location).into_owned();
-    let Some(doc) = parsed? else {
-        return Err(schema_error(&format!("can't import schema from '{loc}'")));
+    let (doc, pending) = parsed?;
+    let Some(doc) = doc else {
+        return Err(schema_error(&format!("can't import schema from '{loc}'")).after(pending));
     };
     let Some(schema) = get_node(doc.children(), b"schema", None) else {
         doc.free_document();

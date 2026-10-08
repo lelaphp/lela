@@ -265,15 +265,17 @@ fn load_wsdl_ex(req: &mut Request, struri: &[u8], ctx: &mut Ctx, include: bool) 
     sdl_set_uri_credentials(req, ctx, struri)?;
     let parsed = parse_file_before_fatal(req, struri);
     sdl_restore_uri_credentials(req, ctx)?;
-    let Some(wsdl) = parsed? else {
-        return Err(match Raised::last() {
+    let (doc, pending) = parsed?;
+    let Some(wsdl) = doc else {
+        let error = match Raised::last() {
             Some(e) => wsdl_error(&format!(
                 "Couldn't load from '{}' : {}",
                 lossy(struri),
                 lossy(&e.message)
             )),
             None => wsdl_error(&format!("Couldn't load from '{}'", lossy(struri))),
-        });
+        };
+        return Err(error.after(pending));
     };
     ctx.docs.add(Key::Str(struri.to_vec()), wsdl);
 
