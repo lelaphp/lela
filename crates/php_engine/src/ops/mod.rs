@@ -1820,7 +1820,7 @@ pub(crate) fn debug_rows(
         let uninitialized = o
             .slot(at)
             .is_undef()
-            .then(|| p.ty.as_ref().map(crate::natives::type_text))
+            .then(|| p.ty.as_ref().map(crate::api::coerce::declared_type_name))
             .flatten();
         let key = req.interned(&bytes)?;
         if !o.slot(at).is_undef() {
