@@ -1,0 +1,8 @@
+# The pub items of ext/pcre beyond extension(), its surface: design §4.10's rows hold its edges, this file its items, and `xtask api-check --write` rewrites it.
+Regex
+Regex::capture_count
+Regex::compile
+Regex::is_match
+Regex::match_impl
+Regex::replace_impl
+Regex::split_impl
