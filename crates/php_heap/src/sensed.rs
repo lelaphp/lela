@@ -49,6 +49,9 @@ pub(crate) enum Sensed {
     /// (`crate::mm`), found as the slot left: the block and its bin's
     /// size. Nothing names the line that wrote.
     FreedWrite { at: usize, size: usize },
+    /// A free of a bin slot its bin's quarantine held already (`crate::mm`),
+    /// refused: the block and its bin's size.
+    FreedTwice { at: usize, size: usize },
     /// An owner dropped without being handed to a sink or given up
     /// (design §5.1): the line that made it.
     Unconsumed {
@@ -123,6 +126,9 @@ impl Sensed {
             }
             Sensed::FreedWrite { at, size } => Fatal::Error(format!(
                 "InternalError: a write into the {size}-byte block at {at:#x} after the heap freed it, found as it left the quarantine"
+            )),
+            Sensed::FreedTwice { at, size } => Fatal::Error(format!(
+                "InternalError: a free of the {size}-byte block at {at:#x}, which the heap has freed"
             )),
             Sensed::Unconsumed { site } => Fatal::Error(format!(
                 "InternalError: the owner made at {site} was dropped without being handed to a sink or given up"

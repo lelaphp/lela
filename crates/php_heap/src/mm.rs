@@ -471,6 +471,16 @@ impl Mm {
         if self.is_retired(at) {
             return;
         }
+        // A block freed already is no block to retire: a debug build
+        // names it as it names a second free ([`Mm::free_small`]).
+        #[cfg(debug_assertions)]
+        if freed::is_freed(at) {
+            self.sensed.record(crate::sensed::Sensed::FreedTwice {
+                at: at.as_ptr().addr(),
+                size: self.accounted(at),
+            });
+            return;
+        }
         self.size = self.size.saturating_sub(self.accounted(at));
         self.retired.push(at);
         if !self.observers.is_empty() {
@@ -893,12 +903,22 @@ impl Mm {
 
     /// `zend_mm_free_small` (`Z/Zend/zend_alloc.c:1417`): the slot goes
     /// back on the head of its bin's free list; in a debug build, into its
-    /// bin's [`Quarantine`] first.
+    /// bin's [`Quarantine`] first, and a slot the quarantine holds already
+    /// is a free of a freed block, recorded as the `InternalError` naming
+    /// it and not freed again.
     ///
     /// # Safety
     ///
     /// `at` is a live slot of bin `bin_num` in this heap.
     unsafe fn free_small(&mut self, at: NonNull<u8>, bin_num: usize) {
+        #[cfg(debug_assertions)]
+        if self.quarantine[bin_num].holds(at.cast()) {
+            self.sensed.record(crate::sensed::Sensed::FreedTwice {
+                at: at.as_ptr().addr(),
+                size: BIN_DATA_SIZE[bin_num],
+            });
+            return;
+        }
         self.size = self.size.saturating_sub(BIN_DATA_SIZE[bin_num]);
         #[cfg(debug_assertions)]
         {
@@ -1735,6 +1755,11 @@ impl Quarantine {
         oldest: 0,
         len: 0,
     };
+
+    /// Whether the ring holds `slot`.
+    fn holds(&self, slot: NonNull<FreeSlot>) -> bool {
+        (0..self.len).any(|i| self.slots[(self.oldest + i) % QUARANTINE_SLOTS] == Some(slot))
+    }
 
     /// `slot` held as the newest, and the oldest given up where the ring
     /// was full.

@@ -1389,6 +1389,33 @@ mod tests {
         assert_eq!(hooks.heap.take_sensed(), None);
     }
 
+    /// A block freed a second time while its bin's quarantine holds it
+    /// is not freed again, and the free is recorded as the
+    /// `InternalError` naming the block: the bin hands the block out once.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_free_of_a_quarantined_slot_is_refused_and_named() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let Ok(at) = heap.mm.alloc(32) else {
+            return;
+        };
+        let held = heap.memory_usage(false);
+        // SAFETY: the block was allocated just above and nothing names it.
+        unsafe { heap.mm.free(at) };
+        // SAFETY: the defect planted: the block is freed and its bin's
+        // quarantine holds it, which is what the sensor reads first.
+        unsafe { heap.mm.free(at) };
+        assert_eq!(held - heap.memory_usage(false), 32, "counted off once");
+        assert_eq!(
+            heap.take_sensed(),
+            Some(Fatal::Error(format!(
+                "InternalError: a free of the 32-byte block at {:#x}, which the heap has freed",
+                at.as_ptr().addr()
+            )))
+        );
+    }
+
     /// A write into a block its bin's quarantine holds is found as the
     /// block leaves, recorded as the `InternalError` naming the block:
     /// over the poison in its first word or over the mark after it, and
