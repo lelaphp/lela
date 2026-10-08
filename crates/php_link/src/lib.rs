@@ -1628,6 +1628,30 @@ fn link_composed<'b, H: Copy>(
     (settled, linker.raised, linker.deferred.into_inner())
 }
 
+/// Whether an internal class names `Stringable` first among its
+/// interfaces: one that declares `__toString`, which
+/// `zend_register_functions` makes implement it before
+/// `zend_class_implements` runs. A user class's compiler appends it to
+/// the names the declaration holds instead.
+fn names_stringable(class: &ClassDecl) -> bool {
+    class.file.0.is_empty()
+        && class.kind != ClassKind::Trait
+        && !class.name.0.eq_ignore_ascii_case(b"Stringable")
+        && class
+            .methods
+            .iter()
+            .any(|m| m.function.name.0.eq_ignore_ascii_case(b"__toString"))
+}
+
+/// A class the linker holds with its record: the declaration, the key
+/// the record's rows name it by, and the record.
+#[derive(Clone, Copy)]
+struct Recorded<'a, H> {
+    decl: &'a ClassDecl,
+    handle: H,
+    record: &'a LinkedClass<H>,
+}
+
 /// A method of a parent's or an interface's function table, as the
 /// prototype rules read it.
 #[derive(Clone, Copy)]
@@ -1942,29 +1966,30 @@ impl<'a, H: Copy> Linker<'a, H> {
         // A class held with a record, none where no class has the name.
         let held = |name: &[u8]| match (self.lookup)(name) {
             None => Some(None),
-            Some(held) => held
-                .record
-                .map(|(handle, record)| Some((held.decl, handle, record))),
+            Some(held) => held.record.map(|(handle, record)| {
+                Some(Recorded {
+                    decl: held.decl,
+                    handle,
+                    record,
+                })
+            }),
         };
         let parent = match &child.parent {
             Some(name) => held(&name.0)?,
             None => None,
         };
-        let inherited = parent.map_or(&[][..], |(_, _, record)| &*record.interfaces);
-        let to_string = |m: &MethodDecl| m.function.name.0.eq_ignore_ascii_case(b"__toString");
-        let stringable = child.file.0.is_empty()
-            && child.kind != ClassKind::Trait
-            && !child.name.0.eq_ignore_ascii_case(b"Stringable")
-            && child.methods.iter().any(to_string);
-        let mut implemented: Vec<(&'a ClassDecl, H, &'a LinkedClass<H>)> = Vec::new();
-        let names = stringable
+        let inherited = parent.map_or(&[][..], |parent| &*parent.record.interfaces);
+        let mut implemented: Vec<Recorded<'a, H>> = Vec::new();
+        let names = names_stringable(child)
             .then(|| &b"Stringable"[..])
             .into_iter()
             .chain(child.interfaces.iter().map(|name| &*name.0));
         for name in names {
             if let Some(interface) = held(name)?
-                && !inherited.contains(&interface.1)
-                && !implemented.iter().any(|seen| seen.1 == interface.1)
+                && !inherited.contains(&interface.handle)
+                && !implemented
+                    .iter()
+                    .any(|seen| seen.handle == interface.handle)
             {
                 implemented.push(interface);
             }
@@ -2006,19 +2031,15 @@ impl<'a, H: Copy> Linker<'a, H> {
 
     /// The row of `class`'s function table under `name`, with its
     /// declaration, its scope and the prototype the record holds for it.
-    fn method_above(
-        &self,
-        (decl, handle, record): (&'a ClassDecl, H, &'a LinkedClass<H>),
-        name: &[u8],
-    ) -> Option<Above<'a, H>> {
-        let (at, row) = record
-            .methods
-            .find_at(name, |row| self.row_member_name::<MethodDecl>(decl, row))?;
-        let (_, method) = self.row_member::<MethodDecl>(decl, row)?;
+    fn method_above(&self, class: Recorded<'a, H>, name: &[u8]) -> Option<Above<'a, H>> {
+        let (at, row) = class.record.methods.find_at(name, |row| {
+            self.row_member_name::<MethodDecl>(class.decl, row)
+        })?;
+        let (_, method) = self.row_member::<MethodDecl>(class.decl, row)?;
         Some(Above {
             method,
-            scope: row.holder_in(handle),
-            prototype: record.prototypes.get(at).copied().flatten(),
+            scope: row.holder_in(class.handle),
+            prototype: class.record.prototypes.get(at).copied().flatten(),
         })
     }
 
@@ -2157,11 +2178,7 @@ impl<'a, H: Copy> Linker<'a, H> {
         let inherited = parent.map_or(&[][..], |(_, parent)| &*parent.interfaces);
         let internal = child.file.0.is_empty();
         let mut list = Vec::new();
-        let to_string = |m: &MethodDecl| m.function.name.0.eq_ignore_ascii_case(b"__toString");
-        if internal
-            && child.kind != ClassKind::Trait
-            && !child.name.0.eq_ignore_ascii_case(b"Stringable")
-            && child.methods.iter().any(to_string)
+        if names_stringable(child)
             && let Some((key, _)) = record(b"Stringable")?
         {
             list.push(key);
