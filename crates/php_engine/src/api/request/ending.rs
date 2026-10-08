@@ -122,7 +122,17 @@ impl Request {
             return;
         }
         let (file, line) = self.executed_site();
-        self.note_error_in(Level::Error, message, &file, line);
+        self.end_in_fatal_at(message, &file, line);
+    }
+
+    /// [`Request::end_in_fatal`] rendered at a site of its own, what a
+    /// debug sensor's fatal names: the line of the handler that tripped
+    /// it, which the frame has moved past by the time the loop asks.
+    pub(super) fn end_in_fatal_at(&mut self, message: &str, file: &[u8], line: u32) {
+        if self.bailout {
+            return;
+        }
+        self.note_error_in(Level::Error, message, file, line);
         self.bail_out();
     }
 

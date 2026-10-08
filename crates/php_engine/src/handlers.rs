@@ -22794,11 +22794,13 @@ mod tests {
                     op1: 0,
                     out_type: OperandKind::Tmp,
                     out: 0,
+                    lineno: 5,
                     ..Opline::default()
                 }]
                 .into_boxed_slice(),
                 literals: vec![php_heap::Zval::long(7)].into_boxed_slice(),
                 num_tmps: 1,
+                filename: php_unit::decl::Name::from("planted.php"),
                 ..OpArray::default()
             },
             ..Unit::default()
@@ -22823,6 +22825,13 @@ mod tests {
             req.slot(frame, 0).as_int(),
             Some(7),
             "the write itself stood"
+        );
+        // Rendered at the line of the handler that wrote the temporary
+        // (#2046).
+        assert!(
+            matches!(req.ending(), Some(crate::api::request::Ending::Fatal(logged)) if logged.contains(" in planted.php on line 5")),
+            "{:?}",
+            req.ending()
         );
         req.pop_frame();
     }

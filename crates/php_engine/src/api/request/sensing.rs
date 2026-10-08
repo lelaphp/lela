@@ -7,7 +7,7 @@
 //! release build senses nothing and compiles none of this.
 
 use php_heap::{Fatal, FrameRef};
-use php_unit::Opcode;
+use php_unit::{OpArray, Opcode, Opline};
 
 use crate::exec;
 
@@ -101,10 +101,10 @@ impl Request {
     /// them, and taken, so it is raised once and the request is ended by
     /// it ([`Sensing::Ended`]). Nothing while a fatal is leaving: what
     /// was found waits for the request's end, where the fatal's
-    /// `zend_bailout` has been caught and it can be rendered. The loop asks after every
-    /// handler, and [`Request::end_in_sensed`] asks where the request
-    /// ends.
-    pub(crate) fn take_sensed(&mut self) -> Option<Fatal> {
+    /// `zend_bailout` has been caught and it can be rendered. The loop
+    /// asks after every handler ([`Request::sensed_after`]), and
+    /// [`Request::end_in_sensed`] asks where the request ends.
+    fn take_sensed(&mut self) -> Option<Fatal> {
         if self.bailout {
             return None;
         }
@@ -117,6 +117,25 @@ impl Request {
             self.sensing = Sensing::Watching;
         }
         sensed
+    }
+
+    /// The loop's sensing point after the handler of `op`, in `code`,
+    /// ran: what the sensors found ends the request in the
+    /// `InternalError` rendered at that handler's line, and not at the
+    /// opline the handler moved the frame to, which is the statement
+    /// after the one that tripped the sensor (#2046). The fatal is handed
+    /// back for the loop to leave by; it is rendered and the request is
+    /// leaving by it, so the caller's `end_in` renders nothing more, as
+    /// for any fatal raised while one leaves.
+    pub(crate) fn sensed_after(&mut self, code: &OpArray, op: &Opline) -> Result<(), Fatal> {
+        let Some(sensed) = self.take_sensed() else {
+            return Ok(());
+        };
+        match &sensed {
+            Fatal::Error(message) => self.end_in_fatal_at(message, &code.filename.0, op.lineno),
+            Fatal::OutOfMemory(_) => self.end_in(&sensed),
+        }
+        Err(sensed)
     }
 
     /// A debug build's sensing point outside the loop, where a request

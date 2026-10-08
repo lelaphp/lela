@@ -149,8 +149,8 @@ fn an_addref_of_a_freed_block_ends_the_request_at_the_next_sensing_point() {
         );
         assert!(stdout.contains(SITE), "{kind}: {stdout}");
         // The loop asks after the native's handler, which has moved
-        // the frame to the next opline, so that is the line rendered.
-        assert!(stdout.contains(" on line 3\n"), "{kind}: {stdout}");
+        // the frame to the next opline; the fatal names the call's line.
+        assert!(stdout.contains(" on line 2\n"), "{kind}: {stdout}");
         assert!(!stdout.contains("went on"), "{kind}: {stdout}");
         assert_eq!(served.exit_code, 255, "{kind}");
     }
