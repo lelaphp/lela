@@ -655,10 +655,18 @@ impl Request {
     /// `get_active_function_or_method_name`: the native being served as
     /// a message names it, `Class::method` for a method, which is what
     /// a native writes before `(): ` in a sentence of its own that no
-    /// raiser here words, as `pdo_sqlite`'s callback refusals do.
+    /// raiser here words, as `pdo_sqlite`'s callback refusals do. Where
+    /// no native is served, as when a handler runs for an opcode, it is
+    /// the innermost user frame's function, `main` for a file's own code,
+    /// as `EG(current_execute_data)->func` is: ext/intl's
+    /// `ResourceBundle` words a missing element read as `$b['x']` so.
     #[must_use]
     pub fn active_function_name(&self) -> String {
-        self.active_native()
+        if self.vm_serving_native() || self.include_being_opened().is_some() {
+            return self.active_native();
+        }
+        self.active_user_function()
+            .unwrap_or_else(|| self.active_native())
     }
 
     /// `func->common.function_name`: the name a function was declared
