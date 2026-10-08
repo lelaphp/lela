@@ -63,6 +63,13 @@ fn main() {
         println!("cargo::rustc-link-lib=dylib={library}");
     }
     let mut build = cc::Build::new();
+    // php compiles C and C++ with -DNDEBUG unless it is built with
+    // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
+    // two builds that set ZEND_DEBUG, as debug assertions are this build's:
+    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
+        build.define("NDEBUG", None);
+    }
     build.cpp(true).std("c++17").warnings(true);
     let mut args = vec!["--cflags-only-I"];
     args.extend(MODULES);

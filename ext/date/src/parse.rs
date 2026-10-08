@@ -12,7 +12,7 @@ use crate::State;
 use crate::ffi::{Errors, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::now;
 use crate::obj::{set_str, set_string};
-use crate::zone::default_zone;
+use crate::zone::{default_zone, zones};
 
 /// `TIMELIB_SPECIAL_WEEKDAY` and `TIMELIB_SPECIAL_FIRST_DAY_OF_MONTH`.
 const SPECIAL_WEEKDAY: u32 = 0x01;
@@ -102,7 +102,7 @@ fn strtotime(
     let mut base_time = Time::new();
     base_time.set_zone_id(zone.clone());
     base_time.unixtime2local(base.unwrap_or_else(now));
-    let (mut t, errors) = Time::strtotime(&text);
+    let (mut t, errors) = Time::strtotime(zones(req), &text);
     if !errors.errors.is_empty() {
         return Ok(OrFalse::False);
     }
@@ -429,7 +429,7 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
 /// ```
 #[php_function]
 fn date_parse(req: &mut Request, datetime: PhpString) -> Result<Owner<PhpArray>, Thrown> {
-    let (t, errors) = Time::strtotime(datetime.as_bytes());
+    let (t, errors) = Time::strtotime(zones(req), datetime.as_bytes());
     parsed_time(req, &t, &errors)
 }
 
@@ -515,6 +515,6 @@ fn date_parse_from_format(
     format: PhpString,
     datetime: Path,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let (t, errors) = Time::parse_from_format(format.as_bytes(), datetime.0.as_bytes());
+    let (t, errors) = Time::parse_from_format(zones(req), format.as_bytes(), datetime.0.as_bytes());
     parsed_time(req, &t, &errors)
 }

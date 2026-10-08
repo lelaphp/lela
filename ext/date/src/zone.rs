@@ -10,19 +10,19 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString};
 
 use crate::State;
-use crate::ffi::{Tzdb, Zone};
+use crate::ffi::{Tzdb, Zone, Zones};
+
+/// `DATEG(tzcache)`, the request's zones, which every parse hands timelib
+/// as `php_date_parse_tzfile_wrapper` reads them.
+pub(super) fn zones(req: &mut Request) -> &mut Zones {
+    &mut req.state::<State>().zones
+}
 
 /// `php_date_parse_tzfile(name, tzdb)`: the zone out of the request's
 /// cache, parsed from the bundled database the first time it is asked
 /// for; none for a name the database has not.
 pub(super) fn parse_tzfile(req: &mut Request, name: &[u8]) -> Option<Arc<Zone>> {
-    let state = req.state::<State>();
-    if let Some(zone) = state.zones.get(name) {
-        return Some(Arc::clone(zone));
-    }
-    let zone = Arc::new(Zone::parse(name)?);
-    state.zones.insert(name.to_vec(), Arc::clone(&zone));
-    Some(zone)
+    zones(req).parse(name)
 }
 
 /// `guess_timezone(tzdb)`: what `date_default_timezone_set` set, else

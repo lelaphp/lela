@@ -13,20 +13,21 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
-use crate::ffi::{Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
+use crate::ffi::{Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zones};
 use crate::format::format_timestamp;
 use crate::obj::{
     TIMEZONE, TzKind, TzObj, class_id, new_timezone, rows_array, set_str, set_string, set_tz,
     std_rows, time_of, tz_fields, tz_of,
 };
+use crate::zone::zones;
 
 /// `timezone_initialize(tzobj, tz, &warning)`: an identifier, an
 /// abbreviation or an offset, as `timelib_parse_zone` reads it, or the
 /// message php gives for one it cannot use.
-pub(super) fn initialize(text: &[u8]) -> Result<TzKind, String> {
+pub(super) fn initialize(zones: &mut Zones, text: &[u8]) -> Result<TzKind, String> {
     let shown = String::from_utf8_lossy(text).into_owned();
     let mut dummy = Time::new();
-    let (offset, dst, not_found, read) = dummy.parse_zone(text);
+    let (offset, dst, not_found, read) = dummy.parse_zone(zones, text);
     #[allow(clippy::cast_possible_truncation)]
     let z = offset as i32;
     dummy.z = z;
@@ -96,7 +97,7 @@ fn timezone_open(
     req: &mut Request,
     timezone: Path,
 ) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
-    match initialize(timezone.0.as_bytes()) {
+    match initialize(zones(req), timezone.0.as_bytes()) {
         Ok(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
         Err(message) => {
             docref(req, Level::Warning, &message);
@@ -456,7 +457,7 @@ fn timezone_location_get(
 }
 
 /// `php_date_timezone_initialize_from_hash`.
-fn from_hash(hash: PhpArray) -> Option<TzKind> {
+fn from_hash(zones: &mut Zones, hash: PhpArray) -> Option<TzKind> {
     let find = |name: &[u8]| hash.find(name).map(|v| v.deref());
     let zone_type = find(b"timezone_type")?;
     let zone = find(b"timezone")?;
@@ -468,7 +469,7 @@ fn from_hash(hash: PhpArray) -> Option<TzKind> {
     if text.contains(&0) {
         return None;
     }
-    initialize(text).ok()
+    initialize(zones, text).ok()
 }
 
 /// `class DateTimeZone`: its fourteen groups, the values of
@@ -578,7 +579,7 @@ impl DateTimeZone {
     /// 96
     /// ```
     fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
-        match initialize(timezone.0.as_bytes()) {
+        match initialize(zones(req), timezone.0.as_bytes()) {
             Ok(kind) => set_zone(req, this.object(), kind),
             Err(message) => Err(throw(
                 req,
@@ -710,7 +711,7 @@ impl DateTimeZone {
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let (object, hash) = (this.object(), data);
-        let Some(kind) = from_hash(hash) else {
+        let Some(kind) = from_hash(zones(req), hash) else {
             return Err(throw_error(
                 req,
                 "Error",
@@ -744,7 +745,7 @@ impl DateTimeZone {
         for (key, value) in object.props(req)? {
             hash.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
-        let kind = from_hash(*hash);
+        let kind = from_hash(zones(req), *hash);
         hash.give_up(req);
         match kind {
             Some(kind) => set_zone(req, object, kind),
@@ -785,7 +786,7 @@ impl DateTimeZone {
         let hash = array;
         let class = class_id(req, "DateTimeZone")?;
         let object = new_object(req, class)?;
-        let Some(kind) = from_hash(hash) else {
+        let Some(kind) = from_hash(zones(req), hash) else {
             object.give_up(req);
             return Err(throw_error(
                 req,
