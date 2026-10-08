@@ -140,6 +140,28 @@ fn end(req: &mut Request, saved: &Saved) {
 /// end
 /// d inner
 /// ```
+///
+/// A response whose decoding meets the engine's fatal, in a typemap's
+/// `from_xml`, is the same fault thrown, or the fatal where the client
+/// does not throw:
+///
+/// ```php
+/// $w = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:t" targetNamespace="urn:t"><message name="q"/><message name="r"><part name="r" type="xsd:string"/></message><portType name="P"><operation name="f"><input message="tns:q"/><output message="tns:r"/></operation></portType><binding name="B" type="tns:P"><soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/><operation name="f"><soap:operation soapAction="f"/><input><soap:body use="encoded" namespace="urn:t" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input><output><soap:body use="encoded" namespace="urn:t" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output></operation></binding><service name="S"><port name="p" binding="tns:B"><soap:address location="http://x/"/></port></service></definitions>';
+/// class C extends SoapClient { function __doRequest($r, $l, $a, $v, $o = false, $u = null): ?string { return '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><e:Body><m:fResponse xmlns:m="urn:t"><r xsi:type="xsd:string">v</r></m:fResponse></e:Body></e:Envelope>'; } }
+/// $tm = [['type_ns' => 'http://www.w3.org/2001/XMLSchema', 'type_name' => 'string', 'from_xml' => function ($x) { trigger_error("in from_xml", E_USER_ERROR); }]];
+/// foreach ([true, false] as $ex) {
+///     $c = new C('data://text/plain;base64,' . base64_encode($w), ['typemap' => $tm, 'exceptions' => $ex, 'cache_wsdl' => WSDL_CACHE_NONE]);
+///     try { var_dump($c->f()); } catch (SoapFault $e) { echo $e->faultcode, ": ", $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect exit=255
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 4
+/// Client: in from_xml
+///
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 4
+///
+/// Fatal error: in from_xml in %s on line 4
+/// ```
 fn end_code<T>(req: &mut Request, r: Res<T>) -> R<T> {
     let thrown = match raised(req, r) {
         Err(thrown) => thrown,
