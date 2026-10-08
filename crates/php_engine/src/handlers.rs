@@ -305,11 +305,7 @@ pub(crate) fn declare_class<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CLASS on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let key = runtime_key(code, op)?;
     match req.bind_class_in_slot(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
@@ -320,12 +316,18 @@ pub(crate) fn declare_class<T: Tier>(
 /// The runtime definition key a class-declaring opline carries in the
 /// constant after its `op1`, php's `rtd_key = lcname + 1`.
 fn runtime_key(code: &OpArray, op: &Opline) -> Result<Vec<u8>, Fatal> {
-    exec::constant(code, ConstIdx(op.op1.saturating_add(1)))
+    constant_bytes(code, op, op.op1.saturating_add(1))
+}
+
+/// The string a declaring opline carries in its constant `at`, the name
+/// it declares or its runtime definition key.
+fn constant_bytes(code: &OpArray, op: &Opline, at: u32) -> Result<Vec<u8>, Fatal> {
+    exec::constant(code, ConstIdx(at))
         .as_str_bytes()
         .map(<[u8]>::to_vec)
         .ok_or_else(|| {
             Fatal::Error(format!(
-                "InternalError: a {} with no runtime definition key after its op1",
+                "InternalError: a {} with no string in its constant {at}",
                 op.opcode.name().trim_start_matches("ZEND_")
             ))
         })
@@ -354,11 +356,7 @@ pub(crate) fn declare_class_delayed<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CLASS_DELAYED on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let key = runtime_key(code, op)?;
     match req.bind_delayed(&serving.unit, &key) {
         Ok(()) => Ok(advance(req, frame)),
@@ -425,19 +423,8 @@ pub(crate) fn declare_anon_class<T: Tier>(
     let class = if let Cached::Class(class) = req.cached(frame, slot) {
         class
     } else {
-        let Some(serving) = req.vm().serving(frame) else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a DECLARE_ANON_CLASS on a frame serving no op array",
-            )));
-        };
-        let Some(key) = exec::constant(code, ConstIdx(op.op1))
-            .as_str_bytes()
-            .map(<[u8]>::to_vec)
-        else {
-            return Err(Fatal::Error(String::from(
-                "InternalError: a DECLARE_ANON_CLASS with no name in its op1",
-            )));
-        };
+        let serving = exec::standing(req, frame)?;
+        let key = constant_bytes(code, op, op.op1)?;
         match req.declare_anonymous(&serving.unit, &key) {
             Ok(class) => {
                 req.prime(frame, slot, Cached::Class(class));
@@ -500,24 +487,13 @@ pub(crate) fn declare_function<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_FUNCTION on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
         return Err(Fatal::Error(String::from(
             "InternalError: a DECLARE_FUNCTION whose op2 names no dynamic function definition",
         )));
     };
-    let Some(lowered) = exec::constant(code, ConstIdx(op.op1))
-        .as_str_bytes()
-        .map(<[u8]>::to_vec)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_FUNCTION whose op1 is no function name",
-        )));
-    };
+    let lowered = constant_bytes(code, op, op.op1)?;
     match req.bind_function(&serving.unit, at, &lowered) {
         Ok(()) => Ok(advance(req, frame)),
         Err(thrown) => threw(req, frame, &thrown),
@@ -576,14 +552,7 @@ pub(crate) fn declare_const<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(written) = exec::constant(code, ConstIdx(op.op1))
-        .as_str_bytes()
-        .map(<[u8]>::to_vec)
-    else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_CONST whose op1 is no constant name",
-        )));
-    };
+    let written = constant_bytes(code, op, op.op1)?;
     // A value the compiler could not fold is its constant expression,
     // evaluated here as `zval_update_constant` evaluates it; the value is
     // the constant's, one owner.
@@ -673,11 +642,7 @@ pub(crate) fn declare_attributed_const<T: Tier>(
             "InternalError: a DECLARE_ATTRIBUTED_CONST with no name or no OP_DATA after it",
         )));
     };
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_ATTRIBUTED_CONST on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let Some(decl) = code
         .literals
         .get(data.op1 as usize)
@@ -779,11 +744,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(serving) = req.vm().serving(frame) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: a DECLARE_LAMBDA_FUNCTION on a frame serving no op array",
-        )));
-    };
+    let serving = exec::standing(req, frame)?;
     let Some(at) = code.dynamic_func_defs.get(op.op2 as usize).copied() else {
         return Err(Fatal::Error(String::from(
             "InternalError: a DECLARE_LAMBDA_FUNCTION whose op2 names no dynamic function definition",
@@ -3468,16 +3429,8 @@ fn enter(
     let returns_to =
         (op.out_type != OperandKind::Unused).then(|| (frame, exec::temporary_slot(code, op.out)));
     let callee = req.push_user_frame(function, call, returns_to, exec::Caller::Opline(frame))?;
-    let Some(serving) = req.vm().serving(callee) else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: the frame just pushed is serving no op array",
-        )));
-    };
-    let Some(body) = serving.code() else {
-        return Err(Fatal::Error(String::from(
-            "InternalError: the frame just pushed names a body the unit has not",
-        )));
-    };
+    let serving = exec::standing(req, callee)?;
+    let body = exec::serving_code(&serving, callee)?;
     if let Some(at) = exec::parameter_prologue(req, callee, body)? {
         return Ok(Stepped::Threw(at));
     }

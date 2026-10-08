@@ -373,8 +373,8 @@ fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
             }
             Stepped::Done => return Ok(()),
         }
-        let serving = standing(req, frame)?;
-        let code = code_of(&serving, frame)?;
+        let serving = exec::standing(req, frame)?;
+        let code = exec::serving_code(&serving, frame)?;
         let op = *at_opline(req, frame, code)?;
         declared.before(req, frame, op.opcode);
         stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
@@ -395,8 +395,8 @@ fn serve_from<T: Tier>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
 /// serving's entry frame caught nothing, which is where the serving
 /// ends.
 fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
-    let serving = standing(req, frame)?;
-    let code = code_of(&serving, frame)?;
+    let serving = exec::standing(req, frame)?;
+    let code = exec::serving_code(&serving, frame)?;
     let op = *at_opline(req, frame, code)?;
     crate::handlers::handle_exception::<T>(req, frame, code, &op)
 }
@@ -417,8 +417,8 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 /// push has begun it, and answers `Threw` of the callee where the
 /// interrupt left a throwable pending.
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
-    let serving = standing(req, frame)?;
-    let code = code_of(&serving, frame)?;
+    let serving = exec::standing(req, frame)?;
+    let code = exec::serving_code(&serving, frame)?;
     let op = *at_opline(req, frame, code)?;
     crate::observer::tell_before(req, frame, op.opcode);
     let stepped = dispatch::dispatch::<Nop>(req, frame, code, &op)?;
@@ -454,27 +454,6 @@ pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
 /// asks [`catches`] first and unwinds only a frame that takes it.
 pub fn unwind(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     unwind_frame::<Nop>(req, frame)
-}
-
-/// What `frame` is serving, held by its own share of the unit so the
-/// oplines can be read while the request is borrowed.
-fn standing(req: &Request, frame: FrameRef) -> Result<exec::Serving, Fatal> {
-    req.vm().serving(frame).ok_or_else(|| {
-        Fatal::Error(format!(
-            "InternalError: frame {} is serving no op array",
-            frame.0
-        ))
-    })
-}
-
-/// The op array `frame` is serving, out of its unit.
-fn code_of(serving: &exec::Serving, frame: FrameRef) -> Result<&php_unit::OpArray, Fatal> {
-    serving.code().ok_or_else(|| {
-        Fatal::Error(format!(
-            "InternalError: frame {} names a body its unit has not",
-            frame.0
-        ))
-    })
 }
 
 /// The opline `frame` stands at.

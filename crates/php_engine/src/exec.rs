@@ -17,7 +17,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use php_heap::{FrameRef, MapPtr, MapTable, Zval};
+use php_heap::{Fatal, FrameRef, MapPtr, MapTable, Zval};
 use php_unit::decl::HookKind;
 use php_unit::{CacheSlot, ConstIdx, Level, OpArray, OperandKind, Opline, Unit};
 
@@ -1231,6 +1231,27 @@ impl Vm {
     pub(crate) fn calls(&self) -> &[CallState] {
         &self.calls
     }
+}
+
+/// What `frame` is serving, held by its own share of the unit so the
+/// oplines can be read while the request is borrowed.
+pub(crate) fn standing(req: &Request, frame: FrameRef) -> Result<Serving, Fatal> {
+    req.vm().serving(frame).ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: frame {} is serving no op array",
+            frame.0
+        ))
+    })
+}
+
+/// The op array `frame` is serving, out of its unit.
+pub(crate) fn serving_code(serving: &Serving, frame: FrameRef) -> Result<&OpArray, Fatal> {
+    serving.code().ok_or_else(|| {
+        Fatal::Error(format!(
+            "InternalError: frame {} names a body its unit has not",
+            frame.0
+        ))
+    })
 }
 
 /// The main op array of `unit`, what the frame `serve` pushes serves.
