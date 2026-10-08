@@ -2917,7 +2917,8 @@ impl EngineBuilder {
         extensions.extend(self.tier_extension);
         let additional = self.additional_functions;
         extensions.extend(self.additional_extension);
-        let registered = sort_modules(&mut extensions);
+        let mut registered = sort_modules(&mut extensions);
+        let unloaded = unload_unmet(&mut extensions, &mut registered);
         // Each extension's supplies taken out of it, by its number in
         // `module_registry`, which numbers Core 0 and the bundle from 1,
         // and installed by the phase it starts in.
@@ -3104,6 +3105,7 @@ impl EngineBuilder {
             held,
             startup,
             &configuration.loads,
+            unloaded,
             self.sapi_name,
             self.bind_loops,
         );
@@ -3400,6 +3402,55 @@ fn sort_modules(modules: &mut [Extension]) -> Vec<usize> {
     registered
 }
 
+/// An extension `zend_startup_module_ex` refused for a dependency: where
+/// in start order its check stood, as the place in `module_registry`
+/// (Core 0) of the extension that starts next, and php's warning.
+struct Unloaded {
+    before: usize,
+    message: String,
+}
+
+/// `zend_startup_module_ex`'s check (`Z/Zend/zend_API.c:2417-2447`), made
+/// over the sorted bundle before any `MINIT`: an extension one of whose
+/// `MODULE_DEP_REQUIRED` rows names no extension started before it,
+/// compared case-insensitively, is taken out of `modules`, with php's
+/// `E_CORE_WARNING` kept for the startup to raise in its place, so an
+/// extension requiring it is refused in turn; `registered` is renumbered
+/// to the places left. php registers a persistent extension's functions
+/// before the check and keeps them once it fails; here nothing of the
+/// refused extension stays, since none of it was started.
+fn unload_unmet(modules: &mut Vec<Extension>, registered: &mut Vec<usize>) -> Vec<Unloaded> {
+    let mut started: Vec<usize> = Vec::with_capacity(modules.len());
+    let mut unloaded = Vec::new();
+    for (at, module) in modules.iter().enumerate() {
+        let unmet = (module.dependencies.iter())
+            .filter(|dep| dep.kind == DependencyKind::Required)
+            .find(|dep| {
+                !dep.name.eq_ignore_ascii_case("Core")
+                    && !(started.iter()).any(|&s| modules[s].name.eq_ignore_ascii_case(&dep.name))
+            });
+        match unmet {
+            Some(dep) => unloaded.push(Unloaded {
+                before: started.len() + 1,
+                message: format!(
+                    "Cannot load module \"{}\" because required module \"{}\" is not loaded",
+                    module.name, dep.name
+                ),
+            }),
+            None => started.push(at),
+        }
+    }
+    if unloaded.is_empty() {
+        return unloaded;
+    }
+    let place = |old: usize| started.binary_search(&old).ok();
+    registered.retain_mut(|old| place(*old).inspect(|new| *old = *new).is_some());
+    *modules = (std::mem::take(modules).into_iter().enumerate())
+        .filter_map(|(at, module)| place(at).map(|_| module))
+        .collect();
+    unloaded
+}
+
 /// One extension's `MINIT` (ADR-0010): its process start, called once
 /// for the process and its outcome kept ([`crate::process_scope`]), its
 /// process state then handed to `start` for this engine start and every
@@ -3416,6 +3467,57 @@ fn start_module(
         states.push(build(start)?);
     }
     Ok(())
+}
+
+/// What the startup request meets as `zend_startup_modules` walks the
+/// bundle, before any engine start: each value the host set for an entry
+/// with an `on_modify` handed to it in `held`'s order, those it took
+/// added to `taken` at the startup stage and to `activated` at the
+/// activate stage, and each extension refused for a dependency raising as its
+/// turn comes ([`unload_unmet`]). The marks say where each extension's
+/// raising starts, by its place in `module_registry`: a refused start
+/// shows what php raised before it, which is nothing of a later
+/// extension's (`Engine::refused`).
+fn modules_startup(
+    req: &mut Request,
+    extensions: &[Extension],
+    held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+    unloaded: Vec<Unloaded>,
+    taken: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    activated: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
+) -> Vec<(usize, usize)> {
+    let mut marks = Vec::new();
+    let mut unloaded = unloaded.into_iter().peekable();
+    let mut refuse_until = |req: &mut Request, marks: &mut Vec<(usize, usize)>, owner| {
+        while let Some(refused) = unloaded.next_if(|refused| refused.before <= owner) {
+            marks.push((refused.before, req.startup_raised_len()));
+            crate::api::raising::raise(req, Level::CoreWarning, &refused.message);
+        }
+    };
+    for (name, value, activate) in held {
+        let owner = (extensions.iter())
+            .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name))
+            .unwrap_or(usize::MAX);
+        refuse_until(req, &mut marks, owner);
+        marks.push((owner, req.startup_raised_len()));
+        req.set_ini_stage(if activate {
+            IniStage::Activate
+        } else {
+            IniStage::Startup
+        });
+        let accepted = on_modify(extensions, &name)
+            .is_some_and(|handler| matches!(handler(req, Some(&value)), Ok(true)));
+        if accepted {
+            req.take_startup_value(&name, &value);
+            if activate {
+                activated.push((name, Some(value)));
+            } else {
+                taken.push((name, Some(value)));
+            }
+        }
+    }
+    refuse_until(req, &mut marks, usize::MAX);
+    marks
 }
 
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
@@ -3585,6 +3687,7 @@ impl Engine {
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
         mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
         loads: &Loads,
+        unloaded: Vec<Unloaded>,
         sapi_name: &'static str,
         bind_loops: BindLoops,
     ) {
@@ -3615,31 +3718,15 @@ impl Engine {
         req.begin_startup();
         let mut taken = core_startup(&mut req);
         let failed = register_extensions(&mut req, loads);
-        // Where each extension's handlers start raising, by its place in
-        // the bundle: a refused start shows what php raised before it,
-        // which is nothing of a later extension's (`Engine::refused`).
-        let mut marks = Vec::new();
         let mut activated = Vec::new();
-        for (name, value, activate) in held {
-            let owner = (self.shared.extensions.iter())
-                .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name));
-            marks.push((owner.unwrap_or(usize::MAX), req.startup_raised_len()));
-            req.set_ini_stage(if activate {
-                IniStage::Activate
-            } else {
-                IniStage::Startup
-            });
-            let accepted = on_modify(&self.shared.extensions, &name)
-                .is_some_and(|handler| matches!(handler(&mut req, Some(&value)), Ok(true)));
-            if accepted {
-                req.take_startup_value(&name, &value);
-                if activate {
-                    activated.push((name, Some(value)));
-                } else {
-                    taken.push((name, Some(value)));
-                }
-            }
-        }
+        let marks = modules_startup(
+            &mut req,
+            &self.shared.extensions,
+            held,
+            unloaded,
+            &mut taken,
+            &mut activated,
+        );
         req.set_ini_stage(IniStage::Startup);
         let encoding_at = req.startup_raised_len();
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);

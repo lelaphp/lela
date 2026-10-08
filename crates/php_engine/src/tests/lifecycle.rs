@@ -902,3 +902,93 @@ fn two_extensions_with_one_process_state_type_are_each_started() {
     let events = rec.events();
     assert_eq!(events.handed(&ProcessStateBuilt), [103, 103]);
 }
+
+/// `ZEND_MOD_REQUIRED(name)`, a row of an extension's `deps` table.
+fn required(name: &str) -> crate::api::abi::Dependency {
+    crate::api::abi::Dependency {
+        name: name.to_owned(),
+        kind: crate::api::abi::DependencyKind::Required,
+        rel: None,
+        version: None,
+    }
+}
+
+/// An extension named `name` declaring one empty class, `class`, and
+/// requiring each of `requires`.
+fn declaring(name: &str, class: &str, requires: &[&str]) -> Extension {
+    use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
+    let decl = ClassDecl {
+        name: Name(class.as_bytes().into()),
+        kind: ClassKind::Class,
+        flags: ClassFlags::default(),
+        parent: None,
+        interfaces: Vec::new(),
+        implementors: Vec::new(),
+        aliases: Vec::new(),
+        traits: Vec::new(),
+        adaptations: Vec::new(),
+        backing: EnumBacking::Pure,
+        constants: Vec::new(),
+        properties: Vec::new(),
+        methods: Vec::new(),
+        attributes: Vec::new(),
+        doc_comment: None,
+        file: Name(Box::new([])),
+        line: 0,
+        end_line: 0,
+        object_size: 0,
+        object_beside: Box::new([]),
+    };
+    ExtensionBuilder::default()
+        .dependencies(requires.iter().map(|name| required(name)).collect())
+        .classes(vec![(decl, Vec::new())])
+        .build(name)
+}
+
+/// `zend_startup_module_ex` (`Z/Zend/zend_API.c:2417-2447`): an
+/// extension whose `MODULE_DEP_REQUIRED` row names no extension started
+/// before it, compared case-insensitively, is not started and leaves
+/// `module_registry`, with php's `E_CORE_WARNING` among what the
+/// startup raised; so its classes never register, and an extension
+/// requiring it is refused in turn. `pdo` requires `spl`; with `SPL`
+/// beside it, the negative control, both start and nothing is raised.
+/// The warning stands where php raises it, after the dynamic-library
+/// warnings of `php_ini_register_extensions` and before
+/// `zend_disable_functions`' own.
+#[test]
+fn an_extension_whose_required_dependency_is_absent_is_not_started() {
+    let pdo = || declaring("PDO", "PDO", &["spl"]);
+    let pdo_driver = || declaring("pdo_driver", "PdoDriver", &["pdo"]);
+    let probe =
+        "<?php var_dump(class_exists('PDO'), extension_loaded('pdo'), class_exists('PdoDriver'));";
+    let control = Engine::cli_builder()
+        .extensions(&[declaring("SPL", "ArrayObject", &[]), pdo(), pdo_driver()])
+        .build();
+    let served = control.serve_capture(probe, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\nbool(true)\nbool(true)\n"
+    );
+    let engine = Engine::cli_builder()
+        .ini("extension_dir", "/nope")
+        .ini("extension", "x")
+        .ini("disable_functions", "exit")
+        .extensions(&[pdo(), pdo_driver()])
+        .build();
+    let served = engine.serve_capture(probe, Capture::default());
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    let refused = [
+        "\nWarning: Cannot load module \"PDO\" because required module \"spl\" is not loaded in Unknown on line 0\n",
+        "\nWarning: Cannot load module \"pdo_driver\" because required module \"pdo\" is not loaded in Unknown on line 0\n",
+    ]
+    .concat();
+    let at = stdout.find(&refused);
+    assert!(at.is_some(), "{stdout}");
+    let library = stdout.find("Unable to load dynamic library 'x'");
+    let disabled = stdout.find("Cannot disable function exit()");
+    assert!(library < at && at < disabled, "{stdout}");
+    assert!(
+        stdout.ends_with("bool(false)\nbool(false)\nbool(false)\n"),
+        "{stdout}"
+    );
+}

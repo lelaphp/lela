@@ -161,8 +161,8 @@ pub enum IniVerdict {
 /// row carries, which php prints after the kind and
 /// `ReflectionExtension::getDependencies` reads. The engine starts its
 /// extensions in the order `zend_sort_modules` leaves by the required
-/// and optional rows; the check php makes that a required one is
-/// loaded is `api-check`'s crate graph here.
+/// and optional rows, and starts none whose required one has not
+/// started before it, as `zend_startup_module_ex` refuses it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     pub name: String,
