@@ -172,7 +172,7 @@ pub struct Pin {
     /// `[sapi]`: the oracle's other hosts beside `php`, pinned from the
     /// same keg (design §1, #1161); absent until a person writes the row.
     #[serde(default)]
-    pub sapi: Hosts,
+    pub sapi: Sapi,
     /// `[variant.<name>]`: the oracle's builds with flags of their own,
     /// each pinned per platform, which a `[[crate]]` row names to run its
     /// lanes under (#1782); absent until a person writes one.
@@ -199,10 +199,25 @@ pub struct Pin {
 /// hosts a test through them is #1184's.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Hosts {
+pub struct Sapi {
     pub cgi: Option<Host>,
     pub fpm: Option<Host>,
     pub phpdbg: Option<Host>,
+}
+
+impl Sapi {
+    /// The pinned host of `kind`'s kind; none for the CLI, which is
+    /// `[oracle]` itself.
+    pub(crate) fn of(&self, kind: hosts::EngineHost) -> Option<&Host> {
+        [
+            (hosts::CGI, &self.cgi),
+            (hosts::FPM, &self.fpm),
+            (hosts::PHPDBG, &self.phpdbg),
+        ]
+        .into_iter()
+        .find_map(|(each, pinned)| (each == kind).then_some(pinned.as_ref()))
+        .flatten()
+    }
 }
 
 /// One of `[sapi]`'s binaries: its path on this machine and its digest.
@@ -647,7 +662,7 @@ impl Pin {
         };
         let mut pin = self.clone();
         pin.asserted = Asserted::default();
-        pin.sapi = Hosts::default();
+        pin.sapi = Sapi::default();
         pin.oracle = Binary {
             version: self.oracle.version.clone(),
             path: build.map(|b| b.path.clone()).unwrap_or_default(),

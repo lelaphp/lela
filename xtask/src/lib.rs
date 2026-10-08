@@ -77,7 +77,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use cli::{Cli, Command, TicketCommand, TrackCommand, UsageCommand, WorktreeCommand};
@@ -114,7 +114,13 @@ pub fn run() -> ExitCode {
 /// The command line, dispatched: one arm per instrument.
 fn command_line() -> Result<()> {
     let cli = Cli::parse();
-    let root = cli.root.unwrap_or_else(built_root);
+    // Absolute where the line is read: a program runs in its test's own
+    // directory, where a relative root names nothing (#942).
+    let root = match cli.root {
+        Some(root) => std::path::absolute(&root)
+            .with_context(|| format!("resolving --root {}", root.display()))?,
+        None => built_root(),
+    };
     // The judge at the tool call reads the manifest itself: a manifest it
     // cannot read is a refusal it records before it exits, and a manifest
     // loaded out here would take that exit before permit saw the call

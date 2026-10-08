@@ -135,7 +135,6 @@ oracle::Binary::variant
 oracle::Build
 oracle::ENGINE
 oracle::Host
-oracle::Hosts
 oracle::Invocation
 oracle::Invocation::new
 oracle::Limits
@@ -178,6 +177,7 @@ oracle::Runner
 oracle::Runner::binary
 oracle::Runner::resolve
 oracle::Runner::stamp
+oracle::Sapi
 oracle::Source
 oracle::Source::named
 oracle::Source::path

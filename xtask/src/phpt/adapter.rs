@@ -659,22 +659,17 @@ fn expectation_of(pin: &Pin, phpt: &Phpt) -> Option<Expectation> {
     if let Some(body) = phpt.section("EXPECT") {
         return Some(Expectation::Exact(trimmed(pin, body)));
     }
-    if let Some(body) = phpt.text("EXPECTF") {
-        return Some(Expectation::Format(trimmed_text(pin, &body)));
+    if let Some(body) = phpt.section("EXPECTF") {
+        return Some(Expectation::Format(trimmed(pin, body)));
     }
-    phpt.text("EXPECTREGEX")
-        .map(|body| Expectation::Pattern(trimmed_text(pin, &body)))
+    phpt.section("EXPECTREGEX")
+        .map(|body| Expectation::Pattern(trimmed(pin, body)))
 }
 
 /// The recipe's normalisation over a section, which is what the stdout it
 /// is compared with has been through; the oracle module owns the rule.
 fn trimmed(pin: &Pin, body: &[u8]) -> Vec<u8> {
     oracle::normalise(&pin.recipe.normalise, body.to_vec())
-}
-
-/// The same over a section a runner reads as words.
-fn trimmed_text(pin: &Pin, text: &str) -> String {
-    String::from_utf8_lossy(&trimmed(pin, text.as_bytes())).into_owned()
 }
 
 /// A test's `--INI--`, one `-d` line each, with upstream's four
