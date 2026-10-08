@@ -306,7 +306,11 @@ fn ticket_command(
             let ticket = ticket::ticket_of(root, number)?;
             let verdict = ticket::Verdict::given(withdrawn.as_deref())?;
             let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
-            (ticket::Act::Close(verdict, successors), ticket, session_id)
+            (
+                ticket::Act::Close(verdict, successors, ticket::Reach::of(root)?),
+                ticket,
+                session_id,
+            )
         }
         TicketCommand::Parent { .. } => bail!("ticket parent: answered above"),
     };

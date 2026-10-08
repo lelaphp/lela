@@ -621,9 +621,10 @@ pub(crate) enum TicketCommand {
     /// Read as `read` does, then set the blocking edge to each ticket the
     /// work opened and close the issue at the tracker with a comment naming
     /// the commit and the successors; refuse while a box is unticked, while
-    /// a successor is closed or missing, and without `--opens` or
-    /// `--opens-nothing`. With `--withdrawn <reason>` the ticket is closed
-    /// as withdrawn rather than done, refused while any box is ticked.
+    /// a successor is closed or missing, while `main` does not contain the
+    /// commit (#2249), and without `--opens` or `--opens-nothing`. With
+    /// `--withdrawn <reason>` the ticket is closed as withdrawn rather than
+    /// done, refused while any box is ticked.
     Close {
         /// The issue number; without it, the branch's recorded ticket.
         number: Option<u64>,

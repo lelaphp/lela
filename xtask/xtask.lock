@@ -305,6 +305,8 @@ ticket::Issue
 ticket::Label
 ticket::Open
 ticket::Open::label_names
+ticket::Reach
+ticket::Reach::of
 ticket::State
 ticket::SubIssues
 ticket::Successors
