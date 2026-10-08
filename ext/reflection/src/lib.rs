@@ -32,12 +32,12 @@
 //! `zend_do_implement_interfaces` ran is the engine's where the engine
 //! keeps it: the function table is the class's linked record, its rows
 //! read through `api` (`Request::method_rows`, `Request::method_row`)
-//! and held as a `MethodRow`, and the interface list in its order is
-//! the record's (`Request::interfaces`). Each method's prototype, and
-//! the constants and the properties with their shadows are computed
-//! here by the same rules over the declarations (`row_prototype`,
-//! `linked_constants`, `linked_properties`), so the words `inherits`, `overwrites`,
-//! `prototype` and `ctor` are php's.
+//! and held as a `MethodRow`, and the interface list and the constants
+//! table in their order are the record's (`Request::interfaces`,
+//! `Request::constants_in_order`). Each method's prototype and the
+//! properties with their shadows are computed here by the same rules
+//! over the declarations (`row_prototype`, `linked_properties`), so the
+//! words `inherits`, `overwrites`, `prototype` and `ctor` are php's.
 //! Reflection's own twenty-six classes are declared by `#[php_class]`
 //! beside the bodies that serve them, every method the stub has, so
 //! `php --re reflection` renders whole.
@@ -5251,10 +5251,8 @@ fn class_constant_named(
     class: ClassId,
     name: &[u8],
 ) -> Option<(ClassId, ClassConstDecl)> {
-    linked_constants(req, class)
-        .into_iter()
-        .find(|(constant, _)| &*constant.name.0 == name)
-        .map(|(constant, declaring)| (declaring, constant))
+    req.class_constant_of(class, name)
+        .map(|(declaring, constant)| (declaring, constant.clone()))
 }
 
 /// `ReflectionClass::getConstant(string $name)`: the constant's value,
@@ -5662,7 +5660,7 @@ fn class_string(
     // `ZEND_CLASS_CONST_IS_CASE`: an enum's cases go first, under a
     // heading shown only when there are any, and its own constants
     // after them.
-    let (cases, constants): (Vec<_>, Vec<_>) = linked_constants(req, class)
+    let (cases, constants): (Vec<_>, Vec<_>) = constant_rows(req, class)
         .into_iter()
         .partition(|(constant, _)| constant.is_case);
     if !cases.is_empty() {
@@ -7035,57 +7033,26 @@ fn prototype_over(req: &mut Request, above: MethodRow, depth: u32) -> Option<Cla
     Some(inherited.unwrap_or(above.scope()))
 }
 
-/// `ce->constants_table` after linking: the class's own constants, then
-/// the parent's that are not private and not overridden
-/// (`do_inherit_class_constant`), then each new interface's
-/// (`do_inherit_iface_constant`), each with the class that declared it.
-fn linked_constants(req: &mut Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)> {
-    linked_constants_at(req, class, 0)
-}
-
-fn linked_constants_at(
-    req: &mut Request,
-    class: ClassId,
-    depth: u32,
-) -> Vec<(ClassConstDecl, ClassId)> {
-    let Some(decl) = req.class_decl(class).cloned() else {
-        return Vec::new();
-    };
-    let own: Vec<(ClassConstDecl, ClassId)> =
-        decl.constants.iter().map(|c| (c.clone(), class)).collect();
-    // An internal class inherits before `zend_declare_class_constant_ex`
-    // adds its own, so the parent's come first; a user class compiles
-    // its own into the table first.
-    let internal = decl.file.0.is_empty();
-    let mut table: Vec<(ClassConstDecl, ClassId)> = if internal { Vec::new() } else { own.clone() };
-    if depth > 64 {
-        return own;
-    }
-    let parent = decl
-        .parent
-        .as_ref()
-        .and_then(|name| lookup_class(req, &name.0).ok().flatten());
-    let mut sources: Vec<ClassId> = parent.into_iter().collect();
-    let parent_interfaces = parent.map_or_else(Vec::new, |p| req.interfaces(p).to_vec());
-    sources.extend(
-        req.interfaces(class)
-            .to_vec()
-            .into_iter()
-            .filter(|i| !parent_interfaces.contains(i)),
-    );
-    for source in sources {
-        for (constant, declaring) in linked_constants_at(req, source, depth + 1) {
-            let present = table.iter().any(|(c, _)| c.name == constant.name)
-                || (internal && own.iter().any(|(c, _)| c.name == constant.name));
-            if !present && constant.visibility != Visibility::Private {
-                table.push((constant, declaring));
-            }
-        }
-    }
-    if internal {
-        table.extend(own);
-    }
-    table
+/// `CE_CONSTANTS_TABLE(ce)`: the rows of the engine's linked record in
+/// php's order ([`Request::constants_in_order`]), the class's own first
+/// for a user class and last for an internal one, each declaration
+/// copied out beside the class that declared it, for a walk that
+/// evaluates as it goes.
+///
+/// ```php
+/// interface I { const IC = 1; } class P implements I { const PC = 2; private const PP = 3; } class C extends P { const CC = 4; }
+/// foreach (['C', 'RecursiveTreeIterator', 'DateTimeImmutable'] as $c) echo implode(', ', array_keys((new ReflectionClass($c))->getConstants())), "\n";
+/// ```
+/// ```expect
+/// CC, PC, IC
+/// LEAVES_ONLY, SELF_FIRST, CHILD_FIRST, CATCH_GET_CHILD, BYPASS_CURRENT, BYPASS_KEY, PREFIX_LEFT, PREFIX_MID_HAS_NEXT, PREFIX_MID_LAST, PREFIX_END_HAS_NEXT, PREFIX_END_LAST, PREFIX_RIGHT
+/// ATOM, COOKIE, ISO8601, ISO8601_EXPANDED, RFC822, RFC850, RFC1036, RFC1123, RFC7231, RFC2822, RFC3339, RFC3339_EXTENDED, RSS, W3C
+/// ```
+fn constant_rows(req: &Request, class: ClassId) -> Vec<(ClassConstDecl, ClassId)> {
+    req.constants_in_order(class)
+        .into_iter()
+        .map(|(declaring, constant)| (constant.clone(), declaring))
+        .collect()
 }
 
 /// `ce->properties_info` after linking: the class's own properties

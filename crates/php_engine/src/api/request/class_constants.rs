@@ -86,7 +86,7 @@ impl Request {
     /// Undefined constant P::P
     /// Cannot access private constant C::P
     /// ```
-    pub(super) fn class_constant_of(
+    pub fn class_constant_of(
         &self,
         class: ClassId,
         name: &[u8],
@@ -112,7 +112,7 @@ impl Request {
 
     /// `CE_CONSTANTS_TABLE(ce)` of a linked class in php's order, each
     /// constant beside the class that declared it.
-    pub(super) fn constants_in_order(&self, class: ClassId) -> Vec<(ClassId, &ClassConstDecl)> {
+    pub fn constants_in_order(&self, class: ClassId) -> Vec<(ClassId, &ClassConstDecl)> {
         let Some(record) = self.linked_class(class) else {
             return Vec::new();
         };

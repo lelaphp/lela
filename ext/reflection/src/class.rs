@@ -4,8 +4,9 @@
 //! three ways php makes an instance. Each reads the linked tables the
 //! reflector's `$name` looks up again, the same `_class_string`
 //! renders: the engine's function table (`Request::method_rows`,
-//! `Request::method_row`) and interface list (`Request::interfaces`),
-//! and `linked_constants` and `linked_properties`.
+//! `Request::method_row`), interface list (`Request::interfaces`) and
+//! constants table (`Request::constants_in_order`), and
+//! `linked_properties`.
 
 use php_ext::abi::{Callable, Instance, NamedVariadic, OrFalse, Passed, Raw, This, Union};
 use php_ext::attr::php_class;
@@ -21,9 +22,9 @@ use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value
 use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
     HeldMethod, Reference, answer, attr, class_chain, class_constant_named, class_extension_name,
-    class_name_of, class_named, class_of, class_string, closure_invoke, constant_value,
-    dynamic_properties, is_closure_invoke, is_internal, keep, keep_method, keep_reference,
-    kept_closure, kept_object, linked_constants, linked_properties, lookup_class, method_or_invoke,
+    class_name_of, class_named, class_of, class_string, closure_invoke, constant_rows,
+    constant_value, dynamic_properties, is_closure_invoke, is_internal, keep, keep_method,
+    keep_reference, kept_closure, kept_object, linked_properties, lookup_class, method_or_invoke,
     namespace_end, new_object, property_named, reflection_class_factory, set_name, set_string_prop,
     string_value, this_class, user_line,
 };
@@ -1367,7 +1368,7 @@ impl ReflectionClass {
         let filter = filter.unwrap_or(1 | 2 | 4);
         let class = this_class(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
-        for (decl, scope) in linked_constants(req, class) {
+        for (decl, scope) in constant_rows(req, class) {
             let bits = match decl.visibility {
                 Visibility::Public => 1,
                 Visibility::Protected => 2,
@@ -1407,7 +1408,7 @@ impl ReflectionClass {
         let filter = filter.unwrap_or(1 | 2 | 4);
         let class = this_class(req, this.object())?;
         let mut constants = PhpArray::new(req)?;
-        for (decl, scope) in linked_constants(req, class) {
+        for (decl, scope) in constant_rows(req, class) {
             let bits = match decl.visibility {
                 Visibility::Public => 1,
                 Visibility::Protected => 2,

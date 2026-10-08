@@ -653,6 +653,7 @@ request::Request::caller_var
 request::Request::captured
 request::Request::cfg_entry
 request::Request::check_open_basedir
+request::Request::class_constant_of
 request::Request::class_decl
 request::Request::class_extension
 request::Request::class_extension_name
@@ -667,6 +668,7 @@ request::Request::connection_status
 request::Request::constant_attributes
 request::Request::constant_file
 request::Request::constants
+request::Request::constants_in_order
 request::Request::content_type
 request::Request::core_ini_info
 request::Request::ctype_locale
