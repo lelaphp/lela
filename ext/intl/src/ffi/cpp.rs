@@ -30,8 +30,8 @@ macro_rules! opaque {
 }
 pub(crate) use opaque;
 
-/// The owner of one heap object the shim made, `delete`d by `$delete`
-/// on drop: a `NonNull` in a transparent struct, so an
+/// The owner of one heap object the shim or ICU's C API made, freed by
+/// `$delete` on drop: a `NonNull` in a transparent struct, so an
 /// `Option<$owner>` crosses the shim as the nullable pointer a factory
 /// answers.
 macro_rules! owner {
