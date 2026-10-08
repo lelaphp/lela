@@ -12,6 +12,7 @@ use php_heap::Fatal;
 use crate::api::abi::AfterLog;
 use crate::api::raising::Level;
 use crate::api::values::Value;
+use crate::supplied::{Bail, ErrorBeneath};
 
 use diagnostics::Display;
 
@@ -93,8 +94,9 @@ impl Request {
     /// `zend_error_noreturn(E_ERROR, ...)`: `php_error_cb` renders the
     /// fatal where the request stands, on the streams the two ini entries
     /// say, and the request ends in it. It is rendered once, here, and
-    /// `serve` writes nothing of its own. The store is marked destructed
-    /// before the request bails out (`zend_objects_store_mark_destructed`), so no
+    /// `serve` writes nothing of its own. `php_error_cb` marks the store
+    /// destructed before the request bails out
+    /// (`zend_objects_store_mark_destructed`), so no
     /// object standing then is destructed, and a delegation of
     /// generators a frame lets go of on the way out is not given up
     /// link by link through their destructors:
@@ -119,12 +121,9 @@ impl Request {
         if self.bailout {
             return;
         }
-        // `php_error_cb` marks the store before it bails out: no object
-        // that stands now is destructed, one a shutdown function makes is.
-        self.heap.mark_destructed();
         let (file, line) = self.executed_site();
         self.note_error_in(Level::Error, message, &file, line);
-        self.end_at_level(Level::Error, message, &file, line);
+        self.bail_out();
     }
 
     /// `zend_error_noreturn(E_CORE_ERROR, ...)`: the one core fatal
@@ -136,9 +135,8 @@ impl Request {
         if self.bailout {
             return;
         }
-        self.heap.mark_destructed();
         self.note_error_in(Level::CoreError, message, b"Unknown", 0);
-        self.end_at_level(Level::CoreError, message, b"Unknown", 0);
+        self.bail_out();
     }
 
     /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936-990`): an
@@ -148,7 +146,8 @@ impl Request {
     /// carries the throwable's own trace in its message and never a
     /// fatal's after the site, whatever `fatal_error_backtraces` says. A
     /// `ParseError` or a `CompileError` is rendered at its own level and
-    /// the rest as `E_ERROR`, and the request ends as the level ends it.
+    /// the rest as `E_ERROR`, under php's `E_DONT_BAIL`, so the store is
+    /// not marked destructed, and the request ends.
     pub(crate) fn end_in_uncaught(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
         if self.bailout {
             return;
@@ -160,19 +159,24 @@ impl Request {
             // `zend_exception_error`'s `zend_observer_error_notify`
             // before `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`).
             crate::observer::uncaught(self, level, file, line, string.as_bytes());
-            self.zend_error_cb(level, string, message, file, line);
+            self.zend_error_cb(level, Bail::DontBail, string, message, file, line);
             self.release(Value::string(string));
         }
-        self.end_at_level(level, message, file, line);
+        self.bail_out();
     }
 
-    /// `php_error_cb`'s `_zend_bailout` (`Z/main/main.c:1492-1520`) for a level
-    /// it cannot recover from that the built-in handler served, raised
-    /// where the request stands: every object standing marked
-    /// destructed, `zend_objects_store_mark_destructed`, so none of them
-    /// is destructed after it, while one a shutdown function makes is;
-    /// and the request ended at the level. What `trigger_error()` reaches
-    /// with `E_USER_ERROR`.
+    /// `zend_bailout` (`Z/Zend/zend.c:1256-1270`) out of a level
+    /// `zend_error_cb` was handed and cannot recover from: the cycle
+    /// collector takes no root from here on, as `_zend_bailout` protects
+    /// it, and a collection serving destructors when the fatal came
+    /// returns without freeing; and the request leaves for the `zend_try`
+    /// that catches it. What `php_error_cb` does before it bails out is
+    /// its own ([`Request::cannot_recover`]), so a fatal a link of
+    /// `zend_error_cb` served without it leaves by this alone, as soap's
+    /// `soap_real_error_handler` throws a client's fault and bails out.
+    /// What `trigger_error()` reaches with `E_USER_ERROR`: every object
+    /// standing then is marked destructed, and one a shutdown function
+    /// makes is not.
     ///
     /// ```php
     /// class D { function __destruct() { echo "d\n"; } }
@@ -187,10 +191,9 @@ impl Request {
     /// sd
     /// d
     /// ```
-    pub(crate) fn bail_out(&mut self, level: Level, message: &str) {
-        let (file, line) = self.executed_site();
-        self.heap.mark_destructed();
-        self.end_at_level(level, message, &file, line);
+    pub(crate) fn bail_out(&mut self) {
+        self.heap.gc_protect(true);
+        self.leave_by_zend_bailout();
     }
 
     /// `CG(unclean_shutdown)`: whether a fatal's `zend_bailout` was
@@ -213,32 +216,63 @@ impl Request {
         crate::observer::end_all(self);
     }
 
-    /// The ending alone, the diagnostic already rendered at its own
-    /// level: php's status alone for `E_PARSE`, and for every other
-    /// fatal level the log form the host is handed, the trace under
-    /// `Stack trace:` where `php_error_cb` gave `php_log_err` one. The
-    /// cycle collector takes no root from here on, as `_zend_bailout`
-    /// protects it (`Z/Zend/zend.c:1263`), and a collection serving
-    /// destructors when the fatal came returns without freeing.
-    fn end_at_level(&mut self, level: Level, message: &str, file: &[u8], line: u32) {
-        self.heap.gc_protect(true);
-        // A host that bailed out from inside its log left before
-        // `php_error_cb` wrote the status or the header.
+    /// `php_error_cb`'s last arm, "Bail out if we can't recover"
+    /// (`Z/main/main.c:1509-1545`), for the level it was handed: the
+    /// status 255, and with nothing displayed, a response not yet
+    /// committed at 200 answers `HTTP/1.0 500 Internal Server Error`;
+    /// unless php's `E_DONT_BAIL` rides on the level, every object
+    /// standing is marked destructed (`zend_objects_store_mark_destructed`),
+    /// so none of them is destructed after it. A host that bailed out from
+    /// inside its log, or a memory limit met while the diagnostic was
+    /// rendered, left before any of it. The ending is the host's: php's
+    /// status alone for `E_PARSE`, and for every other level the log form,
+    /// the trace under `Stack trace:` where `php_error_cb` gave
+    /// `php_log_err` one; the first fatal's stands.
+    ///
+    /// An `include` that does not compile is a compile error past the
+    /// object standing, which is not destructed:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d\n"; } }
+    /// $d = new D;
+    /// register_shutdown_function(function () { echo "sd\n"; });
+    /// $f = tempnam(sys_get_temp_dir(), 'ce');
+    /// file_put_contents($f, "<?php\nfunction f() {}\nfunction f() {}\n");
+    /// try { include $f; } finally { unlink($f); }
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Cannot redeclare function f() (previously declared in %s:2) in %s on line 3
+    /// sd
+    /// ```
+    pub(super) fn cannot_recover(&mut self, error: ErrorBeneath<'_>) {
+        let ErrorBeneath {
+            level,
+            bail,
+            message,
+            file,
+            line,
+            ..
+        } = error;
+        if !diagnostics::fatal_errors(level) {
+            return;
+        }
         let left_in_log = self.take_left_in_log();
+        if self.bailout && !left_in_log {
+            return;
+        }
         if !left_in_log {
             self.exit_status = 255;
+            if self.display_errors() == Display::Off
+                && !self.output().headers_sent()
+                && self.output().response_code() == 200
+            {
+                let _ =
+                    crate::output::header_add(self, b"HTTP/1.0 500 Internal Server Error", true, 0);
+            }
+            if bail == Bail::Out {
+                self.heap.mark_destructed();
+            }
         }
-        // `php_error_cb`'s arm for what it cannot recover from
-        // (`Z/main/main.c:1517`): with nothing displayed, a response not
-        // yet committed at 200 answers `HTTP/1.0 500 Internal Server Error`.
-        if !left_in_log
-            && self.display_errors() == Display::Off
-            && !self.output().headers_sent()
-            && self.output().response_code() == 200
-        {
-            let _ = crate::output::header_add(self, b"HTTP/1.0 500 Internal Server Error", true, 0);
-        }
-        self.leave_by_zend_bailout();
         if self.ending.is_some() {
             return;
         }
@@ -275,7 +309,7 @@ impl Request {
             return;
         }
         self.note_error_in(level, message, file, line);
-        self.end_at_level(level, message, file, line);
+        self.bail_out();
     }
 
     /// `EG(exit_status) = status`, `ZEND_FUNCTION(exit)`'s int arm: the

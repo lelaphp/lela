@@ -425,7 +425,7 @@ fn serialize_response_call2(
         // error, raised after.
         let carried = |error: crate::Error| match error {
             crate::Error::Thrown(thrown) => Err(thrown),
-            other => Ok(ControlFlow::Break(other)),
+            other @ crate::Error::Fatal { .. } => Ok(ControlFlow::Break(other)),
         };
         let failed = walk::foreach(
             req,

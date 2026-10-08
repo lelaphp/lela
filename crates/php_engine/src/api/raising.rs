@@ -684,6 +684,68 @@ pub fn fatal(req: &mut Request, message: &str) -> Thrown {
     Thrown::of(None)
 }
 
+/// `zend_error(E_ERROR, ...)` with `EG(exception)` set, as php raises
+/// one after a step that threw and that it went on past: the throwable
+/// `pending` carries rendered "Uncaught ..." at `E_WARNING` and given
+/// up, and the fatal raised with no trace fetched
+/// (`Z/Zend/zend.c:1503-1526`); a `pending` that carries a fatal or an
+/// exit is handed back as it is. A WSDL whose stream wrapper threw is the
+/// witness, in `ext/soap`.
+pub fn fatal_while_pending(req: &mut Request, pending: Thrown, message: &str) -> Thrown {
+    if pending.exception().is_none() {
+        return pending;
+    }
+    req.leave_pending(&pending);
+    fatal(req, message)
+}
+
+/// What a hook that answers nothing threw, left in php's
+/// `EG(exception)` for the engine to find where the hook returns: the
+/// `Thrown`'s owner is the slot's from here, or, while something stands
+/// pending already or a fatal is leaving, given up, as
+/// `zend_throw_exception_internal` keeps one throwable. soap's link of
+/// `zend_error_cb` leaves a throwing client's fault here before the
+/// request bails out, for the client's `zend_catch` ([`catch_fatal`]);
+/// its witness is in `ext/soap`.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "a sink: the caller's owner moves into the slot, and the type says so"
+)]
+pub fn leave_pending(req: &mut Request, thrown: Thrown) {
+    req.leave_pending(&thrown);
+}
+
+/// `zend_catch` for the native that stands in a `zend_try`, as
+/// `SOAP_CLIENT_END_CODE` stands around a client's call
+/// (`Z/ext/soap/soap.c:105-128`): where a fatal is leaving by
+/// `zend_bailout` while what php's `EG(exception)` holds, still pending
+/// or handed back in `thrown` by the callback the fatal left, is an
+/// instance of `class`, the fatal ends here and that throwable is the
+/// `Ok`, taken off the request for the native to hand on, as the call
+/// returns with it pending; the frames the fatal left are gone already.
+/// Anything else is the `Err`, `thrown` handed back as it is: a
+/// throwable or an exit, or a fatal leaving on for the next `zend_try`
+/// out, as the `zend_catch` bails out again. A client's fault thrown
+/// over the engine's fatal is the witness, in `ext/soap`.
+pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thrown, Thrown> {
+    if !req.bailing_out() || req.unwind_exit() {
+        return Err(thrown);
+    }
+    let held = thrown.exception().copied();
+    let caught = held.or_else(|| req.pending()).filter(|throwable| {
+        req.class_named(class.as_bytes())
+            .is_some_and(|class| req.instance_of(throwable.class(), class))
+    });
+    let Some(throwable) = caught else {
+        return Err(thrown);
+    };
+    req.catch_bailout();
+    if held.is_none() {
+        req.take_pending_view();
+    }
+    Ok(Thrown::of(Some(throwable)))
+}
+
 /// Throw a new instance of `class` with `message`, `zend_throw_exception`.
 /// A throwable the memory limit refuses to build is the fatal that ends
 /// the request, already recorded, and the `Thrown` says so. The

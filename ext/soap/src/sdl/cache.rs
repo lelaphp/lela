@@ -1423,28 +1423,10 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
     req.state::<State>().error_code = Some("WSDL");
     // WSDL code: an error leaves here as php's bailout leaves
     // `load_wsdl`, with `SOAP_GLOBAL(error_code)` still `WSDL` and the
-    // client's stream still libxml's, for the fault it becomes.
-    // `soap_real_error_handler` drops every non-fatal diagnostic a
-    // throwing client raises under the `WSDL` code: none shown, none
-    // left for `error_get_last()`.
-    let mute = mutes_wsdl_diagnostics(req);
-    let shown = mute.then(|| {
-        let had = match req.last_error() {
-            Ok(Some(last)) => {
-                last.give_up(req);
-                true
-            }
-            _ => false,
-        };
-        (had, req.set_display_errors(0))
-    });
+    // client's stream still libxml's, for the fault it becomes. What a
+    // throwing client raises meanwhile below the fatal levels, soap's
+    // handler drops ([`crate::server::soap_error_handler`]).
     let loaded = load_wsdl(req, uri);
-    if let Some((had, display)) = shown {
-        req.set_display_errors(display);
-        if !had {
-            req.clear_last_error();
-        }
-    }
     let sdl = match loaded {
         Ok(sdl) => sdl,
         Err(e) => {
@@ -1453,7 +1435,7 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
             if let Some(orig) = orig_context {
                 orig.give_up(req);
             }
-            return Err(e.coded("WSDL"));
+            return Err(e);
         }
     };
     req.state::<State>().error_code = old_error_code;
@@ -1461,19 +1443,6 @@ fn fetch(req: &mut Request, this: PhpObject, uri: &[u8], uri_len: usize) -> Res<
         new_context.give_up(req);
     }
     Ok(sdl)
-}
-
-/// Whether the running object is a client that throws, under which
-/// `soap_real_error_handler` drops the `WSDL` code's warnings.
-fn mutes_wsdl_diagnostics(req: &mut Request) -> bool {
-    let Some(object) = req.state::<State>().error_object else {
-        return false;
-    };
-    crate::shared::instance_of(req, object, "SoapClient")
-        && !matches!(
-            crate::shared::client_slot(object, crate::shared::ClientSlot::Exceptions).as_ref(),
-            php_ext::values::ValueRef::Bool(false)
-        )
 }
 
 /// `cache_in_memory`: the description kept in the request's memory

@@ -89,6 +89,15 @@ pub(crate) fn client_slot(object: PhpObject, which: ClientSlot) -> Value {
     slot(object, which as u32)
 }
 
+/// `Z_TYPE_P(Z_CLIENT_EXCEPTIONS_P(client)) != IS_FALSE`: whether the
+/// client throws its faults rather than returning them.
+pub(crate) fn client_throws(client: PhpObject) -> bool {
+    !matches!(
+        client_slot(client, ClientSlot::Exceptions).as_ref(),
+        ValueRef::Bool(false)
+    )
+}
+
 /// A client slot written: `value` is the slot's from here.
 pub(crate) fn set_client_slot(
     req: &mut Request,

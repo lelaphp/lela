@@ -15,12 +15,11 @@ use crate::model::{
     ExtraAttribute, Form, RestrictionChar, RestrictionInt, Sdl, ToXml, ToZval, Type, TypeId,
     TypeKind, XSD_1999_NAMESPACE, XSD_DRAFT_2000_NAMESPACE, XSD_NAMESPACE, get_conversion, ty,
 };
-use crate::sdl::wsdl::{Ctx, sdl_restore_uri_credentials, sdl_set_uri_credentials};
+use crate::sdl::wsdl::{Ctx, parse_with_credentials};
 use crate::sdl::{get_encoder, nscat};
 use crate::table::{Key, Table};
 use crate::xml::{
-    attr_content, attr_is_equal, attribute, get_node, href, node_is_equal_one_of,
-    parse_file_before_fatal, parse_namespace,
+    attr_content, attr_is_equal, attribute, get_node, href, node_is_equal_one_of, parse_namespace,
 };
 use crate::{Error, Res, soap_error};
 
@@ -245,12 +244,13 @@ fn schema_load_file(
     if ctx.docs.contains(&Key::Str(location.clone())) {
         return Ok(());
     }
-    sdl_set_uri_credentials(req, ctx, &location)?;
-    let parsed = parse_file_before_fatal(req, &location);
-    sdl_restore_uri_credentials(req, ctx)?;
+    let (doc, pending) = parse_with_credentials(req, ctx, &location)?;
     let loc = lossy(&location).into_owned();
-    let Some(doc) = parsed? else {
-        return Err(schema_error(&format!("can't import schema from '{loc}'")));
+    let Some(doc) = doc else {
+        return Err(Error::soap_after(
+            format_args!("Parsing Schema: can't import schema from '{loc}'"),
+            pending,
+        ));
     };
     let Some(schema) = get_node(doc.children(), b"schema", None) else {
         doc.free_document();

@@ -654,14 +654,22 @@ impl Raised {
         if last.is_null() {
             return None;
         }
+        // The stored record outlives the parser and the node it names, so
+        // it is read through a copy that names neither: its strings are
+        // the record's own and live while it stands.
+        // SAFETY: `last` is the thread's live, aligned record.
+        let mut copy = unsafe { ptr::read(last) };
+        copy.ctxt = ptr::null_mut();
+        copy.node = ptr::null_mut();
         let mut call = Call {
             raised: Vec::new(),
             routing: None,
             io: ptr::null_mut(),
             parent: ptr::null_mut(),
         };
-        // SAFETY: `collect` reads the live error into `call`.
-        unsafe { collect((&raw mut call).cast(), last) };
+        // SAFETY: `collect` reads the copy, whose strings are the live
+        // record's, into `call`.
+        unsafe { collect((&raw mut call).cast(), &raw mut copy) };
         call.raised.pop().filter(|e| e.code != 0)
     }
 

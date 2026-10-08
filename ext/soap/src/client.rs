@@ -7,7 +7,7 @@ use php_ext::abi::{ConstArray, ConstValue, Instance, Ref, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, lookup_function};
 use php_ext::coerce::{to_long, value_name};
-use php_ext::raising::{Level, Thrown, argument_error, docref, fatal, throw_value};
+use php_ext::raising::{Level, Thrown, argument_error, catch_fatal, docref, throw_value};
 use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{
     Key as PhpKey, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef, walk,
@@ -21,10 +21,10 @@ use crate::message::{
 };
 use crate::model::{BindingType, Sdl};
 use crate::shared::{
-    ClientSlot, add_soap_fault, add_soap_fault_ex, client_slot, instance_of, is_null,
-    new_sdl_object, sdl_of, set_client_slot,
+    ClientSlot, add_soap_fault, add_soap_fault_ex, client_slot, client_throws, instance_of,
+    is_null, new_sdl_object, sdl_of, set_client_slot,
 };
-use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State};
+use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, raised};
 
 type R<T> = Result<T, Thrown>;
 
@@ -82,61 +82,92 @@ fn end(req: &mut Request, saved: &Saved) {
     state.soap_version = saved.soap_version;
 }
 
-/// What `soap_real_error_handler` makes of an `E_ERROR` a client raised:
-/// a fault in its `__soap_fault`, thrown, where the client throws; the
-/// fatal itself otherwise.
-fn settle<T>(req: &mut Request, this: PhpObject, r: Res<T>) -> R<T> {
-    match r {
-        Ok(v) => Ok(v),
-        Err(Error::Thrown(t)) => Err(t),
-        Err(Error::Fatal(message)) => {
-            let code = req.state::<State>().error_code.unwrap_or("Client");
-            fail(req, this, code, &message)
-        }
-        Err(Error::FatalCoded(code, message)) => fail(req, this, code, &message),
-    }
-}
-
-/// The fault a client's fatal becomes: thrown, or the fatal itself where
-/// the client does not throw.
-fn fail<T>(req: &mut Request, this: PhpObject, code: &str, message: &str) -> R<T> {
-    {
-        {
-            let exceptions = !matches!(
-                client_slot(this, ClientSlot::Exceptions).as_ref(),
-                ValueRef::Bool(false)
-            );
-            if exceptions {
-                let fault = add_soap_fault_ex(
-                    req,
-                    this,
-                    code.as_bytes(),
-                    message.as_bytes(),
-                    None,
-                    None,
-                    b"en",
-                )?;
-                let thrown = throw_value(req, &fault.as_value());
-                fault.give_up(req);
-                Err(thrown)
-            } else {
-                Err(fatal(req, message))
-            }
-        }
-    }
-}
-
-/// An `E_ERROR` raised outside `SOAP_CLIENT_BEGIN_CODE`: the soap
-/// handler's where one is installed, the plain fatal otherwise.
-fn unwrapped<T>(req: &mut Request, this: PhpObject, r: Res<T>) -> R<T> {
-    if req.state::<State>().use_soap_error_handler {
-        return settle(req, this, r);
-    }
-    match r {
-        Ok(v) => Ok(v),
-        Err(Error::Thrown(t)) => Err(t),
-        Err(Error::Fatal(m) | Error::FatalCoded(_, m)) => Err(fatal(req, &m)),
-    }
+/// `SOAP_CLIENT_END_CODE`'s `zend_catch`: a fatal raised in the call,
+/// which soap's handler made the `SoapFault` a throwing client throws
+/// before the request bailed out ([`crate::server::soap_error_handler`]),
+/// is caught here, and the call leaves with the fault; any other fatal
+/// bails out on past the call. The fatal's own frames are left as php
+/// leaves them, no `finally` served, and `error_get_last()` keeps what
+/// it had:
+///
+/// ```php
+/// class C extends SoapClient {
+///     function __doRequest($r, $l, $a, $v, $o = false, $u = null): ?string {
+///         try { echo $undefined; trigger_error("boom", E_USER_ERROR); } finally { echo "not served\n"; }
+///     }
+/// }
+/// register_shutdown_function(function () { echo "shutdown\n"; });
+/// $c = new C(null, ['location' => 'http://x/', 'uri' => 'u']);
+/// try { $c->f(); } catch (SoapFault $e) { echo $e->faultcode, ": ", $e->getMessage(), "\n"; }
+/// var_dump(error_get_last()["message"]);
+/// $c = new C(null, ['location' => 'http://x/', 'uri' => 'u', 'exceptions' => false]);
+/// $c->f();
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $undefined in %s on line 4
+///
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 4
+/// Client: boom
+/// string(126) "Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead"
+///
+/// Warning: Undefined variable $undefined in %s on line 4
+///
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 4
+///
+/// Fatal error: boom in %s on line 4
+/// shutdown
+/// ```
+///
+/// What the callback held is not released as the fatal leaves it, so
+/// its destructor is served at shutdown, after the program:
+///
+/// ```php
+/// class D { function __construct(public $n) {} function __destruct() { echo "d ", $this->n, "\n"; } }
+/// class C extends SoapClient {
+///     function __doRequest($r, $l, $a, $v, $o = false, $u = null): ?string { $inner = new D("inner"); trigger_error("boom", E_USER_ERROR); }
+/// }
+/// $outer = new D("outer");
+/// $c = new C(null, ['location' => 'http://x/', 'uri' => 'u']);
+/// try { $c->f(); } catch (SoapFault $e) { echo get_class($e), " ", $e->faultstring, "\n"; }
+/// unset($outer);
+/// echo "end\n";
+/// ```
+/// ```expect exit=0
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 4
+/// SoapFault boom
+/// d outer
+/// end
+/// d inner
+/// ```
+///
+/// A response whose decoding meets the engine's fatal, in a typemap's
+/// `from_xml`, is the same fault thrown, or the fatal where the client
+/// does not throw:
+///
+/// ```php
+/// $w = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:tns="urn:t" targetNamespace="urn:t"><message name="q"/><message name="r"><part name="r" type="xsd:string"/></message><portType name="P"><operation name="f"><input message="tns:q"/><output message="tns:r"/></operation></portType><binding name="B" type="tns:P"><soap:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/><operation name="f"><soap:operation soapAction="f"/><input><soap:body use="encoded" namespace="urn:t" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></input><output><soap:body use="encoded" namespace="urn:t" encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"/></output></operation></binding><service name="S"><port name="p" binding="tns:B"><soap:address location="http://x/"/></port></service></definitions>';
+/// class C extends SoapClient { function __doRequest($r, $l, $a, $v, $o = false, $u = null): ?string { return '<e:Envelope xmlns:e="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><e:Body><m:fResponse xmlns:m="urn:t"><r xsi:type="xsd:string">v</r></m:fResponse></e:Body></e:Envelope>'; } }
+/// $tm = [['type_ns' => 'http://www.w3.org/2001/XMLSchema', 'type_name' => 'string', 'from_xml' => function ($x) { trigger_error("in from_xml", E_USER_ERROR); }]];
+/// foreach ([true, false] as $ex) {
+///     $c = new C('data://text/plain;base64,' . base64_encode($w), ['typemap' => $tm, 'exceptions' => $ex, 'cache_wsdl' => WSDL_CACHE_NONE]);
+///     try { var_dump($c->f()); } catch (SoapFault $e) { echo $e->faultcode, ": ", $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect exit=255
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 4
+/// Client: in from_xml
+///
+/// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 4
+///
+/// Fatal error: in from_xml in %s on line 4
+/// ```
+fn end_code<T>(req: &mut Request, r: Res<T>) -> R<T> {
+    let thrown = match raised(req, r) {
+        Err(thrown) => thrown,
+        ok => return ok,
+    };
+    Err(catch_fatal(req, thrown, "SoapFault").unwrap_or_else(|thrown| thrown))
 }
 
 /// `php_error_docref(NULL, E_ERROR, ...)`.
@@ -274,7 +305,7 @@ impl SoapClient {
         let saved = begin(req, object);
         let given = req.argument_count() > 1;
         let r = construct(req, object, wsdl, given.then_some(options));
-        let r = settle(req, object, r);
+        let r = end_code(req, r);
         end(req, &saved);
         r
     }
@@ -361,8 +392,7 @@ impl SoapClient {
                 // are read under the borrowed request.
                 let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
-                    let e = docref_error(req, "Invalid SOAP header");
-                    return unwrapped(req, object, Err(e));
+                    return Err(docref_error(req, "Invalid SOAP header").raise(req));
                 }
                 Some(list)
             }
@@ -554,7 +584,7 @@ impl SoapClient {
         };
         // An `E_ERROR` reaches the soap handler only while a client or a
         // server runs; called on its own it is the plain fatal.
-        let answered = unwrapped(req, object, answered)?;
+        let answered = raised(req, answered)?;
         match answered {
             Some(body) => Ok(Some(PhpString::new(req, &body)?)),
             None => Ok(None),
@@ -663,8 +693,7 @@ impl SoapClient {
                 // (`Z/ext/soap/soap.c:2906`) reads the rows only.
                 let list: Vec<Value> = walk::rows(req, *a).map(|(_, v)| v.deref()).collect();
                 if !verify_soap_headers(req, &list) {
-                    let e = docref_error(req, "Invalid SOAP header");
-                    return unwrapped(req, object, Err(e));
+                    return Err(docref_error(req, "Invalid SOAP header").raise(req));
                 }
                 let headers = Owner::take(req, headers);
                 set_client_slot(req, object, ClientSlot::DefaultHeaders, headers)?;
@@ -1219,7 +1248,7 @@ fn do_soap_call(
         output_headers,
         soap_version,
     );
-    let r = settle(req, this, r);
+    let r = end_code(req, r);
     let state = req.state::<State>();
     state.features = old_features;
     state.typemap = old_typemap;
@@ -1421,10 +1450,7 @@ fn soap_call_body(
     };
     if let ValueRef::Object(o) = return_value.as_ref()
         && instance_of(req, *o, "SoapFault")
-        && !matches!(
-            client_slot(this, ClientSlot::Exceptions).as_ref(),
-            ValueRef::Bool(false)
-        )
+        && client_throws(this)
     {
         let thrown = throw_value(req, &return_value);
         return_value.give_up(req);

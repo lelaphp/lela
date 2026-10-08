@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::api::abi::{AfterLog, Callable, IniStage};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
+use crate::supplied::{Bail, ErrorBeneath};
 
 use super::{Phase, Raised, Request, ini_atol, ini_truth, zone};
 
@@ -608,7 +609,7 @@ impl Request {
         crate::observer::error(self, level, file, line, string.as_bytes());
         let served = !self.user_error_handler(level, string, file, line);
         if served {
-            self.zend_error_cb(level, string, message, file, line);
+            self.zend_error_cb(level, Bail::Out, string, message, file, line);
         }
         if made {
             self.release(Value::string(string));
@@ -625,15 +626,17 @@ impl Request {
     pub(super) fn zend_error_cb(
         &mut self,
         level: Level,
+        bail: Bail,
         string: PhpString,
         message: &str,
         file: &[u8],
         line: u32,
     ) {
         let shared = Arc::clone(&self.shared);
-        let top = crate::supplied::ErrorBeneath {
+        let top = ErrorBeneath {
             links: shared.supplied.error.links(),
             level,
+            bail,
             string,
             message,
             file,
@@ -671,7 +674,28 @@ impl Request {
     /// 160
     /// 376
     /// ```
-    pub(crate) fn php_error_cb(
+    ///
+    /// Then its last arm, for a level it cannot recover from
+    /// ([`Request::cannot_recover`]): the status, the `500` header and
+    /// the store marked destructed are `php_error_cb`'s, so a link of
+    /// `zend_error_cb` that does not serve it, as soap's serves a
+    /// throwing client's fatal, leaves by `zend_bailout` alone.
+    pub(crate) fn php_error_cb(&mut self, error: ErrorBeneath<'_>) {
+        let ErrorBeneath {
+            level,
+            string,
+            message,
+            file,
+            line,
+            ..
+        } = error;
+        self.stored_and_shown(level, string, message, file, line);
+        self.cannot_recover(error);
+    }
+
+    /// `php_error_cb` up to its last arm: the diagnostic stored unless it
+    /// repeats, then logged and displayed unless masked.
+    fn stored_and_shown(
         &mut self,
         level: Level,
         string: PhpString,

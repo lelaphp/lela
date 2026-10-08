@@ -1097,7 +1097,7 @@ fn class_alias(
             String::from_utf8_lossy(&lowered)
         );
         req.note_error(php_unit::Level::CompileError, &message);
-        req.bail_out(php_unit::Level::CompileError, &message);
+        req.bail_out();
         return Err(Thrown::of(None));
     }
     if lowered == b"_" {

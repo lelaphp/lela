@@ -2,8 +2,9 @@
 //! `Parser::soap`, and the node and attribute lookups every other file
 //! walks a tree with.
 
-use php_ext::raising::{Level, Thrown, uncaught_at};
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Kind, Node, Ns, Parser, Source};
 
 /// `is_blank`: only spaces, tabs, newlines and carriage returns.
@@ -45,14 +46,36 @@ pub(crate) fn cleanup_xml_node(node: Node) {
 /// `soap_xmlParseFile`: the document at `filename`, opened through the
 /// request's streams, cleaned of insignificant nodes; none where it was
 /// not well formed. What a program's stream code threw is the `Err`.
+/// What libxml raised meanwhile reaches php's handler as
+/// `php_libxml_ctx_error` raises it, through soap's, which drops a
+/// throwing client's while it loads its WSDL: the `I/O warning` of a
+/// WSDL that is not there is shown where the client does not throw.
+///
+/// ```php
+/// try { new SoapClient('/nonexistent.wsdl', ['cache_wsdl' => WSDL_CACHE_NONE]); }
+/// catch (SoapFault $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(error_get_last());
+/// new SoapClient('/nonexistent.wsdl', ['exceptions' => false, 'cache_wsdl' => WSDL_CACHE_NONE]);
+/// ```
+/// ```expect exit=255
+/// SOAP-ERROR: Parsing WSDL: Couldn't load from '/nonexistent.wsdl' : failed to load external entity "/nonexistent.wsdl"
+///
+/// NULL
+///
+/// Warning: SoapClient::__construct(): I/O warning : failed to load external entity "/nonexistent.wsdl" in %s on line 5
+///
+/// Fatal error: SOAP-ERROR: Parsing WSDL: Couldn't load from '/nonexistent.wsdl' : failed to load external entity "/nonexistent.wsdl"
+///  in %s on line 5
+/// ```
 pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<Node>, Thrown> {
-    let (doc, _raised, thrown) = Parser::soap(req, Source::File(filename));
+    let (doc, raised, thrown) = Parser::soap(req, Source::File(filename));
     if let Some(t) = thrown {
         if let Some(d) = doc {
             d.free_document();
         }
         return Err(t);
     }
+    Errors::route(req, raised);
     if let Some(d) = doc {
         cleanup_xml_node(d);
     }
@@ -61,34 +84,49 @@ pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<No
 
 /// [`parse_file`] where the caller's `NULL` is an `E_ERROR`, a WSDL's or
 /// an imported schema's: what a stream wrapper threw stays pending in
-/// php, and `zend_error` renders it "Uncaught ..." at `E_WARNING` and
-/// gives it up before the fatal (`Z/Zend/zend.c:1518`), so the parse
-/// answers none. Under a client that throws, the warning is one the soap
-/// handler drops while a WSDL is parsed, and the fault is all there is.
+/// php, so the parse answers none and the throwable is handed back
+/// beside it for the fatal to be raised after ([`crate::Error::soap_after`]),
+/// which renders it "Uncaught ..." at `E_WARNING`, gives it up and
+/// fetches no trace (`Z/Zend/zend.c:1503-1526`). Under a client that
+/// throws, the warning is one the soap handler drops while a WSDL is
+/// parsed, and the fault is all there is; under one that does not, the
+/// fatal carries no `Stack trace:`, `fatal_error_backtraces` on or off.
 ///
 /// ```php
-/// class W { public $context; function stream_open($p, $m, $o, &$x) { throw new RuntimeException("open $p"); } function url_stat($p, $f) { return []; } }
+/// ini_set('fatal_error_backtraces', '1'); class W { public $context; function stream_open($p, $m, $o, &$x) { throw new RuntimeException("open $p"); } function url_stat($p, $f) { return []; } }
 /// stream_wrapper_register('boom', 'W');
 /// $i = '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:t"><xsd:import namespace="urn:u" schemaLocation="boom://s.xsd"/></xsd:schema>';
 /// foreach (["<types>$i</types>", '<import namespace="urn:v" location="boom://w.wsdl"/>'] as $body) {
 ///     try { new SoapClient('data://text/plain,' . urlencode("<definitions xmlns='http://schemas.xmlsoap.org/wsdl/' targetNamespace='urn:t'>$body</definitions>"), ['cache_wsdl' => WSDL_CACHE_NONE]); }
 ///     catch (SoapFault $e) { var_dump($e->getMessage(), $e->getPrevious()); }
 /// }
+/// new SoapClient('data://text/plain,' . urlencode("<definitions xmlns='http://schemas.xmlsoap.org/wsdl/' targetNamespace='urn:t'><import namespace='urn:v' location='boom://w.wsdl'/></definitions>"), ['cache_wsdl' => WSDL_CACHE_NONE, 'exceptions' => false]);
 /// ```
-/// ```expect
+/// ```expect exit=255
 /// string(67) "SOAP-ERROR: Parsing Schema: can't import schema from 'boom://s.xsd'"
 /// NULL
 /// string(110) "SOAP-ERROR: Parsing WSDL: Couldn't load from 'boom://w.wsdl' : failed to load external entity "boom://w.wsdl"
 /// "
 /// NULL
+///
+/// Warning: Uncaught RuntimeException: open boom://w.wsdl in %s:2
+/// Stack trace:
+/// #0 [internal function]: W->stream_open('boom://w.wsdl', 'rb', 0, NULL)
+/// #1 %s(9): SoapClient->__construct('data://text/pla...', Array)
+/// #2 {main}
+///   thrown in %s on line 2
+///
+/// Fatal error: SOAP-ERROR: Parsing WSDL: Couldn't load from 'boom://w.wsdl' : failed to load external entity "boom://w.wsdl"
+///  in %s on line 9
 /// ```
 pub(crate) fn parse_file_before_fatal(
     req: &mut Request,
     filename: &[u8],
-) -> Result<Option<Node>, Thrown> {
+) -> Result<(Option<Node>, Option<Thrown>), Thrown> {
     match parse_file(req, filename) {
-        Err(t) => uncaught_at(req, t, Level::Warning).map(|()| None),
-        r => r,
+        Ok(doc) => Ok((doc, None)),
+        Err(t) if t.exception().is_some() => Ok((None, Some(t))),
+        Err(t) => Err(t),
     }
 }
 

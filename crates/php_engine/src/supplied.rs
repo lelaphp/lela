@@ -415,6 +415,7 @@ impl<'a> StringBeneath<'a> {
 pub struct ErrorBeneath<'a> {
     pub(crate) links: &'a [ErrorHook],
     pub(crate) level: Level,
+    pub(crate) bail: Bail,
     pub(crate) string: PhpString,
     pub(crate) message: &'a str,
     pub(crate) file: &'a [u8],
@@ -451,9 +452,21 @@ impl<'a> ErrorBeneath<'a> {
     pub fn serve(self, req: &mut Request) {
         match self.links.split_last() {
             Some((link, links)) => link(req, ErrorBeneath { links, ..self }),
-            None => req.php_error_cb(self.level, self.string, self.message, self.file, self.line),
+            None => req.php_error_cb(self),
         }
     }
+}
+
+/// Whether `php_error_cb` bails out of a level it cannot recover from,
+/// php's `E_DONT_BAIL` bit on the type it is handed: set by
+/// `zend_exception_error` on the uncaught throwable it renders
+/// (`Z/Zend/zend_exceptions.c:951`, `:999`), under which the status is
+/// written and the store is not marked destructed
+/// (`Z/main/main.c:1528`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bail {
+    Out,
+    DontBail,
 }
 
 /// A list each supplier appends to, served in supplier order.
