@@ -9,5 +9,8 @@ each (run-tests.php:1537-1541, #1091), and the names put `one.phpt` and
 so the keys and not the batches hold them apart. `b-alone/all.phpt` names `all` and runs with nothing
 beside it. `c-directory/CONFLICTS` gives `one.phpt` and `two.phpt` the key
 `directory`, and `own.phpt`'s own section, `own`, stands in its place, so it
-runs beside them. Held by `xtask/src/phpt/tests.rs` and, for the keys alone,
+runs beside them. Each control pair, `free1.phpt` and `z-free.phpt`, `own.phpt`
+and `c-directory/two.phpt`, leaves a `.here` file and waits, ten seconds at
+most, for the other's, so the pair's overlap is made by the files and not won
+against the load (#1105). Held by `xtask/src/phpt/tests.rs` and, for the keys alone,
 `xtask/src/phpt/file.rs`.

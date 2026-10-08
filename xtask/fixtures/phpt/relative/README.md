@@ -6,5 +6,7 @@ readgzfile_basic.phpt and readgzfile_basic2.phpt make `readgzfile_temp`
 (#1091); run at once, one of them fails on `mkdir(): File exists`. Three tests
 on a pool of eight make batches of two, so the pair shares one and
 `c-free.phpt` runs beside it in its own, the negative control that shows the
-pool runs anything at once at all. Each program writes the span it ran over
-beside itself. Held by `xtask/src/phpt/tests.rs`.
+pool runs anything at once at all. `a-temp.phpt` and `c-free.phpt` each leave
+a `.here` file and wait, ten seconds at most, for the other's, so their
+overlap is made by the files and not won against the load (#1105). Each
+program writes the span it ran over beside itself. Held by `xtask/src/phpt/tests.rs`.

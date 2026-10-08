@@ -999,10 +999,15 @@ struct Made {
 /// Wait for the test's program to print its pid and the private queues
 /// that appeared between its two reads of `ipcs -q` at `started`, read
 /// its objects off the machine, have `perl` make a private segment and a
-/// keyed queue, and mark `made` so the program ends.
+/// keyed queue, and mark `made` so the program ends. The wait for
+/// `started` is the recipe's limit, 60 s, past which the program is gone
+/// anyway: it covers the run's start and the program's, which took 1.4 s
+/// to 3.0 s at a load average of 70 and outgrew the 5 s it had beside the
+/// file's other tests (#2280). The program waits for `made` 30 s, inside
+/// the same limit.
 fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
     let mut printed = String::new();
-    for _ in 0..500 {
+    for _ in 0..6000 {
         printed = fs::read_to_string(started).unwrap_or_default();
         if !printed.is_empty() {
             break;
@@ -1091,7 +1096,7 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
     let marks = Tree::new("phpt-sysv-marks").unwrap();
     let (started, made) = (marks.join("started"), marks.join("made"));
     let leaves = format!(
-        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\n$m = shmop_open(0, \"c\", 0604, 64);\n$s = sem_get(0, 1, 0604);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid(), 0604);\nmsg_send($q, 1, \"x\");\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$unused = msg_get_queue(0);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\nfor ($i = 0; $i < 500 && !file_exists('{}'); $i++) usleep(10000);\necho \"left\";\n--EXPECT--\nleft\n",
+        "--TEST--\nleaves a segment, a semaphore set and a queue\n--FILE--\n<?php\n$m = shmop_open(0, \"c\", 0604, 64);\n$s = sem_get(0, 1, 0604);\nsem_acquire($s);\n$q = msg_get_queue(0x5a000000 + getmypid(), 0604);\nmsg_send($q, 1, \"x\");\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$unused = msg_get_queue(0);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\nfor ($i = 0; $i < 3000 && !file_exists('{}'); $i++) usleep(10000);\necho \"left\";\n--EXPECT--\nleft\n",
         started.display(),
         made.display()
     );

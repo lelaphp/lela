@@ -20,3 +20,6 @@ workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
+# The calling thread's CPU clock, so the linear-time test measures the
+# parse and not the load beside it (#2205).
+nix = { workspace = true, features = ["time"] }

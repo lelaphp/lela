@@ -316,19 +316,22 @@ fn a_missed_expectation_fails_with_the_difference() {
 
 #[test]
 fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
+    // Room for the quick tests' php to start under any load the machine
+    // runs at; one second was not, at a load average of 48 to 75 (#1105).
+    const LIMIT: u64 = 10;
     if oracle().is_none() {
         return;
     }
     // Three tests in order, the middle one a program that never ends and
-    // says first which process it is. Under a limit of one second it is
-    // that test's fail, naming the limit; the process is killed and
-    // reaped, not left running; and the test after it is still judged
-    // (#691). Before, the limit ended the whole run and took every
-    // verdict with it.
+    // says first which process it is. Under the limit it is that test's
+    // fail, naming the limit; the process is killed and reaped, not left
+    // running; and the test after it is still judged (#691). Before, the
+    // limit ended the whole run and took every verdict with it. The
+    // program sleeps rather than spins, so its wait adds no load.
     let (tree, subset) = subset("past-limit", &[]);
     let pid = tree.path().join("pid");
     let hangs = format!(
-        "--TEST--\nNever ends\n--FILE--\n<?php file_put_contents({:?}, getmypid()); while (true) {{}}\n--EXPECT--\nnothing\n",
+        "--TEST--\nNever ends\n--FILE--\n<?php file_put_contents({:?}, getmypid()); while (true) {{ sleep(1); }}\n--EXPECT--\nnothing\n",
         pid.display().to_string()
     );
     let echo = |n: u8| format!("--TEST--\nn{n}\n--FILE--\n<?php echo {n};\n--EXPECT--\n{n}\n");
@@ -337,7 +340,7 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     fs::write(tree.join("c.phpt"), echo(3)).unwrap();
     let binary = oracle().unwrap();
     let mut manifest = manifest();
-    manifest.pin.recipe.limits.timeout_s = 1;
+    manifest.pin.recipe.limits.timeout_s = LIMIT;
     let oracle = manifest.pin.oracle();
     let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
@@ -366,7 +369,10 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
         "{tally:#?}"
     );
     let note = &tally.judged[1].note;
-    assert!(note.contains("the recipe's limit of 1 s"), "{note}");
+    assert!(
+        note.contains(&format!("the recipe's limit of {LIMIT} s")),
+        "{note}"
+    );
     assert_eq!(tally.against(), ["b.phpt"]);
     assert_eq!(tally.judged[1].miss, Some(miss::Miss::past_limit()));
     // The process the test ran is gone: `kill -0` finds no process by
@@ -1625,6 +1631,18 @@ fn overlap(a: (f64, f64), b: (f64, f64)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// The `.here` files a fixture's control pair leaves, each waiting a
+/// bounded time for the other's, removed before a run, so the pair meets
+/// on this run's files and not on a run's before it (#1105).
+fn clear_here(tree: &Tree, tests: &[&str]) {
+    for test in tests {
+        let here = tree.join(test).with_extension("php.here");
+        if here.exists() {
+            fs::remove_file(&here).unwrap();
+        }
+    }
+}
+
 /// The fixture at `xtask/fixtures/phpt/conflicts` (#938), on a pool of
 /// eight, which cuts its seven tests that do not run alone into batches of
 /// two neighbours: the two tests naming `shared` never run at once, the one
@@ -1632,9 +1650,11 @@ fn overlap(a: (f64, f64), b: (f64, f64)) -> bool {
 /// its two tests apart, and a test's own section stands in place of that
 /// file. The pairs held apart stand in two batches each, so what holds them
 /// is the key. The negative controls are the tests naming no key, which
-/// run at once, and `own.phpt`, which runs beside the directory's second.
-/// The verdicts, in order and word for word, are the ones a pool of one
-/// reaches.
+/// run at once, and `own.phpt`, which runs beside the directory's second;
+/// each pair waits, bounded, for the other's `.here` file, so they meet
+/// however long the load holds one up and not by the clock (#1105). The
+/// verdicts, in order and word for word, are the ones a pool of one
+/// reaches, which finds the pooled run's `.here` files and waits on none.
 #[test]
 fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() {
     if oracle().is_none() {
@@ -1687,11 +1707,12 @@ fn tests_that_conflict_never_run_at_once_and_the_verdicts_are_the_serial_runs() 
 /// judged them at once. On a pool of eight the three tests are cut into
 /// batches of two, as run-tests.php cuts them (run-tests.php:1537-1541),
 /// so the pair is judged one after the other and both pass, run after run;
-/// the third, in a batch of its own, runs beside the pair's first on some
-/// run, the negative control that shows the pool runs anything at once
-/// at all. The control is held on one run of the twenty and not on each:
-/// under load a worker can start the third after the first has ended,
-/// which says nothing about the batches (#1152).
+/// the third, in a batch of its own, runs beside the pair's first, the
+/// negative control that shows the pool runs anything at once at all.
+/// The control is held on every run: the first and the third each wait,
+/// bounded, for the other's `.here` file, so they meet however long the
+/// load holds one up, where a race against the clock lost under load
+/// (#1152, #1105).
 #[test]
 fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
     if oracle().is_none() {
@@ -1699,8 +1720,8 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
     }
     let tests = ["a-temp.phpt", "b-temp.phpt", "c-free.phpt"];
     let (tree, subset) = fixture_subset("relative");
-    let mut controls = Vec::new();
     for run in 0..20 {
+        clear_here(&tree, &tests);
         let tally = run_on(&subset, 8, 30);
         assert!(
             tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
@@ -1708,12 +1729,11 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
         );
         let span = spans(&tree, &tests);
         assert!(span[0].1 <= span[1].0, "run {run}, the batch: {span:?}");
-        controls.push(span);
+        assert!(
+            overlap(span[0], span[2]),
+            "run {run}, the control: {span:?}"
+        );
     }
-    assert!(
-        controls.iter().any(|span| overlap(span[0], span[2])),
-        "the control met on no run: {controls:?}"
-    );
 }
 
 /// The fixture at `xtask/fixtures/phpt/past-limit` (#938): a test that
@@ -1808,7 +1828,9 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
 /// the group kill 13 times in 200 at twelve jobs, the oracle's as often as
 /// the engine's. One that still holds the pipe at the limit leaves what
 /// came by then and goes with its group, so it neither holds the run nor
-/// outlives it.
+/// outlives it. The first half's limit is one the 300 ms child meets with
+/// room under any load, since a run read to its end pays none of it; two
+/// seconds was not, at a load average of 80 to 108 (#2293).
 #[test]
 fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
     if oracle().is_none() {
@@ -1826,7 +1848,7 @@ fn a_child_sharing_stdout_is_read_to_the_end_and_killed_at_the_limit() {
         "writes-after",
         &shares(r#"usleep(300000); echo "child\n";"#),
     );
-    let tally = run_on(&subset, 1, 2);
+    let tally = run_on(&subset, 1, 30);
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
 
     let (root, subset) = rooted("holds-past-limit", &shares("sleep(120);"));
