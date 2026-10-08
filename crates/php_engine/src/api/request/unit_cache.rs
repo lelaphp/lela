@@ -65,6 +65,9 @@ pub struct CacheStatus {
     pub oom_restarts: u64,
     /// `ZCSG(hash_restarts)`: restarts the names running out scheduled.
     pub hash_restarts: u64,
+    /// What the files held weigh, in bytes: the preload's and every file
+    /// listed but a discarded one, whose weight is wasted.
+    pub used: u64,
     /// `ZSMMG(wasted_shared_memory)`: what the files discarded since the
     /// last restart weighed, in bytes.
     pub wasted: u64,
@@ -601,6 +604,40 @@ impl UnitCache<'_> {
     /// so a deleted file is invalidated still, and whatever a wrapper's
     /// `url_stat` throws thrown. Whether the file was found, on disk or
     /// in the cache.
+    ///
+    /// A discarded copy stays filed, as php's `corrupted` entry stays in
+    /// its hash: listed with its timestamp zeroed and counted, but cached
+    /// no more, until an include compiles the file again in its place.
+    /// The count is read past what the cache held before the include,
+    /// which leaves out the primary file whether or not it is held:
+    ///
+    /// ```php
+    /// $count = fn() => opcache_get_status()['opcache_statistics']['num_cached_scripts'];
+    /// $f = realpath(sys_get_temp_dir()) . '/inv' . getmypid() . '.inc';
+    /// file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// $before = $count();
+    /// include $f;
+    /// var_dump(opcache_invalidate($f, true), opcache_invalidate($f, true));
+    /// $s = opcache_get_status();
+    /// var_dump(isset($s['scripts'][$f]), $s['scripts'][$f]['timestamp'], $count() - $before, opcache_is_script_cached($f));
+    /// var_dump(include $f, opcache_is_script_cached($f));
+    /// $s = opcache_get_status();
+    /// var_dump($count() - $before, $s['scripts'][$f]['hits'], $s['scripts'][$f]['timestamp'] > 0);
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// int(0)
+    /// int(1)
+    /// bool(false)
+    /// int(1)
+    /// bool(true)
+    /// int(1)
+    /// int(0)
+    /// bool(true)
+    /// ```
     pub fn invalidate(&mut self, written: &[u8], how: Invalidation) -> Result<bool, Thrown> {
         let (path, on_disk) = match self.req.resolve_path(written) {
             Ok(path) => (path, true),

@@ -151,7 +151,9 @@ pub(crate) struct Held {
     /// `dynamic_members.revalidate`: the request time up to which a hit
     /// under a window is served without a stat.
     revalidate: AtomicI64,
-    /// `corrupted`: discarded, its weight counted as wasted once.
+    /// `corrupted`: discarded, its weight counted as wasted once. It
+    /// stays filed and listed, a miss to every lookup, until a compile
+    /// of its path replaces it or the epoch goes.
     discarded: AtomicBool,
 }
 
@@ -212,6 +214,11 @@ impl Held {
             }
             (Validation::EveryHit, stamp) => Due::Exact(stamp),
         }
+    }
+
+    /// Whether it was discarded, which every lookup takes for a miss.
+    fn discarded(&self) -> bool {
+        self.discarded.load(Ordering::Relaxed)
     }
 
     /// Whether a hit under `validation` at `now` is served without a
@@ -385,6 +392,13 @@ pub(crate) enum Filed {
 /// `CG(compiled_filename)` in `accel_preload`).
 pub(crate) const PRELOAD_SCRIPT: &[u8] = b"$PRELOAD$";
 
+/// What the preload weighs in the cache: its pseudo-file and each file
+/// it saved.
+fn preload_weight(preloaded: &Preloaded) -> u64 {
+    let saved = preloaded.scripts.iter().map(|held| held.size);
+    saved.fold(preloaded.statistics.memory_consumption, u64::saturating_add)
+}
+
 /// Now, in whole seconds since the epoch, php's `time_t`.
 pub(crate) fn now() -> i64 {
     SystemTime::now()
@@ -439,7 +453,8 @@ impl UnitCache {
 
     /// The file `files` holds under `key`, a full path or a path as
     /// written: a saved file of the preload first, as php's hash holds
-    /// them.
+    /// them; none for a discarded one, which php's lookups pass over
+    /// (`!persistent_script->corrupted`).
     pub(crate) fn find(&self, files: &Files, key: &UnitKey) -> Option<Arc<Held>> {
         if let Some(held) = self
             .preloaded()
@@ -447,7 +462,7 @@ impl UnitCache {
         {
             return Some(Arc::clone(held));
         }
-        files.held.get(key)
+        files.held.get(key).filter(|held| !held.discarded())
     }
 
     /// `zend_accel_add_key`: `key` filed beside the names `held` is held
@@ -497,10 +512,7 @@ impl UnitCache {
         let Some(budget) = self.budget.get() else {
             return true;
         };
-        let preload = self.preloaded().map_or(0, |preloaded| {
-            let scripts = preloaded.scripts.iter().map(|held| held.size);
-            scripts.fold(preloaded.statistics.memory_consumption, u64::saturating_add)
-        });
+        let preload = self.preloaded().map_or(0, preload_weight);
         let taken = (files.used.load(Ordering::Relaxed))
             .saturating_add(files.wasted.load(Ordering::Relaxed))
             .saturating_add(preload);
@@ -512,12 +524,12 @@ impl UnitCache {
         false
     }
 
-    /// `zend_accel_discard_script`: `held` dropped under every name it is
-    /// filed under, its weight counted as wasted once however many
-    /// requests discard it, and where the memory is exhausted a restart
-    /// scheduled if enough is now wasted.
-    fn discard_held(&self, files: &Files, held: &Arc<Held>) {
-        files.held.remove_all(held);
+    /// `zend_accel_discard_script`: `held` marked discarded where it is
+    /// filed, as php marks it `corrupted` and leaves it in the hash, its
+    /// weight counted as wasted once however many requests discard it,
+    /// and where the memory is exhausted a restart scheduled if enough is
+    /// now wasted.
+    fn discard_held(&self, files: &Files, held: &Held) {
         if held.discarded.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -550,12 +562,13 @@ impl UnitCache {
 
     /// `persistent_compile_file` by the file's full path: the file held
     /// under `path` where `validation` finds it fresh at the request time
-    /// `now`, a hit; else the stale copy discarded under every name it
-    /// was filed under, the file cache asked where there is one, a hit
+    /// `now`, a hit; else the stale copy discarded, the file cache asked
+    /// where there is one, a hit
     /// where it keeps the file as it stands, `decode`d and held under the
     /// full path alone; else a
-    /// miss, the file read and `compile`d, and what it compiled to held,
-    /// or what another request held for the path meanwhile, filed under
+    /// miss, the file read and `compile`d, and what it compiled to held
+    /// in place of a discarded copy, or what another request held for the
+    /// path meanwhile, filed under
     /// `written` too where given, and kept in the file cache. A file
     /// whose stamp the validation or the `protection` needs and the
     /// system does not give, and one written within `protection` seconds
@@ -682,7 +695,7 @@ impl UnitCache {
     /// whose timestamp php keeps at zero, served as held without the
     /// file looked at, whatever the window, and a held file `validation`
     /// finds fresh at `now`; each filed under `written` too. A stale copy
-    /// is discarded under every name it was filed under.
+    /// is discarded, and a discarded one is a miss.
     fn held_hit(
         &self,
         files: &Files,
@@ -703,7 +716,10 @@ impl UnitCache {
             }
             return Some(Arc::clone(held));
         }
-        let stale = files.held.get(&UnitKey::full(path))?;
+        let stale = files
+            .held
+            .get(&UnitKey::full(path))
+            .filter(|held| !held.discarded())?;
         if stale.validated(validation, now) {
             self.hit(&stale, validation, now);
             if let Some(written) = written {
@@ -716,8 +732,10 @@ impl UnitCache {
     }
 
     /// What `read` compiled from the file at `path`, held in `files`
-    /// under its full path; what another request held for it meanwhile
-    /// where it did.
+    /// under its full path, in place of a discarded copy under every name
+    /// that copy was filed under, as `cache_script_in_shared_memory`
+    /// updates the bucket every key of it points to; what another request
+    /// held for it meanwhile where it did.
     fn hold(
         &self,
         files: &Files,
@@ -741,8 +759,9 @@ impl UnitCache {
             Validation::Never | Validation::EveryHit => 0,
         };
         let order = self.taken.fetch_add(1, Ordering::Relaxed);
-        let held = files.held.insert(
+        let held = files.held.insert_over(
             UnitKey::full(path),
+            Held::discarded,
             Held {
                 unit,
                 early,
@@ -768,14 +787,14 @@ impl UnitCache {
         self.blacklist_misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// `zend_accel_invalidate`'s discard of the file held under `key`,
-    /// with every name it is filed under: where `force`, and otherwise
-    /// where it changed since, `do_validate_timestamps` finding it filed
-    /// under another full path, held with no stamp, or written at
-    /// another second. Whether a unit was held under the name at all; a
-    /// refusal is none, as php persists none.
+    /// `zend_accel_invalidate`'s discard of the file held under `key`:
+    /// where `force`, and otherwise where it changed since,
+    /// `do_validate_timestamps` finding it filed under another full path,
+    /// held with no stamp, or written at another second. Whether a unit
+    /// was held under the name at all; a refusal is none, as php
+    /// persists none, and so is a copy discarded already.
     pub(crate) fn discard(&self, files: &Files, key: &UnitKey, force: bool) -> bool {
-        let Some(held) = files.held.get(key) else {
+        let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
             return false;
         };
         if held.unit.is_err() {
@@ -854,7 +873,10 @@ impl UnitCache {
             hits: held.hits.load(Ordering::Relaxed),
             size: held.size,
             last_used: held.last_used.load(Ordering::Relaxed),
-            timestamp: held.stamp.map_or(0, Stamp::seconds),
+            // `zend_accel_discard_script` zeroes a discarded one's.
+            timestamp: (held.stamp)
+                .filter(|_| !held.discarded())
+                .map_or(0, Stamp::seconds),
             revalidate: held.revalidate.load(Ordering::Relaxed),
         };
         // The preload's pseudo-file and its saved scripts stand in the
@@ -873,6 +895,11 @@ impl UnitCache {
             let preloaded = u64::try_from(listed_files.len()).unwrap_or(u64::MAX);
             keys = keys.saturating_add(preloaded);
         }
+        let live = held.iter().filter(|(_, held)| !held.discarded());
+        let used = (live.map(|(_, held)| held.size)).fold(
+            self.preloaded().map_or(0, preload_weight),
+            u64::saturating_add,
+        );
         listed_files.extend(held.into_iter().map(|(_, held)| listed(&held)));
         CacheStatus {
             restart_pending: files.restart_pending(),
@@ -884,6 +911,7 @@ impl UnitCache {
             manual_restarts: self.manual_restarts.load(Ordering::Relaxed),
             oom_restarts: self.oom_restarts.load(Ordering::Relaxed),
             hash_restarts: self.hash_restarts.load(Ordering::Relaxed),
+            used,
             wasted: files.wasted.load(Ordering::Relaxed),
             cache_full: files.exhausted.load(Ordering::Relaxed),
             interned_strings: u64::try_from(interned_strings).unwrap_or(u64::MAX),
