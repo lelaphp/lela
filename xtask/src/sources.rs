@@ -126,8 +126,8 @@ pub(crate) struct Standing {
 }
 
 /// What the files staged outside every crate void, as [`Reach`] sorts
-/// them: the one reading any instrument but `vocab` measures them for,
-/// xtask's, is the standing readings' own business.
+/// them. A file only the harness reads voids xtask's reading alone, which
+/// [`Standing`] drops itself, so it is not among these.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum Outside {
     /// No reading but, at most, xtask's.
