@@ -2450,6 +2450,24 @@ pub trait ObjectHandlers: Send + Sync {
         Ok(req.std_method(object.class(), lowered))
     }
 
+    /// `ce->get_static_method`, asked before `zend_std_get_static_method`
+    /// for a method a call names on the class: `None`, `Std`'s answer,
+    /// leaves the name to the standard lookup. A class that answers a
+    /// name its table has no row for answers a trampoline
+    /// ([`Request::native_static_trampoline`]), as php's test
+    /// extension's `_ZendTestClass` answers `test`; `written` is the name
+    /// as the call wrote it.
+    fn get_static_method(
+        &self,
+        req: &mut Request,
+        class: ClassId,
+        lowered: &[u8],
+        written: &[u8],
+    ) -> Result<Option<Function>, Thrown> {
+        let _ = (req, class, lowered, written);
+        Ok(None)
+    }
+
     /// php's `get_method` as the slot is handed the name the call wrote
     /// beside its lowered key (`zend_object_handlers.h`: `zend_string
     /// *method_name, const zval *key`): a class whose methods are names

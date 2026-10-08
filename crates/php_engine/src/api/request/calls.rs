@@ -1138,17 +1138,45 @@ impl Request {
         name: &[u8],
         entry: crate::api::abi::Entry,
     ) -> Option<Function> {
+        self.native_trampoline_as(name, entry, true)
+    }
+
+    /// [`Request::native_trampoline`] for a call named on the class,
+    /// `ZEND_ACC_STATIC` beside `ZEND_ACC_CALL_VIA_HANDLER`: what a
+    /// class's [`ObjectHandlers::get_static_method`] answers for a name
+    /// its table has no row for.
+    ///
+    /// [`ObjectHandlers::get_static_method`]: crate::api::abi::ObjectHandlers::get_static_method
+    pub fn native_static_trampoline(
+        &mut self,
+        name: &[u8],
+        entry: crate::api::abi::Entry,
+    ) -> Option<Function> {
+        self.native_trampoline_as(name, entry, false)
+    }
+
+    fn native_trampoline_as(
+        &mut self,
+        name: &[u8],
+        entry: crate::api::abi::Entry,
+        is_instance: bool,
+    ) -> Option<Function> {
         let held = self.calls.trampolines.iter().position(|made| {
             matches!(made.via, crate::trampoline::Via::Native(made_entry)
                 if std::ptr::fn_addr_eq(made_entry, entry))
                 && *made.decl.function.name.0 == *name
+                && made.decl.is_instance == is_instance
         });
         let at = if let Some(at) = held {
             at
         } else {
             self.calls
                 .trampolines
-                .push(crate::trampoline::CallTrampoline::native(entry, name));
+                .push(crate::trampoline::CallTrampoline::native(
+                    entry,
+                    name,
+                    is_instance,
+                ));
             self.calls.trampolines.len().checked_sub(1)?
         };
         crate::trampoline::number(at, crate::trampoline::Served::Trampoline)

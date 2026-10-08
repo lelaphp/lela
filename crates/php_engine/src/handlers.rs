@@ -4944,6 +4944,12 @@ fn static_method(
     this: Option<PhpObject>,
 ) -> Result<(Function, bool), Thrown> {
     let name = written.as_str_bytes().unwrap_or_default().to_vec();
+    if let Some(function) = req
+        .handlers_of(class)
+        .get_static_method(req, class, lowered, &name)?
+    {
+        return Ok((function, true));
+    }
     let function = match req.method_named(class, lowered) {
         Some(function) if req.method_accessible(function) => function,
         Some(function) => {

@@ -202,6 +202,7 @@ abi::ObjectHandlers::get_method_as
 abi::ObjectHandlers::get_properties
 abi::ObjectHandlers::get_properties_for
 abi::ObjectHandlers::get_property_ptr_ptr
+abi::ObjectHandlers::get_static_method
 abi::ObjectHandlers::has_dimension
 abi::ObjectHandlers::has_property
 abi::ObjectHandlers::iterator_element
@@ -770,6 +771,7 @@ request::Request::method_row
 request::Request::method_rows
 request::Request::multibyte_provider
 request::Request::named_arguments
+request::Request::native_static_trampoline
 request::Request::native_trampoline
 request::Request::observe_allocations
 request::Request::op_array
