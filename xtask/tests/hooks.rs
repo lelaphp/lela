@@ -531,6 +531,60 @@ fn a_vocab_refusal_ends_the_hook_before_clippy_runs() {
     assert_eq!(scratch.calls("computed"), Vec::<String>::new());
 }
 
+// ---------------------------------------------------------- post-commit, post-merge
+
+/// A merge closes the tickets it names (#2311): a merge `git merge`
+/// commits itself reaches `xtask ticket merged` through post-merge, since
+/// `ORIG_HEAD`; one committed by `git commit` after `--no-commit`, the way
+/// /specs merges, reaches it through post-commit, since `HEAD^1`; and a
+/// commit with one parent reaches it through neither.
+#[test]
+fn a_merge_reaches_ticket_merged_and_a_plain_commit_does_not() {
+    let scratch = scratch("merged", &Computed::Rendered);
+    let main = scratch
+        .git(&["symbolic-ref", "--short", "HEAD"], false)
+        .trim()
+        .to_owned();
+    let merged = |scratch: &Scratch| {
+        scratch
+            .calls("cargo")
+            .into_iter()
+            .filter(|call| call.starts_with("xtask ticket merged"))
+            .collect::<Vec<_>>()
+    };
+    scratch.git(&["commit", "-q", "--allow-empty", "-m", "one parent"], true);
+    assert!(merged(&scratch).is_empty(), "{:?}", scratch.calls("cargo"));
+
+    for n in ["7", "8"] {
+        scratch.git(&["checkout", "-q", "-b", &format!("t{n}"), &main], false);
+        let work = format!("the work of #{n}");
+        scratch.git(&["commit", "-q", "--allow-empty", "-m", &work], false);
+    }
+    scratch.git(&["checkout", "-q", &main], false);
+    scratch.git(
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t7",
+            "-m",
+            "Merge t7: the work (#7)",
+        ],
+        true,
+    );
+    assert_eq!(merged(&scratch), ["xtask ticket merged --since ORIG_HEAD"]);
+
+    scratch.git(&["merge", "-q", "--no-ff", "--no-commit", "t8"], false);
+    scratch.git(&["commit", "-q", "-m", "Merge t8: the work (#8)"], true);
+    assert_eq!(
+        merged(&scratch),
+        [
+            "xtask ticket merged --since ORIG_HEAD",
+            "xtask ticket merged --since HEAD^1"
+        ]
+    );
+}
+
 // ---------------------------------------------------------------- pre-push
 
 /// A bare remote beside the repository, as `origin`.

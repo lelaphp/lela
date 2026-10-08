@@ -1894,11 +1894,17 @@ fn a_refused_close_with_every_box_ticked_is_met_and_a_ticket_with_no_box_is_not(
 /// reading and stays held, naming the box.
 #[test]
 fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
-    use xtask::ticket::{Act, Successors, Verdict as Close};
+    use xtask::ticket::{Act, Reach, Successors, Verdict as Close};
     let root = scratch("withdrawn");
     sh(&root, &["git", "config", "branch.main.ticket", "31"]);
-    let withdrawn =
-        |reason: &str| Act::Close(Close::Withdrawn(reason.to_owned()), Successors::Nothing);
+    let reach = Reach::of(&root).unwrap();
+    let withdrawn = |reason: &str| {
+        Act::Close(
+            Close::Withdrawn(reason.to_owned()),
+            Successors::Nothing,
+            reach.clone(),
+        )
+    };
 
     let reading = ticket_act(
         &root,

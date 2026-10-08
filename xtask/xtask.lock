@@ -305,6 +305,8 @@ ticket::Issue
 ticket::Label
 ticket::Open
 ticket::Open::label_names
+ticket::Reach
+ticket::Reach::of
 ticket::State
 ticket::SubIssues
 ticket::Successors
@@ -312,8 +314,10 @@ ticket::Successors::named
 ticket::Verdict
 ticket::Verdict::given
 ticket::denied
+ticket::merged
 ticket::parent
 ticket::parent_scope
+ticket::ready_of
 ticket::run
 ticket::ticket_of
 track::Ticket

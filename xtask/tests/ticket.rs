@@ -8,11 +8,12 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command;
 
 use xtask::manifest::Manifest;
 use xtask::reading::Status;
 use xtask::scratch::Tree;
-use xtask::ticket::{Act, CAP, Gh, Successors, Verdict, parent, run};
+use xtask::ticket::{Act, CAP, Gh, Reach, Successors, Verdict, merged, parent, run};
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
@@ -295,6 +296,233 @@ fn read_counts_the_boxes_and_names_the_unticked() {
     assert!(recorded.calls().is_empty());
 }
 
+/// A close of work done at a commit `main` contains, naming `successors`.
+fn done(successors: Successors) -> Act {
+    Act::Close(Verdict::Done, successors, Reach::Landed)
+}
+
+/// `git` in `root` under a fixed name, its stdout trimmed.
+fn git(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=x",
+            "-c",
+            "user.email=x@x",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// A repository of this test's own on `main` with one empty commit.
+fn repository(name: &str) -> Tree {
+    let root = Tree::new(name).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    root
+}
+
+/// `ticket ready` holds the boxes and the successors as a close does,
+/// writes the branch's ready record and closes nothing (#2311).
+#[test]
+fn ready_records_the_branch_with_its_successors_and_closes_nothing() {
+    let root = repository("ticket-ready");
+    git(&root, &["checkout", "-q", "-b", "t7"]);
+    let recorded = Recorded::lay("ready");
+    recorded.issue(7, "OPEN", UNTICKED);
+    recorded.issue(9, "OPEN", TICKED);
+    let ready = |ticket: u64| {
+        run(
+            &root,
+            &manifest(),
+            &recorded.gh(),
+            Act::Ready(Successors::Tickets(vec![Ticket::new(9)])),
+            Ticket::new(ticket),
+            None,
+        )
+        .unwrap()
+    };
+    let refused = ready(7);
+    assert_eq!(refused.status, Status::Fail, "{}", refused.message);
+    assert!(
+        refused.message.ends_with("not ready, nothing recorded"),
+        "{}",
+        refused.message
+    );
+
+    recorded.issue(7, "OPEN", TICKED);
+    let reading = ready(7);
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .contains("recorded as branch.t7.ready; the merge into main closes it"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(git(&root, &["config", "branch.t7.ready"]), "9");
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+}
+
+/// The merge into `main` closes the open tickets its subject names with
+/// the successors their branches' ready records name (#2311): one with a
+/// record closes, one with none fails naming it and is left open, one
+/// closed already is passed over, and off `main` nothing is closed.
+#[test]
+fn a_merge_into_main_closes_the_ready_tickets_its_subject_names() {
+    let root = repository("ticket-merged");
+    for n in ["7", "8"] {
+        git(&root, &["checkout", "-q", "-b", &format!("t{n}"), "main"]);
+        let work = format!("the work of #{n}");
+        git(&root, &["commit", "-q", "--allow-empty", "-m", &work]);
+        git(&root, &["config", &format!("branch.t{n}.ticket"), n]);
+    }
+    git(&root, &["config", "branch.t7.ready", "nothing"]);
+    git(&root, &["checkout", "-q", "t8"]);
+    let recorded = Recorded::lay("merged");
+    recorded.issue(7, "OPEN", TICKED);
+    recorded.issue(8, "OPEN", TICKED);
+    recorded.issue(10, "CLOSED", TICKED);
+    assert!(
+        merged(&root, &manifest(), &recorded.gh(), "main")
+            .unwrap()
+            .is_empty(),
+        "off main nothing is closed"
+    );
+
+    git(&root, &["checkout", "-q", "main"]);
+    git(
+        &root,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t7",
+            "t8",
+            "-m",
+            "Merge t7, t8: the work (#7, #8, #10)",
+        ],
+    );
+    let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    assert_eq!(readings.len(), 2, "{readings:#?}");
+    assert_eq!(readings[0].scope, "7");
+    assert_eq!(readings[0].status, Status::Pass, "{}", readings[0].message);
+    assert_eq!(readings[1].scope, "8");
+    assert_eq!(readings[1].status, Status::Fail, "{}", readings[1].message);
+    assert!(
+        readings[1]
+            .message
+            .contains("#8 is named by a merge into main and its branch has no ready record"),
+        "{}",
+        readings[1].message
+    );
+    let calls = recorded.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("issue close 7")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("issue close 8") || c.starts_with("issue close 10")),
+        "{calls:?}"
+    );
+}
+
+/// Where a close's commit stands against `main` (#2249): `main`'s own
+/// tip is landed, a branch's commit `main` does not contain is unmerged
+/// and named with its branch, and the same commit is landed once `main`
+/// has merged it.
+#[test]
+fn a_commit_is_landed_once_main_contains_it_and_unmerged_before() {
+    let root = Tree::new("ticket-reach").unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    assert_eq!(Reach::of(&root).unwrap(), Reach::Landed);
+
+    git(&root, &["checkout", "-q", "-b", "t7"]);
+    git(&root, &["commit", "-q", "--allow-empty", "-m", "the work"]);
+    let tip = git(&root, &["rev-parse", "--short=7", "HEAD"]);
+    assert_eq!(
+        Reach::of(&root).unwrap(),
+        Reach::Unmerged {
+            commit: tip,
+            branch: String::from("t7"),
+        }
+    );
+
+    git(&root, &["checkout", "-q", "main"]);
+    git(&root, &["merge", "-q", "--no-ff", "--no-edit", "t7"]);
+    git(&root, &["checkout", "-q", "t7"]);
+    assert_eq!(Reach::of(&root).unwrap(), Reach::Landed);
+}
+
+/// A close of work done at a commit `main` does not contain is refused
+/// with every box ticked, naming the commit and the branch and the two
+/// ways on, and asks the tracker nothing (#2249); a withdrawal there is
+/// not held to it, since it says nothing of the work is in the tree.
+#[test]
+fn close_refuses_a_commit_main_does_not_contain_and_changes_nothing_at_the_tracker() {
+    let recorded = Recorded::lay("unmerged");
+    recorded.issue(7, "OPEN", TICKED);
+    let unmerged = Reach::Unmerged {
+        commit: String::from("6e20eaa"),
+        branch: String::from("t2166"),
+    };
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Close(Verdict::Done, Successors::Nothing, unmerged.clone()),
+        Ticket::new(7),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .contains("6e20eaa on t2166 is not in main: merge it first, or close with --withdrawn"),
+        "{}",
+        reading.message
+    );
+    assert!(
+        reading
+            .message
+            .ends_with("not closed, nothing changed at the tracker"),
+        "{}",
+        reading.message
+    );
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+
+    recorded.issue(8, "OPEN", "## Acceptance criteria\n\n- [ ] one\n");
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Close(
+            Verdict::Withdrawn(String::from("measured: nothing of it is in the tree")),
+            Successors::Nothing,
+            unmerged,
+        ),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(recorded.calls().len(), 1, "{:?}", recorded.calls());
+}
+
 #[test]
 fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
     let recorded = Recorded::lay("refuse");
@@ -303,7 +531,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(7),
         Some("s1"),
     )
@@ -322,7 +550,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(9),
         None,
     )
@@ -339,7 +567,7 @@ fn close_refuses_while_a_box_is_unticked_and_changes_nothing_at_the_tracker() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(10),
         None,
     )
@@ -364,7 +592,7 @@ fn close_with_every_box_ticked_closes_and_records_what_closed_it_and_the_session
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(8),
         Some("session-abc"),
     )
@@ -405,10 +633,7 @@ fn close_names_what_it_opened_through_the_tracker_s_blocking_relation() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(
-            Verdict::Done,
-            Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)]),
-        ),
+        done(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
         Some("s2"),
     )
@@ -443,10 +668,7 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(
-            Verdict::Done,
-            Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)]),
-        ),
+        done(Successors::Tickets(vec![Ticket::new(9), Ticket::new(10)])),
         Ticket::new(8),
         None,
     )
@@ -464,7 +686,7 @@ fn close_sets_only_the_edges_the_tracker_does_not_have_yet() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -489,7 +711,7 @@ fn closing_a_tracks_ticket_refuses_a_successor_that_carries_no_track_label() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -520,7 +742,7 @@ fn closing_a_tracks_ticket_refuses_a_successor_that_carries_no_track_label() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -542,7 +764,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -560,7 +782,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -581,7 +803,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -599,7 +821,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -624,7 +846,7 @@ fn a_successor_carrying_the_track_label_closes_and_main_asks_nothing() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -643,7 +865,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(8),
         Some("s3"),
     )
@@ -669,7 +891,7 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(8),
         None,
     )
@@ -700,10 +922,7 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
             workspace(),
             &manifest(),
             &recorded.gh(),
-            Act::Close(
-                Verdict::Done,
-                Successors::Tickets(vec![Ticket::new(successor)]),
-            ),
+            done(Successors::Tickets(vec![Ticket::new(successor)])),
             Ticket::new(8),
             None,
         )
@@ -738,7 +957,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -764,7 +983,7 @@ fn a_tracker_that_refuses_the_edge_leaves_the_ticket_open() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![])),
+        done(Successors::Tickets(vec![])),
         Ticket::new(8),
         None,
     )
@@ -790,7 +1009,7 @@ fn a_tracker_that_refuses_the_close_after_the_edge_says_the_edge_stands() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Tickets(vec![Ticket::new(9)])),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
         Ticket::new(8),
         None,
     )
@@ -819,7 +1038,7 @@ fn a_tracker_that_refuses_the_close_is_a_failed_reading_carrying_its_text() {
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(8),
         None,
     )
@@ -873,6 +1092,7 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
         Act::Close(
             Verdict::Withdrawn(reason.to_owned()),
             Successors::Tickets(vec![Ticket::new(9)]),
+            Reach::Landed,
         ),
         Ticket::new(167),
         Some("s3"),
@@ -913,6 +1133,7 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
         Act::Close(
             Verdict::Withdrawn("landed by #135".to_owned()),
             Successors::Nothing,
+            Reach::Landed,
         ),
         Ticket::new(11),
         None,
@@ -934,7 +1155,7 @@ fn a_withdrawal_closes_a_ticket_with_no_box_ticked_and_records_the_measurement()
         workspace(),
         &manifest(),
         &recorded.gh(),
-        Act::Close(Verdict::Done, Successors::Nothing),
+        done(Successors::Nothing),
         Ticket::new(8),
         None,
     )
@@ -963,6 +1184,7 @@ fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
         Act::Close(
             Verdict::Withdrawn("nothing here".to_owned()),
             Successors::Nothing,
+            Reach::Landed,
         ),
         Ticket::new(12),
         Some("s4"),
@@ -990,6 +1212,7 @@ fn a_withdrawal_of_a_ticket_with_a_box_ticked_is_refused_and_changes_nothing() {
         Act::Close(
             Verdict::Withdrawn("nothing here".to_owned()),
             Successors::Nothing,
+            Reach::Landed,
         ),
         Ticket::new(13),
         None,
