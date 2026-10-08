@@ -166,14 +166,6 @@ impl Request {
         Heap::release_nogc(&mut Hooks(self), value.to_zval());
     }
 
-    /// The pin [`Heap::pin_block`] set over `value` let go, and what holds the
-    /// value freed now where its last owner went while the pin stood, an
-    /// object's destructor served through seam 1.
-    #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn unpin_block(&mut self, value: Value) {
-        Heap::unpin_block(&mut Hooks(self), value.to_zval());
-    }
-
     /// `ZVAL_NEW_REF`, what [`PhpRef::new`] is: a cell of the request's
     /// heap holding `value`, one owner of the cell, `value` the cell's
     /// from here, and the memory limit as the fatal that ends the

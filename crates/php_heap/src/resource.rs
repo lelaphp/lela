@@ -668,13 +668,15 @@ impl Heap {
     /// string(6) "stream"
     /// ```
     pub(crate) fn resource_free(hooks: &mut dyn HeapHooks, r: Res) {
-        if !hooks.heap().resources.del(r.id()) {
+        if hooks.heap().resources.del(r.id()) {
+            Heap::resource_dtor(hooks, r);
+        } else if !hooks.heap().mm.is_retired(r.address()) {
+            // The free under way, reached again from its destructor.
             return;
         }
-        Heap::resource_dtor(hooks, r);
         // SAFETY: the resource came from `resource_alloc`, its entry is
-        // gone and its payload dropped, so nothing names it.
-        unsafe { hooks.heap().mm.free(r.address()) };
+        // gone and its payload dropped, so only a pin names it.
+        unsafe { hooks.heap().give_back(r.address(), r.gc().pinned()) };
     }
 
     /// `zend_close_rsrc_list` (`Z/Zend/zend_list.c:217`), the shutdown

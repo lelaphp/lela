@@ -254,6 +254,10 @@ pub(crate) struct Mm {
     /// The profilers told of what the entries serve, `alloc`, `realloc`,
     /// `free` and `gc`, and of nothing the heap does on its own behalf.
     observers: Observers,
+    /// The blocks whose free php's accounting has seen while a pin keeps
+    /// their bytes ([`Mm::retire`]): few, since each is a block destroyed
+    /// under a pin that still stands.
+    retired: Vec<NonNull<u8>>,
     /// A debug build's record of what its sensors found
     /// ([`crate::sensed`]), shared so the address every chunk's header
     /// holds stands while the heap moves and while any owner the engine
@@ -298,6 +302,7 @@ impl Mm {
             limit: NO_LIMIT,
             overflow: false,
             observers: Observers::default(),
+            retired: Vec::new(),
             #[cfg(debug_assertions)]
             sensed: crate::sensed::Sensor::new(),
             #[cfg(debug_assertions)]
@@ -453,6 +458,77 @@ impl Mm {
             self.observers.tell(Allocation::Freed {
                 at: at.as_ptr().addr(),
             });
+        }
+    }
+
+    /// `_efree` as `memory_get_usage()` and the observers see it, the
+    /// bytes kept: what a pinned block's destruction does at php's
+    /// moment, so the request's counts fall where php's do while a pin
+    /// still names the block (design §4.4, #2230). Its bytes go back
+    /// with [`Mm::free_retired`]; a block retired already is left as it
+    /// stands.
+    pub(crate) fn retire(&mut self, at: NonNull<u8>) {
+        if self.is_retired(at) {
+            return;
+        }
+        self.size = self.size.saturating_sub(self.accounted(at));
+        self.retired.push(at);
+        if !self.observers.is_empty() {
+            self.observers.tell(Allocation::Freed {
+                at: at.as_ptr().addr(),
+            });
+        }
+    }
+
+    /// Whether `at` is a block [`Mm::retire`] took the free of and whose
+    /// bytes have not gone back since.
+    pub(crate) fn is_retired(&self, at: NonNull<u8>) -> bool {
+        !self.retired.is_empty() && self.retired.contains(&at)
+    }
+
+    /// The bytes of a block [`Mm::retire`] took the free of given back,
+    /// with nothing counted or told twice; nothing for a block not
+    /// retired.
+    ///
+    /// # Safety
+    ///
+    /// Where `at` is retired, nothing names it any more.
+    pub(crate) unsafe fn free_retired(&mut self, at: NonNull<u8>) {
+        let Some(index) = self.retired.iter().position(|block| *block == at) else {
+            return;
+        };
+        self.retired.swap_remove(index);
+        self.size += self.accounted(at);
+        // SAFETY: the caller's contract: the block is this heap's, its
+        // free was only counted, and nothing names it.
+        unsafe { self.free_heap(at) };
+        #[cfg(debug_assertions)]
+        if let Some(traces) = &mut self.traces {
+            traces.remove(&at.as_ptr().addr());
+        }
+    }
+
+    /// The bytes [`Mm::free_heap`] takes off `memory_get_usage()` for the
+    /// block at `at`: its bin's size, its pages, or a huge block's bytes
+    /// and the bin slot of its list node.
+    fn accounted(&self, at: NonNull<u8>) -> usize {
+        let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
+        if offset == 0 {
+            return self
+                .huge
+                .iter()
+                .find(|block| block.at == at)
+                .map_or(0, |block| {
+                    block.size + BIN_DATA_SIZE[size_to_bin(HUGE_LIST_SIZE)]
+                });
+        }
+        // SAFETY: `at` is live in this heap, so the chunk it sits in is
+        // one of ours and its header is initialised.
+        let info = unsafe { &*chunk_of(at).as_ptr() }.map[offset / PAGE_SIZE];
+        if info & IS_SRUN != 0 {
+            BIN_DATA_SIZE[(info & SRUN_BIN_NUM_MASK) as usize]
+        } else {
+            (info & LRUN_PAGES_MASK) as usize * PAGE_SIZE
         }
     }
 

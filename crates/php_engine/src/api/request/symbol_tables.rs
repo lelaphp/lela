@@ -423,8 +423,8 @@ impl Request {
     /// is pinned across the release and the settle after it
     /// ([`php_heap::Obj::pin`]): where the release serves code that
     /// releases it again through the variable and so frees it, its
-    /// bytes and its id stand until [`Released::wrote_over`] lets them
-    /// go, so nothing the program makes meanwhile is laid where it
+    /// bytes stand until [`Released::wrote_over`] lets them go, so
+    /// nothing the program makes meanwhile is laid where it
     /// stood, and the settle compares against no block the heap has
     /// freed. A string, a table or a cell is freed by its release only
     /// after every destructor that release serves.

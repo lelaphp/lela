@@ -49,7 +49,8 @@ pub(crate) struct Refcounted {
     type_info: Cell<u32>,
 }
 
-/// A walk's pin over the block (design §4.4, #2197): the top bit of the
+/// A walk's pin over a block other than an object, whose pins are
+/// counted ([`crate::Obj::pin`]) (design §4.4, #2197, #2230): the top bit of the
 /// count's word, which no count reaches, since two to the thirty-one
 /// owners would be thirty-two gigabytes of zvals naming one block. php's
 /// header has no bit to spare beside it: each of the six bits
@@ -203,8 +204,9 @@ impl Refcounted {
         count
     }
 
-    /// Whether a walk pins the block ([`PINNED`]): what a release that
-    /// took its count to zero asks before it frees it.
+    /// Whether a walk pins the block ([`PINNED`]): what the end of its
+    /// destruction asks before it gives the bytes back
+    /// ([`crate::Heap::give_back`]).
     pub(crate) fn pinned(&self) -> bool {
         self.refcount.get() & PINNED != 0
     }
@@ -276,11 +278,14 @@ impl Refcounted {
         self.type_info.get() & TYPE_MASK
     }
 
-    /// `GC_TYPE_INFO(p) = GC_NULL | (GC_TYPE_INFO(p) & ~GC_TYPE_MASK)`:
-    /// the type byte `IS_NULL`, the flags and the info kept.
-    pub(crate) fn set_kind_null(&self) {
+    /// `GC_TYPE_INFO(p) = kind | (GC_TYPE_INFO(p) & ~GC_TYPE_MASK)`: the
+    /// type byte `kind`, the flags and the info kept. `IS_NULL` is
+    /// php's `GC_NULL`, a value being destroyed, so that a release
+    /// reaching zero on it does nothing; a destroyed block's own type
+    /// again is a block a pin keeps standing ([`crate::Heap::give_back`]).
+    pub(crate) fn set_kind(&self, kind: ZvalType) {
         self.type_info
-            .set((self.type_info.get() & !TYPE_MASK) | ZvalType::Null as u32);
+            .set((self.type_info.get() & !TYPE_MASK) | kind as u32);
     }
 
     /// `GC_INFO`: the collector's twenty-two bits, colour and address.

@@ -174,9 +174,9 @@ impl Caller {
 /// A lent receiver is a name with no owner, so it pins the object
 /// ([`Receiver::lent`], [`php_heap::Obj::pin`]): php frees the
 /// object under the running frame when its last owner lets it go, and
-/// here its destructor and its members' release are served at that
-/// moment while its bytes and its id stand until the last pin is
-/// let go ([`Request::give_up_receiver`]); and a frame that leaves the
+/// here its destructor, its members' release and its id are served at
+/// that moment while its bytes stand until the last pin is let go
+/// ([`Request::give_up_receiver`]); and a frame that leaves the
 /// running chain, a generator's or a suspended fiber's, owns what it was
 /// lent.
 #[derive(Clone, Copy)]
