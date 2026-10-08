@@ -313,8 +313,8 @@ impl Str {
         let same = s.is_same(tail);
         // A pinned string is named by the walk that pinned it, which
         // holds no count (`Heap::pin_block`): it is copied, as a shared
-        // one is, and its free waits for the pin, so the block the pin
-        // names never moves.
+        // one is, and only its bytes wait for the pin, so the block the
+        // pin names never moves.
         let grown =
             if !s.is_interned() && !s.is_persistent() && s.refcount() == 1 && !s.gc().pinned() {
                 // SAFETY: `s` is the request's, its one owner is the
@@ -330,8 +330,11 @@ impl Str {
                 // SAFETY: a fresh allocation of the size a string of `len`
                 // bytes takes, which the `old` bytes of `s` fit in.
                 let copy = unsafe { Str::init(at, s.bytes(), 0) };
-                if !s.is_interned() && !s.is_persistent() {
-                    s.delref();
+                // The last owner of a pinned string given up: its free
+                // counted now, as `Heap::give_back` counts it, and its
+                // bytes kept for the pin.
+                if !s.is_interned() && !s.is_persistent() && s.delref() == 0 {
+                    mm.retire(s.address());
                 }
                 copy
             };
