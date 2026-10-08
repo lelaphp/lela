@@ -113,8 +113,9 @@ third-engine-design.md
 - ADR-0010 (accepted, 2026-10-04): An extension's lifecycle is three scopes that start as values and end as phases
 - ADR-0011 (accepted, 2026-10-06): A reading's key covers its crate's whole dependency closure, not the locks of the crates it depends on
 - ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
+- ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 
-<!-- /computed in=cdde5a55c0d2e56a5af707bbc3e086f4e00eefcc15e5bece29d9686f5ed4e362 out=fae392bd0f8f57b71c3f942b943934350316907e133b235a4b1f431a8bfc99ed -->
+<!-- /computed in=be732ccd1dbc5db7915cd76ee094197e6b019cd74819350d09b5e51700caf1d0 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -124,12 +125,12 @@ third-engine-design.md
 | unit | unit.lock | 86 |  | pass |
 | link | link.lock | 36 |  | pass |
 | ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1321 | 1500 | pass |
-| sapi | sapi.lock | 37 |  | pass |
+| api | api.lock | 1337 | 1500 | pass |
+| sapi | sapi.lock | 43 |  | pass |
 | tier | tier.lock | 67 |  | pass |
 | harness | xtask.lock | 373 |  | pass |
 
-<!-- /computed in=a3afaae8e278169bb6c64f6bce2efc01a4a0daec612fe2a7e64fe5f7d5955121 out=bfcc1f1a55f2bd9043d18a3046d4ab315500871c13e569ef1e57373ac8359950 -->
+<!-- /computed in=44b4d9278fe6bb4e94c05322440d6f5c8eea0a5f53f97640e43625d42d05d81d out=1413d123b1c6d5fdd7a1224c44abdcd7d97a40e60f234e99cb02ae8ac041bdcd -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |

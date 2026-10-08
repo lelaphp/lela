@@ -6,20 +6,27 @@
 //! What ICU tells the callbacks as it closes or clones a converter, with
 //! nothing in error, the caller tells them itself ([`Callbacks::told`]),
 //! so a close or a clone never runs with a frame's pointer installed.
+//! The converter itself is the request's ([`Converter`], ADR-0013): a
+//! conversion that lends its callbacks to PHP code holds it, so code that
+//! replaces or frees the object's converter meanwhile leaves the close to
+//! the conversion's end.
 
 use std::ffi::{CStr, c_char, c_void};
+use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::rc::Rc;
 
+use php_ext::request::{Foreign, ForeignId, Held, Request};
+
+use super::cpp::{opaque, owner};
 use super::{Code, length};
+use sys::ucnv_close;
 
 mod sys {
     use std::ffi::{c_char, c_void};
+    use std::ptr::NonNull;
 
     use super::super::Code;
-
-    /// `UConverter`, opaque.
-    pub(crate) enum UConverter {}
+    pub(crate) use super::UConverter;
 
     /// `UConverterToUnicodeArgs`.
     #[repr(C)]
@@ -70,7 +77,7 @@ mod sys {
 
     icu! {
         fn ucnv_open(name: *const c_char, status: &mut Code) -> *mut UConverter;
-        fn ucnv_close(cnv: *mut UConverter);
+        fn ucnv_close(cnv: NonNull<UConverter>);
         fn ucnv_clone(cnv: *const UConverter, status: &mut Code) -> *mut UConverter;
         fn ucnv_getName(cnv: *const UConverter, status: &mut Code) -> *const c_char;
         fn ucnv_getType(cnv: *const UConverter) -> i32;
@@ -319,7 +326,7 @@ unsafe extern "C" fn from_unicode(
 
 /// The two callbacks ICU held before [`install`], to put back.
 #[derive(Clone, Copy)]
-struct Held {
+struct Before {
     to_u: Option<sys::ToU>,
     to_u_context: *const c_void,
     from_u: Option<sys::FromU>,
@@ -328,8 +335,8 @@ struct Held {
 
 /// The trampolines installed on `cnv` with `context`, what was there
 /// answered.
-fn install(cnv: *mut sys::UConverter, context: *const c_void) -> Held {
-    let mut held = Held {
+fn install(cnv: *mut sys::UConverter, context: *const c_void) -> Before {
+    let mut held = Before {
         to_u: None,
         to_u_context: std::ptr::null(),
         from_u: None,
@@ -355,7 +362,7 @@ fn install(cnv: *mut sys::UConverter, context: *const c_void) -> Held {
 }
 
 /// What [`install`] replaced put back on `cnv`.
-fn restore(cnv: *mut sys::UConverter, held: Held) {
+fn restore(cnv: *mut sys::UConverter, held: Before) {
     let (mut status, mut to_u, mut from_u) = (Code::ZERO, None, None);
     let mut context = std::ptr::null();
     // SAFETY: cnv is open; the callback and context are ICU's own again.
@@ -399,56 +406,153 @@ fn served<R>(
     answer
 }
 
-/// One open `UConverter`, closed when its last [`Converter`] goes.
-struct Open(NonNull<sys::UConverter>);
+opaque!(
+    /// `UConverter`.
+    UConverter
+);
 
-impl Drop for Open {
-    fn drop(&mut self) {
-        // SAFETY: the converter is open and closed once, here, with ICU's
-        // own callbacks on it.
-        unsafe { sys::ucnv_close(self.0.as_ptr()) };
+owner!(
+    /// One open `UConverter`, which the request keeps for the object
+    /// that opened it and `ucnv_close` closes once, with ICU's own
+    /// callbacks on it.
+    Open(UConverter),
+    ucnv_close
+);
+
+/// One `UConverter` the request keeps ([`Request::adopt`], ADR-0013):
+/// what an object's payload stores, given up by [`Converter::close`]. A
+/// call that lends the converter's callbacks to PHP code holds it for
+/// its span ([`ConverterId::held`]), so code that replaces or frees the
+/// object's converter meanwhile leaves the close to that call's end.
+pub(crate) struct Converter(Foreign<Open>);
+
+/// The name of a [`Converter`], copied freely: it reaches the converter
+/// while its owner has not given it up, and nothing after.
+#[derive(Clone, Copy)]
+pub(crate) struct ConverterId(ForeignId<Open>);
+
+/// A converter held for the span `'h` of one [`ConverterId::held`], which
+/// it cannot outlive, so the pointer it carries is open while it lives.
+pub(crate) struct Live<'h> {
+    raw: NonNull<UConverter>,
+    span: PhantomData<Held<'h, Open>>,
+}
+
+impl<'h> Live<'h> {
+    /// The converter `held` holds, as the request reaches it.
+    fn of(req: &mut Request, held: &Held<'h, Open>) -> Option<Live<'h>> {
+        let raw = held.get(req)?.0;
+        Some(Live {
+            raw,
+            span: PhantomData,
+        })
+    }
+
+    /// `ucnv_toUChars` into `dest`, its capacity all of it: the length the
+    /// whole answer needs and ICU's code.
+    pub(crate) fn decode(
+        &self,
+        dest: &mut [u16],
+        src: &[u8],
+        callbacks: Option<&mut dyn Callbacks>,
+    ) -> (i32, Code) {
+        let mut status = Code::ZERO;
+        let (Ok(capacity), Ok(len)) = (length(dest.len()), length(src.len())) else {
+            return (0, Code::BUFFER_OVERFLOW);
+        };
+        let (cnv, out, from) = (self.raw.as_ptr(), dest.as_mut_ptr(), src.as_ptr().cast());
+        // SAFETY: the converter is open for the hold `self` lives in;
+        // dest holds capacity UChars, src len bytes.
+        let op = || unsafe { sys::ucnv_toUChars(cnv, out, capacity, from, len, &mut status) };
+        let n = served(cnv, callbacks, op);
+        (n, status)
+    }
+
+    /// `ucnv_fromUChars` into `dest`, as [`Live::decode`].
+    pub(crate) fn encode(
+        &self,
+        dest: &mut [u8],
+        src: &[u16],
+        callbacks: Option<&mut dyn Callbacks>,
+    ) -> (i32, Code) {
+        let mut status = Code::ZERO;
+        let (Ok(capacity), Ok(len)) = (length(dest.len()), length(src.len())) else {
+            return (0, Code::BUFFER_OVERFLOW);
+        };
+        let (cnv, out, from) = (self.raw.as_ptr(), dest.as_mut_ptr().cast(), src.as_ptr());
+        // SAFETY: as in `decode`; dest holds capacity bytes, src len UChars.
+        let op = || unsafe { sys::ucnv_fromUChars(cnv, out, capacity, from, len, &mut status) };
+        let n = served(cnv, callbacks, op);
+        (n, status)
     }
 }
 
-/// One `UConverter`, from `ucnv_open` to `ucnv_close`, which its last
-/// share's drop calls with ICU's own callbacks on it, shared: a call
-/// that lends the converter's callbacks to PHP code holds a second share
-/// for its span, so code that replaces or frees the object's converter
-/// meanwhile leaves the close to that call's end.
-#[derive(Clone)]
-pub(crate) struct Converter(Rc<Open>);
-
-// SAFETY: every share of one converter is held by the one request that
-// opened it, in its objects' payloads and on its stack, and moves between
-// threads only with that request; ICU's converters are thread-compatible.
-unsafe impl Send for Converter {}
-
 impl Converter {
-    fn raw(&self) -> *mut sys::UConverter {
-        self.0.0.as_ptr()
-    }
-
-    /// `ucnv_open`: the converter, or none, and ICU's code, a warning
-    /// (`U_AMBIGUOUS_ALIAS_WARNING`) kept.
-    pub(crate) fn open(name: &CStr) -> (Option<Converter>, Code) {
+    /// `ucnv_open`: the converter, kept by the request, or none, and
+    /// ICU's code, a warning (`U_AMBIGUOUS_ALIAS_WARNING`) kept.
+    pub(crate) fn open(req: &mut Request, name: &CStr) -> (Option<Converter>, Code) {
         let mut status = Code::ZERO;
         // SAFETY: name is NUL-terminated.
         let raw = unsafe { sys::ucnv_open(name.as_ptr(), &mut status) };
-        let open = NonNull::new(raw).map(|raw| Converter(Rc::new(Open(raw))));
+        let open = NonNull::new(raw).map(|raw| Converter(req.adopt(Open(raw))));
         (open, status)
     }
 
-    /// `ucnv_clone`. ICU tells the original's callbacks of it after
-    /// (`UCNV_CLONE`), which its caller does as [`Callbacks::told`] tells
-    /// them; the clone holds ICU's own.
-    pub(crate) fn try_clone(&self) -> Result<Self, Code> {
+    /// Its name.
+    pub(crate) fn id(&self) -> ConverterId {
+        ConverterId(self.0.id())
+    }
+
+    /// Given up: closed now, or as the last call that holds it ends.
+    pub(crate) fn close(self, req: &mut Request) {
+        req.disown(self.0);
+    }
+}
+
+impl ConverterId {
+    /// The converter while its owner keeps it; what a call that runs no
+    /// PHP code reads it through, for the span of its borrow.
+    pub(crate) fn get(self, req: &mut Request) -> Option<&mut Open> {
+        req.foreign(self.0)
+    }
+
+    /// `body` served with the converter held ([`Request::holding`]), for
+    /// a call whose callbacks serve PHP code; `None` where its owner gave
+    /// it up before.
+    pub(crate) fn held<R>(
+        self,
+        req: &mut Request,
+        body: impl for<'h> FnOnce(&mut Request, &Live<'h>) -> R,
+    ) -> Option<R> {
+        req.holding(self.0, |req, held| {
+            let live = Live::of(req, &held)?;
+            Some(body(req, &live))
+        })
+        .flatten()
+    }
+
+    /// `ucnv_clone`, the clone kept by the request. ICU tells the
+    /// original's callbacks of it after (`UCNV_CLONE`), which its caller
+    /// does as [`Callbacks::told`] tells them; the clone holds ICU's own.
+    pub(crate) fn try_clone(self, req: &mut Request) -> Result<Converter, Code> {
+        let open = self.get(req).ok_or(Code::INVALID_STATE)?;
+        let copy = open.try_clone()?;
+        Ok(Converter(req.adopt(copy)))
+    }
+}
+
+impl Open {
+    fn raw(&self) -> *mut sys::UConverter {
+        self.0.as_ptr()
+    }
+
+    /// `ucnv_clone`.
+    fn try_clone(&self) -> Result<Open, Code> {
         let mut status = Code::ZERO;
         // SAFETY: the converter is open.
         let raw = unsafe { sys::ucnv_clone(self.raw(), &mut status) };
         status.check()?;
-        NonNull::new(raw)
-            .map(|raw| Converter(Rc::new(Open(raw))))
-            .ok_or(Code::MEMORY_ALLOCATION)
+        NonNull::new(raw).map(Open).ok_or(Code::MEMORY_ALLOCATION)
     }
 
     /// `ucnv_getName`.
@@ -485,43 +589,6 @@ impl Converter {
         // the slice holds, and refuses a negative one.
         unsafe { sys::ucnv_setSubstChars(self.raw(), chars.as_ptr().cast(), len, &mut status) };
         status
-    }
-
-    /// `ucnv_toUChars` into `dest`, its capacity all of it: the length the
-    /// whole answer needs and ICU's code.
-    pub(crate) fn decode(
-        &self,
-        dest: &mut [u16],
-        src: &[u8],
-        callbacks: Option<&mut dyn Callbacks>,
-    ) -> (i32, Code) {
-        let mut status = Code::ZERO;
-        let (Ok(capacity), Ok(len)) = (length(dest.len()), length(src.len())) else {
-            return (0, Code::BUFFER_OVERFLOW);
-        };
-        let (cnv, out, from) = (self.raw(), dest.as_mut_ptr(), src.as_ptr().cast());
-        // SAFETY: dest holds capacity UChars, src len bytes.
-        let op = || unsafe { sys::ucnv_toUChars(cnv, out, capacity, from, len, &mut status) };
-        let n = served(cnv, callbacks, op);
-        (n, status)
-    }
-
-    /// `ucnv_fromUChars` into `dest`, as [`Converter::decode`].
-    pub(crate) fn encode(
-        &self,
-        dest: &mut [u8],
-        src: &[u16],
-        callbacks: Option<&mut dyn Callbacks>,
-    ) -> (i32, Code) {
-        let mut status = Code::ZERO;
-        let (Ok(capacity), Ok(len)) = (length(dest.len()), length(src.len())) else {
-            return (0, Code::BUFFER_OVERFLOW);
-        };
-        let (cnv, out, from) = (self.raw(), dest.as_mut_ptr().cast(), src.as_ptr());
-        // SAFETY: dest holds capacity bytes, src len UChars.
-        let op = || unsafe { sys::ucnv_fromUChars(cnv, out, capacity, from, len, &mut status) };
-        let n = served(cnv, callbacks, op);
-        (n, status)
     }
 }
 
