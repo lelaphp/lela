@@ -216,6 +216,23 @@ fn a_public_item_without_a_lock_line_fails_naming_the_lock_file() {
     assert_eq!(failures(&readings).len(), 1);
 }
 
+/// A type `include!`d from `OUT_DIR`, as `php_unit::Opcode` is (#2025):
+/// the instrument reads no generated file, so the type's definition is
+/// out of its sight, and the inherent impl in `kind.rs` is joined to it
+/// by the name the including module re-exports. `Kind::COUNT` has its
+/// line and `Kind::name` has none, so the reading names it; the private
+/// method is no line.
+#[test]
+fn a_method_of_a_type_included_from_out_dir_without_a_lock_line_fails() {
+    let readings = readings("include");
+    let heap = of(&readings, "heap");
+    assert_eq!(heap.status, Status::Fail, "{}", heap.message);
+    assert!(heap.message.contains("Kind::name"), "{}", heap.message);
+    assert!(!heap.message.contains("COUNT"), "{}", heap.message);
+    assert!(!heap.message.contains("private"), "{}", heap.message);
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
 /// One order for a lock's lines (#403): `--write` renders them ascending
 /// and a check that read the set alone accepted a file it would rewrite,
 /// which is how `crates/php_heap/heap.lock` carried `Arr::live_from`
@@ -412,6 +429,26 @@ fn a_crate_with_no_edge_row_depending_on_a_workspace_crate_fails() {
     assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
+/// The workspace's lints reach a member only through its own
+/// `[lints] workspace = true` (#1998, #2111): ext/json, without the line,
+/// fails naming itself, and ext/ctype, with it, passes. The tracked
+/// workspace, every member carrying the line, is held by
+/// `the_workspace_today_has_no_failing_reading`.
+#[test]
+fn a_crate_that_does_not_inherit_the_workspace_lints_fails_naming_it() {
+    let readings = readings("lints");
+    let json = of(&readings, "ext/json");
+    assert_eq!(json.status, Status::Fail, "{}", json.message);
+    assert!(
+        json.message
+            .contains("ext/json's Cargo.toml lacks `[lints] workspace = true`"),
+        "{}",
+        json.message
+    );
+    assert_eq!(of(&readings, "ext/ctype").status, Status::Pass);
+    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
+}
+
 /// A host reaches the engine through its facade and never past it
 /// (ADR-0008): `sapi/cli` naming `php_engine` fails with the ADR, and
 /// `sapi/cgi` on the facade, the codecs and the bundle is within its
@@ -446,21 +483,6 @@ fn a_use_path_across_a_denied_module_edge_fails() {
         "the file is named: {}",
         engine.message
     );
-}
-
-#[test]
-fn a_bundle_order_that_is_not_topological_fails() {
-    let readings = api_check::hold(&under("topological"), &fixture("bundle"), false).unwrap();
-    let bundle = of(&readings, "php_bundle");
-    assert_eq!(bundle.status, Status::Fail);
-    assert!(
-        bundle.message.contains("ext/standard"),
-        "{}",
-        bundle.message
-    );
-    assert!(bundle.message.contains("ext/random"), "{}", bundle.message);
-    assert!(bundle.adr.contains("0004"), "{}", bundle.adr);
-    assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
 /// The tracked manifest with `php_bundle`'s edge read as `order`, so a
@@ -515,9 +537,9 @@ fn a_bundle_feature_that_does_not_switch_on_what_its_extension_requires_fails() 
     assert_eq!(failures(&readings).len(), 1, "{readings:#?}");
 }
 
-/// Under `order = "registration"` the order written is no longer held to
-/// the crate graph: the `bundle` fixture, whose extensions are behind no
-/// feature, passes where the topological order fails it.
+/// Under `order = "registration"` the order written is not held to the
+/// crate graph: the `bundle` fixture, which lists ext/standard before
+/// ext/random, which it depends on, behind no feature, passes.
 #[test]
 fn the_registration_order_does_not_hold_the_order_written() {
     let readings = api_check::hold(&under_registration(), &fixture("bundle"), false).unwrap();
@@ -658,24 +680,23 @@ fn each_registration_of_one_extension_is_read() {
     assert_eq!(bundle.numbers["extensions"], 3.into());
 }
 
-/// An order the instrument does not know is refused, never read as one
-/// it knows.
+/// An order the instrument does not serve is refused, never read as one
+/// it does: `"topological"`, retired by #1882 and its code gone since
+/// #2255, among them.
 #[test]
-fn an_order_api_check_does_not_know_fails() {
-    let mut manifest = under_registration();
-    for edge in manifest.edges.iter_mut().filter(|e| e.from == "php_bundle") {
-        edge.order = Some("alphabetical".to_owned());
+fn an_order_api_check_does_not_serve_fails() {
+    for order in ["alphabetical", "topological"] {
+        let readings = api_check::hold(&under(order), &fixture("clean"), false).unwrap();
+        let bundle = of(&readings, "php_bundle");
+        assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
+        assert!(
+            bundle.message.contains(&format!(
+                "order = \"{order}\" is not an order api-check knows; it serves \"registration\" alone"
+            )),
+            "{}",
+            bundle.message
+        );
     }
-    let readings = api_check::hold(&manifest, &fixture("clean"), false).unwrap();
-    let bundle = of(&readings, "php_bundle");
-    assert_eq!(bundle.status, Status::Fail, "{}", bundle.message);
-    assert!(
-        bundle
-            .message
-            .contains("order = \"alphabetical\" is not an order api-check knows"),
-        "{}",
-        bundle.message
-    );
 }
 
 /// The tracked workspace passes under `order = "registration"` as under

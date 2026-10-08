@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 php_engine = { path = "../../crates/php_engine" }
+
+[lints]
+workspace = true

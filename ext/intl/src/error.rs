@@ -11,9 +11,10 @@ use std::any::Any;
 use std::fmt::Write as _;
 
 use php_ext::abi::OrFalse;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::call::write_prop;
+use php_ext::raising::{Level, Thrown, docref, throw, throw_chained};
 use php_ext::request::Request;
-use php_ext::values::PhpObject;
+use php_ext::values::{PhpObject, PhpString};
 
 use crate::State;
 use crate::ffi::Code;
@@ -58,8 +59,8 @@ fn global(req: &mut Request) -> &mut IntlError {
 }
 
 /// `<native>(): <message>`, as `intl_error_set_custom_msg` prefixes it.
-fn prefixed(req: &Request, message: &str) -> Vec<u8> {
-    format!("{}(): {message}", req.active_function_name()).into_bytes()
+fn prefixed(req: &Request, message: &[u8]) -> Vec<u8> {
+    [req.active_function_name().as_bytes(), b"(): ", message].concat()
 }
 
 /// `intl_error_reset(NULL)`.
@@ -127,21 +128,51 @@ pub(crate) fn constructing<T>(req: &mut Request, f: impl FnOnce(&mut Request) ->
 /// `intl_error_set_custom_msg(NULL, msg)`: raised at `intl.error_level`,
 /// thrown as `IntlException` under `intl.use_exceptions`, and kept as
 /// the request's message.
-pub(crate) fn set_custom_msg(req: &mut Request, message: &str) -> Result<(), Thrown> {
+pub(crate) fn set_custom_msg(req: &mut Request, message: impl AsRef<[u8]>) -> Result<(), Thrown> {
+    custom_msg(req, None, message.as_ref())
+}
+
+/// [`set_custom_msg`] where `pending` may already be thrown, as php's C
+/// goes on past a throw: the `IntlException` chained to it, and it
+/// handed on where nothing more is thrown.
+fn custom_msg(req: &mut Request, pending: Option<Thrown>, message: &[u8]) -> Result<(), Thrown> {
     let text = prefixed(req, message);
     if let Some(level) = error_level(req) {
-        docref(req, level, message);
+        docref(req, level, &String::from_utf8_lossy(message));
     }
-    let thrown = use_exceptions(req).then(|| {
-        let text = String::from_utf8_lossy(&text).into_owned();
-        throw(req, "IntlException", &text)
-    });
+    let thrown = if use_exceptions(req) {
+        Some(intl_exception(req, pending, &text))
+    } else {
+        pending
+    };
     global(req).message = Some(Box::new(text));
     thrown.map_or(Ok(()), Err)
 }
 
+/// `zend_throw_exception(IntlException, text)`, chained to what is
+/// pending as `zend_throw_exception_internal` chains it. The message is
+/// php's `char *`, bytes: where they are not UTF-8 they are written over
+/// the empty one the throw laid.
+fn intl_exception(req: &mut Request, pending: Option<Thrown>, text: &[u8]) -> Thrown {
+    let utf8 = std::str::from_utf8(text);
+    let message = utf8.unwrap_or_default();
+    let thrown = match pending {
+        Some(pending) => throw_chained(req, pending, "IntlException", message),
+        None => throw(req, "IntlException", message),
+    };
+    let Some(object) = thrown.exception().copied().filter(|_| utf8.is_err()) else {
+        return thrown;
+    };
+    let written = PhpString::new(req, text)
+        .and_then(|text| write_prop(req, &object, b"message", text.into_value()));
+    match written {
+        Ok(()) => thrown,
+        Err(refused) => thrown.chain(req, refused),
+    }
+}
+
 /// `intl_error_set(NULL, code, msg)`.
-pub(crate) fn set(req: &mut Request, code: Code, message: &str) -> Result<(), Thrown> {
+pub(crate) fn set(req: &mut Request, code: Code, message: impl AsRef<[u8]>) -> Result<(), Thrown> {
     set_code(req, code);
     set_custom_msg(req, message)
 }
@@ -184,7 +215,7 @@ pub(crate) fn errors_set_custom_msg<P: Carrier>(
     object: PhpObject,
     message: &str,
 ) -> Result<(), Thrown> {
-    let text = prefixed(req, message);
+    let text = prefixed(req, message.as_bytes());
     if let Some(error) = carried::<P>(req, object) {
         error.message = Some(Box::new(text));
     }
@@ -306,8 +337,28 @@ impl Outside<'_> {
         &mut self,
         req: &mut Request,
         code: Code,
-        message: &str,
+        message: impl AsRef<[u8]>,
     ) -> Result<(), Thrown> {
+        self.keep(req, code, message.as_ref());
+        set(req, code, message)
+    }
+
+    /// [`Outside::set`] with `pending` already thrown: the
+    /// `IntlException` chained to it, or it handed on; `Err` always.
+    pub(crate) fn set_over(
+        &mut self,
+        req: &mut Request,
+        pending: Thrown,
+        code: Code,
+        message: impl AsRef<[u8]>,
+    ) -> Result<(), Thrown> {
+        self.keep(req, code, message.as_ref());
+        set_code(req, code);
+        custom_msg(req, Some(pending), message.as_ref())
+    }
+
+    /// The outside error's code and message.
+    fn keep(&mut self, req: &mut Request, code: Code, message: &[u8]) {
         let text = prefixed(req, message);
         let error = match self {
             Outside::Request => None,
@@ -318,7 +369,6 @@ impl Outside<'_> {
             error.code = code;
             error.message = Some(Box::new(text));
         }
-        set(req, code, message)
     }
 
     /// `intl_error_get_code(err)`: the outside error's, zero for none.

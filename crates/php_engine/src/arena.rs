@@ -22,13 +22,21 @@
 //! builds once and keeps (its placed properties) its publisher builds
 //! before handing the number on.
 //!
-//! An opcache restart is the one thing that takes rows back ([`Epochs`]):
-//! once no request holds the arena, each column is cut back to the rows
-//! it kept, the preload's, which php keeps across a restart
-//! (`zend_shared_alloc_save_state` after preloading, restored to by
-//! `accel_activate`'s restart), and every number past them is free to
-//! be reserved again. Each request holds the arena it started in, so no
-//! number a live request holds is ever reused.
+//! An opcache restart takes rows back by epochs ([`Epochs`]): it hands
+//! every request that starts after it a new, empty arena at once, and
+//! the arena it replaced is dropped when the last request holding it
+//! ends, as design §5.14 clears an arena "once no request holds its
+//! epoch". Nothing renumbers a row: an epoch's numbers name its rows
+//! alone, and everything that carries a number from one request to
+//! another (the unit cache's files, the inheritance cache) is the
+//! epoch's own ([`Arena::files`], [`Arena::inheritance`]), so it reaches
+//! only requests of the same epoch. The preload's rows are the one
+//! thing every epoch shares: once the preload has published, its arena
+//! is laid below every epoch after ([`Epochs::lay_base`]) and an epoch
+//! numbers its own rows past it, so the preload's classes and functions
+//! keep their numbers across every restart, as php keeps what the
+//! preload put in shared memory (`zend_shared_alloc_save_state` after
+//! preloading, restored to by `accel_activate`'s restart).
 //!
 //! Nothing here is `unsafe`: the slots are `OnceLock`s, so a row is
 //! `Sync` where its type is, and the segments never reallocate, so a
@@ -58,8 +66,6 @@ pub(crate) struct Column<T> {
     segments: [OnceLock<Box<[OnceLock<T>]>>; SEGMENTS],
     /// How many numbers were reserved, which is the next one's.
     reserved: AtomicU32,
-    /// How many rows a restart keeps ([`Column::keep`]).
-    kept: AtomicU32,
     /// The number no row reaches.
     limit: u32,
 }
@@ -83,7 +89,6 @@ impl<T> Column<T> {
         Column {
             segments: std::array::from_fn(|_| OnceLock::new()),
             reserved: AtomicU32::new(0),
-            kept: AtomicU32::new(0),
             limit: limit.min(held),
         }
     }
@@ -133,85 +138,131 @@ impl<T> Column<T> {
     pub(crate) fn reserved(&self) -> u32 {
         self.reserved.load(Ordering::Acquire)
     }
-
-    /// Every number reserved so far kept by a restart.
-    fn keep(&self) {
-        self.kept.store(self.reserved(), Ordering::Release);
-    }
-
-    /// The rows past the kept ones emptied, and their numbers free to
-    /// be reserved again: what only the arena's one holder may do, so
-    /// nothing reads a row as it goes. The segments stay laid down.
-    fn truncate(&mut self) {
-        let kept = *self.kept.get_mut();
-        let reserved = *self.reserved.get_mut();
-        for at in kept..reserved {
-            let slot = locate(at).and_then(|(segment, offset)| {
-                self.segments.get_mut(segment)?.get_mut()?.get_mut(offset)
-            });
-            if let Some(slot) = slot {
-                slot.take();
-            }
-        }
-        *self.reserved.get_mut() = kept;
-    }
 }
 
-/// The arena: the classes, the user functions and methods, and the
-/// enums' own `cases`, `from` and `tryFrom` published past the engine's
-/// own, each numbered past what the engine numbers below them.
+/// The arena of one epoch: the classes, the user functions and methods,
+/// and the enums' own `cases`, `from` and `tryFrom` published past the
+/// engine's own and the preload's, each numbered past what is numbered
+/// below them, with the caches that name them.
 pub(crate) struct Arena {
+    /// The preload's arena, which every epoch after it is laid over and
+    /// shares at the same numbers ([`Epochs::lay_base`]); none in the
+    /// preload's own and where nothing was preloaded.
+    below: Option<Arc<Arena>>,
     classes: Column<Declared>,
     functions: Column<UserFunction>,
     enum_methods: Column<(ClassId, EnumMethod)>,
-    /// The engine's classes, which the arena's are numbered past.
+    /// The classes below, the engine's and the preload's, which the
+    /// arena's are numbered past.
     first_class: u32,
-    /// The engine's natives and native methods, which the arena's user
-    /// functions are numbered past.
+    /// The functions below, the engine's natives and native methods and
+    /// the preload's user functions, which the arena's are numbered past.
     first_function: u32,
+    /// The preload's enum methods, which the arena's are numbered past.
+    first_enum_method: u32,
     /// php's inheritance cache over the classes published here, dropped
     /// with them ([`crate::inheritance_cache`]).
     pub(crate) inheritance: crate::inheritance_cache::InheritanceCache,
+    /// The unit cache's files, whose early-bound classes and functions
+    /// are rows here, php's `ZCSG(hash)` and what is counted of the
+    /// memory under it ([`crate::unit_cache::Files`]).
+    pub(crate) files: crate::unit_cache::Files,
 }
 
 impl Arena {
     /// An empty arena over an engine of `classes` classes and
-    /// `functions` natives and native methods.
-    pub(crate) fn past(classes: usize, functions: usize) -> Arena {
+    /// `functions` natives and native methods, holding `files`.
+    pub(crate) fn past(classes: usize, functions: usize, files: crate::unit_cache::Files) -> Arena {
         let first_class = u32::try_from(classes).unwrap_or(ClassId::LOCAL);
         let first_function = u32::try_from(functions).unwrap_or(Function::ENUM);
+        Arena::numbered(None, [first_class, first_function, 0], files)
+    }
+
+    /// An empty arena numbered from `first` (its classes, functions and
+    /// enum methods) over `below`, holding `files`.
+    fn numbered(
+        below: Option<Arc<Arena>>,
+        first: [u32; 3],
+        files: crate::unit_cache::Files,
+    ) -> Arena {
+        let [first_class, first_function, first_enum_method] = first;
         Arena {
+            below,
             classes: Column::below(ClassId::LOCAL.saturating_sub(first_class)),
             functions: Column::below(Function::ENUM.saturating_sub(first_function)),
-            enum_methods: Column::below(Function::ENUM),
+            enum_methods: Column::below(Function::ENUM.saturating_sub(first_enum_method)),
             first_class,
             first_function,
+            first_enum_method,
             inheritance: crate::inheritance_cache::InheritanceCache::default(),
+            files,
         }
+    }
+
+    /// An empty arena laid over `base`, which is laid over nothing,
+    /// numbered past every number it reserved.
+    fn over(base: Arc<Arena>) -> Arena {
+        let [classes, functions, enum_methods] = base.counts();
+        let first = [
+            base.first_class.saturating_add(classes),
+            base.first_function.saturating_add(functions),
+            base.first_enum_method.saturating_add(enum_methods),
+        ];
+        let files = base.files.emptied();
+        Arena::numbered(Some(base), first, files)
+    }
+
+    /// The arena a restart hands on: empty, over what this one is laid
+    /// over and numbered as it is, which no request of this epoch sees.
+    fn successor(&self) -> Arena {
+        let first = [
+            self.first_class,
+            self.first_function,
+            self.first_enum_method,
+        ];
+        Arena::numbered(self.below.clone(), first, self.files.emptied())
+    }
+
+    /// The arena a number below this one's first names a row of: the
+    /// base, which is laid over nothing ([`Epochs::lay_base`]), so a
+    /// lookup goes down one arena at most.
+    fn base(&self) -> Option<&Arena> {
+        self.below.as_deref()
     }
 
     /// The published class `class` names; none for the engine's own and
     /// for a request's.
     pub(crate) fn class(&self, class: ClassId) -> Option<&Declared> {
-        self.classes
-            .get(class.published_number()?.checked_sub(self.first_class)?)
+        let number = class.published_number()?;
+        if let Some(at) = number.checked_sub(self.first_class) {
+            return self.classes.get(at);
+        }
+        let base = self.base()?;
+        base.classes.get(number.checked_sub(base.first_class)?)
     }
 
     /// The published user function or method `function` names; none for
     /// a native and for a request's.
     pub(crate) fn function(&self, function: Function) -> Option<&UserFunction> {
-        self.functions.get(
-            function
-                .published_number()?
-                .checked_sub(self.first_function)?,
-        )
+        let number = function.published_number()?;
+        if let Some(at) = number.checked_sub(self.first_function) {
+            return self.functions.get(at);
+        }
+        let base = self.base()?;
+        base.functions.get(number.checked_sub(base.first_function)?)
     }
 
     /// The published enum's method `function` names, and its enum.
     pub(crate) fn enum_method(&self, function: Function) -> Option<(ClassId, EnumMethod)> {
-        self.enum_methods
-            .get(function.published_enum_at()?)
-            .copied()
+        let at = function.published_enum_at()?;
+        if let Some(own) = at.checked_sub(self.first_enum_method) {
+            return self.enum_methods.get(own).copied();
+        }
+        let base = self.base()?;
+        let row = base
+            .enum_methods
+            .get(at.checked_sub(base.first_enum_method)?);
+        row.copied()
     }
 
     /// The number of a class to publish, its row to [`Arena::publish_class`].
@@ -229,7 +280,8 @@ impl Arena {
 
     /// The number of an enum's method to publish.
     pub(crate) fn reserve_enum_method(&self) -> Option<Function> {
-        Function::published_enum(self.enum_methods.reserve(1)?)
+        let at = self.enum_methods.reserve(1)?;
+        Function::published_enum(self.first_enum_method.checked_add(at)?)
     }
 
     /// The row of a reserved class, written once; `false` where the
@@ -261,33 +313,17 @@ impl Arena {
         function: Function,
         row: (ClassId, EnumMethod),
     ) -> bool {
-        let Some(at) = function.published_enum_at() else {
+        let Some(at) = function
+            .published_enum_at()
+            .and_then(|at| at.checked_sub(self.first_enum_method))
+        else {
             return false;
         };
         self.enum_methods.fill(at, row).is_ok()
     }
 
-    /// Every row published so far kept by a restart: the preload's, once
-    /// it has published.
-    pub(crate) fn keep(&self) {
-        self.classes.keep();
-        self.functions.keep();
-        self.enum_methods.keep();
-    }
-
-    /// The arena as a restart leaves it: the kept rows alone.
-    fn truncate(&mut self) {
-        self.classes.truncate();
-        self.functions.truncate();
-        self.enum_methods.truncate();
-        // Every link it keeps names a class past the kept rows: the
-        // preload links its classes as its request's own and publishes
-        // them, keeping none here.
-        self.inheritance.clear();
-    }
-
-    /// How many classes, functions and enum methods are reserved.
-    #[cfg(test)]
+    /// How many classes, functions and enum methods this arena reserved,
+    /// what is below it not among them.
     pub(crate) fn counts(&self) -> [u32; 3] {
         [
             self.classes.reserved(),
@@ -299,10 +335,13 @@ impl Arena {
 
 /// The arena's epochs (design §5.14, *Identities*): the arena a request
 /// starting now is handed, which it holds until it ends. A restart
-/// (`accel_activate`'s, under `ZCSG(restart_pending)`) is made only once
-/// no request holds the arena, `accel_is_inactive`, and empties it back
-/// to the rows it kept; while one does, the restart stays pending and
-/// is tried again at the next request's start.
+/// (`accel_activate`'s, under `ZCSG(restart_pending)`) replaces it at the
+/// next request's start with an empty one over the same base, however
+/// many requests of the old epoch are still served; the old arena, its
+/// rows and its caches go with the last of them. php waits instead for a
+/// moment no process is inside (`accel_is_inactive`) and kills the ones
+/// that hold it past `opcache.force_restart_timeout`; a thread cannot be
+/// killed, and an epoch per request makes the wait needless.
 pub(crate) struct Epochs {
     current: Mutex<Arc<Arena>>,
 }
@@ -314,51 +353,95 @@ impl Epochs {
         }
     }
 
-    /// The arena for a request starting now: where `pending` asks for a
-    /// restart and no request holds the arena, the arena emptied back to
-    /// the rows it kept and `restart` called, both while no other
-    /// request can start.
-    pub(crate) fn enter(
-        &self,
-        pending: impl FnOnce() -> bool,
-        restart: impl FnOnce(),
-    ) -> Arc<Arena> {
-        let mut current = match self.current.lock() {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Arc<Arena>> {
+        match self.current.lock() {
             Ok(current) => current,
             Err(poisoned) => poisoned.into_inner(),
-        };
-        if pending()
-            && let Some(arena) = Arc::get_mut(&mut current)
-        {
-            arena.truncate();
-            restart();
+        }
+    }
+
+    /// The arena of the epoch a request starting now would enter, for
+    /// what reads or fills the cache outside a request; no restart is
+    /// made here.
+    pub(crate) fn current(&self) -> Arc<Arena> {
+        Arc::clone(&self.lock())
+    }
+
+    /// The arena for a request starting now: where `restart` finds a
+    /// restart scheduled for the current one (and counts it), a new
+    /// arena in its place, both while no other request can start, so
+    /// one restart replaces an epoch once.
+    pub(crate) fn enter(&self, restart: impl FnOnce(&Arena) -> bool) -> Arc<Arena> {
+        let mut current = self.lock();
+        if restart(&current) {
+            let next = current.successor();
+            *current = Arc::new(next);
         }
         Arc::clone(&current)
+    }
+
+    /// `zend_shared_alloc_save_state` after preloading: the preload's
+    /// `arena`, which it has published into, laid below every epoch from
+    /// now on; the first laid stands, and an arena laid over one is never
+    /// laid. The preload is served before any other request, and
+    /// publishes nothing into it after; a row it did would be numbered
+    /// among the next epoch's own and reached by no request of it.
+    pub(crate) fn lay_base(&self, arena: &Arc<Arena>) {
+        let mut current = self.lock();
+        if arena.below.is_some() || current.below.is_some() {
+            return;
+        }
+        *current = Arc::new(Arena::over(Arc::clone(arena)));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Column, FIRST, locate};
+    use std::sync::Arc;
 
+    use super::{Arena, Column, Epochs, FIRST, locate};
+    use crate::api::values::ClassId;
+    use crate::enums::EnumMethod;
+
+    /// The preload's rows laid below every epoch: each epoch numbers its
+    /// own past them and reads them at their numbers, and a restart
+    /// hands on an empty epoch that reads them still.
     #[test]
-    fn a_truncated_column_keeps_its_kept_rows_and_numbers_the_rest_again() {
-        let mut column: Column<u32> = Column::below(1 << 20);
-        let first = column.reserve(70).unwrap_or(u32::MAX);
-        for at in first..70 {
-            assert_eq!(column.fill(at, at), Ok(()));
+    fn the_preloads_rows_keep_their_numbers_across_restarts() {
+        let epochs = Epochs::of(Arena::past(10, 20, crate::unit_cache::Files::new(16)));
+        let preload = epochs.enter(|_| false);
+        assert_eq!(preload.reserve_class(), Some(ClassId(10)));
+        let method = preload.reserve_enum_method();
+        let row = (ClassId(10), EnumMethod::Cases);
+        assert!(method.is_some_and(|method| preload.publish_enum_method(method, row)));
+        epochs.lay_base(&preload);
+        let first = epochs.enter(|_| false);
+        assert_eq!(
+            first.reserve_class(),
+            Some(ClassId(11)),
+            "numbered past the preload's"
+        );
+        let own = first.reserve_enum_method();
+        let mine = (ClassId(11), EnumMethod::From);
+        assert!(own.is_some_and(|own| first.publish_enum_method(own, mine)));
+        assert_ne!(own, method);
+        let second = epochs.enter(|_| true);
+        assert!(!Arc::ptr_eq(&first, &second), "a new epoch");
+        assert_eq!(second.counts(), [0, 0, 0]);
+        for epoch in [&first, &second] {
+            assert_eq!(
+                method.and_then(|method| epoch.enum_method(method)),
+                Some(row)
+            );
         }
-        column.keep();
-        let past = column.reserve(100).unwrap_or(u32::MAX);
-        assert_eq!(column.fill(past, 7), Ok(()));
-        assert_eq!(column.fill(past + 99, 9), Ok(()));
-        column.truncate();
-        assert_eq!(column.reserved(), 70);
-        assert_eq!(column.get(69), Some(&69), "a kept row stays");
-        assert_eq!(column.get(past), None, "a row past them goes");
-        assert_eq!(column.reserve(1), Some(70), "its number is reserved again");
-        assert_eq!(column.fill(70, 1), Ok(()));
-        assert_eq!(column.get(70), Some(&1));
+        assert_eq!(own.and_then(|own| first.enum_method(own)), Some(mine));
+        assert_eq!(
+            own.and_then(|own| second.enum_method(own)),
+            None,
+            "not the new epoch's"
+        );
+        assert_eq!(second.reserve_class(), Some(ClassId(11)));
+        assert!(Arc::ptr_eq(&second, &epochs.enter(|_| false)));
     }
 
     #[test]

@@ -12,15 +12,17 @@ built; the instrument reads manifests and sources.
 | `lock-line` | a public item with no line in the seam's lock   | fail |
 | `lock-order` | a lock whose every item has its line, in an order `--write` would rewrite (#403) | fail |
 | `ceiling`   | `api.lock` over `[budget] api_items`, and its `__private` lines over `api_private_items`; the crate's `Cargo.toml` alone, its items laid down by the test at one past the ceiling the manifest carries, one cap at a time (#338, #953) | fail |
+| `include`   | a type defined in a module that `include!`s its file from `OUT_DIR`, which the instrument cannot read, with a `pub fn` in an `impl` of another file and no line for it in the lock (#2025): the impl is joined to the type by name; beside it a glob through the including module, which answers for no name, before a glob that defines `Plain` | fail |
 | `edge`      | a crate dependency outside its `[[edge]]` rows  | fail |
 | `harness-edge` | a crate no `[[edge]]` row names depending on a workspace crate: the harness linking `php_bundle`, which the tracked manifest forbids since #2213 | fail |
 | `host-edge` | a host under `sapi/` depending on `php_engine` past its facade (ADR-0008), beside one within its edges | fail |
 | `deny-edge` | a `use` path across a `deny = true` module edge | fail |
-| `bundle`    | a bundle order that is not topological          | fail |
+| `bundle`    | a bundle that lists an extension before one it depends on, behind no feature: the order written is php's and free under `order = "registration"` (#2255) | pass |
 | `registration` | under `order = "registration"` (#1778, #1915), which the test sets on the tracked manifest's `php_bundle` row: a bundle feature that does not switch on the feature of an extension its extension declares `Required`, beside one that does, and a Cargo link and an `Optional` row that require nothing; the test also lays it down in a scratch workspace with its bundle's `src/lib.rs` replaced, for a required extension registered nowhere, a registration behind a `cfg` the instrument does not read, one extension registered twice, a link with no declaration, and, with an extension's `src/lib.rs` replaced, a declaration the instrument does not read | fail |
 | `harness-lock` | a public item of the harness with no line in `xtask.lock`, under the rows #55 proposes | fail |
 | `ops-lock`  | a hand-edited line of `ops.lock`, the lock rendered from `ops.toml` | fail |
 | `tier-face` | a sectioned lock (#1369): php_sapi importing a `tier::*` item `tier.lock`'s `[face]` does not list, which `sapi.lock` does not hold either | fail |
 | `same-name` | two `pub` types of one name in two modules, each listing its own methods alone (#79); read by the unit test beside `Inventory::assoc`, not by `hold` | pass |
+| `lints`     | a crate whose `Cargo.toml` lacks `[lints] workspace = true`, so the root manifest's `[workspace.lints]` do not reach it (#2111), beside one that carries it; every other fixture's crates carry the line | fail |
 | `surface-edge` | an `ext/*` crate's library dependency on another that no row of the fixture's design §4.10 names with both crates (#2020, #2251): ext/zip linking ext/pcre beside ext/spl's link on the `pcre` → `spl` row, and a dev-dependency on no row, which links nothing and is not held | fail |
 | `surface-lock` | an extension's `pub` item beyond `extension()` with no line in its `surface.lock`, and a line naming no item (#2251); `clean` carries the lock of its one export | fail |

@@ -600,6 +600,15 @@ request::OpArrayView::opline
 request::OpArrayView::oplines
 request::OpArrayView::variable
 request::Opcode
+request::Opcode::COUNT
+request::Opcode::effects
+request::Opcode::from_u8
+request::Opcode::is_commutative
+request::Opcode::is_frameless_icall
+request::Opcode::is_safepoint_site
+request::Opcode::name
+request::Opcode::num
+request::Opcode::out_used
 request::Opening
 request::Operand
 request::OplineIdx

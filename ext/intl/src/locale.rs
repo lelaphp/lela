@@ -291,7 +291,7 @@ fn get_display(
     };
     let (name, status) = uloc::display(shown, &c_string(&locale), &c_string(&display));
     if status.is_failure() {
-        error::set(req, status, &format!("unable to get locale {tag}"))?;
+        error::set(req, status, format!("unable to get locale {tag}"))?;
         return Ok(OrFalse::False);
     }
     match ffi::to_utf8(&name) {

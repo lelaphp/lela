@@ -289,6 +289,7 @@ mod tests {
             dir,
             package: format!("php_ext_{name}"),
             deps: Vec::new(),
+            inherits_lints: true,
         };
         let read = Declared::read(&krate).unwrap();
         (read.required.into_iter().collect(), read.unread)

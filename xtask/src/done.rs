@@ -67,7 +67,10 @@
 //!    In practice this is the Stop hook's and pre-push's condition: the
 //!    record is the clone's own configuration, which a push does not
 //!    carry, and a pull request's checkout is detached, so CI's `done`
-//!    is not asked and has no store to answer from if it were.
+//!    is not asked and has no store to answer from if it were. Beside
+//!    it, a ticket a merge since the base names and left open for want
+//!    of a ready record, `main`'s own merge at `HEAD` where the base is
+//!    `HEAD`, is unmet until a close replaces that reading (#2358).
 //!
 //! **What makes a `ticket` reading fresh** (#31). A ticket has no tree of
 //! its own, so the reading is stamped over the workspace, and it is fresh
@@ -395,6 +398,7 @@ pub fn judge(
     if let Some(ticket) = ticket {
         boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
     }
+    unmet.extend(ticket::stranded(root, store, &base.commit)?);
 
     Ok(Verdict {
         base,

@@ -650,7 +650,7 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
     say(WORK, &format!("the session ended: {status}"));
     let tip = rev(root, &format!("refs/heads/{branch}"))?;
     let issue = gh.view(root, ticket)?;
-    let ready = ticket::ready_of(root, &branch)?.is_some();
+    let ready = ticket::ready_of(root, &branch, ticket)?.is_some();
     if issue.state != State::Closed && !ready {
         return Ok(Worked::Standing {
             ticket,

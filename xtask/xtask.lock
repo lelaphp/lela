@@ -319,6 +319,7 @@ ticket::parent
 ticket::parent_scope
 ticket::ready_of
 ticket::run
+ticket::stranded
 ticket::ticket_of
 track::Ticket
 track::Ticket::new

@@ -47,6 +47,7 @@ mod idn;
 mod iterator;
 mod listformatter;
 mod locale;
+mod msgformat;
 mod normalizer;
 mod timezone;
 mod transliterator;
@@ -327,6 +328,7 @@ pub fn extension() -> Extension {
     let builder = grapheme::functions(builder);
     let builder = idn::functions(builder);
     let builder = locale::functions(builder);
+    let builder = msgformat::functions(builder);
     let builder = normalizer::functions(builder);
     let builder = timezone::functions(builder);
     let builder = transliterator::functions(builder);
@@ -343,6 +345,7 @@ pub fn extension() -> Extension {
         .class::<listformatter::IntlListFormatter>()
         .class::<normalizer::Normalizer>()
         .class::<locale::Locale>()
+        .class::<msgformat::MessageFormatter>()
         .class::<dateformat::IntlDateFormatter>()
         .class::<datepatterngenerator::IntlDatePatternGenerator>()
         .class::<transliterator::Transliterator>()
