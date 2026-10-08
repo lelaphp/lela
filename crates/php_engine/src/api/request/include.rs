@@ -578,6 +578,24 @@ impl Request {
         Ok(())
     }
 
+    /// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
+    /// (`Z/Zend/zend_language_scanner.l:604`, `Z/Zend/zend_ast.c:2954`):
+    /// the source parsed from an open tag as a file is, and php's text
+    /// of its tree, the text `assert()`'s description is written by,
+    /// over the whole file. A parse error is the `ParseError` `zendparse`
+    /// throws. What the test extension's `zend_test_compile_to_ast`
+    /// answers, the witness there.
+    pub fn export_tree(&mut self, source: &[u8]) -> Result<Vec<u8>, Thrown> {
+        let options = php_compile::Options {
+            precision: self.precision(),
+            short_open_tag: self.short_open_tag(),
+            ..php_compile::Options::default()
+        };
+        let mut strings = php_heap::Strings::new();
+        php_compile::export_source(source, &options, &mut strings)
+            .map_err(|refused| self.refused_include(&refused, b"", SourceKind::EVAL))
+    }
+
     /// `f` over a string the host evaluates of its own, `-r`'s code, the
     /// shell's and a debugger's, compiled as `zend_eval_stringl` compiles
     /// it: `CG(compiler_options)` set to `ZEND_COMPILE_DEFAULT_FOR_EVAL`

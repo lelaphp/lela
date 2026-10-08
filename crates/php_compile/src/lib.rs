@@ -405,6 +405,30 @@ pub fn compile_source(
     compile_scanned(&parsed, options, strings, Some(scanning))
 }
 
+/// `zend_compile_string_to_ast` and `zend_ast_export("", ast, "")`
+/// (`Z/Zend/zend_language_scanner.l:604`, `Z/Zend/zend_ast.c:2954`):
+/// `source` parsed from where `options` begins the scanner, the parse's
+/// first fatal its refusal, and php's text of the tree, which is what
+/// `assert()`'s description is written by over the whole file.
+pub fn export_source(
+    source: &[u8],
+    options: &Options<'_>,
+    strings: &mut dyn Intern,
+) -> Result<Vec<u8>, CompileError> {
+    let parsed = php_syntax::parse(source, &syntax_options(options));
+    if let Some(fatal) = parsed.diagnostics.iter().find(|d| d.level.is_fatal()) {
+        return Err(CompileError {
+            level: level_of(fatal.level),
+            message: fatal.message.clone(),
+            line: fatal.line,
+            raised: Vec::new(),
+            thrown: false,
+            stage: Stage::Compiling,
+        });
+    }
+    emit::export(&parsed, options, strings)
+}
+
 /// What the lexer is told of a source the compiler is handed: the
 /// entry `CG(short_tags)` reads and where the scanner begins.
 fn syntax_options(options: &Options<'_>) -> php_syntax::Options {

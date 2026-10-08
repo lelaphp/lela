@@ -699,6 +699,7 @@ request::Request::execution
 request::Request::execution_trace
 request::Request::exit_status
 request::Request::expand_filepath
+request::Request::export_tree
 request::Request::extension_constants
 request::Request::extension_dependencies
 request::Request::extension_functions
