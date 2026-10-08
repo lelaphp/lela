@@ -1420,15 +1420,18 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 }
 
 /// The `oracle` section: the pin as this machine has it (#36), from the
-/// pin and the process's environment alone. Four rows: the tree's
+/// pin and the process's environment alone. Five rows: the tree's
 /// variable by name, its value and whether it is set; the promise's
-/// likewise; the pin's path and whether it is a directory; and where
+/// likewise; the pin's path and whether it is a directory; where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
-/// pin's, or the absence it named. CI reads the two names off the JSON,
-/// `tree.variable` and `promise.variable`, and sets them under those
-/// names, so the workflow spells neither.
+/// pin's, or the absence it named; and the pinned php, its version, keg
+/// path and md5, and whether a file stands there. CI reads the two names
+/// off the JSON, `tree.variable` and `promise.variable`, and sets them
+/// under those names, so the workflow spells neither; the oracle runner
+/// pours the keg `binary` names and holds it to that md5 (#2253).
 fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
     let source = &pin.source;
+    let php = &pin.oracle;
     let named = source.named();
     let promise = std::env::var_os(PROMISE_VARIABLE).map(|v| v.to_string_lossy().into_owned());
     let pinned = source.path();
@@ -1460,6 +1463,12 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "path": found.as_ref().ok().map(|p| p.display().to_string()),
                 "at": at,
                 "error": found.as_ref().err().map(|e| format!("{e:#}")),
+            },
+            "binary": {
+                "version": php.version,
+                "path": php.path.display().to_string(),
+                "md5": php.md5,
+                "file": php.path.is_file(),
             },
         }))?,
         Table::Md => {
@@ -1502,6 +1511,14 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 Err(e) => (String::new(), format!("absent: {e:#}")),
             };
             writeln!(out, "| found |  | {} | {} |", cell(&path), cell(&state)).ok();
+            writeln!(
+                out,
+                "| binary |  | {} | php {}, md5 {} |",
+                cell(&php.path.display().to_string()),
+                php.version,
+                php.md5
+            )
+            .ok();
             out
         }
     })
