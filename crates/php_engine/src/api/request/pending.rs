@@ -36,8 +36,12 @@ impl Request {
     /// stands is given up too, which is php's own arm there: what is
     /// unwinding is not replaced by a different throwable
     /// (`Z/Zend/zend_exceptions.c:195-199`). The graceful exit is
-    /// replaced, `zend_exception_set_previous` giving it up.
-    pub(crate) fn leave_pending(&mut self, thrown: &Thrown) {
+    /// replaced, `zend_exception_set_previous` giving it up. A hook
+    /// that answers nothing leaves what it threw here, as soap's link of
+    /// `zend_error_cb` leaves a throwing client's fault in
+    /// `EG(exception)` before the request bails out
+    /// ([`crate::api::raising::catch_fatal`]).
+    pub fn leave_pending(&mut self, thrown: &Thrown) {
         let Some(object) = thrown.exception().copied() else {
             return;
         };

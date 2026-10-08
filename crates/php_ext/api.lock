@@ -469,12 +469,14 @@ raising::argument_error
 raising::arity
 raising::call_stack_end
 raising::call_stack_limit
+raising::catch_fatal
 raising::clear
 raising::deprecated
 raising::docref
 raising::docref_parameter
 raising::exit
 raising::fatal
+raising::fatal_while_pending
 raising::new_throwable
 raising::notice
 raising::pending
@@ -749,6 +751,7 @@ request::Request::interrupt
 request::Request::is_pending
 request::Request::is_uploaded_file
 request::Request::last_error
+request::Request::leave_pending
 request::Request::loaded_env
 request::Request::loaded_extensions
 request::Request::locale_name
