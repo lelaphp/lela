@@ -1432,6 +1432,12 @@ trait ClassMember: Sized + 'static {
     fn inherited(&self) -> bool {
         true
     }
+    /// Whether an internal class's own come after what it inherits: a
+    /// constant, which the stub's register function declares after
+    /// `zend_register_internal_class_ex` inherited the parent's table
+    /// and `zend_class_implements` the interfaces'; a method is
+    /// registered with the class, before either.
+    const LAST_WHEN_INTERNAL: bool = false;
 }
 
 impl ClassMember for MethodDecl {
@@ -1449,6 +1455,7 @@ impl ClassMember for MethodDecl {
 
 impl ClassMember for ClassConstDecl {
     type Case = Exact;
+    const LAST_WHEN_INTERNAL: bool = true;
     fn of(class: &ClassDecl) -> &[Self] {
         &class.constants
     }
@@ -1852,8 +1859,10 @@ impl<'a, H: Copy> Linker<'a, H> {
     /// a private constant not); the rest of its own, which for a method
     /// are the traits' abstract ones it took; then each of its
     /// interfaces', in `zend_do_implement_interfaces`' order, that
-    /// nothing above put there. None where the parent or an interface
-    /// is held with no record.
+    /// nothing above put there. An internal class's constants are the
+    /// parent's and the interfaces' and then its own
+    /// ([`ClassMember::LAST_WHEN_INTERNAL`]). None where the parent or
+    /// an interface is held with no record.
     ///
     /// `ce->properties_info` puts the class's own first, so it is not
     /// the slot order, which puts the parent's slots first.
@@ -1865,19 +1874,28 @@ impl<'a, H: Copy> Linker<'a, H> {
         let named = |row: &Row<H>| self.row_member_name::<M>(child, row);
         let mut rows = Rows::default();
         let declared = (0u32..).zip(M::of(child));
+        let last = M::LAST_WHEN_INTERNAL && child.file.0.is_empty();
+        let own = if last { 0 } else { own };
         for (at, member) in declared.clone().take(own) {
             rows.add(Row { holder: None, at }, member.name(), named);
         }
         if let Some(parent) = &child.parent {
             self.inherit_rows::<M>(&mut rows, child, &parent.0)?;
         }
-        for (at, member) in declared.skip(own) {
-            rows.add(Row { holder: None, at }, member.name(), named);
+        if !last {
+            for (at, member) in declared.clone().skip(own) {
+                rows.add(Row { holder: None, at }, member.name(), named);
+            }
         }
         let mut interfaces = Vec::new();
         self.interfaces_of(&child.interfaces, &mut interfaces, 0);
         for interface in interfaces {
             self.inherit_rows::<M>(&mut rows, child, &interface.name.0)?;
+        }
+        if last {
+            for (at, member) in declared {
+                rows.add(Row { holder: None, at }, member.name(), named);
+            }
         }
         Some(rows)
     }
