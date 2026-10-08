@@ -350,7 +350,9 @@ impl FileDiff {
     /// Every file of the diff `text` carries, in `--- `/`+++ ` headers
     /// as git and `diff -u` write them. A line a hunk does not count is
     /// not the hunk's; an empty line inside one is an empty context line,
-    /// whose leading space an editor drops.
+    /// whose leading space an editor drops; a last line without its
+    /// newline has one, since a preview is text cut at its end, and only
+    /// `\ No newline at end of file` says the file ends without one.
     fn all(text: &str) -> Vec<FileDiff> {
         let lines: Vec<&str> = text.split_inclusive('\n').collect();
         let mut files: Vec<FileDiff> = Vec::new();
@@ -412,7 +414,13 @@ impl FileDiff {
                 '-' => left.0 = left.0.saturating_sub(1),
                 _ => left.1 = left.1.saturating_sub(1),
             }
-            hunk.lines.push((tag, body.to_owned()));
+            // A preview cut at its last line, as the dialog's text is,
+            // still ends that line: only the marker says a file does not.
+            let mut body = body.to_owned();
+            if !body.ends_with('\n') {
+                body.push('\n');
+            }
+            hunk.lines.push((tag, body));
             file.text.push_str(line);
         }
         files

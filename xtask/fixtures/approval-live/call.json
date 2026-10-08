@@ -1,0 +1,1 @@
+{"session_id": "5e55100b-0000-4000-8000-000000000000", "cwd": ".", "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_use_id": "toolu_01FixtureLiveEdit0000001", "tool_input": {"replace_all": false, "file_path": "seams.toml", "old_string": "name = \"php_unit\"\nbudget = 6000", "new_string": "name = \"php_unit\"\nbudget = 2500"}}
