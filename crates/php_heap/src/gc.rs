@@ -64,6 +64,18 @@ const PINNED: u32 = 1 << 31;
 /// The count's thirty-one bits beneath the pin.
 const COUNT: u32 = !PINNED;
 
+/// What one owner given up left of a block's count
+/// ([`Refcounted::release`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Release {
+    /// Owners are left.
+    Owned,
+    /// The last owner went: the block is destroyed.
+    Last,
+    /// There was no owner to give up.
+    Ownerless,
+}
+
 /// `GC_FLAGS_MASK` (`Z/Zend/zend_types.h:769`); the type byte is the low
 /// four bits below it and the collector's colour the bits above.
 const FLAGS_MASK: u32 = 0x0000_03f0;
@@ -202,6 +214,23 @@ impl Refcounted {
         let count = (word & COUNT).saturating_sub(1);
         self.refcount.set((word & PINNED) | count);
         count
+    }
+
+    /// One owner given up as a release gives it up, `GC_DELREF`: what it
+    /// left of the count. A count already at zero has no owner to give
+    /// up: the block's destruction is under way, or done under a pin, and
+    /// a place that still names it, as a release in place leaves one
+    /// (#2245), is released again; it is left as it stands, so nothing
+    /// destroys it twice, where php's count wraps and does the same.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn release(&self) -> Release {
+        if self.refcount() == 0 {
+            Release::Ownerless
+        } else if self.delref() == 0 {
+            Release::Last
+        } else {
+            Release::Owned
+        }
     }
 
     /// Whether a walk pins the block ([`PINNED`]): what the end of its

@@ -393,7 +393,7 @@ impl Heap {
     /// the caller.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_string(&mut self, s: Str) {
-        if s.is_interned() || s.delref() != 0 {
+        if s.is_interned() || s.gc().release() != gc::Release::Last {
             return;
         }
         if s.is_persistent() {
@@ -605,26 +605,24 @@ impl Heap {
         }
         // At zero the block is destroyed whether or not a pin stands:
         // a pin keeps only its bytes ([`Heap::give_back`]).
-        if let Some(a) = z.as_arr() {
-            if a.delref() == 0 {
-                return GivenUp::Last(Last::Table(a));
+        match counted_header(z, Refcounted::release) {
+            Some(gc::Release::Owned) => GivenUp::Owned,
+            Some(gc::Release::Last) => {
+                if let Some(a) = z.as_arr() {
+                    GivenUp::Last(Last::Table(a))
+                } else if let Some(r) = z.as_reference() {
+                    GivenUp::Last(Last::Cell(r))
+                } else {
+                    if let Some(o) = z.as_obj() {
+                        Heap::store_del(hooks, o);
+                    } else if let Some(r) = z.as_resource() {
+                        Heap::resource_free(hooks, r);
+                    }
+                    GivenUp::Freed
+                }
             }
-        } else if let Some(o) = z.as_obj() {
-            if o.delref() == 0 {
-                Heap::store_del(hooks, o);
-                return GivenUp::Freed;
-            }
-        } else if let Some(r) = z.as_resource() {
-            if r.delref() == 0 {
-                Heap::resource_free(hooks, r);
-            }
-            return GivenUp::Freed;
-        } else if let Some(r) = z.as_reference()
-            && r.delref() == 0
-        {
-            return GivenUp::Last(Last::Cell(r));
+            Some(gc::Release::Ownerless) | None => GivenUp::Freed,
         }
-        GivenUp::Owned
     }
 
     /// A pin over the block `z` names (design §4.4, #2197, #2230): an

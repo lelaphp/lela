@@ -426,3 +426,28 @@ echo "end\n";
     });
     assert_eq!(stdout, format!("{rounds}| {rounds}end\n"));
 }
+
+/// A reference cell an `EXTR_REFS` write releases in place, whose
+/// destroy serves a destructor that unsets the variable still naming it
+/// and writes a new object there: the cell is destroyed once, its bytes
+/// given back once, and the new object is released at the write, which
+/// php leaks until the request ends (#2245).
+#[test]
+fn a_cell_released_in_place_is_destroyed_once_where_its_destructor_unsets_it() {
+    let stdout = armed(
+        r#"<?php
+class X { function __destruct() { echo "dtor X\n"; } }
+class D { function __destruct() {
+    echo "dtor D\n";
+    unset($GLOBALS['p_x']);
+    $GLOBALS['p_x'] = new X;
+} }
+$a = [new D]; $p_x = &$a[0]; unset($a);
+$src = ['x' => 5];
+extract($src, EXTR_REFS | EXTR_PREFIX_ALL, 'p');
+var_dump($p_x);
+echo "end\n";
+"#,
+    );
+    assert_eq!(stdout, "dtor D\ndtor X\nint(5)\nend\n");
+}
