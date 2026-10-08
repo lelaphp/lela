@@ -70,6 +70,28 @@ type Picked = Raw<Union<i64, Union<PhpString, PhpArray>>>;
 /// }
 /// ```
 ///
+/// Two rows holding one reference are merged, as php's recursion test
+/// asks whether the rows are one slot; a table that holds itself is
+/// still the `Error`.
+///
+/// ```php
+/// $r = [1]; $m = ["a" => &$r]; var_dump(array_merge_recursive($m, $m));
+/// $a = ['x' => ['k' => 1]]; $a['x']['k'] = &$a['x'];
+/// try { array_merge_recursive($a, $a); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// array(1) {
+///   ["a"]=>
+///   array(2) {
+///     [0]=>
+///     int(1)
+///     [1]=>
+///     int(1)
+///   }
+/// }
+/// Recursion detected
+/// ```
+///
 /// The declarations of the array builders.
 ///
 /// ```php
@@ -177,8 +199,7 @@ fn merge_recursive(
     // `ZEND_HASH_FOREACH_STR_KEY_VAL(src, string_key, src_entry)`
     // (`Z/ext/standard/array.c:4041`), no owner of the table taken: the
     // argument holds it while an object's cast or a destructor an
-    // overwrite serves runs. A count read of the row is php's; where the
-    // two rows are one reference, that is the reference's.
+    // overwrite serves runs.
     walk::foreach(req, src, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let src_entry = *row.value();
@@ -196,11 +217,14 @@ fn merge_recursive(
         let src_value = src_entry.deref();
         let dest_value = dest_entry.deref();
         let thash = dest_value.as_array().copied();
-        let same_cell = matches!(
-            (src_entry.as_php_ref(), dest_entry.as_php_ref()),
-            (Some(a), Some(b)) if a == b && src_entry.refcount() % 2 == 1
-        );
-        if thash.is_some_and(|thash| thash.is_recursive()) || same_cell {
+        // `src_entry == dest_entry && Z_ISREF_P(dest_entry) &&
+        // (Z_REFCOUNT_P(dest_entry) % 2)`: the two rows are one slot, which
+        // they are where the tables are one, as a key finds one bucket in
+        // a table; two slots holding one reference are merged.
+        let same_slot = dest.is_same(src)
+            && dest_entry.as_php_ref().is_some()
+            && dest_entry.refcount() % 2 == 1;
+        if thash.is_some_and(|thash| thash.is_recursive()) || same_slot {
             return Err(throw_error(req, "Error", "Recursion detected"));
         }
         // `convert_to_array(dest_zval)` then `SEPARATE_ZVAL`: a `null` is

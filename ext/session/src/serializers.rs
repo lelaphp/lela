@@ -12,7 +12,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
-use crate::{Format, bind_vars, session_array, session_array_mut, shown};
+use crate::{Format, absorb, bind_vars, session_array, session_array_mut, shown};
 
 /// `PS_SERIALIZER_ENCODE_FUNC`: the session's variables as the format
 /// writes them, `None` where `php` meets a name with `|` in it, and
@@ -163,6 +163,30 @@ fn encode_through(
 /// array(0) {
 /// }
 /// ```
+///
+/// A delayed `__wakeup()` that throws after a good `php_serialize` read
+/// leaves the value bound and its throwable pending, with no warning and
+/// the session standing:
+///
+/// ```php
+/// class A { function __wakeup() { echo "wakeup A\n"; throw new Exception("wake"); } }
+/// ini_set("session.serialize_handler", "php_serialize");
+/// ob_start(); session_start(["save_path" => sys_get_temp_dir(), "use_cookies" => 0, "cache_limiter" => ""]);
+/// try { var_dump(session_decode('a:2:{s:1:"x";i:1;s:1:"a";O:1:"A":0:{}}')); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($_SESSION);
+/// session_destroy(); ob_end_flush();
+/// ```
+/// ```expect
+/// wakeup A
+/// wake
+/// array(2) {
+///   ["x"]=>
+///   int(1)
+///   ["a"]=>
+///   object(A)#1 (0) {
+///   }
+/// }
+/// ```
 pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<bool, Thrown> {
     let data = data.to_vec();
     if format == Format::PhpSerialize {
@@ -173,11 +197,18 @@ pub(super) fn decode(req: &mut Request, format: Format, data: &[u8]) -> Result<b
             Ok(read) => (read.map(|value| Owner::take(req, value)), Ok(())),
             Err(thrown) => (None, Err(thrown)),
         };
-        if let Err(thrown) = reader.finish(req, read) {
+        // `PHP_VAR_UNSERIALIZE_DESTROY`, then the value bound whatever a
+        // delayed call threw: php's decode answers by the read alone, so
+        // a `__wakeup` that throws after a good read leaves its throwable
+        // pending over the bound session, and only a read that failed,
+        // on a throw or not, fails the decode.
+        if let Err(thrown) = reader.finish(req, read)
+            && let Err(fatal) = absorb(req, Err::<(), _>(thrown))
+        {
             if let Some(held) = held {
                 held.give_up(req);
             }
-            return Err(thrown);
+            return Err(fatal);
         }
         let ok = held.is_some();
         // A value read is bound whatever it is, and nothing read is the

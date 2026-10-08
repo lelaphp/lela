@@ -342,8 +342,8 @@ fn pre_commit_re_stages_the_region_it_rewrote_and_the_commit_is_allowed() {
 /// with the variable that gates the command set, from a directory outside
 /// the clone with `HOME` and `CLAUDE_CONFIG_DIR` pointing at empty ones,
 /// so no settings, plugin or hook of the clone or the committer load;
-/// then `tsc` through the pinned `npx`, then `plugin validate --strict`;
-/// what was written is re-staged, so the commit, by pathspec, carries the
+/// then `tsc` through the pinned `npx`, then `plugin validate --strict`,
+/// then `plugin test` (#2247); what was written is re-staged, so the commit, by pathspec, carries the
 /// file whose header names the version.
 #[test]
 fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
@@ -355,7 +355,7 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
 
     let root = scratch.root.display();
     let calls = scratch.calls("plugin");
-    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert_eq!(calls.len(), 4, "{calls:?}");
     let types = &calls[0];
     let prefix = format!("claude -p /plugin-types {root}/harness-plugins/types cwd=");
     assert!(types.starts_with(&prefix), "{types}");
@@ -380,13 +380,19 @@ fn pre_commit_rewrites_the_declarations_when_the_plugin_is_staged() {
         calls[1],
         "npx -y -p typescript@5.9.3 tsc -p harness-plugins"
     );
-    // The validate runs in the clone, under the committer's own environment.
+    // The validate and the tests run in the clone, under the committer's
+    // own environment.
     assert!(
         calls[2].starts_with(&format!(
             "claude plugin validate harness-plugins --strict cwd={root} "
         )),
         "{}",
         calls[2]
+    );
+    assert!(
+        calls[3].starts_with(&format!("claude plugin test harness-plugins cwd={root} ")),
+        "{}",
+        calls[3]
     );
 
     let committed = scratch.git(&["show", "--name-only", "--format=", "HEAD"], false);

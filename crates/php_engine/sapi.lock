@@ -9,6 +9,8 @@ Engine
 EngineBuilder
 FileHandles
 Forked
+HostPage
+HostServes
 HostValue
 IniEvent
 IniFile

@@ -20,9 +20,9 @@ use std::sync::Arc;
 use php_heap::{
     Fatal, FrameRef, Heap, HeapHooks, MapTable, Obj, Ref, Res, ResourceType, VmStack, Zval, ZvalRef,
 };
+use php_link::LinkedClass;
 use php_unit::Unit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, PropertyDecl, Visibility};
-use php_unit::link::LinkedClass;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -563,7 +563,7 @@ pub(crate) enum MemberAt {
 pub(crate) struct Declared {
     unit: Arc<Unit>,
     at: u32,
-    composed: Option<Box<php_unit::link::Composed>>,
+    composed: Option<Box<php_link::Composed>>,
     bound: Bound,
 }
 

@@ -19,7 +19,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
-use crate::{ArrayAccess, Countable, Iterator, Serializable};
+use crate::{ArrayAccess, Countable, Iterator, Record, Serializable};
 
 /// `SPL_DLLIST_IT_MASK`, the two bits `setIteratorMode()` sets.
 const IT_MASK: i64 = 3;
@@ -661,6 +661,22 @@ impl SplDoublyLinkedList {
     /// Error at offset 8 of 8 bytes
     /// Error at offset 4 of 5 bytes
     /// ```
+    ///
+    /// A read that throws breaks the list too, the throwable chained
+    /// under the `UnexpectedValueException`, and so does a delayed
+    /// `__wakeup()` that throws before the list breaks off.
+    ///
+    /// ```php
+    /// class T { public int $p; }
+    /// class W { function __wakeup() { throw new Exception("wake"); } }
+    /// $p = function ($e) { echo get_class($e), ": ", $e->getMessage(), " <- ", get_class($e->getPrevious()), ": ", $e->getPrevious()->getMessage(), "\n"; };
+    /// try { (new SplDoublyLinkedList)->unserialize('i:0;:O:1:"T":1:{s:1:"p";s:1:"x";}'); } catch (Throwable $e) { $p($e); }
+    /// try { (new SplDoublyLinkedList)->unserialize('i:0;:O:1:"W":0:{};'); } catch (Throwable $e) { $p($e); }
+    /// ```
+    /// ```expect
+    /// UnexpectedValueException: Error at offset 32 of 33 bytes <- TypeError: Cannot assign string to property T::$p of type int
+    /// UnexpectedValueException: Error at offset 17 of 18 bytes <- Exception: wake
+    /// ```
     #[php(tentative)]
     fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
         let this = this.object();
@@ -673,15 +689,9 @@ impl SplDoublyLinkedList {
         }
         let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let read = read_list(req, this, &mut reader, &data);
-        let broke_at = reader.finish(req, read)?;
-        match broke_at {
-            Some(at) => Err(throw(
-                req,
-                "UnexpectedValueException",
-                &format!("Error at offset {at} of {} bytes", data.len()),
-            )),
-            None => Ok(()),
-        }
+        let (read, broke_at) = crate::record_read(req, this, &reader, read);
+        let finished = reader.finish(req, read);
+        crate::record_end(req, finished, broke_at, data.len())
     }
 
     /// `serialize(): string`: the flags, then `:` and each element, each
@@ -1078,32 +1088,33 @@ fn move_forward(req: &mut Request, this: PhpObject, flags: i64) -> Result<(), Th
 }
 
 /// The body of `SplDoublyLinkedList::unserialize` over one reader:
-/// `None` once the data is read, or the offset php's `error` label
-/// reports. Each value read is the var hash's, php's `var_tmp_var`, and
+/// read whole, with no members, or the offset php's `error` label
+/// reports, a read that threw going there too. Each value read is the
+/// var hash's, php's `var_tmp_var`, and
 /// the list takes an owner of each element.
 fn read_list(
     req: &mut Request,
     this: PhpObject,
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
-) -> Result<Option<usize>, Thrown> {
+) -> Result<Record, Thrown> {
     let Some(flags) = reader.value(req)? else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     let Some(flags) = flags.as_int() else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     with(req, this, |l| l.flags = flags)?;
     while data.get(reader.offset()) == Some(&b':') {
         reader.set_offset(reader.offset() + 1);
         let Some(value) = reader.value(req)? else {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         };
         let value = Owner::take(req, value);
         with(req, this, |l| l.push(value))?;
     }
     if reader.offset() != data.len() {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     }
-    Ok(None)
+    Ok(Record::Read(None))
 }

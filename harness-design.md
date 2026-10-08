@@ -536,7 +536,7 @@ spawn $X witness --staged
 spawn $X crosscheck --staged
 gather
 ```
-<!-- /computed in=d75960e44358c8289caf17556234245bfbc380ae6cf84b6fc81ed8ff7fa33f40 out=797e27d8f534c9856c14a7fd09e8f80088cbcb865a0f6192dbcefc04fffae727 -->
+<!-- /computed in=98d47ae5113a46babdb4f749c75b3a04af2a6a9c5d337b9e2fc47389eeefe232 out=797e27d8f534c9856c14a7fd09e8f80088cbcb865a0f6192dbcefc04fffae727 -->
 
 Pre-push: `xtask done`. Both hooks are held by `cargo test -p xtask --test hooks`, which runs them in a scratch repository with a stand-in `cargo` (#52). The plugin:
 

@@ -24,7 +24,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::Serializer;
 
-use crate::{ArrayAccess, Countable, Iterator, SeekableIterator, Serializable};
+use crate::{ArrayAccess, Countable, Iterator, Record, SeekableIterator, Serializable};
 use table::Table;
 
 /// A row's key: the object's id, or the string `getHash()` answered.
@@ -707,6 +707,22 @@ impl SplObjectStorage {
     /// Error at offset 46 of 89 bytes
     /// 1:1 2:1
     /// ```
+    ///
+    /// A read that throws breaks the record too: the throwable is
+    /// chained under the `UnexpectedValueException`, at the offset the
+    /// reader stopped at, and so is a `getHash()` that throws.
+    ///
+    /// ```php
+    /// class T { public int $p; }
+    /// class S extends SplObjectStorage { function getHash($o): string { throw new Exception("hash"); } }
+    /// $p = function ($e) { echo get_class($e), ": ", $e->getMessage(), " <- ", get_class($e->getPrevious()), ": ", $e->getPrevious()->getMessage(), "\n"; };
+    /// try { (new SplObjectStorage)->unserialize('x:i:1;O:1:"T":1:{s:1:"p";s:1:"x";},N;;m:a:0:{}'); } catch (Throwable $e) { $p($e); }
+    /// try { (new S)->unserialize('x:i:1;O:8:"stdClass":0:{},N;;m:a:0:{}'); } catch (Throwable $e) { $p($e); }
+    /// ```
+    /// ```expect
+    /// UnexpectedValueException: Error at offset 33 of 46 bytes <- TypeError: Cannot assign string to property T::$p of type int
+    /// UnexpectedValueException: Error at offset 28 of 37 bytes <- Exception: hash
+    /// ```
     #[php(tentative)]
     fn unserialize(req: &mut Request, this: This<Self>, data: PhpString) -> Result<(), Thrown> {
         let this = this.object();
@@ -717,17 +733,10 @@ impl SplObjectStorage {
         let mut reader = php_ext_standard::Unserializer::new(req, &data)?;
         let mut replaced = Vec::new();
         let read = read_storage(req, this, &mut reader, &data, &mut replaced);
-        let read = reader.finish(req, read);
+        let (read, broke_at) = crate::record_read(req, this, &reader, read);
+        let finished = reader.finish(req, read);
         crate::give_up_all(req, replaced);
-        let broke_at = read?;
-        match broke_at {
-            Some(at) => Err(throw(
-                req,
-                "UnexpectedValueException",
-                &format!("Error at offset {at} of {} bytes", data.len()),
-            )),
-            None => Ok(()),
-        }
+        crate::record_end(req, finished, broke_at, data.len())
     }
 
     /// `serialize(): string`, php's `x:i:count;` then `obj,inf;` per row
@@ -1907,8 +1916,9 @@ fn serialize_rows(
     Ok(())
 }
 
-/// The body of `SplObjectStorage::unserialize` over one reader: `None`
-/// once the data is read, or the offset php's `outexcept` reports. The
+/// The body of `SplObjectStorage::unserialize` over one reader: the
+/// members once the rows are read, or the offset php's `outexcept`
+/// reports, a read or a `getHash()` that threw going there too. The
 /// count and the members are the var hash's, php's `var_tmp_var`; each
 /// row's object and information are read as php reads them into locals
 /// and `var_replace`s into the row, the storage's to keep.
@@ -1918,29 +1928,29 @@ fn read_storage(
     reader: &mut php_ext_standard::Unserializer<'_>,
     data: &[u8],
     replaced: &mut Vec<Owner<Value>>,
-) -> Result<Option<usize>, Thrown> {
+) -> Result<Record, Thrown> {
     if !data.starts_with(b"x:") {
-        return Ok(Some(0));
+        return Ok(Record::Broke(0));
     }
     reader.set_offset(2);
     let Some(count) = reader.value(req)? else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     // `--p` back onto the `;` the count's own value ended with.
     reader.set_offset(reader.offset().saturating_sub(1));
     let Some(count) = count.as_int().filter(|n| *n >= 0) else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     for _ in 0..count {
         if data.get(reader.offset()) != Some(&b';') {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         }
         reader.set_offset(reader.offset() + 1);
         if !matches!(data.get(reader.offset()), Some(b'O' | b'C' | b'r')) {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         }
         let Some(entry) = reader.local(req)? else {
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         };
         let inf = if data.get(reader.offset()) == Some(&b',') {
             reader.set_offset(reader.offset() + 1);
@@ -1948,7 +1958,7 @@ fn read_storage(
                 Ok(Some(read)) => read,
                 Ok(None) => {
                     entry.give_up(req);
-                    return Ok(Some(reader.offset()));
+                    return Ok(Record::Broke(reader.offset()));
                 }
                 Err(thrown) => {
                     entry.give_up(req);
@@ -1961,7 +1971,7 @@ fn read_storage(
         let Some(target) = entry.as_object().copied() else {
             entry.give_up(req);
             inf.give_up(req);
-            return Ok(Some(reader.offset()));
+            return Ok(Record::Broke(reader.offset()));
         };
         // A row read again keeps its information and its object until
         // the var hash is destroyed (`var_push_dtor`), so the attach that
@@ -1989,24 +1999,23 @@ fn read_storage(
         attached?;
     }
     if data.get(reader.offset()) != Some(&b';') {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     }
     let at = reader.offset() + 1;
     if data.get(at) != Some(&b'm') {
-        return Ok(Some(at));
+        return Ok(Record::Broke(at));
     }
     if data.get(at + 1) != Some(&b':') {
-        return Ok(Some(at + 1));
+        return Ok(Record::Broke(at + 1));
     }
     reader.set_offset(at + 2);
     let Some(members) = reader.value(req)? else {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     };
     if members.as_array().is_none() {
-        return Ok(Some(reader.offset()));
+        return Ok(Record::Broke(reader.offset()));
     }
-    crate::load_members(req, this, &members)?;
-    Ok(None)
+    Ok(Record::Read(Some(members)))
 }
 
 /// The sub-iterator at the storage's position, held across what is

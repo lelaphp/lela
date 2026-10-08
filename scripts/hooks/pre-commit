@@ -36,8 +36,10 @@
 # by the committer's own Claude Code from a directory outside the clone
 # with an empty HOME and CLAUDE_CONFIG_DIR, so no settings, plugin or hook
 # load, under the variable that gates `/plugin-types`; `tsc` then holds
-# the module to it and `plugin validate --strict` reads the manifest,
-# hooks.json and the module, and what was written is staged. Without
+# the module to it, `plugin validate --strict` reads the manifest,
+# hooks.json and the module, `plugin test` runs its tests (#2247; `tsc`
+# leaves them to the engine, whose kit types them), and what was written
+# is staged. Without
 # `claude` on PATH that step is skipped by name and the commit goes on:
 # CI holds the module to the committed file. Installed per clone by the
 # SessionStart hook, or by hand: `git config core.hooksPath scripts/hooks`.
@@ -95,8 +97,9 @@ if ! git diff --cached --quiet -- harness-plugins; then
         fi
         step buffered npx -y -p typescript@5.9.3 tsc -p harness-plugins
         step buffered claude plugin validate harness-plugins --strict
+        step buffered claude plugin test harness-plugins
     else
-        echo "pre-commit: claude is not on PATH; skipped rewriting harness-plugins/types, tsc and plugin validate" >&2
+        echo "pre-commit: claude is not on PATH; skipped rewriting harness-plugins/types, tsc, plugin validate and plugin test" >&2
     fi
 fi
 # A group of instruments run at once (#1144), each on a pipe of its own,

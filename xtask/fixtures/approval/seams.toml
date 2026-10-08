@@ -1,0 +1,26 @@
+# The workspace of the approval fixtures (#2247): `harness.self` as the
+# manifest carries it, over this directory's own registry. Each case is a
+# directory holding the `PreToolUse` stdin of one `Edit` of
+# `docs/divergence.toml` (`call.json`) and the session's transcript, named
+# by the session's id; `admit*` must be admitted by the person's answer and
+# `deny*` must stay denied. The answer's record is the shape the engine
+# declares for `AskUserQuestion` (`BuiltinToolResults`, Claude Code
+# 2.1.292), carried as `toolUseResult` beside the `tool_result` block.
+[oracle]
+pin = "../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[rule]]
+id = "harness.self"
+tool = ["Edit", "Write"]
+scope = ["seams.toml", "oracle.toml", "docs/divergence.toml"]
+deny = true
+text = "Harness configuration, the oracle pin and the divergence registry are edited by a person."
