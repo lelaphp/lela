@@ -463,6 +463,16 @@ impl Heap {
         self.mm.sensor()
     }
 
+    /// Whether a fatal is leaving the request: the engine says so where
+    /// `zend_bailout` begins and again where its `zend_try` catches it.
+    /// While one is, an owner dropped unconsumed is not recorded, as
+    /// php's jump leaves a native's locals for the heap to discard; a
+    /// refused refcount change still is ([`Sensor::unconsumed`]).
+    #[cfg(debug_assertions)]
+    pub fn fatal_leaving(&self, leaving: bool) {
+        self.mm.fatal_leaving(leaving);
+    }
+
     /// php's debug `zend_mm_shutdown` (`Z/Zend/zend_alloc.c:2434`) once
     /// the engine has freed what the request held: the blocks the heap
     /// itself keeps for the request's lifetime freed by name, the
@@ -1277,6 +1287,36 @@ mod tests {
         );
         drop(heap);
         sensor.unconsumed(site);
+    }
+
+    /// While a fatal leaves the request, an owner dropped unconsumed is
+    /// not recorded, and a refused refcount change still is; once the
+    /// fatal is caught, the owner is a defect again (#2048).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn an_owner_dropped_while_a_fatal_leaves_is_not_recorded() {
+        let _alone = alone();
+        let mut hooks = Recorder { heap: Heap::new() };
+        let sensor = hooks.heap.sensor();
+        let site = std::panic::Location::caller();
+        hooks.heap.fatal_leaving(true);
+        sensor.unconsumed(site);
+        assert_eq!(hooks.heap.take_sensed(), None);
+        let made = hooks.heap.string(b"a string of its own block");
+        assert!(made.is_ok(), "the heap would not allocate");
+        let Ok(s) = made else {
+            return;
+        };
+        let z = Zval::string(s);
+        Heap::release(&mut hooks, z);
+        Heap::release(&mut hooks, z);
+        assert!(matches!(
+            hooks.heap.take_sensed(),
+            Some(Fatal::Error(message)) if message.starts_with("InternalError: a release of the block at ")
+        ));
+        hooks.heap.fatal_leaving(false);
+        sensor.unconsumed(site);
+        assert!(hooks.heap.take_sensed().is_some());
     }
 
     /// A debug build stops at a second release of a block, #723's

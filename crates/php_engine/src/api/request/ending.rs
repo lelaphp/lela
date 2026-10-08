@@ -208,7 +208,7 @@ impl Request {
     /// still stand ([`crate::observer::end_all`]), since the serving that
     /// catches the fatal pops them on its way out.
     pub(super) fn leave_by_zend_bailout(&mut self) {
-        self.bailout = true;
+        self.set_bailing_out(true);
         #[cfg(debug_assertions)]
         {
             self.progress.unclean = true;
@@ -397,7 +397,17 @@ impl Request {
     /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 2
     /// ```
     pub(crate) fn catch_bailout(&mut self) {
-        self.bailout = false;
+        self.set_bailing_out(false);
+    }
+
+    /// The one write of whether a `zend_bailout` is under way, which a
+    /// debug build's heap is told of: an owner dropped while a fatal
+    /// leaves is not a defect, as php's jump leaves a native's locals
+    /// for the heap to discard ([`php_heap::Heap::fatal_leaving`]).
+    pub(super) fn set_bailing_out(&mut self, leaving: bool) {
+        self.bailout = leaving;
+        #[cfg(debug_assertions)]
+        self.heap.fatal_leaving(leaving);
     }
 
     /// The request's [`Phase`].

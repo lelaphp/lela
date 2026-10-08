@@ -173,6 +173,31 @@ fn an_addref_of_a_freed_block_during_shutdown_is_raised_at_the_request_end() {
     assert_eq!(served.exit_code, 255);
 }
 
+/// A refusal made after a fatal, in a request-end function, is still
+/// raised where the request ends: the fatal's `zend_bailout` was caught
+/// before it, and a refused refcount change is a defect on any path
+/// (#2048).
+#[test]
+fn an_addref_of_a_freed_block_after_a_fatal_is_raised_at_the_request_end() {
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .rshutdown(freed_addref_at_rshutdown)
+            .build("freed_use_after_fatal")])
+        .build();
+    let served = engine.serve_capture(
+        "<?php ini_set('memory_limit', '2M');\n$s = 'x';\nwhile (true) { $s .= $s; }\n",
+        Capture::default(),
+    );
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    assert!(
+        stdout.starts_with("\nFatal error: Allowed memory size of 2097152 bytes exhausted"),
+        "{stdout}"
+    );
+    assert!(stdout.contains(REFUSED), "{stdout}");
+    assert!(stdout.contains(" in Unknown on line 0\n"), "{stdout}");
+    assert_eq!(served.exit_code, 255);
+}
+
 /// A request-start function as faulty, whose error then fails the start.
 fn freed_addref_at_rinit(req: &mut Request) -> Result<(), Thrown> {
     if let Some(z) = freed(req, b"string") {

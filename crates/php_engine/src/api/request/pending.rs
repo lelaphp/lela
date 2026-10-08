@@ -201,7 +201,7 @@ impl Request {
             // (`Z/Zend/zend_exceptions.c:1005`); a fatal's bailout is
             // caught where the serving is left.
             self.raised = None;
-            self.bailout = false;
+            self.catch_bailout();
             return Ok(());
         };
         let class = self.class_name_of(throwable);

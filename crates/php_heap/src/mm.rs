@@ -1368,6 +1368,12 @@ impl Mm {
         self.sensed.clone()
     }
 
+    /// Whether a fatal is leaving the request ([`crate::sensed::Record`]).
+    #[cfg(debug_assertions)]
+    pub(crate) fn fatal_leaving(&self, leaving: bool) {
+        self.sensed.fatal_leaving(leaving);
+    }
+
     /// `chunk` laid down as one of this heap's ([`chunk_init`]), its
     /// header naming this heap's sensed record in a debug build.
     fn chunk_init(&self, chunk: NonNull<Chunk>, num: u32) {

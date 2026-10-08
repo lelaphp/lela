@@ -635,9 +635,11 @@ impl Request {
     /// `destroy` is served after the fatal a class declaration raised.
     fn serve_user(&mut self, function: Function, call: CallState) -> Result<Value, Thrown> {
         let caught = self.bailout;
-        self.bailout = false;
+        self.catch_bailout();
         let served = self.serve_user_uncaught(function, call);
-        self.bailout |= caught;
+        if caught {
+            self.set_bailing_out(true);
+        }
         served
     }
 
