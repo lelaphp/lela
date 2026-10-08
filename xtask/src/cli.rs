@@ -732,6 +732,13 @@ pub enum Section {
     Git,
     /// The bundle's registration order against the crate graph.
     Bundle,
+    /// The manifest's `[[crate]]` rows counted by the directory each is
+    /// laid down in, and how many are behind a feature; under `--uncut`
+    /// and in JSON every row, with whether it is created (#2250).
+    Crates,
+    /// The manifest's `[[edge]]` rows: each edge, how its row qualifies
+    /// it and its ADRs (#2250).
+    Edges,
     /// Each item lock's lines counted by the module that defines them,
     /// the widest first: the groups of the seam's api-check reading, which
     /// `locks` totals (#1795).

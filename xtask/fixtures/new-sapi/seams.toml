@@ -35,7 +35,7 @@ adr = "0008"
 id = "unsafe.homes"
 allow = ["php_heap", "ext/*/src/ffi/", "sapi/*/src/ffi/"]
 adr = "0006"
-text = "unsafe is permitted in three places; see design §4.1."
+text = "unsafe is permitted only in the homes this rule names; see design §4.1."
 
 [[rule]]
 id = "lints.no-panic"

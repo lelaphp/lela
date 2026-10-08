@@ -2115,7 +2115,7 @@ fn an_unsafe_inside_a_string_or_a_comment_is_not_a_site() {
 
     assert!(
         denied("let x = unsafe { *p };"),
-        "a site outside the four homes is still denied"
+        "a site outside the homes unsafe.homes names is still denied"
     );
     assert!(denied("pub unsafe fn go() {}"));
     for allowed in [

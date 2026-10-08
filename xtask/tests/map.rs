@@ -97,7 +97,7 @@ fn prose(map: &str) -> usize {
 }
 
 #[test]
-fn the_map_is_under_100_written_lines_with_the_six_regions_of_the_design() {
+fn the_map_is_under_100_written_lines_with_the_regions_of_the_design() {
     let map = map();
     let lines = prose(&map);
     assert!(
@@ -107,6 +107,7 @@ fn the_map_is_under_100_written_lines_with_the_six_regions_of_the_design() {
     let regions = [
         ("design-of-record", "ls "),
         ("adrs", "scripts/adr-index.sh"),
+        ("crates", "status --section crates"),
         ("seams", "status --section locks --format md"),
         ("rules", "status --section rules --format md"),
         ("instruments", "--help"),

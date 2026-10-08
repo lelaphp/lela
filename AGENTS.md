@@ -1,6 +1,17 @@
 # dax-php
 
-dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Twelve crates in `crates/`, one crate per extension in `ext/`, one per host in `sapi/`, and `xtask`, the harness that measures all of it. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
+dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Its crates are in `crates/`, one per extension in `ext/`, one per host in `sapi/`, and `xtask`, the harness that measures all of it, counted below from the manifest. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
+
+<!-- computed exec cmd="cargo xtask status --section crates" inputs=seams.toml name=crates | do not edit; run computed -->
+
+| directory | crates | behind a feature |
+|---|---|---|
+| crates/ | 15 | 1 |
+| ext/ | 59 | 31 |
+| sapi/ | 8 | 0 |
+| xtask | 1 | 0 |
+
+<!-- /computed in=ad904137c1f9d8b8d2d2285f23a395bc78264ae3d64dc713dab466acf172ea92 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -74,7 +85,7 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 ## Taste
 
-- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in seven homes, one operation per block, each with a `SAFETY` comment. `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
+- Types over comments: newtypes for indices and handles, enums for state machines, `&mut Request` on anything that can run PHP code. No panic reaches a request; `unwrap` and `expect` are denied in engine crates. `unsafe` lives in the homes the `unsafe.homes` rule names, one operation per block, each with a `SAFETY` comment. `pub` crosses a crate boundary only through a locked module. Generated code is generated in `build.rs` and never committed; the one exception, `ext/clippy.toml`, is regenerated and diffed.
 - Copy php's algorithm where the behaviour is observable; drop the cleverness where it is not. The floor is php's interpreter by construction; the ceiling comes from threads and whole-program LTO, not a smarter IR. If a rule here fights the task in front of you, say so loudly and get a person's sign-off before breaking it.
 
 ## The facts, computed
@@ -87,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=e2f305899f9e34d97c559a378d710d83b203c5148e0013e25cb8f584107d667d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=741472755390aee78d2dcb3c6fe73876e4e090797c29d25f0ee292ef2115a44e out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -189,7 +200,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=713cd9235eeb66ff8a3561a3522bec71eb5bda1e01d7bcb1c5d5af351db14bde out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
+<!-- /computed in=e2ba8d5399a826e05284475c2c3bcd579e42e74cf994676dddb05b3fe150301d out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
