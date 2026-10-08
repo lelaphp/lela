@@ -1425,7 +1425,7 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 /// likewise; the pin's path and whether it is a directory; where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
 /// pin's, or the absence it named; and the pinned php, its version, keg
-/// path and md5, and whether a file stands there. CI reads the two names
+/// path and md5. CI reads the two names
 /// off the JSON, `tree.variable` and `promise.variable`, and sets them
 /// under those names, so the workflow spells neither; the oracle runner
 /// pours the keg `binary` names and holds it to that md5 (#2253).
@@ -1468,7 +1468,6 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 "version": php.version,
                 "path": php.path.display().to_string(),
                 "md5": php.md5,
-                "file": php.path.is_file(),
             },
         }))?,
         Table::Md => {

@@ -691,9 +691,8 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
 }
 
 /// The pinned php a runner pours (#2253): its version, keg path and md5
-/// as the pin states them, and whether a file stands at the path, so the
-/// oracle job reads the pin off this section and never parses
-/// `oracle.toml` a second time.
+/// as the pin states them, so the oracle job reads the pin off this
+/// section and never parses `oracle.toml` a second time.
 #[test]
 fn oracle_states_the_pinned_php_a_runner_pours() {
     let root = scratch("oracle-binary");
@@ -703,7 +702,6 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     assert_eq!(json["binary"]["version"], oracle.version.as_str());
     assert_eq!(json["binary"]["path"], path.as_str());
     assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
-    assert_eq!(json["binary"]["file"], oracle.path.is_file());
     let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
     assert!(ok, "{err}");
     assert!(
