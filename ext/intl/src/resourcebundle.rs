@@ -8,13 +8,13 @@
 //! a call (ADR-0013).
 
 use php_ext::abi::{
-    ClassIterator, DimensionRead, Instance, ObjectHandlers, OrFalse, Raw, Refusals, This, Union,
-    Untyped,
+    ClassIterator, DimensionRead, Instance, IntoReturn, ObjectHandlers, OrFalse, Raw, Refusals,
+    This, Union, Untyped,
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{internal_iterator, lookup_class, new_object};
 use php_ext::coerce::type_name;
-use php_ext::raising::{Thrown, arg_value_error, argument_error, arity, fatal, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, argument_error, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -24,9 +24,9 @@ use crate::ffi::resourcebundle::{Bundle, Kind};
 use crate::ffi::{self, Code, c_string, locale as uloc};
 use crate::formatter::locale_too_long;
 
-/// `U_USING_FALLBACK_WARNING` and `U_USING_DEFAULT_WARNING`, what a
-/// lookup answers where it fell back to a parent locale.
-const FELL_BACK: [Code; 2] = [Code(-128), Code(-127)];
+/// What a lookup answers where it fell back to a parent locale or the
+/// default one.
+const FELL_BACK: [Code; 2] = [Code::USING_FALLBACK, Code::USING_DEFAULT];
 
 /// `MAXPATHLEN`, which a bundle's name stays below.
 const MAXPATHLEN: usize = 1024;
@@ -132,10 +132,7 @@ fn extract(req: &mut Request, object: PhpObject, child: Bundle) -> Result<Elemen
             Union::B(Union::A(array))
         }
         Kind::Table | Kind::Array => {
-            let Some(class) = lookup_class(req, b"ResourceBundle")? else {
-                return Err(fatal(req, "InternalError: ResourceBundle is not linked"));
-            };
-            let new = new_object(req, class)?;
+            let new = new_bundle(req)?;
             if let Some(o) = new.native_mut::<BundleObject>(req) {
                 o.me = Some(child);
             }
@@ -205,10 +202,8 @@ fn fetch(
         Some(_) if !fallback && FELL_BACK.contains(&status) => {
             // php's `icuerror` here is never initialised; ICU reads it as
             // the zero it most often is.
-            let mut unset = Code::ZERO;
             let locale = bundle(req, object)
-                .and_then(|me| me.actual_locale(&mut unset))
-                .unwrap_or_else(|| b"(null)".to_vec());
+                .map_or_else(|| NULL.to_vec(), |me| actual_locale(me, Code::ZERO));
             let head = b"Cannot load element ";
             [&head[..], &what, b" without fallback from to ", &locale].concat()
         }
@@ -235,8 +230,7 @@ fn arguments(
     bundle: &Raw<Option<PhpString>>,
     fallback: &Raw<bool>,
 ) -> Result<Given, Thrown> {
-    error::reset(req);
-    arity(req, 2, Some(3))?;
+    error::init_vars(req, 2, 3)?;
     Ok(Given {
         locale: locale.hold(req)?,
         bundle: bundle.hold(req)?,
@@ -281,11 +275,7 @@ fn construct(req: &mut Request, object: PhpObject, given: &Given) -> Result<bool
     // warning leaves as it is.
     let actual = match &opened {
         Some(me) if !given.fallback && FELL_BACK.contains(&status) => {
-            let mut code = status;
-            Some(
-                me.actual_locale(&mut code)
-                    .unwrap_or_else(|| b"(null)".to_vec()),
-            )
+            Some(actual_locale(me, status))
         }
         _ => None,
     };
@@ -311,13 +301,29 @@ fn construct(req: &mut Request, object: PhpObject, given: &Given) -> Result<bool
     Ok(false)
 }
 
-/// `resourcebundle_create`: a fresh `ResourceBundle`, or null where its
-/// constructor failed.
-fn create(req: &mut Request, given: &Given) -> Result<Option<Owner<Bundles>>, Thrown> {
+/// `ResourceBundle_ce_ptr`'s `object_init_ex`: a `ResourceBundle` no
+/// constructor ran on, whatever class the caller's is.
+fn new_bundle(req: &mut Request) -> Result<Owner<PhpObject>, Thrown> {
     let Some(class) = lookup_class(req, b"ResourceBundle")? else {
         return Err(fatal(req, "InternalError: ResourceBundle is not linked"));
     };
-    let object = new_object(req, class)?;
+    new_object(req, class)
+}
+
+/// What `%s` prints for a null `char *`.
+const NULL: &[u8] = b"(null)";
+
+/// `ures_getLocaleByType(ULOC_ACTUAL_LOCALE)` from `status`, as a
+/// message quotes it.
+fn actual_locale(me: &Bundle, mut status: Code) -> Vec<u8> {
+    me.actual_locale(&mut status)
+        .unwrap_or_else(|| NULL.to_vec())
+}
+
+/// `resourcebundle_create`: a fresh `ResourceBundle`, or null where its
+/// constructor failed.
+fn create(req: &mut Request, given: &Given) -> Result<Option<Owner<Bundles>>, Thrown> {
+    let object = new_bundle(req)?;
     match construct(req, *object, given) {
         Ok(true) => Ok(Some(object.into_instance())),
         Ok(false) => {
@@ -354,8 +360,10 @@ fn count(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
 
 /// `resourcebundle_locales`: the locales a bundle's package holds, ICU's
 /// own for an empty name.
-fn locales(req: &mut Request, name: &[u8]) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    error::reset(req);
+fn locales(req: &mut Request, name: &Raw<PhpString>) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
+    error::init_vars(req, 1, 1)?;
+    let name = name.hold(req)?;
+    let name = name.as_bytes();
     if name.len() >= MAXPATHLEN {
         return Err(argument_error(req, "ValueError", 1, "is too long"));
     }
@@ -383,16 +391,13 @@ fn locales(req: &mut Request, name: &[u8]) -> Result<OrFalse<Owner<PhpArray>>, T
     Ok(OrFalse::Value(out))
 }
 
-/// `resourcebundle_get_error_code`: the object's code, the request's
-/// reset.
+/// `resourcebundle_get_error_code`: the object's code.
 fn error_code(req: &mut Request, object: PhpObject) -> i64 {
-    error::reset(req);
     i64::from(error::object_code::<BundleObject>(req, object).0)
 }
 
 /// `resourcebundle_get_error_message`.
 fn error_message(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
-    error::reset(req);
     let message = error::object_message::<BundleObject>(req, object);
     PhpString::new(req, &message)
 }
@@ -424,7 +429,7 @@ impl ObjectHandlers for Handlers {
             ValueRef::Str(s) => fetch(req, object, &Offset::Key(s.as_bytes()), true, 0)?,
             _ => return Err(illegal_offset(req, object, &offset, read)),
         };
-        php_ext::abi::IntoReturn::into_return(element, req)
+        IntoReturn::into_return(element, req)
     }
 
     /// `resourcebundle_array_count`: php's `FAILURE` for an
@@ -455,6 +460,7 @@ impl ObjectHandlers for Handlers {
             table,
             length,
             i: 0,
+            read: None,
         })))
     }
 
@@ -495,18 +501,53 @@ fn class_name(req: &Request, object: PhpObject) -> String {
         .unwrap_or_default()
 }
 
-/// The `foreach` over a bundle's elements, `resourcebundle_iterator_funcs`:
-/// each read by its index, as php reads them, and keyed by its table key
-/// or its index. An element is read again for each step that asks for it.
+/// The `foreach` over a bundle's elements, `ResourceBundle_iterator`:
+/// each read by its index, as php reads them, keyed by its table key or
+/// its index, and kept until the walk steps on.
 struct Elements {
     table: bool,
     length: i32,
     i: i32,
+    /// `current` and `currentkey`, none while undefined.
+    read: Option<(Owner<Value>, Vec<u8>)>,
+}
+
+impl Elements {
+    /// `resourcebundle_iterator_read`: the element and its key, read
+    /// where they are not; none where ICU could not open it.
+    fn read(
+        &mut self,
+        req: &mut Request,
+        object: PhpObject,
+    ) -> Result<Option<(Value, &[u8])>, Thrown> {
+        if self.read.is_none() {
+            let mut status = Code::ZERO;
+            let child = bundle(req, object).and_then(|me| me.by_index(self.i, &mut status));
+            if let Some(child) = child.filter(|_| !status.is_failure()) {
+                // The key first: the element is handed on as it is read.
+                let key = if self.table { child.key() } else { Vec::new() };
+                let element = extract(req, object, child)?;
+                self.read = Some((IntoReturn::into_return(element, req)?, key));
+            }
+        }
+        Ok(self
+            .read
+            .as_ref()
+            .map(|(value, key)| (**value, key.as_slice())))
+    }
+
+    /// `resourcebundle_iterator_invalidate`.
+    fn invalidate(&mut self, req: &mut Request) {
+        if let Some((value, _)) = self.read.take() {
+            value.give_up(req);
+        }
+    }
 }
 
 impl ClassIterator for Elements {
-    fn rewind(&mut self, _: &mut Request, _: PhpObject) -> Result<(), Thrown> {
+    fn rewind(&mut self, req: &mut Request, _: PhpObject) -> Result<(), Thrown> {
         self.i = 0;
+        self.invalidate(req);
         Ok(())
     }
 
@@ -514,33 +555,29 @@ impl ClassIterator for Elements {
         Ok(self.i < self.length)
     }
 
-    /// `resourcebundle_iterator_read`: the element, or null where ICU
-    /// could not open it.
     fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
-        let mut status = Code::ZERO;
-        let child = bundle(req, object).and_then(|me| me.by_index(self.i, &mut status));
-        let element = match child {
-            Some(child) if !status.is_failure() => extract(req, object, child)?,
-            _ => None,
-        };
-        php_ext::abi::IntoReturn::into_return(element, req)
+        let value = self
+            .read(req, object)?
+            .map_or_else(Value::null, |(value, _)| value);
+        Ok(Owner::take(req, value))
     }
 
     fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
+        let key = self.read(req, object)?.map(|(_, key)| key.to_vec());
         if !self.table {
             return Ok(Owner::take(req, Value::int(i64::from(self.i))));
         }
-        let mut status = Code::ZERO;
-        let key = bundle(req, object)
-            .and_then(|me| me.by_index(self.i, &mut status))
-            .map(|child| child.key())
-            .unwrap_or_default();
-        Ok(PhpString::new(req, &key)?.into_value())
+        Ok(PhpString::new(req, &key.unwrap_or_default())?.into_value())
     }
 
-    fn move_forward(&mut self, _: &mut Request, _: PhpObject) -> Result<(), Thrown> {
+    fn move_forward(&mut self, req: &mut Request, _: PhpObject) -> Result<(), Thrown> {
         self.i += 1;
+        self.invalidate(req);
         Ok(())
+    }
+
+    fn release(&mut self, req: &mut Request, _: PhpObject) {
+        self.invalidate(req);
     }
 }
 
@@ -556,6 +593,7 @@ impl ClassIterator for Elements {
 /// $v = new ResourceBundle('icuver', 'ICUDATA');
 /// foreach ($v as $k => $e) { echo $k, ' ', gettype($e), "\n"; }
 /// var_dump(get_class($v->getIterator()), in_array('de', ResourceBundle::getLocales('')), ResourceBundle::getLocales('/nope/x'), intl_get_error_code());
+/// $it = $b->getIterator(); var_dump($it->key(), $it->current() === $it->current());
 /// try { new ResourceBundle('en', 'nope'); } catch (IntlException $e) { echo $e->getMessage(), "\n"; }
 /// try { $v->__construct('en', null); } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// try { clone $v; } catch (Error $e) { echo $e->getMessage(), "\n"; }
@@ -590,6 +628,8 @@ impl ClassIterator for Elements {
 /// bool(true)
 /// bool(false)
 /// int(2)
+/// string(9) "Countries"
+/// bool(true)
 /// ResourceBundle::__construct(): Cannot load libICU resource bundle
 /// ResourceBundle object is already constructed
 /// Trying to clone an uncloneable object of class ResourceBundle
@@ -651,26 +691,29 @@ impl ResourceBundle {
         fetch(req, this.object(), &offset(&index), fallback, 1)
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn count(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        error::init_vars(req, 0, 0)?;
         count(req, this.object())
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn getLocales(
         req: &mut Request,
-        bundle: PhpString,
+        bundle: Raw<PhpString>,
     ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-        locales(req, bundle.as_bytes())
+        locales(req, &bundle)
     }
 
-    #[php(tentative)]
-    fn getErrorCode(req: &mut Request, this: This<Self>) -> i64 {
-        error_code(req, this.object())
+    #[php(tentative, arity = manual)]
+    fn getErrorCode(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
+        error::init_vars(req, 0, 0)?;
+        Ok(error_code(req, this.object()))
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn getErrorMessage(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        error::init_vars(req, 0, 0)?;
         error_message(req, this.object())
     }
 
@@ -741,13 +784,19 @@ fn resourcebundle_get(
 ///
 /// ```php
 /// var_dump(resourcebundle_count(resourcebundle_create('icuver', 'ICUDATA')));
+/// resourcebundle_create('en', 'nope');
+/// try { resourcebundle_count(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
 /// ```
 /// ```expect
 /// int(3)
+/// resourcebundle_count(): Argument #1 ($bundle) must be of type ResourceBundle, int given
+/// int(0)
 /// ```
-#[php_function]
-fn resourcebundle_count(req: &mut Request, bundle: Bundles) -> Result<i64, Thrown> {
-    count(req, bundle.object())
+#[php_function(arity = manual)]
+fn resourcebundle_count(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, Thrown> {
+    let bundle = held(req, &bundle)?;
+    count(req, bundle)
 }
 
 /// `resourcebundle_locales`.
@@ -760,12 +809,12 @@ fn resourcebundle_count(req: &mut Request, bundle: Bundles) -> Result<i64, Throw
 /// bool(false)
 /// string(77) "resourcebundle_locales(): Cannot fetch locales list: U_MISSING_RESOURCE_ERROR"
 /// ```
-#[php_function]
+#[php_function(arity = manual)]
 fn resourcebundle_locales(
     req: &mut Request,
-    bundle: PhpString,
+    bundle: Raw<PhpString>,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    locales(req, bundle.as_bytes())
+    locales(req, &bundle)
 }
 
 /// `resourcebundle_get_error_code`.
@@ -779,9 +828,10 @@ fn resourcebundle_locales(
 /// int(2)
 /// int(0)
 /// ```
-#[php_function]
-fn resourcebundle_get_error_code(req: &mut Request, bundle: Bundles) -> i64 {
-    error_code(req, bundle.object())
+#[php_function(arity = manual)]
+fn resourcebundle_get_error_code(req: &mut Request, bundle: Raw<Bundles>) -> Result<i64, Thrown> {
+    let bundle = held(req, &bundle)?;
+    Ok(error_code(req, bundle))
 }
 
 /// `resourcebundle_get_error_message`.
@@ -796,12 +846,20 @@ fn resourcebundle_get_error_code(req: &mut Request, bundle: Bundles) -> i64 {
 /// string(12) "U_ZERO_ERROR"
 /// string(80) "ResourceBundle::get(): Cannot load resource element -1: U_MISSING_RESOURCE_ERROR"
 /// ```
-#[php_function]
+#[php_function(arity = manual)]
 fn resourcebundle_get_error_message(
     req: &mut Request,
-    bundle: Bundles,
+    bundle: Raw<Bundles>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    error_message(req, bundle.object())
+    let bundle = held(req, &bundle)?;
+    error_message(req, bundle)
+}
+
+/// `RESOURCEBUNDLE_METHOD_INIT_VARS` and the function's one argument,
+/// `ResourceBundle $bundle`, held after the reset.
+fn held(req: &mut Request, bundle: &Raw<Bundles>) -> Result<PhpObject, Thrown> {
+    error::init_vars(req, 1, 1)?;
+    Ok(bundle.hold(req)?.object())
 }
 
 /// `php_intl.stub.php`'s `resourcebundle_*` block.
