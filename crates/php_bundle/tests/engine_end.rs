@@ -6,10 +6,13 @@
 //! observable while the pools that close there are dba's, mysqli's and
 //! PDO's and no extension their entries close through declares an engine
 //! end of its own, which would be served before the drain that needs it.
-//! A new pool, or an engine end in a crate that requires one of those
-//! three, fails here, and option 2 of #1960 (a phase that closes
-//! persistent entries alone, served in reverse bundle order before the
-//! engine-end phase) is decided then. Read from the sources, as
+//! A further pool-holding extension that declares an engine end, or an
+//! engine end in a crate that requires one of those three, fails here,
+//! and option 2 of #1960 (a phase that closes persistent entries alone,
+//! served in reverse bundle order before the engine-end phase) is decided
+//! then. A pool whose entries only release, with no engine end, is a
+//! `Drop` (ADR-0010) and trips nothing: ext/curl's persistent shares
+//! (daeef7b3, #1334) are one. Read from the sources, as
 //! `configure.rs` reads them, so a crate's commit trips it whatever the
 //! features of this build.
 
@@ -100,24 +103,30 @@ fn crates() -> Vec<Crate> {
 }
 
 #[test]
-fn only_dba_mysqli_and_pdo_hold_a_pool_each_closed_in_its_engine_end_as_1960_ruled() {
+fn dba_mysqli_and_pdo_alone_close_a_pool_in_an_engine_end_as_1960_ruled() {
     let crates = crates();
     assert!(crates.len() > 50, "ext/ read: {} crates", crates.len());
-    let pooled: Vec<&Crate> = crates.iter().filter(|c| c.pools()).collect();
-    assert_eq!(
-        pooled.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-        POOLED_ENDS,
-        "the extensions holding an api::Pool are no longer dba, mysqli and pdo: a new one closes \
-         its entries in its own engine end (ADR-0010), drained in reverse bundle order while the \
-         others' entries are still open, where php closes them all before any MSHUTDOWN, and \
-         #1960's option 2 (a phase closing persistent entries alone, in reverse bundle order, \
-         before the engine-end phase) is decided now; one that stopped is this list to shorten"
-    );
-    for c in pooled {
+    for name in POOLED_ENDS {
+        let c = crates
+            .iter()
+            .find(|c| c.name == *name)
+            .unwrap_or_else(|| panic!("ext/{name} is read"));
         assert!(
-            c.ends(),
-            "{} holds an api::Pool and declares no engine end, so its idle entries are dropped \
-             with the engine state, never closed through the extension (ADR-0010, #1961)",
+            c.pools() && c.ends(),
+            "{name} no longer holds an api::Pool closed in its own engine end, as #1961 left it \
+             (ADR-0010): this list is to shorten"
+        );
+    }
+    if let Some(c) = crates
+        .iter()
+        .find(|c| c.pools() && c.ends() && !POOLED_ENDS.contains(&c.name.as_str()))
+    {
+        panic!(
+            "{} holds an api::Pool and declares an engine end beside dba, mysqli and pdo: its \
+             entries close in its own engine end (ADR-0010), drained in reverse bundle order \
+             while the others' entries are still open, where php closes them all before any \
+             MSHUTDOWN, and #1960's option 2 (a phase closing persistent entries alone, in \
+             reverse bundle order, before the engine-end phase) is decided now",
             c.name
         );
     }
