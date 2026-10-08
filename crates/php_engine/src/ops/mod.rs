@@ -12,8 +12,6 @@ use std::cmp::Ordering;
 
 use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
-use php_unit::decl::Visibility;
-
 use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
@@ -971,21 +969,9 @@ fn mangled_names(req: &Request, object: PhpObject) -> Vec<MangledName> {
         .iter()
         .zip(0u32..)
         .filter(|(_, i)| !eager || *i >= o.slots() || !o.slot(*i).is_undef())
-        .map(|((declaring, p), _)| {
-            let prefix = match p.visibility {
-                Visibility::Public => None,
-                Visibility::Protected => Some(b"\0*\0".to_vec()),
-                // `property_info->ce->name`: a private property is
-                // mangled with the class that declared it, which for an
-                // inherited one is a class above.
-                Visibility::Private => req
-                    .class_decl(*declaring)
-                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
-            };
-            MangledName {
-                name: p.name.0.clone(),
-                prefix,
-            }
+        .map(|((declaring, p), _)| MangledName {
+            name: p.name.0.clone(),
+            prefix: req.property_prefix(*declaring, p.visibility),
         })
         .collect()
 }
@@ -1826,13 +1812,7 @@ pub(crate) fn debug_rows(
     let mut rest = rows.into_iter().peekable();
     for ((declaring, p), at) in placed.iter().zip(0u32..) {
         let key = {
-            let prefix = match p.visibility {
-                Visibility::Public => None,
-                Visibility::Protected => Some(b"\0*\0".to_vec()),
-                Visibility::Private => req
-                    .class_decl(*declaring)
-                    .map(|d| [&b"\0"[..], &d.name.0, &b"\0"[..]].concat()),
-            };
+            let prefix = req.property_prefix(*declaring, p.visibility);
             let bytes = [prefix.unwrap_or_default().as_slice(), &p.name.0].concat();
             req.interned(&bytes)?
         };

@@ -1316,13 +1316,7 @@ impl Request {
                 out.push((key, value));
                 continue;
             };
-            let prefix = match declared {
-                Some((_, Visibility::Protected)) => Some(b"\0*\0".to_vec()),
-                Some((declaring, Visibility::Private)) => self
-                    .class_decl(declaring)
-                    .map(|decl| [&b"\0"[..], &decl.name.0, &b"\0"[..]].concat()),
-                Some((_, Visibility::Public)) | None => None,
-            };
+            let prefix = declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
             held.push(Value::string(name));
             let key = if let Some(prefix) = prefix {
                 self.interned(&[prefix.as_slice(), name.as_bytes()].concat())?
