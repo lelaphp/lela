@@ -1,0 +1,1 @@
+{"tool_name":"Write","tool_input":{"file_path":"ext/openssl/src/ffi/mod.rs","content":"use std::sync::Once;\n\n/// Once per process, whoever asks.\npub static INIT: Once = Once::new();\n"}}

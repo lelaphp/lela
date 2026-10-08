@@ -1,0 +1,1 @@
+{"tool_name":"Edit","tool_input":{"file_path":"ext/iconv/src/lib.rs","old_string":"pub struct Host;","new_string":"static X: std::sync::OnceLock<u8> = std::sync::OnceLock::new();\npub struct Host;"}}

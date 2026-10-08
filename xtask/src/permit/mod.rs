@@ -32,7 +32,8 @@
 //! [`call`], the rules in [`rules`], a shell line's argv in [`argv`], the
 //! region-body rule in [`region`],
 //! the sensor over `harness.self`'s files around a `Bash` call in
-//! [`after`], the person's approval that lifts `harness.self` from one
+//! [`after`], the changes it kept, which `done` holds, in [`kept`], the
+//! person's approval that lifts `harness.self` from one
 //! change in [`approval`], whether a line can write one of them in [`writes`], the
 //! `unless` qualifier's sensor in [`unless`], the `exempt_label`
 //! qualifier's in [`label`], the adapters and the
@@ -50,6 +51,7 @@ mod bench;
 mod call;
 mod diff;
 mod hand_off;
+mod kept;
 mod label;
 mod region;
 mod rules;
@@ -63,6 +65,7 @@ pub(crate) use bench::{BAR_MS, run_bench, scratch_workspace};
 pub use call::{Arguments, Call};
 pub(crate) use diff::judge_files;
 pub(crate) use diff::{run_diff, working_files};
+pub(crate) use kept::kept_changes;
 pub use rules::{Finding, Judgement, Kind, judge, judged_at_the_call};
 
 /// The instrument name every reading of permit carries.

@@ -11,6 +11,10 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use xtask::divergence::Registry;
+use xtask::done;
+use xtask::key::Snapshot;
+use xtask::manifest::Manifest;
 use xtask::reading::{Status, Store};
 use xtask::scratch::Tree;
 
@@ -273,6 +277,57 @@ fn a_persons_edit_made_while_the_call_runs_is_kept_and_named() {
         "the person's edit stands"
     );
     assert_kept(&root, &out, "seams.toml");
+}
+
+/// `done`'s unmet conditions over the scratch repository's working tree,
+/// measured since `HEAD`, with no divergence row to hold.
+fn unmet(root: &Path) -> Vec<String> {
+    done::judge(
+        &Snapshot::disk(root).unwrap(),
+        &Manifest::load(root).unwrap(),
+        &Registry::default(),
+        &Store::of_workspace(root),
+        Some("HEAD"),
+    )
+    .unwrap()
+    .unmet
+}
+
+/// #1972: a change `--after` kept is one of `done`'s unmet conditions,
+/// naming the file, the blob it was before and the call it moved under,
+/// until a person commits it or restores it to `HEAD` (#1931). Once
+/// settled its record is spent, so a later edit of the file is not read
+/// as the change.
+#[test]
+fn a_kept_change_is_unmet_in_done_until_a_person_commits_or_restores_it() {
+    // The pin and not the manifest: a build judges by the manifest it was
+    // compiled against, and the first commit would leave it another.
+    let root = scratch("kept-done");
+    let pin = "oracle.toml";
+    let keep = |id: &str, rows: &str| {
+        let was = git(&root, &["rev-parse", &format!("HEAD:{pin}")]);
+        let edited = format!("{}\n# {rows}\n", read(&root, pin));
+        let (out, _) = through_the_hooks_while(&root, id, "git status --short", || {
+            std::fs::write(root.join(pin), &edited).unwrap();
+        });
+        assert_kept(&root, &out, pin);
+        let unmet = unmet(&root);
+        assert_eq!(unmet.len(), 1, "{unmet:?}");
+        for named in ["harness.self", pin, was.trim(), "git status --short"] {
+            assert!(unmet[0].contains(named), "{named}: {}", unmet[0]);
+        }
+    };
+    keep("toolu_kept_then_committed", "a person's regime");
+    git(&root, &["commit", "-qam", "a person's regime"]);
+    assert_eq!(unmet(&root), Vec::<String>::new(), "committed");
+    keep("toolu_kept_then_restored", "a regime a person drops");
+    git(&root, &["checkout", "HEAD", "--", pin]);
+    assert_eq!(unmet(&root), Vec::<String>::new(), "restored");
+    // An edit made outside any call is condition 6's note, not the spent
+    // record's change.
+    let edited = format!("{}\n# typed later\n", read(&root, pin));
+    std::fs::write(root.join(pin), edited).unwrap();
+    assert_eq!(unmet(&root), Vec::<String>::new(), "the record is spent");
 }
 
 /// A call whose line names the manifest without writing it, a reader of
@@ -574,6 +629,15 @@ fn a_write_the_person_approved_stands_and_one_that_differs_is_put_back() {
                 .as_str()
                 .unwrap();
             assert!(said.contains("toolu_01AskFixtureApproval0001"), "{said}");
+            // An approved change is no kept one: it leaves no record for
+            // `done` to hold (the fixture's registry is no row `done`
+            // parses, so the record is read where `--after` keeps it).
+            let kept = root.join("target/harness/permit/kept");
+            assert!(
+                std::fs::read_dir(&kept).map_or(true, |mut d| d.next().is_none()),
+                "{}",
+                kept.display()
+            );
             let reading = Store::of_workspace(&root)
                 .read("permit", "harness.self")
                 .unwrap()

@@ -46,7 +46,12 @@
 //!    `docs/divergence.toml`, and the plugin's own files: what the
 //!    manifest's `deny = true` rule covers) are unchanged, or changed by a
 //!    person; the hook cannot tell, so such a change is a note, never an
-//!    unmet condition, and pre-push, run by the person, passes on it.
+//!    unmet condition, and pre-push, run by the person, passes on it. The
+//!    one change it can tell is unattributed is the backstop (#1931): a
+//!    file `permit --after` kept, having moved under a call whose line
+//!    cannot write it, is unmet until a person commits it or restores it
+//!    to `HEAD`, read from the sensor's record ([`permit::kept_changes`]),
+//!    which a change the person approved in the session never has.
 //! 7. The ticket the branch records (`Track::of`'s `ticket`, #30) has no
 //!    unticked acceptance box: the `ticket` reading over its number, the
 //!    one `xtask ticket read` writes (#28), is fresh and passes, and its
@@ -375,6 +380,11 @@ pub fn judge(
         &mut unmet,
         &mut notes,
     )?;
+    unmet.extend(
+        permit::kept_changes(store, root)?
+            .iter()
+            .map(ToString::to_string),
+    );
     if let Some(ticket) = ticket {
         boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
     }
