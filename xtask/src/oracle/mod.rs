@@ -1317,15 +1317,7 @@ pub const ENGINE: &str = hosts::CLI.binary;
 /// with every workspace member's features unified, the harness's
 /// extensions among them, which is not the binary the lane measures.
 pub(crate) fn engine_build() -> String {
-    let packages: Vec<String> = hosts::HOSTS
-        .iter()
-        .map(|host| format!("-p {}", host.package()))
-        .collect();
-    format!(
-        "cargo build --profile {} {}",
-        profile::LANE.name(),
-        packages.join(" ")
-    )
+    format!("cargo {}", profile::hosts().join(" "))
 }
 
 /// The extensions php names otherwise than their crates, the module's

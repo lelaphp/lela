@@ -835,3 +835,141 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
     assert!(!found.contains("no run of ext/pcre is kept"), "{found}");
     assert!(found.contains("this run measured no engine"), "{found}");
 }
+
+fn executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A binary at `path` that hands every call to the pinned php `oracle`:
+/// an engine the lane runs as the engine's own, not as its control.
+fn engine_at(path: &Path, oracle: &Path) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        path,
+        format!("#!/bin/sh\nexec '{}' \"$@\"\n", oracle.display()),
+    )
+    .unwrap();
+    executable(path);
+}
+
+/// `xtask phpt` in the worktree at `dir` with `args`, `cargo` the file
+/// at `cargo` and the corpus the tree at `corpus`.
+fn phpt_in(dir: &Path, args: &[&str], cargo: &Path, corpus: &Path) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(dir)
+        .arg("phpt")
+        .args(args)
+        .current_dir(dir)
+        .env("CARGO", cargo)
+        .env(xtask::oracle::TREE_VARIABLE, corpus)
+        .env_remove("CARGO_MANIFEST_DIR")
+        .output()
+        .unwrap();
+    joined(&out)
+}
+
+/// One call takes the merge base's run of each touched subset (#2364): it
+/// lays a worktree at the base, builds the hosts there through `cargo`,
+/// runs the subset, carries the run into the main worktree and removes
+/// the worktree, and the comparison from the branch's worktree finds the
+/// run by the base alone. The stand-in cargo answers the hosts' build by
+/// laying a `php` that hands every call to the pinned one, and logs each
+/// call; a second call finds the run kept and builds nothing.
+#[test]
+fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let pinned = manifest.pin.oracle.file().map(Path::to_path_buf);
+    let Some(oracle) = Promise::Oracle.or_skip(pinned).unwrap() else {
+        return;
+    };
+    let root = repository("base-run");
+    let corpus = Tree::new("base-run-corpus").unwrap();
+    write(
+        &corpus,
+        "ext/ctype/tests/one.phpt",
+        "--TEST--\none\n--FILE--\n<?php echo \"one\";\n--EXPECT--\none\n",
+    );
+    let bin = Tree::new("base-run-cargo").unwrap();
+    let (cargo, log) = (bin.join("cargo"), bin.join("calls"));
+    write(
+        &bin,
+        "cargo",
+        &format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1 $2\" = 'build --profile' ] || exit 1\nmkdir -p \"target/$3\" && printf '#!/bin/sh\\nexec %s \"$@\"\\n' \"'{}'\" > \"target/$3/php\" && chmod +x \"target/$3/php\"\n",
+            log.display(),
+            oracle.display()
+        ),
+    );
+    executable(&cargo);
+
+    // The branch touches ext/ctype, whose subset the per-commit lane runs.
+    let dir = worktree_of(&root, "t49");
+    let at = dir.to_str().unwrap();
+    sh(
+        &root,
+        &["git", "worktree", "add", "-q", "-b", "t49", at, "main"],
+    );
+    let lib = dir.join("ext/ctype/src/lib.rs");
+    fs::write(&lib, fs::read_to_string(&lib).unwrap() + "// touched\n").unwrap();
+    sh(&dir, &["git", "add", "-A"]);
+    commit(&dir, "touch ext/ctype");
+
+    // Before the call, the comparison names it.
+    engine_at(&dir.join("target/release-da/php"), &oracle);
+    let (_, unkept) = phpt_in(
+        &dir,
+        &["--subset", "ext/ctype", "--against", "main"],
+        &cargo,
+        &corpus,
+    );
+    let base = sh(&root, &["git", "rev-parse", "--short=7", "main"]);
+    let call = format!("cargo xtask phpt --base {} --subset ext/ctype", base.trim());
+    assert!(unkept.contains("no run of ext/ctype is kept"), "{unkept}");
+    assert!(unkept.contains(&call), "{unkept}");
+
+    let (code, out) = phpt_in(&dir, &["--base", "--jobs", "2"], &cargo, &corpus);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("kept: ext/ctype at main"), "{out}");
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        "build --profile release-da -p php_sapi_cli -p php_sapi_cgi -p php_sapi_fpm -p php_sapi_phpdbg\n",
+        "{out}"
+    );
+    assert_eq!(
+        worktrees(&root).len(),
+        2,
+        "the base's worktree is gone: {out}"
+    );
+    let mut kept = Vec::new();
+    for tree in fs::read_dir(root.join("target/phpt-runs")).unwrap() {
+        kept.push(tree.unwrap().path().join("ext/ctype.json"));
+    }
+    assert!(kept.iter().all(|run| run.is_file()), "{kept:?}: {out}");
+    assert_eq!(kept.len(), 1, "{out}");
+
+    // The comparison from the branch's worktree finds the run by the base.
+    engine_at(&dir.join("target/release-da/php"), &oracle);
+    let (code, found) = phpt_in(
+        &dir,
+        &["--subset", "ext/ctype", "--against", "main"],
+        &cargo,
+        &corpus,
+    );
+    assert_eq!(code, 0, "{found}");
+    assert!(!found.contains("no run of ext/ctype is kept"), "{found}");
+
+    // A second call finds the run kept and lays nothing down.
+    let (code, again) = phpt_in(&dir, &["--base"], &cargo, &corpus);
+    assert_eq!(code, 0, "{again}");
+    assert!(
+        again.contains("a run of ext/ctype is kept at main"),
+        "{again}"
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap().lines().count(),
+        1,
+        "{again}"
+    );
+}
