@@ -173,6 +173,188 @@ fn region<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// The files whose regions pre-commit renders, as its `regions=` line
+/// names them: the one list, which CI's `computed check` repeats.
+fn tracked() -> Vec<String> {
+    let hook = read("scripts/hooks/pre-commit");
+    let line = hook
+        .lines()
+        .find_map(|l| l.strip_prefix("regions='"))
+        .expect("pre-commit names its region files as regions='...'");
+    line.trim_end_matches('\'')
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Every `xtask status` region of a tracked file, its file and its opener.
+fn status_regions() -> Vec<(String, String)> {
+    tracked()
+        .into_iter()
+        .flat_map(|file| {
+            staged(workspace(), &file)
+                .lines()
+                .filter(|l| l.starts_with("<!-- computed exec cmd=\"cargo xtask status "))
+                .map(|l| (file.clone(), l.to_owned()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The command of an `exec` opener, `cmd="..."`, as the arguments of xtask.
+fn xtask_args(opener: &str) -> Vec<String> {
+    let cmd = opener
+        .split("cmd=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("no cmd in {opener}"));
+    cmd.strip_prefix("cargo xtask ")
+        .unwrap_or_else(|| panic!("{cmd}"))
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A tracked region renders against an empty store, every reading `no
+/// reading`, since a store is one machine's and its render would churn
+/// the map on every checkout; the live numbers are the local file's
+/// (harness-design.md §5, revision 6; #630). Each `xtask status` region
+/// is rendered over a scratch workspace with the tracked locks, once with
+/// no store and once after a reading for every seam, rule and bundle edge
+/// is recorded: the bytes are the same, and no row carries a reading.
+#[test]
+fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
+    use xtask::manifest::Manifest;
+    use xtask::reading::{Reading, Status, Store};
+
+    let regions = status_regions();
+    for name in ["crates", "seams", "rules", "bundle-order", "divergence"] {
+        assert!(
+            regions
+                .iter()
+                .any(|(_, l)| l.contains(&format!(" name={name} "))),
+            "no xtask status region {name}"
+        );
+    }
+    for (file, opener) in &regions {
+        assert!(
+            xtask_args(opener).iter().any(|a| a == "--tracked"),
+            "{file}: a tracked region renders against the tree alone, with --tracked: {opener}"
+        );
+    }
+
+    let root = Tree::new("map-tracked").unwrap();
+    scratch_workspace(workspace(), &root).unwrap();
+    let locks = Command::new("git")
+        .args(["ls-files", "-z", "--", "*.lock"])
+        .current_dir(workspace())
+        .output()
+        .unwrap();
+    for lock in String::from_utf8(locks.stdout).unwrap().split('\0') {
+        if lock.is_empty() || lock == "Cargo.lock" {
+            continue;
+        }
+        let to = root.join(lock);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(workspace().join(lock), to).unwrap();
+    }
+    let render = || -> Vec<String> {
+        regions
+            .iter()
+            .map(|(_, opener)| {
+                let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+                    .arg("--root")
+                    .arg(&*root)
+                    .args(xtask_args(opener))
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{opener}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                String::from_utf8(out.stdout).unwrap()
+            })
+            .collect()
+    };
+    let empty = render();
+
+    let manifest = Manifest::load(&root).unwrap();
+    let mut readings = Vec::new();
+    let mut reading = |instrument: &str, scope: &str, rule: &str| {
+        let mut r = Reading::new(instrument, scope);
+        r.status = Status::Pass;
+        r.rule = rule.to_owned();
+        r.message = "a reading of this machine".to_owned();
+        r.numbers.insert("items".into(), 9_999.into());
+        r.numbers.insert("extensions".into(), 9_999.into());
+        readings.push(r);
+    };
+    for seam in &manifest.seams {
+        reading("api-check", &seam.name, "");
+    }
+    for rule in &manifest.rules {
+        reading("permit", &rule.id, &rule.id);
+    }
+    for edge in &manifest.edges {
+        reading("api-check", &edge.from, "");
+    }
+    Store::of_workspace(&root).record(&readings).unwrap();
+    let full = render();
+
+    for (((file, opener), empty), full) in regions.iter().zip(&empty).zip(&full) {
+        assert_eq!(empty, full, "{file}: {opener}");
+        assert!(
+            !full.contains("| pass |") && !full.contains("9999"),
+            "{file}: a row carries this machine's reading: {opener}\n{full}"
+        );
+    }
+    let seams = regions
+        .iter()
+        .position(|(_, l)| l.contains(" name=seams "))
+        .unwrap();
+    assert!(
+        full[seams]
+            .lines()
+            .skip(2)
+            .all(|l| l.ends_with("| no reading |")),
+        "{}",
+        full[seams]
+    );
+}
+
+/// The `seams` region names every lock its section counts among its
+/// inputs, so a commit that changes only one of them, the harness's own
+/// `xtask/xtask.lock` included, renders the region again (#631): asked of
+/// `computed affected`, which reads the openers' `inputs=`.
+#[test]
+fn every_lock_the_seams_region_counts_is_one_of_its_inputs() {
+    let locks = Command::new("git")
+        .args(["ls-files", "--", "crates/*.lock", "xtask/xtask.lock"])
+        .current_dir(workspace())
+        .output()
+        .unwrap();
+    let locks = String::from_utf8(locks.stdout).unwrap();
+    assert!(locks.lines().any(|l| l == "xtask/xtask.lock"), "{locks}");
+    // The staged map alone, so a render in flight here is not what is read.
+    let root = Tree::new("map-lock-inputs").unwrap();
+    std::fs::write(root.join("AGENTS.md"), map()).unwrap();
+    for lock in locks.lines() {
+        let out = Command::new("computed")
+            .args(["affected", lock])
+            .current_dir(&*root)
+            .output()
+            .expect("computed is on PATH, as CI installs it");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.lines()
+                .any(|l| l.starts_with("AGENTS.md:") && l.contains(" seams ")),
+            "{lock} is no input of the seams region: {said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// A help line says what the instrument does in one sentence and leaves
 /// the rest to `xtask <name> --help` (#64): the `instruments` region is
 /// the map's widest, and a line of it stays under 200 characters.

@@ -2,7 +2,7 @@
 
 dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's execution model once, with one executor, held to the real `php` binary as its second opinion. Its crates are in `crates/`, one per extension in `ext/`, one per host in `sapi/`, and `xtask`, the harness that measures all of it, counted below from the manifest. Think of it as opcache's memory model applied to threads instead of processes: immutable compiled units shared by every request in one process, with no fork and no recompiling.
 
-<!-- computed exec cmd="cargo xtask status --section crates" inputs=seams.toml name=crates | do not edit; run computed -->
+<!-- computed exec cmd="cargo xtask status --section crates --tracked" inputs=seams.toml,xtask/src/status.rs,xtask/src/status/graph.rs name=crates | do not edit; run computed -->
 
 | directory | crates | behind a feature |
 |---|---|---|
@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=27f40fe2c48d046bceac83520bb495e230da0e76b7337e3b8dfc611d8f411ace out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=1c64d8558468c66fa353fd5df656f6ff7e530fda2fe45dd72226cebf332690c2 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -116,56 +116,56 @@ third-engine-design.md
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 
 <!-- /computed in=be732ccd1dbc5db7915cd76ee094197e6b019cd74819350d09b5e51700caf1d0 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
-<!-- computed exec cmd="cargo xtask status --section locks --format md" inputs=seams.toml,crates/**/*.lock name=seams | do not edit; run computed -->
+<!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 375 |  | pass |
-| process | process.lock | 35 |  | pass |
-| unit | unit.lock | 95 |  | pass |
-| link | link.lock | 37 |  | pass |
-| ops | ops.lock | 209 |  | pass |
-| api | api.lock | 1354 | 1500 | pass |
-| sapi | sapi.lock | 43 |  | pass |
-| tier | tier.lock | 67 |  | pass |
-| harness | xtask.lock | 377 |  | pass |
+| heap | heap.lock | 375 |  | no reading |
+| process | process.lock | 35 |  | no reading |
+| unit | unit.lock | 95 |  | no reading |
+| link | link.lock | 37 |  | no reading |
+| ops | ops.lock | 209 |  | no reading |
+| api | api.lock | 1354 | 1500 | no reading |
+| sapi | sapi.lock | 43 |  | no reading |
+| tier | tier.lock | 67 |  | no reading |
+| harness | xtask.lock | 379 |  | no reading |
 
-<!-- /computed in=be0cfe594f963121c5f8dba6ee50a73aea3c096f46c3030ff43cf5fd85e0c0a1 out=19c1bd35d7a4b0fb977b3bb00dea12e55a2ef4573225d25918cd598626bfae4d -->
-<!-- computed exec cmd="cargo xtask status --section rules --format md" inputs=seams.toml name=rules | do not edit; run computed -->
+<!-- /computed in=32720c855ce37b51180367bda8b9e6b9374f11fb36cf220e099de28cd4b5e0c7 out=bdfdb7fff6386c02873c427240c509a30a691a57d1d113bd275b568cddc9d772 -->
+<!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
 |---|---|---|---|
 | ext.no-locks | ADR-0005 | deny_types | no reading |
-| unsafe.homes | ADR-0006 | allow | pass |
+| unsafe.homes | ADR-0006 | allow | no reading |
 | unsafe.one-op |  | deny_lints | no reading |
 | fork.home |  | deny_pattern | no reading |
 | lints.no-panic |  | deny_lints | no reading |
 | engine.reentry-signature |  | check | no reading |
 | api.no-hot |  | deny_pattern | no reading |
 | ext.no-private |  | deny_pattern | no reading |
-| api.lock-line |  | on | pass |
-| xtask.lock-line |  | on | pass |
-| ext.pub-beyond-extension |  | on | pass |
+| api.lock-line |  | on | no reading |
+| xtask.lock-line |  | on | no reading |
+| ext.pub-beyond-extension |  | on | no reading |
 | witness.exit-authored |  | deny_pattern | no reading |
-| witness.coverage |  | check | pass |
-| vocab.avoid |  | avoid_from | pass |
-| vocab.harness |  | avoid_from | pass |
-| generated.committed |  | generated | pass |
-| git.no-verify |  | deny_argv | fail |
-| ticket.close |  | deny_argv | fail |
-| ticket.close-api |  | deny_pattern | fail |
+| witness.coverage |  | check | no reading |
+| vocab.avoid |  | avoid_from | no reading |
+| vocab.harness |  | avoid_from | no reading |
+| generated.committed |  | generated | no reading |
+| git.no-verify |  | deny_argv | no reading |
+| ticket.close |  | deny_argv | no reading |
+| ticket.close-api |  | deny_pattern | no reading |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | fail |
+| lanes.nightly |  | deny_pattern | no reading |
 | lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | fail |
+| lanes.builder-subset |  | require_argv | no reading |
 | computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | fail |
-| harness.self-shell |  | deny_pattern | fail |
+| harness.self |  | deny | no reading |
+| harness.self-shell |  | deny_pattern | no reading |
 | harness.transcript |  | deny_pattern | no reading |
-| divergence.reason |  | check | pass |
+| divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=3db45df6dd597c017466fc053673e7d321ccdc3fc9301473eecdd4b6495e1653 out=47444399d029cf7085b79987f3be236d8131f5378a1ee473a0d1e8b51eee8f36 -->
+<!-- /computed in=8699f82a4df0bab75898ff3e7d8c49fdd82092db989fcd48ccb5e0d299c83ee6 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -203,7 +203,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=5ddb03b915fcf84e1186bd4e993ad9411de03de0e62de5e50886048a0cf87fe1 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
+<!-- /computed in=92a88eeb152c1df11c630edcea39d2167f4d82549eb0a2cdbc257916c9b8dd62 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

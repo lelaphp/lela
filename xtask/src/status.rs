@@ -15,6 +15,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 
 pub(crate) mod every;
@@ -22,12 +23,13 @@ mod graph;
 mod parity;
 pub(crate) use every::PerReading;
 
-use crate::api_check;
+use crate::api_check::{self, lock::Lock};
 use crate::cli::{Format, Section};
 use crate::crosscheck;
 use crate::divergence::{Kind, Registry, Status};
 use crate::git::git;
-use crate::manifest::{Manifest, Measure, SCRIPTS, Seam, Week};
+use crate::layout;
+use crate::manifest::{LockCeiling, Manifest, Measure, SCRIPTS, Seam, Week};
 use crate::oracle::hosts::{EngineHost, HOSTS};
 use crate::oracle::{PROMISE_VARIABLE, Pin, TREE_VARIABLE};
 use crate::permit;
@@ -62,6 +64,62 @@ pub(crate) const LOCAL_SECTIONS: [&str; 8] = [
 const UNRENDERED: &str = "The local facts above are unrendered: `computed run .claude/harness.local.md` \
 fills them once a person has run `computed trust` for this clone (harness-design.md §11).";
 
+/// What a section is rendered against: this checkout, its store and what
+/// its machine holds, or the tree alone, as a tracked region carries it.
+/// Against the tree every reading is `no reading`, so the render is the
+/// same bytes on a full worktree and a fresh clone and only a tracked file
+/// moves it (harness-design.md §5, revision 6; #630).
+#[derive(Debug, Clone, Copy)]
+pub enum Against<'a> {
+    Checkout(&'a Store),
+    Tree,
+}
+
+impl<'a> Against<'a> {
+    /// The checkout's readings, or none against the tree. A file of the
+    /// store that is no reading costs its own row and is named on stderr,
+    /// never the section (#1235): stdout is the rendering a region holds,
+    /// and a tracked region never carries this machine's store.
+    fn readings(self) -> Result<Vec<Reading>> {
+        let Against::Checkout(store) = self else {
+            return Ok(Vec::new());
+        };
+        let files = store.readings()?;
+        if let Some(note) = files.unreadable_note(store.root()) {
+            eprintln!("{note}");
+        }
+        Ok(files.readings)
+    }
+
+    /// The checkout's store, for a section [`checkouts_alone`] names,
+    /// which `render` refuses against the tree before it asks.
+    fn checkout(self) -> Result<&'a Store> {
+        match self {
+            Against::Checkout(store) => Ok(store),
+            Against::Tree => {
+                bail!("a section of this checkout asked for its store against the tree")
+            }
+        }
+    }
+}
+
+/// The sections whose rows are this checkout's alone, its store's log or
+/// what its machine holds, which no tracked region carries: `--tracked`
+/// refuses them.
+fn checkouts_alone(section: Section) -> bool {
+    matches!(
+        section,
+        Section::Phpt
+            | Section::Track
+            | Section::Usage
+            | Section::Permits
+            | Section::Git
+            | Section::Oracle
+            | Section::Corpus
+            | Section::Parity
+    )
+}
+
 /// Render one section to a string in the asked format; `week` picks one
 /// row of the `week` section and `session_id` names "this session" of the
 /// `permits` section, each belonging to no other.
@@ -69,7 +127,7 @@ fills them once a person has run `computed trust` for this clone (harness-design
 pub fn render(
     manifest: &Manifest,
     registry: &Registry,
-    store: &Store,
+    against: Against<'_>,
     root: &Path,
     section: Section,
     format: Format,
@@ -84,28 +142,28 @@ pub fn render(
     if session_id.is_some() && section != Section::Permits {
         bail!("--session-id names this session of the permits section; use --section permits");
     }
-    // A file of the store that is no reading costs its own row and is
-    // named on stderr, never the section (#1235): stdout is the rendering a
-    // region holds, and a tracked region never carries this machine's
-    // store.
-    let files = store.readings()?;
-    if let Some(note) = files.unreadable_note(store.root()) {
-        eprintln!("{note}");
+    if matches!(against, Against::Tree) && checkouts_alone(section) {
+        bail!(
+            "the {} section is this checkout's, and --tracked renders the tree alone",
+            section
+                .to_possible_value()
+                .map_or_else(String::new, |v| v.get_name().to_owned())
+        );
     }
-    let readings = files.readings;
+    let readings = against.readings()?;
     let (rows, columns): (Vec<Row>, Columns) = match section {
         Section::Rules => (
             rules(manifest, &readings),
             if uncut { RULES_UNCUT } else { RULES },
         ),
-        Section::Locks => (locks(manifest, &readings), LOCKS),
+        Section::Locks => (locks(manifest, root, &readings)?, LOCKS),
         Section::Budget => (
             fold_uncreated(budget(manifest, &readings), "crate")?,
             BUDGET,
         ),
         Section::Divergence => return divergence(registry, format, uncut),
         Section::Phpt => {
-            let rows = standing(store, root)?
+            let rows = standing(against.checkout()?, root)?
                 .into_iter()
                 .filter(|row| !outlived(manifest, row))
                 .collect();
@@ -131,12 +189,19 @@ pub fn render(
         Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
         Section::Crosscheck => (instrument(&readings, crosscheck::INSTRUMENT), INSTRUMENT),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
-        Section::Track => (last_run(&store.history(track_work::INSTRUMENT)?), TRACK),
+        Section::Track => (
+            last_run(&against.checkout()?.history(track_work::INSTRUMENT)?),
+            TRACK,
+        ),
         Section::Usage => (
-            last_per_scope(&store.history(usage::INSTRUMENT)?, usage::INSTRUMENT),
+            last_per_scope(
+                &against.checkout()?.history(usage::INSTRUMENT)?,
+                usage::INSTRUMENT,
+            ),
             USAGE,
         ),
         Section::Permits => {
+            let store = against.checkout()?;
             return permits(
                 manifest,
                 &readings,
@@ -155,7 +220,9 @@ pub fn render(
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
-        Section::Parity => return parity::render(manifest, store, root, format),
+        Section::Parity => {
+            return parity::render(manifest, against.checkout()?, root, format);
+        }
     };
     Ok(match format {
         Table::Json => {
@@ -528,24 +595,48 @@ fn rules(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
         .collect()
 }
 
-fn locks(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
+/// One row per seam: its lock, the items the tree's lock lists, counted
+/// as api-check counts them, its ceiling, and the api-check reading.
+fn locks(manifest: &Manifest, root: &Path, readings: &[Reading]) -> Result<Vec<Row>> {
     manifest
         .seams
         .iter()
         .map(|seam| {
-            let ceiling = manifest
-                .lock_ceiling(seam)
-                .map_or(Value::Null, |n| json!(n.items));
-            Row::new(
+            let ceiling = manifest.lock_ceiling(seam);
+            Ok(Row::new(
                 &[
                     ("seam", json!(seam.name)),
                     ("lock", json!(seam.lock)),
-                    ("ceiling", ceiling),
+                    (
+                        "items",
+                        json!(listed(manifest, root, seam, ceiling.as_ref())?),
+                    ),
+                    ("ceiling", ceiling.map_or(Value::Null, |n| json!(n.items))),
                 ],
                 latest_of(readings, api_check::INSTRUMENT, &seam.name),
-            )
+            ))
         })
         .collect()
+}
+
+/// The items `seam`'s lock lists in the tree, or none while no crate is
+/// its home or its file is not there yet: a fact of the tree, so the map
+/// renders it against an empty store and its region names the lock.
+fn listed(
+    manifest: &Manifest,
+    root: &Path,
+    seam: &Seam,
+    ceiling: Option<&LockCeiling>,
+) -> Result<Option<usize>> {
+    let Some(home) = manifest.lock_home(&seam.lock) else {
+        return Ok(None);
+    };
+    let path = root.join(layout::path(&home)).join(&seam.lock);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let lock = Lock::read(&path)?;
+    Ok(Some(api_check::Counted::of(&lock.lines, ceiling).items()))
 }
 
 /// The budget section: one row per `[[crate]]`, then `scripts/**` against
@@ -1623,7 +1714,7 @@ const LOCKS: Columns = (&["seam", "lock", "items", "ceiling", "reading"], |r| {
     vec![
         r.fact("seam"),
         r.fact("lock"),
-        r.number("items"),
+        r.fact("items"),
         r.fact("ceiling"),
         r.status(),
     ]

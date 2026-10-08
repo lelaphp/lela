@@ -62,7 +62,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::key::Snapshot;
-use crate::manifest::{Edge, Manifest, Seam, Section};
+use crate::manifest::{Edge, LockCeiling, Manifest, Seam, Section};
 use crate::reading::{Number, Reading, Status, Store};
 use crate::sources::Standing;
 
@@ -296,13 +296,12 @@ fn seam_reading(
         reading = rewritten;
     }
     if let Some(ceiling) = manifest.lock_ceiling(seam) {
-        let mut items = generated.len();
+        let counted = Counted::of(&generated, Some(&ceiling));
+        let items = counted.items();
         let mut beside = "";
-        if let Some(cap) = ceiling.private {
+        if let (Some(cap), Counted::Split { private, .. }) = (ceiling.private, counted) {
             // Split, `items` is what `api_items` holds, as the locks
             // section reads it against that ceiling.
-            let private = generated.iter().filter(|line| private(line)).count();
-            items -= private;
             beside = " beside __private's";
             reading.count(numbers::ITEMS, items as u64)?;
             reading.count(numbers::PRIVATE, private as u64)?;
@@ -757,6 +756,37 @@ const PRIVATE: &str = "__private";
 fn private(line: &str) -> bool {
     line.strip_prefix(PRIVATE)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+}
+
+/// A lock's lines as its `items` number counts them: every line, or,
+/// where the seam's ceiling holds the lines under [`PRIVATE`] apart
+/// (`api_private_items`), the rest beside those. api-check counts the
+/// lines it regenerates, and the `locks` section the lines the tree's lock
+/// lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Counted {
+    Whole(usize),
+    Split { items: usize, private: usize },
+}
+
+impl Counted {
+    pub(crate) fn of(lines: &BTreeSet<String>, ceiling: Option<&LockCeiling>) -> Counted {
+        if ceiling.and_then(|c| c.private).is_none() {
+            return Counted::Whole(lines.len());
+        }
+        let private = lines.iter().filter(|line| private(line)).count();
+        Counted::Split {
+            items: lines.len() - private,
+            private,
+        }
+    }
+
+    /// What `items` holds: every line, or those beside `__private`'s.
+    pub(crate) fn items(self) -> usize {
+        match self {
+            Counted::Whole(items) | Counted::Split { items, .. } => items,
+        }
+    }
 }
 
 /// The public items of `krate` as lock lines; on the way, `reading` gains

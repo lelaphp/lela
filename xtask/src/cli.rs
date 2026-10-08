@@ -69,6 +69,12 @@ pub(crate) enum Command {
         /// `permits` and every rule's text.
         #[arg(long)]
         uncut: bool,
+        /// Render against the tree alone, as a tracked region carries the
+        /// section: every reading `no reading`, so the bytes are the same on
+        /// any checkout; a section whose rows are this checkout's alone is
+        /// refused (harness-design.md §5, revision 6).
+        #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "every"])]
+        tracked: bool,
         /// Every reading of a section that keeps one per scope, in the
         /// log's order, rather than the one that stands, as
         /// `--format jsonl`: one line per reading carrying `v`, the version
@@ -719,8 +725,9 @@ pub enum Section {
     /// judges it and its reading; the text its failure prints is under
     /// `--uncut` and in JSON (#1772).
     Rules,
-    /// Each lock's width against `api_items`: the api-check readings, of
-    /// which `--every` renders every one, a crate's edges among them.
+    /// Each lock's width, as the tree's lock lists it, against
+    /// `api_items`, with its api-check reading; `--every` renders every
+    /// api-check reading, a crate's edges among them.
     #[value(alias = "api-check")]
     Locks,
     /// Each crate against its ceiling.

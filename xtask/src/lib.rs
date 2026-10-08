@@ -540,6 +540,7 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         week,
         session_id,
         uncut,
+        tracked,
         every,
         log,
         session: _,
@@ -551,10 +552,15 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         Some(section) if every => status::every::render(store, section, format, log.as_deref())?,
         Some(section) => {
             let registry = Registry::load(root)?;
+            let against = if tracked {
+                status::Against::Tree
+            } else {
+                status::Against::Checkout(store)
+            };
             status::render(
                 manifest,
                 &registry,
-                store,
+                against,
                 root,
                 section,
                 format,

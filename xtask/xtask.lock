@@ -276,6 +276,7 @@ scratch::Tree::new
 scratch::Tree::path
 scratch::cargo
 scratch::repository
+status::Against
 status::render
 status::session
 steer::STEERABLE
