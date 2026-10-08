@@ -314,8 +314,10 @@ ticket::Successors::named
 ticket::Verdict
 ticket::Verdict::given
 ticket::denied
+ticket::merged
 ticket::parent
 ticket::parent_scope
+ticket::ready_of
 ticket::run
 ticket::ticket_of
 track::Ticket

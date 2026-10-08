@@ -618,6 +618,35 @@ pub(crate) enum TicketCommand {
         #[arg(long = "session-id", value_name = "ID")]
         session_id: Option<String>,
     },
+    /// Read as `read` does, then record the branch ready to merge with what
+    /// the work opened, `branch.<name>.ready`, which the merge into `main`
+    /// closes the ticket by (#2270, #2311); refuse while a box is unticked,
+    /// while a successor is closed or missing, and without `--opens` or
+    /// `--opens-nothing`. Nothing at the tracker changes.
+    Ready {
+        /// The issue number; without it, the branch's recorded ticket.
+        number: Option<u64>,
+        /// The session the reading carries, the way a `permit` reading
+        /// carries the hook's `session_id`; empty when none is named.
+        #[arg(long = "session-id", value_name = "ID")]
+        session_id: Option<String>,
+        /// A ticket filed for what this work found and did not do; once
+        /// per ticket. Each must exist and be open.
+        #[arg(long = "opens", value_name = "N")]
+        opens: Vec<u64>,
+        /// The assertion that the work found nothing to file.
+        #[arg(long = "opens-nothing")]
+        opens_nothing: bool,
+    },
+    /// Close each open ticket the merge commits since `--since` name as
+    /// `#n`, with the successors its branch's ready record names; one with
+    /// no ready record fails, named. What the hooks on a merge into `main`
+    /// run (#2311); off `main` it closes nothing.
+    Merged {
+        /// The commit `main` stood at before the merge.
+        #[arg(long, value_name = "REV")]
+        since: String,
+    },
     /// Read as `read` does, then set the blocking edge to each ticket the
     /// work opened and close the issue at the tracker with a comment naming
     /// the commit and the successors; refuse while a box is unticked, while

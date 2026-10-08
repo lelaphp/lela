@@ -139,7 +139,7 @@ impl Scratch {
             "#!/bin/sh\nif [ \"$1\" = issue ] && [ \"$2\" = list ]; then cat '{dir}/list.json'; exit $?; fi\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then f='{dir}/view.'$3'.json'; [ -f \"$f\" ] || f='{dir}/view.json'; cat \"$f\"; exit $?; fi\nprintf '%s\\n' \"$*\" >> '{dir}/calls'\nexit 0\n"
         );
         let claude = format!(
-            "#!/bin/sh\n# the last argument is the prompt; its first line is `/<skill> <n>`\nrest=''; i=0\nfor a; do i=$((i+1)); [ $i -lt $# ] && rest=\"$rest $a\"; prompt=$a; done\nline=$(printf '%s\\n' \"$prompt\" | sed -n 1p); n=${{line##* }}\nprintf '%s\\n' \"${{rest# }} $line\" >> '{dir}/session.args'\nprintf '%s\\n' \"$prompt\" >> '{dir}/session.prompt'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\nif [ \"$line\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\ncase \"$act\" in *spend*) usd=${{act##*spend }}; printf '{{\"context\":{{\"tokens\":152000,\"window\":200000,\"percent\":76}},\"rateLimits\":[],\"cost\":{{\"usd\":%s}}}}' \"$usd\" | '{xtask}' --root \"$(pwd -P)\" usage record --session stand-in --turn 3 >/dev/null || exit 4;; esac\nexit 0\n"
+            "#!/bin/sh\n# the last argument is the prompt; its first line is `/<skill> <n>`\nrest=''; i=0\nfor a; do i=$((i+1)); [ $i -lt $# ] && rest=\"$rest $a\"; prompt=$a; done\nline=$(printf '%s\\n' \"$prompt\" | sed -n 1p); n=${{line##* }}\nprintf '%s\\n' \"${{rest# }} $line\" >> '{dir}/session.args'\nprintf '%s\\n' \"$prompt\" >> '{dir}/session.prompt'\npwd -P >> '{dir}/session.cwd'\nprintf '%s\\n' \"${{CLAUDE_CODE_SUBAGENT_MODEL-unset}}\" >> '{dir}/session.subagent'\nif [ \"$line\" = /frontier ]; then sh '{dir}/act.frontier'; exit $?; fi\nact=$(cat '{dir}/act.'$n 2>/dev/null || cat '{dir}/act')\nview='{dir}/view.'$n'.json'; [ -f \"$view\" ] || view='{dir}/view.json'\ncase \"$act\" in *commit*) echo worked > worked.$n.txt && git add -- worked.$n.txt && git -c commit.gpgsign=false -c core.hooksPath=/var/empty -c user.name=x -c user.email=x@x commit -q -m 'the work' -- worked.$n.txt || exit 3;; esac\ncase \"$act\" in *ready*) git config branch.t$n.ready nothing || exit 5;; esac\ncase \"$act\" in *close*) sed 's/\"OPEN\"/\"CLOSED\"/' \"$view\" > '{dir}/view.tmp' && mv '{dir}/view.tmp' \"$view\";; esac\ncase \"$act\" in *spend*) usd=${{act##*spend }}; printf '{{\"context\":{{\"tokens\":152000,\"window\":200000,\"percent\":76}},\"rateLimits\":[],\"cost\":{{\"usd\":%s}}}}' \"$usd\" | '{xtask}' --root \"$(pwd -P)\" usage record --session stand-in --turn 3 >/dev/null || exit 4;; esac\nexit 0\n"
         );
         for (name, text) in [("gh", gh), ("claude", claude)] {
             let file = self.dir.join("bin").join(name);
@@ -355,15 +355,15 @@ fn listed(issues: &[(u64, &[&str])]) -> String {
 /// `main`, the session started as `claude -p --model <model>` with the
 /// subagents' model in its environment and the defaults for the mode
 /// and the effort, in the worktree, with the prompt running `/build
-/// <n>`; the ticket closed, so the worktree is retired and the branch
-/// left for /specs to merge with its record kept, `main` and `origin`'s
+/// <n>`; the branch recorded ready (#2311), so the worktree is retired
+/// and the branch left for /specs to merge with its records kept, `main` and `origin`'s
 /// `main` where they were (#1749, ADR-0009); one line naming the ticket,
 /// the commit and the outcome; no trust line waited on.
 #[test]
-fn a_closed_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
-    let scratch = Scratch::lay("closed");
+fn a_ready_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
+    let scratch = Scratch::lay("ready");
     scratch.tracker(&[20, 21], 20);
-    scratch.act("commit close");
+    scratch.act("commit ready");
     let before = rev(&scratch.root, "main");
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 0, "{out}");
@@ -385,7 +385,7 @@ fn a_closed_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
     assert!(
         out.lines().any(|line| line
             == format!(
-                "track work: #20 closed at {}; t20 is left for /specs to merge, its worktree retired",
+                "track work: #20 ready at {}; t20 is left for /specs to merge, its worktree retired, and the merge closes it",
                 &tip[..7]
             )),
         "{out}"
@@ -399,8 +399,8 @@ fn a_closed_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
     // The prompt names the exit condition the run reads back (#115).
     let prompt = scratch.wrote("session.prompt");
     assert!(
-        prompt.contains("cargo xtask ticket close 20"),
-        "the prompt names no close: {prompt}"
+        prompt.contains("cargo xtask ticket ready 20"),
+        "the prompt names no ready record: {prompt}"
     );
     assert!(
         prompt.contains("gh issue create"),
@@ -418,6 +418,10 @@ fn a_closed_tickets_branch_is_left_its_worktree_retired_and_main_unmoved() {
     assert_eq!(
         sh(&scratch.root, &["git", "config", "branch.t20.ticket"]).trim(),
         "20"
+    );
+    assert_eq!(
+        sh(&scratch.root, &["git", "config", "branch.t20.ready"]).trim(),
+        "nothing"
     );
 
     // The one trust line is the grant over the worktrees' directory, and
@@ -673,7 +677,7 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
     );
     assert!(
         lines.contains(&format!(
-            "track work: #21 is open after the session (exit status: 0), the branch at {}; the worktree stands at {} for a person, nothing retired",
+            "track work: #21 is open with no ready record after the session (exit status: 0), the branch at {}; the worktree stands at {} for a person, nothing retired",
             &second[..7],
             scratch.worktree("t21").display()
         ).as_str()),
@@ -710,7 +714,8 @@ fn the_frontier_is_worked_until_it_empties_past_a_ticket_left_open() {
         "the standing worktree's usage, read from its own store: {section}"
     );
     assert!(
-        rows[1].contains("#21 is open after the session") && rows[1].contains("stands at"),
+        rows[1].contains("#21 is open with no ready record after the session")
+            && rows[1].contains("stands at"),
         "{section}"
     );
     assert!(

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# post-commit: a merge commit closes the tickets its subject names (#2270,
+# #2311). A ticket closes when its work is on `main`, so `/build` ends at
+# `xtask ticket ready`, and the merge commit closes each open `#n` its
+# subject names through `xtask ticket close`, with the successors its
+# branch's ready record names; a ticket named with no ready record is
+# named and left open. `xtask ticket merged` closes nothing off `main`: a
+# merge made elsewhere closes its tickets when `main` is fast-forwarded to
+# it, through post-merge. The commit stands whatever the close says, since
+# a hook after the commit cannot take it back, so a failure is said on the
+# second stream and the hook exits 0. A commit with one parent closes
+# nothing. Installed per clone by the SessionStart hook, or by hand: `git
+# config core.hooksPath scripts/hooks`.
+set -u
+cd "$(git rev-parse --show-toplevel)"
+[ "$(git rev-list --parents -n 1 HEAD | wc -w)" -gt 2 ] || exit 0
+cargo xtask ticket merged --since HEAD^1 ||
+    echo "post-commit: a ticket this merge names did not close; it is named above" >&2
+exit 0

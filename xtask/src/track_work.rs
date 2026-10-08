@@ -14,23 +14,24 @@
 //! worktree is laid down, named.
 //! The skill's line is the one thing the label changes: under it every
 //! prompt names the exit condition this run reads back (#115), that the
-//! session ends by running `cargo xtask ticket close <n>` and, when
-//! something outside the ticket blocks that close, files the blocker as
-//! a ticket and names it in its reply, so the contract travels with the
-//! job rather than resting on a skill file elsewhere in the filesystem.
+//! session ends by running `cargo xtask ticket ready <n>` (#2311) and,
+//! when something outside the ticket blocks that record, files the
+//! blocker as a ticket and names it in its reply, so the contract travels
+//! with the job rather than resting on a skill file elsewhere in the
+//! filesystem.
 //! The hooks that already exist police the session: `permit` judges each
 //! call and the Stop hook holds the turn until `done` is green and the
-//! ticket's boxes are ticked, so nothing here judges the work. When the session ends with the ticket
-//! closed at the tracker, the worktree is retired, which appends its
-//! readings into the checkout's store, and the branch `t<n>` is left
-//! with its record for the /specs coordinator to merge through its merge
-//! check (#1749, ADR-0009): the loop never moves `main` and pushes
-//! nothing, so a ticket the closed one blocks is not named until `main`
-//! contains that branch ([`track_next::waits`], #1850). The close is
-//! the one signal, so a ticket closed with nothing committed, as a
-//! withdrawn one is, is retired the same way. When the
-//! session ends with the ticket open, the worktree is left standing for a
-//! person, the ticket's record kept with its branch, nothing retired, and
+//! ticket's boxes are ticked, so nothing here judges the work. When the
+//! session ends with the branch's ready record written, the worktree is
+//! retired, which appends its readings into the checkout's store, and the
+//! branch `t<n>` is left with its records for the /specs coordinator to
+//! merge through its merge check (#1749, ADR-0009), whose merge commit
+//! closes the ticket (#2270, #2311): the loop never moves `main` and
+//! pushes nothing, and a ticket the ready one blocks stays blocked until
+//! the merge closes it. The ready record is the one signal, beside a
+//! ticket withdrawn at the tracker with nothing committed, which is
+//! retired the same way. When the session ends with neither, the
+//! worktree is left standing for a person, the ticket's record kept with its branch, nothing retired, and
 //! the line says so; the console shows the worktree. A worktree left
 //! standing is not the loop's again, whatever becomes of its ticket: a
 //! run lays down, and retires, only the worktree its own session ran in,
@@ -219,18 +220,21 @@ impl Session {
     /// The prompt: its first line names the ticket and runs the skill on
     /// it, `/<skill> <n>`, and the rest names the exit condition this run
     /// reads back, the same for every skill, since the one signal is the
-    /// ticket closed at the tracker and a session that ends with it open
-    /// leaves the worktree standing however finished its work is.
+    /// branch's ready record, or the ticket withdrawn at the tracker, and a
+    /// session that ends with neither leaves the worktree standing however
+    /// finished its work is (#2311).
     pub fn prompt(skill: Skill, ticket: Ticket) -> String {
         let n = ticket.number();
         format!(
             "/{} {n}\n\n\
-             The session ends by running `cargo xtask ticket close {n}`. That close is the one \
-             signal this run reads back: a ticket still open at the tracker leaves the worktree \
-             standing for a person, however finished the work is. The close holds the ticket to \
-             its acceptance criteria, so tick each box the work meets first, and it takes \
-             `--opens <m>` for every ticket this work filed, or `--opens-nothing`.\n\n\
-             When something outside this ticket blocks the close, file that blocker with `gh \
+             The session ends by running `cargo xtask ticket ready {n}`. That record is the one \
+             signal this run reads back: a branch with no ready record leaves the worktree \
+             standing for a person, however finished the work is, and the merge into main \
+             closes the ticket (#2270). The record holds the ticket to its acceptance criteria, \
+             so tick each box the work meets first, and it takes `--opens <m>` for every ticket \
+             this work filed, or `--opens-nothing`. A ticket that describes nothing in the tree \
+             is withdrawn instead, `cargo xtask ticket close {n} --withdrawn <reason>`.\n\n\
+             When something outside this ticket blocks the record, file that blocker with `gh \
              issue create`, name its number in your reply, and leave the ticket open.\n",
             skill.name()
         )
@@ -317,12 +321,14 @@ pub enum Worked {
     /// nothing was laid down, and `waits_on` is the track's open
     /// `for-a-person` tickets.
     StillEmpty { track: String, waits_on: Vec<Next> },
-    /// The ticket closed: the worktree on `branch` retired, and `branch`,
-    /// at `commit`, left for /specs to merge (#1749).
+    /// The ticket ready to merge, or withdrawn: the worktree on `branch`
+    /// retired, and `branch`, at `commit`, left for /specs to merge
+    /// (#1749), whose merge closes a ready ticket (#2311).
     Closed {
         ticket: Ticket,
         branch: String,
         commit: String,
+        ready: bool,
     },
     /// The session ended with the ticket open, `why`: the ticket is the
     /// session's to finish. The worktree at `dir` stands for a person with
@@ -404,6 +410,16 @@ impl Worked {
                 ticket,
                 branch,
                 commit,
+                ready: true,
+            } => format!(
+                "{ticket} ready at {}; {branch} is left for /specs to merge, its worktree retired, and the merge closes it",
+                short(commit)
+            ),
+            Worked::Closed {
+                ticket,
+                branch,
+                commit,
+                ready: false,
             } => format!(
                 "{ticket} closed at {}; {branch} is left for /specs to merge, its worktree retired",
                 short(commit)
@@ -634,12 +650,13 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
     say(WORK, &format!("the session ended: {status}"));
     let tip = rev(root, &format!("refs/heads/{branch}"))?;
     let issue = gh.view(root, ticket)?;
-    if issue.state != State::Closed {
+    let ready = ticket::ready_of(root, &branch)?.is_some();
+    if issue.state != State::Closed && !ready {
         return Ok(Worked::Standing {
             ticket,
             commit: tip,
             dir,
-            why: format!("is open after the session ({status})"),
+            why: format!("is open with no ready record after the session ({status})"),
         });
     }
     worktree::retire(root, &branch).with_context(|| {
@@ -653,6 +670,7 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
         ticket,
         branch,
         commit: tip,
+        ready,
     })
 }
 

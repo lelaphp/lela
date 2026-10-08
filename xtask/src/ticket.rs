@@ -187,6 +187,26 @@ pub(crate) const INSTRUMENT: &str = "ticket";
 /// while the workspace's tree still matches (#31; the rule is stated in
 /// `done`'s rustdoc). One statement, read by the writer and the reader.
 pub(crate) const STAMPED_OVER: &str = ".";
+
+/// What a ready record says of a branch whose work opened nothing.
+const NOTHING: &str = "nothing";
+
+/// The configuration key of a branch's ready record (#2311): written by
+/// `ticket ready` beside `branch.<name>.ticket`, in the configuration
+/// every worktree of the repository shares, and read at the merge.
+fn ready_key(branch: &str) -> String {
+    format!("branch.{branch}.ready")
+}
+
+/// The successors `branch`'s ready record names, `None` where it records
+/// none: what `track work` reads a session's end by and the merge closes
+/// the ticket with (#2311).
+pub fn ready_of(root: &Path, branch: &str) -> Result<Option<Successors>> {
+    let Ok(text) = crate::git::git(root, &["config", "--get", &ready_key(branch)], None) else {
+        return Ok(None);
+    };
+    Successors::of_record(&text).map(Some)
+}
 /// The heading whose boxes are the acceptance criteria, matched without
 /// regard to case at level two.
 const HEADING: &str = "acceptance criteria";
@@ -195,12 +215,14 @@ const HEADING: &str = "acceptance criteria";
 /// `seams.toml` carries nothing about it.
 pub const CAP: u64 = 100;
 
-/// What `xtask ticket` does: read the criteria, or read them and close
-/// under a verdict, naming what the work opened, at a commit that stands
-/// where [`Reach`] says.
+/// What `xtask ticket` does: read the criteria; read them and record the
+/// branch ready to merge, naming what the work opened (#2311); or read
+/// them and close under a verdict, naming what the work opened, at a
+/// commit that stands where [`Reach`] says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Act {
     Read,
+    Ready(Successors),
     Close(Verdict, Successors, Reach),
 }
 
@@ -317,6 +339,39 @@ impl Successors {
     }
 
     /// The tickets named, none for the assertion.
+    /// The ready record's text: the successors' numbers, a space between,
+    /// or `nothing`.
+    fn record(&self) -> String {
+        match self {
+            Successors::Nothing => String::from(NOTHING),
+            Successors::Tickets(tickets) => tickets
+                .iter()
+                .map(|t| t.number().to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    /// The successors a ready record names; a record that names neither
+    /// numbers nor `nothing` is an error, never a close that opens nothing.
+    fn of_record(text: &str) -> Result<Successors> {
+        let text = text.trim();
+        if text == NOTHING {
+            return Ok(Successors::Nothing);
+        }
+        let tickets = text
+            .split_whitespace()
+            .map(|n| n.parse().map(Ticket::new))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .with_context(|| {
+                format!("the ready record {text:?} names neither tickets nor {NOTHING}")
+            })?;
+        if tickets.is_empty() {
+            bail!("the ready record is empty; it names the tickets the work opened or {NOTHING}");
+        }
+        Ok(Successors::Tickets(tickets))
+    }
+
     fn tickets(&self) -> &[Ticket] {
         match self {
             Successors::Tickets(tickets) => tickets,
@@ -1151,18 +1206,7 @@ pub fn run(
         &Snapshot::disk(root)?,
         Path::new(STAMPED_OVER),
     )?;
-    reading.count("criteria", criteria.count() as u64)?;
-    reading.count("ticked", criteria.ticked.len() as u64)?;
-    reading.count("unticked", criteria.unticked.len() as u64)?;
-    reading.count("denied", denied.len() as u64)?;
-    reading.count("steerable", steered.len() as u64)?;
-    reading.rule = denied
-        .first()
-        .map_or_else(String::new, |first| first.rule.clone());
-    if let Act::Close(verdict, successors, _) = &act {
-        reading.count("opens", successors.tickets().len() as u64)?;
-        reading.count("withdrawn", u64::from(verdict.withdrawn().is_some()))?;
-    }
+    counted(&mut reading, &criteria, &denied, steered.len(), &act)?;
     session_id
         .unwrap_or_default()
         .clone_into(&mut reading.session);
@@ -1176,6 +1220,7 @@ pub fn run(
     // nothing, said once for every condition that refuses one.
     let nothing = match act {
         Act::Read => "",
+        Act::Ready(_) => "; not ready, nothing recorded",
         Act::Close(..) => "; not closed, nothing changed at the tracker",
     };
     let (status, message) = match act {
@@ -1219,6 +1264,14 @@ pub fn run(
             Status::Pass,
             format!("{ticket}: {boxes}; {}", issue.state.as_str()),
         ),
+        Act::Ready(_) if issue.state == State::Closed => (
+            Status::Fail,
+            format!("{ticket}: {boxes}; closed already, nothing recorded"),
+        ),
+        Act::Ready(successors) => match ready(gh, root, &issue, &reading, &successors) {
+            Ok(said) => (Status::Pass, format!("{ticket}: {boxes}; {said}")),
+            Err(text) => (Status::Fail, format!("{ticket}: {boxes}; {text}")),
+        },
         Act::Close(Verdict::Done, ..) if issue.state == State::Closed => (
             Status::Fail,
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
@@ -1248,6 +1301,124 @@ pub fn run(
     // stands, since it is what the heuristic matched and not a refusal.
     reading.message = message + &steerable(&steered);
     Ok(reading)
+}
+
+/// What a ticket reading counts: the boxes, the rows that say the label
+/// is wrong and those an instrument writes, and for a ready record or a
+/// close the successors and whether it is a withdrawal; its rule is the
+/// first denial's.
+fn counted(
+    reading: &mut Reading,
+    criteria: &Criteria,
+    denied: &[&Denied],
+    steered: usize,
+    act: &Act,
+) -> Result<()> {
+    reading.count("criteria", criteria.count() as u64)?;
+    reading.count("ticked", criteria.ticked.len() as u64)?;
+    reading.count("unticked", criteria.unticked.len() as u64)?;
+    reading.count("denied", denied.len() as u64)?;
+    reading.count("steerable", steered as u64)?;
+    reading.rule = denied
+        .first()
+        .map_or_else(String::new, |first| first.rule.clone());
+    match act {
+        Act::Close(verdict, successors, _) => {
+            reading.count("opens", successors.tickets().len() as u64)?;
+            reading.count("withdrawn", u64::from(verdict.withdrawn().is_some()))?;
+        }
+        Act::Ready(successors) => {
+            reading.count("opens", successors.tickets().len() as u64)?;
+        }
+        Act::Read => {}
+    }
+    Ok(())
+}
+
+/// The tickets the merge commits `since..HEAD` name, each closed as it
+/// lands (#2270, #2311): the hook on a merge commit, and on a fast-forward
+/// of `main`, calls this. An open ticket a subject names as `#n` is
+/// closed through [`run`] with the successors its branch's ready record
+/// names; one with no ready record fails, named, and the merge stands. A
+/// ticket closed already, and a number the tracker answers no issue for,
+/// is passed over. Off `main` nothing is closed: the fast-forward that
+/// brings the merge there calls this again.
+pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<Vec<Reading>> {
+    if Reach::of(root)? != Reach::Landed {
+        return Ok(Vec::new());
+    }
+    let range = format!("{since}..HEAD");
+    let subjects = crate::git::git(root, &["log", "--merges", "--format=%s", &range], None)?;
+    let mut named: Vec<Ticket> = Vec::new();
+    for word in subjects.split(|c: char| !(c == '#' || c.is_ascii_digit())) {
+        if let Some(Ok(number)) = word.strip_prefix('#').map(str::parse) {
+            let ticket = Ticket::new(number);
+            if !named.contains(&ticket) {
+                named.push(ticket);
+            }
+        }
+    }
+    let mut readings = Vec::new();
+    for ticket in named {
+        let Ok(issue) = gh.view(root, ticket) else {
+            continue;
+        };
+        if issue.state == State::Closed {
+            continue;
+        }
+        let ready = crate::track::branch_of_ticket(root, ticket)
+            .map(|branch| ready_of(root, &branch))
+            .transpose()?
+            .flatten();
+        let Some(successors) = ready else {
+            let mut unready = Reading::stamped_over(
+                INSTRUMENT,
+                &scope(ticket),
+                &Snapshot::disk(root)?,
+                Path::new(STAMPED_OVER),
+            )?;
+            unready.status = Status::Fail;
+            unready.message = format!(
+                "{ticket} is named by a merge into main and its branch has no ready record; not closed: close it with `xtask ticket close {}` naming what it opened",
+                ticket.number()
+            );
+            readings.push(unready);
+            continue;
+        };
+        let act = Act::Close(Verdict::Done, successors, Reach::Landed);
+        readings.push(run(root, manifest, gh, act, ticket, None)?);
+    }
+    Ok(readings)
+}
+
+/// The branch ready to merge (#2311): every successor held as a close
+/// holds it, and the record written on the branch `HEAD` is on, which the
+/// merge reads to close the ticket. Nothing at the tracker changes.
+fn ready(
+    gh: &Gh,
+    root: &Path,
+    issue: &Issue,
+    reading: &Reading,
+    successors: &Successors,
+) -> std::result::Result<String, String> {
+    let session_id = (!reading.session.is_empty()).then_some(reading.session.as_str());
+    let opened = successors.describe(session_id);
+    successors
+        .held(
+            gh,
+            root,
+            &tracks_of(issue.labels.iter().map(|l| l.name.as_str())),
+        )
+        .map_err(|err| format!("{err:#}; not ready, nothing recorded"))?;
+    let branch = crate::track::head_branch(root)
+        .ok_or("HEAD is detached, and a ready record is a branch's; not ready, nothing recorded")?;
+    let key = ready_key(&branch);
+    crate::git::git(root, &["config", &key, &successors.record()], None)
+        .map_err(|err| format!("{key} could not be written: {err:#}; not ready"))?;
+    Ok(format!(
+        "{opened}; ready to merge at {}, recorded as {key}; the merge into main closes it",
+        reading.commit
+    ))
 }
 
 /// The act at the tracker, the same for a close of work done and a

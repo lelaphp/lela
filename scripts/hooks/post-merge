@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# post-merge: a merge that moved the checkout, a fast-forward of `main`
+# among them, closes the tickets the merge commits it brought name (#2270,
+# #2311), as post-commit closes a merge committed here: `xtask ticket
+# merged --since ORIG_HEAD`, which reads the subjects of the merge commits
+# between where the branch stood and where it stands, and closes nothing
+# off `main`. The merge stands whatever the close says, so a failure is
+# said on the second stream and the hook exits 0. Installed per clone by
+# the SessionStart hook, or by hand: `git config core.hooksPath
+# scripts/hooks`.
+set -u
+cd "$(git rev-parse --show-toplevel)"
+git rev-parse --verify --quiet ORIG_HEAD >/dev/null || exit 0
+cargo xtask ticket merged --since ORIG_HEAD ||
+    echo "post-merge: a ticket this merge names did not close; it is named above" >&2
+exit 0

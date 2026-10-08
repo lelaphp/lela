@@ -290,6 +290,10 @@ fn ticket_command(
         let reading = ticket::parent(root, &ticket::Gh::on_path(), sheet, session_id.as_deref())?;
         return record(store, std::slice::from_ref(&reading));
     }
+    if let TicketCommand::Merged { since } = command {
+        let readings = ticket::merged(root, manifest, &ticket::Gh::on_path(), &since)?;
+        return record(store, &readings);
+    }
     let (act, ticket, session_id) = match command {
         TicketCommand::Read { number, session_id } => (
             ticket::Act::Read,
@@ -312,7 +316,19 @@ fn ticket_command(
                 session_id,
             )
         }
-        TicketCommand::Parent { .. } => bail!("ticket parent: answered above"),
+        TicketCommand::Ready {
+            number,
+            session_id,
+            opens,
+            opens_nothing,
+        } => {
+            let ticket = ticket::ticket_of(root, number)?;
+            let successors = ticket::Successors::named(ticket, &opens, opens_nothing)?;
+            (ticket::Act::Ready(successors), ticket, session_id)
+        }
+        TicketCommand::Parent { .. } | TicketCommand::Merged { .. } => {
+            bail!("ticket parent and merged: answered above")
+        }
     };
     let reading = ticket::run(
         root,

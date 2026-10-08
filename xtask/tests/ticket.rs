@@ -13,7 +13,7 @@ use std::process::Command;
 use xtask::manifest::Manifest;
 use xtask::reading::Status;
 use xtask::scratch::Tree;
-use xtask::ticket::{Act, CAP, Gh, Reach, Successors, Verdict, parent, run};
+use xtask::ticket::{Act, CAP, Gh, Reach, Successors, Verdict, merged, parent, run};
 use xtask::track::Ticket;
 
 fn workspace() -> &'static Path {
@@ -322,6 +322,121 @@ fn git(root: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// A repository of this test's own on `main` with one empty commit.
+fn repository(name: &str) -> Tree {
+    let root = Tree::new(name).unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    root
+}
+
+/// `ticket ready` holds the boxes and the successors as a close does,
+/// writes the branch's ready record and closes nothing (#2311).
+#[test]
+fn ready_records_the_branch_with_its_successors_and_closes_nothing() {
+    let root = repository("ticket-ready");
+    git(&root, &["checkout", "-q", "-b", "t7"]);
+    let recorded = Recorded::lay("ready");
+    recorded.issue(7, "OPEN", UNTICKED);
+    recorded.issue(9, "OPEN", TICKED);
+    let ready = |ticket: u64| {
+        run(
+            &root,
+            &manifest(),
+            &recorded.gh(),
+            Act::Ready(Successors::Tickets(vec![Ticket::new(9)])),
+            Ticket::new(ticket),
+            None,
+        )
+        .unwrap()
+    };
+    let refused = ready(7);
+    assert_eq!(refused.status, Status::Fail, "{}", refused.message);
+    assert!(
+        refused.message.ends_with("not ready, nothing recorded"),
+        "{}",
+        refused.message
+    );
+
+    recorded.issue(7, "OPEN", TICKED);
+    let reading = ready(7);
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert!(
+        reading
+            .message
+            .contains("recorded as branch.t7.ready; the merge into main closes it"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(git(&root, &["config", "branch.t7.ready"]), "9");
+    assert!(recorded.calls().is_empty(), "{:?}", recorded.calls());
+}
+
+/// The merge into `main` closes the open tickets its subject names with
+/// the successors their branches' ready records name (#2311): one with a
+/// record closes, one with none fails naming it and is left open, one
+/// closed already is passed over, and off `main` nothing is closed.
+#[test]
+fn a_merge_into_main_closes_the_ready_tickets_its_subject_names() {
+    let root = repository("ticket-merged");
+    for n in ["7", "8"] {
+        git(&root, &["checkout", "-q", "-b", &format!("t{n}"), "main"]);
+        let work = format!("the work of #{n}");
+        git(&root, &["commit", "-q", "--allow-empty", "-m", &work]);
+        git(&root, &["config", &format!("branch.t{n}.ticket"), n]);
+    }
+    git(&root, &["config", "branch.t7.ready", "nothing"]);
+    git(&root, &["checkout", "-q", "t8"]);
+    let recorded = Recorded::lay("merged");
+    recorded.issue(7, "OPEN", TICKED);
+    recorded.issue(8, "OPEN", TICKED);
+    recorded.issue(10, "CLOSED", TICKED);
+    assert!(
+        merged(&root, &manifest(), &recorded.gh(), "main")
+            .unwrap()
+            .is_empty(),
+        "off main nothing is closed"
+    );
+
+    git(&root, &["checkout", "-q", "main"]);
+    git(
+        &root,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "t7",
+            "t8",
+            "-m",
+            "Merge t7, t8: the work (#7, #8, #10)",
+        ],
+    );
+    let readings = merged(&root, &manifest(), &recorded.gh(), "HEAD^1").unwrap();
+    assert_eq!(readings.len(), 2, "{readings:#?}");
+    assert_eq!(readings[0].scope, "7");
+    assert_eq!(readings[0].status, Status::Pass, "{}", readings[0].message);
+    assert_eq!(readings[1].scope, "8");
+    assert_eq!(readings[1].status, Status::Fail, "{}", readings[1].message);
+    assert!(
+        readings[1]
+            .message
+            .contains("#8 is named by a merge into main and its branch has no ready record"),
+        "{}",
+        readings[1].message
+    );
+    let calls = recorded.calls();
+    assert!(
+        calls.iter().any(|c| c.starts_with("issue close 7")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("issue close 8") || c.starts_with("issue close 10")),
+        "{calls:?}"
+    );
 }
 
 /// Where a close's commit stands against `main` (#2249): `main`'s own
