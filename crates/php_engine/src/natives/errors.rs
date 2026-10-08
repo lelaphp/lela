@@ -86,8 +86,7 @@ fn trigger_error(
     };
     let served = req.note_error_string(level, message);
     if served && level == Level::UserError {
-        let message = String::from_utf8_lossy(message.as_bytes()).into_owned();
-        req.bail_out(level, &message);
+        req.bail_out();
         return Err(Thrown::of(None));
     }
     Ok(True)
