@@ -238,11 +238,13 @@ fn evaluate(
     } else if p.deny == Some(true) {
         true
     } else if let Some(types) = &p.deny_types {
+        // What the write leaves, read whole, since a fragment of an edit
+        // cannot say whether it stands in a comment or a string.
         let macros = p.deny_macros.as_deref().unwrap_or_default();
         source
             && call
-                .written()
-                .is_some_and(|t| mentions_a_type(t, types) || invokes_a_macro(t, macros))
+                .rewrite(root, path)
+                .is_some_and(|(_, after)| uses_a_denied_item(&after, types, macros))
     } else if let Some(homes) = &p.allow {
         source
             && call.written().is_some_and(has_unsafe)
@@ -349,6 +351,16 @@ pub(super) fn adds(regex: &Regex, after: &str, before: &str) -> bool {
             None => true,
         },
     )
+}
+
+/// Whether a Rust text uses a `deny_types` type or invokes a `deny_macros`
+/// macro, as clippy's `disallowed-types` and `disallowed-macros`, which the
+/// rule renders to, count a use: in code, so the word in a comment, in
+/// rustdoc prose or inside a string literal is none (#2026), as an unsafe
+/// site is not ([`rust::without_comments_or_literals`]).
+fn uses_a_denied_item(text: &str, types: &[String], macros: &[String]) -> bool {
+    let code = rust::without_comments_or_literals(text);
+    mentions_a_type(&code, types) || invokes_a_macro(&code, macros)
 }
 
 /// A `deny_types` entry in the text: the full path, or its last segment as
@@ -471,5 +483,27 @@ mod tests {
             "let mutex_free = 1; // Mutexes are elsewhere",
             &types
         ));
+    }
+
+    /// A use is what clippy's `disallowed-types` and `disallowed-macros`
+    /// count, a path in code: the word in a comment, in rustdoc prose or
+    /// inside a string literal is none (#2026).
+    #[test]
+    fn a_type_or_macro_named_in_prose_or_a_literal_is_no_use() {
+        let types = ["std::sync::Once".to_owned(), "std::cell::Cell".to_owned()];
+        let macros = ["std::thread_local".to_owned()];
+        let uses = |text: &str| uses_a_denied_item(text, &types, &macros);
+        assert!(!uses(
+            "/// Once per process, whoever asks.\npub fn init() {}"
+        ));
+        assert!(!uses("//! Once a byte reached the host, a Cell held it."));
+        assert!(!uses(
+            "/* thread_local! { } */ let s = \"std::sync::Once\";"
+        ));
+        assert!(!uses("let s = r#\"Once::new() and thread_local!(x)\"#;"));
+        assert!(uses("use std::sync::Once;"));
+        assert!(uses("/// Once.\nstatic X: Once = Once::new();"));
+        assert!(uses("let c = std::cell::Cell::new(1); // Once"));
+        assert!(uses("thread_local! { static K: u8 = 0; }"));
     }
 }
