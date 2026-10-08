@@ -81,7 +81,7 @@ use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{self, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked};
 use crate::reading::{Reading, Status, Store, listed, plural};
-use crate::sources::{self, Standing};
+use crate::sources::{self, Outside, Standing};
 use crate::tally;
 use crate::witness::Binary;
 use crate::{git, key};
@@ -677,7 +677,12 @@ impl Reads {
 /// through its key is rendered unless both its columns' readings pass
 /// over what is staged ([`Standing`]), which is how a run already taken
 /// over the commit's content, or a change to an extension's closure that
-/// was rendered before it was staged, is relied on and named.
+/// was rendered before it was staged, is relied on and named. A staged
+/// file outside every crate reaches renderings as [`sources::Outside`]
+/// sorts it (#1738): one every reading reads, such as `oracle.toml` or
+/// `docs/divergence.toml`, renders every extension again, and a staged
+/// lock reaches, as a staged change to its crate would, each extension
+/// whose closure it pins otherwise than `HEAD` ([`sources::lock_moved`]).
 pub(crate) fn staged(
     root: &Path,
     manifest: &Manifest,
@@ -702,6 +707,25 @@ pub(crate) fn staged(
         }
     }
     let standing = Standing::for_commit_over(root, manifest, store, INSTRUMENT, &scopes)?;
+    let locked = match standing.outside() {
+        Outside::Every(file) => {
+            println!(
+                "{INSTRUMENT}: {file} is staged and every rendering reads it, so every extension renders again"
+            );
+            return Ok(carried.to_vec());
+        }
+        Outside::Lock => {
+            let paths: Vec<(&str, PathBuf)> = pairs
+                .iter()
+                .map(|(name, host)| (name.as_str(), stamped_path(manifest, name, *host)))
+                .collect();
+            let taken = paths
+                .iter()
+                .map(|(name, path)| (*name, path.as_path(), "HEAD"));
+            sources::lock_moved(root, manifest, taken)?
+        }
+        Outside::Nothing => Vec::new(),
+    };
     let reached = |dirs: &[PathBuf]| {
         files
             .iter()
@@ -720,7 +744,7 @@ pub(crate) fn staged(
             unkeyed.push(name);
             true
         } else {
-            reached(&reads.keyed).is_some() && !stands
+            (reached(&reads.keyed).is_some() || locked.contains(name)) && !stands
         };
         if again && !render.contains(name) {
             render.push(name.clone());
