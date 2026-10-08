@@ -1,0 +1,73 @@
+# The pinned php-src the subsets need (#37, #1713), named to the harness, for
+# every job that reads it (harness.yml's two jobs, the dashboard's oracle job).
+# What is checked out is `xtask status --section corpus`'s: the pin's tag, the
+# sparse patterns of the corpus's roots, the table the nightly lane walks and
+# every `[[crate]]` row's subset stands under, and the key, the pinned commit
+# and a digest of the patterns. So a person's bump moves the checkout and the
+# key with it, a subset the manifest adds is checked out without an edit here,
+# and a changed set of patterns never reuses another set's tree. The checkout
+# is sparse and shallow: one commit at the tag, the patterns handed to git on
+# stdin. Measured on the dev machine (2026-09-10, M-series, residential link)
+# before #1713: the shallow clone 9.6 s and the sparse checkout 2.4 s; with
+# `--filter=blob:none` 1.0 s and 13.3 s, so the plain shallow clone is taken.
+#
+# The runner keeps the tree in its tool cache, one directory per key, made
+# once and reset to its commit before each job (a lane that wrote into it
+# leaves nothing behind); a tree of another key is removed when a new one is
+# made. Two tests hold it to the pin: `Source::tree()` refuses a checkout at
+# another commit, and the tree must hold every `.phpt` `[source].phpt_files`
+# counts.
+#
+# The tree's variable and the promise's, `oracle::TREE_VARIABLE` and
+# `oracle::PROMISE_VARIABLE`, are read off `xtask status --section oracle`
+# and set through `$GITHUB_ENV`, so no workflow spells either name. The
+# promise (#38) lists what of the pin this runner has: a test that would skip
+# for an absent fact the runner promised fails instead, naming where it
+# looked, so a provisioning step that breaks turns the job red rather than
+# measuring less in silence.
+name: corpus
+description: Check out the pinned php-src the harness names, and set its variable and the promise
+inputs:
+  xtask:
+    description: The command the job runs the harness by
+    default: cargo xtask
+  promise:
+    description: What of the pin this runner has, the words the promise variable takes (`tree`, `oracle`)
+    required: true
+outputs:
+  tree:
+    description: The pinned php-src's directory on this runner
+    value: ${{ steps.tree.outputs.tree }}
+  corpus:
+    description: The file `xtask status --section corpus --format json` was written to
+    value: ${{ steps.tree.outputs.corpus }}
+runs:
+  using: composite
+  steps:
+    - name: the pinned php-src, sparse and shallow at the tag, and its variable
+      id: tree
+      shell: bash
+      env:
+        XTASK: ${{ inputs.xtask }}
+        PROMISE: ${{ inputs.promise }}
+      run: |
+        corpus="$RUNNER_TEMP/corpus.json" oracle="$RUNNER_TEMP/oracle.json"
+        $XTASK status --section corpus --format json > "$corpus"
+        $XTASK status --section oracle --format json > "$oracle"
+        key=$(jq -er .key "$corpus") tag=$(jq -er .tag "$corpus")
+        home="$RUNNER_TOOL_CACHE/php-src" tree="$RUNNER_TOOL_CACHE/php-src/$key"
+        if [ -d "$tree" ]; then
+          git -C "$tree" reset --hard --quiet
+          git -C "$tree" clean -ffdxq
+        else
+          rm -rf "$tree.partial"
+          git clone --quiet --no-checkout --depth 1 --branch "$tag" https://github.com/php/php-src.git "$tree.partial"
+          jq -r '.patterns[]' "$corpus" | git -C "$tree.partial" sparse-checkout set --no-cone --stdin
+          git -C "$tree.partial" checkout --quiet
+          mv "$tree.partial" "$tree"
+          find "$home" -mindepth 1 -maxdepth 1 ! -name "$key" -exec rm -rf {} +
+        fi
+        echo "$(jq -er .tree.variable "$oracle")=$tree" >> "$GITHUB_ENV"
+        echo "$(jq -er .promise.variable "$oracle")=$PROMISE" >> "$GITHUB_ENV"
+        echo "tree=$tree" >> "$GITHUB_OUTPUT"
+        echo "corpus=$corpus" >> "$GITHUB_OUTPUT"

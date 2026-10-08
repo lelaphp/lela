@@ -1,0 +1,24 @@
+# The pinned php on the oracle runner (#2253): the one install the per-commit
+# oracle job (harness.yml, #678, #2200) and the dashboard's oracle job both
+# run, scripts/ci/pinned-php.sh over the pin as xtask renders it. The version,
+# keg path and md5 are oracle.toml's, read by xtask alone (`status --section
+# oracle`'s `binary`), so this file spells none of them. The runner keeps the
+# keg between jobs: a keg already at the pin's md5 is checked and left, and a
+# pour whose md5 is not the pin's stops the job before any lane.
+name: pinned php
+description: Pour the keg oracle.toml pins and hold it to the pin's md5
+inputs:
+  xtask:
+    description: The command the job runs the harness by
+    default: cargo xtask
+runs:
+  using: composite
+  steps:
+    - name: the pinned php, by md5
+      shell: bash
+      env:
+        XTASK: ${{ inputs.xtask }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $XTASK status --section oracle --format json > "$RUNNER_TEMP/oracle.json"
+        "$GITHUB_WORKSPACE/scripts/ci/pinned-php.sh" "$RUNNER_TEMP/oracle.json"

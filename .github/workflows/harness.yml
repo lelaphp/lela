@@ -8,44 +8,60 @@
 # the session that worked it, through `xtask ticket close`, the instrument
 # that reads its acceptance criteria; CI closes none (#290; CONTEXT.md,
 # Ticket).
+#
+# Every job runs on one of two self-hosted runners, as Mitchell ruled on
+# 2026-10-07 (#2218, #2253), set up by scripts/ci/runner.sh and registered
+# through scripts/ci/wizard.sh: `dax-build`, a Hetzner Linux server, for the
+# build, clippy, the tests and the rest of the instruments; and
+# `dax-oracle`, a Mac mini, which has the pinned php, a macOS keg
+# (oracle.toml), for the witnesses, the crosscheck and the tests that spawn
+# the oracle (#678, #2200). The two stores meet in `done`. A runner keeps its
+# work directory between jobs, so each checkout is `clean: false` and the
+# workspace action cleans all but target/, the warm build.
 name: harness
 on:
   push:
     branches: [main] # a ticket's branch reaches CI as a pull request (ADR-0009)
   pull_request:
 # A push to a pull request supersedes the run of the push before it, which
-# is cancelled: a run nobody reads is minutes billed. `main`'s runs queue
-# and finish.
+# is cancelled: a run nobody reads holds a runner for nothing. `main`'s runs
+# queue and finish.
 concurrency:
   group: harness-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   regions:
     name: computed check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo install computed --locked
-      - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md
-  per-commit:
-    name: the instruments, then done
-    runs-on: ubuntu-26.04 # libtidy 5.8, the oracle's (#1724)
+    runs-on: [self-hosted, linux, dax-build]
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # done measures since the merge base with main
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      - run: cargo install computed --locked
+      - run: computed check AGENTS.md ext/AGENTS.md data/INDEX.md docs/divergence.md harness-design.md
+  per-commit:
+    name: the instruments
+    # Ubuntu 26.04 for libtidy 5.8, the oracle's (#1724); runner.sh refuses
+    # another release.
+    runs-on: [self-hosted, linux, dax-build]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
       # The platform libraries the workspace links, from the one list the
       # action reads (design §7.2; #1300).
       - uses: ./.github/actions/platform-libraries
       # The named locales a request's setlocale() asks the C library for
-      # (design §5.14, revision 40; #1150), in the tests and the witnesses
-      # alike: de_DE for ext/standard's two-request test, and the names
-      # the witnesses under ext/ pin. ubuntu-26.04 generates none of
-      # them. `locale-gen` builds the ones glibc lists as supported, the
+      # (design §5.14, revision 40; #1150): de_DE for ext/standard's
+      # two-request test, and the names the witnesses under ext/ pin, so a
+      # test that reads one finds it here as the witnesses do on the oracle
+      # runner, whose macOS carries every one. Ubuntu 26.04 generates none
+      # of them; runner.sh lets the runner's user run these two commands as
+      # root. `locale-gen` builds the ones glibc lists as supported, the
       # ISO-8859 ones under their bare names, from the `locales` package
       # the image carries, with no download (3 s for the seven and
       # ja_JP.SJIS in an ubuntu:26.04 container, 2026-10-04);
@@ -56,17 +72,13 @@ jobs:
       # `update-locale` is left out: it sets the system's default LANG,
       # which nothing here reads. A name that fails to build fails the
       # step, so no test here reads an absent locale as its skip.
-      - name: the named locales the tests and the witnesses ask for
+      - name: the named locales the tests ask for
         run: |
           sudo locale-gen de_DE de_DE.UTF-8 fr_FR fr_FR.UTF-8 tr_TR is_IS is_IS.UTF-8
           sudo localedef -c --no-warnings=ascii -i ja_JP -f SHIFT_JIS ja_JP.SJIS
-      # The MySQL server the witnesses marked `mysql` and the mysqli and
-      # pdo_mysql suites run against, started here as on the pin machine,
-      # as Mitchell ruled on #1345: `--wait` returns once its healthcheck
-      # passes, and a witness or a subset that needs it is refused, not
-      # skipped, where it does not answer (#1366).
-      - name: the MySQL server of ci/mysql/compose.yaml
-        run: docker compose -f ci/mysql/compose.yaml up -d --wait
+      # The MySQL server the mysqli and pdo_mysql tests run against, as
+      # Mitchell ruled on #1345, fresh for this job.
+      - uses: ./.github/actions/mysql
       # Each instrument exits 1 on a failing reading, which fails the job;
       # the readings it wrote are uploaded either way.
       - run: cargo fmt --check
@@ -90,70 +102,15 @@ jobs:
       # cache, is read off the first run.
       - run: npx -y -p typescript@5.9.3 tsc -p harness-plugins
       # The pinned php-src (#37): the tree the tests that resolve a subset
-      # of the real corpus read, found where the variable
-      # `oracle::TREE_VARIABLE` names first and at the pin's path second
-      # (#36). The name is stated in the harness alone: the step below
-      # reads it off `xtask status --section oracle`, whose JSON carries
-      # the two variables by name, and sets the tree under it through
-      # `$GITHUB_ENV`, so this file spells neither name. What is checked
-      # out is `xtask status --section corpus`'s (#1713): the pin's tag,
-      # the sparse patterns of the corpus's roots, the table the nightly
-      # lane walks and every `[[crate]]` row's subset stands under, and
-      # the cache key, the pinned commit and a digest of the patterns. So
-      # a person's bump moves the checkout and the key with it, a subset
-      # the manifest adds is checked out without an edit here, and a
-      # changed set of patterns never restores another set's tree. The
-      # checkout is sparse and shallow: one commit at the tag, the
-      # patterns handed to git on stdin. What holds the tree to the pin
-      # is two tests: `Source::tree()` refuses a checkout at another
-      # commit naming both revisions, and the tree must hold every `.phpt`
-      # `[source].phpt_files` counts, so a checkout narrower than the
-      # corpus names both numbers; the one step running both fails the
-      # job there, before the suite, and the suite reads the same tree.
-      # The promise (#38): `oracle::PROMISE_VARIABLE`, read off the same
-      # section and set beside the tree's variable, lists what of the pin
-      # this runner has, so a test
-      # that would skip for an absent tree fails instead naming both
-      # places it looked; a provisioning step that breaks turns the job
-      # red rather than measuring less in silence. The tree alone is
-      # promised: the pinned php is a macOS keg (oracle.toml) that this
-      # ubuntu runner cannot have, so the tests that spawn it skip here
-      # until the pin names a binary the runner can have, which is a
-      # person's.
-      # The wall-clock, measured on the dev machine (2026-09-10, M-series,
-      # residential link), for the narrower set before #1713: the shallow
-      # clone 9.6 s and the sparse checkout 2.4 s, 132 MB in the tree and
-      # 31 MB under `.git`, 21414 `.phpt` files; with `--filter=blob:none`
-      # the clone is 1.0 s and the checkout 13.3 s, so the plain shallow
-      # clone is the one taken. The roots `xtask status --section corpus`
-      # names hold every `.phpt` the pin counts; the runner's figures for
-      # them, cold and from cache, are read off the first two runs.
-      - name: the corpus the subsets need, named by the harness
-        id: pin
-        run: |
-          cargo xtask status --section corpus --format json > "$RUNNER_TEMP/corpus.json"
-          jq -r '"tag=\(.tag)", "key=\(.key)"' "$RUNNER_TEMP/corpus.json" >> "$GITHUB_OUTPUT"
-      - name: the pinned php-src, from the cache
-        id: corpus
-        uses: actions/cache@v4
+      # of the real corpus read, named to the harness by its variable, with
+      # the tree promised and not the binary: the pinned php is a macOS keg
+      # this runner cannot have, so the tests that spawn it skip here and
+      # run in the oracle job below. The one step running the tree's two
+      # tests fails the job there, before the suite, and the suite reads
+      # the same tree.
+      - uses: ./.github/actions/corpus
         with:
-          path: ${{ runner.temp }}/php-src
-          key: ${{ runner.os }}-${{ steps.pin.outputs.key }}
-      - name: the pinned php-src, checked out sparse and shallow at the tag
-        if: steps.corpus.outputs.cache-hit != 'true'
-        env:
-          TAG: ${{ steps.pin.outputs.tag }}
-        run: |
-          git clone --quiet --no-checkout --depth 1 --branch "$TAG" https://github.com/php/php-src.git "$RUNNER_TEMP/php-src"
-          jq -r '.patterns[]' "$RUNNER_TEMP/corpus.json" | git -C "$RUNNER_TEMP/php-src" sparse-checkout set --no-cone --stdin
-          git -C "$RUNNER_TEMP/php-src" checkout --quiet
-      - name: the tree's variable and the promise's, named by the harness and set for the steps below
-        run: |
-          cargo xtask status --section oracle --format json > "$RUNNER_TEMP/oracle.json"
-          tree=$(jq -r .tree.variable "$RUNNER_TEMP/oracle.json")
-          promise=$(jq -r .promise.variable "$RUNNER_TEMP/oracle.json")
-          echo "$tree=$RUNNER_TEMP/php-src" >> "$GITHUB_ENV"
-          echo "$promise=tree" >> "$GITHUB_ENV"
+          promise: tree
       - name: the tree is at the pin's commit and holds every test the pin counts
         run: cargo test -p xtask --test oracle a_tree_the_variable_names_
       # The crate's own tests as the reading `done`'s condition 1 asks
@@ -174,24 +131,80 @@ jobs:
       # `--tree`. The unmatched rows are the failure; the unresolved rows
       # are the number the weekly bars read.
       - run: cargo xtask port-map
+      - name: this job's readings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-build
+          path: target/harness
+          if-no-files-found: warn
+          retention-days: 1 # read by `done`'s job, minutes later
+
+  oracle:
+    name: the witnesses, the crosscheck and the oracle's tests
+    runs-on: [self-hosted, macos, dax-oracle]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      # The pin's one install, shared with the dashboard's oracle job (#2200).
+      - uses: ./.github/actions/pinned-php
+      - uses: ./.github/actions/mysql
+      # The tree and the binary both promised: a test of the harness that
+      # spawns the oracle and finds it absent fails here rather than skip.
+      - uses: ./.github/actions/corpus
+        with:
+          promise: tree oracle
       # The witness reading `done`'s condition 1 asks every touched crate
-      # for (§4.5, §7: witnesses run per commit over all crates). A kernel
-      # or native without a witness fails here and names the coverage
-      # rule's text. The pinned php is not on this runner, so a crate with
-      # nothing to run reads `skip`, not `pass` (#60), and `done` lists it
-      # unmet for a touched crate until the oracle is at the pin's path
-      # here; the pin is a person's. `phpt` stays out until a crate's
-      # subset has a home (#18).
+      # for (§4.5, §7: witnesses run per commit over all crates), under the
+      # pinned php. A kernel or native without a witness fails here and
+      # names the coverage rule's text. The served binaries build in
+      # release-da, the correctness lanes' profile (#2056, #2217). `phpt`
+      # stays out until a crate's subset has a home (#18).
       - run: cargo xtask witness
       # The rendering diff `done`'s condition 1 asks an extension the
       # binary carries for (§4.5, §7: per commit over every extension the
       # `php` binary carries, revision 63). A red row is an extension not
       # yet ported and `done` holds a touched one to it, so the step writes
-      # the readings and fails the job for nothing; without the pinned php
-      # here it reads `skip` as `witness` does, until the oracle is at the
-      # pin's path.
+      # the readings and fails the job for nothing.
       - run: cargo xtask crosscheck
         continue-on-error: true
+      # The harness's tests that spawn the oracle, which skip on the build
+      # runner. Plain `cargo test`, which writes no reading: the `test`
+      # reading is the build runner's, and the two stores keep one
+      # instrument each so they meet in `done` whole.
+      - run: cargo test -p xtask
+      - name: this job's readings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-oracle
+          path: target/harness
+          if-no-files-found: warn
+          retention-days: 1 # read by `done`'s job, minutes later
+
+  done:
+    name: done
+    needs: [per-commit, oracle]
+    # Run whatever the two found, so its list names every unmet condition.
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, linux, dax-build]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # done measures since the merge base with main
+      - uses: ./.github/actions/workspace
+      # The two jobs' stores, one store again: each instrument keeps its
+      # own files, and no instrument ran on both runners.
+      - name: the two jobs' readings, one store
+        uses: actions/download-artifact@v4
+        with:
+          pattern: store-*
+          merge-multiple: true
+          path: target/harness
       # A ticket's branch is judged on its pull request, whose checkout is
       # a detached merge commit, so the base is the ref the pull request
       # targets (§4.5, ADR-0009). A push to `main` passes none, and the
@@ -218,3 +231,4 @@ jobs:
           name: harness
           path: target/harness
           if-no-files-found: warn
+

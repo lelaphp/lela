@@ -1291,7 +1291,10 @@ fn ci_typechecks_the_module_against_the_committed_declarations_before_the_tests(
 
 /// CI per commit (harness-design.md §7): the same instruments over the
 /// workspace, then `done`; the reading store is the only thing the run
-/// uploads; what it renders is the permits section.
+/// uploads; what it renders is the permits section. The instruments run
+/// on two runners, the build runner's and the oracle runner's (#2253),
+/// and each job uploads its own store for `done`'s job, which joins them
+/// and uploads the one store the run keeps, `harness`.
 #[test]
 fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     let text = read(".github/workflows/harness.yml");
@@ -1314,11 +1317,16 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
         assert!(at > last, "{step} is out of order: {text}");
         last = at;
     }
-    // One job uploads, per commit, and it uploads its store and nothing
-    // else; a ticket is closed by the session that worked it, so no job
-    // closes one on a push (#290).
+    // Every upload is a store and nothing else, and one of them is the
+    // run's, `harness`; a ticket is closed by the session that worked it,
+    // so no job closes one on a push (#290).
     let uploads = text.match_indices("upload-artifact").collect::<Vec<_>>();
-    assert_eq!(uploads.len(), 1, "the one store: {text}");
+    assert_eq!(
+        uploads.len(),
+        3,
+        "the two jobs' stores and the run's: {text}"
+    );
+    let mut kept = 0;
     for (upload, _) in uploads {
         let step = &text[upload..];
         let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
@@ -1326,7 +1334,9 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
             step.contains("path: target/harness"),
             "the upload is the store: {step}"
         );
+        kept += usize::from(step.contains("name: harness\n"));
     }
+    assert_eq!(kept, 1, "one store is the run's: {text}");
     assert!(
         text.contains("fetch-depth: 0"),
         "done needs the merge base with main: {text}"
@@ -1367,7 +1377,8 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
         "the base is passed as the ref, which merge_base resolves on origin: {step}"
     );
     assert!(
-        step.contains("cargo xtask done\n"),
+        step.lines()
+            .any(|l| l.contains("cargo xtask done") && !l.contains("--base")),
         "a push passes nothing and gets the merge base with main: {step}"
     );
 }

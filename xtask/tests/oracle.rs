@@ -585,10 +585,37 @@ fn a_tree_the_variable_names_holds_every_test_the_pin_counts() {
     );
 }
 
-/// No workflow holds a directory of the corpus (#1713): a checkout of
-/// php-src takes its sparse patterns off `status --section corpus`, on
-/// stdin, so no step lists one and none can fall behind a subset the
-/// manifest adds. A token anchored as a pattern under a root's first
+/// Every file CI runs, the workflows and the local actions they use
+/// (`.github/actions/<name>/action.yml`), by name and text (#2253).
+fn ci_files() -> Vec<(String, String)> {
+    let github = workspace().join(".github");
+    let mut paths: Vec<_> = std::fs::read_dir(github.join("workflows"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    paths.extend(
+        std::fs::read_dir(github.join("actions"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path().join("action.yml"))
+            .filter(|p| p.is_file()),
+    );
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|p| {
+            let name = p.strip_prefix(&github).unwrap().display().to_string();
+            (name, std::fs::read_to_string(&p).unwrap())
+        })
+        .collect()
+}
+
+/// No workflow or action holds a directory of the corpus (#1713): a
+/// checkout of php-src takes its sparse patterns off `status --section
+/// corpus`, on stdin, so no step lists one and none can fall behind a
+/// subset the manifest adds; and one action checks it out, for every job
+/// that reads it (#2253). A token anchored as a pattern under a root's first
 /// directory is one, `/sapi/cli/tests/` as much as `/ext/*/`; a lane's
 /// `--subset Zend/tests` is the lane's composition (harness §7) and no
 /// pattern. Comments are stripped, so prose that cites a pattern does not
@@ -617,13 +644,7 @@ fn no_workflow_holds_a_directory_of_the_corpus() {
         })
         .collect();
     let mut checked_out = 0;
-    for entry in std::fs::read_dir(workspace().join(".github/workflows"))
-        .unwrap()
-        .flatten()
-    {
-        let path = entry.path();
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let text = std::fs::read_to_string(&path).unwrap();
+    for (name, text) in ci_files() {
         let mut reads_section = false;
         let mut checks_out = false;
         for (n, line) in text.lines().enumerate() {
@@ -655,17 +676,18 @@ fn no_workflow_holds_a_directory_of_the_corpus() {
         );
     }
     assert_eq!(
-        checked_out, 2,
-        "harness.yml and dashboard.yml each check the corpus out once"
+        checked_out, 1,
+        "the corpus action checks the corpus out, for every job that reads it"
     );
 }
 
 /// The variable's name is stated in one place that both the code and CI
 /// read (#36): `oracle::TREE_VARIABLE`, which `status --section oracle`
-/// renders and the workflow reads off it, setting the tree under that
-/// name through `$GITHUB_ENV`. So the workflow spells neither name, in
-/// an `env:` block or anywhere outside a comment, and it does run the
-/// section and read both variables off its JSON; the promise travels the
+/// renders and CI reads off it, setting the tree under that name through
+/// `$GITHUB_ENV`. So no workflow or action spells either name, in an
+/// `env:` block or anywhere outside a comment, and CI does run the
+/// section and read both variables off its JSON, once, in the corpus
+/// action every job that reads the tree uses (#2253); the promise travels the
 /// same way, since a tree named and not promised skips in silence where
 /// it is absent (#38). The comments are stripped first, so a name cited
 /// in prose does not stand in for a setting; the negative control is a
@@ -673,7 +695,7 @@ fn no_workflow_holds_a_directory_of_the_corpus() {
 /// harness would never read.
 #[test]
 fn ci_reads_the_variables_off_the_oracle_section_and_spells_neither() {
-    let text = std::fs::read_to_string(workspace().join(".github/workflows/harness.yml")).unwrap();
+    let text: String = ci_files().into_iter().map(|(_, text)| text).collect();
     let mut env = false;
     let mut section = false;
     let mut reads = Vec::new();
