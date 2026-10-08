@@ -247,6 +247,36 @@ fn a_criterion_whose_object_is_a_file_xtask_steer_writes_is_said_and_not_refused
     );
 }
 
+/// A criterion whose denied subject stays as it is asks for no write
+/// (#2391): #630's third box asks that the live numbers still render, and
+/// the read passes it, while #111's "`oracle.toml` carries" beside it is
+/// still the write, said as the steer that makes it.
+#[test]
+fn a_criterion_saying_a_denied_path_still_behaves_as_before_asks_for_no_write() {
+    let body = "## Acceptance criteria\n\n- [x] `.claude/harness.local.md` still renders this machine's live numbers, and `cargo xtask status --section rules` still prints them\n- [x] `seams.toml` is unchanged\n- [x] `oracle.toml` carries a `[regime.dump]` with the ini above\n";
+    let recorded = Recorded::lay("kept");
+    recorded.labelled(630, "OPEN", body, &["ready-for-agent"]);
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &recorded.gh(),
+        Act::Read,
+        Ticket::new(630),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(reading.numbers["denied"], 0.into(), "{reading:#?}");
+    assert_eq!(reading.numbers["steerable"], 1.into(), "{reading:#?}");
+    assert!(
+        reading.message.contains("asks for oracle.toml")
+            && !reading.message.contains("harness.local.md")
+            && !reading.message.contains("asks for seams.toml"),
+        "{}",
+        reading.message
+    );
+}
+
 const UNTICKED: &str =
     "## What to build\n\nthings\n\n## Acceptance criteria\n\n- [x] one\n- [ ] two\n- [ ] three\n";
 const TICKED: &str = "## Acceptance criteria\n\n- [x] one\n- [X] two\n";

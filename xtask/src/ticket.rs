@@ -67,7 +67,11 @@
 //! quoting with a comment, the ticket or the commit message as its place,
 //! #1516's "the `.claude/settings.json` `PostToolUse` entry is drafted in a
 //! comment on the person's ticket", asks for a comment an agent posts. A
-//! verb of writing in the same clause still asks for the write.
+//! verb of writing in the same clause still asks for the write. Nor does
+//! a clause whose subject stays as it is (#2391): #630's
+//! "`.claude/harness.local.md` still renders this machine's live numbers"
+//! asks that nothing regress, where "`oracle.toml` carries" asks for new
+//! content.
 //!
 //! Ticked boxes are not enough (#29): work that found a thing it did not
 //! do has three homes, a ticket of its own, a divergence row, or a rule
@@ -702,10 +706,11 @@ pub fn denied(manifest: &Manifest, labels: &[Label], criteria: &Criteria) -> Vec
         if !writing && elsewhere(clause) {
             continue;
         }
-        // The path is the thing asked for while the clause is about it.
-        let asked = paths(clause)
-            .into_iter()
-            .filter(|(at, _)| writing || subject(clause, *at));
+        // The path is the thing asked for while the clause is about it,
+        // and not where the clause says it stays as it is (#2391).
+        let asked = paths(clause).into_iter().filter(|(at, named)| {
+            writing || (subject(clause, *at) && !kept(&clause[at + named.len()..]))
+        });
         for (_, named) in asked {
             let path = Path::new(named);
             if let Some(rule) = rules
@@ -802,6 +807,31 @@ fn elsewhere(clause: &str) -> bool {
                 .any(|next| PLACES.contains(&next.as_str()))
     });
     landing && placed
+}
+
+/// The words that say a file stays as it is: a criterion asking that
+/// nothing regress, which asks for no write.
+const STAYING: [&str; 9] = [
+    "still",
+    "keeps",
+    "keep",
+    "stays",
+    "stay",
+    "remains",
+    "remain",
+    "unchanged",
+    "untouched",
+];
+
+/// Whether what follows a clause's subject says the subject stays as it
+/// is (#2391): one of [`STAYING`] among its first two words, as #630's
+/// "`.claude/harness.local.md` still renders this machine's live numbers"
+/// or "`seams.toml` is unchanged" says. A word of staying further on is
+/// about something else the clause names.
+fn kept(after: &str) -> bool {
+    words(after)
+        .take(2)
+        .any(|word| STAYING.contains(&word.as_str()))
 }
 
 /// Whether a path is a path character: what a token naming one is made of.
