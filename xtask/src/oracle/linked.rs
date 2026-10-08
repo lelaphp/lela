@@ -37,7 +37,7 @@
 //! no such fence asserts the engine wrote nothing there (#248).
 //!
 //! **A process of its own.** The engine is `sapi/cli`'s `php-linked`,
-//! built with the bundle's `linked` set in this harness's profile at the
+//! built with the bundle's `linked` set in the lanes' profile at the
 //! first snippet that asks for it, from the workspace this harness was
 //! built in, and the harness links no engine of its own (harness §8,
 //! revision 84; #2166): an edit under `crates/` or `ext/` rebuilds that
@@ -235,7 +235,7 @@ impl Drop for Server {
 }
 
 /// The binary, built at the first snippet of this process from the
-/// workspace this harness was built in, in this harness's profile.
+/// workspace this harness was built in, in the lanes' profile.
 fn binary() -> Result<PathBuf> {
     static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     BUILT

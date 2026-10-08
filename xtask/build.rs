@@ -2,10 +2,8 @@
 //! the digest of `seams.toml`, the rules, and of the `.rs` files under
 //! `xtask/src`, the code that reads them, as they stood when this binary was
 //! built, handed to the crate as `XTASK_MANIFEST_DIGEST` and
-//! `XTASK_SOURCES_DIGEST`; the cfg set of the target it builds for, in
-//! `target.cfg` under `OUT_DIR`, which witness coverage reads (#1068); and
-//! the directory of the profile it is built in, as `XTASK_PROFILE_DIR`,
-//! which the witness lane builds a `process` fence's host in (#1994).
+//! `XTASK_SOURCES_DIGEST`; and the cfg set of the target it builds for,
+//! in `target.cfg` under `OUT_DIR`, which witness coverage reads (#1068).
 //! `permit` compares
 //! them with the tree and refuses to judge when either differs, so a build
 //! older than what it judges by is the loud kind of stale rather than the
@@ -54,26 +52,6 @@ fn main() {
     println!("cargo::rustc-env=XTASK_MANIFEST_DIGEST={manifest}");
     println!("cargo::rustc-env=XTASK_SOURCES_DIGEST={code}");
     print_target_cfg();
-    print_profile_dir();
-}
-
-/// The directory of the profile this build is in, `debug`, `release` or a
-/// named profile's own, read off `OUT_DIR`, which cargo lays as
-/// `<target>/[<triple>/]<profile>/build/<package>-<hash>/out`: cargo's
-/// `PROFILE` variable says only `debug` or `release`, whatever profile the
-/// build inherits from, so a named profile's name is only there. A path
-/// that is not laid out so reads as empty, which `oracle::profile` reads
-/// as the default profile.
-fn print_profile_dir() {
-    let out = std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR");
-    let dir = Path::new(&out)
-        .ancestors()
-        .nth(3)
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_owned();
-    println!("cargo::rustc-env=XTASK_PROFILE_DIR={dir}");
 }
 
 /// The cfg set of the target this build is for, as rustc prints it under
