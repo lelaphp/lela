@@ -2107,6 +2107,16 @@ pub type CurrentPlace = fn(&mut Request, PhpObject) -> Result<Option<Owner<PhpRe
 /// them calls is called from the loop's frame. The state names no value
 /// of the heap; what it walks is the object's.
 pub trait ClassIterator: Send {
+    /// The rest of the class's `get_iterator` once `zend_iterator_init`
+    /// has put the iterator in the object store, so what it makes takes a
+    /// number after the iterator's: `pdo_stmt_iter_get` fetches its first
+    /// row here. A throw is a throw from `get_iterator`, the iterator
+    /// released through [`ClassIterator::release`] as
+    /// `zend_iterator_dtor` releases it. Nothing by default.
+    fn made(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        let _ = (req, object);
+        Ok(())
+    }
     /// `funcs->rewind`.
     fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown>;
     /// `funcs->valid`, `SUCCESS` as `true`.

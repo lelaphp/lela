@@ -31,6 +31,7 @@ abi::Class::new_payload
 abi::ClassIterator
 abi::ClassIterator::current
 abi::ClassIterator::key
+abi::ClassIterator::made
 abi::ClassIterator::move_forward
 abi::ClassIterator::release
 abi::ClassIterator::rewind

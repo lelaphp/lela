@@ -322,7 +322,6 @@ impl ObjectHandlers for Handlers {
         }
         handle(req, object)?;
         Ok(Some(Box::new(Rows {
-            started: false,
             key: None,
             ahead: None,
         })))
@@ -330,10 +329,10 @@ impl ObjectHandlers for Handlers {
 }
 
 /// `struct php_pdo_iterator`: the key and the row fetched ahead, `None`
-/// once a fetch found none; the first is fetched at the first step, as
+/// once a fetch found none; the first is fetched once the iterator
+/// stands in the object store ([`ClassIterator::made`]), as
 /// `pdo_stmt_iter_get` fetches it after `zend_iterator_init`.
 struct Rows {
-    started: bool,
     key: Option<i64>,
     ahead: Option<Owner<Value>>,
 }
@@ -341,7 +340,6 @@ struct Rows {
 impl Rows {
     /// `pdo_stmt_iter_move_forwards`.
     fn forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-        self.started = true;
         if let Some(old) = self.ahead.take() {
             old.give_up(req);
         }
@@ -353,34 +351,50 @@ impl Rows {
         self.key = Some(self.key.map_or(0, |key| key + 1));
         Ok(())
     }
-
-    fn start(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-        if self.started {
-            return Ok(());
-        }
-        self.forward(req, object)
-    }
 }
 
 impl ClassIterator for Rows {
-    /// No `rewind` in `pdo_stmt_iter_funcs`: the first step alone fetches.
-    fn rewind(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-        self.start(req, object)
+    /// The rest of `pdo_stmt_iter_get`: the first row fetched ahead, once
+    /// the iterator stands in the object store, so a row's object takes a
+    /// number after the iterator's and before an `InternalIterator`'s, and
+    /// an `IteratorIterator` fetches it as it is made.
+    ///
+    /// ```php
+    /// class C { public $n; function __construct() { echo "ctor\n"; } }
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->query("SELECT 1 AS n", PDO::FETCH_CLASS, 'C');
+    /// $it = new IteratorIterator($s);
+    /// echo "made\n";
+    /// foreach ($it as $r) {}
+    /// $s = $db->query("SELECT 1 AS n", PDO::FETCH_OBJ);
+    /// $it = $s->getIterator();
+    /// foreach ($it as $r) var_dump(spl_object_id($r), spl_object_id($it));
+    /// ```
+    /// ```expect
+    /// ctor
+    /// made
+    /// int(10)
+    /// int(11)
+    /// ```
+    fn made(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+        self.forward(req, object)
     }
 
-    fn valid(&mut self, req: &mut Request, object: PhpObject) -> Result<bool, Thrown> {
-        self.start(req, object)?;
+    /// No `rewind` in `pdo_stmt_iter_funcs`.
+    fn rewind(&mut self, _: &mut Request, _: PhpObject) -> Result<(), Thrown> {
+        Ok(())
+    }
+
+    fn valid(&mut self, _: &mut Request, _: PhpObject) -> Result<bool, Thrown> {
         Ok(self.ahead.is_some())
     }
 
-    fn current(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
-        self.start(req, object)?;
+    fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
         let row = self.ahead.as_deref().copied().unwrap_or_default();
         Ok(Owner::take(req, row))
     }
 
-    fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
-        self.start(req, object)?;
+    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
         let key = self.key.map_or_else(Value::null, Value::int);
         Ok(Owner::take(req, key))
     }
