@@ -543,6 +543,9 @@ request::FdStream
 request::FilterFactory
 request::FilterFlags
 request::FilterStatus
+request::Foreign
+request::Foreign::id
+request::ForeignId
 request::Forked
 request::FormatDate
 request::FrameId
@@ -560,6 +563,8 @@ request::HandlerCall
 request::HandlerOp
 request::HandlerStatus
 request::Handshake
+request::Held
+request::Held::get
 request::HostPath
 request::InfoRow
 request::IniEntry
@@ -635,6 +640,7 @@ request::Request::active_function_name
 request::Request::add_begin_handler
 request::Request::add_end_handler
 request::Request::addref
+request::Request::adopt
 request::Request::argument
 request::Request::argument_count
 request::Request::argv
@@ -676,6 +682,7 @@ request::Request::cwd
 request::Request::declared_classes
 request::Request::define_constant
 request::Request::defined_functions
+request::Request::disown
 request::Request::dl
 request::Request::encodings
 request::Request::engine
@@ -703,6 +710,7 @@ request::Request::extension_version
 request::Request::finish_response
 request::Request::flush
 request::Request::forbid_dynamic_call
+request::Request::foreign
 request::Request::fork
 request::Request::frame_args
 request::Request::frame_of
@@ -723,6 +731,7 @@ request::Request::header_remove_prefix
 request::Request::headers_list
 request::Request::headers_sent
 request::Request::heap_memory_limit
+request::Request::holding
 request::Request::host_fd
 request::Request::host_fds_are_process
 request::Request::host_status
