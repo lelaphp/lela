@@ -560,11 +560,47 @@ impl Request {
     /// int(0)
     /// int(1)
     /// ```
+    ///
+    /// A frame a `zend_bailout` leaves is not unwound in php: the
+    /// `zend_try` that catches it puts `vm_stack_top` back, and what the
+    /// frame held is held on until shutdown destructs the objects and the
+    /// heap's end discards the rest. So none of it is given up here then:
+    /// what the frame held stands for a shutdown function to see, and a
+    /// client's call caught over its callback's fatal destructs what the
+    /// callback held at the end (`ext/soap`'s witness).
+    ///
+    /// ```php
+    /// function f() { $o = new stdClass; $GLOBALS['w'] = WeakReference::create($o); trigger_error("x", E_USER_ERROR); }
+    /// register_shutdown_function(function () { var_dump($GLOBALS['w']->get() !== null); });
+    /// f();
+    /// ```
+    /// ```expect exit=255
+    /// Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead in %s on line 2
+    ///
+    /// Fatal error: x in %s on line 2
+    /// bool(true)
+    /// ```
     pub(crate) fn pop_frame(&mut self) {
         let frame = self.stack.current();
         if let Some(state) = self.vm.at_mut(frame) {
             state.leaving = true;
         }
+        if !self.bailout {
+            self.release_frame(frame);
+        }
+        // `destroy_op_array`, which frees the heap runtime cache, then
+        // `efree_size(EX(func))`.
+        if let Some(held) = self.vm.pop().and_then(|state| state.op_array) {
+            if let Some(cache) = held.run_time_cache {
+                cache.free(self);
+            }
+            held.copy.free(self);
+        }
+        self.stack.pop_frame(&mut self.heap);
+    }
+
+    /// What [`Request::pop_frame`] gives up of `frame`, in its order.
+    fn release_frame(&mut self, frame: FrameRef) {
         let slots = self.stack.frame(frame).map_or(0, php_heap::Frame::len);
         let cvs = self
             .vm
@@ -606,15 +642,6 @@ impl Request {
                 self.release(closure.as_value());
             }
         }
-        // `destroy_op_array`, which frees the heap runtime cache, then
-        // `efree_size(EX(func))`.
-        if let Some(held) = self.vm.pop().and_then(|state| state.op_array) {
-            if let Some(cache) = held.run_time_cache {
-                cache.free(self);
-            }
-            held.copy.free(self);
-        }
-        self.stack.pop_frame(&mut self.heap);
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
