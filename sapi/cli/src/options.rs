@@ -180,7 +180,8 @@ pub(crate) const CONFLICT: &str = "Either execute direct code, process stdin or 
 /// is unset, which it is with no readline extension linked.
 pub(crate) const NO_SHELL: &str = "Interactive shell (-a) requires the readline extension.\n";
 
-/// `OPTIONS`, `php_cli.c:124-165`, row for row.
+/// `OPTIONS`, `php_cli.c:124-165`, row for row; the `-` row that ends
+/// php's table is the slice's end.
 const OPTIONS: &[Opt] = &[
     opt(b'a', 0, "interactive"),
     opt(b'B', 1, "process-begin"),
@@ -219,7 +220,6 @@ const OPTIONS: &[Opt] = &[
     opt(14, 1, "rextinfo"),
     opt(15, 2, "ini"),
     opt(16, 1, "repeat"),
-    opt(b'-', 0, ""),
 ];
 
 /// What `do_cli`'s second pass settled: the mode, the program `-f` or
@@ -369,7 +369,7 @@ impl Options {
     /// module, and what ends it early; `-i`, `-v` and `-m` are the CLI's
     /// whatever came before them.
     fn main_pass(&mut self, argv: &[Vec<u8>]) -> Result<Host, Refused> {
-        let mut getopt = Getopt::new(OPTIONS);
+        let mut getopt = Getopt::new(OPTIONS, 0);
         let mut server = false;
         loop {
             let ask = match getopt.next(argv) {
@@ -382,7 +382,7 @@ impl Options {
                         ..usage(1)
                     });
                 }
-                Ok(Taken::Switch(code, value)) => match code {
+                Ok(Taken::Switch { code, value, .. }) => match code {
                     b'n' => {
                         self.startup.ini_search.ignore = true;
                         continue;
@@ -467,8 +467,11 @@ fn mode_pass(argv: &[Vec<u8>], shell: bool) -> Settled {
         usage: false,
         optind: 0,
     };
-    let mut getopt = Getopt::new(OPTIONS);
-    while let Ok(Taken::Switch(code, given)) = getopt.next(argv) {
+    let mut getopt = Getopt::new(OPTIONS, 0);
+    while let Ok(Taken::Switch {
+        code, value: given, ..
+    }) = getopt.next(argv)
+    {
         let value = given.clone().unwrap_or_default();
         let mode = settled.mode;
         let interactive = settled.interactive;
@@ -559,8 +562,8 @@ fn server_pass(argv: &[Vec<u8>]) -> Server {
         router: None,
         quiet: 0,
     };
-    let mut getopt = Getopt::new(OPTIONS);
-    while let Ok(Taken::Switch(code, value)) = getopt.next(argv) {
+    let mut getopt = Getopt::new(OPTIONS, 0);
+    while let Ok(Taken::Switch { code, value, .. }) = getopt.next(argv) {
         match code {
             b'S' => server.address = value.unwrap_or_default(),
             b't' => server.document_root = value.map(|value| PathBuf::from(os(&value))),

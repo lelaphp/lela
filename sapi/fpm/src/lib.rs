@@ -64,7 +64,8 @@ use crate::master::{Args, Became, EXIT_CONFIG, EXIT_OK, EXIT_USAGE, Fpm, Init};
 /// ([`define`]).
 type Define = (Vec<u8>, Vec<u8>);
 
-/// `OPTIONS`, `fpm_main.c:121-140`, row for row.
+/// `OPTIONS`, `fpm_main.c:121-140`, row for row; the `-` row that ends
+/// php's table is the slice's end.
 const OPTIONS: &[Opt] = &[
     opt(b'c', 1, "php-ini"),
     opt(b'd', 1, "define"),
@@ -83,7 +84,6 @@ const OPTIONS: &[Opt] = &[
     opt(b'D', 0, "daemonize"),
     opt(b'F', 0, "nodaemonize"),
     opt(b'O', 0, "force-stderr"),
-    opt(b'-', 0, ""),
 ];
 
 /// What the command line asks of php-fpm, `main`'s switch.
@@ -162,11 +162,11 @@ fn parse(argv: &[Vec<u8>], search: &mut Search, extended_info: &mut bool) -> (Ve
         force_stderr: false,
     };
     let mut info = false;
-    let mut getopt = Getopt::new(OPTIONS);
+    let mut getopt = Getopt::new(OPTIONS, 0);
     loop {
         match getopt.next(argv) {
             Ok(Taken::End) => break,
-            Ok(Taken::Switch(code, value)) => {
+            Ok(Taken::Switch { code, value, .. }) => {
                 let value = value.unwrap_or_default();
                 match code {
                     b'd' => ini.push(define(&value)),

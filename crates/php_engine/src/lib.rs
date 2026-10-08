@@ -9,6 +9,8 @@
 //! at its safepoints, and the execution timer that sets it, are
 //! [`interrupt`] (design §5.8). The one home for `fork`, which pcntl asks
 //! through the request and a host through [`fork()`], is `fork` (#1807).
+//! [`getopt`] is `main/getopt.c`, which every host reads its command line
+//! with and `getopt()` reads a program's `argv` with (#889).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -33,6 +35,7 @@ mod exec;
 mod fiber;
 mod fork;
 mod generator;
+pub mod getopt;
 mod handlers;
 mod inheritance_cache;
 mod ini_quantity;

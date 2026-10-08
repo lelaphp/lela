@@ -1019,6 +1019,9 @@ syntax::Element
 syntax::Element::id
 syntax::Element::kind
 syntax::FileId
+syntax::Getopt
+syntax::Getopt::new
+syntax::Getopt::next
 syntax::IniEvent
 syntax::IniScanner
 syntax::IniValue
@@ -1026,12 +1029,15 @@ syntax::Level
 syntax::Level::is_fatal
 syntax::LexOptions
 syntax::Lexed
+syntax::Need
+syntax::Opt
 syntax::Options
 syntax::Parsed
 syntax::Parsed::dump
 syntax::ScannedToken
 syntax::Scanning
 syntax::SyntaxKind
+syntax::Taken
 syntax::Token
 syntax::TokenId
 syntax::Tree

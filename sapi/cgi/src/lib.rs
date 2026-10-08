@@ -53,7 +53,8 @@ use php_sapi::{
 /// `sapi_module.name` for php's CGI: what `php_sapi_name()` answers.
 pub const NAME: &str = "cgi-fcgi";
 
-/// `OPTIONS`, `cgi_main.c:142-163`, row for row.
+/// `OPTIONS`, `cgi_main.c:142-163`, row for row; the `-` row that ends
+/// php's table is the slice's end.
 const OPTIONS: &[Opt] = &[
     opt(b'a', 0, "interactive"),
     opt(b'b', 1, "bindpath"),
@@ -74,7 +75,6 @@ const OPTIONS: &[Opt] = &[
     opt(b'?', 0, "usage"),
     opt(b'v', 0, "version"),
     opt(b'T', 1, "timing"),
-    opt(b'-', 0, ""),
 ];
 
 /// What one request is made of, `main`'s `behavior`.
@@ -233,17 +233,19 @@ impl Options {
 /// and `-?`; `php_getopt`'s line and the usage, and exit 1, for a switch
 /// it does not know.
 fn usage_pass(argv: &[Vec<u8>]) -> Option<Ask> {
-    let mut getopt = Getopt::new(OPTIONS);
+    let mut getopt = Getopt::new(OPTIONS, 0);
     loop {
         match getopt.next(argv) {
             Ok(Taken::End) => return None,
-            Ok(Taken::Switch(b'h' | b'?', _)) => {
+            Ok(Taken::Switch {
+                code: b'h' | b'?', ..
+            }) => {
                 return Some(Ask::Usage {
                     stderr: String::new(),
                     exit_code: 0,
                 });
             }
-            Ok(Taken::Switch(..)) => {}
+            Ok(Taken::Switch { .. }) => {}
             Err((argument, at, error)) => {
                 return Some(Ask::Usage {
                     stderr: getopt_line(argv, argument, at, error),
@@ -257,8 +259,8 @@ fn usage_pass(argv: &[Vec<u8>]) -> Option<Ask> {
 /// `main`'s third pass, from a shell alone: the switches that shape
 /// the request, `-m` and `-v` answered in its place, and the words left.
 fn shell_pass(argv: &[Vec<u8>], mut invocation: Invocation) -> Ask {
-    let mut getopt = Getopt::new(OPTIONS);
-    while let Ok(Taken::Switch(code, value)) = getopt.next(argv) {
+    let mut getopt = Getopt::new(OPTIONS, 0);
+    while let Ok(Taken::Switch { code, value, .. }) = getopt.next(argv) {
         match code {
             b'a' => invocation.interactive = true,
             b'C' => invocation.no_chdir = true,
@@ -289,12 +291,12 @@ fn shell_pass(argv: &[Vec<u8>], mut invocation: Invocation) -> Ask {
 /// Every switch of one `php_getopt` pass that reads all it can, a switch
 /// php does not know passed over as `show_err` 0 passes it.
 fn switches(argv: &[Vec<u8>]) -> Vec<(u8, Vec<u8>)> {
-    let mut getopt = Getopt::new(OPTIONS);
+    let mut getopt = Getopt::new(OPTIONS, 0);
     let mut taken = Vec::new();
     loop {
         match getopt.next(argv) {
             Ok(Taken::End) => return taken,
-            Ok(Taken::Switch(code, value)) => taken.push((code, value.unwrap_or_default())),
+            Ok(Taken::Switch { code, value, .. }) => taken.push((code, value.unwrap_or_default())),
             Err(_) => {}
         }
     }
