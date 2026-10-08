@@ -1673,6 +1673,22 @@ pub fn bound_variables(
 /// 376
 /// 0
 /// ```
+///
+/// Each loader is handed the name as written, the unit's interned
+/// string where the source wrote the name, which costs nothing; a name
+/// past a leading `\` is a new string, as php's `zend_string_init` of
+/// it is.
+///
+/// ```php
+/// spl_autoload_register(function ($c) { $GLOBALS['held'] = $c; });
+/// class_exists('First');
+/// $m = memory_get_usage(); class_exists('Second'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); class_exists('\Third'); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 0
+/// 32
+/// ```
 pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Thrown> {
     let bare = name.strip_prefix(b"\\").unwrap_or(name);
     // The table first, which holds an anonymous class under its name
@@ -1697,7 +1713,15 @@ pub fn autoload(req: &mut Request, name: &[u8]) -> Result<Option<ClassId>, Throw
     let served = req.without_site_override(|req| {
         let mut at = 0;
         while let Some(loader) = req.autoloader(at) {
-            let class = req.string(bare)?;
+            // php hands each loader the name it was given, a string
+            // already standing (the unit's interned string for a name the
+            // source wrote), and makes a new one only for the name past
+            // a leading `\`.
+            let class = if bare.len() < name.len() {
+                req.string(bare)?
+            } else {
+                req.existing_interned(bare)?
+            };
             let returned = serve(req, loader.target(), &[Value::string(class)], &[]);
             req.release(Value::string(class));
             req.release(returned?);
