@@ -570,7 +570,7 @@ spawn $X unsafe-audit --staged
 spawn $X vocab --staged
 spawn $X permit --diff
 gather
-if rendered=$($X regions $regions); then
+if rendered=$($X regions --staged $regions); then
 if ! computed check $regions >/dev/null 2>&1; then
 step $X clippy --staged
 step $X test --staged
@@ -578,7 +578,7 @@ spawn $X witness --staged
 spawn $X crosscheck --staged
 gather
 ```
-<!-- /computed in=ccb11435705dcd7d0cefbd26afc716992707aa17419b26fb580db2f2c0b8b87c out=797e27d8f534c9856c14a7fd09e8f80088cbcb865a0f6192dbcefc04fffae727 -->
+<!-- /computed in=d364897f8c36b3022f09ebc97d1cfb37414025fc09b93eed84a42495b524d322 out=2d3947799f6d676777f699b3dae01f7466ca2b83d09a3399c619cb2bb9cce444 -->
 
 Pre-push: `xtask done`. Post-commit, on a merge commit, and post-merge: `xtask ticket merged`, which closes each open ticket the merge commits name as `#n` with the successors its ready record names, one record per ticket of a branch (#2358), and closes nothing off `main` (revision 98). The hooks are held by `cargo test -p xtask --test hooks`, which runs them in a scratch repository with a stand-in `cargo` (#52). The plugin:
 

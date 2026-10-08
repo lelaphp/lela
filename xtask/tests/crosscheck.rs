@@ -280,7 +280,7 @@ fn every_default_extension_reads_the_ports_reach_in_both_columns_and_the_floor_h
     let rendered = xtask::status::render(
         &scratch.manifest,
         &registry(),
-        &scratch.store,
+        xtask::status::Against::Checkout(&scratch.store),
         &scratch.root,
         Section::Crosscheck,
         Format::Md,

@@ -73,10 +73,10 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 ```
 <!-- /computed in=073532650c3f2016b644e55d6199bb7d754ef49b4249dd271e1290d0193b545f out=1f6b1b2ad0d65a8a29ca4c6008bce6c0123d6b3a69b771b5e1a8310e039dcace -->
 
-<!-- computed exec cmd="cargo xtask status --section bundle" inputs=../seams.toml name=bundle-order | do not edit; run computed -->
+<!-- computed exec cmd="cargo xtask status --section bundle --tracked" inputs=../seams.toml,../xtask/src/status.rs name=bundle-order | do not edit; run computed -->
 
 | crate | order | extensions | reading | message |
 |---|---|---|---|---|
-| php_bundle | registration | 59 | pass | 60 workspace dependencies within its edges |
+| php_bundle | registration |  | no reading |  |
 
-<!-- /computed in=b2d424c205c2d3d3115df79d02ddde40054169fdabbe2368d95223d1dcc51730 out=efacbf76c0f18b14a095721bb320f198897b8bce374beb7e52c69614edfee39a -->
+<!-- /computed in=651e6aec44c60e6503197030a615f2f494dd9b532cd346d72c23db6701778cec out=58cc83918bab7d79043de737bf76884da1fb3927782cef8fbdd378e4dc8542df -->

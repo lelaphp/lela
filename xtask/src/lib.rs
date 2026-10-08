@@ -500,7 +500,7 @@ fn before_the_manifest(root: &Path, command: &Command) -> Option<Result<()>> {
             ..
         } => Some(track_work::command(root, run, *one)),
         Command::Track { branch, json, .. } => Some(track_command(root, branch.as_deref(), *json)),
-        Command::Regions { files } => Some(computed::command(root, files)),
+        Command::Regions { staged, files } => Some(computed::command(root, files, *staged)),
         Command::Steer {
             file,
             from,
@@ -544,6 +544,7 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         week,
         session_id,
         uncut,
+        tracked,
         every,
         log,
         session: _,
@@ -555,10 +556,15 @@ fn status_command(manifest: &Manifest, store: &Store, root: &Path, ask: Command)
         Some(section) if every => status::every::render(store, section, format, log.as_deref())?,
         Some(section) => {
             let registry = Registry::load(root)?;
+            let against = if tracked {
+                status::Against::Tree
+            } else {
+                status::Against::Checkout(store)
+            };
             status::render(
                 manifest,
                 &registry,
-                store,
+                against,
                 root,
                 section,
                 format,

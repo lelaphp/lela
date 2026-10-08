@@ -1,7 +1,8 @@
 //! The `crates` and `edges` sections (#2250): the manifest's `[[crate]]`
 //! and `[[edge]]` rows, which the design documents and the map render as
 //! regions rather than restate by hand (design §4.1, §4.2). Both read the
-//! manifest alone, so a region over either is held by `inputs=seams.toml`;
+//! manifest alone, so a region over either is held by `inputs=seams.toml`
+//! and the renderer's own files, `xtask/src/status.rs` and this one;
 //! only the crates' every-row rendering also reads whether a crate's
 //! directory holds a `Cargo.toml`.
 

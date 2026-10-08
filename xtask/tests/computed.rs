@@ -159,3 +159,178 @@ fn regions_is_a_subcommand_and_needs_a_file() {
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("\n  regions "), "{help}");
 }
+
+/// git in `dir`, as a test's scratch repository runs it.
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=xtask", "-c", "user.email=xtask@scratch"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+/// A scratch repository with one region file, MAP.md, rendered by the
+/// real `computed` and committed: an `exec` region over x.lock at line 3
+/// and a `tree` region over d, beside other.txt.
+fn laid(name: &str) -> (Tree, String) {
+    let dir = Tree::new(name).unwrap();
+    let opener = "<!-- computed exec cmd=\"cat x.lock\" inputs=x.lock name=lock | do not edit; run computed -->";
+    fs::write(dir.join("x.lock"), "one\n").unwrap();
+    fs::write(dir.join("other.txt"), "a\n").unwrap();
+    fs::create_dir_all(dir.join("d/a")).unwrap();
+    fs::write(dir.join("d/a/f"), "").unwrap();
+    fs::write(
+        dir.join("MAP.md"),
+        format!(
+            "# map\n\n{opener}\n<!-- /computed -->\n\n\
+             <!-- computed tree src=d depth=1 name=dirs | do not edit; run computed -->\n<!-- /computed -->\n"
+        ),
+    )
+    .unwrap();
+    git(&dir, &["init", "-q"]);
+    let laid = Command::new("computed")
+        .args(["run", "--trust", "MAP.md"])
+        .current_dir(&*dir)
+        .output()
+        .expect("computed is on PATH, as CI installs it");
+    assert!(laid.status.code().is_some_and(|c| c < 2), "{laid:?}");
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-q", "-m", "scratch"]);
+    let rendered = fs::read_to_string(dir.join("MAP.md")).unwrap();
+    assert!(rendered.contains("\none\n"), "{rendered}");
+    (dir, rendered)
+}
+
+/// `xtask regions --staged` against the real `computed`, as pre-commit
+/// runs it (#2236): a region it would write that reads a path whose
+/// working copy the commit does not stage is refused before anything is
+/// written, naming the region and the path, whether the region reads it
+/// as an input, a lock, or as a directory a `tree` region lists; once the
+/// path is staged, the refusal is gone.
+#[test]
+fn staged_refuses_a_region_that_would_carry_an_unstaged_change() {
+    let (dir, rendered) = laid("computed-staged");
+    let staged = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .arg("--root")
+            .arg(&*dir)
+            .args(["regions", "--staged", "MAP.md"])
+            .output()
+            .unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // The lock changed in the working tree alone, beside a staged change.
+    fs::write(dir.join("x.lock"), "two\n").unwrap();
+    fs::write(dir.join("other.txt"), "b\n").unwrap();
+    git(&dir, &["add", "--", "other.txt"]);
+    let (code, err) = staged();
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("does not stage"), "{err}");
+    assert!(err.contains("MAP.md:3 lock reads x.lock"), "{err}");
+    assert!(
+        !err.contains("other.txt"),
+        "a staged path is no cause: {err}"
+    );
+    assert_eq!(fs::read_to_string(dir.join("MAP.md")).unwrap(), rendered);
+
+    // A directory the tree region would list, untracked.
+    git(&dir, &["add", "--", "x.lock"]);
+    fs::create_dir_all(dir.join("d/b")).unwrap();
+    fs::write(dir.join("d/b/f"), "").unwrap();
+    let (code, err) = staged();
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("dirs reads d/b/"), "{err}");
+    assert!(!err.contains("lock reads"), "x.lock is staged now: {err}");
+    assert_eq!(fs::read_to_string(dir.join("MAP.md")).unwrap(), rendered);
+
+    // Every path a region would read is staged: no refusal of this kind.
+    git(&dir, &["add", "--", "d"]);
+    let (_, err) = staged();
+    assert!(!err.contains("does not stage"), "{err}");
+}
+
+/// The commit #2236 names, by pathspec through a pre-commit hook that
+/// runs `xtask regions --staged`, as scripts/hooks/pre-commit does: git
+/// hands the hook a temporary index of HEAD and the named paths. A region
+/// rendered from an unstaged lock, its file named in the commit and the
+/// lock not, is refused, and HEAD does not move; named with the lock, the
+/// commit goes in.
+#[test]
+fn a_pathspec_commit_carries_no_region_of_an_unstaged_lock() {
+    let (dir, _) = laid("computed-pathspec");
+    let hooks = dir.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nexec '{}' --root '{}' regions --staged MAP.md\n",
+            env!("CARGO_BIN_EXE_xtask"),
+            dir.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    let head = || {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&*dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let before = head();
+
+    // The region rendered from the lock as the working tree has it.
+    fs::write(dir.join("x.lock"), "two\n").unwrap();
+    let ran = Command::new("computed")
+        .args(["run", "--trust", "MAP.md"])
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert!(ran.status.code().is_some_and(|c| c < 2), "{ran:?}");
+    fs::write(dir.join("other.txt"), "b\n").unwrap();
+
+    let commit = |paths: &[&str]| {
+        Command::new("git")
+            .args(["-c", "user.name=xtask", "-c", "user.email=xtask@scratch"])
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "m",
+                "--",
+            ])
+            .args(paths)
+            .current_dir(&*dir)
+            .output()
+            .unwrap()
+    };
+    let refused = commit(&["MAP.md", "other.txt"]);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{err}");
+    assert!(err.contains("MAP.md:3 lock reads x.lock"), "{err}");
+    assert_eq!(head(), before, "the commit was refused");
+
+    let carried = commit(&["MAP.md", "other.txt", "x.lock"]);
+    assert!(
+        carried.status.success(),
+        "{}",
+        String::from_utf8_lossy(&carried.stderr)
+    );
+    assert_ne!(head(), before);
+}
