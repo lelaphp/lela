@@ -58,7 +58,7 @@ impl Request {
     /// variadic callee, carried on the call as
     /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`.
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn serve_method(
+    pub(crate) fn serve_method(
         &mut self,
         function: Function,
         this: Option<PhpObject>,

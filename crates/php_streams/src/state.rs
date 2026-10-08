@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::api::abi::PersistentList;
+use crate::api::layer::Face as _;
 use php_engine::api::values::ResourceType;
 
 use crate::api::request::{

@@ -34,11 +34,11 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
 use crate::api::values::{Emalloc, Owner, ResourceType};
 
+use crate::api::layer::{Face as _, TemporaryGuard};
 use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
 use crate::api::request::{
     Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Notification,
-    OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx, StreamOption, TemporaryGuard,
-    Whence,
+    OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx, StreamOption, Whence,
 };
 use crate::api::values::{ClassId, FreshString, PhpArray, PhpString, Resource, Value};
 
@@ -2659,14 +2659,14 @@ impl Ops for Stdio {
                 let Some(file) = self.file.as_ref() else {
                     return OptionAnswer::Err;
                 };
-                if crate::api::net::set_fd_blocking(file.as_fd(), blocking).is_err() {
+                if crate::api::layer::set_fd_blocking(file.as_fd(), blocking).is_err() {
                     return OptionAnswer::Err;
                 }
                 self.blocking = blocking;
                 OptionAnswer::Ok
             }
             StreamOption::Sync { data_only } => match self.file.as_ref() {
-                Some(file) if crate::api::net::sync_fd(file.as_fd(), data_only).is_ok() => {
+                Some(file) if crate::api::layer::sync_fd(file.as_fd(), data_only).is_ok() => {
                     OptionAnswer::Ok
                 }
                 _ => OptionAnswer::Err,
@@ -2947,7 +2947,7 @@ impl Ops for HostFd {
             return OptionAnswer::NotImplemented;
         };
         match req.host_fd(self.standard()) {
-            Some(fd) if crate::api::net::sync_fd(fd, data_only).is_ok() => OptionAnswer::Ok,
+            Some(fd) if crate::api::layer::sync_fd(fd, data_only).is_ok() => OptionAnswer::Ok,
             _ => OptionAnswer::Err,
         }
     }
@@ -2977,7 +2977,7 @@ impl Ops for HostFd {
     }
 }
 
-/// [`StreamHooks::standard_handles`](crate::api::abi::StreamHooks::standard_handles):
+/// [`StreamHooks::standard_handles`](crate::api::layer::StreamHooks::standard_handles):
 /// `cli_register_file_handles`' three opens, `php://stdin` `rb`,
 /// `php://stdout` and `php://stderr` `wb`, each stream's one owner
 /// handed to the constant the engine registers; the others freed where
@@ -3393,7 +3393,7 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
         return Ok(Err(form()));
     }
     let fildes = strtol(digits);
-    let dtablesize = crate::api::net::fd_table_size();
+    let dtablesize = crate::api::layer::fd_table_size();
     if fildes < 0 || fildes >= i64::from(dtablesize) {
         return Ok(Err(format!(
             "The file descriptors must be non-negative numbers smaller than {dtablesize}"
@@ -3407,7 +3407,7 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
     };
     let duped = match standard.and_then(|s| req.host_fd(s)) {
         Some(fd) => fd.try_clone_to_owned(),
-        None => crate::api::net::dup_fd(i32::try_from(fildes).unwrap_or(-1)),
+        None => crate::api::layer::dup_fd(i32::try_from(fildes).unwrap_or(-1)),
     };
     let fd = match duped {
         Ok(fd) => fd,
@@ -4901,7 +4901,7 @@ impl Stream {
         let fd = req
             .stream_op(self, |req, stream| stream.keep_fd(req))
             .flatten()?;
-        crate::api::net::dup_fd(fd).ok()
+        crate::api::layer::dup_fd(fd).ok()
     }
 
     /// `php_stream_can_cast` (`Z/main/php_streams.h:567`), `_php_stream_cast`

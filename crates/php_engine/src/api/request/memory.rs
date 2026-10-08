@@ -636,7 +636,7 @@ impl Request {
 
     /// The heap's memory limit in bytes, `PG(memory_limit)` as
     /// `zend_set_memory_limit` set it.
-    pub fn heap_memory_limit(&self) -> usize {
+    pub(crate) fn heap_memory_limit(&self) -> usize {
         self.heap.memory_limit()
     }
 }

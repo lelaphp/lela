@@ -63,7 +63,7 @@ impl ScannerFile {
             req,
             StreamOption::ReadBuffer {
                 buffered: false,
-                size: crate::api::net::BUFSIZ,
+                size: crate::api::layer::BUFSIZ,
             },
         );
         Ok(Some(ScannerFile {

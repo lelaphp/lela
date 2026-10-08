@@ -39,12 +39,13 @@ use php_unit::decl::Name;
 use crate::api::abi::{
     AdmissionHook, CachedHook, CompileFileHook, CompileStringHook, EncodingsHook, Entry, ErrorHook,
     Extension, FatalLoggedHook, FiberHandler, FiberSwitchHandler, GcCollectHook, InputFilterHook,
-    InterruptHook, ObserverInit, PostStartupHook, ResolvePathHook, Shell, StreamHooks, ThrownHook,
-    TicksHook, TreatDataHook, UploadHook,
+    InterruptHook, ObserverInit, PostStartupHook, ResolvePathHook, Shell, ThrownHook, TicksHook,
+    TreatDataHook, UploadHook,
 };
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
 use crate::api::values::PhpString;
+use crate::layer::StreamHooks;
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared, OpcodeObserver};
 use crate::statement::StatementHandler;
 

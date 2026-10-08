@@ -627,7 +627,7 @@ impl Request {
     /// #0 {main}
     ///   thrown in %s on line 6
     /// ```
-    pub fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
+    pub(crate) fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
         let Some(decl) = self.class_decl(class) else {
             return Ok(());
         };

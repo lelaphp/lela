@@ -1,8 +1,8 @@
 //! The engine (design §4.1, §5): the one loop over `php_unit`, the native
-//! face [`api`], the tier seam [`tier`], the linker, and `serve`. Three
+//! face [`api`], the tier seam [`tier`], the linker, and `serve`. Four
 //! faces, each locked: the host's (`Engine`, `serve`, `sapi.lock`), the
-//! extension's (`api`, measured on `php_ext` as `api.lock`) and the
-//! tier's (`tier.lock`). The loop over `php_unit::Opcode` is [`tier`], its
+//! extension's (`api`, measured on `php_ext` as `api.lock`), the
+//! tier's (`tier.lock`) and the stream layer's ([`layer`], `layer.lock`). The loop over `php_unit::Opcode` is [`tier`], its
 //! dispatch generated from `ops.toml` in `build.rs`, its handlers in
 //! `handlers` and its semantics in `ops`; the rest of the kernels and the
 //! natives are Lane B and C of design §11. The interrupt the loop tests
@@ -10,7 +10,9 @@
 //! [`interrupt`] (design §5.8). The one home for `fork`, which pcntl asks
 //! through the request and a host through [`fork()`], is `fork` (#1807).
 //! [`getopt`] is `main/getopt.c`, which every host reads its command line
-//! with and `getopt()` reads a program's `argv` with (#889).
+//! with and `getopt()` reads a program's `argv` with (#889). [`layer`] is
+//! the face `php_streams` alone reaches, which no extension can name
+//! (#1959).
 #![forbid(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
@@ -42,6 +44,7 @@ mod ini_quantity;
 mod ini_syntax;
 mod interfaces;
 mod interrupt;
+pub mod layer;
 mod multibyte;
 mod natives;
 mod observer;

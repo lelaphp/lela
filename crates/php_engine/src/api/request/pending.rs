@@ -279,7 +279,7 @@ impl Request {
     /// and either leaves by `zend_bailout`, which is the `Thrown` with
     /// no throwable handed back. The session's write at request end is
     /// the witness, in `ext/session`.
-    pub fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown> {
+    pub(crate) fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown> {
         let threw = thrown.exception().is_some();
         self.leave_pending(thrown);
         match self.uncaught() {
@@ -647,7 +647,7 @@ impl Request {
     /// request is leaving for the `zend_try` that catches a fatal: the
     /// loop's `Threw` edge, and nothing more is served until it is
     /// handled.
-    pub fn is_pending(&self) -> bool {
+    pub(crate) fn is_pending(&self) -> bool {
         self.raised.is_some() || self.bailout
     }
 

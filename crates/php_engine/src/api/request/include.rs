@@ -377,7 +377,7 @@ impl Request {
     ///
     /// A read that fails, as one through a filter that answers
     /// `PSFS_ERR_FATAL` fails, is the file php could not open
-    /// (`zend_stream_fixup`, [`crate::api::abi::StreamHooks::open`]).
+    /// (`zend_stream_fixup`, [`crate::layer::StreamHooks::open`]).
     ///
     /// ```php
     /// class F extends php_user_filter { }
@@ -413,7 +413,7 @@ impl Request {
         if let Some(thrown) = self.stream_thrown.take() {
             return Err(thrown);
         }
-        let Some(crate::api::abi::IncludeSource {
+        let Some(crate::layer::IncludeSource {
             source,
             opened_path,
         }) = read
@@ -582,7 +582,7 @@ impl Request {
     /// `zend_resolve_path`: each extension's override asked first, in
     /// bundle order ([`crate::api::abi::ExtensionBuilder::resolve_path`]),
     /// then the stream layer's `php_resolve_path` over the ini's
-    /// `include_path` ([`crate::api::abi::StreamHooks::resolve_path`]), or,
+    /// `include_path` ([`crate::layer::StreamHooks::resolve_path`]), or,
     /// with no stream layer, Zend's own `VCWD_REALPATH`. The `Err` is the
     /// last attempt's reason, which the stream warning prints, or the
     /// throwable an override or a wrapper's `url_stat` raised.
@@ -601,15 +601,15 @@ impl Request {
     }
 
     /// The stream layer's hooks, as the supplied table resolved them
-    /// ([`crate::api::abi::StreamHooks`]).
-    pub(crate) fn stream_hooks(&self) -> Option<crate::api::abi::StreamHooks> {
+    /// ([`crate::layer::StreamHooks`]).
+    pub(crate) fn stream_hooks(&self) -> Option<crate::layer::StreamHooks> {
         self.shared.supplied.stream_hooks.get()
     }
 
     /// `tsrm_realpath` of a path that is a regular file: the canonical
     /// path, against the request's working directory where the path is
     /// relative.
-    pub fn realpath_file(&mut self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+    pub(crate) fn realpath_file(&mut self, path: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         // `virtual_file_ex` sets `errno = ENOENT` for a path it could not
         // resolve.
         const ENOENT: i32 = 2;
@@ -625,7 +625,7 @@ impl Request {
     /// The warning `php_stream_display_wrapper_errors` raises with
     /// `php_error_docref1`, the path its `estrdup` (`php_strip_url_passwd`)
     /// standing across the raise as the parameter `function` names.
-    pub fn wrapper_warning(&mut self, function: &str, path: &[u8], text: &str) {
+    pub(crate) fn wrapper_warning(&mut self, function: &str, path: &[u8], text: &str) {
         let copy = self.heap_mut().block(path.len() + 1);
         let Ok(copy) = self.fatal_of(copy) else {
             return;

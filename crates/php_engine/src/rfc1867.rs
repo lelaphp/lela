@@ -12,7 +12,7 @@
 
 use crate::api::abi::{Encoding, Multibyte};
 use crate::api::raising::{Level, Thrown, docref, throw};
-use crate::api::request::TemporaryGuard;
+use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{Owner, PhpArray, PhpString, Value};
 
