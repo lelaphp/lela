@@ -690,6 +690,29 @@ fn oracle_names_both_places_when_the_tree_is_at_neither() {
     );
 }
 
+/// The pinned php a runner pours (#2253): its version, keg path and md5
+/// as the pin states them, so the oracle job reads the pin off this
+/// section and never parses `oracle.toml` a second time.
+#[test]
+fn oracle_states_the_pinned_php_a_runner_pours() {
+    let root = scratch("oracle-binary");
+    let oracle = Manifest::load(workspace()).unwrap().pin.oracle;
+    let path = oracle.path.display().to_string();
+    let json = oracle_json(&root, None, None);
+    assert_eq!(json["binary"]["version"], oracle.version.as_str());
+    assert_eq!(json["binary"]["path"], path.as_str());
+    assert_eq!(json["binary"]["md5"], oracle.md5.as_str());
+    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains(&format!(
+            "| binary |  | {path} | php {}, md5 {} |",
+            oracle.version, oracle.md5
+        )),
+        "{md}"
+    );
+}
+
 /// The corpus CI checks out (#1713): the pin's tag, commit and count of
 /// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
 /// key of the commit and a digest of the patterns, the same on every call,
