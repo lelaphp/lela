@@ -609,6 +609,7 @@ request::Overwrite
 request::OwnedStream
 request::OwnedStream::free
 request::OwnedStream::keep
+request::OwnedStream::unlist
 request::PHP_VERSION
 request::Periodic
 request::Persisted
@@ -1273,6 +1274,7 @@ values::Resource::new
 values::Resource::persistent
 values::Resource::sized
 values::Resource::type_name
+values::Resource::unlist
 values::ResourceType
 values::ResourceView
 values::ResourceView::resource

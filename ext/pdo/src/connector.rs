@@ -525,15 +525,14 @@ pub trait Connection: Any + Send {
     }
 
     /// `persistent_shutdown`: what a persistent connection holds of the
-    /// request given back, when a `PDO` sharing it is freed and when the
-    /// request gives it back to the engine's pool, so that nothing of one
-    /// request's reaches the next.
+    /// request given back, when a `PDO` sharing it is freed, so that
+    /// nothing of one request's reaches the next.
     fn persistent_shutdown(&mut self, req: &mut Request) {
         let _ = req;
     }
 
     /// A persistent connection given back to the engine's pool as the
-    /// request ends, after `persistent_shutdown`: what it holds in the
+    /// request ends, after its objects are freed: what it holds in the
     /// request's tables moved out of them, for the next request to take
     /// up. php's `pdo_dbh_t` stands in `EG(persistent_list)` as it is,
     /// which this default answers.

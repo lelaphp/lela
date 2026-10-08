@@ -2635,6 +2635,16 @@ impl Resource {
         req.close_resource(self.0);
     }
 
+    /// `zend_hash_index_del(&EG(regular_list), handle)` with the list's
+    /// destructor set aside, as mysqlnd takes the stream it opens out
+    /// (`mysqlnd_fixup_regular_list`): the resource left open and its
+    /// owners' alone. `get_resources()` no longer lists it, the request's
+    /// end does not close it, and its id stays spent; the last owner's
+    /// release serves its destructor as for any other.
+    pub fn unlist(&self, req: &mut Request) {
+        req.heap_mut().resource_unlist(self.0);
+    }
+
     /// The native payload, as `T`, borrowed for as long as the request
     /// is: `None` for a resource of another payload, of none or closed.
     #[must_use]

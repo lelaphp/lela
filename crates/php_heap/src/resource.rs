@@ -73,6 +73,10 @@ pub(crate) struct ResHeader {
     kind: Cell<i32>,
     /// Which allocator `ptr` came from, in the word php's struct pads.
     home: Home,
+    /// Whether its owners took it off the list ([`Heap::resource_unlist`]),
+    /// in the same word: the last release frees it with no entry to
+    /// delete.
+    unlisted: Cell<bool>,
     /// `ptr`: the payload allocation, none for a resource of no payload
     /// and none once closed.
     ptr: Cell<Option<NonNull<PayloadBox>>>,
@@ -84,7 +88,7 @@ pub(crate) struct ResHeader {
 /// persistent stream's `php_stream`), which no request counts and whose
 /// drop gives it back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
+#[repr(u8)]
 enum Home {
     Request,
     Persistent,
@@ -167,6 +171,7 @@ impl Res {
                 id,
                 kind: Cell::new(i32::try_from(kind.0).unwrap_or(i32::MAX)),
                 home,
+                unlisted: Cell::new(false),
                 ptr: Cell::new(ptr),
             });
         }
@@ -567,6 +572,21 @@ impl Heap {
         self.resources.get(id)
     }
 
+    /// `zend_hash_index_del(&EG(regular_list), handle)` with the list's
+    /// destructor set aside, as mysqlnd's `mysqlnd_fixup_regular_list`
+    /// does to the stream it opens (`Z/ext/mysqlnd/mysqlnd_vio.c:115-126`):
+    /// the entry deleted and the resource left standing, its payload with
+    /// it, its owners' alone. The list no longer finds or counts it, the
+    /// shutdown walk does not close it, and its id is spent; the release
+    /// that reaches zero serves its destructor and frees it as it would a
+    /// listed one. php `efree`s the thirty-two bytes there and keeps the
+    /// `php_stream`; here they stay, the payload's home.
+    pub fn resource_unlist(&mut self, r: Res) {
+        if self.resources.del(r.id()) {
+            r.header().unlisted.set(true);
+        }
+    }
+
     /// How many resources the list holds, closed ones included.
     #[must_use]
     pub fn resources(&self) -> usize {
@@ -662,7 +682,10 @@ impl Heap {
     /// string(6) "stream"
     /// ```
     pub(crate) fn resource_free(hooks: &mut dyn HeapHooks, r: Res) {
-        if hooks.heap().resources.del(r.id()) {
+        // An unlisted resource has no entry to delete: its flag is the
+        // entry, cleared as the entry is deleted, so a free reached again
+        // from the destructor finds neither.
+        if r.header().unlisted.replace(false) || hooks.heap().resources.del(r.id()) {
             Heap::resource_dtor(hooks, r);
         } else if !hooks.heap().mm.is_retired(r.address()) {
             // The free under way, reached again from its destructor.
@@ -831,6 +854,55 @@ mod tests {
         };
         drop(rec);
         assert_eq!(drops.get(), 3, "the sweep dropped the last payload");
+    }
+
+    /// A resource its owners took off the list: the list neither finds
+    /// nor counts it, the shutdown walk leaves it open, its id stays
+    /// spent, and its last release serves the destructor once and gives
+    /// its bytes back as a listed one's does.
+    #[test]
+    fn an_unlisted_resource_is_its_owners_alone_and_freed_at_their_last_release() {
+        let _alone = alone();
+        let mut rec = Recorder {
+            heap: Heap::new(),
+            freed: Vec::new(),
+        };
+        let start = rec.heap.memory_usage(false);
+        let drops = std::rc::Rc::new(Cell::new(0));
+        let Ok(kept) = rec
+            .heap
+            .resource_with(ResourceType(4), Observed(std::rc::Rc::clone(&drops)))
+        else {
+            return;
+        };
+        rec.heap.resource_unlist(kept);
+        rec.heap.resource_unlist(kept);
+        assert_eq!(rec.heap.resources(), 0);
+        assert!(rec.heap.resource_at(1).is_none());
+        Heap::close_resources(&mut rec);
+        assert!(!kept.is_closed() && rec.freed.is_empty());
+        let Ok(next) = rec.heap.resource(ResourceType(3)) else {
+            return;
+        };
+        assert_eq!(next.id(), 2, "the unlisted id stays spent");
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 32 + 16);
+        let z = Zval::resource(kept);
+        rec.heap.addref(z);
+        Heap::release(&mut rec, z);
+        assert!(rec.freed.is_empty(), "an owner still holds it");
+        Heap::release(&mut rec, z);
+        assert_eq!(rec.freed, vec![(1, 4, true)]);
+        assert_eq!(drops.get(), 1);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
+        // Closed first, then let go: the destructor is not served again.
+        let Ok(closed) = rec.heap.resource(ResourceType(5)) else {
+            return;
+        };
+        rec.heap.resource_unlist(closed);
+        Heap::resource_close(&mut rec, closed);
+        Heap::release(&mut rec, Zval::resource(closed));
+        assert_eq!(rec.freed, vec![(1, 4, true), (3, 5, true)]);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
     }
 
     /// `EG(regular_list)`'s storage is the request's, sized as

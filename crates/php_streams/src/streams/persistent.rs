@@ -145,10 +145,7 @@ impl Persistent for Request {
     /// 32 hi
     /// ```
     fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Owner<Stream>, Thrown> {
-        let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
-        stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
-        stream.flags.no_seek = true;
-        let stream = self.stream_alloc_as(stream, true)?;
+        let stream = reopen(self, entry)?;
         self.persistent_pool();
         self.streams().persistent.push(Held {
             key,
@@ -190,6 +187,38 @@ impl Persistent for Request {
     }
 }
 
+/// `entry` under a fresh resource of the `persistent stream` type, `r+`
+/// and seeking nowhere, held under no key.
+fn reopen(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
+    let mut stream = PhpStream::new(Box::new(entry.socket), b"r+");
+    stream.orig_path = entry.orig_path.map(super::OrigPath::Persistent);
+    stream.flags.no_seek = true;
+    req.stream_alloc_as(stream, true)
+}
+
+/// What [`Streams::stream_lend`](crate::api::request::Streams::stream_lend)
+/// lends: the connection [`keep`] took out, under a fresh resource taken
+/// off both of the request's lists at once ([`unlist`]), as php's
+/// persistent mysqlnd connection carries its `php_stream` from request to
+/// request in no list at all.
+pub(crate) fn lend_alone(req: &mut Request, entry: Entry) -> Result<Owner<Stream>, Thrown> {
+    let stream = reopen(req, entry)?;
+    unlist(req, *stream);
+    Ok(stream)
+}
+
+/// What php's mysqlnd does to the stream it opens
+/// (`mysqlnd_vio::open_tcp_or_unix`, `Z/ext/mysqlnd/mysqlnd_vio.c:139-175`):
+/// a persistent stream deleted from `EG(persistent_list)` without its
+/// destructor, and every stream from `EG(regular_list)`
+/// (`mysqlnd_fixup_regular_list`), so the stream is its owner's alone,
+/// one the request's end neither closes nor holds idle under its key.
+pub(crate) fn unlist(req: &mut Request, stream: Stream) {
+    let res = stream.resource();
+    req.drop_persistent(res);
+    res.unlist(req);
+}
+
 /// `PHP_RSHUTDOWN_FUNCTION(streams)` and the request's end
 /// (`forget_persistent_resource_id_numbers`, `streams.c:68-101`): every
 /// entry the request still holds given back to the engine's pool, its
@@ -207,13 +236,13 @@ pub(crate) fn give_back(pool: &PersistentList, held: Vec<Held>) {
     }
 }
 
-/// What php's mysqlnd does with the persistent stream it opens
-/// (`mysqlnd_vio::open_tcp_or_unix`, `Z/ext/mysqlnd/mysqlnd_vio.c:139-169`),
-/// deleting it from `EG(persistent_list)` and from `EG(regular_list)` so
-/// that the connection is its owner's alone: the socket of `stream` taken
-/// out, its owed write flushed first, out of the request's persistent list
-/// and out of the resource, which is closed, and the caller's owner given
-/// up. `None`, and the stream freed, for a stream that is not a socket's.
+/// The socket of a persistent stream taken out for the extension that
+/// opened it to keep across requests, as php's persistent mysqlnd
+/// connection keeps its `php_stream`: its owed write flushed first, out
+/// of the request's persistent list, where an unlisted stream is not
+/// already, and out of the resource, which is closed, and the caller's
+/// owner given up. `None`, and the stream freed, for a stream that is not
+/// a socket's.
 pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
     let res = stream.resource();
     let socket = req.stream_op(*stream, |_, s| s.ops.as_socket().is_some());
@@ -241,7 +270,9 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
 /// `stream_resource_persistent_dtor`'s regular-list half, php's `NULL`
 /// (`Z/main/streams/streams.c:1911`): a `persistent stream` resource whose
 /// last owner let go, or which the request's shutdown closed, leaves its
-/// socket open and held idle under its key.
+/// socket open and held idle under its key. One held under none, which
+/// its owner took off the lists ([`unlist`]), is closed, as
+/// `php_stream_free` closes the stream it reaches with no resource.
 pub(crate) fn dtor(req: &mut Request, r: Resource) {
     let Some(mut stream) = r
         .native_mut::<Option<PhpStream>>(req)
@@ -250,25 +281,24 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) {
         return;
     };
     stream.flush_owed(req);
-    let entry = stream.ops.as_socket().map(|socket| Entry {
-        socket: socket.detach(),
-        orig_path: stream
-            .orig_path
-            .take()
-            .map(|path| path.into_persistent(req)),
-    });
-    let Some(at) = req
+    let held = req
         .streams()
         .persistent
         .iter()
-        .position(|held| matches!(held.state, State::InResource(res) if res == r))
-    else {
-        return;
-    };
-    match entry {
-        Some(entry) => req.streams().persistent[at].state = State::Idle(entry),
-        None => {
-            req.streams().persistent.remove(at);
+        .position(|held| matches!(held.state, State::InResource(res) if res == r));
+    if let Some(at) = held {
+        let entry = stream.ops.as_socket().map(|socket| Entry {
+            socket: socket.detach(),
+            orig_path: stream
+                .orig_path
+                .take()
+                .map(|path| path.into_persistent(req)),
+        });
+        match entry {
+            Some(entry) => req.streams().persistent[at].state = State::Idle(entry),
+            None => {
+                req.streams().persistent.remove(at);
+            }
         }
     }
     req.streams().pclose_ret = stream.release(req);
