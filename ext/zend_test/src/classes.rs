@@ -912,6 +912,7 @@ pub(crate) mod ns2 {
 ///
 /// ```php
 /// var_dump(ZendTestUnitEnum::cases());
+/// try { $c = ZendTestUnitEnum::Foo; $c->dynamic = 1; } catch (Error $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// array(2) {
@@ -920,6 +921,7 @@ pub(crate) mod ns2 {
 ///   [1]=>
 ///   enum(ZendTestUnitEnum::Bar)
 /// }
+/// Cannot create dynamic property ZendTestUnitEnum::$dynamic
 /// ```
 #[php_class]
 pub(crate) enum ZendTestUnitEnum {

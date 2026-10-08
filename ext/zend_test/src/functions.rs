@@ -413,41 +413,100 @@ fn zend_string_or_object_or_null(
 }
 
 /// `zend_string_or_stdclass($param): stdClass|string`, its parameter
-/// undeclared and held by `Z_PARAM_OBJ_OF_CLASS_OR_STR`.
+/// undeclared and held by `Z_PARAM_OBJ_OF_CLASS_OR_STR`
+/// ([`stdclass_or_string`]).
 ///
 /// ```php
-/// var_dump(zend_string_or_stdclass("a"), zend_string_or_stdclass(new stdClass));
+/// class S { function __toString(): string { return "s"; } }
+/// var_dump(zend_string_or_stdclass("a"), zend_string_or_stdclass(new stdClass), zend_string_or_stdclass(1), zend_string_or_stdclass(new S), zend_string_or_stdclass(null));
 /// try { zend_string_or_stdclass(new ArrayObject); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
+/// Deprecated: zend_string_or_stdclass(): Passing null to parameter #1 ($param) of type string is deprecated in %s on line 3
 /// string(1) "a"
 /// object(stdClass)#1 (0) {
 /// }
+/// string(1) "1"
+/// string(1) "s"
+/// string(0) ""
 /// zend_string_or_stdclass(): Argument #1 ($param) must be of type stdClass|string, ArrayObject given
 /// ```
 #[php_function]
 fn zend_string_or_stdclass(
-    param: Untyped<Union<Instance<stdClass>, PhpString>>,
-) -> Union<Instance<stdClass>, PhpString> {
-    param.0
+    req: &mut Request,
+    param: Untyped<Value>,
+) -> Result<StdClassOrString, Thrown> {
+    match stdclass_or_string(req, param.0, false)? {
+        Some(held) => Ok(held),
+        None => Err(fatal(
+            req,
+            "InternalError: null held where null is not taken",
+        )),
+    }
 }
 
 /// `zend_string_or_stdclass_or_null($param): stdClass|string|null`,
 /// `Z_PARAM_OBJ_OF_CLASS_OR_STR_OR_NULL`.
 ///
 /// ```php
-/// var_dump(zend_string_or_stdclass_or_null(null));
+/// var_dump(zend_string_or_stdclass_or_null(null), zend_string_or_stdclass_or_null(1.5));
 /// try { zend_string_or_stdclass_or_null([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// NULL
+/// string(3) "1.5"
 /// zend_string_or_stdclass_or_null(): Argument #1 ($param) must be of type stdClass|string|null, array given
 /// ```
 #[php_function]
 fn zend_string_or_stdclass_or_null(
-    param: Untyped<Option<Union<Instance<stdClass>, PhpString>>>,
-) -> Option<Union<Instance<stdClass>, PhpString>> {
-    param.0
+    req: &mut Request,
+    param: Untyped<Value>,
+) -> Result<Option<StdClassOrString>, Thrown> {
+    stdclass_or_string(req, param.0, true)
+}
+
+/// What `Z_PARAM_OBJ_OF_CLASS_OR_STR` holds over `stdClass`.
+type StdClassOrString = Union<Instance<stdClass>, Owner<PhpString>>;
+
+/// `Z_PARAM_OBJ_OF_CLASS_OR_STR` and `_OR_NULL` over `stdClass`: an
+/// object of the class as it is, null as itself where `nullable` says,
+/// and every other value as `Z_PARAM_STR` holds it, `zend_parse_arg_str`
+/// under the caller's `strict_types`, whose null deprecation names
+/// `string`; what neither takes is php's `TypeError` naming the whole
+/// type.
+fn stdclass_or_string(
+    req: &mut Request,
+    value: Value,
+    nullable: bool,
+) -> Result<Option<StdClassOrString>, Thrown> {
+    let strict = php_ext::coerce::strict_types(req);
+    let stdclass = lookup_class(req, b"stdClass")?;
+    let as_string = match value.as_ref() {
+        ValueRef::Object(object) if stdclass.is_some_and(|class| object.class() == class) => {
+            return Instance::from_value(req, value).map(|held| Some(Union::A(held)));
+        }
+        ValueRef::Str(string) => return Ok(Some(Union::B(Owner::take(req, *string)))),
+        ValueRef::Null if nullable => return Ok(None),
+        ValueRef::Null if !strict => {
+            php_ext::raising::arg_null_deprecated(req, 1, "string");
+            true
+        }
+        ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => !strict,
+        ValueRef::Object(object) => {
+            !strict && req.method_named(object.class(), b"__tostring").is_some()
+        }
+        _ => false,
+    };
+    if as_string {
+        return php_ext::coerce::to_string(req, &value).map(|string| Some(Union::B(string)));
+    }
+    let expected = if nullable {
+        "stdClass|string|null"
+    } else {
+        "stdClass|string"
+    };
+    let text = format!("be of type {expected}, {} given", value_name(req, &value));
+    Err(arg_type_error(req, 1, &text))
 }
 
 /// A number or a string, `string|int|float`, `Z_PARAM_NUMBER_OR_STR`.
@@ -967,8 +1026,8 @@ fn get_open_basedir(req: &mut Request) -> Result<Option<Owner<PhpString>>, Throw
 /// bool(true)
 /// ```
 #[php_function]
-fn zend_test_cast_fread(req: &mut Request, stream: Untyped<Resource>) -> Result<(), Thrown> {
-    let Some(stream) = Stream::from_value(req, &stream.0.as_value()) else {
+fn zend_test_cast_fread(req: &mut Request, stream: Resource) -> Result<(), Thrown> {
+    let Some(stream) = Stream::from_value(req, &stream.as_value()) else {
         return Ok(());
     };
     if let Some(read) = stream.read(req, 10240)? {
