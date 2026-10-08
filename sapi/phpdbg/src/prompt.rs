@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use php_sapi::tier::{self, Argument, FrameRef, Opcode, Request};
 
-use crate::bp::{Kind, OpArray};
+use crate::bp::{Kind, OpArray, Resolution};
 use crate::cmd::{self, Command, Param};
 use crate::input::{self, Line};
 use crate::out;
@@ -18,10 +18,13 @@ use crate::session::{Context, Execution, Origin, Seek, SeekKind, Session, Stop};
 
 /// Where the prompt stands.
 pub enum Here<'a> {
-    /// A run stopped between two handlers, at `frame`.
+    /// A run stopped between two handlers: `frame` is the one the
+    /// commands read, php's `EG(current_execute_data)`, the frame the run
+    /// stopped in unless `frame n` switched it.
     Paused {
         req: &'a mut Request,
         frame: FrameRef,
+        switched: Option<Switched>,
     },
     /// The execution context compiled before `run`, with nothing
     /// executing: php's `PHPDBG_G(ops)` with `EG(current_execute_data)`
@@ -34,7 +37,51 @@ pub enum Here<'a> {
     Outside,
 }
 
+/// `PHPDBG_G(frame)` while `frame n` has switched the frame the
+/// commands read: its number, counted from the frame the run stopped in,
+/// and that frame, which the prompt goes back to before the run goes on
+/// (`phpdbg_restore_frame`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Switched {
+    num: u32,
+    stopped: FrameRef,
+}
+
+impl<'a> Here<'a> {
+    /// The prompt of a run stopped at `frame`.
+    pub fn paused(req: &'a mut Request, frame: FrameRef) -> Here<'a> {
+        Here::Paused {
+            req,
+            frame,
+            switched: None,
+        }
+    }
+}
+
 impl Here<'_> {
+    /// `phpdbg_restore_frame`: the frame the run stopped in read again.
+    fn restore_frame(&mut self) {
+        if let Here::Paused {
+            frame, switched, ..
+        } = self
+            && let Some(Switched { stopped, .. }) = switched.take()
+        {
+            *frame = stopped;
+        }
+    }
+
+    /// `PHPDBG_FRAME(num)`: how many frames below the one the run stopped
+    /// in the commands read.
+    pub fn frame_num(&self) -> u32 {
+        match self {
+            Here::Paused {
+                switched: Some(Switched { num, .. }),
+                ..
+            } => *num,
+            _ => 0,
+        }
+    }
+
     /// The request the prompt stands in, where one stands.
     pub fn request(&mut self) -> Option<&mut Request> {
         match self {
@@ -47,7 +94,7 @@ impl Here<'_> {
     /// where one is executing.
     pub fn standing(&mut self) -> Option<(&mut Request, FrameRef)> {
         match self {
-            Here::Paused { req, frame } => Some((&mut **req, *frame)),
+            Here::Paused { req, frame, .. } => Some((&mut **req, *frame)),
             Here::Held { .. } | Here::Idle { .. } | Here::Outside => None,
         }
     }
@@ -58,7 +105,7 @@ impl Here<'_> {
     /// `NULL` at a prompt no run stands under.
     fn serving(&mut self) -> Option<(&mut Request, tier::Under)> {
         match self {
-            Here::Paused { req, frame } => Some((&mut **req, tier::Under::Frame(*frame))),
+            Here::Paused { req, frame, .. } => Some((&mut **req, tier::Under::Frame(*frame))),
             Here::Held { req } | Here::Idle { req } => Some((&mut **req, tier::Under::Nothing)),
             Here::Outside => None,
         }
@@ -129,6 +176,13 @@ pub enum Ret {
 /// program or ends the request; the commands left of a line after a
 /// `run` wait in the session for the run to end.
 pub fn interactive(s: &mut Session, here: &mut Here<'_>) -> Outcome {
+    let outcome = prompt_loop(s, here);
+    here.restore_frame();
+    outcome
+}
+
+/// The prompt's commands, read and run until one ends it.
+fn prompt_loop(s: &mut Session, here: &mut Here<'_>) -> Outcome {
     loop {
         if s.stopped.is_some() {
             return Outcome::Stopped;
@@ -390,7 +444,7 @@ static ROOT: [Def; 27] = [
     with_subs("print", Some(b'p'), "|*c", PRINT, print),
     with_subs("break", Some(b'b'), "|*c", BREAK, breakpoint),
     def("back", Some(b't'), "|n", back),
-    def("frame", Some(b'f'), "|n", unsupported),
+    def("frame", Some(b'f'), "|n", frame),
     with_subs("list", Some(b'l'), "*", LIST, list),
     with_subs("info", Some(b'i'), "|s", INFO, info_overview),
     def("clean", Some(b'X'), "", clean),
@@ -1753,15 +1807,31 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         },
         Some(Param::File { name, line }) => crate::host::file_break(s, name, *line),
         Some(Param::Method { class, name }) => s.breaks.set_method(class, name),
-        Some(Param::NumericMethod { class, name, num }) => {
-            opline_break(s, here, Some(class), name, *num);
-        }
-        Some(Param::NumericFunction { name, num }) => opline_break(s, here, None, name, *num),
-        Some(Param::NumericFile { name, line }) => {
-            let path = crate::host::real_path(name);
-            s.breaks
-                .set_file_opline(&path, u32::try_from(*line).unwrap_or(u32::MAX));
-        }
+        Some(Param::NumericMethod { class, name, num }) => opline_break(
+            s,
+            here,
+            Kind::MethodOpline {
+                class: class.clone(),
+                name: name.clone(),
+                opline: opline_of(*num),
+            },
+        ),
+        Some(Param::NumericFunction { name, num }) => opline_break(
+            s,
+            here,
+            Kind::FunctionOpline {
+                name: name.clone(),
+                opline: opline_of(*num),
+            },
+        ),
+        Some(Param::NumericFile { name, line }) => opline_break(
+            s,
+            here,
+            Kind::FileOpline {
+                file: name.clone(),
+                opline: opline_of(*line),
+            },
+        ),
         Some(Param::Str(name)) => s.breaks.set_symbol(name),
         Some(Param::Op(name)) => s.breaks.set_opcode(name),
         Some(_) => {}
@@ -1769,19 +1839,112 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     Ret::Success
 }
 
-/// `phpdbg_set_breakpoint_method_opline` and
-/// `phpdbg_set_breakpoint_function_opline`: resolved against the tables
-/// where the function exists, pending where the class or the function
-/// does not.
-fn opline_break(
-    s: &mut Session,
+/// The opline a `#N` names, as php's `zend_ulong` holds it.
+fn opline_of(num: i64) -> u32 {
+    u32::try_from(num).unwrap_or(u32::MAX)
+}
+
+/// `phpdbg_set_breakpoint_function_opline`, `_method_opline` and
+/// `_file_opline`: the breakpoint's number taken, then
+/// `phpdbg_resolve_opline_break`, which refuses it with its number spent,
+/// resolves it, or leaves it pending; then the breakpoint set
+/// ([`crate::bp::Breakpoints::set_named_opline`]). A file's is resolved
+/// at once against the frames executing, its own code's under the name
+/// as typed, and is pending where nothing executes, as php's compare
+/// with the compiled context never matches.
+///
+/// ```php
+/// function f() {
+///   return 1;
+/// }
+/// f();
+/// ```
+/// ```request phpdbg
+/// b witness.php:#0
+/// b f
+/// r
+/// b witness.php:#0
+/// b f#9
+/// b f#0
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Pending breakpoint #0 at witness.php:0]
+/// prompt> [Breakpoint #1 added at f]
+/// prompt> [Breakpoint #1 in f() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:   return 1;
+///  00004: }
+///  00005: f();
+/// prompt> [Pending breakpoint #2 at witness.php:0]
+/// [Breakpoint already exists for witness.php:0]
+/// prompt> [There are only 2 oplines in function f (breaking at opline 9 impossible)]
+/// prompt> [Breakpoint #3 added at f#0]
+/// prompt>
+/// ```
+fn opline_break(s: &mut Session, here: &mut Here<'_>, kind: Kind) {
+    let id = s.breaks.next_id();
+    let refused = |message: String| {
+        out::error(message.as_bytes());
+        None
+    };
+    let resolved = match &kind {
+        Kind::FileOpline { file, opline } => match executing_code(here, file) {
+            Some(last) if last <= *opline => refused(format!(
+                "There are only {last} oplines in file {} (breaking at opline {opline} impossible)",
+                lossy(file)
+            )),
+            Some(_) => {
+                let op = OpArray {
+                    file,
+                    function: None,
+                    class: None,
+                };
+                Some(Resolution::At(crate::bp::address(op, *opline)))
+            }
+            None => Some(Resolution::Pending),
+        },
+        Kind::FunctionOpline { name, opline } => named_opline(here, None, name, *opline),
+        Kind::MethodOpline {
+            class,
+            name,
+            opline,
+        } => named_opline(here, Some(class), name, *opline),
+        _ => None,
+    };
+    if let Some(found) = resolved {
+        s.breaks.set_named_opline(id, kind, found);
+    }
+}
+
+/// `phpdbg_resolve_opline_break`'s walk for a file: the frames from the
+/// one executing down to the first serving the code of the file `name`,
+/// and how many oplines that code holds; none where nothing executes or
+/// no frame serves it.
+fn executing_code(here: &mut Here<'_>, name: &[u8]) -> Option<u32> {
+    let (req, frame) = here.standing()?;
+    let mut at = Some(frame);
+    while let Some(frame) = at {
+        if tier::serves(req, frame) == tier::Serves::Code
+            && let Some(position) = tier::position(req, frame)
+            && position.file == name
+        {
+            return Some(position.oplines);
+        }
+        at = tier::below(req, frame);
+    }
+    None
+}
+
+/// `phpdbg_resolve_opline_break` for a function or a method: the opline
+/// where the function exists, pending where it does not yet, and none
+/// where it is refused, said so.
+fn named_opline(
     here: &mut Here<'_>,
     class: Option<&Vec<u8>>,
     name: &[u8],
-    num: i64,
-) {
-    let id = s.breaks.next_id();
-    let opline = u32::try_from(num).unwrap_or(u32::MAX);
+    opline: u32,
+) -> Option<Resolution> {
     let found = match here.request() {
         Some(req) => match class {
             Some(class) => tier::method_named(req, class, name),
@@ -1789,83 +1952,48 @@ fn opline_break(
         },
         None => tier::Named::NoClass,
     };
-    let shown = match class {
-        Some(class) => format!("{}::{}#{num}", lossy(class), lossy(name)),
-        None => format!("{}#{num}", lossy(name)),
-    };
-    let resolved = match found {
-        tier::Named::Code(code) if !code.user => {
-            let message = match class {
-                Some(class) => format!(
-                    "{}::{} is not a user defined method, no oplines exist",
-                    lossy(class),
-                    lossy(name)
-                ),
-                None => format!(
-                    "{} is not a user defined function, no oplines exist",
-                    lossy(name)
-                ),
-            };
-            out::error(message.as_bytes());
-            return;
-        }
-        tier::Named::Code(code) if code.ops.len() <= opline as usize => {
-            let message = match class {
-                Some(class) => format!(
-                    "There are only {} oplines in method {}::{} (breaking at opline {num} impossible)",
-                    code.ops.len(),
-                    lossy(class),
-                    lossy(name)
-                ),
-                None => format!(
-                    "There are only {} oplines in function {} (breaking at opline {num} impossible)",
-                    code.ops.len(),
-                    lossy(name)
-                ),
-            };
-            out::error(message.as_bytes());
-            return;
-        }
+    let message = match found {
+        tier::Named::Code(code) if !code.user => match class {
+            Some(class) => format!(
+                "{}::{} is not a user defined method, no oplines exist",
+                lossy(class),
+                lossy(name)
+            ),
+            None => format!(
+                "{} is not a user defined function, no oplines exist",
+                lossy(name)
+            ),
+        },
+        tier::Named::Code(code) if code.ops.len() <= opline as usize => match class {
+            Some(class) => format!(
+                "There are only {} oplines in method {}::{} (breaking at opline {opline} impossible)",
+                code.ops.len(),
+                lossy(class),
+                lossy(name)
+            ),
+            None => format!(
+                "There are only {} oplines in function {} (breaking at opline {opline} impossible)",
+                code.ops.len(),
+                lossy(name)
+            ),
+        },
         tier::Named::Code(code) => {
-            out::notice(format!("Breakpoint #{id} added at {shown}").as_bytes());
             let op = OpArray {
                 file: &code.file,
                 function: Some(&code.name),
                 class: code.class.as_deref(),
             };
-            Some(crate::bp::address(op, opline))
+            return Some(Resolution::At(crate::bp::address(op, opline)));
         }
-        tier::Named::NoFunction if class.is_some() => {
-            out::error(
-                format!(
-                    "Method {} doesn't exist in class {}",
-                    lossy(name),
-                    class.map(|c| lossy(c)).unwrap_or_default()
-                )
-                .as_bytes(),
-            );
-            return;
-        }
-        tier::Named::NoFunction | tier::Named::NoClass => {
-            out::notice(format!("Pending breakpoint #{id} at {shown}").as_bytes());
-            None
-        }
+        tier::Named::NoFunction if class.is_some() => format!(
+            "Method {} doesn't exist in class {}",
+            lossy(name),
+            class.map(|c| lossy(c)).unwrap_or_default()
+        ),
+        tier::Named::NoFunction | tier::Named::NoClass => return Some(Resolution::Pending),
     };
-    let kind = match class {
-        Some(class) => Kind::MethodOpline {
-            class: class.clone(),
-            name: name.to_vec(),
-            opline,
-        },
-        None => Kind::FunctionOpline {
-            name: name.to_vec(),
-            opline,
-        },
-    };
-    s.breaks.push(id, kind);
-    if let Some(address) = resolved {
-        s.breaks.resolve_to(id, address);
-    }
+    out::error(message.as_bytes());
+    None
 }
 
 /// `PHPDBG_BREAK(del)`.
@@ -1876,9 +2004,10 @@ fn break_del(s: &mut Session, _: &mut Here<'_>, params: &[Param]) -> Ret {
     Ret::Success
 }
 
-/// `PHPDBG_COMMAND(back)`.
+/// `PHPDBG_COMMAND(back)`: from the frame the commands read.
 fn back(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let executing = here.executing();
+    let above = here.frame_num();
     let Some((req, frame)) = here.standing().filter(|_| executing) else {
         out::error(b"Not executing!");
         return Ret::Success;
@@ -1887,7 +2016,186 @@ fn back(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         Some(Param::Num(n)) => usize::try_from(*n).unwrap_or(0),
         _ => 0,
     };
-    crate::info::backtrace(req, frame, limit);
+    crate::info::backtrace(req, frame, above, limit);
+    Ret::Success
+}
+
+/// `PHPDBG_COMMAND(frame)`: with no number, the frame the commands read;
+/// with one, `phpdbg_switch_frame`: the frame that many below the one the
+/// run stopped in made the one `ev`, `info vars`, `back` and the listings
+/// read, said so with its call and listed, until the run goes on.
+///
+/// ```php
+/// function g() {
+///     return 1;
+/// }
+/// function m() {
+///     $local = 2;
+///     g();
+///     echo $local, "\n";
+/// }
+/// m();
+/// ```
+/// ```request phpdbg
+/// b g
+/// r
+/// frame 1
+/// ev $local = 5
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at g]
+/// prompt> [Breakpoint #0 in g() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:     return 1;
+///  00004: }
+///  00005: function m() {
+/// prompt> [Switched to frame #1: m() at %SCRATCH%/witness.php:7]
+/// >00007:     g();
+///  00008:     echo $local, "\n";
+///  00009: }
+/// prompt> 5
+/// prompt> 5
+/// [Script ended normally]
+/// prompt>
+/// ```
+///
+/// The frame of a file's code is named by its number alone, a native's
+/// call between two frames is passed over, and the count is from the
+/// frame the run stopped in whichever one the commands read.
+///
+/// ```php
+/// function g($x) {
+///     return $x;
+/// }
+/// array_map(function ($v) { return g($v); }, [3]);
+/// ```
+/// ```request phpdbg
+/// b g
+/// r
+/// frame
+/// frame 2
+/// frame
+/// frame 1
+/// frame 3
+/// frame 0
+/// frame 0
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at g]
+/// prompt> [Breakpoint #0 in g() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:     return $x;
+///  00004: }
+///  00005: array_map(function ($v) { return g($v); }, [3]);
+/// prompt> [Currently in frame #0]
+/// prompt> [Switched to frame #2]
+/// >00005: array_map(function ($v) { return g($v); }, [3]);
+/// prompt> [Currently in frame #2]
+/// prompt> [Switched to frame #1: {closure:%SCRATCH%/witness.php:5}(v=3) at %SCRATCH%/witness.php:5]
+/// >00005: array_map(function ($v) { return g($v); }, [3]);
+/// prompt> [No frame #3]
+/// prompt> [Switched to frame #0: g(x=3) at %SCRATCH%/witness.php:3]
+/// >00003:     return $x;
+///  00004: }
+///  00005: array_map(function ($v) { return g($v); }, [3]);
+/// prompt> [Already in frame #0]
+/// prompt>
+/// ```
+///
+/// `info vars` and `back` read the frame switched to, and a step goes
+/// on from the frame the run stopped in, the frame read again.
+///
+/// ```php
+/// function g() {
+///     return 1;
+/// }
+/// function m() {
+///     $v = 4;
+///     g();
+///     echo "m\n";
+/// }
+/// m();
+/// ```
+/// ```request phpdbg
+/// b g
+/// r
+/// frame 1
+/// i v
+/// back
+/// s
+/// frame
+/// c
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at g]
+/// prompt> [Breakpoint #0 in g() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:     return 1;
+///  00004: }
+///  00005: function m() {
+/// prompt> [Switched to frame #1: m() at %SCRATCH%/witness.php:7]
+/// >00007:     g();
+///  00008:     echo "m\n";
+///  00009: }
+/// prompt> [Variables in m() (1)]
+/// Address            Refs    Type      Variable
+/// 0x%s1       int       $v
+/// int (4)
+/// prompt> frame #0: m() at %SCRATCH%/witness.php:7
+/// frame #1: {main} at %SCRATCH%/witness.php:10
+/// prompt> >00008:     echo "m\n";
+///  00009: }
+///  00010: m();
+/// prompt> [Currently in frame #0]
+/// prompt> m
+/// [Script ended normally]
+/// prompt>
+/// ```
+fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
+    let num = here.frame_num();
+    let Some(Param::Num(asked)) = params.first() else {
+        out::notice(format!("Currently in frame #{num}").as_bytes());
+        return Ret::Success;
+    };
+    if i64::from(num) == *asked {
+        out::notice(format!("Already in frame #{asked}").as_bytes());
+        return Ret::Success;
+    }
+    let Here::Paused {
+        req,
+        frame,
+        switched,
+    } = here
+    else {
+        out::error(format!("No frame #{asked}").as_bytes());
+        return Ret::Success;
+    };
+    let stopped = switched.map_or(*frame, |switched| switched.stopped);
+    let target = u32::try_from(*asked).ok().and_then(|to| {
+        let mut at = Some(stopped);
+        for _ in 0..to {
+            at = tier::below(req, at?);
+        }
+        at.map(|at| (to, at))
+    });
+    let Some((to, target)) = target else {
+        out::error(format!("No frame #{asked}").as_bytes());
+        return Ret::Success;
+    };
+    *frame = target;
+    *switched = (to > 0).then_some(Switched { num: to, stopped });
+    let switched = format!("Switched to frame #{to}");
+    match crate::info::stackframe(req, target, to) {
+        Some(call) => out::notice(format!("{switched}: {call}").as_bytes()),
+        None => out::notice(switched.as_bytes()),
+    }
+    if let Some(position) = tier::position(req, target) {
+        crate::list::code(s, &position.file, position.line);
+    }
     Ret::Success
 }
 

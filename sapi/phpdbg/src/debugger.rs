@@ -518,7 +518,7 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
         session.context = Context::Refused;
     }
     let mut here = match standing {
-        Some((frame, _)) => Here::Paused { req, frame },
+        Some((frame, _)) => Here::paused(req, frame),
         None if session.exec.is_some() && session.context != Context::Refused => Here::Held { req },
         None => Here::Idle { req },
     };
@@ -1085,7 +1085,7 @@ fn interactive(req: &mut Request, frame: FrameRef, file: &[u8], line: u32) -> Op
     }
     let aside = tier::set_aside(req);
     let outcome = {
-        let mut here = Here::Paused { req, frame };
+        let mut here = Here::paused(req, frame);
         prompt::interactive(&mut session, &mut here)
     };
     let stopped = session.stopped.is_some();

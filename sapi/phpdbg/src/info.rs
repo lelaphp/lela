@@ -400,10 +400,91 @@ fn prototype(row: &TraceRow) -> String {
     text
 }
 
-/// `phpdbg_dump_backtrace`: a row per frame, each at the site the row
-/// before named, the first at the current one, and `{main}` last.
-pub fn backtrace(req: &mut Request, frame: FrameRef, limit: usize) {
-    let rows = shown::backtrace(req, i64::try_from(limit).unwrap_or(0));
+/// `zend_fetch_debug_backtrace` from the frame `above` frames below the
+/// innermost, as php fetches it from the frame `frame n` switched to:
+/// the chain's rows from the innermost, past each of those frames' row
+/// and the rows of the natives that called it, a row with no file
+/// being a frame a native called; `limit` of them where it is not zero.
+fn trace_from(req: &mut Request, above: u32, limit: usize) -> Vec<TraceRow> {
+    if above == 0 {
+        return shown::backtrace(req, i64::try_from(limit).unwrap_or(0));
+    }
+    let mut rows = shown::backtrace(req, 0).into_iter();
+    for _ in 0..above {
+        for row in rows.by_ref() {
+            if row.file.is_some() {
+                break;
+            }
+        }
+    }
+    match limit {
+        0 => rows.collect(),
+        limit => rows.take(limit).collect(),
+    }
+}
+
+/// `phpdbg_compile_stackframe` over `frame`, `above` frames below the
+/// innermost: the function its op array declares, with its scope, its
+/// arguments as `phpdbg_short_zval_print` writes them, each the
+/// function declares named, and where the frame stands. None for a
+/// file's own code, whose `function_name` php's `smart_str_append`
+/// faults on, which `phpdbg_try_access` catches.
+pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<String> {
+    let tier::Serves::Function { name, class } = tier::serves(req, frame) else {
+        return None;
+    };
+    let position = tier::position(req, frame)?;
+    let args = trace_from(req, above, 1)
+        .into_iter()
+        .next()
+        .map(|row| row.args)
+        .unwrap_or_default();
+    // `op_array->num_args`, the parameters before a variadic one, named
+    // as the frame's first compiled variables are, read only where an
+    // argument was passed, since the read builds the frame's table.
+    let declared = tier::frame_code(req, frame)
+        .filter(|_| !args.is_empty())
+        .map_or(0, |code| {
+            let variadic = code
+                .params
+                .checked_sub(1)
+                .and_then(|last| code.ops.get(last as usize))
+                .is_some_and(|(opcode, _)| *opcode == tier::Opcode::RecvVariadic);
+            code.params - u32::from(variadic)
+        });
+    let names: Vec<Vec<u8>> = match declared {
+        0 => Vec::new(),
+        declared => tier::variables(req, frame)
+            .into_iter()
+            .take(declared as usize)
+            .map(|(name, _)| name)
+            .collect(),
+    };
+    let args: Vec<String> = args
+        .iter()
+        .enumerate()
+        .map(|(at, arg)| match names.get(at) {
+            Some(name) => format!("{}={}", lossy(name), short(arg)),
+            None => short(arg),
+        })
+        .collect();
+    let function = match class {
+        Some(class) => format!("{}::{}", lossy(&class), lossy(&name)),
+        None => lossy(&name),
+    };
+    Some(format!(
+        "{function}({}) at {}:{}",
+        args.join(", "),
+        lossy(&position.file),
+        position.line
+    ))
+}
+
+/// `phpdbg_dump_backtrace` from the frame `frame`, `above` frames below
+/// the innermost: a row per frame, each at the site the row before
+/// named, the first at `frame`'s, and `{main}` last.
+pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
+    let rows = trace_from(req, above, limit);
     let position = tier::position(req, frame);
     let mut file = position.as_ref().map(|p| p.file.clone());
     let mut line = position.map_or(0, |p| i64::from(p.line));
