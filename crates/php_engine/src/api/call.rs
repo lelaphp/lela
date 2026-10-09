@@ -2073,7 +2073,7 @@ pub(crate) fn eval_declared_made(
     scope: Option<ClassId>,
 ) -> Result<Value, Thrown> {
     if let ConstExpr::Str(s) = expr {
-        return Ok(Value::string(req.new_interned(s)?));
+        return Ok(Value::string(req.interned(s)?));
     }
     eval_const_expr_made(req, expr, scope)
 }

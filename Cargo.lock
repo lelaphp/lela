@@ -1148,7 +1148,6 @@ dependencies = [
 name = "php_ext_session"
 version = "0.0.0"
 dependencies = [
- "libc",
  "php_ext",
  "php_ext_lexbor",
  "php_ext_standard",

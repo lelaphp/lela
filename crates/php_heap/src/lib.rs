@@ -729,6 +729,10 @@ impl Heap {
             && s.is_persistent()
         {
             string::free_persistent(s);
+        } else if z.as_resource().is_some_and(|r| !r.is_destroyed()) {
+            // A resource its owners took off the list has its bytes
+            // retired while it lives ([`Heap::resource_unlist`]): they go
+            // back with its last owner, not with a pin.
         } else if let Some(at) = counted_header(z, |header| NonNull::from(header).cast()) {
             // SAFETY: where it is retired, the block's last owner went
             // while the pin stood, its destruction is done, and the pin

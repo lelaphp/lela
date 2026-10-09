@@ -312,6 +312,30 @@ fn mysqli_commit(
 ///   int(0)
 /// }
 /// ```
+///
+/// A connection costs the request its link and mysqlnd's structures,
+/// strings and stream, and no resource for the stream, whose
+/// `zend_resource` `mysqlnd_fixup_regular_list` efrees; its close gives
+/// back all but what the link object keeps. The connection
+/// `mysqli_init` makes is persistent to mysqlnd and costs nothing more:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $m = memory_get_usage();
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// echo memory_get_usage() - $m, "\n";
+/// mysqli_close($l);
+/// echo memory_get_usage() - $m, "\n";
+/// $l = mysqli_init();
+/// $n = memory_get_usage();
+/// mysqli_real_connect($l, '127.0.0.1', 'root', '', 'test');
+/// echo memory_get_usage() - $n, "\n";
+/// ```
+/// ```expect mysql
+/// 42152
+/// 416
+/// 0
+/// ```
 #[php_function]
 fn mysqli_connect(
     req: &mut Request,

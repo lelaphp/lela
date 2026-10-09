@@ -33,18 +33,6 @@ impl Request {
         }
     }
 
-    /// `zend_new_interned_string`, what `zval_make_interned_string`
-    /// makes of a declared value: the interned string for `bytes` where
-    /// the engine or this request holds one already, a string a unit's
-    /// compilation interned among them, and one interned into the
-    /// request's otherwise, as [`Request::interned`] interns it.
-    pub(crate) fn new_interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        match self.interned_held(bytes) {
-            Some(held) => Ok(held),
-            None => self.interned(bytes),
-        }
-    }
-
     /// The interned string for `bytes` the engine's table or this
     /// request's holds, `zend_interned_string_ht_lookup` over both.
     fn interned_held(&self, bytes: &[u8]) -> Option<PhpString> {
@@ -613,12 +601,18 @@ impl Request {
         Ok(array)
     }
 
-    /// An interned string, never refcounted, for a name the engine holds
-    /// as bytes, as `zend_string_init_interned_request` answers it: the
-    /// engine's permanent one where a declaration made the name
-    /// ([`crate::engine::Shared::permanent`]), which costs the request
-    /// nothing, else this request's heap's; the `Err` is the memory
-    /// limit refusing the intern.
+    /// An interned string, never refcounted, for `bytes`, as
+    /// `zend_string_init_interned_request` and `zend_new_interned_string`
+    /// answer it: the one the engine holds already, a name its startup
+    /// interned ([`crate::engine::Shared::permanent`]) or a string a
+    /// published unit's compilation interned (design §5.2), which costs
+    /// the request nothing, else this request's own, a string a unit
+    /// compiled for it alone interned among them, interned on its first
+    /// ask; the `Err` is the memory limit refusing the intern. A published
+    /// unit's strings are opcache's shared ones, which php's lookup finds
+    /// under opcache and, for the strings php -n interns per request
+    /// rather than for every constant, without it
+    /// (`trace:immutable-literal-arrays`).
     ///
     /// A class's and a method's names are `ce->name` and
     /// `function_name`, so only the array of names is counted:
@@ -633,8 +627,8 @@ impl Request {
     /// int(216)
     /// ```
     pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        if let Some(permanent) = self.shared.permanent(bytes) {
-            return Ok(PhpString::of(permanent));
+        if let Some(held) = self.shared.existing_interned(bytes) {
+            return Ok(PhpString::of(held));
         }
         let interned = self.heap.intern(bytes);
         self.fatal_of(interned).map(PhpString::of)

@@ -1,9 +1,11 @@
-//! The process's identity, its real user and group and its supplementary
-//! groups (design §4.1, §4.4, revision 41; `unsafe.homes`): `getuid(2)`,
-//! `getgid(2)` and `getgroups(2)`, bound once for the engine and read by
-//! every extension through `api::process`. php calls them from
-//! `<unistd.h>` wherever it asks, `php_stat`'s and `phar_fancy_stat`'s
-//! permission masks and `posix_getuid` and its kin among them; the
+//! The process's identity, its real and effective user and group and its
+//! supplementary groups (design §4.1, §4.4, revision 41; `unsafe.homes`;
+//! #1132): `getuid(2)`, `geteuid(2)`, `getgid(2)`, `getegid(2)` and
+//! `getgroups(2)`, bound once for the engine and read by every extension
+//! through `api::process`. php calls them from `<unistd.h>` wherever it
+//! asks, `php_stat`'s and `phar_fancy_stat`'s permission masks,
+//! `ps_files_open`'s ownership rule and `posix_getuid` and its kin among
+//! them; the
 //! standard library does not read them, and `nix` has no `getgroups` on
 //! Apple's targets. Each is a call that reads the process and writes
 //! nothing of it, safe from any thread.
@@ -17,11 +19,25 @@ pub fn uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// `geteuid()`: the process's effective user id.
+#[must_use]
+pub fn euid() -> u32 {
+    // SAFETY: `geteuid` takes nothing, cannot fail and writes nothing.
+    unsafe { libc::geteuid() }
+}
+
 /// `getgid()`: the process's real group id.
 #[must_use]
 pub fn gid() -> u32 {
     // SAFETY: `getgid` takes nothing, cannot fail and writes nothing.
     unsafe { libc::getgid() }
+}
+
+/// `getegid()`: the process's effective group id.
+#[must_use]
+pub fn egid() -> u32 {
+    // SAFETY: `getegid` takes nothing, cannot fail and writes nothing.
+    unsafe { libc::getegid() }
 }
 
 /// `getgroups(0, NULL)` and then `getgroups(n, list)`: the process's

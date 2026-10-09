@@ -154,7 +154,7 @@ pub(crate) struct Settings {
 /// Warning: openssl_pkey_new(): Unknown elliptic curve (short) name nope in %s on line 6
 /// bool(false)
 ///
-/// Warning: openssl_csr_new(): Error loading extensions_section section nope of /opt/homebrew/etc/openssl@3/openssl.cnf in %s on line 8
+/// Warning: openssl_csr_new(): Error loading extensions_section section nope of %s/openssl.cnf in %s on line 8
 /// bool(false)
 /// ```
 pub(crate) fn parse(req: &mut Request, options: Option<PhpArray>) -> Option<Settings> {

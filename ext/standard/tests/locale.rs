@@ -93,3 +93,29 @@ fn two_requests_at_once_never_read_each_other_s_locale() {
     assert_eq!(c, "3.14|C/C.UTF-8/C/C/C/C|B<a|3.14");
     assert_eq!(after, "3.14|C/C.UTF-8/C/C/C/C");
 }
+
+/// `setlocale(LC_ALL, "")` under an environment naming a locale the C
+/// library refuses answers `false` and moves no category, as php built
+/// without libintl does:
+/// the engine's side of `trace:setlocale-libintl-fallback` (#1126), where
+/// the pinned oracle's libintl answers `C/UTF-8/C/C/C/C` from its own
+/// fallback and the machine's language settings. A witness cannot hold
+/// it, since a fence is held to the oracle's bytes; the row is the
+/// accepted difference, and this test is what turns red if the engine's
+/// answer moves.
+#[test]
+fn an_environment_locale_the_c_library_refuses_fails_setlocale() {
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+        ])
+        .build();
+    let answered = served(
+        &engine,
+        r#"<?php $before = setlocale(LC_ALL, "0"); putenv("LC_ALL="); putenv("LANG=xx_XX");
+        var_dump(setlocale(LC_ALL, ""), setlocale(LC_ALL, "0") === $before);"#,
+    );
+    assert_eq!(answered, "bool(false)\nbool(true)\n");
+}

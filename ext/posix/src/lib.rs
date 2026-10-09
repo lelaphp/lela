@@ -36,8 +36,8 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::sys::stat::{Mode, SFlag, mknod};
 use nix::unistd::{
-    AccessFlags, Gid, Group, Pid, Uid, User, access, getegid, geteuid, getpgid, getpgrp, getpid,
-    getppid, getsid, mkfifo, setegid, seteuid, setgid, setpgid, setsid, setuid,
+    AccessFlags, Gid, Group, Pid, Uid, User, access, getpgid, getpgrp, getpid, getppid, getsid,
+    mkfifo, setegid, seteuid, setgid, setpgid, setsid, setuid,
 };
 
 use php_ext::abi::{Extension, ExtensionBuilder, OrFalse, Untyped};
@@ -388,7 +388,7 @@ fn posix_setuid(req: &mut Request, user_id: i64) -> bool {
     }
 }
 
-/// `posix_geteuid(): int`: `geteuid(2)`.
+/// `posix_geteuid(): int`: `geteuid(2)`, the engine's (`php_ext::process`).
 ///
 /// ```php
 /// var_dump(posix_geteuid() === posix_getuid());
@@ -398,7 +398,7 @@ fn posix_setuid(req: &mut Request, user_id: i64) -> bool {
 /// ```
 #[php_function]
 fn posix_geteuid() -> i64 {
-    i64::from(geteuid().as_raw())
+    i64::from(process::euid())
 }
 
 /// `posix_seteuid(int $user_id): bool`: `seteuid(2)`.
@@ -448,7 +448,7 @@ fn posix_setgid(req: &mut Request, group_id: i64) -> bool {
     }
 }
 
-/// `posix_getegid(): int`: `getegid(2)`.
+/// `posix_getegid(): int`: `getegid(2)`, the engine's (`php_ext::process`).
 ///
 /// ```php
 /// var_dump(posix_getegid() === posix_getgid());
@@ -458,7 +458,7 @@ fn posix_setgid(req: &mut Request, group_id: i64) -> bool {
 /// ```
 #[php_function]
 fn posix_getegid() -> i64 {
-    i64::from(getegid().as_raw())
+    i64::from(process::egid())
 }
 
 /// `posix_setegid(int $group_id): bool`: `setegid(2)`.
