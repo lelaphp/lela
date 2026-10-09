@@ -187,6 +187,15 @@ impl Frame {
             .map(|cell| ZvalRef::new(NonNull::from(cell)))
     }
 
+    /// Every slot in place, php's `EX_VAR` base: the CVs, then the
+    /// temporaries past them. What a handler's inline path reads its
+    /// operands from and writes its temporary into with one lookup of the
+    /// frame for all three, as php's handler indexes off `execute_data`
+    /// in a register (design §5.8).
+    pub fn slots_mut(&mut self) -> &mut [Zval] {
+        self.cells_mut()
+    }
+
     fn cells(&self) -> &[Zval] {
         // SAFETY: the frame's `len` slots at `at` are inside a page of
         // the heap, written `UNDEF` by the push and live until the frame

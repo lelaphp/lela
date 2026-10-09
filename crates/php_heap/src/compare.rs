@@ -103,10 +103,10 @@ impl Scalar<'_> {
 #[must_use]
 pub fn compare(left: Scalar, right: Scalar, precision: i32) -> Ordering {
     match (left, right) {
-        (Scalar::Long(a), Scalar::Long(b)) => a.cmp(&b),
-        (Scalar::Long(a), Scalar::Double(b)) => three_way(Number::Long(a).double(), b),
-        (Scalar::Double(a), Scalar::Long(b)) => three_way(a, Number::Long(b).double()),
-        (Scalar::Double(a), Scalar::Double(b)) => three_way(a, b),
+        (Scalar::Long(a), Scalar::Long(b)) => Number::Long(a).compare(Number::Long(b)),
+        (Scalar::Long(a), Scalar::Double(b)) => Number::Long(a).compare(Number::Double(b)),
+        (Scalar::Double(a), Scalar::Long(b)) => Number::Double(a).compare(Number::Long(b)),
+        (Scalar::Double(a), Scalar::Double(b)) => Number::Double(a).compare(Number::Double(b)),
         (Scalar::Null | Scalar::Bool(false), Scalar::Null | Scalar::Bool(false))
         | (Scalar::Bool(true), Scalar::Bool(true)) => Ordering::Equal,
         (Scalar::Null, Scalar::Bool(true)) => Ordering::Less,
@@ -185,20 +185,10 @@ pub fn compare(left: Scalar, right: Scalar, precision: i32) -> Ordering {
     }
 }
 
-/// `ZEND_THREEWAY_COMPARE` over two doubles: equal, less, else greater,
-/// which is where a NAN lands whichever side it is on.
-#[expect(
-    clippy::float_cmp,
-    reason = "php's `(a) == (b)`, the exact equality being copied"
-)]
+/// `ZEND_THREEWAY_COMPARE` over two doubles, which [`Number::compare`]
+/// holds.
 fn three_way(a: f64, b: f64) -> Ordering {
-    if a == b {
-        Ordering::Equal
-    } else if a < b {
-        Ordering::Less
-    } else {
-        Ordering::Greater
-    }
+    Number::Double(a).compare(Number::Double(b))
 }
 
 /// `zendi_smart_strcmp` (`Z/Zend/zend_operators.c:3421`): two numeric

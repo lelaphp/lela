@@ -34,7 +34,7 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
-use php_ext_dom::XPathCallbacks;
+use php_ext_dom::{CallbacksAt, XPathCallbacks};
 use php_ext_libxml::ffi::{ClassType, Kind, Node, NodeObject, Ns, Raised, Route};
 use php_ext_libxml::{Errors, import_node};
 
@@ -148,7 +148,7 @@ fn class_name(req: &Request, class: ClassId) -> String {
 /// the profile's path.
 #[derive(Default)]
 pub(crate) struct Intern {
-    sheet: Option<ffi::Stylesheet>,
+    sheet: Option<ffi::Sheet>,
     has_keys: bool,
     params: Vec<(Vec<u8>, Vec<u8>)>,
     security: i64,
@@ -207,8 +207,10 @@ impl ObjectHandlers for Handlers {
     /// `xsl_objects_free_storage`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if let Some(i) = intern(req, object) {
-            let callbacks = std::mem::take(&mut i.callbacks);
-            i.sheet = None;
+            let (sheet, callbacks) = (i.sheet.take(), std::mem::take(&mut i.callbacks));
+            if let Some(sheet) = sheet {
+                sheet.close(req);
+            }
             callbacks.release(req);
         }
         Std.free_obj(req, object);
@@ -379,71 +381,68 @@ fn routed(mut raised: Vec<Raised>) -> Vec<Raised> {
 
 // ---- the transformation
 
-/// `php_xsl_apply_stylesheet`: the document made, the caller's, or
-/// `None` where libxslt made none; the stylesheet stays taken off the
-/// object for the caller to save with and hand back through [`restore`].
-fn apply(
+/// `php_xsl_apply_stylesheet`, then `finish` with the document made,
+/// the caller's, or `None` where libxslt made none, and the stylesheet
+/// to save it with. The stylesheet stays on the object and is held for
+/// the whole span (ADR-0013), so a callback's nested transformation runs
+/// with it and one that imports another leaves the old one's free to
+/// the end of this one, saving included (#2319).
+fn apply<R>(
     req: &mut Request,
     this: PhpObject,
     document: PhpObject,
     method: &str,
-) -> Result<(ffi::Stylesheet, Option<Node>), Thrown> {
+    finish: impl for<'h> FnOnce(&mut Request, ffi::Compiled<'h>, Option<Node>) -> Result<R, Thrown>,
+) -> Result<R, Thrown> {
     let exported = import_node(req, document);
     let Some((exported, doc)) = exported.and_then(|e| e.node().doc().map(|d| (e, d))) else {
         return Err(arg_type_error(req, 1, "be a valid XML node"));
     };
-    let Some(sheet) = intern(req, this).and_then(|i| i.sheet.take()) else {
+    let held = intern(req, this).and_then(|i| {
+        let id = i.sheet.as_ref()?.id();
+        let read = (
+            i.has_keys,
+            i.params.clone(),
+            i.security,
+            i.profiling.clone(),
+        );
+        Some((id, read))
+    });
+    let Some((id, (has_keys, params, security, profiling))) = held else {
         let message = format!(
             "XSLTProcessor::{method}() can only be called after a stylesheet has been imported"
         );
         return Err(throw_error(req, "Error", &message));
     };
-    let Some(i) = intern(req, this) else {
-        return Ok((sheet, None));
-    };
-    let (has_keys, params, security) = (i.has_keys, i.params.clone(), i.security);
-    let (mut callbacks, profiling) = (std::mem::take(&mut i.callbacks), i.profiling.clone());
     let profile = profiling.filter(|p| req.check_open_basedir(p, true).is_ok());
-    let mut holder = NodeObject::default();
-    let doc = if has_keys {
-        let copy = doc.copy_doc(true).unwrap_or(doc);
-        holder.adopt_document(req, copy);
-        copy
-    } else {
-        holder.share(req, exported.document(), doc);
-        doc
-    };
-    let state = State {
-        doc,
-        holder: &holder,
-        params: &params,
-        security,
-        profile: profile.as_deref(),
-    };
-    let answer = transform(req, this, &sheet, &state, &mut callbacks);
-    callbacks.clean_node_list(req);
-    if let Some(i) = intern(req, this) {
-        let meanwhile = std::mem::replace(&mut i.callbacks, callbacks);
-        meanwhile.release(req);
-    }
-    holder.decrement_doc_ref(req);
-    match answer {
-        Ok(result) => Ok((sheet, result)),
-        Err(thrown) => {
-            restore(req, this, sheet);
-            Err(thrown)
-        }
-    }
-}
-
-/// The stylesheet handed back to its object, unless a program's code
-/// imported another meanwhile.
-fn restore(req: &mut Request, this: PhpObject, sheet: ffi::Stylesheet) {
-    if let Some(i) = intern(req, this)
-        && i.sheet.is_none()
-    {
-        i.sheet = Some(sheet);
-    }
+    let answer = id.held(req, |req, sheet| {
+        let mut holder = NodeObject::default();
+        let doc = if has_keys {
+            let copy = doc.copy_doc(true).unwrap_or(doc);
+            holder.adopt_document(req, copy);
+            copy
+        } else {
+            holder.share(req, exported.document(), doc);
+            doc
+        };
+        let state = State {
+            doc,
+            holder: &holder,
+            params: &params,
+            security,
+            profile: profile.as_deref(),
+        };
+        let made = transform(req, this, sheet, &state);
+        at(this).clean_node_list(req);
+        holder.decrement_doc_ref(req);
+        finish(req, sheet, made?)
+    });
+    answer.unwrap_or_else(|| {
+        let message = format!(
+            "XSLTProcessor::{method}() can only be called after a stylesheet has been imported"
+        );
+        Err(throw_error(req, "Error", &message))
+    })
 }
 
 /// What one transformation reads off its object.
@@ -460,9 +459,8 @@ struct State<'a> {
 fn transform(
     req: &mut Request,
     this: PhpObject,
-    sheet: &ffi::Stylesheet,
+    sheet: ffi::Compiled<'_>,
     state: &State<'_>,
-    callbacks: &mut XPathCallbacks,
 ) -> Result<Option<Node>, Thrown> {
     let doc = state.doc;
     let Some(mut ctxt) = ffi::Transform::new(sheet, doc) else {
@@ -489,7 +487,8 @@ fn transform(
     let vars = read_int(req, this, b"maxTemplateVars")?;
     ctxt.set_limits(xinclude_on, depth, vars);
     let secured = ctxt.secure(state.security);
-    for (ns, name) in callbacks.registered() {
+    let registered = intern(req, this).map(|i| i.callbacks.registered());
+    for (ns, name) in registered.unwrap_or_default() {
         ctxt.register(&ns, &name);
     }
     if !secured {
@@ -509,8 +508,9 @@ fn transform(
         };
         php_ext_dom::create_object_in(req, node, state.holder)
     };
+    let at = at(this);
     let mut handler = |req: &mut Request, called, operands| {
-        callbacks.call(req, called, operands, modern, &mut proxy)
+        XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
     };
     let (result, raised, thrown) = ctxt.apply(req, state.profile, &mut handler);
     Errors::route(req, routed(raised));
@@ -574,7 +574,18 @@ fn compatible(req: &mut Request, class: ClassId, of: ClassId) -> Result<bool, Th
     Ok(false)
 }
 
-/// The callbacks taken off the object for `f`, and put back after.
+/// Where `this` keeps its callbacks, which a transformation reaches at
+/// each call it serves, so a callback's own registration on the
+/// processor is the one the rest of the transformation sees (#2319).
+fn at(this: PhpObject) -> CallbacksAt {
+    CallbacksAt {
+        object: this,
+        reach: |req, object| intern(req, object).map(|i| &mut i.callbacks),
+    }
+}
+
+/// The callbacks taken off the object for `f`, a registration that can
+/// call PHP code, and put back after, in place of any laid meanwhile.
 fn with_callbacks<R>(
     req: &mut Request,
     this: PhpObject,
@@ -584,8 +595,9 @@ fn with_callbacks<R>(
         .map(|i| std::mem::take(&mut i.callbacks))
         .unwrap_or_default();
     let answer = f(req, &mut callbacks);
-    if let Some(i) = intern(req, this) {
-        i.callbacks = callbacks;
+    match intern(req, this) {
+        Some(i) => std::mem::replace(&mut i.callbacks, callbacks).release(req),
+        None => callbacks.release(req),
     }
     answer
 }
@@ -665,9 +677,16 @@ impl XSLTProcessor {
         let clone = Std.read_property(req, this, b"cloneDocument", PropertyRead::Warning)?;
         let has_keys = truthy(req, &clone) || sheet.doc().is_some_and(declares_keys);
         clone.give_up(req);
-        if let Some(i) = intern(req, this) {
-            i.has_keys = has_keys;
-            i.sheet = Some(sheet);
+        let sheet = ffi::Sheet::adopt(req, sheet);
+        let replaced = match intern(req, this) {
+            Some(i) => {
+                i.has_keys = has_keys;
+                i.sheet.replace(sheet)
+            }
+            None => Some(sheet),
+        };
+        if let Some(old) = replaced {
+            old.close(req);
         }
         Ok(true)
     }
@@ -733,8 +752,7 @@ impl XSLTProcessor {
             }
             None => None,
         };
-        let (sheet, result) = apply(req, this, document, "transformToDoc")?;
-        restore(req, this, sheet);
+        let result = apply(req, this, document, "transformToDoc", |_, _, made| Ok(made))?;
         let Some(result) = result else {
             return Ok(OrFalse::False);
         };
@@ -786,17 +804,14 @@ impl XSLTProcessor {
         uri: Path,
     ) -> Result<i64, Thrown> {
         let this = this.object();
-        let (sheet, result) = apply(req, this, document, "transformToUri")?;
-        let mut written = -1;
-        let mut failure = Ok(());
-        if let Some(result) = result {
+        apply(req, this, document, "transformToUri", |req, sheet, made| {
+            let Some(result) = made else {
+                return Ok(-1);
+            };
             let (n, raised, thrown) = sheet.save_to_file(req, uri.0.as_bytes(), result);
             result.free_document();
-            written = n;
-            failure = Errors::settle(req, raised, thrown);
-        }
-        restore(req, this, sheet);
-        failure.map(|()| written)
+            Errors::settle(req, raised, thrown).map(|()| n)
+        })
     }
 
     /// `transformToXml`: the document made, serialised as its `xsl:output` says,
@@ -821,6 +836,35 @@ impl XSLTProcessor {
     /// "
     /// NULL
     /// ```
+    ///
+    /// The stylesheet and the callbacks stay on the processor while it
+    /// transforms, so a callback transforms with it again, and what it
+    /// registers holds for the rest of the transformation and after
+    /// (#2319).
+    ///
+    /// ```php
+    /// $xsl = new DOMDocument;
+    /// $xsl->loadXML('<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:php="http://php.net/xsl"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="php:function(\'inner\', string(/r))"/>|<xsl:value-of select="php:function(\'strrev\', string(/r))"/></xsl:template></xsl:stylesheet>');
+    /// $doc = new DOMDocument;
+    /// $doc->loadXML('<r>xy</r>');
+    /// $p = new XSLTProcessor;
+    /// $p->registerPHPFunctions(['inner']);
+    /// $p->importStylesheet($xsl);
+    /// $depth = 0;
+    /// function inner($s) {
+    ///     global $p, $doc, $depth;
+    ///     if ($depth++) return "deep";
+    ///     $p->registerPHPFunctions(['strrev']);
+    ///     var_dump($p->transformToXml($doc));
+    ///     return "in:$s";
+    /// }
+    /// var_dump($p->transformToXml($doc), $p->transformToXml($doc));
+    /// ```
+    /// ```expect
+    /// string(7) "deep|yx"
+    /// string(8) "in:xy|yx"
+    /// string(7) "deep|yx"
+    /// ```
     #[php(tentative)]
     fn transformToXml(
         req: &mut Request,
@@ -828,14 +872,14 @@ impl XSLTProcessor {
         document: PhpObject,
     ) -> Result<Option<OrFalse<Owner<PhpString>>>, Thrown> {
         let this = this.object();
-        let (sheet, result) = apply(req, this, document, "transformToXml")?;
-        let saved = result.map(|r| {
-            let saved = sheet.save_to_string(r);
-            r.free_document();
-            saved
-        });
-        restore(req, this, sheet);
-        match saved.flatten() {
+        let saved = apply(req, this, document, "transformToXml", |_, sheet, made| {
+            Ok(made.and_then(|r| {
+                let saved = sheet.save_to_string(r);
+                r.free_document();
+                saved
+            }))
+        })?;
+        match saved {
             None => Ok(Some(OrFalse::False)),
             Some(bytes) if bytes.is_empty() => Ok(None),
             Some(bytes) => Ok(Some(OrFalse::Value(PhpString::new(req, &bytes)?))),

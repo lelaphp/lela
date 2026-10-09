@@ -28,7 +28,7 @@ pub(crate) use every::PerReading;
 use crate::api_check::{self, lock::Lock};
 use crate::cli::{Format, Section};
 use crate::crosscheck;
-use crate::divergence::{Counts, Kind, Registry, Status};
+use crate::divergence::{Counts, Registry, Retires, Status};
 use crate::git::git;
 use crate::layout;
 use crate::manifest::{LockCeiling, Manifest, Measure, SCRIPTS, Seam, Week};
@@ -166,7 +166,7 @@ pub fn render(
             fold_uncreated(budget(manifest, &readings), "crate")?,
             BUDGET,
         ),
-        Section::Divergence => return divergence(registry, format, uncut),
+        Section::Divergence => return divergence(manifest, registry, format, uncut),
         Section::Phpt => {
             let rows = standing(against.checkout()?, root)?
                 .into_iter()
@@ -447,10 +447,26 @@ pub(crate) fn local_template() -> String {
 const EVERY_ROW: &str = "Every row with its reason whole: \
 `cargo xtask status --section divergence --uncut`, which `docs/divergence.md` renders.";
 
-/// What the divergence section says under its counts when a kind that is
-/// not parity debt has rows: that the total leaves them out (#2220).
-const APART: &str = "The total is the parity rows, what the day-30 target of under 20 reads; \
-a `php-ub` row records php's undefined behaviour or crash and is counted on its own line after it.";
+/// What the divergence section says under its counts when a cause other
+/// than debt has rows: that the total leaves them out (#2220, #2462).
+const APART: &str = "A row of another cause is counted on its own line after the total: \
+`php-ub` records php's undefined behaviour or crash, `by-design` a difference the design or an ADR \
+chose, `oracle-build` one of the oracle's build until what its `retires` names.";
+
+/// What the divergence section says of the total: the debt rows, against
+/// the manifest's `[divergence] target`, or that the manifest names none.
+fn against_target(manifest: &Manifest) -> String {
+    match &manifest.divergence {
+        Some(table) => format!(
+            "The total is the debt rows, held to the day-30 target of under {} \
+             (`[divergence] target` in seams.toml).",
+            table.target
+        ),
+        None => "The total is the debt rows; seams.toml has no `[divergence] target`, \
+                 which a person writes, so they are held to none."
+            .to_owned(),
+    }
+}
 
 /// The widest a reading's message renders in a Markdown cell, in
 /// characters. A Markdown table is what a session scans, and the local
@@ -721,19 +737,24 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 }
 
 /// The divergence section: the registry's rows, a covering row's id with
-/// how many ids it covers beside its own, then counts by kind (rows) and status (columns)
-/// with a total, a covering row counted once. The total is the parity
-/// rows', what the day-30 target reads, and a kind that is not parity
-/// debt (`php-ub`, #2220) is counted on its own line after it. It reads no
-/// reading; the registry is the truth and this is its view
-/// (harness-design.md §4.3).
+/// how many ids it covers beside its own, then counts by kind (rows) and
+/// status (columns) of the debt rows with their total, a covering row
+/// counted once, and a line per other cause after it (#2462). The total is
+/// what the day-30 target reads, held to the manifest's `[divergence]
+/// target`. It reads no reading; the registry is the truth and this is its
+/// view (harness-design.md §4.3).
 ///
 /// Under `uncut` the rows are every row with its reason whole, which is
 /// what `docs/divergence.md` renders. Without it they are the `open` rows
 /// alone, since `done` fails while one touches the scope, followed by the
 /// command that reads the rest: the local facts carry this, and it grows
 /// with the kinds and not with each accepted row (#821).
-fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String> {
+fn divergence(
+    manifest: &Manifest,
+    registry: &Registry,
+    format: Table,
+    uncut: bool,
+) -> Result<String> {
     let counts = registry.counts();
     match format {
         Table::Json => {
@@ -744,6 +765,8 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                     json!({
                         "id": r.id,
                         "kind": r.kind.as_str(),
+                        "cause": r.cause.as_str(),
+                        "retires": r.retires.map(Retires::as_str),
                         "status": r.status.as_str(),
                         "since": r.since,
                         "covers": r.covers,
@@ -751,22 +774,29 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                     })
                 })
                 .collect();
-            let mut by_kind = Map::new();
-            for kind in kinds(&counts) {
-                let cells: Map<String, Value> = Status::ALL
-                    .into_iter()
-                    .map(|s| (s.as_str().to_owned(), json!(counts.cell(kind, s))))
-                    .collect();
-                by_kind.insert(kind.as_str().to_owned(), Value::Object(cells));
+            let cells = |of: &dyn Fn(Status) -> u64| -> Value {
+                Value::Object(
+                    Status::ALL
+                        .into_iter()
+                        .map(|s| (s.as_str().to_owned(), json!(of(s))))
+                        .collect(),
+                )
+            };
+            let mut lines = Map::new();
+            for kind in counts.debt_kinds() {
+                lines.insert(kind.as_str().to_owned(), cells(&|s| counts.debt(kind, s)));
             }
-            let total: Map<String, Value> = Status::ALL
-                .into_iter()
-                .map(|s| (s.as_str().to_owned(), json!(counts.parity(s))))
-                .collect();
-            by_kind.insert("total".to_owned(), Value::Object(total));
+            lines.insert("total".to_owned(), cells(&|s| counts.total(s)));
+            for cause in counts.apart() {
+                lines.insert(
+                    cause.as_str().to_owned(),
+                    cells(&|s| counts.of(cause, None, s)),
+                );
+            }
             Ok(serde_json::to_string_pretty(&json!({
                 "rows": rows,
-                "counts": by_kind,
+                "counts": lines,
+                "target": manifest.divergence.as_ref().map(|d| d.target),
             }))?)
         }
         Table::Md => {
@@ -778,8 +808,8 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                 .collect();
             let reason: fn(&str) -> String = if uncut { cell } else { clipped };
             if !shown.is_empty() {
-                writeln!(out, "| id | kind | status | since | reason |").ok();
-                writeln!(out, "|---|---|---|---|---|").ok();
+                writeln!(out, "| id | kind | cause | status | since | reason |").ok();
+                writeln!(out, "|---|---|---|---|---|---|").ok();
             }
             for row in &shown {
                 let id = match row.covers.len() {
@@ -788,8 +818,9 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                 };
                 writeln!(
                     out,
-                    "| {id} | {} | {} | {} | {} |",
+                    "| {id} | {} | {} | {} | {} | {} |",
                     row.kind.as_str(),
+                    row.cause.as_str(),
                     row.status.as_str(),
                     row.since,
                     reason(&row.reason),
@@ -800,6 +831,10 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                 writeln!(out).ok();
             }
             counts_table(&counts, &mut out);
+            writeln!(out, "\n{}", against_target(manifest)).ok();
+            if !counts.apart().is_empty() {
+                writeln!(out, "\n{APART}").ok();
+            }
             if !uncut {
                 writeln!(out, "\n{EVERY_ROW}").ok();
             }
@@ -808,16 +843,9 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
     }
 }
 
-/// The kinds the registry has a row of, in the registry's order.
-fn kinds(counts: &Counts) -> impl Iterator<Item = Kind> + '_ {
-    Kind::ALL
-        .into_iter()
-        .filter(|k| counts.by_kind.contains_key(k))
-}
-
-/// The divergence section's counts: a line per parity kind the registry
-/// has, the total of those, which the day-30 target reads, then a line per
-/// kind counted apart from it and the sentence saying so (#2220).
+/// The divergence section's counts: a line per kind a debt row is of, the
+/// total of those, which the day-30 target reads, then a line per other
+/// cause a row is of (#2220, #2462).
 fn counts_table(counts: &Counts, out: &mut String) {
     let line = |out: &mut String, name: &str, of: &dyn Fn(Status) -> u64| {
         let rows: u64 = Status::ALL.into_iter().map(of).sum();
@@ -830,18 +858,14 @@ fn counts_table(counts: &Counts, out: &mut String) {
         )
         .ok();
     };
-    let (parity, apart): (Vec<Kind>, Vec<Kind>) = kinds(counts).partition(|k| k.is_parity());
-    writeln!(out, "| kind | open | accepted | fixed | rows |").ok();
+    writeln!(out, "| kind or cause | open | accepted | fixed | rows |").ok();
     writeln!(out, "|---|---|---|---|---|").ok();
-    for kind in parity {
-        line(out, kind.as_str(), &|s| counts.cell(kind, s));
+    for kind in counts.debt_kinds() {
+        line(out, kind.as_str(), &|s| counts.debt(kind, s));
     }
-    line(out, "total", &|s| counts.parity(s));
-    for kind in &apart {
-        line(out, kind.as_str(), &|s| counts.cell(*kind, s));
-    }
-    if !apart.is_empty() {
-        writeln!(out, "\n{APART}").ok();
+    line(out, "total", &|s| counts.total(s));
+    for cause in counts.apart() {
+        line(out, cause.as_str(), &|s| counts.of(cause, None, s));
     }
 }
 

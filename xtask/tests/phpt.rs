@@ -1063,8 +1063,11 @@ struct Made {
 
 /// Wait for the test's program to print its pid and the private queues
 /// that appeared between its two reads of `ipcs -q` at `started`, read
-/// its objects off the machine, have `perl` make a private segment and a
-/// keyed queue, and mark `made` so the program ends. The wait for
+/// its objects off the machine, have `perl` make a keyed segment and a
+/// keyed queue, and mark `made` so the program ends. The segment is keyed
+/// since a private one whose creator is gone is any reclaim's on the
+/// machine to take (`sysv::abandoned`, #2115), a System V subset's run
+/// beside this one among them (#2448). The wait for
 /// `started` is the recipe's limit, 60 s, past which the program is gone
 /// anyway: it covers the run's start and the program's, which took 1.4 s
 /// to 3.0 s at a load average of 70 and outgrew the 5 s it had beside the
@@ -1110,7 +1113,7 @@ fn made_while_it_runs(started: &Path, made: &Path, stood: &[Ipc]) -> Made {
     let perl = Command::new("perl")
         .args([
             "-e",
-            "use IPC::SysV qw(IPC_PRIVATE IPC_CREAT); print shmget(IPC_PRIVATE, 64, IPC_CREAT | 0600), ' ', msgget(0x5b000000 + $$, IPC_CREAT | 0600)",
+            "use IPC::SysV qw(IPC_CREAT); print shmget(0x5b100000 + $$, 64, IPC_CREAT | 0600), ' ', msgget(0x5b000000 + $$, IPC_CREAT | 0600)",
         ])
         .output()
         .unwrap();
@@ -1217,6 +1220,113 @@ fn a_run_removes_the_system_v_objects_its_tests_leave_and_nothing_else() {
         after.iter().any(|o| o.kind == "q" && o.id == keyed),
         "the keyed queue perl made, {keyed}, was removed"
     );
+}
+
+/// A System V subset's run killed before its sweep leaves its claim, and
+/// the next System V subset's run removes what the killed one's tests
+/// left and names it in its reading (#2448): here a private queue of
+/// mode 0600 nobody sends to, naming no process, as php's
+/// `msg_get_queue(0)` leaves one, made by a test of `ext/sysvmsg` that
+/// then hangs; the run is killed, and the test's php with it, both
+/// processes this test started. The runs take their temporary directory
+/// apart, so the claims directory is theirs alone and no other run's
+/// reclaim takes the claim first; another run's sweep on the machine may
+/// still take the queue itself, which this test then cannot name.
+#[test]
+fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
+    if oracle().is_none() {
+        return;
+    }
+    if let Some(why) = ipcs_readable() {
+        eprintln!("skipped: {why}");
+        return;
+    }
+    let tree = OneTree::new("sysv-killed");
+    let dir = tree.corpus.join("ext/sysvmsg/tests");
+    fs::create_dir_all(&dir).unwrap();
+    let marks = Tree::new("phpt-sysv-killed-marks").unwrap();
+    let started = marks.join("started");
+    fs::write(
+        dir.join("leaves.phpt"),
+        format!(
+            "--TEST--\nleaves a private queue and hangs\n--FILE--\n<?php\n$private = fn() => preg_grep('/^q\\s+\\d+\\s+0x00000000\\s/', explode(\"\\n\", shell_exec('ipcs -q')));\n$stood = $private();\n$q = msg_get_queue(0, 0600);\n$new = array_map(fn($line) => preg_split('/\\s+/', $line)[1], array_diff($private(), $stood));\nfile_put_contents('{}', getmypid() . ' ' . implode(' ', $new));\nsleep(50);\n--EXPECT--\n",
+            started.display()
+        ),
+    )
+    .unwrap();
+    let tmp = Tree::new("phpt-sysv-killed-tmp").unwrap();
+    let claims = tmp.join("xtask-sysv-claims");
+    let checkout = OneTree::checkout("sysv-killed");
+    let run = || {
+        let mut command = tree.command(&checkout, "ext/sysvmsg");
+        command.env("TMPDIR", tmp.path());
+        command
+    };
+    let mut killed = run().spawn().unwrap();
+    let mut printed = String::new();
+    for _ in 0..6000 {
+        printed = fs::read_to_string(&started).unwrap_or_default();
+        if !printed.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    killed.kill().unwrap();
+    killed.wait().unwrap();
+    let mut words = printed.split_whitespace();
+    let pid = words.next().expect("the test printed its pid");
+    Command::new("kill").args(["-9", pid]).status().unwrap();
+    let appeared: Vec<&str> = words.collect();
+    let left: Vec<PathBuf> = fs::read_dir(&claims)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(left.len(), 1, "the killed run left its claim: {left:?}");
+    // Its journal names each program as it started, the test's own among
+    // them, and its last write bounds the window the next run takes.
+    let journal = fs::read_to_string(&left[0]).unwrap();
+    assert!(
+        journal
+            .lines()
+            .any(|line| line.starts_with("started ") && line.ends_with(&format!(" {pid}"))),
+        "the claim names the test's program {pid}: {journal}"
+    );
+    fs::write(
+        dir.join("leaves.phpt"),
+        "--TEST--\nquick\n--FILE--\n<?php echo 'quick';\n--EXPECT--\nquick\n",
+    )
+    .unwrap();
+    let out = run().output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let reading = xtask::reading::Store::of_workspace(checkout.path())
+        .read("phpt", "ext/sysvmsg")
+        .unwrap()
+        .expect("the second run's reading");
+    assert!(
+        fs::read_dir(&claims).unwrap().next().is_none(),
+        "the next run took the claim"
+    );
+    let standing = ipcs();
+    let [queue] = appeared.as_slice() else {
+        eprintln!("the queue is not told apart: {appeared:?}");
+        return;
+    };
+    assert!(
+        !standing.iter().any(|o| o.kind == "q" && o.id == *queue),
+        "the queue {queue} the killed run's test left stands"
+    );
+    let named = "before the run, of what runs cut off left, removed";
+    if reading.message.contains(named) {
+        assert!(
+            reading.message.contains(queue) && count(&reading, "sysv_removed") >= 1,
+            "{reading:#?}"
+        );
+    } else {
+        eprintln!(
+            "another run's sweep took the queue {queue} first: {}",
+            reading.message
+        );
+    }
 }
 
 /// On Linux, a run where no private IPC namespace is in play still removes

@@ -355,6 +355,41 @@ fn render_ruled(name: &str) -> (Tree, xtask::manifest::Rule) {
     (root, manifest.rule("ext.no-locks").unwrap().clone())
 }
 
+/// A clippy rule's scope decides the files it lands in, and the
+/// `generated` row names files and no rule (#2473): a rule added under
+/// `ext/*` lands in `ext/clippy.toml`, beside the ruled row's lists and
+/// named in the header, with the row unchanged.
+#[test]
+fn a_rule_added_under_ext_lands_in_ext_clippy_toml_without_naming_the_file() {
+    let fixture = ruled_fixture();
+    let text = std::fs::read_to_string(fixture.join("seams.toml")).unwrap();
+    assert!(text.contains("generated = [\"ext/clippy.toml\"]"), "{text}");
+    let added = format!(
+        "{text}\n[[rule]]\nid = \"fixture.no-cells\"\nscope = \"ext/*\"\ndeny_types = [\"std::cell::RefCell\"]\ntext = \"No RefCell in ext/* (fixture).\"\n"
+    );
+    let manifest = Manifest::parse(&added).unwrap();
+    let root = scratch("added-rule");
+    std::fs::copy(fixture.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let written = generated::write_all(&root, &manifest).unwrap();
+    assert_eq!(written, [root.join("ext/clippy.toml")]);
+    let rendered = std::fs::read_to_string(&written[0]).unwrap();
+    assert!(
+        rendered.contains(
+            "{ path = \"std::cell::RefCell\", reason = \"No RefCell in ext/* (fixture).\" }"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered
+            .lines()
+            .next()
+            .unwrap()
+            .contains("fixture.no-cells")
+            && rendered.lines().next().unwrap().contains("ext.no-locks"),
+        "the header names every rule the file carries: {rendered}"
+    );
+}
+
 /// `deny_macros` renders to `disallowed-macros` beside `deny_types`'
 /// `disallowed-types`, each row with the rule's text and ADR as its
 /// reason (#1888): the ruled row's `std::thread_local`, which no type ban

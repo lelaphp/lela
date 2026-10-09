@@ -505,7 +505,7 @@ impl Converter {
 
     /// Given up: closed now, or as the last call that holds it ends.
     pub(crate) fn close(self, req: &mut Request) {
-        req.disown(self.0);
+        drop(req.disown(self.0));
     }
 }
 

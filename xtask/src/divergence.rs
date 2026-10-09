@@ -1,7 +1,9 @@
 //! The divergence registry, `docs/divergence.toml` (harness-design.md §4.3):
 //! one row per accepted difference from the oracle, keyed by a witness hash,
-//! a phpt path, a compile-identity path, an extension's name, a trace site
-//! or a site where php's own behaviour is undefined. A row whose one reason
+//! a phpt path, a compile-identity path, an extension's name or a trace
+//! site. A row's `kind` says which lane reads it and its `cause` whether it
+//! is parity debt, counted against the manifest's day-30 target, or a
+//! difference that does not count (#2460, #2462). A row whose one reason
 //! holds for many ids of its kind names them in `covers`, and
 //! [`Registry::row`] answers each of them with the row as it answers the
 //! row's own id; the row counts once (revision 62). A `trace:` row's
@@ -11,7 +13,9 @@
 //! ([`Registry::pinning`]; harness §4.3, #1650). A person
 //! writes a row and its reason; `compare`'s caller or the fuzzer may propose
 //! one with status `open` and an empty reason; the `divergence-reason`
-//! instrument fails an accepted row without a reason. The TOML is the truth;
+//! instrument fails an accepted row without a reason, a `by-design` row
+//! whose reason cites no design section or ADR, and an `oracle-build` row
+//! that names nothing it retires at. The TOML is the truth;
 //! `status --section divergence` is the rendering.
 
 use std::borrow::Borrow;
@@ -35,9 +39,10 @@ pub const FILE: &str = "docs/divergence.toml";
 pub const INSTRUMENT: &str = "divergence-reason";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
-/// `crosscheck:<name>`, `trace:<site>` or `php-ub:<site>`. Only [`Id::of`]
-/// makes one, so an id in hand carries the prefix of the kind it was
-/// decoded under.
+/// `crosscheck:<name>` or `trace:<site>`, or `php-ub:<site>` on a row the
+/// file still spells in #2220's shape ([`LEGACY_PHP_UB`]). Only
+/// [`Id::of`] makes one, so an id in hand carries the prefix of the kind it
+/// was decoded under.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Id(String);
@@ -47,24 +52,27 @@ impl Id {
     /// prefix: the one place that rule is held, for a row's own id, for
     /// each id it covers and for a proposed one.
     pub fn of(kind: Kind, text: &str) -> Result<Id> {
-        if !text.starts_with(kind.prefix()) {
-            bail!(
-                "the id {text:?} is of kind {}, whose ids start with {:?}",
-                kind.as_str(),
-                kind.prefix()
-            );
+        Id::under(kind.as_str(), kind.prefix(), text)
+    }
+
+    /// `text` as an id of the kind the file spells `kind`, whose ids start
+    /// with `prefix`.
+    fn under(kind: &str, prefix: &str, text: &str) -> Result<Id> {
+        if !text.starts_with(prefix) {
+            bail!("the id {text:?} is of kind {kind}, whose ids start with {prefix:?}");
         }
         Ok(Id(text.to_owned()))
     }
 
-    /// `text` as an id a row of `kind` covers: one of the kind's own, as
-    /// [`Id::of`] holds it, or under a `trace:` row a `witness:` id, a
+    /// `text` as an id a row of `kind` covers, the file spelling the kind
+    /// `spelled` with ids under `prefix`: one of the row's own, as
+    /// [`Id::under`] holds it, or under a `trace:` row a `witness:` id, a
     /// fence that pins the engine's side of the row (harness §4.3, #1650).
-    fn covered(kind: Kind, text: &str) -> Result<Id> {
+    fn covered(kind: Kind, spelled: &str, prefix: &str, text: &str) -> Result<Id> {
         if kind == Kind::Trace && text.starts_with(Kind::Witness.prefix()) {
             return Ok(Id(text.to_owned()));
         }
-        Id::of(kind, text)
+        Id::under(spelled, prefix, text)
     }
 
     pub fn as_str(&self) -> &str {
@@ -92,7 +100,14 @@ pub struct Divergence {
     /// What names the row; the prefix is the kind's, and `runner` shares
     /// `phpt:`.
     pub id: Id,
+    /// Which lane reads the row.
     pub kind: Kind,
+    /// Whether the row is parity debt, and if not, why not; `debt` where
+    /// the file writes no `cause`.
+    pub cause: Cause,
+    /// What the row stops being needed at, where it names one: an
+    /// `oracle-build` row must, a `php-ub` row reported upstream may.
+    pub retires: Option<Retires>,
     /// Written by a person; empty on a proposed row.
     pub reason: String,
     pub status: Status,
@@ -118,12 +133,18 @@ impl Divergence {
     }
 }
 
-/// One row as the file spells it, before its ids are decoded.
+/// One row as the file spells it, before its ids are decoded. `kind` is
+/// text, so the one kind the file may still spell and [`Kind`] has not,
+/// [`LEGACY_PHP_UB`], decodes beside the others.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Row {
     id: String,
-    kind: Kind,
+    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cause: Option<Cause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retires: Option<Retires>,
     reason: String,
     status: Status,
     since: String,
@@ -135,18 +156,34 @@ impl TryFrom<Row> for Divergence {
     type Error = anyhow::Error;
 
     fn try_from(row: Row) -> Result<Divergence> {
-        let id = Id::of(row.kind, &row.id)?;
+        let (kind, cause, prefix) = if row.kind == LEGACY_PHP_UB {
+            if row.cause.is_some_and(|c| c != Cause::PhpUb) {
+                bail!(
+                    "the row {:?} is of kind {LEGACY_PHP_UB}, which is cause {}, and says cause {}",
+                    row.id,
+                    Cause::PhpUb.as_str(),
+                    row.cause.unwrap_or_default().as_str()
+                );
+            }
+            (Kind::Trace, Cause::PhpUb, LEGACY_PHP_UB_PREFIX)
+        } else {
+            let kind: Kind = row.kind.parse()?;
+            (kind, row.cause.unwrap_or_default(), kind.prefix())
+        };
+        let id = Id::under(&row.kind, prefix, &row.id)?;
         let mut covers = BTreeSet::new();
         for text in &row.covers {
-            let covered =
-                Id::covered(row.kind, text).map_err(|e| anyhow!("{e}, in the covers of {id}"))?;
+            let covered = Id::covered(kind, &row.kind, prefix, text)
+                .map_err(|e| anyhow!("{e}, in the covers of {id}"))?;
             if covered == id || !covers.insert(covered) {
                 bail!("the id {text:?} is named twice in the row {id}");
             }
         }
         Ok(Divergence {
             id,
-            kind: row.kind,
+            kind,
+            cause,
+            retires: row.retires,
             reason: row.reason,
             status: row.status,
             since: row.since,
@@ -159,7 +196,9 @@ impl From<Divergence> for Row {
     fn from(row: Divergence) -> Row {
         Row {
             id: row.id.0,
-            kind: row.kind,
+            kind: row.kind.as_str().to_owned(),
+            cause: (row.cause != Cause::Debt).then_some(row.cause),
+            retires: row.retires,
             reason: row.reason,
             status: row.status,
             since: row.since,
@@ -168,8 +207,19 @@ impl From<Divergence> for Row {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// The `kind` #2220 gave a row recording php's undefined behaviour, before
+/// #2460 made that a cause: a row the file still spells so decodes as a
+/// `trace` row of cause `php-ub`, its ids under [`LEGACY_PHP_UB_PREFIX`]
+/// as written, so the registry decodes before and after #2463 moves its
+/// rows to `trace:<site>`. The spelling goes once that migration lands
+/// (#2510).
+const LEGACY_PHP_UB: &str = "php-ub";
+/// The prefix of a [`LEGACY_PHP_UB`] row's ids.
+const LEGACY_PHP_UB_PREFIX: &str = "php-ub:";
+
+/// Which lane reads a row: what its id names and which comparison
+/// consults it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Kind {
     Witness,
     Phpt,
@@ -180,26 +230,17 @@ pub enum Kind {
     /// rendering differs from the oracle's (harness §7).
     Crosscheck,
     Trace,
-    /// A `php-ub:<site>` id: a place where php's own behaviour
-    /// is not defined, and the
-    /// engine does something defined instead, its `covers` naming the
-    /// fixture that holds the engine's side. Not parity debt, so counted
-    /// apart from the day-30 target (#2220).
-    #[serde(rename = "php-ub")]
-    PhpUb,
 }
 
 impl Kind {
-    /// The seven kinds, in the registry's order: the parity kinds, then
-    /// the one counted apart.
-    pub const ALL: [Kind; 7] = [
+    /// The six kinds, in the registry's order.
+    pub const ALL: [Kind; 6] = [
         Kind::Witness,
         Kind::Phpt,
         Kind::Runner,
         Kind::Compile,
         Kind::Crosscheck,
         Kind::Trace,
-        Kind::PhpUb,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -210,16 +251,7 @@ impl Kind {
             Kind::Compile => "compile",
             Kind::Crosscheck => "crosscheck",
             Kind::Trace => "trace",
-            Kind::PhpUb => "php-ub",
         }
-    }
-
-    /// Whether a row of this kind is parity debt, counted against the
-    /// day-30 target of under 20 rows (harness-design.md §4.3): every kind
-    /// but `php-ub`, whose rows record php's undefined behaviour rather
-    /// than a difference the engine owes (#2220).
-    pub fn is_parity(self) -> bool {
-        self != Kind::PhpUb
     }
 
     /// The prefix an id of this kind carries, colon included.
@@ -230,7 +262,92 @@ impl Kind {
             Kind::Compile => "compile:",
             Kind::Crosscheck => "crosscheck:",
             Kind::Trace => "trace:",
-            Kind::PhpUb => "php-ub:",
+        }
+    }
+}
+
+impl std::str::FromStr for Kind {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> Result<Kind> {
+        Kind::ALL
+            .into_iter()
+            .find(|k| k.as_str() == text)
+            .ok_or_else(|| {
+                let names: Vec<&str> = Kind::ALL.iter().map(|k| k.as_str()).collect();
+                anyhow!(
+                    "unknown kind {text:?}, expected one of {}",
+                    names.join(", ")
+                )
+            })
+    }
+}
+
+/// Why a row differs from the oracle, apart from which lane reads it
+/// (#2460): parity debt, counted against the manifest's day-30 target, or
+/// one of the causes counted on lines of their own.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum Cause {
+    /// A difference the engine owes; a row that writes no `cause` is one.
+    #[default]
+    Debt,
+    /// The engine does something defined where php's own behaviour is
+    /// not, its `covers` naming the fixture that holds the engine's side.
+    PhpUb,
+    /// The engine differs on purpose, as the design section or ADR its
+    /// reason cites decided.
+    ByDesign,
+    /// The oracle's build differs from what the engine is held to, until
+    /// what the row's `retires` names.
+    OracleBuild,
+}
+
+impl Cause {
+    /// The four causes, debt first and then the ones counted apart, in
+    /// the order the counts render them.
+    pub const ALL: [Cause; 4] = [
+        Cause::Debt,
+        Cause::PhpUb,
+        Cause::ByDesign,
+        Cause::OracleBuild,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Cause::Debt => "debt",
+            Cause::PhpUb => "php-ub",
+            Cause::ByDesign => "by-design",
+            Cause::OracleBuild => "oracle-build",
+        }
+    }
+}
+
+/// What a row stops being needed at, so an oracle bump can list the rows
+/// it should retire (Mitchell, 2026-10-09, on #2462): the guard reads this
+/// and never the reason's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Retires {
+    /// The oracle rebuilt under the pin it has, linking what the engine does.
+    OracleRebuild,
+    /// The pin moved to a php that carries the fix upstream.
+    Pin,
+    /// The fixture the row names changed.
+    Fixture,
+    /// The platform the row holds on is no longer one the lanes run.
+    Platform,
+}
+
+impl Retires {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Retires::OracleRebuild => "oracle-rebuild",
+            Retires::Pin => "pin",
+            Retires::Fixture => "fixture",
+            Retires::Platform => "platform",
         }
     }
 }
@@ -372,6 +489,8 @@ impl Registry {
         let row = Divergence {
             id: Id::of(kind, id)?,
             kind,
+            cause: Cause::Debt,
+            retires: None,
             reason: String::new(),
             status: Status::Open,
             since,
@@ -389,28 +508,91 @@ impl Registry {
         self.hold(row)
     }
 
-    /// Accepted rows whose reason nobody wrote.
-    pub fn unreasoned(&self) -> Vec<&Divergence> {
+    /// The accepted rows the guard refuses, each with what it lacks.
+    pub(crate) fn refused(&self) -> Vec<(&Divergence, Lack)> {
         self.rows
             .iter()
-            .filter(|r| r.status == Status::Accepted && r.reason.trim().is_empty())
+            .filter(|r| r.status == Status::Accepted)
+            .filter_map(|r| r.lack().map(|lack| (r, lack)))
             .collect()
     }
 
-    /// Rows by kind and by status, a covering row once, and the ids the
-    /// rows hold.
+    /// Rows by status, and by cause, kind and status, a covering row
+    /// once, and the ids the rows hold.
     pub fn counts(&self) -> Counts {
         let mut counts = Counts {
             ids: self.held.len() as u64,
             ..Counts::default()
         };
         for row in &self.rows {
-            *counts.by_kind.entry(row.kind).or_default() += 1;
             *counts.by_status.entry(row.status).or_default() += 1;
-            *counts.cells.entry((row.kind, row.status)).or_default() += 1;
+            *counts
+                .cells
+                .entry((row.cause, row.kind, row.status))
+                .or_default() += 1;
         }
         counts
     }
+}
+
+/// What an accepted row lacks that the guard asks of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Lack {
+    /// No reason at all.
+    Reason,
+    /// A `by-design` row whose reason cites no design section or ADR.
+    Citation,
+    /// An `oracle-build` row that names nothing it retires at.
+    Retires,
+}
+
+impl Lack {
+    /// Each lack, in the order the guard's message names them.
+    const ALL: [Lack; 3] = [Lack::Reason, Lack::Citation, Lack::Retires];
+
+    /// The reading's number counting the rows that lack it.
+    fn number(self) -> &'static str {
+        match self {
+            Lack::Reason => "unreasoned",
+            Lack::Citation => "uncited",
+            Lack::Retires => "unretired",
+        }
+    }
+
+    /// What the message says of a row that lacks it.
+    fn says(self) -> &'static str {
+        match self {
+            Lack::Reason => "without a reason",
+            Lack::Citation => "of cause by-design whose reason cites no design section (§) or ADR",
+            Lack::Retires => "of cause oracle-build that carries no `retires`",
+        }
+    }
+}
+
+impl Divergence {
+    /// What the guard finds missing from the row were it accepted: a
+    /// reason, then what its cause asks for.
+    fn lack(&self) -> Option<Lack> {
+        if self.reason.trim().is_empty() {
+            Some(Lack::Reason)
+        } else if self.cause == Cause::ByDesign && !cites_design(&self.reason) {
+            Some(Lack::Citation)
+        } else if self.cause == Cause::OracleBuild && self.retires.is_none() {
+            Some(Lack::Retires)
+        } else {
+            None
+        }
+    }
+}
+
+/// Whether a reason cites a section of the design of record (`§`, as
+/// `third-engine-design.md §5.2` or `harness-design.md §4.3` write it) or
+/// an ADR (`ADR-0005`).
+fn cites_design(reason: &str) -> bool {
+    reason.contains('§')
+        || reason
+            .match_indices("ADR-")
+            .any(|(at, _)| reason[at + 4..].starts_with(|c: char| c.is_ascii_digit()))
 }
 
 #[derive(Serialize)]
@@ -418,38 +600,71 @@ struct Rows<'a> {
     divergence: &'a [Divergence],
 }
 
-/// How many rows of each kind, of each status, and of each pair, a row
-/// that covers many ids counting once, since the day-30 target counts
+/// How many rows of each status, and of each cause, kind and status, a
+/// row that covers many ids counting once, since the day-30 target counts
 /// reasons (harness-design.md §4.3); and how many ids the rows hold.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counts {
     pub ids: u64,
-    pub by_kind: BTreeMap<Kind, u64>,
     pub by_status: BTreeMap<Status, u64>,
-    pub cells: BTreeMap<(Kind, Status), u64>,
+    pub cells: BTreeMap<(Cause, Kind, Status), u64>,
 }
 
 impl Counts {
-    pub fn cell(&self, kind: Kind, status: Status) -> u64 {
-        self.cells.get(&(kind, status)).copied().unwrap_or(0)
-    }
-
-    /// The parity rows of one status, every kind [`Kind::is_parity`]
-    /// summed: the total the day-30 target reads.
-    pub fn parity(&self, status: Status) -> u64 {
+    /// The rows of one cause and status, a kind or every kind.
+    pub(crate) fn of(&self, cause: Cause, kind: Option<Kind>, status: Status) -> u64 {
         self.cells
             .iter()
-            .filter(|((kind, s), _)| kind.is_parity() && *s == status)
+            .filter(|((c, k, s), _)| {
+                *c == cause && kind.is_none_or(|kind| *k == kind) && *s == status
+            })
             .map(|(_, n)| n)
             .sum()
+    }
+
+    /// The debt rows of one kind and status: a line above the total.
+    pub fn debt(&self, kind: Kind, status: Status) -> u64 {
+        self.of(Cause::Debt, Some(kind), status)
+    }
+
+    /// The debt rows of one status, every kind summed: the total the
+    /// day-30 target reads.
+    pub fn total(&self, status: Status) -> u64 {
+        self.of(Cause::Debt, None, status)
+    }
+
+    /// The rows of `cause`, every status.
+    pub fn rows_of(&self, cause: Cause) -> u64 {
+        Status::ALL
+            .into_iter()
+            .map(|s| self.of(cause, None, s))
+            .sum()
+    }
+
+    /// The kinds a debt row is of, in the registry's order.
+    pub(crate) fn debt_kinds(&self) -> Vec<Kind> {
+        Kind::ALL
+            .into_iter()
+            .filter(|k| Status::ALL.into_iter().any(|s| self.debt(*k, s) > 0))
+            .collect()
+    }
+
+    /// The causes other than debt a row is of, in [`Cause::ALL`]'s order.
+    pub(crate) fn apart(&self) -> Vec<Cause> {
+        Cause::ALL
+            .into_iter()
+            .filter(|c| *c != Cause::Debt && self.rows_of(*c) > 0)
+            .collect()
     }
 }
 
 /// The `divergence-reason` instrument's reading over the workspace: fail
-/// when an accepted row has no reason, naming each such row, and how many
-/// ids it covers where it covers any, and printing the text of the
-/// manifest rule whose `check` predicate names this instrument. A covering
-/// row is held to the rule once, as one reason. The counts are the numbers.
+/// when an accepted row lacks what the guard asks ([`Lack`]): a reason,
+/// a design citation on a `by-design` row, a `retires` on an
+/// `oracle-build` row. It names each such row, how many ids it covers
+/// where it covers any, and prints the text of the manifest rule whose
+/// `check` predicate names this instrument. A covering row is held to the
+/// rule once, as one reason. The counts are the numbers.
 pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<Reading> {
     let rule = manifest.rule_checked_by(INSTRUMENT);
     let mut reading =
@@ -460,7 +675,7 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
     }
     let rows = registry.rows().len();
     let counts = registry.counts();
-    let unreasoned = registry.unreasoned();
+    let refused = registry.refused();
     reading.numbers.insert("rows".into(), Number::count(rows));
     reading
         .numbers
@@ -471,29 +686,40 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
             .numbers
             .insert(status.as_str().into(), Number::count(n));
     }
-    reading
-        .numbers
-        .insert("unreasoned".into(), Number::count(unreasoned.len()));
-    if unreasoned.is_empty() {
-        reading.status = reading::Status::Pass;
-        reading.message = format!(
-            "{FILE}: {rows} rows holding {} ids, every accepted row has a reason",
-            counts.ids
-        );
-    } else {
-        reading.status = reading::Status::Fail;
-        let named: Vec<String> = unreasoned
+    let mut failures = Vec::new();
+    for lack in Lack::ALL {
+        let named: Vec<String> = refused
             .iter()
-            .map(|r| match r.covers.len() {
+            .filter(|(_, l)| *l == lack)
+            .map(|(r, _)| match r.covers.len() {
                 0 => r.id.to_string(),
                 n => format!("{} (covering {n} ids)", r.id),
             })
             .collect();
+        reading
+            .numbers
+            .insert(lack.number().into(), Number::count(named.len()));
+        if !named.is_empty() {
+            failures.push(format!(
+                "{} accepted row{} {}: {}",
+                named.len(),
+                if named.len() == 1 { "" } else { "s" },
+                lack.says(),
+                named.join(", ")
+            ));
+        }
+    }
+    if failures.is_empty() {
+        reading.status = reading::Status::Pass;
         reading.message = format!(
-            "{FILE}: {} accepted row{} without a reason: {}. {}",
-            named.len(),
-            if named.len() == 1 { "" } else { "s" },
-            named.join(", "),
+            "{FILE}: {rows} rows holding {} ids, every accepted row has a reason, every by-design row a citation and every oracle-build row a `retires`",
+            counts.ids
+        );
+    } else {
+        reading.status = reading::Status::Fail;
+        reading.message = format!(
+            "{FILE}: {}. {}",
+            failures.join("; "),
             rule.map(|r| r.text.as_str()).unwrap_or_default()
         );
     }

@@ -1,0 +1,154 @@
+//! The operand kinds as types (design §5.8, "bodies written once,
+//! monomorphised over operand kinds"). A handler of a hot opcode, one
+//! `ops.toml` marks `specialise`, is generic over the kind of each
+//! operand it reads, and `build.rs` emits a dispatch arm per kind the
+//! spec lists for each operand, as `zend_vm_gen.php` emits
+//! `ZEND_ADD_SPEC_TMPVAR_CV_HANDLER`: the handler's inline path finds
+//! its operand at a place fixed when it was compiled, and tests no kind
+//! while the request is served. A handler the spec does not specialise
+//! reads through [`ByKind`], the kind the opline's byte says, with the
+//! same inline path behind it. The kernel behind an inline path reads
+//! the operand by the opline's byte either way, which says the same
+//! kind.
+
+use php_heap::{Zval, ZvalType};
+use php_unit::{OpArray, OperandKind};
+
+use crate::exec;
+
+/// One way of addressing an operand: where it stands, read without an
+/// owner taken.
+pub(crate) trait Operand: Copy {
+    /// The kind, as the opline's `op1_type` or `op2_type` byte says it.
+    fn kind(self) -> OperandKind;
+
+    /// The index among the frame's slots of the operand `field` names:
+    /// the CV itself, a temporary past the last CV, and none for a
+    /// constant, which stands in the op array's table, or an unused
+    /// operand.
+    fn slot(self, code: &OpArray, field: u32) -> Option<usize>;
+
+    /// `GET_OPn_ZVAL_PTR_UNDEF(BP_VAR_R)` for an inline path: the zval
+    /// `field` names, a copy with no owner taken, and `UNDEF` for a
+    /// field past the frame or the table. An inline path takes none of
+    /// what a kernel would warn of, so an undefined CV is the kernel's,
+    /// and its warning with it.
+    #[inline(always)] // one load at a fixed offset, which is the point
+    #[allow(clippy::inline_always)]
+    fn read(self, slots: &[Zval], code: &OpArray, field: u32) -> Zval {
+        let found = if self.kind() == OperandKind::Const {
+            code.literals.get(field as usize)
+        } else {
+            self.slot(code, field).and_then(|at| slots.get(at))
+        };
+        found.copied().unwrap_or(Zval::UNDEF)
+    }
+}
+
+/// `IS_CONST`: the op array's constant at the field's index.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Const;
+
+/// `IS_TMP_VAR`: a temporary, past the last CV (`EX_NUM_TO_VAR`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Tmp;
+
+/// `IS_VAR`: a temporary as `IS_TMP_VAR` is, which may hold a reference
+/// or an `IS_INDIRECT`; an inline path takes neither.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Var;
+
+/// `IS_CV`: a compiled variable, the frame's slot at the field's index.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Cv;
+
+/// An operand of the kind the opline's byte names, read with one test
+/// of the kind: what a handler the spec does not specialise addresses
+/// its inline path through.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ByKind(pub(crate) OperandKind);
+
+impl Operand for Const {
+    fn kind(self) -> OperandKind {
+        OperandKind::Const
+    }
+
+    fn slot(self, _: &OpArray, _: u32) -> Option<usize> {
+        None
+    }
+}
+
+impl Operand for Tmp {
+    fn kind(self) -> OperandKind {
+        OperandKind::Tmp
+    }
+
+    #[inline(always)] // as `read`
+    #[allow(clippy::inline_always)]
+    fn slot(self, code: &OpArray, field: u32) -> Option<usize> {
+        Some(exec::temporary_slot(code, field) as usize)
+    }
+}
+
+impl Operand for Var {
+    fn kind(self) -> OperandKind {
+        OperandKind::Var
+    }
+
+    #[inline(always)] // as `read`
+    #[allow(clippy::inline_always)]
+    fn slot(self, code: &OpArray, field: u32) -> Option<usize> {
+        Some(exec::temporary_slot(code, field) as usize)
+    }
+}
+
+impl Operand for Cv {
+    fn kind(self) -> OperandKind {
+        OperandKind::Cv
+    }
+
+    #[inline(always)] // as `read`
+    #[allow(clippy::inline_always)]
+    fn slot(self, _: &OpArray, field: u32) -> Option<usize> {
+        Some(field as usize)
+    }
+}
+
+impl Operand for ByKind {
+    #[inline(always)] // as `read`
+    #[allow(clippy::inline_always)]
+    fn kind(self) -> OperandKind {
+        self.0
+    }
+
+    #[inline(always)] // as `read`
+    #[allow(clippy::inline_always)]
+    fn slot(self, code: &OpArray, field: u32) -> Option<usize> {
+        match self.0 {
+            OperandKind::Cv => Cv.slot(code, field),
+            OperandKind::Tmp | OperandKind::Var => Tmp.slot(code, field),
+            OperandKind::Const | OperandKind::Unused => None,
+        }
+    }
+}
+
+/// Whether a zval may be copied bitwise with no owner taken and none
+/// given up (`Z_OPT_REFCOUNTED` clear): `null`, a bool, a number, an
+/// interned string or an immutable array. An `UNDEF` and a constant
+/// expression, which no variable may hold, and anything refcounted are
+/// not.
+#[inline(always)] // a test of two bytes, on an inline path
+#[allow(clippy::inline_always)]
+pub(crate) fn owns_nothing(z: Zval) -> bool {
+    !z.is_refcounted()
+        && matches!(
+            z.kind(),
+            ZvalType::Null
+                | ZvalType::False
+                | ZvalType::True
+                | ZvalType::Long
+                | ZvalType::Double
+                | ZvalType::String
+                | ZvalType::Array
+        )
+}

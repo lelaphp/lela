@@ -11,7 +11,7 @@
 # own prose; each cites this file and none of the three design documents
 # restates a number (design ledger 14, jit ledger 6, harness ledger 38).
 # `xtask` refuses a manifest with a key outside this grammar:
-#   [oracle] [budget] [telemetry] [[crate]] [[seam]] [[edge]] [[rule]] [[week]]
+#   [oracle] [budget] [telemetry] [divergence] [[crate]] [[seam]] [[edge]] [[rule]] [[week]]
 # Keys beyond the harness's §4.1 example, added here because §10 states a rule
 # the example had no predicate for, are marked `# grammar:` where they first
 # appear. Each is one predicate, as the grammar requires.
@@ -33,6 +33,9 @@ bindings = 32000                           # design §4.1: `ext/*/src/ffi/**` po
 
 [telemetry]
 silent_days = 14                           # harness §7: readings and no failure this long is a candidate for silent; `status --section permits`
+
+[divergence]
+target = 10                                # harness §4.3: the day-30 target, debt rows under it; no other cause counts (Mitchell on #2460, #2462)
 
 [parity]
 # Suites php builds and parity does not count, each with the ruling that put it there.

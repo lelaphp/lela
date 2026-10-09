@@ -1,0 +1,4 @@
+# Cargo hands [env] to clippy-driver, so this points every crate's clippy
+# at elsewhere/ and past ext/clippy.toml, the environment set or not.
+[env]
+CLIPPY_CONF_DIR = { value = "elsewhere", relative = true }

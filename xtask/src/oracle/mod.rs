@@ -34,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
+use std::io::Write as _;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1274,8 +1275,15 @@ impl Place {
 /// is told from what any other process on the machine holds (#1412), and
 /// of when each ran, from spawn to exit, which is how an object the
 /// kernel names no process on is told as made during one of them (#1482).
+///
+/// Where a lane holds a System V claim, each program's start and end is
+/// written to the claim's file as well, so its last write bounds the
+/// window a run cut off left behind it (`sysv::Claim`, #2448).
 #[derive(Debug, Default)]
-pub(crate) struct Spawned(Mutex<Programs>);
+pub(crate) struct Spawned {
+    programs: Mutex<Programs>,
+    journal: Mutex<Option<File>>,
+}
 
 /// What [`Spawned`] kept since the last take: each program's process, and
 /// each program's run as the wall clock read it.
@@ -1314,7 +1322,7 @@ impl Spawned {
     /// One program spawned as `pid` at `from`; the number
     /// [`Spawned::ended`] closes its run by.
     fn add(&self, pid: u32, from: SystemTime) -> u64 {
-        let mut programs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
         let number = programs.next;
         programs.next += 1;
         programs.pids.insert(pid);
@@ -1323,23 +1331,36 @@ impl Spawned {
             to: None,
             number,
         });
+        self.journal(format_args!("{} {number} {pid}", crate::sysv::STARTED));
         number
+    }
+
+    /// `line` written to the journal where there is one. A write that
+    /// fails leaves the window its last write bounds, which the lane's
+    /// own sweep settles whole when the run is not cut off.
+    fn journal(&self, line: fmt::Arguments<'_>) {
+        let journal = self.journal.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(mut file) = journal.as_ref() {
+            writeln!(file, "{line}").ok();
+        }
     }
 
     /// The program numbered `number` seen to exit now; one a take has
     /// forgotten since is not looked for.
     fn ended(&self, number: u64) {
         let now = SystemTime::now();
-        let mut programs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(ran) = programs.runs.iter_mut().rev().find(|r| r.number == number) {
             ran.to = Some(now);
         }
+        drop(programs);
+        self.journal(format_args!("{} {number}", crate::sysv::ENDED));
     }
 
     /// The programs spawned since the last take, and none kept after but
     /// the count, so a number is never given twice.
     fn take(&self) -> Programs {
-        let mut programs = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
         let next = programs.next;
         std::mem::replace(
             &mut *programs,
@@ -1394,6 +1415,16 @@ impl<'a> Oracle<'a> {
     /// forked, and when each program ran.
     pub(crate) fn take_spawned(&self) -> Programs {
         self.spawned.take()
+    }
+
+    /// Each program's start and end written to `journal` from now, a
+    /// System V claim's file, or to none (#2448).
+    pub(crate) fn journal(&self, journal: Option<File>) {
+        *self
+            .spawned
+            .journal
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = journal;
     }
 
     /// Run `program` under the pinned binary and the recipe, with

@@ -275,11 +275,8 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     // sending a reading for is stamped with.
     let snapshot = Snapshot::disk(root)?;
     let grace = Duration::from_secs(manifest.pin.recipe.limits.timeout_s);
-    let reclaimed = said(
-        "before the run, of what runs cut off left",
-        sysv::reclaim(grace),
-    );
-    let claim = sysv::Claim::new(INSTRUMENT)?;
+    let mut removed = sysv::Removed::new(INSTRUMENT);
+    let claim = sysv::Claim::taken(INSTRUMENT, grace, &mut removed)?;
     let journal: PathBuf = claim.path().to_path_buf();
     let exe = std::env::current_exe().context("locating this binary")?;
     let mut served = Command::new(&exe);
@@ -303,14 +300,11 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
             in_flight(&kept)
         );
     }
-    let settled = said("of what was left while it ran", claim.settle());
-    let swept: Vec<(u64, String)> = [reclaimed, settled].into_iter().flatten().collect();
-    if !swept.is_empty() {
-        let removed = swept.iter().map(|(n, _)| n).sum();
-        let words: Vec<String> = swept.into_iter().map(|(_, words)| words).collect();
+    removed.add("of what was left while it ran", claim.settle());
+    if removed.count > 0 {
         for reading in &mut readings {
-            reading.count(SYSV_REMOVED, removed)?;
-            reading.message = format!("{}; {}", reading.message, words.join("; "));
+            reading.count(sysv::REMOVED, removed.count)?;
+            reading.message = format!("{}; {}", reading.message, removed.words.join("; "));
         }
     }
     ask.scope.record(store, &readings)?;
@@ -319,29 +313,6 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
             bail!("witness: the served run ended with exit {code}; the line above it says why")
         }
         _ => Ok(()),
-    }
-}
-
-/// What the readings of a run count the System V objects removed around
-/// it as.
-const SYSV_REMOVED: &str = "sysv_removed";
-
-/// What a sweep of System V IPC `when` removed, said in a line now and
-/// returned with the words for every reading of the run; nothing where it
-/// removed nothing, and a line saying so where it could not read the
-/// machine.
-fn said(when: &str, swept: Result<sysv::Swept>) -> Option<(u64, String)> {
-    match swept {
-        Ok(swept) if swept.removed() > 0 => {
-            let words = format!("{when}, {swept}");
-            println!("witness: {words}");
-            Some((swept.removed() as u64, words))
-        }
-        Ok(_) => None,
-        Err(why) => {
-            println!("witness: System V IPC not swept {when}: {why:#}");
-            None
-        }
     }
 }
 

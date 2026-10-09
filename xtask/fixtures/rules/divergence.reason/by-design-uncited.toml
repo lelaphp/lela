@@ -1,0 +1,19 @@
+# A negative control for the manifest rule `divergence.reason` (#2462): an
+# accepted by-design row whose reason cites no design section or ADR,
+# beside one that does.
+
+[[divergence]]
+id = "phpt:fixture-uncited"
+kind = "phpt"
+cause = "by-design"
+reason = "The engine differs on purpose, and says not where that was decided."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "phpt:fixture-in-order"
+kind = "phpt"
+cause = "by-design"
+reason = "The engine differs on purpose, as third-engine-design.md §5.2 decided."
+status = "accepted"
+since = "2026-10-09"

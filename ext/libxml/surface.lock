@@ -381,6 +381,7 @@ ffi::XPath::bare
 ffi::XPath::c14n_query
 ffi::XPath::doc
 ffi::XPath::eval
+ffi::XPath::eval_held
 ffi::XPath::eval_raw
 ffi::XPath::eval_scoped
 ffi::XPath::lend

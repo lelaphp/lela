@@ -10,6 +10,8 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use std::cmp::Ordering;
+
 /// One operand of php's arithmetic: `IS_LONG` or `IS_DOUBLE`, the two
 /// types `add_function` and its kin switch on, and the two a numeric
 /// string reads as.
@@ -30,6 +32,32 @@ impl Number {
         match self {
             Number::Long(n) => n as f64,
             Number::Double(d) => d,
+        }
+    }
+
+    /// `zend_compare`'s four numeric pairs: two longs as longs, and any
+    /// other pair as doubles under `ZEND_THREEWAY_COMPARE`, equal, less,
+    /// else greater, which is where a NAN lands whichever side it is on.
+    /// The one home of the rule: [`crate::compare`] takes it for its
+    /// numeric pairs and the engine's handlers for their inline ones
+    /// (design §5.8), so `<` over two numbers is one function.
+    #[must_use]
+    #[inline]
+    #[expect(
+        clippy::float_cmp,
+        reason = "php's `(a) == (b)`, the exact equality being copied"
+    )]
+    pub fn compare(self, other: Number) -> Ordering {
+        if let (Number::Long(a), Number::Long(b)) = (self, other) {
+            return a.cmp(&b);
+        }
+        let (a, b) = (self.double(), other.double());
+        if a == b {
+            Ordering::Equal
+        } else if a < b {
+            Ordering::Less
+        } else {
+            Ordering::Greater
         }
     }
 }
