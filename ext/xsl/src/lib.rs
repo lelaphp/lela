@@ -34,7 +34,7 @@ use php_ext::raising::{
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
-use php_ext_dom::XPathCallbacks;
+use php_ext_dom::{CallbacksAt, XPathCallbacks};
 use php_ext_libxml::ffi::{ClassType, Kind, Node, NodeObject, Ns, Raised, Route};
 use php_ext_libxml::{Errors, import_node};
 
@@ -402,7 +402,7 @@ fn apply(
         return Ok((sheet, None));
     };
     let (has_keys, params, security) = (i.has_keys, i.params.clone(), i.security);
-    let (mut callbacks, profiling) = (std::mem::take(&mut i.callbacks), i.profiling.clone());
+    let profiling = i.profiling.clone();
     let profile = profiling.filter(|p| req.check_open_basedir(p, true).is_ok());
     let mut holder = NodeObject::default();
     let doc = if has_keys {
@@ -420,12 +420,8 @@ fn apply(
         security,
         profile: profile.as_deref(),
     };
-    let answer = transform(req, this, &sheet, &state, &mut callbacks);
-    callbacks.clean_node_list(req);
-    if let Some(i) = intern(req, this) {
-        let meanwhile = std::mem::replace(&mut i.callbacks, callbacks);
-        meanwhile.release(req);
-    }
+    let answer = transform(req, this, &sheet, &state);
+    at(this).clean_node_list(req);
     holder.decrement_doc_ref(req);
     match answer {
         Ok(result) => Ok((sheet, result)),
@@ -462,7 +458,6 @@ fn transform(
     this: PhpObject,
     sheet: &ffi::Stylesheet,
     state: &State<'_>,
-    callbacks: &mut XPathCallbacks,
 ) -> Result<Option<Node>, Thrown> {
     let doc = state.doc;
     let Some(mut ctxt) = ffi::Transform::new(sheet, doc) else {
@@ -489,7 +484,8 @@ fn transform(
     let vars = read_int(req, this, b"maxTemplateVars")?;
     ctxt.set_limits(xinclude_on, depth, vars);
     let secured = ctxt.secure(state.security);
-    for (ns, name) in callbacks.registered() {
+    let registered = intern(req, this).map(|i| i.callbacks.registered());
+    for (ns, name) in registered.unwrap_or_default() {
         ctxt.register(&ns, &name);
     }
     if !secured {
@@ -509,8 +505,9 @@ fn transform(
         };
         php_ext_dom::create_object_in(req, node, state.holder)
     };
+    let at = at(this);
     let mut handler = |req: &mut Request, called, operands| {
-        callbacks.call(req, called, operands, modern, &mut proxy)
+        XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
     };
     let (result, raised, thrown) = ctxt.apply(req, state.profile, &mut handler);
     Errors::route(req, routed(raised));
@@ -574,7 +571,18 @@ fn compatible(req: &mut Request, class: ClassId, of: ClassId) -> Result<bool, Th
     Ok(false)
 }
 
-/// The callbacks taken off the object for `f`, and put back after.
+/// Where `this` keeps its callbacks, which a transformation reaches at
+/// each call it serves, so a callback's own registration on the
+/// processor is the one the rest of the transformation sees (#2319).
+fn at(this: PhpObject) -> CallbacksAt {
+    CallbacksAt {
+        object: this,
+        reach: |req, object| intern(req, object).map(|i| &mut i.callbacks),
+    }
+}
+
+/// The callbacks taken off the object for `f`, a registration that can
+/// call PHP code, and put back after, in place of any laid meanwhile.
 fn with_callbacks<R>(
     req: &mut Request,
     this: PhpObject,
@@ -584,8 +592,9 @@ fn with_callbacks<R>(
         .map(|i| std::mem::take(&mut i.callbacks))
         .unwrap_or_default();
     let answer = f(req, &mut callbacks);
-    if let Some(i) = intern(req, this) {
-        i.callbacks = callbacks;
+    match intern(req, this) {
+        Some(i) => std::mem::replace(&mut i.callbacks, callbacks).release(req),
+        None => callbacks.release(req),
     }
     answer
 }
