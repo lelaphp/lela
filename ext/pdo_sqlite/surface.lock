@@ -14,7 +14,6 @@ ffi::Callbacks::finalize
 ffi::Callbacks::scalar
 ffi::Callbacks::step
 ffi::Db
-ffi::Db::authorizer
 ffi::Db::autocommit
 ffi::Db::backup
 ffi::Db::blob_open
@@ -35,13 +34,12 @@ ffi::Db::open
 ffi::Db::prepare
 ffi::Db::serve_with
 ffi::Db::set_authorizer
+ffi::Db::visit_authorizer
 ffi::Function
-ffi::Function::handlers
 ffi::Function::into_handlers
 ffi::Function::release
+ffi::Function::visit
 ffi::Handler
-ffi::Handler::keep
-ffi::Handler::release
 ffi::Invocation
 ffi::Invocation::arguments
 ffi::Invocation::failed
@@ -51,8 +49,8 @@ ffi::Invocation::return_int64
 ffi::Invocation::return_null
 ffi::Invocation::return_text
 ffi::Registration
-ffi::Registration::handlers
 ffi::Registration::unregister
+ffi::Registration::visit
 ffi::SQLITE_ATTACH
 ffi::SQLITE_BLOB
 ffi::SQLITE_BUSY
