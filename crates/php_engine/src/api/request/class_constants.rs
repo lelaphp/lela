@@ -405,6 +405,25 @@ impl Request {
     /// ```expect regime=immutable-literals
     /// string(2) "ex" interned
     /// ```
+    ///
+    /// The first read costs the case's object, `zend_objects_new` at the
+    /// enum's size, and nothing else: the case's constant expression is
+    /// the unit's and stays, as opcache's persisted one does, where php
+    /// -n frees the request's copy of it as it evaluates the case, 96
+    /// bytes for a pure case, and so reads 40 bytes less than nothing
+    /// (`trace:immutable-literal-arrays`):
+    ///
+    /// ```php
+    /// enum E { case A; case B; }
+    /// $m = memory_get_usage(); $x = E::A; echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $y = E::B; echo memory_get_usage() - $m, "\n";
+    /// $m = memory_get_usage(); $z = E::A; echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// 56
+    /// 56
+    /// 0
+    /// ```
     pub(crate) fn enum_case(&mut self, class: ClassId, name: &[u8]) -> Result<PhpObject, Thrown> {
         if let Some((_, case)) = self
             .class_constants

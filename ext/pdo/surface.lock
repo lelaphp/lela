@@ -42,6 +42,8 @@ connector::Failure::unsupported
 connector::OnError
 connector::Orientation
 connector::Orientation::of
+connector::ParameterMap
+connector::ParameterMap::give_up
 connector::Placeholders
 connector::Prepared
 connector::Rewritten

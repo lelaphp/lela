@@ -297,7 +297,7 @@ impl ObjectHandlers for Handlers {
         }
         drop(db);
         for handler in handlers {
-            handler.release(req);
+            handler.give_up(req);
         }
     }
 
@@ -307,13 +307,9 @@ impl ObjectHandlers for Handlers {
         let Some(Link::Open(open)) = object.native::<Conn>(req).map(|conn| &conn.link) else {
             return;
         };
-        if let Some(handler) = open.db.authorizer() {
-            visit(handler.value);
-        }
+        open.db.visit_authorizer(visit);
         for registration in &open.registrations {
-            for handler in registration.handlers() {
-                visit(handler.value);
-            }
+            registration.visit(visit);
         }
     }
 }
@@ -376,23 +372,22 @@ fn ever_opened(req: &mut Request, object: PhpObject) -> Result<Option<Db>, Throw
     }
 }
 
-/// A callable argument at `position` kept past the call.
-fn kept(req: &mut Request, callable: Callable, position: u32) -> Handler {
-    let value = req.argument(position).unwrap_or_default();
-    Handler::keep(req, callable, value)
-}
-
 /// `sqlite3_create_function` or `sqlite3_create_collation` of what
-/// `make` registers, kept on the connection; the handlers given up where
-/// the library refused it.
+/// `make` registers, its callables kept (`zend_fcc_dup`) once the
+/// connection stands, kept on the connection; the handlers given up
+/// where the library refused it.
 fn register(
     req: &mut Request,
     object: PhpObject,
-    make: impl FnOnce(&Db) -> Result<Registration, Vec<Handler>>,
+    make: impl FnOnce(&Request, &Db) -> Result<Registration, Vec<Handler>>,
 ) -> Result<bool, Thrown> {
-    let outcome = match &conn(req, object)?.link {
-        Link::Open(open) => make(&open.db),
-        _ => Err(Vec::new()),
+    let db = match &conn(req, object)?.link {
+        Link::Open(open) => Some(open.db.clone()),
+        _ => None,
+    };
+    let outcome = match db {
+        Some(db) => make(req, &db),
+        None => Err(Vec::new()),
     };
     match outcome {
         Ok(registration) => {
@@ -403,7 +398,7 @@ fn register(
         }
         Err(handlers) => {
             for handler in handlers {
-                handler.release(req);
+                handler.give_up(req);
             }
             Ok(false)
         }
@@ -710,7 +705,7 @@ impl SQLite3 {
         match db.close(registrations) {
             Ok(handlers) => {
                 for handler in handlers.into_iter().chain(authorizer) {
-                    handler.release(req);
+                    handler.give_up(req);
                 }
                 Ok(true)
             }
@@ -725,7 +720,7 @@ impl SQLite3 {
                 db.set_authorizer(authorizer);
                 conn_reopen(req, object, db, registrations)?;
                 for handler in released {
-                    handler.release(req);
+                    handler.give_up(req);
                 }
                 let message = format!("Unable to close database: {}", text(&message));
                 fail(req, exceptions, None, i64::from(code), &message)?;
@@ -1084,6 +1079,27 @@ impl SQLite3 {
     /// int(42)
     /// float(9.223372036854776E+18)
     /// ```
+    ///
+    /// The callback is kept as `zend_fcc_dup` keeps it, so a
+    /// `Class::method` string resolved with `$this` in scope keeps that
+    /// object until the connection gives the function up:
+    ///
+    /// ```php
+    /// class A { public $n = 'kept'; function __destruct(){ echo "dtor\n"; } function f($x){ return $this->n . $x; }
+    ///   function reg($db){ $db->createFunction('f', 'A::f'); } }
+    /// $db = new SQLite3(':memory:');
+    /// (new A)->reg($db);
+    /// echo "registered\n";
+    /// var_dump($db->querySingle("SELECT f('1')"));
+    /// unset($db);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// registered
+    /// string(5) "kept1"
+    /// dtor
+    /// end
+    /// ```
     #[php(tentative)]
     fn createFunction(
         req: &mut Request,
@@ -1098,16 +1114,15 @@ impl SQLite3 {
         if name.as_bytes().is_empty() {
             return Ok(false);
         }
-        let handler = kept(req, callback, 2);
         let name = name.as_bytes().to_vec();
         // php hands the library its `zend_long`s as `int`s.
         #[allow(clippy::cast_possible_truncation)]
-        register(req, object, |db| {
+        register(req, object, |req, db| {
             db.create_function(
                 &name,
                 argCount as i32,
                 flags as i32,
-                Function::Scalar(handler),
+                Function::Scalar(Owner::take(req, callback)),
             )
             .map_err(|(function, _)| function.into_handlers())
         })
@@ -1139,12 +1154,12 @@ impl SQLite3 {
         if name.as_bytes().is_empty() {
             return Ok(false);
         }
-        let step = kept(req, stepCallback, 2);
-        let finalize = kept(req, finalCallback, 3);
         let name = name.as_bytes().to_vec();
         // php hands the library its `zend_long` as an `int`.
         #[allow(clippy::cast_possible_truncation)]
-        register(req, object, |db| {
+        register(req, object, |req, db| {
+            let step = Owner::take(req, stepCallback);
+            let finalize = Owner::take(req, finalCallback);
             db.create_function(
                 &name,
                 argCount as i32,
@@ -1181,10 +1196,9 @@ impl SQLite3 {
         if name.as_bytes().is_empty() {
             return Ok(false);
         }
-        let handler = kept(req, callback, 2);
         let name = name.as_bytes().to_vec();
-        register(req, object, |db| {
-            db.create_collation(&name, handler)
+        register(req, object, |req, db| {
+            db.create_collation(&name, Owner::take(req, callback))
                 .map_err(|(handler, _)| vec![handler])
         })
     }
@@ -1332,18 +1346,10 @@ impl SQLite3 {
         callback: Option<Callable>,
     ) -> Answer<bool> {
         let object = this.object();
-        let handler = callback.map(|callable| kept(req, callable, 1));
-        let db = match open_db(req, object) {
-            Ok((db, _)) => db,
-            Err(thrown) => {
-                if let Some(handler) = handler {
-                    handler.release(req);
-                }
-                return Err(thrown);
-            }
-        };
+        let (db, _) = open_db(req, object)?;
+        let handler = callback.map(|callable| Owner::take(req, callable));
         if let Some(old) = db.set_authorizer(handler) {
-            old.release(req);
+            old.give_up(req);
         }
         Ok(true)
     }

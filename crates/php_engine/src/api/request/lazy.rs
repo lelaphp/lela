@@ -43,7 +43,7 @@ pub(crate) enum Strategy {
 #[derive(Debug)]
 enum State {
     Waiting {
-        initializer: Callable,
+        initializer: Owner<Callable>,
         lazy: Vec<bool>,
     },
     Instance(PhpObject),
@@ -169,16 +169,11 @@ impl Request {
         match self.lazy_row(o).map(|row| &row.state) {
             Some(State::Instance(instance)) => visit(instance.as_value()),
             Some(State::Waiting { initializer, .. }) => {
-                match initializer.target() {
-                    Target::Method {
-                        this: Some(this), ..
-                    } => visit(this.as_value()),
-                    // `zend_get_gc_buffer_add_fcc`: the closure the
-                    // callable names, beside the value.
-                    Target::Closure(closure) => visit(closure.as_value()),
-                    _ => {}
+                initializer.visit(visit);
+                // The closure the row owns apart, beside the value.
+                if let Target::Closure(closure) = initializer.target() {
+                    visit(closure.as_value());
                 }
-                visit(initializer.value());
             }
             None => {}
         }
@@ -240,12 +235,12 @@ impl Request {
     /// bool(false)
     /// int(2)
     /// ```
-    fn release_initializer(&mut self, initializer: Callable) {
+    fn release_initializer(&mut self, initializer: Owner<Callable>) {
         let closure = match initializer.target() {
             Target::Closure(closure) => Some(closure),
             _ => None,
         };
-        initializer.release(self);
+        initializer.give_up(self);
         if let Some(closure) = closure {
             self.release(closure.as_value());
         }
@@ -344,7 +339,7 @@ impl Request {
         // `ZVAL_COPY(&info->u.initializer.zv, ...)` and `zend_fcc_dup`:
         // the row owns the value and, apart, the closure `fcc.closure`
         // names, so a closure initializer has two owners here.
-        initializer.addref(self);
+        let held = Owner::take(self, initializer.clone());
         if let Target::Closure(closure) = initializer.target() {
             self.addref(&closure.as_value());
         }
@@ -352,7 +347,7 @@ impl Request {
             o.id().0,
             Info {
                 state: State::Waiting {
-                    initializer: initializer.clone(),
+                    initializer: held,
                     lazy,
                 },
                 skip_on_serialize: options & SKIP_INITIALIZATION_ON_SERIALIZE != 0,
@@ -584,7 +579,7 @@ impl Request {
             Some(Info {
                 state: State::Waiting { initializer, lazy },
                 ..
-            }) => Some((initializer.clone(), lazy.clone())),
+            }) => Some(((**initializer).clone(), lazy.clone())),
             _ => None,
         }
     }
