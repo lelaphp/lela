@@ -3,8 +3,8 @@
 //! harness-design.md §4.1, §13 D.19): the row names the files and no rule
 //! (#2473). Each is a `clippy.toml`, which clippy finds by nearest-file
 //! search: the one at `<dir>/clippy.toml` carries every rule whose scope
-//! reaches `<dir>`, so a crate under it is held to all of them. `deny_types` renders to
-//! `disallowed-types`, with the rule's text as each reason and wildcards
+//! reaches `<dir>`, so a crate under it is held to all of them.
+//! `deny_types` renders to `disallowed-types`, with the rule's text as each reason and wildcards
 //! expanded from `Cargo.lock` to the paths a package's types are reachable
 //! at (#1910); its `deny_macros` to `disallowed-macros` (#1781); and
 //! `deny_methods` to `disallowed-methods` (#1950). The committed copies are
@@ -77,11 +77,12 @@ pub fn write_all(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>> {
 /// name that source again in the row, as a `{ file, from }` entry beside
 /// the paths, and its generator would be an arm here.
 pub(crate) fn render(root: &Path, manifest: &Manifest, file: &str) -> Result<String> {
+    let dir = dir_of(file);
     match file
-        .rsplit_once('/')
-        .map_or(("", file), |(dir, name)| (dir, name))
+        .strip_prefix(dir)
+        .map(|name| name.trim_start_matches('/'))
     {
-        (dir, "clippy.toml") => clippy_toml(root, manifest, file, dir),
+        Some("clippy.toml") => clippy_toml(root, manifest, file, dir),
         _ => bail!(
             "no generator renders {file}: only a clippy.toml is generated, from the rules whose scope reaches it"
         ),
@@ -151,6 +152,15 @@ pub(crate) fn dir_of(file: &str) -> &str {
     file.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
+/// The path of the `clippy.toml` in `dir`, `""` being the root.
+fn clippy_toml_in(dir: &str) -> String {
+    if dir.is_empty() {
+        "clippy.toml".to_owned()
+    } else {
+        format!("{dir}/clippy.toml")
+    }
+}
+
 /// The clippy configurations nearer than `file`, one of the generated
 /// files `generated` names, to some crate below it: each `clippy.toml` or
 /// `.clippy.toml` under its directory, a `.clippy.toml` beside it among
@@ -176,11 +186,7 @@ pub(crate) fn nearer(root: &Path, generated: &[&str], file: &str) -> Result<Vec<
 fn nearest_generated<'g>(generated: &[&'g str], dir: &str) -> Option<&'g str> {
     let mut at = dir;
     loop {
-        let candidate = if at.is_empty() {
-            "clippy.toml".to_owned()
-        } else {
-            format!("{at}/clippy.toml")
-        };
+        let candidate = clippy_toml_in(at);
         if let Some(found) = generated.iter().find(|g| **g == candidate) {
             return Some(found);
         }
@@ -219,11 +225,7 @@ fn every_scope_rendered(manifest: &Manifest) -> Result<()> {
     let files = manifest.generated_files();
     for rule in manifest.rules.iter().filter(|r| renders_to_clippy(r)) {
         for dir in clippy_dirs(rule)? {
-            let file = if dir.is_empty() {
-                "clippy.toml".to_owned()
-            } else {
-                format!("{dir}/clippy.toml")
-            };
+            let file = clippy_toml_in(dir);
             if !files.contains(&file.as_str()) {
                 bail!(
                     "rule {}'s scope reaches {dir}/, and no generated rule renders {file}, so clippy would hold nothing there",
