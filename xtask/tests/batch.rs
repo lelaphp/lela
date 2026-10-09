@@ -240,9 +240,10 @@ type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
 /// The sensor of the manifest's `deny_lints` rules (#1917): every such
 /// rule has a fixture workspace under `xtask/fixtures/rules/<id>/` whose
 /// clippy readings carry the rule, fail where a source the scope covers
-/// sits under no module that denies the rule's lints, naming the source
-/// and the lints, and pass where the crate root, a module above the
-/// source or the crate's Cargo `[lints]` denies them.
+/// sits under no module that denies the rule's lints, or under one that
+/// lifts a denial again (an inner `allow`, or one on the `mod` item),
+/// naming the source and the lints, and pass where the crate root, a
+/// module above the source or the crate's Cargo `[lints]` denies them.
 #[test]
 fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_at() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -258,9 +259,16 @@ fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_a
             &[
                 (
                     "php_unit",
-                    "crates/php_unit/src/lib.rs: no #![deny] of clippy::expect_used, clippy::panic, clippy::todo, clippy::unimplemented, clippy::unreachable",
+                    "crates/php_unit/src/lib.rs: clippy::expect_used, clippy::panic, clippy::todo, clippy::unimplemented, clippy::unreachable not denied",
                 ),
-                ("php_syntax", "crates/php_syntax/src/main.rs: no #![deny]"),
+                (
+                    "php_syntax",
+                    "crates/php_syntax/src/main.rs: clippy::expect_used",
+                ),
+                (
+                    "php_link",
+                    "crates/php_link/src/lifted.rs and 1 more: clippy::panic, clippy::unwrap_used not denied",
+                ),
             ],
             &["php_heap", "php_sapi"],
         ),
@@ -268,7 +276,7 @@ fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_a
             "unsafe.one-op",
             &[(
                 "ext/pcre",
-                "ext/pcre/src/ffi/inner.rs and 1 more: no #![deny] of clippy::multiple_unsafe_ops_per_block, clippy::undocumented_unsafe_blocks",
+                "ext/pcre/src/ffi/inner.rs and 1 more: clippy::multiple_unsafe_ops_per_block, clippy::undocumented_unsafe_blocks not denied",
             )],
             &["ext/ctype"],
         ),

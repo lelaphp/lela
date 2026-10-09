@@ -2,8 +2,9 @@
 # fail the instrument named by its directory. The pin is the real one, by path.
 # The deny_lints sensor of the `clippy` instrument (#1917): php_heap denies
 # the rule's lints at its root and php_sapi through its Cargo [lints], so
-# both pass; php_unit denies one of the six and php_syntax's binary, a
-# crate root of its own, none, so both fail naming the source.
+# both pass; php_unit denies one of the six, php_syntax's binary, a
+# crate root of its own, none, and two modules of php_link lift what its
+# root denies, so the three fail naming the sources.
 [oracle]
 pin = "../../../../oracle.toml"
 [budget]
@@ -30,6 +31,10 @@ budget = 100
 
 [[crate]]
 name = "php_syntax"
+budget = 100
+
+[[crate]]
+name = "php_link"
 budget = 100
 
 [[rule]]
