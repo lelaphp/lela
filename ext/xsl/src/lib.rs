@@ -1012,10 +1012,16 @@ impl XSLTProcessor {
     /// var_dump($x->transformToXml($d));
     /// $x->registerPHPFunctions(['strrev']);
     /// try { $x->registerPHPFunctions(''); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// $y = new XSLTProcessor;
+    /// $y->importStylesheet($s);
+    /// try { $y->registerPHPFunctions(['strtoupper', 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
+    /// var_dump($y->transformToXml($d));
     /// ```
     /// ```expect
     /// string(1) "T"
     /// XSLTProcessor::registerPHPFunctions(): Argument #1 ($functions) must be a valid callback name
+    /// TypeError
+    /// string(1) "T"
     /// ```
     #[php(tentative)]
     fn registerPHPFunctions(

@@ -89,7 +89,6 @@ impl WrapperLabel for Request {
     fn wrapper_label(&self, wrapper: &Located) -> &'static str {
         match wrapper {
             Located::Plain => "plainfile",
-            Located::Php => "PHP",
             Located::Data => "RFC2397",
             Located::Ext(at) => self
                 .streams_ref()
@@ -104,9 +103,7 @@ impl WrapperLabel for Request {
 /// php_stream_locate_url_wrapper(new_name, NULL, 0)` in `rename`.
 fn same(a: &Located, b: &Located) -> bool {
     match (a, b) {
-        (Located::Plain, Located::Plain)
-        | (Located::Php, Located::Php)
-        | (Located::Data, Located::Data) => true,
+        (Located::Plain, Located::Plain) | (Located::Data, Located::Data) => true,
         (Located::Ext(x), Located::Ext(y)) => x == y,
         (Located::Space(x), Located::Space(y)) => x.same(y),
         _ => false,
@@ -344,7 +341,7 @@ impl PlainFiles for Request {
                 },
                 None => UrlStat::Unsupported,
             },
-            Located::Php | Located::Data | Located::Nothing => UrlStat::Unsupported,
+            Located::Data | Located::Nothing => UrlStat::Unsupported,
         })
     }
 
@@ -380,7 +377,7 @@ impl PlainFiles for Request {
                     Located::Space(user) => {
                         crate::streams::userspace::path_op(self, &user, path, op)
                     }
-                    Located::Php | Located::Data | Located::Nothing => Ok(false),
+                    Located::Data | Located::Nothing => Ok(false),
                 }
             }
             WrapperOp::Rmdir => {
@@ -395,7 +392,7 @@ impl PlainFiles for Request {
                     Located::Space(user) => {
                         crate::streams::userspace::path_op(self, &user, path, op)
                     }
-                    Located::Php | Located::Data | Located::Nothing => Ok(false),
+                    Located::Data | Located::Nothing => Ok(false),
                 }
             }
             WrapperOp::Touch(_)
@@ -423,7 +420,7 @@ impl PlainFiles for Request {
                 return crate::streams::userspace::path_op(self, user, path, WrapperOp::Unlink);
             }
             Located::Ext(at) => self.streams().wrappers[*at].unlink,
-            Located::Php | Located::Data => None,
+            Located::Data => None,
         };
         if let Some(unlink) = unlink {
             return unlink(self, path);
@@ -484,7 +481,7 @@ impl PlainFiles for Request {
             Located::Ext(at) if self.streams().wrappers[*at].rename.is_some() => {
                 self.streams().wrappers[*at].rename
             }
-            Located::Ext(_) | Located::Php | Located::Data => {
+            Located::Ext(_) | Located::Data => {
                 let text = format!(
                     "{} wrapper does not support renaming",
                     self.wrapper_label(&wrapper)
@@ -752,7 +749,7 @@ impl PlainFiles for Request {
             Located::Space(user) => {
                 return crate::streams::userspace::path_op(self, &user, path, op);
             }
-            Located::Php | Located::Data | Located::Nothing => {}
+            Located::Data | Located::Nothing => {}
         }
         let name = match op {
             WrapperOp::Touch(None) => {

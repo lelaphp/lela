@@ -494,10 +494,8 @@ pub(crate) struct Phpt {
     /// The compiled tier's lane: the engine runs under `jit.mode`.
     #[arg(long, value_name = "MODE")]
     pub jit: Option<Lane>,
-    /// The binary the process adapter runs; without it, the engine's own
-    /// where cargo puts it.
-    #[arg(long, value_name = "PATH")]
-    pub engine: Option<PathBuf>,
+    #[command(flatten)]
+    pub binary: PhptEngine,
     /// The census beside the run: every missed test grouped by the
     /// signature its miss kept, and the tests the compiler refused grouped
     /// by the construct it refused them for, carried on each reading; each
@@ -520,7 +518,7 @@ pub(crate) struct Phpt {
         value_name = "REF",
         num_args = 0..=1,
         default_missing_value = "main",
-        conflicts_with_all = ["full", "jit", "engine", "against", "unkept"]
+        conflicts_with_all = ["full", "jit", "engine", "control", "against", "unkept"]
     )]
     pub base: Option<String>,
     /// How many tests run at once: the machine's cores unless named, and
@@ -528,10 +526,11 @@ pub(crate) struct Phpt {
     /// never run at once whatever the number.
     #[arg(long, value_name = "N")]
     pub jobs: Option<std::num::NonZeroUsize>,
-    /// With `--engine` the pinned php, the runner's control: run only the
-    /// subsets whose kept target does not stand, none kept under the pin or
-    /// one that predates a test the subset has now, and say so of the rest.
-    #[arg(long, requires = "engine")]
+    /// Under the runner's control, `--control` or `--engine` a pinned php:
+    /// run only the subsets whose kept target does not stand, none kept
+    /// under the pin or one that predates a test the subset has now, and
+    /// say so of the rest.
+    #[arg(long)]
     pub unkept: bool,
     /// php-src's own `run-tests.php` beside this runner, both under the
     /// pinned oracle, over these `.phpt` files of the subset only, each
@@ -543,9 +542,33 @@ pub(crate) struct Phpt {
         value_name = "FILE",
         num_args = 1..,
         requires = "subset",
-        conflicts_with_all = ["full", "jit", "engine", "census", "against", "base", "unkept"]
+        conflicts_with_all = ["full", "jit", "engine", "control", "census", "against", "base", "unkept"]
     )]
     pub upstream: Vec<PathBuf>,
+}
+
+/// The binary under test one `phpt` run asks for, at most one of the two.
+#[derive(Debug, Args)]
+pub(crate) struct PhptEngine {
+    /// The binary the process adapter runs; without it, the engine's own
+    /// where cargo puts it.
+    #[arg(long, value_name = "PATH")]
+    pub engine: Option<PathBuf>,
+    /// The runner's control: each subset under its own oracle's pinned
+    /// php, the main one or the variant its row names, as the binary
+    /// under test, which keeps the subset's target under that pin.
+    #[arg(long, conflicts_with_all = ["engine", "jit"])]
+    pub control: bool,
+}
+
+impl PhptEngine {
+    pub(crate) fn engine(self) -> crate::phpt::Engine {
+        match (self.engine, self.control) {
+            (Some(path), _) => crate::phpt::Engine::Named(path),
+            (None, true) => crate::phpt::Engine::Control,
+            (None, false) => crate::phpt::Engine::Built,
+        }
+    }
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the

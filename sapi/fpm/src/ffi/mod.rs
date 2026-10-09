@@ -11,7 +11,7 @@ mod signals;
 mod title;
 pub(crate) mod trace;
 
-pub(crate) use signals::{child_soft_quit, master_signals, restore_defaults};
+pub(crate) use signals::{Listening, child_soft_quit, master_signals, restore_defaults};
 
 /// `in_shutdown`: the child was told to finish.
 pub(crate) fn shutting_down() -> bool {

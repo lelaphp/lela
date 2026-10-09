@@ -9,9 +9,9 @@
 //! log written, and the child gone after `pm.max_requests`.
 
 use std::io::{Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream};
-use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::net::{IpAddr, TcpStream};
+use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use php_proto::cgi::{Environment, Proxy, Settings};
@@ -32,12 +32,6 @@ use crate::{zlog, zlog_sys};
 
 /// `sapi_module.name`: what `php_sapi_name()` answers.
 pub(crate) const NAME: &str = "fpm-fcgi";
-
-/// The pool's listening socket, as the child accepts from it.
-enum Listener {
-    Tcp(TcpListener),
-    Unix(UnixListener),
-}
 
 /// One connection.
 enum Conn {
@@ -357,7 +351,10 @@ pub(crate) struct Worker {
     /// status pool serves the page of.
     status_board: Scoreboard,
     slot: usize,
-    listener: Listener,
+    /// The pool's listening socket, which the `SIGQUIT` handler closes.
+    listening: crate::ffi::Listening,
+    /// Whether it is a TCP socket or a Unix one.
+    domain: Domain,
     allowed: Option<Vec<IpAddr>>,
     access: Option<AccessLog>,
     status_uri: Option<Vec<u8>>,
@@ -418,14 +415,14 @@ pub(crate) fn init(
         failed(&name);
     }
     fpm.close_signal_pipe();
-    if crate::ffi::child_soft_quit(listening.as_raw_fd()).is_err() {
+    let Ok(listening) = crate::ffi::child_soft_quit(listening) else {
         zlog_sys!(
             Error @ fpm_signals_init_child:248,
             nix::errno::Errno::last(),
             "failed to init child signals: sigaction()"
         );
         failed(&name);
-    }
+    };
     crate::master::unblock_all();
     crate::env::init_child(&fpm.pools[pool]);
     let engine = build(ini, &config, started);
@@ -434,10 +431,6 @@ pub(crate) fn init(
         allowed_clients(config.listen_allowed_clients.as_deref())
     } else {
         None
-    };
-    let listener = match domain {
-        Domain::Inet => Listener::Tcp(TcpListener::from(listening)),
-        Domain::Unix => Listener::Unix(UnixListener::from(listening)),
     };
     LOGGING.store(
         engine.ini_get(b"fastcgi.logging").is_none_or(|v| truth(&v)),
@@ -455,7 +448,8 @@ pub(crate) fn init(
         engine,
         scoreboard,
         slot,
-        listener,
+        listening,
+        domain,
         allowed,
         access,
         status_uri: config.pm_status_path.clone(),
@@ -560,15 +554,25 @@ impl Worker {
                 return None;
             }
             self.accepting();
-            let accepted = match &self.listener {
-                Listener::Tcp(l) => l.accept().map(|(s, peer)| (Conn::Tcp(s), Some(peer.ip()))),
-                Listener::Unix(l) => l.accept().map(|(s, _)| (Conn::Unix(s), None)),
-            };
-            let (conn, peer) = match accepted {
-                Ok(accepted) => accepted,
+            let (conn, peer) = match self.listening.accept() {
+                Ok(fd) => match self.domain {
+                    Domain::Inet => {
+                        let s = TcpStream::from(fd);
+                        // A peer gone before its address is read is let go,
+                        // so `listen.allowed_clients` never lets in a
+                        // connection it could not judge.
+                        let Ok(peer) = s.peer_addr() else {
+                            continue;
+                        };
+                        (Conn::Tcp(s), Some(peer.ip()))
+                    }
+                    Domain::Unix => (Conn::Unix(UnixStream::from(fd)), None),
+                },
                 Err(e) => {
-                    let transient =
-                        matches!(e.raw_os_error(), Some(libc::EINTR | libc::ECONNABORTED));
+                    let transient = matches!(
+                        e,
+                        nix::errno::Errno::EINTR | nix::errno::Errno::ECONNABORTED
+                    );
                     if crate::ffi::shutting_down() || !transient {
                         return None;
                     }
