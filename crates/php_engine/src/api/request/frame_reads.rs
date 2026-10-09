@@ -187,9 +187,15 @@ impl<'a> FrameView<'a> {
     /// opline the frame stands on, as php names it, `ZEND_ECHO`, the
     /// call's for a frame below the innermost, as `zend_test`'s
     /// `observer.show_opcode` prints it from a begin or an end handler;
+    /// `ZEND_HANDLE_EXCEPTION` while the unwinder answers a throwable in
+    /// the frame, php's `EG(exception_op)`, which is what an end handler
+    /// the uncaught arm calls reads;
     /// empty past its op array.
     #[must_use]
     pub fn opcode(&self) -> &'static str {
+        if self.state().is_some_and(|state| state.at_exception_op) {
+            return "ZEND_HANDLE_EXCEPTION";
+        }
         self.state()
             .and_then(|state| {
                 exec::body_of(&state.unit, state.body)

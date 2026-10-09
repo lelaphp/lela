@@ -469,6 +469,13 @@ pub(crate) struct FrameState {
     /// serves is called from the caller's activation, and this one is
     /// on no chain a backtrace reads.
     pub(crate) leaving: bool,
+    /// `EX(opline) == EG(exception_op)`: the unwinder is answering a
+    /// throwable in the frame (`ZEND_HANDLE_EXCEPTION`), from the throw
+    /// until it lands at a `catch` or a `finally`, or ends the frame at
+    /// its uncaught arm. `opline` keeps the opline that raised, php's
+    /// `EG(opline_before_exception)`, which a trace reads; this is what
+    /// an observer that reads the opcode reads.
+    pub(crate) at_exception_op: bool,
     /// The `Generator` whose frame this is, php's `EX(return_value)`
     /// under `ZEND_CALL_GENERATOR` (`zend_get_running_generator`): set
     /// by `GENERATOR_CREATE` when it moves the frame into the object,
@@ -1035,6 +1042,7 @@ impl Vm {
             extra_named: ExtraNamed::default(),
             calls_below,
             leaving: false,
+            at_exception_op: false,
             generator: None,
             fast_calls: Vec::new(),
             op_array: None,
@@ -1099,6 +1107,14 @@ impl Vm {
     pub(crate) fn innermost(&self) -> Option<&FrameState> {
         self.below(self.frames.len())
             .and_then(|at| self.frames.get(at))
+    }
+
+    /// `EX(opline) = EG(exception_op)` on `frame`, or the frame back at
+    /// an opline of its own ([`FrameState::at_exception_op`]).
+    pub(crate) fn stand_at_exception_op(&mut self, frame: FrameRef, at: bool) {
+        if let Some(state) = self.at_mut(frame) {
+            state.at_exception_op = at;
+        }
     }
 
     /// Every frame's state, the entry frame first.

@@ -264,6 +264,48 @@ fn a_handler_reads_the_opcode_its_frame_stands_on() {
     );
 }
 
+/// A frame an uncaught throwable or an `exit` leaves stands at
+/// `ZEND_HANDLE_EXCEPTION` for its end handler, php's `EG(exception_op)`,
+/// as the oracle's `zend_test.observer.show_opcode` prints it at `b`'s,
+/// `d`'s and the main file's ends of this program. `a`'s end comes from
+/// the `FAST_RET` that takes the unwind up again past its `finally`,
+/// which this engine reads as `ZEND_FAST_RET` and php as the stale
+/// `ZEND_ECHO` its last saving handler left.
+#[test]
+fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
+    fn init(_: &mut Observed<'_>) -> ObserverHandlers {
+        ObserverHandlers {
+            begin: None,
+            end: Some(end),
+        }
+    }
+    fn end(observed: &mut Observed<'_>, _: Option<&crate::api::values::Value>) {
+        let req: &Request = observed;
+        let Some(view) = observed.frame() else {
+            return;
+        };
+        let line = format!("<end {} {}>", name(req, &view), view.opcode());
+        observed.write(line.as_bytes());
+    }
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default().observer(init).build("showing")])
+        .build();
+    let dir = super::observer::scratch("opcode_unwound");
+    let served = super::observer::serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction b() { throw new Exception(\"x\"); }\n\
+         function a() { try { b(); } finally { echo \"f\\n\"; } }\n\
+         function c() { try { a(); } catch (Exception $e) { echo \"c\\n\"; } return 1; }\n\
+         c();\nfunction d() { exit(0); }\nd();\n",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "<end b ZEND_HANDLE_EXCEPTION>f\n<end a ZEND_FAST_RET>c\n<end c ZEND_RETURN>\
+         <end d ZEND_HANDLE_EXCEPTION><end main.php ZEND_HANDLE_EXCEPTION>"
+    );
+}
+
 /// One frame of a walk as `observer_show_init_backtrace` writes it:
 /// `C::m`, `f`, or `{main}` and the file's base name, `[no active file]`
 /// where it has none; then, for a user frame standing on a stack, the

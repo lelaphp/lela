@@ -20701,6 +20701,7 @@ pub(crate) fn handle_exception<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
+    req.vm_mut().stand_at_exception_op(frame, true);
     let mut op_num = req.vm().opline(frame);
     // A throwable a loop variable's destruction raised on the way out of
     // a `foreach` is held to have been raised at the last of the frees,
@@ -20791,6 +20792,7 @@ fn unwind_from<T: Tier>(
         };
         if op_num < element.catch_op.0 && req.is_pending() {
             cleanup_live_vars(req, frame, code, op_num, element.catch_op.0);
+            req.vm_mut().stand_at_exception_op(frame, false);
             return jump_to(req, frame, element.catch_op.0);
         }
         if op_num < element.finally_op.0 {
@@ -20809,6 +20811,7 @@ fn unwind_from<T: Tier>(
                 cell.delayed = delayed;
                 cell.from = None;
             }
+            req.vm_mut().stand_at_exception_op(frame, false);
             return jump_to(req, frame, element.finally_op.0);
         }
         if op_num < element.finally_end.0 {
@@ -20843,7 +20846,11 @@ fn unwind_from<T: Tier>(
         at = offset.checked_sub(1);
     }
     // The uncaught arm (`Z/Zend/zend_vm_def.h:8157-8161`): the frame's
-    // observers ended with no value before its live temporaries go.
+    // observers ended with no value before its live temporaries go, the
+    // frame standing at `ZEND_HANDLE_EXCEPTION` where the unwinder
+    // reached it from a throw, and at the `FAST_RET` that took the
+    // unwind up again, where php reads a stale `EX(opline)`: the last
+    // one a handler saved, since `FAST_RET` saves none.
     crate::observer::returned(req, frame, None);
     cleanup_live_vars(req, frame, code, op_num, 0);
     if req.stack_mut().entry() == frame {

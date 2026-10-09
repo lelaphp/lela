@@ -700,7 +700,9 @@ impl Request {
         };
         if raised.is_some() {
             // The `RECV` that raised is the callee's, whose unwind ends
-            // what it began (`unwind_from`); here it is left at once.
+            // what it began (`unwind_from`) at `ZEND_HANDLE_EXCEPTION`;
+            // here it is left at once.
+            self.vm.stand_at_exception_op(frame, true);
             crate::observer::returned(self, frame, None);
             while self.vm.frames().len() > standing {
                 self.pop_frame();
