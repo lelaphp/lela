@@ -125,6 +125,7 @@ fn send_file(
         will_cast: false,
         disable_open_basedir: false,
         only_get_headers: false,
+        ..Opening::default()
     };
     let Some(stream) = req.open_stream_with(filename, b"r", opening)? else {
         let shown: String = String::from_utf8_lossy(filename).chars().take(64).collect();

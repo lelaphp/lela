@@ -3110,6 +3110,22 @@ impl OpenOptions {
         for_zend_stream: false,
     };
 
+    /// The options a wrapper's opener is handed, with `USE_PATH` as
+    /// `use_path` says and the warning bit cleared,
+    /// `options & ~REPORT_ERRORS`.
+    const fn opening(self, use_path: bool) -> crate::api::request::Opening {
+        crate::api::request::Opening {
+            use_path,
+            warn: false,
+            for_include: self.for_include,
+            must_seek: self.must_seek,
+            will_cast: self.will_cast,
+            disable_open_basedir: self.disable_open_basedir,
+            only_get_headers: self.only_get_headers,
+            for_zend_stream: self.for_zend_stream,
+        }
+    }
+
     /// `options & ~REPORT_ERRORS`, what a wrapper's opener is handed.
     const fn unreported(self) -> OpenOptions {
         OpenOptions {
@@ -3133,6 +3149,25 @@ impl OpenOptions {
             | (self.use_url as i64) << 8
             | (self.only_get_headers as i64) << 9
             | (self.for_zend_stream as i64) << 16
+    }
+}
+
+/// The options an extension's [`Opening`](crate::api::request::Opening)
+/// names, as the bits php's `options` carries: `REPORT_ERRORS` where it
+/// warns, and never `STREAM_USE_URL`.
+impl From<crate::api::request::Opening> for OpenOptions {
+    fn from(opening: crate::api::request::Opening) -> OpenOptions {
+        OpenOptions {
+            use_path: opening.use_path,
+            use_url: false,
+            report: opening.warn,
+            for_include: opening.for_include,
+            must_seek: opening.must_seek,
+            will_cast: opening.will_cast,
+            disable_open_basedir: opening.disable_open_basedir,
+            only_get_headers: opening.only_get_headers,
+            for_zend_stream: opening.for_zend_stream,
+        }
     }
 }
 
@@ -3954,15 +3989,19 @@ impl StreamLayer for Request {
         mode: &[u8],
         opening: crate::api::request::Opening,
     ) -> Result<Option<Owner<Stream>>, Thrown> {
-        let options = OpenOptions {
-            use_path: opening.use_path,
-            report: opening.warn,
-            must_seek: opening.must_seek,
-            will_cast: opening.will_cast,
-            disable_open_basedir: opening.disable_open_basedir,
-            ..OpenOptions::REPORT
+        // The opener's caller holds `*opened_path` where the opener hands
+        // on `STREAM_OPEN_FOR_ZEND_STREAM`, and this open the
+        // `opened_path`: the name it sets is the opener's own, set once
+        // the open stands, and the string the open made of it given up.
+        let Some((stream, named)) = self.open_wrapper_named(path, mode, opening.into())? else {
+            return Ok(None);
         };
-        self.open_wrapper_ex(path, mode, options)
+        if let Some(name) = named {
+            let bytes = name.as_bytes().to_vec();
+            name.give_up(self);
+            self.streams().opened_path = Some(bytes);
+        }
+        Ok(Some(stream))
     }
 
     /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL
@@ -4222,15 +4261,7 @@ impl StreamLayer for Request {
                 Err(String::from("wrapper does not support stream open")),
             ));
         };
-        let opening = crate::api::request::Opening {
-            use_path,
-            warn: false,
-            for_include: options.for_include,
-            must_seek: options.must_seek,
-            will_cast: options.will_cast,
-            disable_open_basedir: options.disable_open_basedir,
-            only_get_headers: options.only_get_headers,
-        };
+        let opening = options.opening(use_path);
         let outer = std::mem::take(&mut self.streams().wrapper_errors);
         let opened = open(self, path, mode, opening);
         let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
