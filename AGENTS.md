@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=9df6e618d339a7e6cf9e90b95042a5d18882ddcfbf3579e9a1733f31f30d3f3d out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=77e1cf2cc1f45a5324121493c022eb709d5d662dd5d32caa18d3d4075916c3c6 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 37 |  | no reading |
 | harness | xtask.lock | 393 |  | no reading |
 
-<!-- /computed in=dbc057c6814cd6ebed2b878c48069655719a97415879f89b5fca88380e73707b out=11c67b8d96ec1b95a07d2f9b07fd5e457ec98645dd5cc4bbf0b92b899b049f01 -->
+<!-- /computed in=7b4733bc786e783bb1e23ebe365f2be7968b16118f526b66434923cecc30feb2 out=11c67b8d96ec1b95a07d2f9b07fd5e457ec98645dd5cc4bbf0b92b899b049f01 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -155,6 +155,7 @@ third-engine-design.md
 | vocab.harness |  | avoid_from | no reading |
 | generated.committed |  | generated | no reading |
 | git.no-verify |  | deny_argv | no reading |
+| git.no-amend |  | deny_argv | no reading |
 | ticket.close |  | deny_argv | no reading |
 | ticket.close-api |  | deny_pattern | no reading |
 | ticket.reply-unfiled |  | deny_pattern | no reading |
@@ -167,7 +168,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern | no reading |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=29c4cbaaebe61724c35aeba399f94d617478ed2a4196f8b17ea0d34260a21b9a out=9e41c88846f9205321377215b3c283712138042314d0b10d6de8e940afcf6681 -->
+<!-- /computed in=7efedd8463d9b73c70437aebb50f78a436acf3bf23e498487cb037b9f21c020d out=be25d111f0a41da9a2ef28c2c7751b8ec9e73aa6c7c93c97f0a3396365224876 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

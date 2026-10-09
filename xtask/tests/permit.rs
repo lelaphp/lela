@@ -221,7 +221,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
     for line in [
         "git add .",
         "git add -u",
-        "git commit --amend --no-edit",
+        "git commit -a -m msg",
         "git add -- .",
         "git -C /Users/x/dax-php commit -F /tmp/msg",
     ] {
@@ -234,7 +234,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
     }
     for line in [
         "git add -- AGENTS.md",
-        "git commit --amend -F /tmp/msg -- xtask/src",
+        "git commit -F /tmp/msg -- xtask/src",
         "git add -A -- xtask/fixtures/rules/git.pathspec",
         "git worktree add -b t/x .claude/worktrees/t/x main",
         "cargo add serde",

@@ -742,6 +742,13 @@ with = "git commit"
 text = "Commits run the pre-commit hook; --no-verify is not available to agents."
 
 [[rule]]
+id = "git.no-amend"
+tool = "Bash"
+deny_argv = ["--amend"]
+with = "git commit"
+text = "A commit is never rewritten: make a new one. An amend of a pushed commit forks main from origin (#2267)."
+
+[[rule]]
 id = "ticket.close"
 tool = "Bash"
 deny_argv = ["close", "reopen"]

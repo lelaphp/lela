@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cd x && git add -- AGENTS.md && git commit --amend -F /tmp/msg -- AGENTS.md","description":"Amend the last commit by pathspec after a cd"}}
