@@ -10,7 +10,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -156,11 +156,6 @@ impl Server {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-
-    /// A file under the document root.
-    pub fn file(&self, name: &str) -> PathBuf {
-        self.root.join(name)
-    }
 }
 
 impl Drop for Server {
@@ -180,16 +175,4 @@ pub fn body(stream: &mut TcpStream) -> String {
         Some((_, body)) => body.to_owned(),
         None => text,
     }
-}
-
-/// Whether `path` exists and is `size` bytes long within `within`.
-pub fn sized_within(path: &Path, size: u64, within: Duration) -> bool {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if std::fs::metadata(path).is_ok_and(|meta| meta.len() == size) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
 }
