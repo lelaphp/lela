@@ -186,15 +186,13 @@ impl Request {
 
     /// The natives an extension declared, in the order it declared
     /// them: what `CG(function_table)` holds with
-    /// `internal_function.module` naming it.
+    /// `internal_function.module` naming it, so none `disable_functions`
+    /// took out.
     #[must_use]
     pub fn extension_functions(&self, extension: ExtensionId) -> Vec<Function> {
-        self.shared
-            .function_modules
-            .iter()
-            .zip(0u32..)
-            .filter(|(module, _)| **module == Some(extension))
-            .map(|(_, at)| Function(at))
+        (self.shared.function_modules.iter().enumerate())
+            .filter(|&(at, module)| *module == Some(extension) && self.shared.in_function_table(at))
+            .filter_map(|(at, _)| Some(Function(u32::try_from(at).ok()?)))
             .collect()
     }
 

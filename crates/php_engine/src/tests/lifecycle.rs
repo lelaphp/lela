@@ -10,7 +10,7 @@ use crate::api::abi::{
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::engine::{
-    Engine, HostPage, HostServes, IniOrigin, Method, RequestDescription, WebRequest,
+    Engine, HostPage, HostServes, IniOrigin, Method, NotAlone, RequestDescription, WebRequest,
 };
 use crate::test::Capture;
 
@@ -633,27 +633,40 @@ fn starts_from_ini() -> Extension {
         .build("starts_from_ini")
 }
 
-/// A host's own entries are laid over at `ZEND_INI_STAGE_ACTIVATE`, as
-/// php-fpm's child applies its pool's `php_value` and `php_admin_value`
-/// to an engine whose `MINIT` ran once in the master: an extension's
-/// engine start sees the startup ini without them, the `-d` value where
-/// one was given and the default where none was, whether or not the
-/// entry has an `on_modify`, while the master value every request
-/// starts with is the host's (#1944).
+/// A host's own entries are laid over the started engine at
+/// `ZEND_INI_STAGE_ACTIVATE` ([`Engine::alter_master_ini`]), as php-fpm's
+/// child applies its pool's `php_value` and `php_admin_value` to the
+/// engine whose `MINIT` ran once in the master: an extension's engine
+/// start saw the startup ini alone, the `-d` value where one was given
+/// and the default where none was, and the master value every request
+/// starts with is the host's after, whether or not the entry has an
+/// `on_modify` (#1944, #2273). With a clone of the engine standing,
+/// nothing is laid.
 #[test]
-fn an_engine_start_sees_the_startup_ini_without_the_host_s_entries() {
+fn a_host_s_entries_are_laid_over_the_started_engine() {
     let _rec = Recording::start();
-    let engine = Engine::cli_builder()
+    let mut engine = Engine::cli_builder()
         .extensions(&[starts_from_ini()])
         .ini(b"t.plain", b"line")
-        .host_ini(b"t.plain", b"pool", IniOrigin::Admin)
-        .host_ini(b"t.handled", b"pool", IniOrigin::Value)
         .build();
     let seen = STARTED_WITH
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     assert_eq!(seen, [Some(b"line".to_vec()), Some(b"default".to_vec())]);
+    let pool = |name: &[u8], mode| (name.to_vec(), b"pool".to_vec(), mode);
+    let clone = engine.clone();
+    assert_eq!(
+        engine.alter_master_ini(vec![pool(b"t.plain", IniOrigin::Admin)]),
+        Err(NotAlone)
+    );
+    assert_eq!(engine.ini_get(b"t.plain"), Some(b"line".to_vec()));
+    drop(clone);
+    let written = engine.alter_master_ini(vec![
+        pool(b"t.plain", IniOrigin::Admin),
+        pool(b"t.handled", IniOrigin::Value),
+    ]);
+    assert_eq!(written, Ok(Vec::new()));
     assert_eq!(engine.ini_get(b"t.plain"), Some(b"pool".to_vec()));
     assert_eq!(engine.ini_get(b"t.handled"), Some(b"pool".to_vec()));
 }

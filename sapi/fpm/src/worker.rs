@@ -18,8 +18,8 @@ use php_proto::cgi::{Environment, Proxy, Settings};
 use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::cgi::ini_text;
 use php_sapi::{
-    Aborted, Body, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, OutputSink,
-    RequestDescription, ResponseHead, WebRequest,
+    Aborted, Body, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
+    OutputSink, RequestDescription, ResponseHead, WebRequest,
 };
 
 use crate::access::AccessLog;
@@ -368,15 +368,10 @@ pub(crate) struct Worker {
     get_values: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
-/// `fpm_child_init`: the child made ready for pool `pool` of `fpm`, and
-/// its engine built; the child exits with 70 where a step fails.
-pub(crate) fn init(
-    fpm: &mut Fpm,
-    pool: usize,
-    slot: usize,
-    ini: (&[crate::Define], &crate::Startup),
-    started: &[u8],
-) -> Worker {
+/// `fpm_child_init`: the child made ready for pool `pool` of `fpm`, on
+/// the master's engine with the pool's values laid over it ([`lay`]);
+/// the child exits with 70 where a step fails.
+pub(crate) fn init(fpm: &mut Fpm, pool: usize, slot: usize) -> Worker {
     let failed = |name: &str| -> ! {
         zlog!(Error @ fpm_child_init:202, "[pool {name}] child failed to initialize");
         std::process::exit(i32::from(EXIT_SOFTWARE));
@@ -425,7 +420,9 @@ pub(crate) fn init(
     };
     crate::master::unblock_all();
     crate::env::init_child(&fpm.pools[pool]);
-    let engine = build(ini, &config, started);
+    let Some(Ok(engine)) = fpm.engine.take().map(|engine| lay(engine, &config)) else {
+        failed(&name)
+    };
     let domain = fpm.pools[pool].domain;
     let allowed = if domain == Domain::Inet {
         allowed_clients(config.listen_allowed_clients.as_deref())
@@ -469,29 +466,23 @@ fn truth(value: &[u8]) -> bool {
     v == "on" || v == "yes" || v == "true" || v.parse::<i64>().is_ok_and(|n| n != 0)
 }
 
-/// The child's engine: the bundle, `-d`'s entries, and the pool's
-/// `php_value`s and `php_admin_value`s as `fpm_php_apply_defines` sets
-/// them, each one php does not know logged.
-fn build(
-    (ini, startup): (&[crate::Define], &crate::Startup),
-    config: &PoolConfig,
-    started: &[u8],
-) -> Engine {
-    let mut builder = php_sapi::prepare(crate::builder(startup), ini);
-    for (name, value) in &config.php_values {
-        builder = builder.host_ini(name, value, IniOrigin::Value);
-    }
-    for (name, value) in &config.php_admin_values {
-        builder = builder.host_ini(name, value, IniOrigin::Admin);
-    }
-    let engine = builder.build();
-    // What the pool's entries wrote as they were laid over, past what the
-    // master wrote as php started.
-    let own = engine
-        .startup_errors()
-        .strip_prefix(started)
-        .unwrap_or_default();
-    std::io::stderr().write_all(own).ok();
+/// `fpm_php_init_child`'s `fpm_php_apply_defines`: the pool's
+/// `php_value`s and then its `php_admin_value`s laid over the engine the
+/// master started and the fork copied, which the child keeps, as php's
+/// child keeps what its master's `php_module_startup` built and
+/// preloaded; what laying them wrote to stderr written there, and each
+/// one php does not know logged; nothing laid where another clone of
+/// the engine stands.
+fn lay(mut engine: Engine, config: &PoolConfig) -> Result<Engine, NotAlone> {
+    let entries = (config.php_values.iter())
+        .map(|(name, value)| (name.clone(), value.clone(), IniOrigin::Value))
+        .chain(
+            (config.php_admin_values.iter())
+                .map(|(name, value)| (name.clone(), value.clone(), IniOrigin::Admin)),
+        )
+        .collect();
+    let written = engine.alter_master_ini(entries)?;
+    std::io::stderr().write_all(&written).ok();
     for (kind, values, line) in [
         ("php_value", &config.php_values, 110),
         ("php_admin_value", &config.php_admin_values, 119),
@@ -506,7 +497,7 @@ fn build(
             }
         }
     }
-    engine
+    Ok(engine)
 }
 
 impl Worker {

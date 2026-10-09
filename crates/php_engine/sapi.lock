@@ -19,6 +19,7 @@ IniOrigin
 IniValue
 LeakSensor
 Method
+NotAlone
 Observables
 OutputSink
 PHP_CONFIG_FILE_PATH

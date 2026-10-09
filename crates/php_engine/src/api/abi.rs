@@ -99,10 +99,11 @@ pub struct Start {
 
 impl Start {
     /// The startup ini, as the engine's entries stand once every
-    /// handler has taken what the host set at the startup stage: the
-    /// host's own entries, laid over at the activate stage
-    /// (`EngineBuilder::host_ini`), are not in it, as php-fpm's pool
-    /// values are not in the ini its master's `MINIT` read.
+    /// handler has taken what the host set at the startup stage: a
+    /// host's own entries are laid over the started engine at the
+    /// activate stage (`Engine::alter_master_ini`), after every engine
+    /// start, as php-fpm's pool values are not in the ini its master's
+    /// `MINIT` read.
     #[must_use]
     pub fn ini(&self) -> &StartupIni {
         &self.ini

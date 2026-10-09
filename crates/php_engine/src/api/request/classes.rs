@@ -1402,7 +1402,8 @@ impl Request {
             .map(|(function, _)| function)
     }
 
-    /// `EG(function_table)` in its order: every native function, then
+    /// `EG(function_table)` in its order: every native function the
+    /// table holds, so none `disable_functions` took out, then
     /// each user function the request can find, in the order the table
     /// took them, as `get_defined_functions()` lists them; a method is
     /// none, being its class's, and a closure is none, since php never
@@ -1416,7 +1417,11 @@ impl Request {
                 .filter(|decl| !decl.name.0.starts_with(b"{"))
                 .map(|_| function)
         });
-        (0..natives).map(Function).chain(user).collect()
+        (0..natives)
+            .filter(|&at| self.shared.in_function_table(at as usize))
+            .map(Function)
+            .chain(user)
+            .collect()
     }
 
     /// The user functions the request's `EG(function_table)` can find,
