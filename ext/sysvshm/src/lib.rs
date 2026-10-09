@@ -536,7 +536,7 @@ fn shm_get_var(
     let Some(bytes) = bytes else {
         let text = format!("Variable key {key} doesn't exist");
         docref(req, Level::Warning, &text);
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     let mut reader = Unserializer::new(req, bytes.as_deref().unwrap_or_default())?;
     // The value read is the caller's, kept beside the read's outcome.
@@ -561,7 +561,7 @@ fn shm_get_var(
                 Level::Warning,
                 "Variable data in shared memory is corrupted",
             );
-            Ok(Owner::take(req, Value::bool(false)))
+            Ok(Owner::bool(false))
         }
     }
 }

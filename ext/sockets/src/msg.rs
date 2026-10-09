@@ -5,7 +5,7 @@ use php_ext::abi::{Instance, OrFalse, Ref};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, Value};
+use php_ext::values::{Owner, PhpArray};
 
 use crate::State;
 use crate::conv::{Ancillary, Conv};
@@ -153,7 +153,7 @@ fn socket_recvmsg(
     let value = if conv.failed() {
         value.give_up(req);
         conv.report(req);
-        Owner::take(req, Value::bool(false))
+        Owner::bool(false)
     } else {
         value
     };

@@ -386,12 +386,8 @@ impl Dimensions {
         offset: Option<&Value>,
         access: Access,
     ) -> Result<(), Thrown> {
-        object.set_slot(req, access as u32, Owner::take(req, Value::bool(true)))?;
-        object.set_slot(
-            req,
-            HAS_OFFSET,
-            Owner::take(req, Value::bool(offset.is_some())),
-        )?;
+        object.set_slot(req, access as u32, Owner::bool(true))?;
+        object.set_slot(req, HAS_OFFSET, Owner::bool(offset.is_some()))?;
         if let Some(offset) = offset {
             object.set_slot(req, OFFSET, Owner::take(req, *offset))?;
         }
@@ -416,8 +412,8 @@ impl ObjectHandlers for Dimensions {
             DimensionRead::Silent => 3,
             DimensionRead::Unset => 5,
         };
-        object.set_slot(req, READ_TYPE, Owner::take(req, Value::int(kind)))?;
-        Ok(Owner::take(req, Value::bool(true)))
+        object.set_slot(req, READ_TYPE, Owner::int(kind))?;
+        Ok(Owner::bool(true))
     }
 
     /// The write recorded; the value is not kept.
@@ -440,11 +436,7 @@ impl ObjectHandlers for Dimensions {
         offset: &Value,
         not_empty: bool,
     ) -> Result<bool, Thrown> {
-        object.set_slot(
-            req,
-            CHECK_EMPTY,
-            Owner::take(req, Value::int(i64::from(not_empty))),
-        )?;
+        object.set_slot(req, CHECK_EMPTY, Owner::int(i64::from(not_empty)))?;
         Dimensions::record(req, object, Some(offset), Access::Has)?;
         Ok(true)
     }

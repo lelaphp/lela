@@ -974,13 +974,13 @@ impl Props for StmtProps {
             "affected_rows" => affected(req, status.affected_rows)?,
             "insert_id" => long_or_string(req, status.insert_id)?,
             "num_rows" => long_or_string(req, status.num_rows)?,
-            "param_count" => Owner::take(req, Value::int(i64::from(status.parameter_count))),
-            "field_count" => Owner::take(req, Value::int(i64::from(status.field_count))),
-            "errno" => Owner::take(req, Value::int(i64::from(status.errno))),
+            "param_count" => Owner::int(i64::from(status.parameter_count)),
+            "field_count" => Owner::int(i64::from(status.field_count)),
+            "errno" => Owner::int(i64::from(status.errno)),
             "error" => string(req, &status.error)?,
             "error_list" => props::error_list(req, &status.error_list)?.into_value(),
             "sqlstate" => string(req, &status.sqlstate)?,
-            "id" => Owner::take(req, Value::int(i64::from(status.id))),
+            "id" => Owner::int(i64::from(status.id)),
             _ => return Ok(None),
         };
         Ok(Some(value))

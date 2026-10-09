@@ -397,7 +397,7 @@ fn fields(req: &mut Request, fields: &[Field]) -> Result<Owner<PhpArray>, Thrown
     for field in fields {
         let value = match field {
             Field::Word(bytes) => PhpString::new(req, &bin2hex(bytes))?.into_value(),
-            Field::Long(n) => Owner::take(req, Value::int(*n)),
+            Field::Long(n) => Owner::int(*n),
         };
         out.append(req, value)?;
     }

@@ -500,7 +500,7 @@ fn posix_getgroups(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown
     };
     let mut array = PhpArray::new(req)?;
     for gid in groups {
-        array.append(req, Owner::take(req, Value::int(i64::from(gid))))?;
+        array.append(req, Owner::int(i64::from(gid)))?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -704,7 +704,7 @@ fn posix_times(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
         (b"cutime", t.cutime),
         (b"cstime", t.cstime),
     ] {
-        set(req, &mut array, key, Owner::take(req, Value::int(count)))?;
+        set(req, &mut array, key, Owner::int(count))?;
     }
     Ok(OrFalse::Value(array))
 }
@@ -1092,7 +1092,7 @@ fn group_array(req: &mut Request, group: &Group) -> Result<Owner<PhpArray>, Thro
         members.append(req, member)?;
     }
     set(req, &mut array, b"members", members.into_value())?;
-    let gid = Owner::take(req, Value::int(i64::from(group.gid.as_raw())));
+    let gid = Owner::int(i64::from(group.gid.as_raw()));
     set(req, &mut array, b"gid", gid)?;
     Ok(array)
 }
@@ -1167,13 +1167,13 @@ fn user_array(req: &mut Request, user: &User) -> Result<Owner<PhpArray>, Thrown>
         req,
         &mut array,
         b"uid",
-        Owner::take(req, Value::int(i64::from(user.uid.as_raw()))),
+        Owner::int(i64::from(user.uid.as_raw())),
     )?;
     set(
         req,
         &mut array,
         b"gid",
-        Owner::take(req, Value::int(i64::from(user.gid.as_raw()))),
+        Owner::int(i64::from(user.gid.as_raw())),
     )?;
     let gecos = string(req, user.gecos.as_bytes())?;
     set(req, &mut array, b"gecos", gecos)?;
@@ -1273,7 +1273,7 @@ const LIMITS: &[(i64, &str)] = &[
 /// One limit as php renders it: the number, or `"unlimited"`.
 fn limit_value(req: &mut Request, limit: Option<i64>) -> Result<Owner<Value>, Thrown> {
     match limit {
-        Some(n) => Ok(Owner::take(req, Value::int(n))),
+        Some(n) => Ok(Owner::int(n)),
         None => string(req, b"unlimited"),
     }
 }

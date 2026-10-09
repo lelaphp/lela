@@ -677,44 +677,32 @@ fn unpack(
                     }
                     Some(PhpString::new(req, &hex)?.into_value())
                 }
-                b'c' => Some(Owner::take(
-                    req,
-                    Value::int(i64::from(i8::from_ne_bytes([input[at]]))),
-                )),
-                b'C' => Some(Owner::take(req, Value::int(i64::from(input[at])))),
+                b'c' => Some(Owner::int(i64::from(i8::from_ne_bytes([input[at]])))),
+                b'C' => Some(Owner::int(i64::from(input[at]))),
                 b's' | b'S' | b'n' | b'v' => {
                     let pair = [input[at], input[at + 1]];
-                    Some(Owner::take(
-                        req,
-                        Value::int(match ty {
-                            b's' => i64::from(i16::from_le_bytes(pair)),
-                            b'n' => i64::from(u16::from_be_bytes(pair)),
-                            _ => i64::from(u16::from_le_bytes(pair)),
-                        }),
-                    ))
+                    Some(Owner::int(match ty {
+                        b's' => i64::from(i16::from_le_bytes(pair)),
+                        b'n' => i64::from(u16::from_be_bytes(pair)),
+                        _ => i64::from(u16::from_le_bytes(pair)),
+                    }))
                 }
                 b'i' | b'I' | b'l' | b'L' | b'N' | b'V' => {
                     let word = [input[at], input[at + 1], input[at + 2], input[at + 3]];
-                    Some(Owner::take(
-                        req,
-                        Value::int(match ty {
-                            b'i' | b'l' => i64::from(i32::from_le_bytes(word)),
-                            b'N' => i64::from(u32::from_be_bytes(word)),
-                            _ => i64::from(u32::from_le_bytes(word)),
-                        }),
-                    ))
+                    Some(Owner::int(match ty {
+                        b'i' | b'l' => i64::from(i32::from_le_bytes(word)),
+                        b'N' => i64::from(u32::from_be_bytes(word)),
+                        _ => i64::from(u32::from_le_bytes(word)),
+                    }))
                 }
                 b'q' | b'Q' | b'J' | b'P' => {
                     let mut word = [0u8; 8];
                     word.copy_from_slice(bytes(8));
-                    Some(Owner::take(
-                        req,
-                        Value::int(if ty == b'J' {
-                            i64::from_be_bytes(word)
-                        } else {
-                            i64::from_le_bytes(word)
-                        }),
-                    ))
+                    Some(Owner::int(if ty == b'J' {
+                        i64::from_be_bytes(word)
+                    } else {
+                        i64::from_le_bytes(word)
+                    }))
                 }
                 b'f' | b'g' | b'G' => {
                     let word = [input[at], input[at + 1], input[at + 2], input[at + 3]];
@@ -723,19 +711,16 @@ fn unpack(
                     } else {
                         f32::from_le_bytes(word)
                     };
-                    Some(Owner::take(req, Value::float(f64::from(v))))
+                    Some(Owner::float(f64::from(v)))
                 }
                 b'd' | b'e' | b'E' => {
                     let mut word = [0u8; 8];
                     word.copy_from_slice(bytes(8));
-                    Some(Owner::take(
-                        req,
-                        Value::float(if ty == b'E' {
-                            f64::from_be_bytes(word)
-                        } else {
-                            f64::from_le_bytes(word)
-                        }),
-                    ))
+                    Some(Owner::float(if ty == b'E' {
+                        f64::from_be_bytes(word)
+                    } else {
+                        f64::from_le_bytes(word)
+                    }))
                 }
                 b'x' => None,
                 b'X' => {

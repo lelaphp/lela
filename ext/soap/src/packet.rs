@@ -30,7 +30,7 @@ fn bad(
         d.free_document();
     }
     add_soap_fault(req, this, code, text, None, None, b"en")?;
-    Ok((false, Owner::take(req, Value::null())))
+    Ok((false, Owner::null()))
 }
 
 /// The next element from `trav` on.
@@ -85,7 +85,7 @@ fn parse(
     soap_headers: Option<&Ref<Untyped<Value>>>,
 ) -> Res<(bool, Owner<Value>)> {
     if buffer.is_empty() {
-        return Ok((true, Owner::take(req, Value::null())));
+        return Ok((true, Owner::null()));
     }
     let Some(response) = crate::xml::parse_memory(req, buffer)? else {
         return bad(
@@ -279,7 +279,7 @@ fn parse(
         let r = read_fault(req, cx, this, fault, soap_version);
         response.free_document();
         r?;
-        return Ok((false, Owner::take(req, Value::null())));
+        return Ok((false, Owner::null()));
     }
     let r = read_body(req, cx, body, head, fn_, sdl, soap_headers);
     response.free_document();
@@ -420,7 +420,7 @@ fn read_body(
                         }
                     }
                     let tmp = match val {
-                        None => Owner::take(req, Value::null()),
+                        None => Owner::null(),
                         Some(v) => match decode(req, cx, param.encode, v) {
                             Ok(tmp) => tmp,
                             Err(err) => {
@@ -482,7 +482,7 @@ fn read_body(
     }
     let result = if param_count == 0 {
         return_value.give_up(req);
-        Owner::take(req, Value::null())
+        Owner::null()
     } else if param_count == 1 {
         // `ZVAL_COPY(return_value, tmp)` of the one element, then the
         // array destroyed.

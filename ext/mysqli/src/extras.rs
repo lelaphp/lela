@@ -87,15 +87,13 @@ impl Props for DriverProps {
     ) -> Result<Option<Owner<Value>>, Thrown> {
         Ok(Some(match name {
             "client_info" => string(req, CLIENT_INFO.as_bytes())?,
-            "client_version" => {
-                Owner::take(req, Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0)))
-            }
+            "client_version" => Owner::int(i64::try_from(CLIENT_VERSION).unwrap_or(0)),
             "driver_version" => {
                 if quiet {
                     return Ok(None);
                 }
                 php_ext::raising::deprecated(req, "The driver_version property is deprecated");
-                Owner::take(req, Value::int(VERSION_ID))
+                Owner::int(VERSION_ID)
             }
             "report_mode" => {
                 let mode = Value::int(link::read_report_mode(req));

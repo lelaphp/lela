@@ -206,7 +206,7 @@ fn usage_into(
     ];
     for (name, value) in fields {
         let key = PhpString::new(req, name)?;
-        array.set(req, key.into_key(), Owner::take(req, Value::int(value)))?;
+        array.set(req, key.into_key(), Owner::int(value))?;
     }
     Ok(())
 }
@@ -756,7 +756,7 @@ pub(crate) fn pcntl_getcpuaffinity(
     let mut out = PhpArray::new(req)?;
     for cpu in cpus {
         let cpu = i64::try_from(cpu).unwrap_or(i64::MAX);
-        out.append(req, Owner::take(req, Value::int(cpu)))?;
+        out.append(req, Owner::int(cpu))?;
     }
     Ok(OrFalse::Value(out))
 }

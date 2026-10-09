@@ -730,8 +730,7 @@ fn rsa_encrypt(req: &mut Request, pem: &[u8], data: &[u8]) -> Result<Option<Vec<
     let Some(encrypt) = native(req, b"openssl_public_encrypt")? else {
         return Ok(None);
     };
-    let null = Owner::take(req, Value::null());
-    let out = PhpRef::new(req, null)?;
+    let out = PhpRef::new(req, Owner::null())?;
     let data = PhpString::new(req, data)?;
     let pem = PhpString::new(req, pem)?;
     let args = [

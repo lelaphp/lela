@@ -94,7 +94,7 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
     if size > len {
         fit(req, object, size)?;
     }
-    let fill = nulls(req, size.saturating_sub(len));
+    let fill = nulls(size.saturating_sub(len));
     let cut = with(req, object, |a| {
         a.resizing = Some(size);
         if size < a.elements.len() {
@@ -216,7 +216,7 @@ impl SplFixedArray {
         }
         let size = usize::try_from(size).unwrap_or(0);
         let allocation = laid(req, size)?;
-        let elements = nulls(req, size);
+        let elements = nulls(size);
         lay(req, this, elements, allocation)
     }
 
@@ -438,7 +438,7 @@ impl SplFixedArray {
                 ));
             };
             allocation = laid(req, size)?;
-            elements = nulls(req, size);
+            elements = nulls(size);
             let mut nulled = Vec::new();
             for (key, value) in walk::rows(req, array) {
                 if let Key::Int(n) = key
@@ -698,9 +698,8 @@ fn write(
 
 fn unset(req: &mut Request, object: PhpObject, offset: &Value) -> Result<(), Thrown> {
     let at = inside(req, object, offset)?;
-    let null = Owner::take(req, Value::null());
     let old = with(req, object, |a| {
-        std::mem::replace(&mut a.elements[at], null)
+        std::mem::replace(&mut a.elements[at], Owner::null())
     })?;
     old.give_up(req);
     Ok(())
@@ -749,7 +748,7 @@ impl ObjectHandlers for Handlers {
             && let Some(at) = offset
             && !self.has_dimension(req, object, at, false)?
         {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         }
         if crate::overridden(req, object, b"offsetget") {
             let offset = offset.copied().unwrap_or_default();
@@ -991,8 +990,8 @@ fn lay_laid(
 }
 
 /// `size` slots of `null`, each its owner.
-fn nulls(req: &Request, size: usize) -> Vec<Owner<Value>> {
-    (0..size).map(|_| Owner::take(req, Value::null())).collect()
+fn nulls(size: usize) -> Vec<Owner<Value>> {
+    (0..size).map(|_| Owner::null()).collect()
 }
 
 /// The elements' views.

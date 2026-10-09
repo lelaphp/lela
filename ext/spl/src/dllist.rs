@@ -766,7 +766,7 @@ impl SplDoublyLinkedList {
         let this = this.object();
         let (flags, values) = with(req, this, |l| (l.flags, l.values()))?;
         let mut out = PhpArray::new(req)?;
-        out.append(req, Owner::take(req, Value::int(flags)))?;
+        out.append(req, Owner::int(flags))?;
         let mut list = PhpArray::new(req)?;
         for value in values {
             list.append(req, Owner::take(req, value.deref()))?;
@@ -996,8 +996,8 @@ impl ClassIterator for ListIterator {
         Ok(Owner::take(req, current))
     }
 
-    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
-        Ok(Owner::take(req, Value::int(self.cursor.position)))
+    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::int(self.cursor.position))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -1034,7 +1034,7 @@ fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
     let name = PhpString::new(req, b"\0SplDoublyLinkedList\0flags")?;
-    out.set(req, name.into_key(), Owner::take(req, Value::int(flags)))?;
+    out.set(req, name.into_key(), Owner::int(flags))?;
     let mut list = PhpArray::new(req)?;
     for value in values {
         list.append(req, Owner::take(req, value.deref()))?;

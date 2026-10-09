@@ -1208,7 +1208,7 @@ fn decode_text(
     for field in fields {
         let len = p.field_length();
         if len == NULL_LENGTH {
-            row.push(Owner::take(req, Value::null()));
+            row.push(Owner::null());
             continue;
         }
         let Ok(len) = usize::try_from(len) else {
@@ -1251,22 +1251,22 @@ fn text_value(
             crate::codec::Bits::Long(n) if !native => {
                 PhpString::new(req, n.cast_unsigned().to_string().as_bytes()).map(Owner::into_value)
             }
-            crate::codec::Bits::Long(n) => Ok(Owner::take(req, Value::int(n))),
+            crate::codec::Bits::Long(n) => Ok(Owner::int(n)),
             crate::codec::Bits::Text(s) => PhpString::new(req, s.as_bytes()).map(Owner::into_value),
         };
     }
     if native && php_type == PhpType::Long && field.flags & column::ZEROFILL == 0 {
         if pack_len < 8 {
-            return Ok(Owner::take(req, Value::int(atoll(text))));
+            return Ok(Owner::int(atoll(text)));
         }
         let v = strtoull(text);
         if field.flags & column::UNSIGNED != 0 && i64::try_from(v).is_err() {
             return PhpString::new(req, text).map(Owner::into_value);
         }
-        return Ok(Owner::take(req, Value::int(v.cast_signed())));
+        return Ok(Owner::int(v.cast_signed()));
     }
     if native && php_type == PhpType::Double {
-        return Ok(Owner::take(req, Value::float(strtod(text))));
+        return Ok(Owner::float(strtod(text)));
     }
     PhpString::new(req, text).map(Owner::into_value)
 }

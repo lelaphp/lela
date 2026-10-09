@@ -522,7 +522,7 @@ impl IntlRuleBasedBreakIterator {
             Ok(all) => {
                 let mut array = PhpArray::new(req)?;
                 for n in all {
-                    array.append(req, Owner::take(req, Value::int(i64::from(n))))?;
+                    array.append(req, Owner::int(i64::from(n)))?;
                 }
                 Ok(OrFalse::Value(array))
             }
@@ -815,8 +815,8 @@ impl ClassIterator for Boundaries {
         Ok(Owner::take(req, current))
     }
 
-    fn key(&mut self, req: &mut Request, _: PhpObject) -> Answer<Owner<Value>> {
-        Ok(Owner::take(req, Value::int(self.index)))
+    fn key(&mut self, _: &mut Request, _: PhpObject) -> Answer<Owner<Value>> {
+        Ok(Owner::int(self.index))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Answer<()> {
@@ -870,7 +870,7 @@ impl ObjectHandlers for Handlers {
         };
         let mut table = PhpArray::new(req)?;
         let key = PhpString::new(req, b"valid")?.into_key();
-        table.set(req, key, Owner::take(req, Value::bool(valid)))?;
+        table.set(req, key, Owner::bool(valid))?;
         if valid {
             let key = PhpString::new(req, b"text")?.into_key();
             table.set(req, key, Owner::take(req, text))?;

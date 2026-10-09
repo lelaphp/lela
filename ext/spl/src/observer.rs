@@ -1610,7 +1610,7 @@ impl ObjectHandlers for Handlers {
                 })?;
                 match found {
                     Some(inf) => Ok(Owner::take(req, inf.deref())),
-                    None if read == DimensionRead::Silent => Ok(Owner::take(req, Value::null())),
+                    None if read == DimensionRead::Silent => Ok(Owner::null()),
                     None => Err(throw(req, "UnexpectedValueException", "Object not found")),
                 }
             }
@@ -1966,7 +1966,7 @@ fn read_storage(
                 }
             }
         } else {
-            Owner::take(req, Value::null())
+            Owner::null()
         };
         let Some(target) = entry.as_object().copied() else {
             entry.give_up(req);
@@ -2127,7 +2127,7 @@ fn get_one(
     } else if let Some(thrown) = pending {
         return Err(thrown);
     } else {
-        Owner::take(req, Value::null())
+        Owner::null()
     };
     if with(req, this, |s| s.flags)? & MultipleIterator::MIT_KEYS_ASSOC == 0 {
         return out.append(req, value);

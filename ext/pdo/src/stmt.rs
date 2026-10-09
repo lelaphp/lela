@@ -971,8 +971,8 @@ fn convert(req: &mut Request, bound: &mut Bound) -> Result<(), Thrown> {
     let converted = match (bound.ty.kind(), inner.as_ref()) {
         (BindKind::Str, ValueRef::Null | ValueRef::Str(_)) => None,
         (BindKind::Str, _) if bound.max_len <= 0 => Some(to_string(req, &inner)?.into_value()),
-        (BindKind::Int, ValueRef::Bool(b)) => Some(Owner::take(req, Value::int(i64::from(b)))),
-        (BindKind::Bool, ValueRef::Int(n)) => Some(Owner::take(req, Value::bool(n != 0))),
+        (BindKind::Int, ValueRef::Bool(b)) => Some(Owner::int(i64::from(b))),
+        (BindKind::Bool, ValueRef::Int(n)) => Some(Owner::bool(n != 0)),
         _ => None,
     };
     if let Some(converted) = converted {
@@ -1422,7 +1422,7 @@ impl PDOStatement {
             error::fetch_error(req, dbh, On::Stmt(stmt), &mut out)?;
         }
         while out.len() < 3 {
-            out.append(req, Owner::take(req, Value::null()))?;
+            out.append(req, Owner::null())?;
         }
         Ok(out)
     }
@@ -1513,7 +1513,7 @@ impl PDOStatement {
                     name,
                     ty: BindType::STR,
                     value: Owner::take(req, value),
-                    driver_params: Owner::take(req, Value::null()),
+                    driver_params: Owner::null(),
                     max_len: 0,
                     is_parameter: true,
                 };
@@ -1849,10 +1849,10 @@ impl PDOStatement {
             let key = PhpString::new(req, b"len")?.into_key();
             // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(req, key, Owner::take(req, Value::int(max_len as i64)))?;
+            meta.set(req, key, Owner::int(max_len as i64))?;
             let key = PhpString::new(req, b"precision")?.into_key();
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(req, key, Owner::take(req, Value::int(precision as i64)))?;
+            meta.set(req, key, Owner::int(precision as i64))?;
         }
         Ok(OrFalse::Value(meta))
     }

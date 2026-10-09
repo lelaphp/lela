@@ -111,7 +111,7 @@ fn with_code(req: &mut Request, thrown: Thrown, code: i64) -> Thrown {
     let Some(object) = thrown.exception().copied() else {
         return thrown;
     };
-    let code = Owner::take(req, Value::int(code));
+    let code = Owner::int(code);
     let written = php_ext::call::write_prop(req, &object, b"code", code);
     match written {
         Ok(()) => thrown,
@@ -487,7 +487,7 @@ fn query_single(
         Err(code) => {
             let message = format!("Unable to prepare statement: {}", text(&db.errmsg()));
             fail(req, exceptions, thrown, i64::from(code), &message)?;
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
     };
     let (step, thrown) = stmt::step(req, stmt.as_ref());
@@ -503,13 +503,13 @@ fn query_single(
         }
         (Step::Row, Some(stmt)) => column_value(req, stmt, 0)?,
         (Step::Done, _) if entire => PhpArray::new(req)?.into_value(),
-        (Step::Done, _) => Owner::take(req, Value::null()),
+        (Step::Done, _) => Owner::null(),
         _ => {
             if thrown.is_none() {
                 let message = format!("Unable to execute statement: {}", text(&db.errmsg()));
                 fail(req, exceptions, None, i64::from(db.errcode()), &message)?;
             }
-            Owner::take(req, Value::bool(false))
+            Owner::bool(false)
         }
     };
     drop(stmt);
@@ -752,11 +752,7 @@ impl SQLite3 {
         let key = PhpString::new(req, b"versionString")?.into_key();
         out.set(req, key, version)?;
         let key = PhpString::new(req, b"versionNumber")?.into_key();
-        out.set(
-            req,
-            key,
-            Owner::take(req, Value::int(ffi::version_number())),
-        )?;
+        out.set(req, key, Owner::int(ffi::version_number()))?;
         Ok(out)
     }
 
@@ -1052,7 +1048,7 @@ impl SQLite3 {
         let (db, exceptions) = open_db(req, object)?;
         let sql = query.as_bytes().to_vec();
         if sql.is_empty() {
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         if !req.return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
@@ -1061,7 +1057,7 @@ impl SQLite3 {
             } else if let Some(thrown) = thrown {
                 return Err(thrown);
             }
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         query_single(req, object, &sql, entireRow)
     }
@@ -1249,7 +1245,7 @@ impl SQLite3 {
             Err(message) => {
                 let message = format!("Unable to open blob: {}", text(&message));
                 fail(req, exceptions, None, i64::from(db.errcode()), &message)?;
-                return Ok(Untyped(Owner::take(req, Value::bool(false))));
+                return Ok(Untyped(Owner::bool(false)));
             }
         };
         let read_only = flags & i64::from(SQLITE_OPEN_READONLY) != 0;

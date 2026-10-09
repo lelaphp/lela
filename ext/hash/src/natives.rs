@@ -1700,9 +1700,9 @@ impl HashContext {
         let mut out = PhpArray::new(req)?;
         let algo_name = PhpString::new(req, name.as_bytes())?;
         out.append(req, algo_name.into_value())?;
-        out.append(req, Owner::take(req, Value::int(flags.0)))?;
+        out.append(req, Owner::int(flags.0))?;
         out.append(req, fields.into_value())?;
-        out.append(req, Owner::take(req, Value::int(magic)))?;
+        out.append(req, Owner::int(magic))?;
         let mut members = PhpArray::new(req)?;
         for (key, value) in this.props(req)? {
             let value = Owner::take(req, value);

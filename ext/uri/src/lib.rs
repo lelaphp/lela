@@ -722,7 +722,7 @@ fn put_string(
 ) -> Result<(), Thrown> {
     let value = match value {
         Some(bytes) => PhpString::new(req, &bytes)?.into_value(),
-        None => Owner::take(req, Value::null()),
+        None => Owner::null(),
     };
     put(req, array, name, value)
 }

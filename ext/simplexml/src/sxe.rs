@@ -438,7 +438,7 @@ fn prop_dim_read(
         attr = first_attr;
     }
     let Some(node) = node else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     if access == Access::Attributes {
         let found = match (&member, &view.walk) {
@@ -448,13 +448,13 @@ fn prop_dim_read(
         };
         return match found {
             Some(a) => Ok(wrap(req, object, a, Walk::Node, view.ns.clone())?.into_value()),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         };
     }
     match member {
         Member::Name(name) => {
             if fetch == Fetch::Silent && view.find(node.children(), &name).is_none() {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             Ok(wrap(req, object, node, Walk::Elements(name), view.ns.clone())?.into_value())
         }
@@ -481,7 +481,7 @@ fn prop_dim_read(
                 return Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.into_value());
             }
             if fetch != Fetch::Write {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             if let Member::Index(i) = member
                 && count < i
@@ -493,7 +493,7 @@ fn prop_dim_read(
                 .and_then(|p| p.new_text_child(mine.ns(), &mine.name(), None));
             match made {
                 Some(n) => Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.into_value()),
-                None => Ok(Owner::take(req, Value::null())),
+                None => Ok(Owner::null()),
             }
         }
     }
@@ -1189,17 +1189,17 @@ fn cast(req: &mut Request, object: PhpObject, to: TypeTag) -> Result<Option<Owne
             }
         };
         let truth = first.is_some() || !prop_is_empty(req, object)?;
-        return Ok(Some(Owner::take(req, Value::bool(truth))));
+        return Ok(Some(Owner::bool(truth)));
     }
     let text = cast_text(req, object)?;
     let value = match text {
         Some(t) => string(req, &t)?,
-        None => Owner::take(req, Value::null()),
+        None => Owner::null(),
     };
     let converted = match to {
         TypeTag::String => to_string(req, &value).map(Owner::into_value),
-        TypeTag::Int => to_long(req, &value).map(|n| Owner::take(req, Value::int(n))),
-        TypeTag::Float => to_double(req, &value).map(|f| Owner::take(req, Value::float(f))),
+        TypeTag::Int => to_long(req, &value).map(Owner::int),
+        TypeTag::Float => to_double(req, &value).map(Owner::float),
         TypeTag::Number => to_number(req, &value).map(|n| Owner::take(req, n)),
         _ => {
             value.give_up(req);
@@ -1306,7 +1306,7 @@ impl ClassIterator for Loop {
     fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         match current_name(req, object) {
             Some(name) => string(req, &name),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         }
     }
 
@@ -1415,7 +1415,7 @@ impl ObjectHandlers for Handlers {
                 let made =
                     prop_dim_write(req, object, &Member::Name(name), None, Access::Elements)?;
                 let Some(n) = made else {
-                    return Ok(Owner::take(req, Value::null()));
+                    return Ok(Owner::null());
                 };
                 let wrapped = wrap(req, object, n, Walk::Node, view.ns)?;
                 let value = Owner::take(req, wrapped.as_value());

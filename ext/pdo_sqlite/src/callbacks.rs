@@ -160,8 +160,7 @@ fn state_of(
     state: &mut Option<Box<Aggregate>>,
 ) -> Result<(PhpRef, i64), Thrown> {
     if state.is_none() {
-        let null = Owner::take(req, Value::null());
-        let context = PhpRef::new(req, null)?.into_value();
+        let context = PhpRef::new(req, Owner::null())?.into_value();
         *state = Some(Box::new(Aggregate {
             value: context,
             row: 0,
@@ -283,11 +282,11 @@ fn authorize(
     if pending {
         return Ok(SQLITE_DENY);
     }
-    let mut values = vec![Owner::take(req, Value::int(i64::from(action)))];
+    let mut values = vec![Owner::int(i64::from(action))];
     for name in names {
         values.push(match name {
             Some(name) => PhpString::new(req, &name)?.into_value(),
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         });
     }
     let returned = call(req, handler, &views(&values));

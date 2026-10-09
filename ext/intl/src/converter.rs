@@ -944,8 +944,7 @@ impl Served<'_> {
             return None;
         }
         let req = &mut *self.req;
-        let held = Owner::take(req, Value::int(i64::from(status.0)));
-        let error = match PhpRef::new(req, held) {
+        let error = match PhpRef::new(req, Owner::int(i64::from(status.0))) {
             Ok(error) => error,
             Err(thrown) => {
                 for v in middle {
@@ -1119,13 +1118,11 @@ impl Callbacks for Served<'_> {
                 |e| i64::from(e.unpaired_surrogate()),
                 |c| i64::from(u32::from(c)),
             );
-            let c = Owner::take(self.req, Value::int(c));
-            if let Err(thrown) = source.append(self.req, c) {
+            if let Err(thrown) = source.append(self.req, Owner::int(c)) {
                 self.pending.keep(self.req, thrown);
             }
         }
-        let point = Owner::take(self.req, Value::int(i64::from(code_point)));
-        let middle = [source.into_value(), point];
+        let middle = [source.into_value(), Owner::int(i64::from(code_point))];
         if let Some(answer) = self.call(b"fromUCallback", reason, middle, status) {
             self.append_from_unicode(*answer, target);
             answer.give_up(self.req);

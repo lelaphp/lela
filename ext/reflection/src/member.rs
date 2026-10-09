@@ -1605,13 +1605,13 @@ impl ReflectionProperty {
         let (_, name, found) = this_declared(req, this.object())?;
         match default_of(req, &name, found) {
             Default::Written(expr, scope) => eval_declared(req, &expr, Some(scope)),
-            Default::ImplicitNull => Ok(Owner::take(req, Value::null())),
+            Default::ImplicitNull => Ok(Owner::null()),
             Default::Absent => {
                 deprecated(
                     req,
                     "ReflectionProperty::getDefaultValue() for a property without a default value is deprecated, use ReflectionProperty::hasDefaultValue() to check if the default value exists",
                 );
-                Ok(Owner::take(req, Value::null()))
+                Ok(Owner::null())
             }
         }
     }

@@ -585,7 +585,7 @@ fn parse_url(
     for (id, name, bytes) in parts {
         let value = if id == PHP_URL_PORT {
             match url.port {
-                Some(port) => Owner::take(req, Value::int(i64::from(port))),
+                Some(port) => Owner::int(i64::from(port)),
                 None => continue,
             }
         } else {

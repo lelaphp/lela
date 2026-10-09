@@ -366,12 +366,12 @@ pub(crate) fn hand_to_magic(req: &mut Request, function: Function) -> Result<Fun
 /// ```
 pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some((function, this, called)) = req.serving_callee() else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let Some((magic, name)) = req.trampoline_of(function).and_then(|(trampoline, _)| {
         Some((trampoline.magic()?, trampoline.decl.function.name.clone()))
     }) else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let count = u32::try_from(req.argument_count()).unwrap_or(u32::MAX);
     let passed: Vec<Value> = (1..=count)

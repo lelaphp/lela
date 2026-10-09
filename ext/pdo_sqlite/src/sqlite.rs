@@ -408,7 +408,7 @@ impl Connection for Handle {
                 let version = PhpString::new(req, ffi::version().as_bytes())?;
                 Ok(Some(version.into_value()))
             }
-            ATTR_TRANSACTION_MODE => Ok(Some(Owner::take(req, Value::int(self.transaction_mode)))),
+            ATTR_TRANSACTION_MODE => Ok(Some(Owner::int(self.transaction_mode))),
             _ => Ok(None),
         }
     }
@@ -641,8 +641,7 @@ impl Statement for Stmt {
                     self.handle.bind_null(at)
                 } else {
                     let n = to_long(req, &value)?;
-                    let converted = Owner::take(req, Value::int(n));
-                    param.value.convert(req, converted);
+                    param.value.convert(req, Owner::int(n));
                     self.handle.bind_int(at, n)
                 }
             }
@@ -804,7 +803,7 @@ impl Statement for Stmt {
         let key = PhpString::new(req, b"native_type")?.into_key();
         out.set(req, key, Owner::take(req, native).into_value())?;
         let key = PhpString::new(req, b"pdo_type")?.into_key();
-        out.set(req, key, Owner::take(req, Value::int(pdo_type)))?;
+        out.set(req, key, Owner::int(pdo_type))?;
         set(
             req,
             &mut out,

@@ -143,10 +143,7 @@ fn set_encoding(req: &mut Request, object: PhpObject, value: &Value) -> Result<(
 /// ```
 pub(crate) fn standalone(req: &mut Request, object: PhpObject) -> Read {
     let doc = doc_node(req, object)?;
-    Ok(Some(Owner::take(
-        req,
-        Value::bool(doc.doc_standalone() > 0),
-    )))
+    Ok(Some(Owner::bool(doc.doc_standalone() > 0)))
 }
 
 fn set_standalone(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
@@ -206,7 +203,7 @@ pub(crate) fn document_uri(req: &mut Request, object: PhpObject) -> Read {
     match doc.doc_url() {
         Some(url) => Ok(Some(string(req, &url)?)),
         None if crate::modern::follows_spec(req, object) => Ok(Some(string(req, b"about:blank")?)),
-        None => Ok(Some(Owner::take(req, Value::null()))),
+        None => Ok(Some(Owner::null())),
     }
 }
 
@@ -222,7 +219,7 @@ fn set_document_uri(req: &mut Request, object: PhpObject, value: &Value) -> Resu
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn config(req: &mut Request, _object: PhpObject) -> Read {
     crate::deprecated_property(req, "Property DOMDocument::$config is deprecated");
-    Ok(Some(Owner::take(req, Value::null())))
+    Ok(Some(Owner::null()))
 }
 
 /// One of `libxml_doc_props`' switches, read and written.
@@ -240,18 +237,15 @@ enum Switch {
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn read_switch(req: &mut Request, object: PhpObject, which: Switch) -> Read {
     let p = props_of(req, object);
-    Ok(Some(Owner::take(
-        req,
-        Value::bool(match which {
-            Switch::Strict => p.strict_error,
-            Switch::Format => p.format,
-            Switch::Validate => p.validate_on_parse,
-            Switch::Resolve => p.resolve_externals,
-            Switch::Preserve => p.preserve_whitespace,
-            Switch::Recover => p.recover,
-            Switch::Substitute => p.substitute_entities,
-        }),
-    )))
+    Ok(Some(Owner::bool(match which {
+        Switch::Strict => p.strict_error,
+        Switch::Format => p.format,
+        Switch::Validate => p.validate_on_parse,
+        Switch::Resolve => p.resolve_externals,
+        Switch::Preserve => p.preserve_whitespace,
+        Switch::Recover => p.recover,
+        Switch::Substitute => p.substitute_entities,
+    })))
 }
 
 #[allow(clippy::unnecessary_wraps)] // the writer shape every row of a property table has
@@ -509,7 +503,7 @@ fn created(req: &mut Request, this: PhpObject, node: Option<Node>) -> Result<Own
 fn invalid_name(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let strict = strict(req, this);
     dom_error(req, Code::InvalidCharacter, strict)?;
-    Ok(Owner::take(req, Value::bool(false)))
+    Ok(Owner::bool(false))
 }
 
 /// The legacy branch of `DOMDocument::createAttributeNS` past the name's
@@ -822,7 +816,7 @@ pub(crate) fn save_xml(
         if node.doc() != Some(doc) {
             let strict = strict(req, this);
             dom_error(req, Code::WrongDocument, strict)?;
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         handlers.dump_node_to_str(req, doc, node, format, no_empty, encoding.as_deref())?
     } else {
@@ -839,7 +833,7 @@ pub(crate) fn save_xml(
         string(req, &bytes)
     } else {
         docref(req, Level::Warning, "Could not save document");
-        Ok(Owner::take(req, Value::bool(false)))
+        Ok(Owner::bool(false))
     }
 }
 
@@ -864,7 +858,7 @@ fn save_html(
         if node.doc() != Some(doc) {
             let strict = strict(req, this);
             dom_error(req, Code::WrongDocument, strict)?;
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         let nodes: Vec<Node> = if node.kind() == Kind::Fragment {
             let mut out = Vec::new();
@@ -881,7 +875,7 @@ fn save_html(
         if saved.is_none() {
             Errors::route(req, raised);
             docref(req, Level::Warning, "Error dumping HTML node");
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         (saved, raised)
     } else {
@@ -890,7 +884,7 @@ fn save_html(
     Errors::route(req, raised);
     match saved {
         Some(bytes) => string(req, &bytes),
-        None => Ok(Owner::take(req, Value::bool(false))),
+        None => Ok(Owner::bool(false)),
     }
 }
 
@@ -930,7 +924,7 @@ fn create_element_ns(
             }
             let strict = strict(req, this);
             dom_error(req, code, strict)?;
-            Ok(Owner::take(req, Value::bool(false)))
+            Ok(Owner::bool(false))
         }
     }
 }
@@ -947,7 +941,7 @@ fn create_attribute_ns(
     let root = doc.root();
     if root.is_none() && !modern {
         docref(req, Level::Warning, "Document Missing Root Element");
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let parts = match validate_and_extract(uri, name) {
         Ok(parts) => parts,
@@ -955,7 +949,7 @@ fn create_attribute_ns(
             let code = if modern { code } else { Code::Namespace };
             let strict = strict(req, this);
             dom_error(req, code, strict)?;
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
     };
     if modern {
@@ -976,7 +970,7 @@ fn create_attribute_ns(
         Err(code) => {
             let strict = strict(req, this);
             dom_error(req, code, strict)?;
-            Ok(Owner::take(req, Value::bool(false)))
+            Ok(Owner::bool(false))
         }
     }
 }
@@ -996,13 +990,13 @@ fn import_node(
             Level::Warning,
             "Cannot import: Node Type Not Supported",
         );
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     if node.doc() == Some(doc) {
         return object_for(req, node, Some(this));
     }
     let Some(copy) = crate::clone_node(node, Some(doc), deep) else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     if copy.kind() == Kind::Attribute
         && copy.ns().is_none()
@@ -1086,7 +1080,7 @@ fn get_element_by_id(
         }
         at = crate::next_in_tree_order(n, doc);
     }
-    Ok(Owner::take(req, Value::null()))
+    Ok(Owner::null())
 }
 
 /// `dom_document_adopt_node`.
@@ -1108,14 +1102,14 @@ fn adopt_node(
     ) {
         let strict = strict(req, node_obj);
         dom_error(req, Code::NotSupported, strict)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let doc = fetch(req, this)?;
     if !adopt(req, this, node, doc) {
         if modern {
             return Err(crate::dom_throw(req, Code::InvalidState));
         }
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let value = node_obj.as_value();
     Ok(Owner::take(req, value))
@@ -2182,7 +2176,7 @@ impl Document {
             Err(code) => {
                 let strict = strict(req, this);
                 dom_error(req, code, strict)?;
-                Owner::take(req, Value::null())
+                Owner::null()
             }
         };
         returned(made)

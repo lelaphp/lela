@@ -592,10 +592,10 @@ impl Request {
         // `sapi_get_request_time`, when the request started.
         let now = self.started().as_secs_f64();
         let name = PhpString::new(self, b"REQUEST_TIME_FLOAT")?;
-        server.set(self, name.into_key(), Owner::take(self, Value::float(now)))?;
+        server.set(self, name.into_key(), Owner::float(now))?;
         let name = PhpString::new(self, b"REQUEST_TIME")?;
         let whole = self.request_time();
-        server.set(self, name.into_key(), Owner::take(self, Value::int(whole)))?;
+        server.set(self, name.into_key(), Owner::int(whole))?;
         // `zend_hash_find_ex_ind` of both, and neither where one is
         // missing: the zval as the table holds it, a reference kept one.
         let found = |req: &mut Request, name: &[u8]| {
@@ -633,7 +633,7 @@ impl Request {
             let name = PhpString::new(self, b"argv")?;
             server.set(self, name.into_key(), words.into_value())?;
             let name = PhpString::new(self, b"argc")?;
-            server.set(self, name.into_key(), Owner::take(self, Value::int(count)))?;
+            server.set(self, name.into_key(), Owner::int(count))?;
         }
         self.check_http_proxy(&mut server)?;
         Ok(server)

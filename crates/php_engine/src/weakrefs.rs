@@ -364,7 +364,7 @@ impl ObjectHandlers for WeakMapHandlers {
         let found = entries_of(req, object).and_then(|e| e.get(&Key::Int(i64::from(key.index()))));
         let Some(value) = found else {
             if read == DimensionRead::Silent {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             let class = req.class_name(key.class());
             return Err(throw_error(
@@ -639,13 +639,13 @@ impl ClassIterator for MapIter {
     /// it points at one.
     fn current(&mut self, req: &mut Request, map: PhpObject) -> Result<Owner<Value>, Thrown> {
         let Some((_, key, value)) = self.here(req, map) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         if !self.by_ref || value.as_php_ref().is_some() {
             return Ok(Owner::take(req, value));
         }
         let Some(mut entries) = entries_of(req, map) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         req.addref(&value);
         // The cell's one owner is the caller's, and the entry takes a

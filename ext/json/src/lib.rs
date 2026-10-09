@@ -216,7 +216,7 @@ fn throw_json(req: &mut Request, code: i64) -> Thrown {
         Err(thrown) => return thrown,
     };
     if let Some(object) = value.as_object().copied() {
-        let code = Owner::take(req, Value::int(code));
+        let code = Owner::int(code);
         let written = php_ext::call::write_prop(req, &object, b"code", code);
         if let Err(thrown) = written {
             value.give_up(req);
@@ -477,7 +477,7 @@ fn json_decode(
             return Err(throw_json(req, JSON_ERROR_SYNTAX));
         }
         set_error(req, JSON_ERROR_SYNTAX);
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     depth_within(req, depth, 3)?;
     // For BC reasons the bool overrides the option bit, either way.
@@ -493,7 +493,7 @@ fn json_decode(
                 return Err(throw_json(req, code));
             }
             set_error(req, code);
-            Ok(Owner::take(req, Value::null()))
+            Ok(Owner::null())
         }
     }
 }

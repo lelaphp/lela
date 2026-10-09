@@ -407,7 +407,7 @@ fn getopt(
         for value in values {
             items.push(match value {
                 Some(bytes) => PhpString::new(req, &bytes)?.into_value(),
-                None => Owner::take(req, Value::bool(false)),
+                None => Owner::bool(false),
             });
         }
         let value = if items.len() == 1 {
@@ -1379,7 +1379,7 @@ fn ini_get_all(
             for (name, value) in [
                 (&b"global_value"[..], ini_value(req, global)?),
                 (b"local_value", ini_value(req, entry.value.as_deref())?),
-                (b"access", Owner::take(req, Value::int(access))),
+                (b"access", Owner::int(access)),
             ] {
                 let name = PhpString::new(req, name)?.into_key();
                 option.set(req, name, value)?;
@@ -1398,7 +1398,7 @@ fn ini_get_all(
 fn ini_value(req: &mut Request, value: Option<&[u8]>) -> Result<Owner<Value>, Thrown> {
     Ok(match value {
         Some(value) => PhpString::new(req, value)?.into_value(),
-        None => Owner::take(req, Value::null()),
+        None => Owner::null(),
     })
 }
 
@@ -1665,7 +1665,7 @@ fn sys_getloadavg(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown>
     };
     let mut array = PhpArray::new(req)?;
     for average in load {
-        array.append(req, Owner::take(req, Value::float(average)))?;
+        array.append(req, Owner::float(average))?;
     }
     Ok(OrFalse::Value(array))
 }

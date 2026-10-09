@@ -597,7 +597,7 @@ impl RecursiveIteratorIterator {
         let level = top(req, this)?;
         let inner = match level {
             Some(l) => Owner::take(req, l.iterator.as_value()),
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         };
         Ok(crate::answered(inner))
     }
@@ -619,7 +619,7 @@ impl RecursiveIteratorIterator {
         let this = this.object();
         let answered = match top(req, this)? {
             Some(level) => crate::method(req, level.iterator, b"hasChildren")?,
-            None => Owner::take(req, Value::bool(false)),
+            None => Owner::bool(false),
         };
         Ok(crate::answered(answered))
     }
@@ -634,7 +634,7 @@ impl RecursiveIteratorIterator {
         let this = rec_checked(req, this.object())?;
         let answered = match top(req, this)? {
             Some(level) => crate::method(req, level.iterator, b"getChildren")?,
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         };
         Ok(crate::answered(answered))
     }
@@ -986,7 +986,7 @@ impl RecursiveFilterIterator {
         let this = checked(req, this.object())?;
         let answered = match inner(req, this)? {
             Some(inner) => crate::method(req, inner, b"hasChildren")?,
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         };
         Ok(crate::answered(answered))
     }
@@ -1060,7 +1060,7 @@ impl CallbackFilterIterator {
             )
         })?;
         let (Some(data), Some(key), Some(callback)) = (data, key, callback) else {
-            return Ok(crate::answered(Owner::take(req, Value::bool(false))));
+            return Ok(crate::answered(Owner::bool(false)));
         };
         let inner = inner.map_or_else(Value::null, |o| o.as_value());
         let answered = call(req, &callback, &[data, key, inner])?;
@@ -1671,7 +1671,7 @@ impl NoRewindIterator {
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         match no_rewind_iter(req, this.object())? {
             Some(iter) => iter.key(req),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         }
     }
 
@@ -1696,7 +1696,7 @@ impl NoRewindIterator {
                 let data = iter.value(req)?;
                 Ok(crate::dereferenced(req, data))
             }
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         }
     }
 
@@ -2426,7 +2426,7 @@ impl RecursiveTreeIterator {
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
         let this = rec_checked(req, this.object())?;
         let Some(level) = top(req, this)? else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let bypass = rec(req, this, |it| it.flags & Self::BYPASS_KEY != 0)?;
         let key = level.sub.key(req)?;
@@ -2453,7 +2453,7 @@ impl RecursiveTreeIterator {
             return rec_current(req, this);
         }
         let Some(entry) = tree_entry(req, this)? else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let mut out = tree_prefix(req, this)?;
         out.extend(entry);
@@ -2516,7 +2516,7 @@ impl RecursiveTreeIterator {
         let this = rec_checked(req, this.object())?;
         let entry = match tree_entry(req, this)? {
             Some(entry) => crate::string_value(req, &entry)?,
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         };
         Ok(crate::answered(entry))
     }
@@ -3300,7 +3300,7 @@ fn rec_checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> 
 /// The sub-iterator's `key()`.
 fn rec_key(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let Some(level) = top(req, this)? else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let key = level.sub.key(req)?;
     Ok(crate::dereferenced(req, key))
@@ -3310,7 +3310,7 @@ fn rec_key(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
 /// `BYPASS_CURRENT` tree answer.
 fn rec_current(req: &mut Request, this: PhpObject) -> Result<Owner<Value>, Thrown> {
     let Some(level) = top(req, this)? else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let current = level.sub.value(req)?;
     Ok(crate::dereferenced(req, current))

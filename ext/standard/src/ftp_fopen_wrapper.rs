@@ -18,7 +18,7 @@ use php_ext::request::{
     Closer, DirListing, Handshake, Notification, NotifyCode, Opening, OwnedStream as _, Request,
     SocketOptions, Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, ValueRef};
 use php_ext_uri::UriStruct;
 
 use crate::http_fopen_wrapper::{closed, file_ini, url_wrap_http};
@@ -1054,7 +1054,7 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<Owner<PhpArray>>, Th
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
         let key = PhpString::new(req, name)?.into_key();
-        out.set(req, key, Owner::take(req, Value::int(field)))?;
+        out.set(req, key, Owner::int(field))?;
     }
     Ok(Some(out))
 }

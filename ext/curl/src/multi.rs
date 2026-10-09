@@ -414,8 +414,8 @@ fn curl_multi_info_read(
         queued_messages.set(req, Untyped(Value::int(done.queued)))?;
     }
     let mut out = Assoc::new(req)?;
-    out.add(req, "msg", Owner::take(req, Value::int(done.msg)))?;
-    out.add(req, "result", Owner::take(req, Value::int(done.result)))?;
+    out.add(req, "msg", Owner::int(done.msg))?;
+    out.add(req, "result", Owner::int(done.result))?;
     if let Some(handle) = find(req, multi_handle.object(), done.easy) {
         if let Some(curl) = handle.native_mut::<Curl>(req) {
             curl.err = done.result;

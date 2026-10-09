@@ -752,19 +752,13 @@ fn to_array(req: &mut Request, rows: &Rows) -> Result<Owner<PhpArray>, Thrown> {
         let mut inner = PhpArray::new(req)?;
         for sub in subs {
             match sub {
-                Sub::Count(index, n) => inner.set(
-                    req,
-                    Owner::take(req, Key::Int(*index)),
-                    Owner::take(req, Value::int(*n)),
-                )?,
+                Sub::Count(index, n) => {
+                    inner.set(req, Owner::take(req, Key::Int(*index)), Owner::int(*n))?;
+                }
                 Sub::Named(name, counts) => {
                     let mut named = PhpArray::new(req)?;
                     for (index, n) in counts {
-                        named.set(
-                            req,
-                            Owner::take(req, Key::Int(*index)),
-                            Owner::take(req, Value::int(*n)),
-                        )?;
+                        named.set(req, Owner::take(req, Key::Int(*index)), Owner::int(*n))?;
                     }
                     let key = PhpString::new(req, name)?.into_key();
                     inner.set(req, key, named.into_value())?;

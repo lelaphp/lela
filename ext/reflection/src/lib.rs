@@ -6041,8 +6041,7 @@ fn enum_case_string(
     )
     .ok();
     if backing != EnumBacking::Pure {
-        let value = eval_const_expr(req, &case.value, None)
-            .unwrap_or_else(|_| Owner::take(req, Value::null()));
+        let value = eval_const_expr(req, &case.value, None).unwrap_or_else(|_| Owner::null());
         write!(out, " = {}", value_string(req, &value)).ok();
         value.give_up(req);
     }
@@ -8170,7 +8169,7 @@ impl ReflectionExtension {
             let key = PhpString::new(req, &entry.decl.name.0)?.into_key();
             let value = match entry.value {
                 Some(value) => PhpString::new(req, &value)?.into_value(),
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             };
             entries.set(req, key, value)?;
         }

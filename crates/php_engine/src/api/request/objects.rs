@@ -1156,7 +1156,7 @@ impl Request {
                     &format!("Method {class}::__toString() must return a string value"),
                 ))
             }
-            TypeTag::Bool => Ok(Some(Owner::take(self, Value::bool(true)))),
+            TypeTag::Bool => Ok(Some(Owner::bool(true))),
             _ => Ok(None),
         }
     }

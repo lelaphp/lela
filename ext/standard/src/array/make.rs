@@ -233,7 +233,7 @@ fn merge_recursive(
             ValueRef::Array(array) => array.copy(req)?,
             ValueRef::Null => {
                 let mut array = PhpArray::new(req)?;
-                array.append(req, Owner::take(req, Value::null()))?;
+                array.append(req, Owner::null())?;
                 array
             }
             _ => to_array(req, &dest_value)?,
@@ -836,7 +836,7 @@ fn double_range(
         let mut i = 0u32;
         let mut element = start;
         while i < size && if down { element >= end } else { element <= end } {
-            out.append(req, Owner::take(req, Value::float(element)))?;
+            out.append(req, Owner::float(element))?;
             i += 1;
             let distance = f64::from(i) * step;
             element = if down {
@@ -898,7 +898,7 @@ fn long_range(
             } else {
                 start.wrapping_add(distance)
             };
-            out.append(req, Owner::take(req, Value::int(element)))?;
+            out.append(req, Owner::int(element))?;
         }
         Ok(())
     })

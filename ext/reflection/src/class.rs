@@ -1452,7 +1452,7 @@ impl ReflectionClass {
             req,
             "ReflectionClass::getConstant() for a non-existent constant is deprecated, use ReflectionClass::hasConstant() to check if the constant exists",
         );
-        Ok(Owner::take(req, Value::bool(false)))
+        Ok(Owner::bool(false))
     }
 
     /// `ReflectionClass::getReflectionConstant(string $name)`: one
@@ -2697,7 +2697,7 @@ impl ReflectionClass {
                         }
                     },
                     None if property.ty.is_some() => continue,
-                    None => Owner::take(req, Value::null()),
+                    None => Owner::null(),
                 };
                 let key = PhpString::new(req, &property.name.0)?.into_key();
                 defaults.set(req, key, value)?;

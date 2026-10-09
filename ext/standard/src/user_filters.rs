@@ -462,8 +462,7 @@ impl StreamFilter for UserFilter {
             }
             unprocessed(req, input);
             if has_stream {
-                let null = Owner::take(req, Value::null());
-                write_prop(req, &object, b"stream", null)?;
+                write_prop(req, &object, b"stream", Owner::null())?;
             }
             Ok(status)
         })();
@@ -629,8 +628,7 @@ fn bucket_object(
     write_prop(req, &object, b"bucket", res.into_value())?;
     write_prop(req, &object, b"data", data)?;
     for name in [&b"datalen"[..], b"dataLength"] {
-        let len = Owner::take(req, Value::int(len));
-        write_prop(req, &object, name, len)?;
+        write_prop(req, &object, name, Owner::int(len))?;
     }
     Ok(object.into_instance())
 }

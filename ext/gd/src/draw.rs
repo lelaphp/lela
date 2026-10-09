@@ -833,12 +833,7 @@ fn imagecolorsforindex(
     let channels = im.rgba(col);
     let mut array = PhpArray::new(req)?;
     for (name, n) in ["red", "green", "blue", "alpha"].into_iter().zip(channels) {
-        crate::set(
-            req,
-            &mut array,
-            name,
-            Owner::take(req, Value::int(i64::from(n))),
-        )?;
+        crate::set(req, &mut array, name, Owner::int(i64::from(n)))?;
     }
     Ok(array)
 }

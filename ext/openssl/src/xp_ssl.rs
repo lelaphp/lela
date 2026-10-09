@@ -1252,7 +1252,7 @@ impl Layer {
                     }
                     array.into_value()
                 }
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             };
             let set = context.set_option(req, b"ssl", b"peer_certificate_chain", &value);
             value.give_up(req);
@@ -1859,12 +1859,7 @@ impl Crypto for Layer {
         let (name, bits, version) =
             cipher.map_or((Vec::new(), 0, Vec::new()), |c| (c.name, c.bits, c.version));
         crate::put_bytes(req, &mut array, b"cipher_name", &name)?;
-        crate::put(
-            req,
-            &mut array,
-            b"cipher_bits",
-            Owner::take(req, Value::int(i64::from(bits))),
-        )?;
+        crate::put(req, &mut array, b"cipher_bits", Owner::int(i64::from(bits)))?;
         crate::put_bytes(req, &mut array, b"cipher_version", &version)?;
         if let Some(alpn) = tls.alpn_selected() {
             crate::put_bytes(req, &mut array, b"alpn_protocol", &alpn)?;

@@ -564,44 +564,24 @@ fn opcache_get_status(
     }
     let status = req.unit_cache().status();
     let mut out = PhpArray::new(req)?;
-    put(
-        req,
-        &mut out,
-        "opcache_enabled",
-        Owner::take(req, Value::bool(enabled)),
-    )?;
+    put(req, &mut out, "opcache_enabled", Owner::bool(enabled))?;
     let file_cache = value(req, "opcache.file_cache").to_vec();
     if !file_cache.is_empty() {
         let shown = text(req, &file_cache)?;
         put(req, &mut out, "file_cache", shown)?;
     }
     if flag(req, "opcache.file_cache_only") {
-        put(
-            req,
-            &mut out,
-            "file_cache_only",
-            Owner::take(req, Value::bool(true)),
-        )?;
+        put(req, &mut out, "file_cache_only", Owner::bool(true))?;
         return Ok(OrFalse::Value(out));
     }
-    put(
-        req,
-        &mut out,
-        "cache_full",
-        Owner::take(req, Value::bool(status.cache_full)),
-    )?;
+    put(req, &mut out, "cache_full", Owner::bool(status.cache_full))?;
     put(
         req,
         &mut out,
         "restart_pending",
-        Owner::take(req, Value::bool(status.restart_pending)),
+        Owner::bool(status.restart_pending),
     )?;
-    put(
-        req,
-        &mut out,
-        "restart_in_progress",
-        Owner::take(req, Value::bool(false)),
-    )?;
+    put(req, &mut out, "restart_in_progress", Owner::bool(false))?;
 
     let memory = memory_usage(req, &status)?;
     put(req, &mut out, "memory_usage", memory.into_value())?;
@@ -1002,9 +982,9 @@ fn opcache_get_configuration(req: &mut Request) -> Result<OrFalse<Owner<PhpArray
             continue;
         };
         let stored = match entry.stored(value(req, name)) {
-            Stored::Bool(b) => Owner::take(req, Value::bool(b)),
-            Stored::Long(n) => Owner::take(req, Value::int(n)),
-            Stored::Double(f) => Owner::take(req, Value::float(f)),
+            Stored::Bool(b) => Owner::bool(b),
+            Stored::Long(n) => Owner::int(n),
+            Stored::Double(f) => Owner::float(f),
             Stored::Text(bytes) => text(req, &bytes)?,
         };
         put(req, &mut directives, name, stored)?;

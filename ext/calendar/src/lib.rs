@@ -274,12 +274,7 @@ fn calendar_row(req: &mut Request, calendar: Calendar) -> Result<Owner<PhpArray>
         }
         set(req, &mut row, name, list.into_value())?;
     }
-    set(
-        req,
-        &mut row,
-        "maxdaysinmonth",
-        Owner::take(req, Value::int(max_days)),
-    )?;
+    set(req, &mut row, "maxdaysinmonth", Owner::int(max_days))?;
     let (name, symbol) = calendar.names();
     set_string(req, &mut row, "calname", name)?;
     set_string(req, &mut row, "calsymbol", symbol)?;
@@ -576,15 +571,10 @@ fn cal_from_jd(
         day: 0,
     });
     for (name, n) in [("month", month), ("day", day), ("year", year)] {
-        set(
-            req,
-            &mut array,
-            name,
-            Owner::take(req, Value::int(i64::from(n))),
-        )?;
+        set(req, &mut array, name, Owner::int(i64::from(n)))?;
     }
     if cal == Calendar::Jewish && date.is_none() {
-        set(req, &mut array, "dow", Owner::take(req, Value::null()))?;
+        set(req, &mut array, "dow", Owner::null())?;
         set_string(req, &mut array, "abbrevdayname", "")?;
         set_string(req, &mut array, "dayname", "")?;
     } else {
@@ -593,7 +583,7 @@ fn cal_from_jd(
             req,
             &mut array,
             "dow",
-            Owner::take(req, Value::int(i64::try_from(dow).unwrap_or(0))),
+            Owner::int(i64::try_from(dow).unwrap_or(0)),
         )?;
         set_string(req, &mut array, "abbrevdayname", sdn::DAY_NAME_SHORT[dow])?;
         set_string(req, &mut array, "dayname", sdn::DAY_NAME_LONG[dow])?;

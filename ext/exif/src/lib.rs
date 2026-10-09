@@ -494,7 +494,7 @@ fn add_section(
     let mut index = 0;
     for entry in entries {
         let value = if entry.length == 0 {
-            Owner::take(req, Value::null())
+            Owner::null()
         } else {
             match &entry.value {
                 Stored::Text(text) if section == Section::Comment => {

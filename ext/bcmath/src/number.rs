@@ -1306,7 +1306,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<Owner<Value>>, Thrown> {
         if to == TypeTag::Bool {
             let zero = held(req, object)?.num.is_zero();
-            return Ok(Some(Owner::take(req, Value::bool(!zero))));
+            return Ok(Some(Owner::bool(!zero)));
         }
         Std.cast_object(req, object, to)
     }

@@ -861,12 +861,12 @@ fn session_get_cookie_params(req: &mut Request) -> Result<Owner<PhpArray>, Throw
     ];
     for (key, entry, kind) in rows {
         let value = match kind {
-            0 => Owner::take(req, Value::int(ini_long(req, entry))),
+            0 => Owner::int(ini_long(req, entry)),
             1 => {
                 let text = ini(req, entry);
                 string_value(req, &text)?
             }
-            _ => Owner::take(req, Value::bool(ini_bool(req, entry))),
+            _ => Owner::bool(ini_bool(req, entry)),
         };
         let key = PhpString::new(req, key)?.into_key();
         array.set(req, key, value)?;

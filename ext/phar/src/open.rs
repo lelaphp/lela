@@ -217,7 +217,7 @@ pub(crate) fn window_params(
 ) -> Result<php_ext::values::Owner<Value>, Thrown> {
     let mut params = php_ext::values::PhpArray::new(req)?;
     let key = php_ext::values::PhpString::new(req, b"window")?.into_key();
-    params.set(req, key, Owner::take(req, Value::int(bits)))?;
+    params.set(req, key, Owner::int(bits))?;
     Ok(params.into_value())
 }
 

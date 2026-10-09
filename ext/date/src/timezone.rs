@@ -7,7 +7,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
 
 use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
@@ -178,21 +178,11 @@ fn transition(
     abbr: &[u8],
 ) -> Result<(), Thrown> {
     let mut row = PhpArray::new(req)?;
-    set_str(req, &mut row, b"ts", Owner::take(req, Value::int(ts)))?;
+    set_str(req, &mut row, b"ts", Owner::int(ts))?;
     let time = format_timestamp(req, b"x-m-d\\TH:i:sP", ts, false)?;
     set_string(req, &mut row, b"time", &time)?;
-    set_str(
-        req,
-        &mut row,
-        b"offset",
-        Owner::take(req, Value::int(offset)),
-    )?;
-    set_str(
-        req,
-        &mut row,
-        b"isdst",
-        Owner::take(req, Value::bool(is_dst)),
-    )?;
+    set_str(req, &mut row, b"offset", Owner::int(offset))?;
+    set_str(req, &mut row, b"isdst", Owner::bool(is_dst))?;
     set_string(req, &mut row, b"abbr", abbr)?;
     out.append(req, row.into_value())
 }
@@ -397,18 +387,8 @@ fn location_of(req: &mut Request, object: PhpObject) -> Result<OrFalse<Owner<Php
     let loc = zone.location();
     let mut out = PhpArray::new(req)?;
     set_string(req, &mut out, b"country_code", &loc.country_code)?;
-    set_str(
-        req,
-        &mut out,
-        b"latitude",
-        Owner::take(req, Value::float(loc.latitude)),
-    )?;
-    set_str(
-        req,
-        &mut out,
-        b"longitude",
-        Owner::take(req, Value::float(loc.longitude)),
-    )?;
+    set_str(req, &mut out, b"latitude", Owner::float(loc.latitude))?;
+    set_str(req, &mut out, b"longitude", Owner::float(loc.longitude))?;
     set_string(req, &mut out, b"comments", &loc.comments)?;
     Ok(OrFalse::Value(out))
 }

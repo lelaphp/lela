@@ -43,7 +43,7 @@ use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder, OrFa
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 use settings::{Mode, State, Substitute, named_or_pass, settings};
 use tables::{MBFL_VERSION_MAJOR, MBFL_VERSION_MINOR, MBFL_VERSION_TEENY};
 use text::{new_string, value_error};
@@ -655,7 +655,7 @@ fn mb_get_info(
                 let value = match value {
                     Union::A(list) => list.into_value(),
                     Union::B(Union::A(text)) => text.into_value(),
-                    Union::B(Union::B(n)) => Owner::take(req, Value::int(n)),
+                    Union::B(Union::B(n)) => Owner::int(n),
                 };
                 let key = PhpString::new(req, key.as_bytes())?;
                 out.set(req, key.into_key(), value)?;

@@ -304,12 +304,12 @@ fn length(req: &mut Request, object: PhpObject) -> i64 {
 /// `handler->get_item`: the object at `index`, `null` past the end.
 fn item(req: &mut Request, object: PhpObject, index: i64) -> Result<Owner<Value>, Thrown> {
     let Ok(at) = usize::try_from(index) else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     match view(req, object) {
         View::Set(array) => match array.get(&Key::Int(index)) {
             Some(v) => Ok(Owner::take(req, v)),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         },
         View::Nodes {
             base,
@@ -322,7 +322,7 @@ fn item(req: &mut Request, object: PhpObject, index: i64) -> Result<Owner<Value>
             });
             match found {
                 Some(n) => object_for(req, n, Some(base)),
-                None => Ok(Owner::take(req, Value::null())),
+                None => Ok(Owner::null()),
             }
         }
         View::Nodes {
@@ -331,9 +331,9 @@ fn item(req: &mut Request, object: PhpObject, index: i64) -> Result<Owner<Value>
             kind,
         } => match nodes(node, &kind).get(at) {
             Some(n) => object_for(req, *n, Some(base)),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         },
-        _ => Ok(Owner::take(req, Value::null())),
+        _ => Ok(Owner::null()),
     }
 }
 
@@ -350,7 +350,7 @@ fn named(
         kind,
     } = view(req, object)
     else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let found = match kind {
         Walk::Attributes => match ns {
@@ -368,7 +368,7 @@ fn named(
     };
     match found {
         Some(n) => object_for(req, n, Some(base)),
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -414,7 +414,7 @@ fn collection_named(
     key: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
     if key.is_empty() {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let View::Nodes {
         base,
@@ -422,7 +422,7 @@ fn collection_named(
         kind,
     } = view(req, object)
     else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     for candidate in nodes(node, &kind) {
         let id = candidate.has_ns_prop(b"id", None);
@@ -435,7 +435,7 @@ fn collection_named(
             return object_for(req, candidate, Some(base));
         }
     }
-    Ok(Owner::take(req, Value::null()))
+    Ok(Owner::null())
 }
 
 /// `dom_modern_nodelist_get_index`: an index, a name, or neither.
@@ -542,7 +542,7 @@ fn offset(req: &mut Request, value: &Value) -> Result<Result<i64, PhpString>, Th
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn length_read(req: &mut Request, object: PhpObject) -> crate::Read {
     let length = length(req, object);
-    Ok(Some(Owner::take(req, Value::int(length))))
+    Ok(Some(Owner::int(length)))
 }
 
 /// The `length` property both classes have.
@@ -658,7 +658,7 @@ impl ObjectHandlers for MapHandlers {
         match offset(req, offset_value)? {
             Err(name) if is_list => {
                 let _ = name;
-                Ok(Owner::take(req, Value::null()))
+                Ok(Owner::null())
             }
             Err(name) => named(req, object, name.as_bytes(), None),
             Ok(index) if is_list => item(req, object, index),
@@ -820,11 +820,11 @@ impl ClassIterator for NodeIter {
     /// by its name, a modern attribute by its qualified name.
     fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         if !named_keys(req, object) {
-            return Ok(Owner::take(req, Value::int(self.index)));
+            return Ok(Owner::int(self.index));
         }
         let current = self.current.as_deref().and_then(|o| o.as_object().copied());
         let Some(node) = current.and_then(|o| node_of(req, o)) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let modern = current.is_some_and(|o| crate::modern::follows_spec(req, o));
         let name = if modern && node.kind() == Kind::Attribute {
@@ -843,7 +843,7 @@ impl ClassIterator for NodeIter {
         self.index += 1;
         let next = match garbage.as_object().copied() {
             Some(old) => self.next(req, object, old),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         };
         // `zval_ptr_dtor(&garbage)`, whatever the step came to.
         garbage.give_up(req);
@@ -877,7 +877,7 @@ impl NodeIter {
         match view(req, object) {
             View::Nodes { base, .. } if cursor => match node_of(req, old).and_then(Node::next) {
                 Some(node) => object_for(req, node, Some(base)),
-                None => Ok(Owner::take(req, Value::null())),
+                None => Ok(Owner::null()),
             },
             _ => item(req, object, self.index),
         }

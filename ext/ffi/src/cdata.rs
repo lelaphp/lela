@@ -446,7 +446,7 @@ pub(crate) fn to_value(
         if let Some(pointee) = f.pointee {
             let value = ffi::read::<usize>(ptr);
             if value == 0 {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             if debug_union {
                 let text = format!("{value:#x}");
@@ -1182,7 +1182,7 @@ impl ObjectHandlers for Handlers {
     ) -> Result<Option<Owner<Value>>, Thrown> {
         let v = view(req, object);
         match to {
-            TypeTag::Bool => Ok(Some(Owner::take(req, Value::bool(true)))),
+            TypeTag::Bool => Ok(Some(Owner::bool(true))),
             TypeTag::String if !v.freed() => {
                 let f = facts(req, v.ty);
                 let value = if let Some(scalar) = f.scalar {
@@ -1194,7 +1194,7 @@ impl ObjectHandlers for Handlers {
                 } else if let Some(pointee) = f.pointee {
                     let value = ffi::read::<usize>(v.ptr);
                     if value == 0 {
-                        Owner::take(req, Value::null())
+                        Owner::null()
                     } else if f.attr & attr::CONST != 0 && is_char(req, pointee) {
                         let text = ffi::c_string(value);
                         let text = PhpString::new(req, &text)?;
@@ -1498,9 +1498,9 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
         Kind::Pointer(to) => {
             let value = ffi::read::<usize>(v.ptr);
             let shown = if value == 0 {
-                Owner::take(req, Value::null())
+                Owner::null()
             } else if matches!(types(req).get(*to).kind, Kind::Void) {
-                Owner::take(req, Value::int(value as i64))
+                Owner::int(value as i64)
             } else {
                 to_value(req, None, value, *to, Fetch::Read, true, false, false)?
             };
@@ -1693,8 +1693,8 @@ impl ClassIterator for Iter {
         )
     }
 
-    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
-        Ok(Owner::take(req, Value::int(self.key)))
+    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::int(self.key))
     }
 
     fn move_forward(&mut self, _: &mut Request, _: PhpObject) -> Result<(), Thrown> {

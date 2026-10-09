@@ -309,24 +309,18 @@ pub(crate) fn serialize(
             }
             Slot::B(bytes) => {
                 for byte in bytes {
-                    out.append(req, Owner::take(req, Value::int(i64::from(*byte))))?;
+                    out.append(req, Owner::int(i64::from(*byte)))?;
                 }
             }
             Slot::L(words) => {
                 for word in words {
-                    out.append(req, Owner::take(req, Value::int(i64::from(*word as i32))))?;
+                    out.append(req, Owner::int(i64::from(*word as i32)))?;
                 }
             }
             Slot::Q(words) => {
                 for word in words {
-                    out.append(
-                        req,
-                        Owner::take(req, Value::int(i64::from(*word as u32 as i32))),
-                    )?;
-                    out.append(
-                        req,
-                        Owner::take(req, Value::int(i64::from((*word >> 32) as u32 as i32))),
-                    )?;
+                    out.append(req, Owner::int(i64::from(*word as u32 as i32)))?;
+                    out.append(req, Owner::int(i64::from((*word >> 32) as u32 as i32)))?;
                 }
             }
             Slot::Over(_) => {}

@@ -556,7 +556,7 @@ impl Attribute {
         this: This<Self>,
         #[php(default = Attribute::TARGET_ALL)] flags: i64,
     ) -> Result<(), Thrown> {
-        let flags = Owner::take(req, Value::int(flags));
+        let flags = Owner::int(flags);
         this.object().set_slot(req, 0, flags)
     }
 }

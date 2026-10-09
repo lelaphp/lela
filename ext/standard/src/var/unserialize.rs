@@ -447,7 +447,7 @@ impl<'a> State<'a> {
             hash.lay_down(req)?;
         }
         let root = hash.roots.len();
-        hash.roots.push(Owner::take(req, Value::null()));
+        hash.roots.push(Owner::null());
         Ok(State {
             buf,
             p: 0,
@@ -461,7 +461,7 @@ impl<'a> State<'a> {
     /// is read, which [`State::hand_on`] fills; the `Err` is the memory
     /// limit's fatal.
     fn tmp_var(&mut self, req: &mut Request) -> Result<DtorAt, Thrown> {
-        let null = Owner::take(req, Value::null());
+        let null = Owner::null();
         self.hash.tmp_var(req, Dtor::Kept(null))
     }
 
@@ -470,7 +470,7 @@ impl<'a> State<'a> {
     /// here, and the reader's next value is a root of its own. A view,
     /// which lives as long as the var hash.
     fn hand_on(&mut self, req: &mut Request, at: DtorAt) -> Value {
-        let root = self.hand_over(req);
+        let root = self.hand_over();
         let view = *root;
         self.hash.fill(req, at, root);
         view
@@ -478,8 +478,8 @@ impl<'a> State<'a> {
 
     /// The root handed over to the caller with its owner: the slots that
     /// named it name the value as the caller keeps it.
-    fn hand_over(&mut self, req: &Request) -> Owner<Value> {
-        let root = self.take_root(req);
+    fn hand_over(&mut self) -> Owner<Value> {
+        let root = self.take_root();
         let at = self.root;
         for (slot, _) in self.hash.slots.iter_mut().flatten() {
             if matches!(slot, Slot::Root(of) if *of == at) {
@@ -491,8 +491,8 @@ impl<'a> State<'a> {
 
     /// The root taken out as the value `unserialize()` returns, with the
     /// owner the var hash held of it.
-    fn take_root(&mut self, req: &Request) -> Owner<Value> {
-        let null = Owner::take(req, Value::null());
+    fn take_root(&mut self) -> Owner<Value> {
+        let null = Owner::null();
         match self.hash.roots.get_mut(self.root) {
             Some(root) => std::mem::replace(root, null),
             None => null,
@@ -775,7 +775,7 @@ pub fn php_unserialize_with_options(
     function: &str,
 ) -> Result<Owner<Value>, Thrown> {
     if data.is_empty() {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let mut state = State::open(req, data)?;
     let given = match self::options(req, options, function) {
@@ -834,13 +834,13 @@ pub fn php_unserialize_with_options(
         // with no root offered, as a native's argument is freed, is still
         // the collector's to find (#2444).
         (Ok(true), None) => {
-            let root = state.take_root(req);
+            let root = state.take_root();
             req.gc_possible_root(&root);
             Some(root)
         }
         _ => {
             if state.holder != Holder::Joined {
-                state.take_root(req).give_up(req);
+                state.take_root().give_up(req);
             }
             None
         }
@@ -860,7 +860,7 @@ pub fn php_unserialize_with_options(
         return Err(thrown);
     }
     let Some(answer) = answer else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     // A reference is unwrapped, per calling convention, after the delayed
     // calls, which may have changed what it holds.
@@ -1021,7 +1021,7 @@ impl<'a> Unserializer<'a> {
     pub fn local(&mut self, req: &mut Request) -> Result<Option<Owner<Value>>, Thrown> {
         let root = self.state.root;
         let read = self.state.read(req, Slot::Root(root));
-        let value = self.state.hand_over(req);
+        let value = self.state.hand_over();
         // A read that failed, on a throw or not, frees what it left in
         // the caller's zval, as php's callers `zval_ptr_dtor` it.
         if !matches!(read, Ok(true)) {
@@ -1213,7 +1213,7 @@ fn allowed_names(
         if names.find(lowered.as_bytes()).is_some() {
             lowered.give_up(req);
         } else {
-            names.set(req, lowered.into_key(), Owner::take(req, Value::null()))?;
+            names.set(req, lowered.into_key(), Owner::null())?;
         }
         Ok(ControlFlow::Continue(()))
     })?;
@@ -1474,8 +1474,7 @@ impl State<'_> {
             }
             (b'N', b';') => {
                 self.p = start + 2;
-                let null = Owner::take(req, Value::null());
-                self.write(req, &slot, entry, null)?;
+                self.write(req, &slot, entry, Owner::null())?;
                 Ok(true)
             }
             (b'b', b':')
@@ -1484,8 +1483,7 @@ impl State<'_> {
                     && start + 3 < self.buf.len() =>
             {
                 self.p = start + 4;
-                let bool = Owner::take(req, Value::bool(self.at(start + 2) == b'1'));
-                self.write(req, &slot, entry, bool)?;
+                self.write(req, &slot, entry, Owner::bool(self.at(start + 2) == b'1'))?;
                 Ok(true)
             }
             (b'i', b':') => {
@@ -1497,8 +1495,7 @@ impl State<'_> {
                 }
                 self.p = end + 1;
                 let (n, _) = self.parse_iv2(req, start + 2);
-                let n = Owner::take(req, Value::int(n));
-                self.write(req, &slot, entry, n)?;
+                self.write(req, &slot, entry, Owner::int(n))?;
                 Ok(true)
             }
             (b'd', b':') => self.double(req, &slot, entry, start),
@@ -1630,8 +1627,7 @@ impl State<'_> {
                 .and_then(|t| t.parse::<f64>().ok())
                 .unwrap_or(0.0),
         };
-        let value = Owner::take(req, Value::float(value));
-        self.write(req, slot, entry, value)?;
+        self.write(req, slot, entry, Owner::float(value))?;
         Ok(true)
     }
 
@@ -1875,7 +1871,7 @@ impl State<'_> {
                 self.repeat_place(&Slot::Element(array, key.clone()));
             }
             let at = Owner::take(req, key.clone());
-            array.set(req, at, Owner::take(req, Value::null()))?;
+            array.set(req, at, Owner::null())?;
             if !self.value(req, Some(Slot::Element(array, key)))? {
                 return Ok(false);
             }
@@ -2301,10 +2297,9 @@ impl State<'_> {
                 self.repeat_place(&Slot::Property(object, name));
             }
             let held = Owner::take(req, name);
-            let null = Owner::take(req, Value::null());
             // A key naming a virtual property fails the whole object,
             // `is_property_visibility_changed`'s `-1`.
-            if !object.unserialize_prop(req, held, null)? {
+            if !object.unserialize_prop(req, held, Owner::null())? {
                 return Ok(false);
             }
             let at = self.hash.slots.len();

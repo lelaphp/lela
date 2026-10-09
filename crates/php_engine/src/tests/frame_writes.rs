@@ -101,8 +101,7 @@ fn stop(observed: &mut Observed<'_>) {
         return;
     };
     if let Some((name, value)) = plan.write {
-        let value = Owner::take(observed, Value::int(value));
-        let set = observed.set_frame_var(frame, name.as_bytes(), value);
+        let set = observed.set_frame_var(frame, name.as_bytes(), Owner::int(value));
         let line = format!("[set {}]", if set { "ok" } else { "refused" });
         observed.write(line.as_bytes());
     }
@@ -241,8 +240,7 @@ fn stop_kept(observed: &mut Observed<'_>) {
         KEPT.set(observed.caller().map(|caller| caller.id()));
         return;
     };
-    let value = Owner::take(observed, Value::int(5));
-    let set = observed.set_frame_var(frame, b"x", value);
+    let set = observed.set_frame_var(frame, b"x", Owner::int(5));
     let line = format!("[set {}]", if set { "ok" } else { "refused" });
     observed.write(line.as_bytes());
     let answered = observed.eval_in_frame(frame, b"$x * 2", b"debugger");

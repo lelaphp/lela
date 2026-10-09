@@ -582,7 +582,7 @@ impl PharFileInfo {
         let this = this.object();
         held(req, this)?;
         let Some(mut meta) = entry_of(req, this).map(|e| std::mem::take(&mut e.metadata)) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let value = metadata_value(
             req,

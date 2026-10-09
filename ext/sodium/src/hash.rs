@@ -1378,7 +1378,7 @@ pub(crate) fn sodium_crypto_secretstream_xchacha20poly1305_pull(
     let string = made(req, &msg[..real])?;
     msg.fill(0);
     pair.append(req, string.into_value())?;
-    pair.append(req, Owner::take(req, Value::int(i64::from(tag))))?;
+    pair.append(req, Owner::int(i64::from(tag)))?;
     Ok(OrFalse::Value(pair))
 }
 

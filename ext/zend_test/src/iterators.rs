@@ -129,12 +129,12 @@ impl ClassIterator for Steps {
 
     fn current(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
         req.write(b"TraversableTest::current\n");
-        Ok(Owner::take(req, Value::int(self.0)))
+        Ok(Owner::int(self.0))
     }
 
     fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
         req.write(b"TraversableTest::key\n");
-        Ok(Owner::take(req, Value::int(self.0)))
+        Ok(Owner::int(self.0))
     }
 
     fn move_forward(&mut self, req: &mut Request, _: PhpObject) -> Result<(), Thrown> {

@@ -161,7 +161,7 @@ impl Compat {
                 let decoded = self.decode(req, t);
                 Ok(PhpString::new(req, &decoded)?.into_value())
             }
-            None => Ok(Owner::take(req, Value::bool(false))),
+            None => Ok(Owner::bool(false)),
         }
     }
 
@@ -224,12 +224,7 @@ impl Compat {
         let mut entry = PhpArray::new(req)?;
         set_str(req, &mut entry, b"tag", &stripped)?;
         set_str(req, &mut entry, b"type", b"open")?;
-        set(
-            req,
-            &mut entry,
-            b"level",
-            Owner::take(req, Value::int(i64::from(level))),
-        )?;
+        set(req, &mut entry, b"level", Owner::int(i64::from(level)))?;
         if let Some(p) = self.parser(req) {
             if let Some(slot) = usize::try_from(level - 1)
                 .ok()
@@ -299,12 +294,7 @@ impl Compat {
                     let mut entry = PhpArray::new(req)?;
                     set_str(req, &mut entry, b"tag", &stripped)?;
                     set_str(req, &mut entry, b"type", b"close")?;
-                    set(
-                        req,
-                        &mut entry,
-                        b"level",
-                        Owner::take(req, Value::int(i64::from(level))),
-                    )?;
+                    set(req, &mut entry, b"level", Owner::int(i64::from(level)))?;
                     data.append(req, entry.into_value())?;
                 }
             }
@@ -385,12 +375,7 @@ impl Compat {
             set_str(req, &mut entry, b"tag", &stripped)?;
             set_str(req, &mut entry, b"value", &decoded)?;
             set_str(req, &mut entry, b"type", b"cdata")?;
-            set(
-                req,
-                &mut entry,
-                b"level",
-                Owner::take(req, Value::int(i64::from(level))),
-            )?;
+            set(req, &mut entry, b"level", Owner::int(i64::from(level)))?;
             data.append(req, entry.into_value())?;
         } else if level == MAX_LEVEL + 1 {
             docref(
@@ -478,7 +463,7 @@ impl Compat {
             Some(list) => separate_owned(req, list)?,
             None => PhpArray::new(req)?,
         };
-        list.append(req, Owner::take(req, Value::int(i64::from(curtag))))?;
+        list.append(req, Owner::int(i64::from(curtag)))?;
         index.set(req, key, list.into_value())?;
         if let Some(p) = self.parser(req) {
             p.curtag += 1;

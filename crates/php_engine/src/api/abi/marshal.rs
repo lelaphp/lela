@@ -939,8 +939,8 @@ impl IntoReturn for () {
     fn declared() -> Option<Type> {
         Some(Type::Void)
     }
-    fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
-        Ok(Owner::take(req, Value::null()))
+    fn into_return(self, _: &mut Request) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::null())
     }
 }
 
@@ -1101,7 +1101,7 @@ impl<T: IntoReturn> IntoReturn for Option<T> {
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             Some(value) => value.into_return(req),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         }
     }
 }
@@ -1121,7 +1121,7 @@ impl<T: IntoReturn> IntoReturn for OrFalse<T> {
     fn into_return(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         match self {
             OrFalse::Value(value) => value.into_return(req),
-            OrFalse::False => Ok(Owner::take(req, Value::bool(false))),
+            OrFalse::False => Ok(Owner::bool(false)),
         }
     }
 }

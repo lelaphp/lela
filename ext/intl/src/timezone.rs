@@ -215,27 +215,17 @@ pub(crate) fn debug_table(
     rows: Option<DebugRows>,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut table = PhpArray::new(req)?;
-    set(
-        req,
-        &mut table,
-        b"valid",
-        Owner::take(req, Value::bool(rows.is_some())),
-    )?;
+    set(req, &mut table, b"valid", Owner::bool(rows.is_some()))?;
     if let Some((Some(id), offsets)) = rows {
         let id = PhpString::new(req, &id)?;
         set(req, &mut table, b"id", id.into_value())?;
         if let Some((raw, current)) = offsets {
-            set(
-                req,
-                &mut table,
-                b"rawOffset",
-                Owner::take(req, Value::int(i64::from(raw))),
-            )?;
+            set(req, &mut table, b"rawOffset", Owner::int(i64::from(raw)))?;
             set(
                 req,
                 &mut table,
                 b"currentOffset",
-                Owner::take(req, Value::int(i64::from(current))),
+                Owner::int(i64::from(current)),
             )?;
         }
     }

@@ -80,10 +80,10 @@ fn substring_data(
         return index_error(req, this).map(|v| Owner::take(req, v));
     }
     let Some(offset) = to_unsigned(req, this, offset)? else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     let Some(count) = to_unsigned(req, this, count)? else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     if offset > as_uint(length) {
         return index_error(req, this).map(|v| Owner::take(req, v));
@@ -239,7 +239,7 @@ impl DOMImplementation {
                 php_ext::raising::Level::Warning,
                 "URI must not contain percent-encoded NUL bytes",
             );
-            return Ok(Untyped(Owner::take(req, Value::bool(false))));
+            return Ok(Untyped(Owner::bool(false)));
         }
         let non_empty = |v: &[u8]| (!v.is_empty()).then(|| v.to_vec());
         let dtd = Node::create_int_subset(
@@ -657,7 +657,7 @@ impl DOMText {
             if follows_spec(req, this) {
                 return Err(dom_throw(req, Code::IndexSize));
             }
-            return Ok(Untyped(Owner::take(req, Value::bool(false))));
+            return Ok(Untyped(Owner::bool(false)));
         }
         let first = Utf8::ndup(&cur, offset).unwrap_or_default();
         let second = Utf8::sub(&cur, offset, length - offset).unwrap_or_default();

@@ -836,7 +836,7 @@ fn throwable_at(
     write_prop(req, &object, b"message", message.into_value())?;
     let file = PhpString::new(req, file)?;
     write_prop(req, &object, b"file", file.into_value())?;
-    let line = Owner::take(req, Value::int(i64::from(line)));
+    let line = Owner::int(i64::from(line));
     write_prop(req, &object, b"line", line)?;
     Ok(object)
 }

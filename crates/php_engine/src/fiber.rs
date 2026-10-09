@@ -1462,7 +1462,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
                 // What the destructor left, the graceful exit of a destroy
                 // among it, is what the fiber ends in.
                 crate::api::raising::pending(req)?;
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
         }
         req.fibers_mut().gc.running = false;

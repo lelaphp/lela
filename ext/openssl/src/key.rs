@@ -763,12 +763,7 @@ fn openssl_pkey_get_details(
         return Ok(OrFalse::False);
     };
     let mut out = PhpArray::new(req)?;
-    put(
-        req,
-        &mut out,
-        b"bits",
-        Owner::take(req, Value::int(pkey.bits())),
-    )?;
+    put(req, &mut out, b"bits", Owner::int(pkey.bits()))?;
     put_bytes(req, &mut out, b"key", &pem)?;
     let kind = pkey.kind();
     if let Some((name, params)) = layout(kind) {
@@ -795,12 +790,7 @@ fn openssl_pkey_get_details(
         }
         put(req, &mut out, name, inner.into_value())?;
     }
-    put(
-        req,
-        &mut out,
-        b"type",
-        Owner::take(req, Value::int(key_type(kind))),
-    )?;
+    put(req, &mut out, b"type", Owner::int(key_type(kind)))?;
     Ok(OrFalse::Value(out))
 }
 

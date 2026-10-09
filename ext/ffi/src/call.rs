@@ -44,7 +44,7 @@ pub(crate) struct Callback {
 pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let name = req.active_function_name();
     let Some(this) = req.this() else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let Some((ty, addr)) = function_symbol(req, this, name.as_bytes()) else {
         let message = format!("Attempt to call undefined C function '{name}'");
@@ -66,7 +66,7 @@ pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// ```
 pub(crate) fn invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(this) = req.this() else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let v = view(req, this);
     let Some(func) = func_pointee(req, v.ty) else {
@@ -180,7 +180,7 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Owne
         return Err(thrown);
     }
     if matches!(types(req).get(shape.ret).kind, Kind::Void) {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     to_value(
         req,

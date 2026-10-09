@@ -37,9 +37,9 @@ fn arguments(req: &mut Request, given: Vec<Argument>) -> Result<Vec<Owner<Value>
     let mut out = Vec::with_capacity(given.len());
     for one in given {
         out.push(match one {
-            Argument::Int(n) => Owner::take(req, Value::int(n)),
-            Argument::Float(f) => Owner::take(req, Value::float(f)),
-            Argument::Null => Owner::take(req, Value::null()),
+            Argument::Int(n) => Owner::int(n),
+            Argument::Float(f) => Owner::float(f),
+            Argument::Null => Owner::null(),
             Argument::Text(bytes) => match PhpString::new(req, &bytes) {
                 Ok(text) => text.into_value(),
                 Err(thrown) => {
@@ -123,7 +123,7 @@ impl Callbacks for Sqlite3 {
         let held = match state {
             Some(held) => held,
             None => state.insert(Box::new(Aggregate {
-                value: Owner::take(req, Value::null()),
+                value: Owner::null(),
                 row: 0,
             })),
         };
@@ -135,7 +135,7 @@ impl Callbacks for Sqlite3 {
         release_all(req, extra);
         let (kept, thrown) = match returned {
             Ok(value) => (value, None),
-            Err(thrown) => (Owner::take(req, Value::null()), Some(thrown)),
+            Err(thrown) => (Owner::null(), Some(thrown)),
         };
         std::mem::replace(&mut held.value, kept).give_up(req);
         thrown.map_or(Ok(()), Err)
@@ -227,7 +227,7 @@ impl Callbacks for Sqlite3 {
         if pending {
             return Ok(SQLITE_DENY);
         }
-        let mut values = vec![Owner::take(req, Value::int(i64::from(action)))];
+        let mut values = vec![Owner::int(i64::from(action))];
         for name in names {
             values.push(match name.map(|name| PhpString::new(req, &name)) {
                 Some(Ok(name)) => name.into_value(),
@@ -235,7 +235,7 @@ impl Callbacks for Sqlite3 {
                     release_all(req, values);
                     return Err(thrown);
                 }
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             });
         }
         let returned = call(req, handler, &views(&values));

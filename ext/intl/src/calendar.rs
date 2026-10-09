@@ -290,12 +290,7 @@ impl ObjectHandlers for Handlers {
                 });
                 (cal::kind(calendar), zone, locale, fields)
             });
-        set(
-            req,
-            &mut table,
-            b"valid",
-            Owner::take(req, Value::bool(calendar.is_some())),
-        )?;
+        set(req, &mut table, b"valid", Owner::bool(calendar.is_some()))?;
         let Some((kind, zone, locale, fields)) = calendar else {
             return Ok(Some(table.into()));
         };
@@ -308,7 +303,7 @@ impl ObjectHandlers for Handlers {
         let mut rows = PhpArray::new(req)?;
         for (name, value) in fields {
             let value = match value {
-                Ok(n) => Owner::take(req, Value::int(i64::from(n))),
+                Ok(n) => Owner::int(i64::from(n)),
                 Err(code) => PhpString::new(req, code.name().as_bytes())?.into_value(),
             };
             set(req, &mut rows, name.as_bytes(), value)?;

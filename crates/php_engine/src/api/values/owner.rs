@@ -458,7 +458,59 @@ impl Owner<Resource> {
     }
 }
 
+/// An owner of a value that carries no count, made without the request:
+/// `ZVAL_LONG`, `ZVAL_BOOL`, `ZVAL_DOUBLE` and `ZVAL_NULL` into a place
+/// of the native's own, where [`Owner::take`] would take no count either.
+/// One constructor per kind, each over the scalar alone, so none can name
+/// a counted value, and a debug build's owner records no line: dropped
+/// unconsumed, it leaks nothing, so its heap records nothing.
+///
+/// ```compile_fail,E0308
+/// # use php_engine::api::values::{Owner, PhpString, Value};
+/// fn counted(s: PhpString) -> Owner<Value> {
+///     Owner::int(s)
+/// }
+/// # fn main() {}
+/// ```
+///
+/// ```compile_fail,E0599
+/// # use php_engine::api::values::{Owner, PhpString};
+/// fn counted() -> Owner<PhpString> {
+///     Owner::<PhpString>::null()
+/// }
+/// # fn main() {}
+/// ```
 impl Owner<Value> {
+    /// The owner of `null`.
+    pub const fn null() -> Owner<Value> {
+        Owner::scalar(Value::null())
+    }
+
+    /// The owner of `b`.
+    pub const fn bool(b: bool) -> Owner<Value> {
+        Owner::scalar(Value::bool(b))
+    }
+
+    /// The owner of `n`.
+    pub const fn int(n: i64) -> Owner<Value> {
+        Owner::scalar(Value::int(n))
+    }
+
+    /// The owner of `f`.
+    pub const fn float(f: f64) -> Owner<Value> {
+        Owner::scalar(Value::float(f))
+    }
+
+    /// The owner of a value its constructor vouches carries no count.
+    const fn scalar(view: Value) -> Owner<Value> {
+        Owner {
+            view,
+            kept: (),
+            #[cfg(debug_assertions)]
+            made: None,
+        }
+    }
+
     /// The owner of the value returned as it is under `T`'s declaration,
     /// the same count ([`Raw`]).
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]

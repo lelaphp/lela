@@ -10,7 +10,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString};
 
 use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::lent::{Lent, kept, lent};
@@ -714,9 +714,9 @@ fn localtime_rows(
     let mut array = PhpArray::new(req)?;
     for (name, value) in rows {
         if associative {
-            set_str(req, &mut array, name, Owner::take(req, Value::int(value)))?;
+            set_str(req, &mut array, name, Owner::int(value))?;
         } else {
-            array.append(req, Owner::take(req, Value::int(value)))?;
+            array.append(req, Owner::int(value))?;
         }
     }
     Ok(array)
@@ -768,7 +768,7 @@ fn getdate_rows(req: &mut Request, t: &Time, ts: i64) -> Result<Owner<PhpArray>,
         (b"yday", ffi::day_of_year(t.y, t.m, t.d)),
     ];
     for (name, value) in rows {
-        set_str(req, &mut array, name, Owner::take(req, Value::int(value)))?;
+        set_str(req, &mut array, name, Owner::int(value))?;
     }
     set_string(
         req,
@@ -777,11 +777,7 @@ fn getdate_rows(req: &mut Request, t: &Time, ts: i64) -> Result<Owner<PhpArray>,
         full_day(t.y, t.m, t.d).as_bytes(),
     )?;
     set_string(req, &mut array, b"month", full_month(t.m).as_bytes())?;
-    array.set(
-        req,
-        Owner::take(req, Key::Int(0)),
-        Owner::take(req, Value::int(ts)),
-    )?;
+    array.set(req, Owner::take(req, Key::Int(0)), Owner::int(ts))?;
     Ok(array)
 }
 

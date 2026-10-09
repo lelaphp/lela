@@ -555,7 +555,7 @@ fn to_zval_object_ex(
             !matches!(bt.kind, TypeKind::Simple | TypeKind::List | TypeKind::Union)
         }) {
             if xml_nil(data) {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             if let Some(v) = soap_check_xml_ref(req, cx, data) {
                 return Ok(v);
@@ -627,7 +627,7 @@ enum Fresh {
 /// `FIND_XML_NULL`, `soap_check_xml_ref`, `object_init_ex` and `soap_add_xml_ref`.
 fn new_object_ref(req: &mut Request, cx: &mut Cx, data: Node, ce: ClassId) -> Res<Fresh> {
     if xml_nil(data) {
-        return Ok(Fresh::Found(Owner::take(req, Value::null())));
+        return Ok(Fresh::Found(Owner::null()));
     }
     if let Some(v) = soap_check_xml_ref(req, cx, data) {
         return Ok(Fresh::Found(v));

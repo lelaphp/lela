@@ -357,7 +357,7 @@ fn register_node_ns_read(req: &mut Request, object: PhpObject) -> Read {
         Some(Extra::XPath(s)) => s.register_node_ns,
         _ => true,
     };
-    Ok(Some(Owner::take(req, Value::bool(on))))
+    Ok(Some(Owner::bool(on)))
 }
 
 #[allow(clippy::unnecessary_wraps)] // the writer shape every row of a property table has
@@ -404,12 +404,12 @@ fn item_object(
             parent,
         } => {
             let Some(parent) = parent else {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             };
             let parent_value = proxy(req, parent)?;
             let Some(parent_obj) = parent_value.as_object().copied() else {
                 parent_value.give_up(req);
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             };
             let Some(fake) = Node::fake_namespace_decl(parent, href.as_deref(), prefix.as_deref())
             else {
@@ -444,8 +444,8 @@ fn operand_value(
 ) -> Result<Owner<Value>, Thrown> {
     match operand {
         Operand::Str(s) => string(req, &s),
-        Operand::Bool(b) => Ok(Owner::take(req, Value::bool(b))),
-        Operand::Number(n) => Ok(Owner::take(req, Value::float(n))),
+        Operand::Bool(b) => Ok(Owner::bool(b)),
+        Operand::Number(n) => Ok(Owner::float(n)),
         // `ZVAL_EMPTY_ARRAY` for a node set with no node
         // (`Z/ext/dom/xpath_callbacks.c:367`).
         Operand::Nodes(items) if items.is_empty() => {
@@ -632,7 +632,7 @@ fn eval(
             return Err(throw_error(req, "Error", "Invalid XPath Document Pointer"));
         }
         docref(req, Level::Warning, "Invalid XPath Document Pointer");
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     let node = match context {
         Some(o) => match fetch(req, o) {
@@ -685,7 +685,7 @@ fn eval(
                 "Could not evaluate XPath expression",
             ));
         }
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     let answer = if force_node_set && !matches!(answer, Answer::NodeSet(_)) {
         Answer::NodeSet(Vec::new())
@@ -694,10 +694,10 @@ fn eval(
     };
     match answer {
         Answer::NodeSet(items) => node_list(req, this, items, modern),
-        Answer::Bool(b) => Ok(Owner::take(req, Value::bool(b))),
-        Answer::Number(n) => Ok(Owner::take(req, Value::float(n))),
+        Answer::Bool(b) => Ok(Owner::bool(b)),
+        Answer::Number(n) => Ok(Owner::float(n)),
         Answer::Str(s) => string(req, &s),
-        Answer::Other => Ok(Owner::take(req, Value::null())),
+        Answer::Other => Ok(Owner::null()),
     }
 }
 

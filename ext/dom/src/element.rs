@@ -429,7 +429,7 @@ fn in_scope_namespace_info(
         }
         let info = php_ext::call::new_object(req, class)?;
         let prefix = if prefix.is_empty() {
-            Owner::take(req, Value::null())
+            Owner::null()
         } else {
             string(req, &prefix)?
         };
@@ -537,7 +537,7 @@ fn insert_adjacent_element(
     let other = fetch(req, other_obj)?;
     match insert_adjacent(req, this, elem, place, other)? {
         Inserted::Done => object_for(req, other, Some(other_obj)),
-        Inserted::NoParent | Inserted::Failed => Ok(Owner::take(req, Value::null())),
+        Inserted::NoParent | Inserted::Failed => Ok(Owner::null()),
     }
 }
 
@@ -581,19 +581,19 @@ fn set_attribute(
     let elem = fetch(req, this)?;
     if follows_spec(req, this) {
         set_attribute_modern(req, this, elem, name, value);
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     match attribute_or_decl(false, elem, name) {
         Some(Found::Attr(a)) if a.kind() == Kind::Attribute => {
             crate::attr_value_will_change(req, this, a);
             node_list_unlink(a.children());
         }
-        Some(Found::Decl(_)) => return Ok(Owner::take(req, Value::bool(false))),
+        Some(Found::Decl(_)) => return Ok(Owner::bool(false)),
         _ => {}
     }
     if name == b"xmlns" {
         return Ok(match elem.new_ns(value, None) {
-            Some(_) => Owner::take(req, Value::bool(true)),
+            Some(_) => Owner::bool(true),
             None => return Err(arg_value_error(req, 1, "be a valid XML attribute")),
         });
     }
@@ -626,7 +626,7 @@ fn set_attribute_node(
     } else if attr.doc().is_some() && attr.doc() != elem.doc() {
         let strict = strict(req, this);
         dom_error(req, Code::WrongDocument, strict)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let existing = match attr.ns().and_then(Ns::href).filter(|_| use_ns) {
         Some(href) => elem.has_ns_prop(&attr.name(), Some(&href)),
@@ -635,7 +635,7 @@ fn set_attribute_node(
     .filter(|a| a.kind() != Kind::AttributeDecl);
     if let Some(old) = existing {
         if old == attr {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         }
         old.unlink();
     }
@@ -693,9 +693,9 @@ fn get_attribute_node_ns(
         Some(a) => object_for(req, a, Some(this)),
         None if !modern && uri == Some(XMLNS_NS) => match decl_named(elem, Some(name)) {
             Some(ns) => namespace_node(req, this, elem, ns),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         },
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -708,8 +708,8 @@ fn get_attribute_node(
     let elem = fetch(req, this)?;
     let modern = follows_spec(req, this);
     match attribute_or_decl(modern, elem, name) {
-        None if modern => Ok(Owner::take(req, Value::null())),
-        None => Ok(Owner::take(req, Value::bool(false))),
+        None if modern => Ok(Owner::null()),
+        None => Ok(Owner::bool(false)),
         Some(Found::Decl(ns)) => namespace_node(req, this, elem, ns),
         Some(Found::Attr(a)) => object_for(req, a, Some(this)),
     }
@@ -726,7 +726,7 @@ fn remove_attribute_node(
     if attr.parent() != Some(elem) {
         let strict = strict(req, this);
         dom_error(req, Code::NotFound, strict)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     attr.unlink();
     object_for(req, attr, Some(this))
@@ -942,7 +942,7 @@ impl DOMElement {
         };
         let value = match value {
             Some(v) => string(req, &v)?,
-            None if modern => Owner::take(req, Value::null()),
+            None if modern => Owner::null(),
             None => empty_string(req)?,
         };
         returned(value)
@@ -1014,7 +1014,7 @@ impl DOMElement {
         let uri = namespace.as_ref().map(PhpString::as_bytes);
         let value = match attribute_ns(modern, elem, uri, localName.as_bytes()) {
             Some(v) => string(req, &v)?,
-            None if modern => Owner::take(req, Value::null()),
+            None if modern => Owner::null(),
             None => empty_string(req)?,
         };
         returned(value)

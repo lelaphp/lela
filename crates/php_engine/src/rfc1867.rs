@@ -890,17 +890,11 @@ fn parts(
             req,
             upload.files,
             &slot("error"),
-            Owner::take(req, Value::int(cancel_upload)),
+            Owner::int(cancel_upload),
             false,
         )?;
         let size = if cancel_upload != 0 { 0 } else { total_bytes };
-        upload.register(
-            req,
-            upload.files,
-            &slot("size"),
-            Owner::take(req, Value::int(size)),
-            false,
-        )?;
+        upload.register(req, upload.files, &slot("size"), Owner::int(size), false)?;
     }
     Ok(())
 }

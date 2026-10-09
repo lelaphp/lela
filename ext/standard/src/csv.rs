@@ -12,7 +12,7 @@ use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::ffi::locale::{self as c, Class, Mblen};
 
@@ -399,7 +399,7 @@ pub(super) fn str_getcsv(
     match fgetcsv(string.as_bytes(), delimiter, enclosure, escape, &mut || {
         None
     }) {
-        None => array.append(req, Owner::take(req, Value::null()))?,
+        None => array.append(req, Owner::null())?,
         Some(fields) => {
             for field in fields {
                 let value = PhpString::new(req, &field)?.into_value();

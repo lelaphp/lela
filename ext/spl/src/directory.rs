@@ -2500,7 +2500,7 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thr
         // `spl_filesystem_dir_open` was handed it, `glob://` first.
         let value = match path {
             Some(pattern) if glob => crate::string_value(req, &pattern)?,
-            _ => Owner::take(req, Value::bool(false)),
+            _ => Owner::bool(false),
         };
         set(req, &mut out, b"DirectoryIterator", b"glob", value)?;
         let value = crate::string_value(req, &sub_path.unwrap_or_default())?;
@@ -2810,7 +2810,7 @@ fn read_csv(
     }
     let mut parsed = PhpArray::new(req)?;
     let filled = match fields {
-        None => parsed.append(req, Owner::take(req, Value::null())),
+        None => parsed.append(req, Owner::null()),
         Some(fields) => fields.iter().try_for_each(|field| {
             let value = crate::string_value(req, field)?;
             parsed.append(req, value)

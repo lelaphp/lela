@@ -106,11 +106,11 @@ fn properties(
             }
             array.into_value()
         }
-        None => Owner::take(req, Value::null()),
+        None => Owner::null(),
     };
     write_prop(req, &object, b"attribute", attribute)?;
     let child = if facts.children.is_empty() {
-        Owner::take(req, Value::null())
+        Owner::null()
     } else {
         let mut array = PhpArray::new(req)?;
         for child in facts.children {

@@ -4774,8 +4774,8 @@ fn meta_rows(
     for (key, value) in entries {
         let key = PhpString::new(req, &key)?.into_key();
         let value = match value {
-            MetaValue::Bool(b) => Owner::take(req, Value::bool(b)),
-            MetaValue::Int(n) => Owner::take(req, Value::int(n)),
+            MetaValue::Bool(b) => Owner::bool(b),
+            MetaValue::Int(n) => Owner::int(n),
             MetaValue::Str(bytes) => match PhpString::new(req, &bytes) {
                 Ok(bytes) => bytes.into_value(),
                 Err(thrown) => {

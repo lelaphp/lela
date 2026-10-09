@@ -437,8 +437,7 @@ impl Statement for Stmt {
                 let n = u32::try_from(*param.position).unwrap_or(u32::MAX);
                 let value = param.value.deref();
                 if param.ty.kind() == BindKind::Null || matches!(value.as_ref(), ValueRef::Null) {
-                    let null = Owner::take(req, Value::null());
-                    ps.bind_parameter(req, n, null, FieldType::Null)?;
+                    ps.bind_parameter(req, n, Owner::null(), FieldType::Null)?;
                     return Ok(());
                 }
                 match param.ty.kind() {
@@ -540,12 +539,7 @@ impl Statement for Stmt {
             | FieldType::LongLong => 1,
             _ => 2,
         };
-        set(
-            req,
-            &mut meta,
-            b"pdo_type",
-            Owner::take(req, Value::int(pdo_type)),
-        )?;
+        set(req, &mut meta, b"pdo_type", Owner::int(pdo_type))?;
         set(req, &mut meta, b"flags", flags.into_value())?;
         let table = string_init(req, &field.table)?;
         set(req, &mut meta, b"table", table)?;

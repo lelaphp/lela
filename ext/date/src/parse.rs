@@ -48,7 +48,7 @@ fn add_errors(
         (b"error_count", b"errors", &errors.errors),
     ] {
         let n = i64::try_from(messages.len()).unwrap_or(i64::MAX);
-        set_str(req, array, count, Owner::take(req, Value::int(n)))?;
+        set_str(req, array, count, Owner::int(n))?;
         let mut element = PhpArray::new(req)?;
         for message in messages {
             let text = PhpString::new(req, &message.text)?.into_value();
@@ -187,19 +187,14 @@ fn parsed_time(
         req,
         &mut array,
         b"is_localtime",
-        Owner::take(req, Value::bool(t.is_localtime != 0)),
+        Owner::bool(t.is_localtime != 0),
     )?;
     if t.is_localtime != 0 {
         element(req, &mut array, b"zone_type", i64::from(t.zone_type))?;
         match t.zone_type {
             ZONETYPE_OFFSET => {
                 element(req, &mut array, b"zone", i64::from(t.z))?;
-                set_str(
-                    req,
-                    &mut array,
-                    b"is_dst",
-                    Owner::take(req, Value::bool(t.dst != 0)),
-                )?;
+                set_str(req, &mut array, b"is_dst", Owner::bool(t.dst != 0))?;
             }
             ZONETYPE_ID => {
                 if !t.tz_abbr().is_empty() {
@@ -211,12 +206,7 @@ fn parsed_time(
             }
             ZONETYPE_ABBR => {
                 element(req, &mut array, b"zone", i64::from(t.z))?;
-                set_str(
-                    req,
-                    &mut array,
-                    b"is_dst",
-                    Owner::take(req, Value::bool(t.dst != 0)),
-                )?;
+                set_str(req, &mut array, b"is_dst", Owner::bool(t.dst != 0))?;
                 set_string(req, &mut array, b"tz_abbr", t.tz_abbr())?;
             }
             _ => {}
@@ -560,23 +550,13 @@ fn relative_row(req: &mut Request, r: &RelTime) -> Result<Owner<PhpArray>, Throw
         (b"minute", r.i),
         (b"second", r.s),
     ] {
-        set_str(req, &mut rel, name, Owner::take(req, Value::int(n)))?;
+        set_str(req, &mut rel, name, Owner::int(n))?;
     }
     if r.have_weekday_relative != 0 {
-        set_str(
-            req,
-            &mut rel,
-            b"weekday",
-            Owner::take(req, Value::int(i64::from(r.weekday))),
-        )?;
+        set_str(req, &mut rel, b"weekday", Owner::int(i64::from(r.weekday)))?;
     }
     if r.have_special_relative != 0 && r.special_type == SPECIAL_WEEKDAY {
-        set_str(
-            req,
-            &mut rel,
-            b"weekdays",
-            Owner::take(req, Value::int(r.special_amount)),
-        )?;
+        set_str(req, &mut rel, b"weekdays", Owner::int(r.special_amount))?;
     }
     if r.first_last_day_of != 0 {
         let name: &[u8] = if r.first_last_day_of == FIRST_DAY_OF_MONTH {
@@ -584,7 +564,7 @@ fn relative_row(req: &mut Request, r: &RelTime) -> Result<Owner<PhpArray>, Throw
         } else {
             b"last_day_of_month"
         };
-        set_str(req, &mut rel, name, Owner::take(req, Value::bool(true)))?;
+        set_str(req, &mut rel, name, Owner::bool(true))?;
     }
     Ok(rel)
 }

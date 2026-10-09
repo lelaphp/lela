@@ -249,7 +249,7 @@ pub(super) fn raise_impl(
     let mut info = PhpArray::new(req)?;
     let text = crate::string(req, state.as_str().as_bytes())?;
     info.append(req, text)?;
-    info.append(req, Owner::take(req, Value::int(0)))?;
+    info.append(req, Owner::int(0))?;
     Err(throw_pdo(req, &message, code, Some(info)))
 }
 
@@ -269,7 +269,7 @@ pub(super) fn fetch_error(
         _ => crate::dbh::state(req, dbh).and_then(|h| h.native_error.clone()),
     };
     if let Some((code, message)) = recorded {
-        info.append(req, Owner::take(req, Value::int(code)))?;
+        info.append(req, Owner::int(code))?;
         let text = crate::string(req, &message)?;
         info.append(req, text)?;
     }
@@ -405,14 +405,14 @@ pub(super) fn throw_connect(req: &mut Request, failure: Failure) -> Thrown {
         let mut info = PhpArray::new(req)?;
         let text = crate::string(req, error.state.as_str().as_bytes())?;
         info.append(req, text)?;
-        info.append(req, Owner::take(req, Value::int(error.code)))?;
+        info.append(req, Owner::int(error.code))?;
         let text = crate::string(req, &error.message)?;
         info.append(req, text)?;
         Ok::<Owner<PhpArray>, Thrown>(info)
     })();
     match info {
         Ok(info) => {
-            let code = Owner::take(req, Value::int(error.code));
+            let code = Owner::int(error.code);
             throw_pdo(req, &message, code, Some(info))
         }
         Err(thrown) => thrown,

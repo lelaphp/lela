@@ -130,7 +130,7 @@ impl Request {
             return Ok(None);
         }
         let key = Owner::take(self, Key::Str(name));
-        if let Err(thrown) = table.add_new(self, key, Owner::take(self, Value::null())) {
+        if let Err(thrown) = table.add_new(self, key, Owner::null()) {
             self.release(Value::string(name));
             return Err(thrown);
         }

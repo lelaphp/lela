@@ -294,7 +294,7 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
         let converted = match target {
             "null" => {
                 now.give_up(req);
-                Owner::take(req, Value::null())
+                Owner::null()
             }
             "array" => {
                 let mut array = PhpArray::new(req)?;
@@ -318,11 +318,11 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
     let converted = match name.as_slice() {
         b"integer" | b"int" => {
             let n = to_long(req, &current)?;
-            Owner::take(req, Value::int(n))
+            Owner::int(n)
         }
         b"float" | b"double" => {
             let f = to_double(req, &current)?;
-            Owner::take(req, Value::float(f))
+            Owner::float(f)
         }
         b"string" => match to_string(req, &current) {
             Ok(string) => string.into_value(),
@@ -352,9 +352,9 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
         }
         b"bool" | b"boolean" => {
             let truth = truthy(req, &current);
-            Owner::take(req, Value::bool(truth))
+            Owner::bool(truth)
         }
-        b"null" => Owner::take(req, Value::null()),
+        b"null" => Owner::null(),
         b"resource" => {
             return Err(throw_error(
                 req,

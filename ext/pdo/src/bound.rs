@@ -219,7 +219,7 @@ impl BoundTable {
             Some(name) => Owner::take(req, **name).into_key(),
             None => Owner::take(req, Key::Int(bound.position)),
         };
-        match self.table.set(req, key, Owner::take(req, Value::null())) {
+        match self.table.set(req, key, Owner::null()) {
             Ok(()) => Ok(held),
             Err(thrown) => {
                 held.free(req);

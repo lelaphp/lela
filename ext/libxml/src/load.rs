@@ -181,7 +181,7 @@ fn arguments(
         |req: &mut Request, bytes: Option<&[u8]>| -> Result<Owner<Value>, Thrown> {
             match bytes {
                 Some(b) => Ok(PhpString::new(req, b)?.into_value()),
-                None => Ok(Owner::take(req, Value::null())),
+                None => Ok(Owner::null()),
             }
         };
     let public = string_or_null(req, id)?;

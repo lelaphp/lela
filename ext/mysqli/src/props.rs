@@ -86,7 +86,7 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
             Some(name) => Ok(
                 match P::read(req, object, name, read == PropertyRead::Silent)? {
                     Some(value) => value,
-                    None => Owner::take(req, Value::null()),
+                    None => Owner::null(),
                 },
             ),
             None => Std.read_property(req, object, name, read),
@@ -218,7 +218,7 @@ pub(crate) fn error_list(
         let mut row = PhpArray::new(req)?;
         let state_end = sqlstate.iter().position(|b| *b == 0).unwrap_or(5);
         for (key, value) in [
-            ("errno", Owner::take(req, Value::int(i64::from(*errno)))),
+            ("errno", Owner::int(i64::from(*errno))),
             ("sqlstate", crate::string(req, &sqlstate[..state_end])?),
             ("error", crate::string(req, error)?),
         ] {

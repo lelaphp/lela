@@ -415,8 +415,7 @@ impl Request {
             crate::engine::ProcessTitle::Saved => Some(true),
         };
         if let Some(titled) = titled {
-            let titled = Owner::take(self, Value::bool(titled));
-            self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", titled);
+            self.register_host_constant(b"PHP_CLI_PROCESS_TITLE", Owner::bool(titled));
         }
         let Some(hooks) = self.stream_hooks() else {
             return Ok(());

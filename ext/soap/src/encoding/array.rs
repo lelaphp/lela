@@ -799,7 +799,7 @@ pub(super) fn to_zval_array(
     data: Node,
 ) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let shape = array_shape(req, e, data)?;
     let dims = match shape.dims {
@@ -950,7 +950,7 @@ pub(super) fn to_xml_map(
 /// `to_zval_map`.
 pub(super) fn to_zval_map(req: &mut Request, cx: &mut Cx, data: Node) -> Res<Owner<Value>> {
     if xml_nil(data) || data.children().is_none() {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let ret = PhpArray::new(req)?;
     match fill_map(req, cx, *ret, data) {

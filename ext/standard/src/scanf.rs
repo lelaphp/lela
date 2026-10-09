@@ -471,7 +471,7 @@ fn scan(
     } else {
         let mut array = PhpArray::new(req)?;
         for _ in 0..total {
-            array.append(req, Owner::take(req, Value::null()))?;
+            array.append(req, Owner::null())?;
         }
         Target::Array(array)
     };
@@ -539,8 +539,12 @@ fn scan(
         let (op, base) = match ch {
             b'n' => {
                 if !suppress {
-                    let consumed = Owner::take(req, Value::int(i64::try_from(s).unwrap_or(0)));
-                    put(req, &mut target, &mut obj_index, consumed)?;
+                    put(
+                        req,
+                        &mut target,
+                        &mut obj_index,
+                        Owner::int(i64::try_from(s).unwrap_or(0)),
+                    )?;
                 }
                 nconversions += 1;
                 continue;
@@ -719,7 +723,7 @@ fn scan(
                         let text = u64::from_ne_bytes(value.to_ne_bytes()).to_string();
                         PhpString::new(req, text.as_bytes())?.into_value()
                     } else {
-                        Owner::take(req, Value::int(value))
+                        Owner::int(value)
                     };
                     put(req, &mut target, &mut obj_index, value)?;
                 }
@@ -781,12 +785,7 @@ fn scan(
                 if !suppress {
                     let text = String::from_utf8_lossy(&buf).into_owned();
                     let value = strtod(&text);
-                    put(
-                        req,
-                        &mut target,
-                        &mut obj_index,
-                        Owner::take(req, Value::float(value)),
-                    )?;
+                    put(req, &mut target, &mut obj_index, Owner::float(value))?;
                 }
             }
         }
@@ -804,9 +803,7 @@ fn scan(
         return Ok(Owner::take(req, answer));
     }
     Ok(match target {
-        Target::Vars { .. } => {
-            Owner::take(req, Value::int(i64::try_from(nconversions).unwrap_or(0)))
-        }
+        Target::Vars { .. } => Owner::int(i64::try_from(nconversions).unwrap_or(0)),
         Target::Array(array) => array.into_value(),
     })
 }

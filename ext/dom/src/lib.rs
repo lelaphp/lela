@@ -584,7 +584,7 @@ fn dom_error_message(
     if strict {
         let exception = new_throwable(req, "DOMException", message)?;
         if let Some(object) = exception.as_object().copied() {
-            let code = Owner::take(req, Value::int(code as i64));
+            let code = Owner::int(code as i64);
             let set = php_ext::call::write_prop(req, &object, b"code", code);
             if let Err(thrown) = set {
                 exception.give_up(req);
@@ -699,7 +699,7 @@ fn passed(given: Passed<PhpString>) -> Option<Vec<u8>> {
 fn nullable_string(req: &mut Request, bytes: Option<&[u8]>) -> Result<Owner<Value>, Thrown> {
     match bytes {
         Some(b) => string(req, b),
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -796,7 +796,7 @@ fn nullable_object(
 ) -> Result<Owner<Value>, Thrown> {
     match node {
         Some(n) => object_for(req, n, context),
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -856,7 +856,7 @@ fn read_property(
     match handler(req, object, name) {
         Some(prop) => Ok(match (prop.read)(req, object)? {
             Some(read) => read,
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         }),
         None => Std.read_property(req, object, name, read),
     }
@@ -1204,7 +1204,7 @@ fn content_value(
     };
     match content {
         Some(bytes) => string(req, &bytes),
-        None if null_on_failure => Ok(Owner::take(req, Value::null())),
+        None if null_on_failure => Ok(Owner::null()),
         None => empty_string(req),
     }
 }
@@ -2017,12 +2017,12 @@ fn coerce_property(
             ValueRef::Bool(_) => Ok(Owner::take(req, v)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_) => {
                 let truth = truthy(req, &v);
-                Ok(Owner::take(req, Value::bool(truth)))
+                Ok(Owner::bool(truth))
             }
             _ => Err(fail(req, "bool")),
         },
         Declared::String { nullable } => match v.as_ref() {
-            ValueRef::Null if nullable => Ok(Owner::take(req, Value::null())),
+            ValueRef::Null if nullable => Ok(Owner::null()),
             ValueRef::Str(_) => Ok(Owner::take(req, v)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
                 Ok(to_string(req, &v)?.into_value())

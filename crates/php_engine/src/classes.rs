@@ -346,12 +346,7 @@ impl ObjectHandlers for ClosureHandlers {
             set_row(req, &mut out, b"name", named)?;
             let file = PhpString::new(req, &decl.file.0)?.into_value();
             set_row(req, &mut out, b"file", file)?;
-            set_row(
-                req,
-                &mut out,
-                b"line",
-                Owner::take(req, Value::int(i64::from(decl.line))),
-            )?;
+            set_row(req, &mut out, b"line", Owner::int(i64::from(decl.line)))?;
         }
         // The whole table, the `use` variables and the body's `static`s.
         let bound = req.closure_bound(object, false);
@@ -848,11 +843,11 @@ impl Closure {
     ) -> Result<Owner<Value>, Thrown> {
         let closure = this.object();
         let Some(info) = closure.closure(req).cloned() else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let class = newThis.class();
         if !valid_closure_binding(req, &info, Some(newThis), Some(class)) {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         }
         // `fci.named_params`, placed by `zend_call_function` over the
         // closure's function.
@@ -1824,7 +1819,7 @@ impl ErrorException {
     ) -> Result<(), Thrown> {
         let this = this.object();
         update_exception_properties(req, this, message, code, previous)?;
-        let severity = Owner::take(req, Value::int(severity));
+        let severity = Owner::int(severity);
         write_prop(req, &this, b"severity", severity)?;
         let named = filename.is_some();
         if let Some(filename) = filename {
@@ -1836,7 +1831,7 @@ impl ErrorException {
             None if named => 0,
             None => return Ok(()),
         };
-        let line = Owner::take(req, Value::int(line));
+        let line = Owner::int(line);
         write_prop(req, &this, b"line", line)
     }
 
@@ -1981,7 +1976,7 @@ fn update_exception_properties(
         write_prop(req, &this, b"message", message)?;
     }
     if let Passed::Given(code) = code {
-        let code = Owner::take(req, Value::int(code));
+        let code = Owner::int(code);
         write_prop(req, &this, b"code", code)?;
     }
     if let Passed::Given(previous) = previous {

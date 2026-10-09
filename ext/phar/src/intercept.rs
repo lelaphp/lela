@@ -364,7 +364,7 @@ fn file_function(req: &mut Request, kind: Fs) -> Result<Owner<Value>, Thrown> {
 /// for any other.
 fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value>, Thrown> {
     if filename.is_empty() {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     if !relative(filename) {
         return passthrough(req, None);
@@ -399,7 +399,7 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value
                 .is_some_and(|a| a.virtual_dirs.contains(&entry)) =>
             {
                 if kind.exists_check() {
-                    return Ok(Owner::take(req, Value::bool(true)));
+                    return Ok(Owner::bool(true));
                 }
                 dir_stat(req)
             }
@@ -420,7 +420,7 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value
         .is_some_and(|a| a.virtual_dirs.contains(&held))
     {
         if kind.exists_check() {
-            return Ok(Owner::take(req, Value::bool(true)));
+            return Ok(Owner::bool(true));
         }
         dir_stat(req)
     } else {
@@ -432,14 +432,14 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value
             );
             docref(req, Level::Warning, &text);
         }
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     if kind.exists_check() {
-        return Ok(Owner::take(req, Value::bool(true)));
+        return Ok(Owner::bool(true));
     }
     match stated {
         Some(sb) => fancy_stat(req, sb, kind),
-        None => Ok(Owner::take(req, Value::bool(false))),
+        None => Ok(Owner::bool(false)),
     }
 }
 
@@ -565,11 +565,11 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
         Fs::Lstat | Fs::Stat => {
             let mut out = PhpArray::new(req)?;
             for field in sb {
-                out.append(req, Owner::take(req, Value::int(field)))?;
+                out.append(req, Owner::int(field))?;
             }
             for (name, field) in NAMES.iter().zip(sb) {
                 let key = PhpString::new(req, name)?.into_key();
-                out.set(req, key, Owner::take(req, Value::int(field)))?;
+                out.set(req, key, Owner::int(field))?;
             }
             return Ok(out.into_value());
         }
@@ -614,7 +614,7 @@ fn is_entry(req: &mut Request, link: bool) -> Result<Owner<Value>, Thrown> {
         return passthrough(req, None);
     };
     let Ok(id) = archive::get_archive(req, &arch, None) else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     let entry = fixed(req, &filename);
     let held = entry.strip_prefix(b"/").unwrap_or(&entry);
@@ -622,7 +622,7 @@ fn is_entry(req: &mut Request, link: bool) -> Result<Owner<Value>, Thrown> {
         .get(id)
         .and_then(|a| a.manifest.get(held))
         .is_some_and(|e| if link { e.link.is_some() } else { !e.is_dir });
-    Ok(Owner::take(req, Value::bool(answer)))
+    Ok(Owner::bool(answer))
 }
 
 fn is_file(req: &mut Request) -> Result<Owner<Value>, Thrown> {

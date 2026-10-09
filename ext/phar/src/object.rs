@@ -874,7 +874,7 @@ impl Phar {
     ) -> Result<Owner<Value>, Thrown> {
         let id = held(req, this.object())?;
         let Some(a) = archives(req).get_mut(id) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let mut meta = std::mem::take(&mut a.metadata);
         let value = metadata_value(req, &mut meta, unserializeOptions, "Phar::getMetadata");
@@ -1753,7 +1753,7 @@ pub(crate) fn metadata_value(
     function: &str,
 ) -> Result<Owner<Value>, Thrown> {
     if !meta.has_data() {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let options = match options {
         Passed::Given(options) if !options.is_empty() => Some(options),

@@ -352,33 +352,23 @@ fn rendered(req: &mut Request) -> Result<Owner<Value>, Thrown> {
         .as_mut()
         .and_then(|progress| progress.data.take());
     let Some(data) = taken else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let mut array = PhpArray::new(req)?;
-    set(
-        req,
-        &mut array,
-        b"start_time",
-        Owner::take(req, Value::int(data.start_time)),
-    )?;
+    set(req, &mut array, b"start_time", Owner::int(data.start_time))?;
     set(
         req,
         &mut array,
         b"content_length",
-        Owner::take(req, Value::int(data.content_length)),
+        Owner::int(data.content_length),
     )?;
     set(
         req,
         &mut array,
         b"bytes_processed",
-        Owner::take(req, Value::int(data.bytes_processed)),
+        Owner::int(data.bytes_processed),
     )?;
-    set(
-        req,
-        &mut array,
-        b"done",
-        Owner::take(req, Value::bool(data.done)),
-    )?;
+    set(req, &mut array, b"done", Owner::bool(data.done))?;
     let mut files = PhpArray::new(req)?;
     for file in &data.files {
         let mut entry = PhpArray::new(req)?;
@@ -388,32 +378,17 @@ fn rendered(req: &mut Request) -> Result<Owner<Value>, Thrown> {
         set(req, &mut entry, b"name", name)?;
         let tmp_name = match &file.tmp_name {
             Some(tmp) => string_value(req, tmp)?,
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         };
         set(req, &mut entry, b"tmp_name", tmp_name)?;
-        set(
-            req,
-            &mut entry,
-            b"error",
-            Owner::take(req, Value::int(file.error)),
-        )?;
-        set(
-            req,
-            &mut entry,
-            b"done",
-            Owner::take(req, Value::bool(file.done)),
-        )?;
-        set(
-            req,
-            &mut entry,
-            b"start_time",
-            Owner::take(req, Value::int(file.start_time)),
-        )?;
+        set(req, &mut entry, b"error", Owner::int(file.error))?;
+        set(req, &mut entry, b"done", Owner::bool(file.done))?;
+        set(req, &mut entry, b"start_time", Owner::int(file.start_time))?;
         set(
             req,
             &mut entry,
             b"bytes_processed",
-            Owner::take(req, Value::int(file.bytes_processed)),
+            Owner::int(file.bytes_processed),
         )?;
         files.append(req, entry.into_value())?;
     }

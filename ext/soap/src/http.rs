@@ -816,13 +816,12 @@ fn fault(req: &mut Request, this: PhpObject, text: &[u8]) -> R<()> {
 /// (`convert_to_null(Z_CLIENT_HTTPURL_P(this_ptr))`).
 fn drop_connection(req: &mut Request, this: PhpObject, stream: Stream, forget_url: bool) -> R<()> {
     stream.close(req);
-    let value = Owner::take(req, Value::null());
+    let value = Owner::null();
     set_client_slot(req, this, ClientSlot::HttpSocket, value)?;
     if forget_url {
-        let value = Owner::take(req, Value::null());
-        set_client_slot(req, this, ClientSlot::HttpUrl, value)?;
+        set_client_slot(req, this, ClientSlot::HttpUrl, Owner::null())?;
     }
-    let value = Owner::take(req, Value::null());
+    let value = Owner::null();
     set_client_slot(req, this, ClientSlot::UseProxy, value)
 }
 
@@ -1094,8 +1093,12 @@ fn send(req: &mut Request, this: PhpObject, call: &Call<'_>) -> Res<Sent> {
             // The client's slot keeps the connection.
             let kept = s.into_resource().into_value();
             set_client_slot(req, this, ClientSlot::HttpSocket, kept)?;
-            let use_proxy = Owner::take(req, Value::int(i64::from(use_proxy)));
-            set_client_slot(req, this, ClientSlot::UseProxy, use_proxy)?;
+            set_client_slot(
+                req,
+                this,
+                ClientSlot::UseProxy,
+                Owner::int(i64::from(use_proxy)),
+            )?;
             stream = Some(view);
         }
         let client_trace = matches!(
@@ -1255,8 +1258,7 @@ fn request_headers(
     let context = head.context;
     let set_url = client_slot(this, ClientSlot::HttpUrl);
     if set_url.as_object().is_some() {
-        let value = Owner::take(req, Value::null());
-        set_client_slot(req, this, ClientSlot::HttpUrl, value)?;
+        set_client_slot(req, this, ClientSlot::HttpUrl, Owner::null())?;
     }
     let class = class_id(req, "Soap\\Url")?;
     let url = new_object(req, class)?;
@@ -1430,7 +1432,7 @@ fn digest_authorization(
         .and_then(|v| v.as_int())
         .map_or(1, |n| n.wrapping_add(1));
     let key = PhpString::new(req, b"nc")?.into_key();
-    digest.set(req, key, Owner::take(req, Value::int(count)))?;
+    digest.set(req, key, Owner::int(count))?;
     // `snprintf(nc, sizeof(nc), "%08" ZEND_LONG_FMT_SPEC, ...)`, or
     // `"00000001"` for a count it adds.
     let mut nc = format!("{count:08}").into_bytes();
@@ -1624,11 +1626,7 @@ fn store_cookie(
                 let value = string(req, &domain[..end - 7])?;
                 zcookie.set(req, Owner::take(req, Key::Int(2)), value)?;
             } else if rest.starts_with(b"secure") {
-                zcookie.set(
-                    req,
-                    Owner::take(req, Key::Int(3)),
-                    Owner::take(req, Value::bool(true)),
-                )?;
+                zcookie.set(req, Owner::take(req, Key::Int(3)), Owner::bool(true))?;
             }
             match next {
                 Some(next) => options += next + 1,

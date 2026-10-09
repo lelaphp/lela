@@ -7,7 +7,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString};
 
 /// A string key of the request's.
 fn key(req: &mut Request, name: &[u8]) -> Result<Owner<Key>, Thrown> {
@@ -71,10 +71,10 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
     for entry in found {
         let mut unicast_entry = PhpArray::new(req)?;
         let k = key(req, b"flags")?;
-        unicast_entry.set(req, k, Owner::take(req, Value::int(i64::from(entry.flags))))?;
+        unicast_entry.set(req, k, Owner::int(i64::from(entry.flags)))?;
         if let Some(family) = entry.family {
             let k = key(req, b"family")?;
-            unicast_entry.set(req, k, Owner::take(req, Value::int(family)))?;
+            unicast_entry.set(req, k, Owner::int(family))?;
         }
         let texts: [(&[u8], Option<Vec<u8>>); 4] = [
             (b"address", entry.address),
@@ -104,7 +104,7 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
         let k = key(req, b"unicast")?;
         iface.set(req, k, unicast.into_value())?;
         let k = key(req, b"up")?;
-        iface.set(req, k, Owner::take(req, Value::bool(up)))?;
+        iface.set(req, k, Owner::bool(up))?;
         let k = key(req, &name)?;
         array.set(req, k, iface.into_value())?;
     }

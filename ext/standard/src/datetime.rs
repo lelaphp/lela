@@ -7,7 +7,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Zone};
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `strptime(string $timestamp, string $format): array|false`,
 /// `PHP_FUNCTION(strptime)` (`Z/ext/standard/datetime.c:34`): the
@@ -105,7 +105,7 @@ fn strptime(
     ];
     for (name, value) in names.iter().zip(fields) {
         let key = PhpString::new(req, name.as_bytes())?.into_key();
-        array.set(req, key, Owner::take(req, Value::int(i64::from(value))))?;
+        array.set(req, key, Owner::int(i64::from(value)))?;
     }
     let key = PhpString::new(req, b"unparsed")?.into_key();
     let unparsed = PhpString::new(req, &unparsed)?.into_value();

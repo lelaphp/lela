@@ -299,12 +299,7 @@ fn date_sun_info(
     let mut array = PhpArray::new(req)?;
     let (rs, _, _, rise, set, transit) = first;
     add_pair(req, &mut array, rs, (b"sunrise", b"sunset"), (rise, set))?;
-    set_str(
-        req,
-        &mut array,
-        b"transit",
-        Owner::take(req, Value::int(transit)),
-    )?;
+    set_str(req, &mut array, b"transit", Owner::int(transit))?;
     for ((rs, _, _, rise, set, _), begin, end) in [
         (
             civil,
