@@ -22,7 +22,7 @@
     clippy::unimplemented
 )]
 
-use std::ffi::{c_char, c_double, c_float, c_int, c_uint};
+use std::ffi::{c_char, c_double, c_float, c_int, c_uint, c_void};
 
 /// `timelib_rel_time`: a relative time, the body of a `DateInterval`.
 #[repr(C)]
@@ -303,6 +303,13 @@ unsafe extern "C" {
 
     pub fn timelib_update_ts(time: *mut TimeFields, tzi: *mut TzInfo);
     pub fn timelib_unixtime2gmt(tm: *mut TimeFields, ts: i64);
+    pub fn timelib_unixtime2date(ts: i64, y: *mut i64, m: *mut i64, d: *mut i64);
+
+    /// `timelib_free`, which `include/timelib_config.h` points at
+    /// `efree`, as php's does: what php's code calls on a string timelib
+    /// copied, `timelib_free(dummy_t.tz_abbr)`.
+    #[link_name = "efree"]
+    pub fn timelib_free(ptr: *mut c_void);
     pub fn timelib_unixtime2local(tm: *mut TimeFields, ts: i64);
     pub fn timelib_update_from_sse(tm: *mut TimeFields);
     pub fn timelib_set_timezone_from_offset(t: *mut TimeFields, utc_offset: i64);

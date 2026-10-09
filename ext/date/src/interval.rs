@@ -11,33 +11,43 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::datetime::restore_properties;
-use crate::ffi::{self, RelTime, Time, UNSET, Zones};
+use crate::ffi::{self, ErrorContainer, Parsed, RelTime, Time, UNSET};
+use crate::lent::{Lent, lent};
 use crate::obj::{
     CIVIL, INTERVAL, IntervalObj, WALL, class_id, hold_diff, interval_fields, interval_of,
     new_interval, rows_array, std_rows,
 };
-use crate::zone::zones;
 
 /// `date_interval_initialize(&rt, format, len)`: the period of an ISO
 /// 8601 duration, or the difference of its two dates, or php's
 /// `DateMalformedIntervalStringException`.
 fn initialize(req: &mut Request, text: &[u8]) -> Result<RelTime, Thrown> {
-    let parsed = ffi::strtointerval(text);
+    let read = lent(req, |l| {
+        let parsed = ffi::strtointerval(l, text);
+        if !parsed.errors.errors.is_empty() {
+            return Err(true);
+        }
+        if let Some(period) = parsed.period {
+            return Ok(period);
+        }
+        if let (Some(mut b), Some(mut e)) = (parsed.begin, parsed.end) {
+            b.update_ts(l, None);
+            e.update_ts(l, None);
+            return Ok(b.diff(l, &e));
+        }
+        Err(false)
+    })?;
     let shown = String::from_utf8_lossy(text);
-    if !parsed.errors.errors.is_empty() {
+    let unknown = match read {
+        Ok(period) => return Ok(period),
+        Err(unknown) => unknown,
+    };
+    if unknown {
         return Err(throw(
             req,
             "DateMalformedIntervalStringException",
             &format!("Unknown or bad format ({shown})"),
         ));
-    }
-    if let Some(period) = parsed.period {
-        return Ok(period);
-    }
-    if let (Some(mut b), Some(mut e)) = (parsed.begin, parsed.end) {
-        b.update_ts(None);
-        e.update_ts(None);
-        return Ok(b.diff(&e));
     }
     Err(throw(
         req,
@@ -48,10 +58,14 @@ fn initialize(req: &mut Request, text: &[u8]) -> Result<RelTime, Thrown> {
 
 /// The relative part of a parse of `text`, or its first error.
 fn from_date_string(
-    zones: &mut Zones,
+    lent: &mut Lent<'_>,
     text: &[u8],
 ) -> Result<(RelTime, bool), (i32, char, String)> {
-    let (t, errors) = Time::strtotime(zones, text);
+    let Parsed { time: t, errors } = Time::strtotime(lent, text);
+    let errors = errors
+        .as_ref()
+        .map(ErrorContainer::messages)
+        .unwrap_or_default();
     if let Some(e) = errors.errors.first() {
         let c = if e.character == 0 {
             ' '
@@ -99,7 +113,7 @@ fn date_interval_create_from_date_string(
 ) -> Result<OrFalse<Owner<Instance<DateInterval>>>, Thrown> {
     let text = datetime.as_bytes();
     let shown = String::from_utf8_lossy(text).into_owned();
-    match from_date_string(zones(req), text) {
+    match lent(req, |l| from_date_string(l, text))? {
         Err((at, c, message)) => {
             docref(
                 req,
@@ -267,26 +281,21 @@ fn from_hash(req: &mut Request, object: PhpObject, hash: PhpArray) -> Result<(),
     if let Some(text) =
         find(hash, b"date_string").and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     {
-        let (t, errors) = Time::strtotime(zones(req), &text);
-        if let Some(e) = errors.errors.first() {
-            let c = if e.character == 0 {
-                ' '
-            } else {
-                char::from(e.character)
-            };
-            return Err(throw_error(
-                req,
-                "Error",
-                &format!(
-                    "Unknown or bad format ({}) at position {} ({c}) while unserializing: {}",
-                    String::from_utf8_lossy(&text),
-                    e.position,
-                    String::from_utf8_lossy(&e.text)
-                ),
-            ));
-        }
+        let relative = match lent(req, |l| from_date_string(l, &text))? {
+            Ok((relative, _)) => relative,
+            Err((position, c, message)) => {
+                return Err(throw_error(
+                    req,
+                    "Error",
+                    &format!(
+                        "Unknown or bad format ({}) at position {position} ({c}) while unserializing: {message}",
+                        String::from_utf8_lossy(&text),
+                    ),
+                ));
+            }
+        };
         if let Some(payload) = object.native_mut::<IntervalObj>(req) {
-            payload.diff = Some(t.relative);
+            payload.diff = Some(relative);
             payload.civil_or_wall = CIVIL;
             payload.from_string = true;
             payload.date_string = Some(text);
@@ -433,6 +442,17 @@ impl DateInterval {
     /// 176
     /// -880
     /// ```
+    ///
+    /// What `timelib_strtointerval` allocates while it scans is the
+    /// request's, as php's build has it (ADR-0014), so the peak is php's:
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+    /// pk(fn () => new DateInterval('P1D'));
+    /// ```
+    /// ```expect
+    /// 768 208
+    /// ```
     fn __construct(req: &mut Request, this: This<Self>, duration: PhpString) -> Result<(), Thrown> {
         let diff = initialize(req, duration.as_bytes())?;
         if let Some(payload) = this.object().native_mut::<IntervalObj>(req) {
@@ -465,7 +485,7 @@ impl DateInterval {
     ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
         let text = datetime.as_bytes();
         let shown = String::from_utf8_lossy(text).into_owned();
-        match from_date_string(zones(req), text) {
+        match lent(req, |l| from_date_string(l, text))? {
             Err((at, c, message)) => Err(throw_error(
                 req,
                 "DateMalformedIntervalStringException",

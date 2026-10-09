@@ -8,6 +8,7 @@
 //! the clone.
 
 use std::ops::ControlFlow;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use php_ext::abi::{Class, ClassRef, Instance, OrFalse, Path, Static, This, Union};
@@ -23,19 +24,20 @@ use php_ext::values::{
 use crate::State;
 use crate::classes::DateTimeInterface;
 use crate::ffi::{
-    self, NO_CLONE, OVERRIDE_TIME, RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID,
-    ZONETYPE_OFFSET,
+    self, ErrorContainer, NO_CLONE, OVERRIDE_TIME, Parsed, RelTime, Time, UNSET, ZONETYPE_ABBR,
+    ZONETYPE_ID, ZONETYPE_OFFSET, Zone,
 };
 use crate::format::date_format as format_time;
 use crate::interval::DateInterval;
+use crate::lent::{Lent, lent, release};
 use crate::obj::{
-    CIVIL, DATE, DateObj, TzKind, WALL, again, class_id, clone_date, date_fields, interval_of,
-    new_date, new_interval, new_timezone, rows_array, set_time, std_rows, time_of, tz_from_time,
-    tz_of,
+    CIVIL, DATE, DateObj, TzKind, WALL, again, check_time, class_id, clone_date, date_fields,
+    interval_of, lent_time, new_interval, new_timezone, rows_array, set_time, std_rows, time_of,
+    tz_from_time, tz_of, uninitialized, with_time,
 };
 use crate::parse::keep_errors;
 use crate::timezone::DateTimeZone;
-use crate::zone::{default_zone, parse_tzfile, zones};
+use crate::zone::{corrupt, guess_timezone, parse_tzfile};
 
 /// `php_date_get_current_time_with_fraction`: `gettimeofday`.
 fn now_with_fraction() -> (i64, i64) {
@@ -90,92 +92,130 @@ pub(super) fn initialize(
     } else {
         text
     };
-    let (mut parsed, errors) = match format {
-        Some(format) => Time::parse_from_format(zones(req), format, text),
-        None => Time::strtotime(zones(req), text),
-    };
-    keep_errors(req, &errors);
-    if !errors.errors.is_empty() {
-        if how.ctor {
-            let (at, c, message) = first_error(&errors);
-            return Err(throw(
-                req,
-                "DateMalformedStringException",
-                &format!(
-                    "Failed to parse time string ({}) at position {at} ({c}): {message}",
-                    String::from_utf8_lossy(text)
-                ),
-            ));
-        }
-        return Ok(false);
-    }
-    let mut now = Time::new();
-    let zone = match timezone {
-        Some(tz) => {
-            let Some(kind) = tz
-                .native::<crate::obj::TzObj>(req)
-                .and_then(|t| t.tz.clone())
-            else {
+    let given = match timezone {
+        Some(tz) => match tz
+            .native::<crate::obj::TzObj>(req)
+            .and_then(|t| t.tz.clone())
+        {
+            Some(kind) => Some(kind),
+            None => {
                 return Err(throw_error(
                     req,
                     "Error",
                     "The DateTimeZone object has not been correctly initialized by its constructor",
                 ));
-            };
-            match kind {
-                TzKind::Id(zone) => Some(zone),
-                TzKind::Offset(offset) => {
-                    now.zone_type = ZONETYPE_OFFSET;
-                    #[allow(clippy::cast_possible_truncation)]
-                    let z = offset as i32;
-                    now.z = z;
-                    None
-                }
-                TzKind::Abbr {
-                    utc_offset,
-                    abbr,
-                    dst,
-                } => {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let z = utc_offset as i32;
-                    now.z = z;
-                    now.dst = dst;
-                    now.zone_type = ZONETYPE_ABBR;
-                    now.set_abbr(&abbr);
-                    None
-                }
             }
+        },
+        None => None,
+    };
+    let default = guess_timezone(req);
+    let (sec, usec) = now_with_fraction();
+    let made = lent(req, |l| {
+        let parsed = match format {
+            Some(format) => Time::parse_from_format(l, format, text),
+            None => Time::strtotime(l, text),
+        };
+        let errors = keep_errors(l, parsed.errors);
+        if !errors.errors.is_empty() {
+            return Made::Refused(errors);
+        }
+        let mut parsed = parsed.time;
+        let Some((mut now, zone)) = now_in(l, given, &parsed, &default) else {
+            return Made::Corrupt;
+        };
+        now.unixtime2local(l, sec);
+        now.us = usec;
+        if format.is_none() && text == b"now" {
+            return Made::Time(now);
+        }
+        let options = NO_CLONE | if how.format { OVERRIDE_TIME } else { 0 };
+        parsed.fill_holes(l, &mut now, options);
+        parsed.update_ts(l, zone.as_ref());
+        parsed.update_from_sse(l);
+        parsed.have_relative = 0;
+        Made::Time(parsed)
+    })?;
+    match made {
+        Made::Time(time) => {
+            set_time(req, object, Some(time))?;
+            Ok(true)
+        }
+        Made::Refused(errors) => {
+            if how.ctor {
+                let (at, c, message) = first_error(&errors);
+                return Err(throw(
+                    req,
+                    "DateMalformedStringException",
+                    &format!(
+                        "Failed to parse time string ({}) at position {at} ({c}): {message}",
+                        String::from_utf8_lossy(text)
+                    ),
+                ));
+            }
+            Ok(false)
+        }
+        Made::Corrupt => Err(corrupt(req)),
+    }
+}
+
+/// `php_date_initialize`'s `now`, made in the zone the object given
+/// names, the one the parse named, or the default, and that zone where
+/// it is one of the database's; none where the default is not in the
+/// database.
+fn now_in(
+    l: &mut Lent<'_>,
+    given: Option<TzKind>,
+    parsed: &Time,
+    default: &[u8],
+) -> Option<(Time, Option<Arc<Zone>>)> {
+    let mut now = Time::new(l);
+    let zone = match given {
+        Some(TzKind::Id(zone)) => Some(zone),
+        Some(TzKind::Offset(offset)) => {
+            now.zone_type = ZONETYPE_OFFSET;
+            #[allow(clippy::cast_possible_truncation)]
+            let z = offset as i32;
+            now.z = z;
+            None
+        }
+        Some(TzKind::Abbr {
+            utc_offset,
+            abbr,
+            dst,
+        }) => {
+            #[allow(clippy::cast_possible_truncation)]
+            let z = utc_offset as i32;
+            now.z = z;
+            now.dst = dst;
+            now.zone_type = ZONETYPE_ABBR;
+            now.set_abbr(l, &abbr);
+            None
         }
         None => match parsed.zone() {
             Some(zone) => Some(zone.clone()),
-            None => Some(default_zone(req)?),
+            None => Some(l.zone(default)?),
         },
     };
     if let Some(zone) = &zone {
         now.set_zone_id(zone.clone());
     }
-    let (sec, usec) = now_with_fraction();
-    now.unixtime2local(sec);
-    now.us = usec;
-    if format.is_none() && text == b"now" {
-        set_time(req, object, Some(now))?;
-        return Ok(true);
-    }
-    let options = NO_CLONE | if how.format { OVERRIDE_TIME } else { 0 };
-    parsed.fill_holes(&mut now, options);
-    parsed.update_ts(zone.as_ref());
-    parsed.update_from_sse();
-    parsed.have_relative = 0;
-    set_time(req, object, Some(parsed))?;
-    Ok(true)
+    Some((now, zone))
+}
+
+/// What `php_date_initialize`'s timelib work came to: the time to set,
+/// the parse's messages where it failed, or no default zone.
+enum Made {
+    Time(Time),
+    Refused(ffi::Errors),
+    Corrupt,
 }
 
 /// `php_date_initialize_from_ts_long(dateobj, sec, usec)`.
-fn from_timestamp(sec: i64, usec: i64) -> Time {
-    let mut t = Time::new();
+fn from_timestamp(lent: &Lent<'_>, sec: i64, usec: i64) -> Time {
+    let mut t = Time::new(lent);
     t.zone_type = ZONETYPE_OFFSET;
-    t.unixtime2gmt(sec);
-    t.update_ts(None);
+    t.unixtime2gmt(lent, sec);
+    t.update_ts(lent, None);
     t.us = usec;
     t
 }
@@ -183,7 +223,7 @@ fn from_timestamp(sec: i64, usec: i64) -> Time {
 /// `php_date_initialize_from_ts_double`: the seconds and the rounded
 /// microseconds, or the `DateRangeError` for a number no timestamp is.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn from_float(req: &mut Request, ts: f64) -> Result<Time, Thrown> {
+fn from_float(req: &mut Request, ts: f64) -> Result<(i64, i64), Thrown> {
     let range = |req: &mut Request| {
         argument_error(
             req,
@@ -216,7 +256,7 @@ fn from_float(req: &mut Request, ts: f64) -> Result<Time, Thrown> {
         sec -= 1;
         usec += 1_000_000;
     }
-    Ok(from_timestamp(sec, usec))
+    Ok((sec, usec))
 }
 
 /// `%g` of a double, what `zend_argument_error`'s messages print.
@@ -325,9 +365,16 @@ fn create_from(
     from: PhpObject,
     fallback: &str,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let time = time_of(req, from)?;
+    check_time(req, from)?;
     let class = called_or(req, fallback)?;
-    new_date(req, class, time)
+    // `php_date_instantiate`, then `timelib_time_clone(old_obj->time)`.
+    let object = new_object(req, class)?;
+    let copied = time_of(req, from).and_then(|time| set_time(req, *object, Some(time)));
+    if let Err(thrown) = copied {
+        object.give_up(req);
+        return Err(thrown);
+    }
+    Ok(object)
 }
 
 /// `createFromTimestamp(int|float $timestamp): static` of either class.
@@ -341,23 +388,28 @@ fn create_from_timestamp(
     // `DateRangeError`, and `zval_ptr_dtor` after it.
     let class = called_or(req, fallback)?;
     let object = new_object(req, class)?;
-    let time = match timestamp {
-        Union::A(n) => from_timestamp(n, 0),
-        Union::B(f) => match from_float(req, f) {
-            Ok(time) => time,
-            Err(thrown) => {
-                object.give_up(req);
-                return Err(thrown);
-            }
-        },
+    let parts = match timestamp {
+        Union::A(n) => Ok((n, 0)),
+        Union::B(f) => from_float(req, f),
     };
-    set_time(req, *object, Some(time))?;
+    let set = parts
+        .and_then(|(sec, usec)| lent(req, |l| from_timestamp(l, sec, usec)))
+        .and_then(|time| set_time(req, *object, Some(time)));
+    if let Err(thrown) = set {
+        object.give_up(req);
+        return Err(thrown);
+    }
     Ok(object.into_static())
 }
 
 /// `date_get_last_errors` and `getLastErrors` of both classes.
 fn last_errors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    let Some(errors) = req.state::<State>().last_errors.clone() else {
+    let Some(errors) = req
+        .state::<State>()
+        .last_errors
+        .as_ref()
+        .map(ErrorContainer::messages)
+    else {
         return Ok(OrFalse::False);
     };
     crate::parse::errors_value(req, &errors).map(OrFalse::Value)
@@ -366,10 +418,10 @@ fn last_errors(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
 /// `php_format_date_obj`: the object's time formatted, none where no
 /// constructor set it.
 pub(crate) fn format_obj(req: &mut Request, format: &[u8], object: PhpObject) -> Option<Vec<u8>> {
-    let t = object
-        .native::<DateObj>(req)
-        .and_then(|d| d.time.as_ref())?;
-    Some(format_time(format, t, t.is_localtime != 0))
+    with_time(req, object, |req, t| {
+        lent(req, |l| format_time(l, format, t, t.is_localtime != 0))
+    })?
+    .ok()
 }
 
 /// `date_format` and `format` of both classes.
@@ -395,25 +447,38 @@ fn modify(
     text: &[u8],
     method: Option<&str>,
 ) -> Result<bool, Thrown> {
-    let mut time = time_of(req, object)?;
-    let (tmp, errors) = Time::strtotime(zones(req), text);
-    keep_errors(req, &errors);
-    if !errors.errors.is_empty() {
-        let (at, c, message) = first_error(&errors);
-        let message = format!(
-            "Failed to parse time string ({}) at position {at} ({c}): {message}",
-            String::from_utf8_lossy(text)
-        );
-        if let Some(name) = method {
-            return Err(throw(
-                req,
-                "DateMalformedStringException",
-                &format!("{name}(): {message}"),
-            ));
+    let errors = lent_time(req, object, |l, time| {
+        let Parsed { time: tmp, errors } = Time::strtotime(l, text);
+        let errors = keep_errors(l, errors);
+        if !errors.errors.is_empty() {
+            return Err(errors);
         }
-        docref(req, Level::Warning, &message);
-        return Ok(false);
+        modify_fields(l, time, tmp);
+        Ok(())
+    })?;
+    let Err(errors) = errors else {
+        return Ok(true);
+    };
+    let (at, c, message) = first_error(&errors);
+    let message = format!(
+        "Failed to parse time string ({}) at position {at} ({c}): {message}",
+        String::from_utf8_lossy(text)
+    );
+    if let Some(name) = method {
+        return Err(throw(
+            req,
+            "DateMalformedStringException",
+            &format!("{name}(): {message}"),
+        ));
     }
+    docref(req, Level::Warning, &message);
+    Ok(false)
+}
+
+/// What `php_date_modify` writes over the time from the parse `tmp`:
+/// its relative part, each field it set, UTC for a `@<ts>`, and the
+/// time brought up to date with the relative part applied.
+fn modify_fields(l: &Lent<'_>, time: &mut Time, tmp: Time) {
     time.relative = tmp.relative;
     time.have_relative = tmp.have_relative;
     time.sse_uptodate = 0;
@@ -451,28 +516,28 @@ fn modify(
         && tmp.z == 0
         && tmp.dst == 0
     {
-        time.set_timezone_from_offset(0);
+        time.set_timezone_from_offset(l, 0);
     }
-    time.update_ts(None);
-    time.update_from_sse();
+    drop(tmp);
+    time.update_ts(l, None);
+    time.update_from_sse(l);
     time.have_relative = 0;
     time.relative = RelTime::default();
-    set_time(req, object, Some(time))?;
-    Ok(true)
 }
 
 /// `php_date_add`: `timelib_add_wall` for an interval a constructor
 /// made, `timelib_add` for a computed one.
 fn add(req: &mut Request, object: PhpObject, interval: PhpObject) -> Result<(), Thrown> {
-    let time = time_of(req, object)?;
+    check_time(req, object)?;
     let (diff, civil) = interval_of(req, interval)?;
-    let new = if civil == WALL {
-        time.add_wall(&diff)
-    } else {
-        time.add(&diff)
-    };
-    set_time(req, object, Some(new))?;
-    Ok(())
+    let new = lent_time(req, object, |l, time| {
+        if civil == WALL {
+            time.add_wall(l, &diff)
+        } else {
+            time.add(l, &diff)
+        }
+    })?;
+    set_time(req, object, Some(new))
 }
 
 /// `php_date_sub`: as `add`, but a weekday or special relative part is
@@ -483,7 +548,7 @@ fn sub(
     interval: PhpObject,
     method: Option<&str>,
 ) -> Result<(), Thrown> {
-    let time = time_of(req, object)?;
+    check_time(req, object)?;
     let (diff, civil) = interval_of(req, interval)?;
     if diff.have_weekday_relative != 0 || diff.have_special_relative != 0 {
         let message = "Only non-special relative time specifications are supported for subtraction";
@@ -497,13 +562,14 @@ fn sub(
         docref(req, Level::Warning, message);
         return Ok(());
     }
-    let new = if civil == WALL {
-        time.sub_wall(&diff)
-    } else {
-        time.sub(&diff)
-    };
-    set_time(req, object, Some(new))?;
-    Ok(())
+    let new = lent_time(req, object, |l, time| {
+        if civil == WALL {
+            time.sub_wall(l, &diff)
+        } else {
+            time.sub(l, &diff)
+        }
+    })?;
+    set_time(req, object, Some(new))
 }
 
 /// `date_timezone_get` and `getTimezone` of both classes: `false` for a
@@ -512,11 +578,12 @@ fn timezone_of(
     req: &mut Request,
     object: PhpObject,
 ) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
-    let time = time_of(req, object)?;
-    if time.is_localtime == 0 {
-        return Ok(OrFalse::False);
-    }
-    match tz_from_time(&time) {
+    let kind = lent_time(req, object, |_, time| {
+        (time.is_localtime != 0)
+            .then(|| tz_from_time(time))
+            .flatten()
+    })?;
+    match kind {
         Some(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
         None => Ok(OrFalse::False),
     }
@@ -524,36 +591,38 @@ fn timezone_of(
 
 /// `php_date_timezone_set`: the zone set and the local time recomputed.
 fn timezone_set(req: &mut Request, object: PhpObject, timezone: PhpObject) -> Result<(), Thrown> {
-    let mut time = time_of(req, object)?;
+    check_time(req, object)?;
     let kind = tz_of(req, timezone)?;
-    match &kind {
-        TzKind::Offset(offset) => time.set_timezone_from_offset(*offset),
-        TzKind::Abbr {
-            utc_offset,
-            abbr,
-            dst,
-        } => time.set_timezone_from_abbr(*utc_offset, abbr, *dst),
-        TzKind::Id(zone) => time.set_timezone(zone),
-    }
-    let sse = time.sse;
-    time.unixtime2local(sse);
-    set_time(req, object, Some(time))?;
-    Ok(())
+    lent_time(req, object, |l, time| {
+        match &kind {
+            TzKind::Offset(offset) => time.set_timezone_from_offset(l, *offset),
+            TzKind::Abbr {
+                utc_offset,
+                abbr,
+                dst,
+            } => time.set_timezone_from_abbr(l, *utc_offset, abbr, *dst),
+            TzKind::Id(zone) => time.set_timezone(l, zone),
+        }
+        let sse = time.sse;
+        time.unixtime2local(l, sse);
+    })?;
+    release(req, kind)
 }
 
 /// `date_offset_get` and `getOffset` of both classes.
 fn offset_of(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
-    let time = time_of(req, object)?;
-    if time.is_localtime == 0 {
-        return Ok(0);
-    }
-    Ok(match time.zone_type {
-        ZONETYPE_ID => time
-            .zone()
-            .map_or(0, |zone| i64::from(zone.offset_at(time.sse).offset)),
-        ZONETYPE_OFFSET => i64::from(time.z),
-        ZONETYPE_ABBR => i64::from(time.z + 3600 * time.dst),
-        _ => 0,
+    lent_time(req, object, |l, time| {
+        if time.is_localtime == 0 {
+            return 0;
+        }
+        match time.zone_type {
+            ZONETYPE_ID => time
+                .zone()
+                .map_or(0, |zone| i64::from(zone.offset_in(l, time.sse).offset)),
+            ZONETYPE_OFFSET => i64::from(time.z),
+            ZONETYPE_ABBR => i64::from(time.z + 3600 * time.dst),
+            _ => 0,
+        }
     })
 }
 
@@ -566,15 +635,14 @@ fn time_set(
     second: i64,
     microsecond: i64,
 ) -> Result<(), Thrown> {
-    let mut time = time_of(req, object)?;
-    time.h = hour;
-    time.i = minute;
-    time.s = second;
-    time.us = microsecond;
-    time.update_ts(None);
-    time.update_from_sse();
-    set_time(req, object, Some(time))?;
-    Ok(())
+    lent_time(req, object, |l, time| {
+        time.h = hour;
+        time.i = minute;
+        time.s = second;
+        time.us = microsecond;
+        time.update_ts(l, None);
+        time.update_from_sse(l);
+    })
 }
 
 /// `php_date_date_set`.
@@ -585,13 +653,12 @@ fn date_set(
     month: i64,
     day: i64,
 ) -> Result<(), Thrown> {
-    let mut time = time_of(req, object)?;
-    time.y = year;
-    time.m = month;
-    time.d = day;
-    time.update_ts(None);
-    set_time(req, object, Some(time))?;
-    Ok(())
+    lent_time(req, object, |l, time| {
+        time.y = year;
+        time.m = month;
+        time.d = day;
+        time.update_ts(l, None);
+    })
 }
 
 /// `php_date_isodate_set`.
@@ -602,26 +669,24 @@ fn isodate_set(
     week: i64,
     day_of_week: i64,
 ) -> Result<(), Thrown> {
-    let mut time = time_of(req, object)?;
-    time.y = year;
-    time.m = 1;
-    time.d = 1;
-    time.relative = RelTime::default();
-    time.relative.d = ffi::daynr_from_weeknr(year, week, day_of_week);
-    time.have_relative = 1;
-    time.update_ts(None);
-    set_time(req, object, Some(time))?;
-    Ok(())
+    lent_time(req, object, |l, time| {
+        time.y = year;
+        time.m = 1;
+        time.d = 1;
+        time.relative = RelTime::default();
+        time.relative.d = ffi::daynr_from_weeknr(year, week, day_of_week);
+        time.have_relative = 1;
+        time.update_ts(l, None);
+    })
 }
 
 /// `php_date_timestamp_set`.
 fn timestamp_set(req: &mut Request, object: PhpObject, timestamp: i64) -> Result<(), Thrown> {
-    let mut time = time_of(req, object)?;
-    time.unixtime2local(timestamp);
-    time.update_ts(None);
-    time.us = 0;
-    set_time(req, object, Some(time))?;
-    Ok(())
+    lent_time(req, object, |l, time| {
+        time.unixtime2local(l, timestamp);
+        time.update_ts(l, None);
+        time.us = 0;
+    })
 }
 
 /// `setMicrosecond`'s range, php's `DateRangeError` outside it.
@@ -657,11 +722,13 @@ fn changed_copy(
 /// `date_timestamp_get` and `getTimestamp` of both classes: the
 /// `DateRangeError` where the epoch does not fit.
 fn timestamp_of(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
-    let mut time = time_of(req, object)?;
-    if time.sse_uptodate == 0 {
-        time.update_ts(None);
-    }
-    match time.date_to_int() {
+    let ts = lent_time(req, object, |l, time| {
+        if time.sse_uptodate == 0 {
+            time.update_ts(l, None);
+        }
+        time.date_to_int()
+    })?;
+    match ts {
         Some(ts) => Ok(ts),
         None => Err(throw_error(
             req,
@@ -678,9 +745,21 @@ fn diff_of(
     two: PhpObject,
     absolute: bool,
 ) -> Result<Owner<Instance<DateInterval>>, Thrown> {
-    let a = time_of(req, one)?;
-    let b = time_of(req, two)?;
-    let mut diff = a.diff(&b);
+    check_time(req, one)?;
+    check_time(req, two)?;
+    // `timelib_diff(dateobj1->time, dateobj2->time)`, both where they
+    // stand, the one time twice for a date diffed with itself.
+    let diff = with_time(req, one, |req, a| {
+        if one == two {
+            return lent(req, |l| a.diff(l, a));
+        }
+        with_time(req, two, |req, b| lent(req, |l| a.diff(l, b)))
+            .unwrap_or_else(|| Ok(RelTime::default()))
+    });
+    let Some(diff) = diff else {
+        return Err(uninitialized(req, one.class()));
+    };
+    let mut diff = diff?;
     if absolute {
         diff.invert = 0;
     }
@@ -714,7 +793,7 @@ pub(super) fn initialize_from_hash(
             initialize(req, object, &text, None, None, init)
         }
         ZONETYPE_ID => {
-            let Some(tzi) = parse_tzfile(req, &zone) else {
+            let Some(tzi) = parse_tzfile(req, &zone)? else {
                 return Ok(false);
             };
             let tz = new_timezone(req, TzKind::Id(tzi))?;
@@ -1471,6 +1550,21 @@ impl DateTime {
     ///   - Tentative return [ DateTime ]
     /// }
     /// ```
+    ///
+    /// What timelib allocates while it parses and fills the holes from
+    /// the current time is the request's, as php's build has it
+    /// (ADR-0014), so a construction's peak is php's, beside what the
+    /// object keeps:
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+    /// pk(fn () => new DateTime);
+    /// pk(fn () => new DateTime('2020-01-01 10:00'));
+    /// ```
+    /// ```expect
+    /// 624 352
+    /// 640 320
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -1507,9 +1601,11 @@ impl DateTime {
     /// ```
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let object = this.object();
-        let time = time_of(req, object)?;
+        check_time(req, object)?;
         let own = std_rows(req, object)?;
-        let fields = date_fields(req, &time)?;
+        let fields = with_time(req, object, |req, t| date_fields(req, t))
+            .transpose()?
+            .unwrap_or_default();
         rows_array(req, &own, fields, true)
     }
 
@@ -1825,7 +1921,7 @@ impl DateTime {
     /// int(0)
     /// ```
     fn getMicrosecond(req: &mut Request, this: This<Self>) -> Result<i64, Thrown> {
-        Ok(time_of(req, this.object())?.us)
+        lent_time(req, this.object(), |_, t| t.us)
     }
 
     /// `DateTime::setTime(...)`, `date_time_set`'s body.
@@ -1914,9 +2010,7 @@ impl DateTime {
     ) -> Result<Static, Thrown> {
         microsecond_in_range(req, microsecond)?;
         let object = this.object();
-        let mut time = time_of(req, object)?;
-        time.us = microsecond;
-        set_time(req, object, Some(time))?;
+        lent_time(req, object, |_, t| t.us = microsecond)?;
         // `RETURN_OBJ_COPY`, answered as `static`, the engine's own owner.
         Ok(Static(object))
     }
@@ -2304,10 +2398,12 @@ impl DateTimeImmutable {
     ) -> Result<Owner<Static>, Thrown> {
         microsecond_in_range(req, microsecond)?;
         let object = this.object();
-        let mut time = time_of(req, object)?;
-        time.us = microsecond;
+        check_time(req, object)?;
         let copy = clone_date(req, object)?;
-        set_time(req, *copy, Some(time))?;
+        if let Err(thrown) = lent_time(req, *copy, |_, t| t.us = microsecond) {
+            copy.give_up(req);
+            return Err(thrown);
+        }
         Ok(copy.into_static())
     }
 

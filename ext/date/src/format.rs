@@ -13,6 +13,7 @@ use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::ffi::{self, Offset, Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
+use crate::lent::{Lent, kept, lent};
 use crate::obj::{set_str, set_string};
 use crate::zone::default_zone;
 
@@ -106,7 +107,7 @@ pub(super) fn c_int(n: i64) -> i64 {
 
 /// The offset `date_format` reads for a local time: the abbreviation's,
 /// the fixed offset's under `GMT±hhmm`, or the zone's at the time.
-fn local_offset(t: &Time) -> Offset {
+fn local_offset(lent: &Lent<'_>, t: &Time) -> Offset {
     match t.zone_type {
         ZONETYPE_ABBR => Offset {
             offset: t.z + t.dst * 3600,
@@ -128,7 +129,7 @@ fn local_offset(t: &Time) -> Offset {
             }
         }
         ZONETYPE_ID => match t.zone() {
-            Some(zone) => zone.offset_at(t.sse),
+            Some(zone) => zone.offset_in(lent, t.sse),
             None => blank_offset(),
         },
         _ => blank_offset(),
@@ -146,12 +147,12 @@ fn blank_offset() -> Offset {
 /// `date_format(format, len, t, localtime)`: the format read byte by
 /// byte, each letter replaced by what `php_date.c` prints for it.
 #[allow(clippy::too_many_lines)]
-pub(super) fn date_format(format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
+pub(super) fn date_format(lent: &Lent<'_>, format: &[u8], t: &Time, localtime: bool) -> Vec<u8> {
     let mut out = Vec::new();
     if format.is_empty() {
         return out;
     }
-    let offset = localtime.then(|| local_offset(t));
+    let offset = localtime.then(|| local_offset(lent, t));
     let off = offset.as_ref().map_or(0, |o| o.offset);
     let sign = if localtime && off < 0 { '-' } else { '+' };
     let oh = (off / 3600).abs();
@@ -322,15 +323,22 @@ pub(super) fn format_timestamp(
     ts: i64,
     localtime: bool,
 ) -> Result<Vec<u8>, Thrown> {
-    let mut t = Time::new();
-    if localtime {
-        let zone = default_zone(req)?;
-        t.set_zone_id(zone);
-        t.unixtime2local(ts);
+    let zone = if localtime {
+        Some(default_zone(req)?)
     } else {
-        t.unixtime2gmt(ts);
-    }
-    Ok(date_format(format, &t, localtime))
+        None
+    };
+    lent(req, |l| {
+        let mut t = Time::new(l);
+        match zone {
+            Some(zone) => {
+                t.set_zone_id(zone);
+                t.unixtime2local(l, ts);
+            }
+            None => t.unixtime2gmt(l, ts),
+        }
+        date_format(l, format, &t, localtime)
+    })
 }
 
 /// `php_date(INTERNAL_FUNCTION_PARAM_PASSTHRU, localtime)`.
@@ -400,13 +408,20 @@ fn gmdate(
 /// `php_idate(format, ts, localtime)`: one field of the local time as a
 /// C `int`, `-1` for a letter it has no field for.
 fn php_idate(req: &mut Request, format: u8, ts: i64) -> Result<i64, Thrown> {
-    let mut t = Time::new();
     let zone = default_zone(req)?;
-    t.set_zone_id(zone);
-    t.unixtime2local(ts);
-    let offset = local_offset(&t);
+    lent(req, |l| {
+        let mut t = Time::new(l);
+        t.set_zone_id(zone);
+        t.unixtime2local(l, ts);
+        idate_field(l, format, &t)
+    })
+}
+
+/// The field `php_idate` reads off the local time for `format`.
+fn idate_field(lent: &Lent<'_>, format: u8, t: &Time) -> i64 {
+    let offset = local_offset(lent, t);
     let (week, iso_year) = ffi::isoweek_from_date(t.y, t.m, t.d);
-    Ok(match format {
+    match format {
         b'd' | b'j' => c_int(t.d),
         b'N' => c_int(ffi::iso_day_of_week(t.y, t.m, t.d)),
         b'w' => c_int(ffi::day_of_week(t.y, t.m, t.d)),
@@ -427,7 +442,7 @@ fn php_idate(req: &mut Request, format: u8, ts: i64) -> Result<i64, Thrown> {
         b'Z' => i64::from(offset.offset),
         b'U' => c_int(t.sse),
         _ => -1,
-    })
+    }
 }
 
 /// `idate(string $format, ?int $timestamp = null): int|false`: one
@@ -482,16 +497,31 @@ fn php_mktime(
     fields: [Option<i64>; 5],
     gmt: bool,
 ) -> Result<OrFalse<i64>, Thrown> {
-    let mut now_t = Time::new();
-    let zone = if gmt {
-        now_t.unixtime2gmt(now());
-        None
-    } else {
-        let zone = default_zone(req)?;
-        now_t.set_zone_id(zone.clone());
-        now_t.unixtime2local(now());
-        Some(zone)
+    let zone = if gmt { None } else { Some(default_zone(req)?) };
+    let ts = lent(req, |l| mktime_of(l, zone.as_ref(), hour, fields))?;
+    let Some(ts) = ts else {
+        docref(req, Level::Warning, "Epoch doesn't fit in a PHP integer");
+        return Ok(OrFalse::False);
     };
+    Ok(OrFalse::Value(ts))
+}
+
+/// `php_mktime`'s time: now, in `zone` or in UTC, with each given field
+/// written over it, and its epoch where it fits.
+fn mktime_of(
+    lent: &Lent<'_>,
+    zone: Option<&std::sync::Arc<ffi::Zone>>,
+    hour: i64,
+    fields: [Option<i64>; 5],
+) -> Option<i64> {
+    let mut now_t = Time::new(lent);
+    match zone {
+        None => now_t.unixtime2gmt(lent, now()),
+        Some(zone) => {
+            now_t.set_zone_id(zone.clone());
+            now_t.unixtime2local(lent, now());
+        }
+    }
     now_t.h = hour;
     let [min, sec, mon, day, year] = fields;
     if let Some(v) = min {
@@ -514,12 +544,8 @@ fn php_mktime(
         }
         now_t.y = y;
     }
-    now_t.update_ts(zone.as_ref());
-    let Some(ts) = now_t.date_to_int() else {
-        docref(req, Level::Warning, "Epoch doesn't fit in a PHP integer");
-        return Ok(OrFalse::False);
-    };
-    Ok(OrFalse::Value(ts))
+    now_t.update_ts(lent, zone);
+    now_t.date_to_int()
 }
 
 /// `mktime(int $hour, ?int $minute = null, ?int $second = null, ?int
@@ -616,10 +642,12 @@ fn time() -> i64 {
 /// `getdate` read.
 fn local_time(req: &mut Request, ts: i64) -> Result<Time, Thrown> {
     let zone = default_zone(req)?;
-    let mut t = Time::new();
-    t.set_zone_id(zone);
-    t.unixtime2local(ts);
-    Ok(t)
+    lent(req, |l| {
+        let mut t = Time::new(l);
+        t.set_zone_id(zone);
+        t.unixtime2local(l, ts);
+        t
+    })
 }
 
 /// `localtime(?int $timestamp = null, bool $associative = false):
@@ -663,6 +691,15 @@ fn localtime(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let ts = timestamp.unwrap_or_else(now);
     let t = local_time(req, ts)?;
+    kept(req, t, |req, t| localtime_rows(req, t, associative))
+}
+
+/// The rows of `localtime()` over the local time `t`.
+fn localtime_rows(
+    req: &mut Request,
+    t: &Time,
+    associative: bool,
+) -> Result<Owner<PhpArray>, Thrown> {
     let rows: [(&[u8], i64); 9] = [
         (b"tm_sec", t.s),
         (b"tm_min", t.i),
@@ -714,6 +751,11 @@ fn getdate(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let ts = timestamp.unwrap_or_else(now);
     let t = local_time(req, ts)?;
+    kept(req, t, |req, t| getdate_rows(req, t, ts))
+}
+
+/// The rows of `getdate()` over the local time `t` of `ts`.
+fn getdate_rows(req: &mut Request, t: &Time, ts: i64) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     let rows: [(&[u8], i64); 8] = [
         (b"seconds", t.s),
@@ -759,20 +801,35 @@ fn php_strftime(
         return Ok(OrFalse::False);
     }
     let ts = timestamp.unwrap_or_else(now);
-    let mut t = Time::new();
-    let offset = if gmt {
-        t.unixtime2gmt(ts);
-        Offset {
-            offset: 0,
-            is_dst: false,
-            abbr: b"GMT".to_vec(),
-        }
-    } else {
-        let zone = default_zone(req)?;
-        t.set_zone_id(zone.clone());
-        t.unixtime2local(ts);
-        zone.offset_at(ts)
-    };
+    let zone = if gmt { None } else { Some(default_zone(req)?) };
+    let text = lent(req, |l| {
+        let mut t = Time::new(l);
+        let offset = match zone {
+            None => {
+                t.unixtime2gmt(l, ts);
+                Offset {
+                    offset: 0,
+                    is_dst: false,
+                    abbr: b"GMT".to_vec(),
+                }
+            }
+            Some(zone) => {
+                t.set_zone_id(zone.clone());
+                t.unixtime2local(l, ts);
+                zone.offset_in(l, ts)
+            }
+        };
+        strftime_of(format, &t, &offset)
+    })?;
+    match text {
+        Some(text) => PhpString::new(req, &text).map(OrFalse::Value),
+        None => Ok(OrFalse::False),
+    }
+}
+
+/// `strftime(3)` over the `struct tm` `php_strftime` fills from `t` and
+/// its offset.
+fn strftime_of(format: &[u8], t: &Time, offset: &Offset) -> Option<Vec<u8>> {
     let tm = ffi::BrokenDown {
         sec: t.s,
         min: t.i,
@@ -786,10 +843,7 @@ fn php_strftime(
         gmtoff: i64::from(offset.offset),
         zone: &offset.abbr,
     };
-    match ffi::strftime(format, &tm) {
-        Some(text) => PhpString::new(req, &text).map(OrFalse::Value),
-        None => Ok(OrFalse::False),
-    }
+    ffi::strftime(format, &tm)
 }
 
 /// `strftime(string $format, ?int $timestamp = null): string|false`,
