@@ -353,8 +353,8 @@ api = "values::PhpObject::props"
 mahout = "mahout_value::ArrayIter::value"
 sites = 4
 crates = 2
-status = "same"
-api = "values::ArrayIter::value"
+status = "gone"
+rule = "a table's rows are read by walk::rows or a callback walk (#2121)"
 
 [[item]]
 mahout = "mahout_value::PhpObject::with_native_mut"
@@ -381,8 +381,8 @@ api = "values::Value::refcount"
 mahout = "mahout_value::ArrayIter::advance"
 sites = 2
 crates = 1
-status = "same"
-api = "values::ArrayIter::advance"
+status = "gone"
+rule = "a table's rows are read by walk::rows or a callback walk (#2121)"
 
 [[item]]
 mahout = "mahout_value::Value::as_raw"
@@ -528,8 +528,8 @@ rule = "foreach-iterator slots are php_heap's"
 mahout = "mahout_value::ArrayIter::key"
 sites = 1
 crates = 1
-status = "same"
-api = "values::ArrayIter::key"
+status = "gone"
+rule = "a table's rows are read by walk::rows or a callback walk (#2121)"
 
 [[item]]
 mahout = "mahout_value::PhpObject::native_dump_entries"
