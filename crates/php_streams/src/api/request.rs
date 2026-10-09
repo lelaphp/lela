@@ -27,7 +27,7 @@ pub use scanner_file::ScannerFile;
 
 use crate::state::Layer;
 use crate::streams::StreamLayer;
-use crate::streams::filters::FilterChain;
+use crate::streams::filters::FilterLayer;
 use crate::streams::sockets::Transports;
 use crate::wrapper::PlainFiles;
 pub use crate::zend::STREAM_HOOKS;
@@ -991,17 +991,24 @@ pub struct Opening {
     pub will_cast: bool,
     pub disable_open_basedir: bool,
     pub only_get_headers: bool,
+    /// `STREAM_OPEN_FOR_ZEND_STREAM`: the open an `include` makes for the
+    /// engine's scanner, whose caller holds the `*opened_path` the opener
+    /// sets. An opener that hands its `Opening` on to an open of its own,
+    /// as `php://filter` opens its resource, hands on that `*opened_path`
+    /// with it, as php's openers pass theirs: the name the inner open
+    /// sets is the opener's own.
+    pub for_zend_stream: bool,
 }
 
-/// A wrapper whose kinds the engine keeps, which the extension that
-/// registers it in php, `standard`, registers here by name at its place
-/// in `PHP_MINIT(basic)`'s order (`Z/ext/standard/basic_functions.c:341`),
-/// so `url_stream_wrappers_hash` has one order for the engine's wrappers
-/// and every extension's.
+/// A wrapper whose kinds the layer keeps, as php's `main/streams/`
+/// does, which the extension that registers it in php, `standard`,
+/// registers here by name at its place in `PHP_MINIT(basic)`'s order
+/// (`Z/ext/standard/basic_functions.c:341`), so `url_stream_wrappers_hash`
+/// has one order for the layer's wrappers and every extension's.
+/// `php://` is `standard`'s own, a [`StreamWrapper`] as php keeps it in
+/// `ext/standard/php_fopen_wrapper.c`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineWrapper {
-    /// `php://`, `php_stream_php_wrapper`.
-    Php,
     /// `file://`, `php_plain_files_wrapper`.
     Plain,
     /// `data:`, `php_stream_rfc2397_wrapper`.
@@ -1050,6 +1057,14 @@ pub enum FilterStatus {
     ErrFatal,
     FeedMe,
     PassOn,
+}
+
+/// Which of a stream's two filter chains, `stream->readfilters` or
+/// `stream->writefilters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterChain {
+    Read,
+    Write,
 }
 
 /// `PSFS_FLAG_NORMAL`, `PSFS_FLAG_FLUSH_INC` and `PSFS_FLAG_FLUSH_CLOSE`:
@@ -1222,6 +1237,45 @@ pub trait Streams {
     /// owner, the caller's, at position zero with nothing read.
     fn new_stream(&mut self, ops: Box<dyn StreamOps>, mode: &[u8])
     -> Result<Owner<Stream>, Thrown>;
+
+    /// `php_stream_memory_create(php_stream_mode_from_str(mode))`: an
+    /// empty memory stream, read only unless `mode` has a `w` or a `+`,
+    /// and appending where it has an `a`.
+    fn memory_stream(&mut self, mode: &[u8]) -> Result<Owner<Stream>, Thrown>;
+
+    /// `php_stream_temp_create(php_stream_mode_from_str(mode),
+    /// max_memory)`: a memory stream that spills to a temporary file past
+    /// `max_memory` bytes, `PHP_STREAM_MAX_MEM` where none is named.
+    fn temp_stream(
+        &mut self,
+        mode: &[u8],
+        max_memory: Option<usize>,
+    ) -> Result<Owner<Stream>, Thrown>;
+
+    /// `php://input`, `php_stream_input_ops` over the request's body: read
+    /// only, seekable, labelled `Input`.
+    fn input_stream(&mut self) -> Result<Owner<Stream>, Thrown>;
+
+    /// One of the host's standard streams as `php://stdin`,
+    /// `php://stdout` and `php://stderr` open it: nothing once a program
+    /// closed the constant over it, a copy of the host's fd where it
+    /// handed one to be read or the constants stand over the process's
+    /// own, and otherwise the host's body and sink, which do not seek.
+    /// A copy that fails is logged as a wrapper's opener logs it
+    /// ([`Request::wrapper_log_error`]), so this is an opener's to ask.
+    fn standard_stream(
+        &mut self,
+        standard: Standard,
+        mode: &[u8],
+    ) -> Result<Option<Owner<Stream>>, Thrown>;
+
+    /// `dup(fd)` and `php_stream_fopen_from_fd` over the copy, what
+    /// `php://fd/N` opens: `fd` below `getdtablesize()`, the host's own
+    /// for 0, 1 and 2 where it handed them, a socket as a socket and
+    /// anything else as a plain file. The refusals, an `fd` out of range
+    /// and a `dup` that fails, are php's messages logged as a wrapper's
+    /// opener logs them, so this is an opener's to ask.
+    fn fd_stream(&mut self, fd: i64, mode: &[u8]) -> Result<Option<Owner<Stream>>, Thrown>;
 
     /// `opendir()`, `php_stream_opendir` under `REPORT_ERRORS`: the
     /// directory as a stream of the `stream` type, through the plain
@@ -1405,13 +1459,13 @@ pub trait Streams {
     /// table every request starts with; `false` when the scheme is taken.
     fn register_wrapper(&mut self, wrapper: StreamWrapper) -> bool;
 
-    /// `php_register_url_stream_wrapper` of a wrapper the engine keeps,
-    /// under the scheme php registers it by, `php`, `file` or `data`: its
-    /// row moved to the end of the table, where
-    /// [`Request::register_wrapper`] puts one. The engine's table has the
-    /// three from the start, so a bundle without the extension that
-    /// registers them still opens `php://stdin`; the registration is what
-    /// gives each its place among the extensions' wrappers.
+    /// `php_register_url_stream_wrapper` of a wrapper the layer keeps,
+    /// under the scheme php registers it by, `file` or `data`: its row
+    /// moved to the end of the table, where [`Request::register_wrapper`]
+    /// puts one. The layer's table has the two from the start, so a
+    /// bundle without the extension that registers them still opens a
+    /// plain file; the registration is what gives each its place among
+    /// the extensions' wrappers.
     /// A wrapper restored goes back at the end, after one a program
     /// registered meanwhile, as php's `stream_wrapper_restore` deletes
     /// and adds it.
@@ -1629,6 +1683,34 @@ impl Streams for Request {
         self.stream_alloc(crate::streams::of_extension(ops, mode))
     }
 
+    fn memory_stream(&mut self, mode: &[u8]) -> Result<Owner<Stream>, Thrown> {
+        crate::streams::open_memory(self, mode)
+    }
+
+    fn temp_stream(
+        &mut self,
+        mode: &[u8],
+        max_memory: Option<usize>,
+    ) -> Result<Owner<Stream>, Thrown> {
+        crate::streams::open_temp(self, mode, max_memory)
+    }
+
+    fn input_stream(&mut self) -> Result<Owner<Stream>, Thrown> {
+        crate::streams::open_input(self)
+    }
+
+    fn standard_stream(
+        &mut self,
+        standard: Standard,
+        mode: &[u8],
+    ) -> Result<Option<Owner<Stream>>, Thrown> {
+        crate::streams::open_standard(self, standard, mode)
+    }
+
+    fn fd_stream(&mut self, fd: i64, mode: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
+        crate::streams::open_fd(self, fd, mode)
+    }
+
     fn open_dir(&mut self, path: &[u8]) -> Result<Option<Owner<Stream>>, Thrown> {
         self.open_dir_wrapper(path)
     }
@@ -1764,7 +1846,7 @@ impl Streams for Request {
     }
 
     fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown> {
-        FilterChain::remove_filter(self, res)
+        FilterLayer::remove_filter(self, res)
     }
 
     fn transports(&self) -> Vec<&'static str> {

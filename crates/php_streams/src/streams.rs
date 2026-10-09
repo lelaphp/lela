@@ -2365,9 +2365,6 @@ pub(crate) fn freed_on_throw<T>(
 /// `php_plain_files_wrapper.wops->label`.
 const PLAIN_FILES: &str = "plainfile";
 
-/// `php_stream_php_wrapper.wops->label`.
-const PHP_WRAPPER: &str = "PHP";
-
 /// `php_stdio_stream_data` under `php_stream_stdio_ops`
 /// (`Z/main/streams/plain_wrapper.c:135`): the file, `None` once closed;
 /// whether it seeks; `temp_name`, the path of a temporary file to unlink
@@ -3031,39 +3028,6 @@ pub(crate) fn standard_handles(
     ))
 }
 
-/// `php_stream_output_ops` (`Z/ext/standard/php_fopen_wrapper.c:52`),
-/// `php://output`: a write is `PHPWRITE`, through the `php_output` layer, a
-/// read is eof and `-1`, and there is no seek.
-struct Output;
-
-impl Ops for Output {
-    fn label(&self) -> &'static str {
-        "Output"
-    }
-
-    fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        req.write(buf);
-        Some(buf.len())
-    }
-
-    fn read(&mut self, _req: &mut Request, _buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        *eof = true;
-        None
-    }
-
-    fn close(&mut self, _req: &mut Request) -> i32 {
-        0
-    }
-}
-
-/// What one wrapper's opener answered: the stream, or the message
-/// `php_stream_display_wrapper_errors` prints after `Failed to open
-/// stream: `, which is what the wrapper logged
-/// (`php_stream_wrapper_log_error`), `strerror(errno)` for the plain
-/// files wrapper, and `operation failed` for any other that logged
-/// nothing.
-type Opened = Result<Owner<Stream>, String>;
-
 /// `php_stream_open_wrapper_ex`'s `options`, the bits of it this engine
 /// reads.
 #[derive(Debug, Clone, Copy, Default)]
@@ -3134,271 +3098,101 @@ impl OpenOptions {
             | (self.only_get_headers as i64) << 9
             | (self.for_zend_stream as i64) << 16
     }
+
+    /// The [`Opening`](crate::api::request::Opening) an extension
+    /// wrapper's opener is handed: these options, `REPORT_ERRORS`
+    /// cleared, with `USE_PATH` as the open left it.
+    const fn opening(self, use_path: bool) -> crate::api::request::Opening {
+        crate::api::request::Opening {
+            use_path,
+            warn: false,
+            for_include: self.for_include,
+            must_seek: self.must_seek,
+            will_cast: self.will_cast,
+            disable_open_basedir: self.disable_open_basedir,
+            only_get_headers: self.only_get_headers,
+            for_zend_stream: self.for_zend_stream,
+        }
+    }
 }
 
-/// `php_stream_url_wrap_php` (`Z/ext/standard/php_fopen_wrapper.c:176`):
-/// the path after `php://`, case-insensitively, as `temp`, with
-/// `/maxmemory:N` after it, `memory`, `output`, `input`, `stdin`,
-/// `stdout`, `stderr`, `fd/N` or `filter/...`; anything else is php's
-/// `Invalid php:// URL specified` and nothing opened. `input`, `stdin`
-/// and `fd/` are refused an include under `allow_url_include=0`.
-#[allow(clippy::too_many_lines)] // php's one `php_stream_url_wrap_php`, kept as one
-fn php_open(
+impl From<crate::api::request::Opening> for OpenOptions {
+    /// The options an extension opens with, `REPORT_ERRORS` as `warn`
+    /// says; `STREAM_USE_URL` is never an extension's.
+    fn from(opening: crate::api::request::Opening) -> OpenOptions {
+        OpenOptions {
+            use_path: opening.use_path,
+            use_url: false,
+            report: opening.warn,
+            for_include: opening.for_include,
+            must_seek: opening.must_seek,
+            will_cast: opening.will_cast,
+            disable_open_basedir: opening.disable_open_basedir,
+            only_get_headers: opening.only_get_headers,
+            for_zend_stream: opening.for_zend_stream,
+        }
+    }
+}
+
+/// [`Streams::standard_stream`](crate::api::request::Streams::standard_stream):
+/// the host's standard stream as `php://stdin`, `php://stdout` and
+/// `php://stderr` open it (`Z/ext/standard/php_fopen_wrapper.c:238-290`).
+/// Nothing once a program closed the constant over it; under a host
+/// that handed its fd 0, `php://stdin` over a copy of it
+/// ([`standard_open`]); `php://stdout` and `php://stderr` over copies of
+/// the process's fds once the constants stand under php's CLI; and
+/// otherwise the host's sink and body, [`HostFd`], which does not seek
+/// (a pipe or a terminal under the CLI, which `detect_is_seekable` says
+/// does not seek).
+pub(crate) fn open_standard(
     req: &mut Request,
-    path: &[u8],
+    standard: Standard,
     mode: &[u8],
-    options: OpenOptions,
-) -> Result<Opened, Thrown> {
-    let path = if path.len() >= 6 && path[..6].eq_ignore_ascii_case(b"php://") {
-        &path[6..]
-    } else {
-        path
-    };
-    let lower = path.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix(b"temp") {
-        let mut smax = PHP_STREAM_MAX_MEM;
-        if let Some(digits) = rest.strip_prefix(b"/maxmemory:") {
-            let max_memory = strtol(digits);
-            if max_memory < 0 {
-                return Err(crate::api::raising::arg_value_error(
-                    req,
-                    2,
-                    "be greater than or equal to 0",
-                ));
-            }
-            smax = usize::try_from(max_memory).unwrap_or(usize::MAX);
-        }
-        return Ok(Ok(temp(req, TempMode::of(mode), smax)?));
+) -> Result<Option<Owner<Stream>>, Thrown> {
+    if req.standard_closed(standard) {
+        return Ok(None);
     }
-    if lower.starts_with(b"filter/") {
-        return filter_open(req, &path[6..], mode, options);
+    let copied = match standard {
+        Standard::Stdin => req.host_fd(Standard::Stdin).is_some(),
+        Standard::Stdout | Standard::Stderr => req.copies_standard(),
+    };
+    if copied {
+        return standard_open(req, standard, mode);
     }
-    let for_include_refused = |req: &mut Request| {
-        let refused = options.for_include
-            && !req
-                .ini_get(b"allow_url_include")
-                .is_none_or(Request::ini_parse_bool);
-        if refused && options.report {
-            let text = format!(
-                "{}(): URL file-access is disabled in the server configuration",
-                req.active_function_name()
-            );
-            warning(req, &text);
-        }
-        refused
+    let kind = match standard {
+        Standard::Stdin => HostFd::Stdin(Memory {
+            data: MemBytes::Host(Vec::new()),
+            fpos: 0,
+            mode: TempMode::ReadOnly,
+            label: "STDIO",
+            own: None,
+        }),
+        Standard::Stdout => HostFd::Stdout(host_label(req, Standard::Stdout)),
+        Standard::Stderr => HostFd::Stderr(host_label(req, Standard::Stderr)),
     };
-    let stream = match lower.as_slice() {
-        b"memory" => memory(TempMode::of(mode)),
-        b"output" => PhpStream::new(Box::new(Output), b"wb"),
-        // `php_stream_input_ops` seeks the body it reads
-        // (`php_stream_input_seek`).
-        b"input" => {
-            if for_include_refused(req) {
-                return Ok(Err(String::from("operation failed")));
-            }
-            PhpStream::new(
-                Box::new(Memory {
-                    data: MemBytes::Host(req.input_bytes()),
-                    fpos: 0,
-                    mode: TempMode::ReadOnly,
-                    label: "Input",
-                    own: None,
-                }),
-                b"rb",
-            )
-        }
-        // Each a pipe or a terminal under the CLI, which
-        // `detect_is_seekable` says does not seek.
-        b"stdin" if for_include_refused(req) => return Ok(Err(String::from("operation failed"))),
-        b"stdin" | b"stdout" | b"stderr" if req.standard_closed(standard_of(&lower)) => {
-            return Ok(Err(String::from("operation failed")));
-        }
-        b"stdin" if req.host_fd(Standard::Stdin).is_some() => {
-            return standard_open(req, Standard::Stdin, mode);
-        }
-        b"stdout" | b"stderr" if req.copies_standard() => {
-            return standard_open(req, standard_of(&lower), mode);
-        }
-        b"stdin" | b"stdout" | b"stderr" => {
-            let kind = match lower.as_slice() {
-                b"stdin" => HostFd::Stdin(Memory {
-                    data: MemBytes::Host(Vec::new()),
-                    fpos: 0,
-                    mode: TempMode::ReadOnly,
-                    label: "STDIO",
-                    own: None,
-                }),
-                b"stdout" => HostFd::Stdout(host_label(req, Standard::Stdout)),
-                _ => HostFd::Stderr(host_label(req, Standard::Stderr)),
-            };
-            let mut stream = PhpStream::new(Box::new(kind), mode);
-            stream.flags.no_seek = true;
-            stream.position = -1;
-            stream
-        }
-        _ if lower.starts_with(b"fd/") => {
-            if req.sapi_name() != "cli" {
-                if options.report {
-                    let text = format!(
-                        "{}(): Direct access to file descriptors is only available from command-line PHP",
-                        req.active_function_name()
-                    );
-                    warning(req, &text);
-                }
-                return Ok(Err(String::from("operation failed")));
-            }
-            if for_include_refused(req) {
-                return Ok(Err(String::from("operation failed")));
-            }
-            return fd_open(req, &path[3..], mode);
-        }
-        _ => {
-            let text = format!(
-                "{}(): Invalid php:// URL specified",
-                req.active_function_name()
-            );
-            warning(req, &text);
-            return Ok(Err(String::from("operation failed")));
-        }
-    };
-    Ok(Ok(req.stream_alloc(stream)?))
+    let mut stream = PhpStream::new(Box::new(kind), mode);
+    stream.flags.no_seek = true;
+    stream.position = -1;
+    Ok(Some(req.stream_alloc(stream)?))
 }
 
-/// `php://filter/` (`Z/ext/standard/php_fopen_wrapper.c:339`): the
-/// resource after the first `/resource=` opened as its own wrapper opens
-/// it, reporting nothing of its own, then each `/`-separated part before
-/// it applied to it: `read=` a `|`-separated list for the read chain,
-/// `write=` one for the write chain, and a bare list for the chains
-/// `fopen`'s `$mode` reads and writes, each name URL-decoded, and php's `Unable to
-/// create filter (%s)` after the filter layer's own warning for one
-/// that cannot be made. A path with no `/resource=` is php's `Error`.
-///
-/// ```php
-/// var_dump(file_get_contents('php://filter/read=string.toupper|string.rot13/resource=data:,abc'));
-/// var_dump(file_get_contents('php://filter/string.toupper/nope%2Ex/resource=data:,abc'));
-/// $f = fopen('php://filter/read=string.rot13/resource=data:,abc', 'r');
-/// echo json_encode(array_slice(stream_get_meta_data($f), 1, 2)), ' ', stream_get_meta_data($f)['uri'], "\n";
-/// var_dump(@file_get_contents('php://filter/read=string.rot13/resource=nofile'), error_get_last()['message']);
-/// $w = fopen('php://filter/write=string.toupper/resource=php://memory', 'w+');
-/// fwrite($w, "shout"); rewind($w); var_dump(fread($w, 10));
-/// try { fopen('php://filter/read=string.rot13', 'r'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// string(3) "NOP"
-///
-/// Warning: file_get_contents(): Unable to locate filter "nope.x" in %s on line 3
-///
-/// Warning: file_get_contents(): Unable to create filter (nope.x) in %s on line 3
-/// string(3) "ABC"
-/// {"wrapper_type":"PHP","stream_type":"RFC2397"} php://filter/read=string.rot13/resource=data:,abc
-/// bool(false)
-/// string(106) "file_get_contents(php://filter/read=string.rot13/resource=nofile): Failed to open stream: operation failed"
-/// string(5) "SHOUT"
-/// No URL resource specified
-/// ```
-///
-/// The resource's opened path is the filter's own, so a file included
-/// through the filter is named as the file it read, in `__FILE__` and in
-/// `get_included_files()`:
-///
-/// ```php
-/// $f = __DIR__ . '/filter-include-witness.php';
-/// file_put_contents($f, '<?php echo __FILE__ === realpath($GLOBALS["f"]) ? "real" : __FILE__, "\n";');
-/// include 'php://filter/read=string.rot13|string.rot13/resource=' . $f;
-/// var_dump(in_array(realpath($f), get_included_files(), true)); unlink($f);
-/// ```
-/// ```expect
-/// real
-/// bool(true)
-/// ```
-fn filter_open(
+/// [`Streams::fd_stream`](crate::api::request::Streams::fd_stream):
+/// `php://fd/N` past its form (`Z/ext/standard/php_fopen_wrapper.c:316-337`),
+/// `N` below `getdtablesize()` and `dup(2)` of it, the host's own fd for
+/// 0, 1 and 2 where it handed them; a socket opens as a socket, anything
+/// else as a plain file's kind over the copy. A refusal is logged as
+/// `php_stream_wrapper_log_error` logs it.
+pub(crate) fn open_fd(
     req: &mut Request,
-    path: &[u8],
+    fildes: i64,
     mode: &[u8],
-    options: OpenOptions,
-) -> Result<Opened, Thrown> {
-    let Some(at) = path.windows(10).position(|w| w == b"/resource=") else {
-        return Err(throw_error(req, "Error", "No URL resource specified"));
-    };
-    // `php_stream_open_wrapper_ex(p + 10, mode, options, opened_path,
-    // context)`: the resource's opened path is the filter's own, so an
-    // include through the filter is named as the file it read. The
-    // string the open made of it is given up here, and the name set as
-    // this opener's once the filters stand.
-    let Some((stream, named)) = req.open_wrapper_named(&path[at + 10..], mode, options)? else {
-        return Ok(Err(String::from("operation failed")));
-    };
-    let named = named.map(|name| {
-        let bytes = name.as_bytes().to_vec();
-        name.give_up(req);
-        bytes
-    });
-    let read = mode.contains(&b'r') || mode.contains(&b'+');
-    let write = mode.iter().any(|b| matches!(b, b'w' | b'+' | b'a'));
-    for part in path[..at].split(|b| *b == b'/').filter(|p| !p.is_empty()) {
-        let (list, chains) = if part.len() >= 5 && part[..5].eq_ignore_ascii_case(b"read=") {
-            (&part[5..], (true, false))
-        } else if part.len() >= 6 && part[..6].eq_ignore_ascii_case(b"write=") {
-            (&part[6..], (false, true))
-        } else {
-            (part, (read, write))
-        };
-        for name in list.split(|b| *b == b'|').filter(|n| !n.is_empty()) {
-            let name = rfc2397::url_decode(name);
-            // `if (EG(exception)) { php_stream_close(stream); return NULL; }`
-            if let Err(thrown) = stream.apply_filter(req, &name, chains) {
-                stream.free(req);
-                return Err(thrown);
-            }
-        }
-    }
-    if named.is_some() {
-        req.streams().opened_path = named;
-    }
-    Ok(Ok(stream))
-}
-
-/// `php://fd/N` (`Z/ext/standard/php_fopen_wrapper.c:292`): `N` all
-/// decimal digits, below `getdtablesize()`, and `dup(2)` of it, the
-/// host's own fd for 0, 1 and 2 where it handed them; a socket opens as
-/// a socket, anything else as a plain file's kind over the copy.
-///
-/// ```php
-/// foreach (['php://fd', 'php://fd/', 'php://fd/-2', 'php://fd/1/', 'php://fd/1023'] as $p) {
-///     var_dump(@fopen($p, 'w'));
-///     echo preg_replace('/smaller than \d+/', 'smaller than N', error_get_last()['message']), "\n";
-/// }
-/// var_dump(get_resource_type(fopen('php://fd/2', 'w')));
-/// ```
-/// ```expect
-/// bool(false)
-/// fopen(php://fd): Failed to open stream: operation failed
-/// bool(false)
-/// fopen(php://fd/): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>
-/// bool(false)
-/// fopen(php://fd/-2): Failed to open stream: The file descriptors must be non-negative numbers smaller than N
-/// bool(false)
-/// fopen(php://fd/1/): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>
-/// bool(false)
-/// fopen(php://fd/1023): Failed to open stream: Error duping file descriptor 1023; possibly it doesn't exist: [9]: Bad file descriptor
-/// string(6) "stream"
-/// ```
-fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thrown> {
-    let form = || String::from("php://fd/ stream must be specified in the form php://fd/<orig fd>");
-    let body = digits.trim_ascii_start();
-    let unsigned = body
-        .strip_prefix(b"-")
-        .or_else(|| body.strip_prefix(b"+"))
-        .unwrap_or(body);
-    if unsigned.is_empty() || !unsigned.iter().all(u8::is_ascii_digit) {
-        return Ok(Err(form()));
-    }
-    let fildes = strtol(digits);
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let dtablesize = crate::api::layer::fd_table_size();
     if fildes < 0 || fildes >= i64::from(dtablesize) {
-        return Ok(Err(format!(
+        req.streams().wrapper_errors.push(format!(
             "The file descriptors must be non-negative numbers smaller than {dtablesize}"
-        )));
+        ));
+        return Ok(None);
     }
     let standard = match fildes {
         0 => Some(Standard::Stdin),
@@ -3410,19 +3204,54 @@ fn fd_open(req: &mut Request, digits: &[u8], mode: &[u8]) -> Result<Opened, Thro
         Some(fd) => fd.try_clone_to_owned(),
         None => crate::api::layer::dup_fd(i32::try_from(fildes).unwrap_or(-1)),
     };
-    let fd = match duped {
-        Ok(fd) => fd,
+    match duped {
+        Ok(fd) => Ok(Some(fd_stream(req, fd, mode)?)),
         Err(error) => {
-            return Ok(Err(format!(
+            req.streams().wrapper_errors.push(format!(
                 "Error duping file descriptor {fildes}; possibly it doesn't exist: [{}]: {}",
                 error.raw_os_error().unwrap_or(0),
                 strerror(&error)
-            )));
+            ));
+            Ok(None)
         }
-    };
-    Ok(Ok(fd_stream(req, fd, mode)?))
+    }
 }
 
+/// [`Streams::input_stream`](crate::api::request::Streams::input_stream):
+/// `php://input`, `php_stream_input_ops` over the request's body
+/// (`Z/ext/standard/php_fopen_wrapper.c:58-146`), read whole, read only,
+/// and sought as `php_stream_input_seek` seeks it.
+pub(crate) fn open_input(req: &mut Request) -> Result<Owner<Stream>, Thrown> {
+    let kind = Memory {
+        data: MemBytes::Host(req.input_bytes()),
+        fpos: 0,
+        mode: TempMode::ReadOnly,
+        label: "Input",
+        own: None,
+    };
+    req.stream_alloc(PhpStream::new(Box::new(kind), b"rb"))
+}
+
+/// [`Streams::memory_stream`](crate::api::request::Streams::memory_stream):
+/// `php_stream_memory_create(php_stream_mode_from_str(mode))`.
+pub(crate) fn open_memory(req: &mut Request, mode: &[u8]) -> Result<Owner<Stream>, Thrown> {
+    req.stream_alloc(memory(TempMode::of(mode)))
+}
+
+/// [`Streams::temp_stream`](crate::api::request::Streams::temp_stream):
+/// `php_stream_temp_create(php_stream_mode_from_str(mode), max_memory)`,
+/// [`PHP_STREAM_MAX_MEM`] where no bound is named.
+pub(crate) fn open_temp(
+    req: &mut Request,
+    mode: &[u8],
+    max_memory: Option<usize>,
+) -> Result<Owner<Stream>, Thrown> {
+    temp(
+        req,
+        TempMode::of(mode),
+        max_memory.unwrap_or(PHP_STREAM_MAX_MEM),
+    )
+}
 /// The stream a `php://` fd opens as: over a socket, the `tcp_socket` kind
 /// php swaps its ops to ([`Request::php_socket_stream`]); over anything
 /// else, the plain file's kind.
@@ -3481,14 +3310,21 @@ fn fd_kind<'m>(fd: &OwnedFd, mode: &'m [u8]) -> FdStream<'m> {
 /// the host's sink as php's write past `php_output`, and read as the
 /// constants are, a pipe or a terminal that does not seek; a socket is
 /// the socket kind (`Z/ext/standard/php_fopen_wrapper.c:361`).
-fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<Opened, Thrown> {
+fn standard_open(
+    req: &mut Request,
+    standard: Standard,
+    mode: &[u8],
+) -> Result<Option<Owner<Stream>>, Thrown> {
     let duped = req.host_fd(standard).map_or_else(
         || Err(std::io::Error::from_raw_os_error(EBADF)),
         |fd| fd.try_clone_to_owned(),
     );
     let fd = match duped {
         Ok(fd) => fd,
-        Err(error) => return Ok(Err(strerror(&error))),
+        Err(error) => {
+            req.streams().wrapper_errors.push(strerror(&error));
+            return Ok(None);
+        }
     };
     let seeks = standard == Standard::Stdin || matches!(fd_kind(&fd, mode), FdStream::Socket);
     let stream = fd_stream(req, fd, mode)?;
@@ -3498,7 +3334,7 @@ fn standard_open(req: &mut Request, standard: Standard, mode: &[u8]) -> Result<O
             opened.position = -1;
         });
     }
-    Ok(Ok(stream))
+    Ok(Some(stream))
 }
 
 /// The label of php's kind over the host's fd `standard`: `tcp_socket`
@@ -3510,37 +3346,6 @@ fn host_label(req: &Request, standard: Standard) -> &'static str {
         .and_then(|fd| fd.try_clone_to_owned().ok())
         .is_some_and(|fd| matches!(fd_kind(&fd, b""), FdStream::Socket));
     if socket { "tcp_socket" } else { "STDIO" }
-}
-
-/// Which of the three a `php://` name is, `stdin` for any other.
-fn standard_of(lower: &[u8]) -> Standard {
-    match lower {
-        b"stdout" => Standard::Stdout,
-        b"stderr" => Standard::Stderr,
-        _ => Standard::Stdin,
-    }
-}
-
-/// `ZEND_STRTOL(path, NULL, 10)`: leading white space, a sign and the
-/// decimal digits after it, saturating where they overflow, and zero
-/// where there are none.
-fn strtol(bytes: &[u8]) -> i64 {
-    let bytes = bytes.trim_ascii_start();
-    let (negative, digits) = match bytes.first() {
-        Some(b'-') => (true, &bytes[1..]),
-        Some(b'+') => (false, &bytes[1..]),
-        _ => (false, bytes),
-    };
-    let mut value: i64 = 0;
-    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        let d = i64::from(digit - b'0');
-        value = if negative {
-            value.saturating_mul(10).saturating_sub(d)
-        } else {
-            value.saturating_mul(10).saturating_add(d)
-        };
-    }
-    value
 }
 
 /// `_php_stream_temp_create_ex` (`Z/main/streams/memory.c:519`): the
@@ -3586,13 +3391,13 @@ fn temp_stream(
 
 /// Which wrapper `php_stream_locate_url_wrapper`
 /// (`Z/main/streams/streams.c:2010`) found for a path: the plain files
-/// wrapper, the `php://` wrapper, the `data:` wrapper, one an extension
-/// registered (its place in [`Request::wrappers`]), one a program
-/// registered with `stream_wrapper_register`, or none.
+/// wrapper, the `data:` wrapper, one an extension registered (its place
+/// in [`Request::wrappers`]), `php://` among them since `standard`
+/// registers it, one a program registered with `stream_wrapper_register`,
+/// or none.
 #[derive(Clone)]
 pub(crate) enum Located {
     Plain,
-    Php,
     Data,
     Ext(usize),
     Space(userspace::UserWrapper),
@@ -3611,7 +3416,6 @@ impl Registered {
     /// The row of a wrapper the engine keeps, under php's scheme for it.
     pub(crate) fn engine(which: EngineWrapper) -> Registered {
         let (scheme, wrapper) = match which {
-            EngineWrapper::Php => (&b"php"[..], Located::Php),
             EngineWrapper::Plain => (&b"file"[..], Located::Plain),
             EngineWrapper::Data => (&b"data"[..], Located::Data),
         };
@@ -3633,7 +3437,7 @@ impl Located {
                 .streams_ref()
                 .and_then(|state| state.wrappers.get(*at))
                 .is_some_and(|w| w.is_url),
-            Located::Plain | Located::Php | Located::Nothing => false,
+            Located::Plain | Located::Nothing => false,
         }
     }
 }
@@ -3642,9 +3446,7 @@ impl Located {
 /// wrapper` compares them.
 fn same_wrapper(a: &Located, b: &Located) -> bool {
     match (a, b) {
-        (Located::Plain, Located::Plain)
-        | (Located::Php, Located::Php)
-        | (Located::Data, Located::Data) => true,
+        (Located::Plain, Located::Plain) | (Located::Data, Located::Data) => true,
         (Located::Ext(x), Located::Ext(y)) => x == y,
         _ => false,
     }
@@ -3947,22 +3749,25 @@ impl StreamLayer for Request {
         self.open_wrapper_ex(path, mode, options)
     }
 
-    /// `_php_stream_open_wrapper_ex` under an extension's [`Opening`].
+    /// `_php_stream_open_wrapper_ex` under an extension's [`Opening`],
+    /// with the `*opened_path` it was handed: under
+    /// `STREAM_OPEN_FOR_ZEND_STREAM` the name this open sets is the
+    /// calling opener's own, as php's openers hand theirs on.
     fn open_wrapper_with(
         &mut self,
         path: &[u8],
         mode: &[u8],
         opening: crate::api::request::Opening,
     ) -> Result<Option<Owner<Stream>>, Thrown> {
-        let options = OpenOptions {
-            use_path: opening.use_path,
-            report: opening.warn,
-            must_seek: opening.must_seek,
-            will_cast: opening.will_cast,
-            disable_open_basedir: opening.disable_open_basedir,
-            ..OpenOptions::REPORT
+        let Some((stream, named)) = self.open_wrapper_named(path, mode, opening.into())? else {
+            return Ok(None);
         };
-        self.open_wrapper_ex(path, mode, options)
+        if let Some(name) = named {
+            let bytes = name.as_bytes().to_vec();
+            name.give_up(self);
+            self.streams().opened_path = Some(bytes);
+        }
+        Ok(Some(stream))
     }
 
     /// `_php_stream_open_wrapper_ex` under `REPORT_ERRORS | STREAM_USE_URL
@@ -4064,7 +3869,6 @@ impl StreamLayer for Request {
     /// The wrapper `to_open` names located and asked, past
     /// `_php_stream_open_wrapper_ex`'s `USE_PATH`; `resolved` is whether
     /// that found the path, php's `STREAM_ASSUME_REALPATH`.
-    #[expect(clippy::too_many_lines, reason = "one php function, kept whole")]
     fn open_located(
         &mut self,
         to_open: &[u8],
@@ -4106,10 +3910,6 @@ impl StreamLayer for Request {
                     }
                     Err(message) => Err(message),
                 },
-            ),
-            Located::Php => (
-                PHP_WRAPPER,
-                php_open(self, &path_to_open, mode, options.unreported())?,
             ),
             Located::Data => ("RFC2397", rfc2397::open(self, &path_to_open, mode)?),
             Located::Ext(at) => self.open_ext(at, &path_to_open, mode, use_path, options)?,
@@ -4222,15 +4022,7 @@ impl StreamLayer for Request {
                 Err(String::from("wrapper does not support stream open")),
             ));
         };
-        let opening = crate::api::request::Opening {
-            use_path,
-            warn: false,
-            for_include: options.for_include,
-            must_seek: options.must_seek,
-            will_cast: options.will_cast,
-            disable_open_basedir: options.disable_open_basedir,
-            only_get_headers: options.only_get_headers,
-        };
+        let opening = options.opening(use_path);
         let outer = std::mem::take(&mut self.streams().wrapper_errors);
         let opened = open(self, path, mode, opening);
         let logged = std::mem::replace(&mut self.streams().wrapper_errors, outer);
@@ -4392,7 +4184,6 @@ impl StreamLayer for Request {
                     },
                 },
             ),
-            Located::Php => (PHP_WRAPPER, Err(String::from("not implemented"))),
             Located::Data => ("RFC2397", Err(String::from("not implemented"))),
             Located::Ext(at) => {
                 let wrapper = &self.streams().wrappers[at];

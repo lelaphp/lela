@@ -263,15 +263,11 @@ fn register_types(req: &mut Request) -> Types {
     }
 }
 
-/// The layer's own wrappers, `php`, `file` and `data`: the table every
-/// request starts from until `standard`, which registers them, moves
-/// them to its place.
+/// The layer's own wrappers, `file` and `data`: the table every request
+/// starts from until `standard`, which registers them, moves them to its
+/// place.
 pub(crate) fn layer_wrappers() -> Vec<Registered> {
-    [
-        EngineWrapper::Php,
-        EngineWrapper::Plain,
-        EngineWrapper::Data,
-    ]
-    .map(Registered::engine)
-    .into()
+    [EngineWrapper::Plain, EngineWrapper::Data]
+        .map(Registered::engine)
+        .into()
 }
