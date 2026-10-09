@@ -423,6 +423,28 @@ fn parsed_time(
 ///   int(0)
 /// }
 /// ```
+///
+/// Its peak is php's: each row goes in under a key made after the table
+/// has room, so at the ninth row, where the table doubles, no key stands
+/// beside the old data and the new ([`PhpArray::set_str`]).
+///
+/// ```php
+/// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+/// pk(fn () => date_parse('now'));
+/// pk(fn () => date_parse('2006-12-12 10:00:00.5'));
+/// pk(fn () => date_parse('2006-12-12 Europe/Amsterdam'));
+/// pk(fn () => date_parse_from_format('Y-m-d', '2006-12-12'));
+/// pk(fn () => date_parse('foo'));
+/// pk(fn () => date_parse('+1 day'));
+/// ```
+/// ```expect capture
+/// 1624 1264
+/// 1624 1232
+/// 1624 1352
+/// 1624 1232
+/// 1784 1512
+/// 2096 1840
+/// ```
 #[php_function]
 fn date_parse(req: &mut Request, datetime: PhpString) -> Result<Owner<PhpArray>, Thrown> {
     let parsed = lent(req, |l| Time::strtotime(l, datetime.as_bytes()))?;
