@@ -238,19 +238,46 @@ impl Handle {
 
 impl Connection for Handle {
     /// `sqlite_handle_preparer`: a scrollable cursor refused as php
-    /// refuses it, with whatever the connection last recorded.
+    /// refuses it, with whatever the connection last recorded. What a
+    /// statement holds of the request's is its object, its
+    /// `pdo_sqlite_stmt`, PDO's columns and their names, all given back
+    /// with it:
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $q = str_repeat('SELECT 1 AS a, 2 AS b', 1);
+    /// $m = memory_get_usage();
+    /// $s = $db->query($q);
+    /// echo memory_get_usage() - $m, "\n";
+    /// $s->fetch();
+    /// echo memory_get_usage() - $m, "\n";
+    /// unset($s);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// 360
+    /// 392
+    /// 32
+    /// ```
     fn prepare(
         &mut self,
         req: &mut Request,
         sql: &[u8],
         options: Option<PhpArray>,
     ) -> Result<Prepared, Failure> {
-        if option_long(req, options, ATTR_CURSOR, 0)? != 0 {
+        let scrollable = option_long(req, options, ATTR_CURSOR, 0)? != 0;
+        // `ecalloc(1, sizeof(pdo_sqlite_stmt))`, which the statement's
+        // `dtor` frees, as PDO's free of a statement its preparer failed
+        // runs it.
+        let held = Emalloc::new(req, PDO_SQLITE_STMT)?;
+        if scrollable {
+            held.free(req);
             return Err(failed(&self.db, None));
         }
         match self.db.prepare(req, sql) {
             (Ok(Some(stmt)), thrown) => {
                 if let Some(thrown) = thrown {
+                    held.free(req);
                     return Err(Failure::from(thrown));
                 }
                 Ok(Prepared {
@@ -259,6 +286,7 @@ impl Connection for Handle {
                         pre_fetched: false,
                         done: false,
                         executed: false,
+                        held: Some(held),
                     }),
                     placeholders: Placeholders::Native {
                         named: true,
@@ -267,7 +295,10 @@ impl Connection for Handle {
                     parameter_map: None,
                 })
             }
-            (Ok(None) | Err(_), thrown) => Err(failed(&self.db, thrown)),
+            (Ok(None) | Err(_), thrown) => {
+                held.free(req);
+                Err(failed(&self.db, thrown))
+            }
         }
     }
 
@@ -431,6 +462,9 @@ impl Connection for Handle {
     }
 }
 
+/// `sizeof(pdo_sqlite_stmt)`.
+const PDO_SQLITE_STMT: usize = 24;
+
 /// `pdo_sqlite_stmt`: the statement, and whether a row is waiting and
 /// whether the last row was stepped past.
 struct Stmt {
@@ -439,6 +473,8 @@ struct Stmt {
     done: bool,
     /// `stmt->executed`, as the binding callback reads it.
     executed: bool,
+    /// The `pdo_sqlite_stmt` itself, none once the `dtor` gave it back.
+    held: Option<Emalloc>,
 }
 
 impl Stmt {
@@ -763,6 +799,14 @@ impl Statement for Stmt {
     fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure> {
         self.executed = false;
         self.reset(req)
+    }
+
+    /// `pdo_sqlite_stmt_dtor`'s `efree(S)`; the statement is finalized
+    /// with its `Drop`.
+    fn close(&mut self, req: &mut Request) {
+        if let Some(held) = self.held.take() {
+            held.free(req);
+        }
     }
 }
 
