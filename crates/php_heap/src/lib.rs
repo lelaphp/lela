@@ -39,6 +39,7 @@ mod fiber;
 mod gc;
 mod hooks;
 mod iterators;
+mod lend;
 mod map;
 mod mm;
 mod numeric;
