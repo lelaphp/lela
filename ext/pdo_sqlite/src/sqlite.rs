@@ -538,14 +538,15 @@ impl Statement for Stmt {
         }
     }
 
-    /// `pdo_sqlite_stmt_describe`.
+    /// `pdo_sqlite_stmt_describe`: the name `zend_string_init`'d, a
+    /// string of the request's whatever its length.
     fn describe(&mut self, req: &mut Request, column: usize) -> Result<Column, Failure> {
-        let _ = req;
         if column >= self.handle.column_count() {
             return Err(self.failed(None));
         }
+        let name = self.handle.column_name(column).unwrap_or_default();
         Ok(Column {
-            name: self.handle.column_name(column).unwrap_or_default(),
+            name: PhpString::filled(req, name.len(), |to| to.copy_from_slice(&name))?,
             max_len: u64::MAX,
             precision: 0,
         })

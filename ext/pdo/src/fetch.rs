@@ -755,31 +755,33 @@ fn columns(
         }
         next += 1;
     }
-    let names: Vec<Vec<u8>> = stmt::read(req, object, |s| {
-        s.columns
-            .as_ref()
-            .map(|c| c.iter().map(|c| c.name.clone()).collect())
-            .unwrap_or_default()
-    })
-    .unwrap_or_default();
     let mut pending: Option<Thrown> = None;
     let mut at = next;
     while usize::try_from(at).is_ok_and(|a| a < count) {
         let fetched = value(req, object, at, None)?;
-        let name = names
-            .get(usize::try_from(at).unwrap_or(0))
-            .cloned()
-            .unwrap_or_default();
+        // `stmt->columns[i].name`, read as php reads it after the value;
+        // each sink below takes its own owner of it before PHP code runs.
+        let name = stmt::read(req, object, |s| {
+            s.columns
+                .as_ref()?
+                .name(usize::try_from(at).unwrap_or(usize::MAX))
+        })
+        .flatten();
+        let Some(name) = name else {
+            fetched.give_up(req);
+            at += 1;
+            continue;
+        };
         match (kind, out.object()) {
-            (Kind::Assoc, _) => set(req, out, &name, fetched)?,
-            (Kind::Default | Kind::Both, _) => both(req, out, &name, at, fetched)?,
-            (Kind::Named, _) => named(req, out, &name, fetched)?,
+            (Kind::Assoc, _) => set(req, out, name, fetched)?,
+            (Kind::Default | Kind::Both, _) => both(req, out, name, at, fetched)?,
+            (Kind::Named, _) => named(req, out, name, fetched)?,
             (Kind::Num, _) => match out {
                 Out::Array(array) => array.append(req, fetched)?,
                 Out::Value(_) => fetched.give_up(req),
             },
             (Kind::Class | Kind::Obj | Kind::Into, Some(made)) => {
-                write_column(req, &mut pending, made, scope(kind, class), &name, fetched)?;
+                write_column(req, &mut pending, made, scope(kind, class), name, fetched)?;
             }
             (Kind::Func, _) => arguments.push(fetched),
             _ => fetched.give_up(req),
@@ -817,16 +819,10 @@ fn write_column(
     pending: &mut Option<Thrown>,
     made: PhpObject,
     scope: PropertyScope,
-    name: &[u8],
+    name: PhpString,
     fetched: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let name = match PhpString::new(req, name) {
-        Ok(name) => name,
-        Err(thrown) => {
-            fetched.give_up(req);
-            return Err(thrown);
-        }
-    };
+    let name = Owner::take(req, name);
     let wrote = match pending {
         Some(standing) => while_pending(req, standing, |req| {
             made.write_prop_in(req, scope, name, fetched)
@@ -864,7 +860,7 @@ fn scope(kind: Kind, class: Option<ClassId>) -> PropertyScope {
 fn both(
     req: &mut Request,
     out: &mut Out,
-    name: &[u8],
+    name: PhpString,
     at: i64,
     fetched: Owner<Value>,
 ) -> Result<(), Thrown> {
@@ -884,20 +880,39 @@ fn both(
     }
 }
 
-/// `zend_symtable_update` on the row's array under `name`; the value
-/// given up where the row is no array.
-fn set(req: &mut Request, out: &mut Out, name: &[u8], value: Owner<Value>) -> Result<(), Thrown> {
+/// `zend_symtable_update` on the row's array under the column's name,
+/// one more owner of the statement's string; the value given up where
+/// the row is no array. Every row shares the names the statement holds,
+/// whatever the style that keys or names by them:
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// $q = "SELECT 1 AS first, 2 AS second, 3 AS `7` UNION SELECT 4, 5, 6";
+/// foreach ([PDO::FETCH_ASSOC, PDO::FETCH_BOTH, PDO::FETCH_NAMED, PDO::FETCH_OBJ] as $mode) {
+///     $s = $db->query($q);
+///     $m = memory_get_usage();
+///     $rows = $s->fetchAll($mode);
+///     echo memory_get_usage() - $m, "\n";
+///     unset($rows, $s);
+/// }
+/// ```
+/// ```expect
+/// 968
+/// 968
+/// 968
+/// 1048
+/// ```
+fn set(
+    req: &mut Request,
+    out: &mut Out,
+    name: PhpString,
+    value: Owner<Value>,
+) -> Result<(), Thrown> {
     let Out::Array(array) = out else {
         value.give_up(req);
         return Ok(());
     };
-    match symtable_key(req, name) {
-        Ok(key) => array.set(req, key, value),
-        Err(thrown) => {
-            value.give_up(req);
-            Err(thrown)
-        }
-    }
+    array.set(req, Owner::take(req, Key::lookup(name)), value)
 }
 
 /// `FETCH_NAMED`'s column: a name seen before becomes a list of every
@@ -905,14 +920,14 @@ fn set(req: &mut Request, out: &mut Out, name: &[u8], value: Owner<Value>) -> Re
 fn named(
     req: &mut Request,
     out: &mut Out,
-    name: &[u8],
+    name: PhpString,
     fetched: Owner<Value>,
 ) -> Result<(), Thrown> {
     let Out::Array(array) = out else {
         fetched.give_up(req);
         return Ok(());
     };
-    let current = array.find(name);
+    let current = array.find(name.as_bytes());
     if let Some(mut list) = current.and_then(|current| current.as_array().copied()) {
         return list.append(req, fetched);
     }
@@ -920,13 +935,8 @@ fn named(
         Some(current) => listed(req, current, fetched)?,
         None => fetched,
     };
-    match PhpString::new(req, name) {
-        Ok(key) => array.set(req, key.into_key(), stored),
-        Err(thrown) => {
-            stored.give_up(req);
-            Err(thrown)
-        }
-    }
+    // `zend_hash_update`: the name as the string key it is.
+    array.set(req, Owner::take(req, name).into_key(), stored)
 }
 
 /// A new list of `first`, the value a name held, and `fetched`.

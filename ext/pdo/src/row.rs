@@ -132,7 +132,7 @@ fn by_name(
     let at = stmt::read(req, stmt, |s| {
         s.columns
             .as_ref()
-            .and_then(|columns| columns.iter().position(|c| c.name == name))
+            .and_then(|columns| columns.position(name))
     })
     .flatten();
     match at {
@@ -387,26 +387,20 @@ fn debug_rows(req: &mut Request, stmt: PhpObject, out: &mut Owner<PhpArray>) -> 
     for (key, value) in rows {
         out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
-    let names: Vec<Vec<u8>> = stmt::read(req, stmt, |s| {
-        s.columns
-            .as_ref()
-            .map(|c| c.iter().map(|c| c.name.clone()).collect())
-            .unwrap_or_default()
-    })
-    .unwrap_or_default();
-    for (at, name) in names.iter().enumerate() {
-        if name == b"queryString" {
+    let count = stmt::read(req, stmt, |s| s.columns.as_ref().map_or(0, |c| c.len())).unwrap_or(0);
+    for at in 0..count {
+        let name =
+            |req: &mut Request| stmt::read(req, stmt, |s| s.columns.as_ref()?.name(at)).flatten();
+        if name(req).is_none_or(|n| n.as_bytes() == b"queryString") {
             continue;
         }
         let value = crate::fetch::value(req, stmt, i64::try_from(at).unwrap_or(-1), None)?;
-        let key = match PhpString::new(req, name) {
-            Ok(key) => key.into_key(),
-            Err(thrown) => {
-                value.give_up(req);
-                return Err(thrown);
-            }
-        };
-        out.set(req, key, value)?;
+        // `zend_hash_update(props, stmt->columns[i].name, &val)`, the
+        // name read after the value as php reads it.
+        match name(req) {
+            Some(name) => out.set(req, Owner::take(req, name).into_key(), value)?,
+            None => value.give_up(req),
+        }
     }
     Ok(())
 }
