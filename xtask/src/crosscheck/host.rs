@@ -223,7 +223,7 @@ pub(crate) fn served_by_server(
             .arg("-t")
             .arg(own.path());
         recipe
-            .environ(&mut server)
+            .environ(&mut server)?
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());

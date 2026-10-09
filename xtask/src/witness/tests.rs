@@ -300,7 +300,7 @@ fn the_linked_engine_runs_under_the_recipes_environment_alone() {
                 .insert("WITNESS_ENVIRONMENT".to_owned(), "another".to_owned());
         }
         let linked = read(crate::oracle::linked::serve(&pin.recipe, None, snippet).unwrap());
-        for (name, value) in &pin.recipe.env {
+        for (name, value) in &pin.recipe.environment().unwrap() {
             assert_eq!(linked.get(name), Some(value), "{linked:#?}");
         }
         for own in ["PATH", "CARGO_PKG_NAME"] {

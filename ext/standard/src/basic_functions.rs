@@ -883,8 +883,8 @@ const ZEND_MMAP_AHEAD: usize = 32;
 /// var_dump($a); unlink($p);
 /// ```
 /// ```expect
-/// 5114 472
-/// 1064 440
+/// 5170 472
+/// 1120 440
 /// array(1) {
 ///   ["k"]=>
 ///   string(1) "v"

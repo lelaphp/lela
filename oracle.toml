@@ -101,6 +101,12 @@ PDO_MYSQL_TEST_DSN = "mysql:host=127.0.0.1;dbname=test"
 # DSN is set, and config.inc defaults pdo_mysql's own tests to root; the redirect is given the
 # same user, or ext/pdo's shared tests connect as the empty one and skip (#1392).
 PDO_MYSQL_TEST_USER = "root"
+# A home and a temporary directory of the run's own, as upstream's runner passes a real HOME
+# (#1705, #1927): `{RUN}` is a directory the harness lays down for each run and removes after,
+# HOME holding an empty `.php_history`, so `php -a` (sapi/cli/tests/017.phpt) keeps its history
+# there and never in the user's home, and TMPDIR is what `sys_get_temp_dir()` answers.
+HOME = "{RUN}/home"
+TMPDIR = "{RUN}/tmp"
 
 [recipe.limits]
 # `run-tests.php:1187`: 60 s per test, 300 under valgrind. A witness's `wall=`

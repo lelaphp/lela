@@ -143,7 +143,7 @@ fn upstream(pin: &Pin, tree: &Path, tests: &[PathBuf]) -> Result<String> {
     let php = pin.oracle.file()?;
     let mut runner = Command::new(php);
     pin.recipe
-        .environ(&mut runner)
+        .environ(&mut runner)?
         .current_dir(tree)
         .args(&pin.recipe.args)
         .arg("run-tests.php")

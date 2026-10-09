@@ -238,7 +238,7 @@ struct Server {
 impl Server {
     fn start(binary: PathBuf, recipe: &Recipe, environ: Environ) -> Result<Server> {
         let mut child = recipe
-            .environ(Command::new(&binary).arg("--serve"))
+            .environ(Command::new(&binary).arg("--serve"))?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()

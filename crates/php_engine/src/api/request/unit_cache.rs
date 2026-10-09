@@ -315,11 +315,12 @@ impl Request {
     /// The file is opened as a stream, a resource id spent, wherever php
     /// opens it: to compile it, and to resolve its path after the lookup
     /// by the key missed, which a file read back from `opcache.file_cache`
-    /// is found after, the key filed by the next include. Served by the
-    /// binary, since the child is `PHP_BINARY`:
+    /// is found after, the key filed by the next include. The path as
+    /// written carries a doubled slash, so it is never the resolved one.
+    /// Served by the binary, since the child is `PHP_BINARY`:
     ///
     /// ```php
-    /// $dir = sys_get_temp_dir() . '/kept' . getmypid(); @mkdir($dir);
+    /// $dir = sys_get_temp_dir() . '//kept' . getmypid(); @mkdir($dir);
     /// file_put_contents("$dir/a.inc", '<?php return 1;'); touch("$dir/a.inc", time() - 10);
     /// $code = 'function r() { return get_resource_id(fopen("php://memory", "r")); } echo implode(" ", [r(), include $argv[1], r(), include $argv[1], r(), include $argv[1], r()]), "\n";';
     /// foreach ([1, 2] as $run) {
