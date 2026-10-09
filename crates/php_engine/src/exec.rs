@@ -1224,9 +1224,13 @@ impl Vm {
         }
     }
 
-    /// `ZEND_VM_SET_OPCODE`: the frame stands at `at`, which is where a
-    /// jump leaves it.
-    pub(crate) fn jump(&mut self, frame: FrameRef, at: u32) {
+    /// `EX(opline) = opline`, php's `SAVE_OPLINE()`: the frame's state
+    /// records that it stands at `at`. The loop holds the position of
+    /// the frame it executes in its own hand ([`crate::tier::Next`]) and
+    /// writes it here where something outside the loop can read it; a
+    /// frame the loop is not executing, a caller under a call or a
+    /// generator's, is moved here directly.
+    pub(crate) fn stand(&mut self, frame: FrameRef, at: u32) {
         if let Some(state) = self.at_mut(frame) {
             state.opline = at;
         }
@@ -1996,12 +2000,16 @@ pub(crate) fn parameter_prologue(
     body: &OpArray,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
     let entry = body.safepoints.first().map_or(0, |at| at.0);
-    while req.vm().opline(callee) < entry {
-        let Some(prologue) = opline_at(body, req.vm().opline(callee)) else {
+    loop {
+        let at = req.vm().opline(callee);
+        if at >= entry {
+            break;
+        }
+        let Some(prologue) = opline_at(body, at) else {
             break;
         };
         crate::observer::tell_before(req, callee, prologue.opcode);
-        let stepped = match prologue.opcode {
+        let next = match prologue.opcode {
             php_unit::Opcode::Recv => {
                 crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?
             }
@@ -2018,7 +2026,9 @@ pub(crate) fn parameter_prologue(
                 )));
             }
         };
-        if let crate::tier::Stepped::Threw(at) = stepped {
+        // The frame is not the loop's yet, so where a `RECV` leaves it is
+        // written to its state, which the next one and the activation read.
+        if let crate::tier::Stepped::Threw(at) = crate::tier::settled(req, callee, at, next) {
             return Ok(Some(at));
         }
     }

@@ -162,6 +162,49 @@ pub enum Stepped {
     Done,
 }
 
+/// Where one handler sends the loop (design §5.8): on in the frame it
+/// was handed, at an opline the loop holds in its own hand, or along
+/// any other edge of the frame chain. The first two are php's
+/// `ZEND_VM_NEXT_OPCODE` and `ZEND_VM_SET_OPCODE` with `opline` in a
+/// register: no frame's state records where the loop stands while it
+/// goes on in one frame, and the position is written to the frame
+/// where something outside the loop can read it, as php's
+/// `SAVE_OPLINE()` writes `EX(opline)`: before a handler the dispatch
+/// does not leave its own position to, at a safepoint, at a call, a
+/// throw or a return, and wherever a step hands the frame to a tier.
+/// Every other edge is a [`Stepped`] with every frame's position
+/// written where the handler left it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Next {
+    /// `ZEND_VM_NEXT_OPCODE`: the opline after this one.
+    Advance,
+    /// `ZEND_VM_SET_OPCODE`: this opline of the same frame.
+    Jump(u32),
+    /// Any other edge, the positions on the chain written.
+    Left(Stepped),
+}
+
+impl From<Stepped> for Next {
+    fn from(stepped: Stepped) -> Next {
+        Next::Left(stepped)
+    }
+}
+
+/// What a handler's [`Next`] is as an edge of the frame chain, for an
+/// entry that hands the frame on rather than going on in it: a step,
+/// the unwinder, a prologue. The position the loop would have held is
+/// written to `frame`, the opline at `at` being the one the handler
+/// served.
+pub(crate) fn settled(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Stepped {
+    let to = match next {
+        Next::Left(stepped) => return stepped,
+        Next::Advance => at.saturating_add(1),
+        Next::Jump(to) => to,
+    };
+    req.vm_mut().stand(frame, to);
+    Stepped::Same(frame)
+}
+
 /// The generated dispatch (design §4.3 seam 7): one `match` arm per
 /// opcode `ops.toml` names, over the handlers beside it.
 mod dispatch {
@@ -169,7 +212,7 @@ mod dispatch {
     use php_unit::{OpArray, Opcode, Opline};
 
     use crate::api::request::Request;
-    use crate::tier::{Stepped, Tier};
+    use crate::tier::{Next, Tier};
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 }
@@ -436,28 +479,33 @@ fn serve_from<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<
 }
 
 /// The loop inside one frame: its oplines dispatched one after another
-/// for as long as each answers [`Stepped::Same`] of the frame, and the
-/// first other edge handed back to [`serve_from`]. The unit the frame
-/// serves is held by the caller across them, so a step pays for the
-/// opline's fetch and the dispatch and nothing else, as php's
-/// `execute_ex` keeps `EX(func)` in hand between handlers (design §5.8);
-/// what the frame serves is looked up again only where the edge leaves
-/// it.
+/// for as long as each answers on in the frame, and the first other edge
+/// handed back to [`serve_from`]. The unit the frame serves and the
+/// opline the loop stands at are held here across them, so a step pays
+/// for the opline's fetch and the dispatch and nothing else, as php's
+/// `execute_ex` keeps `EX(func)` in hand and `opline` in a register
+/// between handlers (design §5.8). The position is read off the frame
+/// once, where the edge entered it, and written back only where
+/// something outside the loop can read it ([`Next`]); what the frame
+/// serves is looked up again only where the edge leaves it.
 fn serve_frame<T: Tier, D: Telling>(
     req: &mut Request,
     frame: FrameRef,
     code: &php_unit::OpArray,
     declared: D,
 ) -> Result<Stepped, Fatal> {
+    let mut at = req.vm().opline(frame);
     loop {
-        let op = *at_opline(req, frame, code)?;
-        declared.before(req, frame, op.opcode);
-        let stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
+        let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+        declared.before(req, frame, at, op.opcode);
+        let next = dispatch::dispatch::<T>(req, frame, code, op, at)?;
         #[cfg(debug_assertions)]
-        req.sensed_after(code, &op)?;
-        if stepped != Stepped::Same(frame) {
-            return Ok(stepped);
-        }
+        req.sensed_after(code, op)?;
+        at = match next {
+            Next::Advance => at.saturating_add(1),
+            Next::Jump(to) => to,
+            Next::Left(stepped) => return Ok(stepped),
+        };
     }
 }
 
@@ -473,8 +521,10 @@ fn serve_frame<T: Tier, D: Telling>(
 fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
-    let op = *at_opline(req, frame, code)?;
-    crate::handlers::handle_exception::<T>(req, frame, code, &op)
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    let next = crate::handlers::handle_exception::<T>(req, frame, code, op)?;
+    Ok(settled(req, frame, at, next))
 }
 
 /// Exactly one handler, the one at the frame's opline, with `Nop` at the
@@ -495,12 +545,13 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
-    let op = *at_opline(req, frame, code)?;
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
     crate::observer::tell_before(req, frame, op.opcode);
-    let stepped = dispatch::dispatch::<Nop>(req, frame, code, &op)?;
+    let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
     #[cfg(debug_assertions)]
-    req.sensed_after(code, &op)?;
-    match stepped {
+    req.sensed_after(code, op)?;
+    match settled(req, frame, at, next) {
         Stepped::Pushed(callee) => match activated::<Nop>(req, callee)? {
             Stepped::Threw(at) => Ok(Stepped::Threw(at)),
             _ => Ok(Stepped::Pushed(callee)),
@@ -530,17 +581,12 @@ pub fn unwind(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     unwind_frame::<Nop>(req, frame)
 }
 
-/// The opline `frame` stands at.
-fn at_opline<'a>(
-    req: &Request,
-    frame: FrameRef,
-    code: &'a php_unit::OpArray,
-) -> Result<&'a php_unit::Opline, Fatal> {
-    let at = req.vm().opline(frame);
-    exec::opline_at(code, at).ok_or_else(|| {
-        Fatal::Error(format!(
-            "InternalError: frame {} stands at opline {at}, past the end of its op array",
-            frame.0
-        ))
-    })
+/// The internal error for a frame whose position is past the end of
+/// its op array, which no unit the compiler wrote reaches.
+#[cold]
+fn past_the_end(frame: FrameRef, at: u32) -> Fatal {
+    Fatal::Error(format!(
+        "InternalError: frame {} stands at opline {at}, past the end of its op array",
+        frame.0
+    ))
 }

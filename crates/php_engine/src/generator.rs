@@ -1596,7 +1596,7 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
     }
     // `-1 because zend_generator_resume() will increment it`.
     req.vm_mut()
-        .jump(frame, element.finally_op.0.saturating_sub(1));
+        .stand(frame, element.finally_op.0.saturating_sub(1));
     if suspend(req, object).is_err() {
         return;
     }

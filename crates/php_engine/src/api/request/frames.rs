@@ -567,7 +567,7 @@ impl Request {
         }
         let declared = u32::try_from(parameters).unwrap_or(u32::MAX);
         if let Some(at) = exec::skipped_recv(num_args, declared, typed, entry) {
-            self.vm.jump(frame, at);
+            self.vm.stand(frame, at);
         }
         crate::observer::call(self, frame);
         Ok(frame)
