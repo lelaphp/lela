@@ -830,8 +830,10 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_session",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -841,6 +843,8 @@ dependencies = [
  "php_ext",
  "php_ext_lexbor",
  "php_ext_libxml",
+ "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -848,7 +852,9 @@ name = "php_ext_exif"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -964,7 +970,9 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_standard",
+ "php_ext_uri",
  "pkg-config",
 ]
 
@@ -984,10 +992,14 @@ name = "php_ext_mysqli"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_json",
+ "php_ext_lexbor",
  "php_ext_mysqlnd",
  "php_ext_openssl",
  "php_ext_session",
+ "php_ext_spl",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -997,6 +1009,9 @@ dependencies = [
  "flate2",
  "mysql_common",
  "php_ext",
+ "php_ext_lexbor",
+ "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1004,7 +1019,9 @@ name = "php_ext_opcache"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1041,6 +1058,7 @@ name = "php_ext_pdo"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_json",
  "php_ext_spl",
 ]
 
@@ -1049,11 +1067,14 @@ name = "php_ext_pdo_mysql"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_json",
+ "php_ext_lexbor",
  "php_ext_mysqlnd",
  "php_ext_pdo",
  "php_ext_session",
  "php_ext_spl",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1062,9 +1083,13 @@ version = "0.0.0"
 dependencies = [
  "libsqlite3-sys",
  "php_ext",
+ "php_ext_json",
+ "php_ext_lexbor",
  "php_ext_pdo",
  "php_ext_session",
+ "php_ext_spl",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1074,8 +1099,11 @@ dependencies = [
  "libc",
  "php_ext",
  "php_ext_hash",
+ "php_ext_json",
+ "php_ext_lexbor",
  "php_ext_spl",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1117,7 +1145,9 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1133,8 +1163,12 @@ name = "php_ext_simplexml"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_json",
+ "php_ext_lexbor",
  "php_ext_libxml",
+ "php_ext_spl",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1144,6 +1178,7 @@ dependencies = [
  "getrandom",
  "php_ext",
  "php_ext_date",
+ "php_ext_lexbor",
  "php_ext_libxml",
  "php_ext_standard",
  "php_ext_uri",
@@ -1163,6 +1198,9 @@ name = "php_ext_sodium"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_lexbor",
+ "php_ext_standard",
+ "php_ext_uri",
  "pkg-config",
 ]
 
@@ -1171,8 +1209,11 @@ name = "php_ext_spl"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_json",
+ "php_ext_lexbor",
  "php_ext_pcre",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1191,6 +1232,7 @@ dependencies = [
  "miniz_oxide",
  "php_ext",
  "php_ext_date",
+ "php_ext_lexbor",
  "php_ext_random",
  "php_ext_uri",
 ]
@@ -1250,8 +1292,10 @@ name = "php_ext_xml"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_libxml",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1260,7 +1304,10 @@ version = "0.0.0"
 dependencies = [
  "php_ext",
  "php_ext_dom",
+ "php_ext_lexbor",
  "php_ext_libxml",
+ "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1268,7 +1315,10 @@ name = "php_ext_xmlwriter"
 version = "0.0.0"
 dependencies = [
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_libxml",
+ "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1278,7 +1328,10 @@ dependencies = [
  "cc",
  "php_ext",
  "php_ext_dom",
+ "php_ext_lexbor",
  "php_ext_libxml",
+ "php_ext_standard",
+ "php_ext_uri",
  "pkg-config",
 ]
 
@@ -1303,8 +1356,10 @@ dependencies = [
  "lzma-rust2",
  "pbkdf2",
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_pcre",
  "php_ext_standard",
+ "php_ext_uri",
  "ruzstd",
  "sha1",
  "zip",
@@ -1317,7 +1372,9 @@ dependencies = [
  "cc",
  "libz-sys",
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]

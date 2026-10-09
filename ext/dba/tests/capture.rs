@@ -52,6 +52,8 @@ fn a_persistent_link_and_its_flock_outlive_the_request() {
 fn a_session_written_at_the_request_end_still_has_the_persistent_link() {
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_session::extension(),
             php_ext_dba::extension(),
@@ -103,7 +105,12 @@ fn written_then_read(name: &str, then: &str) -> (String, String) {
     let path = path.display();
     let built = || {
         Engine::builder()
-            .extensions(&[php_ext_standard::extension(), php_ext_dba::extension()])
+            .extensions(&[
+                php_ext_lexbor::extension(),
+                php_ext_uri::extension(),
+                php_ext_standard::extension(),
+                php_ext_dba::extension(),
+            ])
             .ini("html_errors", "0")
             .build()
     };

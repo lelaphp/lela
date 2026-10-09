@@ -12,7 +12,7 @@ fn the_extension_is_loaded() {
 
 fn engine() -> Engine {
     Engine::builder()
-        .extensions(&[php_ext_mbstring::extension()])
+        .extensions(&[php_ext_pcre::extension(), php_ext_mbstring::extension()])
         .build()
 }
 

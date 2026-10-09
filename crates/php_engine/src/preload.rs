@@ -24,22 +24,35 @@ pub(crate) enum Started {
 }
 
 impl Engine {
-    /// `php_module_startup` finished for a host that serves no request
-    /// after it, as php's CLI answers `-v` and its built-in server waits
-    /// for its first client (`Z/sapi/cli/php_cli.c:638-641`,
-    /// `do_cli_server`): what the extensions' `MINIT`s raised, displayed
-    /// to `sink` as `php_error_cb` displays a startup error and once, then
-    /// `zend_post_startup_cb`'s chain on `host`'s environment, the request
-    /// `opcache.preload` serves among it. No extension's `rinit` runs.
-    /// The status the process ends with where the startup failed, 1 where
-    /// an `E_CORE_ERROR` bailed out of it, or the chain's refusal; `None`
+    /// `php_module_startup` finished, as every host's `main` runs it
+    /// before it reads its line further (`php_sapi::start`): what the
+    /// extensions' `MINIT`s raised, displayed to `sink` as `php_error_cb`
+    /// displays a startup error and once, then `zend_post_startup_cb`'s
+    /// chain on the host process's environment `env` and working
+    /// directory `cwd`, the request `opcache.preload` serves among it
+    /// (`accel_finish_startup_preload`). No extension's `rinit` runs. The
+    /// status the process ends with where the startup failed, 1 where an
+    /// `E_CORE_ERROR` bailed out of it, or the chain's refusal; `None`
     /// where it started.
-    pub fn start_up(&self, host: &RequestDescription, sink: &mut dyn OutputSink) -> Option<i32> {
-        let description = RequestDescription {
-            sapi_name: host.sapi_name.clone(),
+    pub fn start_up(
+        &self,
+        env: Vec<(Vec<u8>, Vec<u8>)>,
+        cwd: std::path::PathBuf,
+        sink: &mut dyn OutputSink,
+    ) -> Option<i32> {
+        let host = RequestDescription {
+            env,
+            cwd,
+            sapi_name: self.shared.host.to_owned(),
             ..RequestDescription::default()
         };
-        let mut req = Request::new(Arc::clone(&self.shared), description);
+        let mut req = Request::new(
+            Arc::clone(&self.shared),
+            RequestDescription {
+                sapi_name: host.sapi_name.clone(),
+                ..RequestDescription::default()
+            },
+        );
         if let Some(held) = sink.held() {
             req.hold(held);
         }
@@ -48,7 +61,7 @@ impl Engine {
         if failed {
             return Some(1);
         }
-        match self.started(host, sink) {
+        match self.started(&host, sink) {
             Started::Serving => None,
             Started::Refused(status) => Some(status),
         }

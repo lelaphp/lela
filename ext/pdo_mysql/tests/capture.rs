@@ -15,7 +15,16 @@ use php_ext_pdo::connector::{Connection, Connector, Failure, Prepared, Source};
 #[test]
 fn the_extension_is_loaded() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_pdo_mysql::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_pdo::extension(),
+            php_ext_uri::extension(),
+            php_ext_pdo_mysql::extension(),
+        ])
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('pdo_mysql'));", sink);
@@ -31,6 +40,10 @@ fn the_extension_is_loaded() {
 fn a_persistent_connection_serves_the_next_request_and_a_dead_one_is_replaced() {
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_uri::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),
             php_ext_mysqlnd::extension(),
@@ -81,6 +94,9 @@ fn a_session_written_at_the_request_end_still_has_the_persistent_connection() {
     }
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_spl::extension(),
             php_ext_session::extension(),
@@ -194,6 +210,10 @@ fn a_persistent_connection_past_the_pool_s_bound_is_closed() {
         .build("pdo_filler");
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_uri::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),
             filler,
@@ -239,6 +259,9 @@ fn a_persistent_connection_keeps_its_socket_however_full_the_stream_pool_is() {
     }
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),
@@ -302,6 +325,10 @@ fn a_pooled_persistent_connection_is_quit_as_the_engine_ends() {
     });
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_uri::extension(),
             php_ext_spl::extension(),
             php_ext_pdo::extension(),
             php_ext_mysqlnd::extension(),

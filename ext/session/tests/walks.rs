@@ -12,7 +12,12 @@ use php_ext::test::{Capture, Engine, LeakSensor};
 #[test]
 fn session_unset_ends_where_a_destructor_replaces_the_session() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension(), php_ext_session::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            php_ext_session::extension(),
+        ])
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(

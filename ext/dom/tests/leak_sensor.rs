@@ -9,7 +9,13 @@ use php_ext::test::{Capture, Engine, LeakSensor};
 /// wrote held to `expected`.
 fn served(src: &str, expected: &str) {
     let engine = Engine::builder()
-        .extensions(&[php_ext_dom::extension()])
+        .extensions(&[
+            php_ext_libxml::extension(),
+            php_ext_lexbor::extension(),
+            php_ext_standard::extension(),
+            php_ext_uri::extension(),
+            php_ext_dom::extension(),
+        ])
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(src, Capture::default());

@@ -9,7 +9,12 @@ use php_ext::test::{Capture, Engine, LeakSensor};
 /// standard one it writes files through wrote.
 fn armed(source: &str) -> String {
     let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension(), php_ext_zlib::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            php_ext_zlib::extension(),
+        ])
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());

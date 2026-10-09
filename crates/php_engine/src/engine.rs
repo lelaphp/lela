@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
@@ -43,7 +43,7 @@ use crate::api::values::{ClassId, Value};
 use crate::exec;
 use crate::ini_syntax::{IniEvent, IniScanner, IniValue};
 use crate::natives::StubPlace;
-use crate::supplied::{Keyed, Last, Phase, Resolved};
+use crate::supplied::{Keyed, Resolved, Suppliers};
 use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::UnitCache;
@@ -691,7 +691,9 @@ pub(crate) struct Shared {
     /// What the bundle supplies beyond its declarations, each kind
     /// resolved by php's rule ([`crate::supplied`]); the shell only
     /// where the host carries php's table of shell callbacks
-    /// ([`EngineBuilder::cli_shell`]).
+    /// ([`EngineBuilder::cli_shell`]); on an engine whose start refused,
+    /// only what the extensions started before the refusal installed
+    /// ([`Suppliers::refused_at`]).
     pub(crate) supplied: Resolved,
     /// What reading the host's ini entries wrote to `stderr` in php
     /// ([`Configuration`]), and after it what the extensions' `on_modify`
@@ -705,10 +707,14 @@ pub(crate) struct Shared {
     startup_raised: Vec<(Level, Vec<u8>)>,
     /// Whether a request has raised [`Shared::startup_raised`].
     startup_shown: AtomicBool,
-    /// Where an extension's engine start refused: the host's name and
-    /// the [`Refusal`] with `Unable to start %s module` raised after what
-    /// the extension raised ([`Engine::refused`]).
-    refused: Option<(&'static str, Refusal)>,
+    /// Where an extension's engine start refused: the [`Refusal`] with
+    /// `Unable to start %s module` raised after what the extension
+    /// raised ([`Engine::refused`]).
+    refused: Option<Refusal>,
+    /// `sapi_module.name`, the host's name the engine was built under
+    /// ([`EngineBuilder::sapi_name`]): what the requests the engine makes
+    /// for itself, its startup, its refusal and its end, are made under.
+    pub(crate) host: &'static str,
     /// `configuration_hash`: what the host's ini text set, before any
     /// entry read it, which `get_cfg_var()` answers from
     /// ([`Request::cfg_entry`]).
@@ -2650,6 +2656,8 @@ pub struct EngineBuilder {
     hooked: php_compile::Hooked,
     extended_info: bool,
     sapi_name: &'static str,
+    /// Where the engine end writes ([`EngineBuilder::ends_into`]).
+    ends_into: Option<Box<dyn OutputSink + Send>>,
     additional_extension: Option<Extension>,
     additional_functions: Vec<(FunctionDecl, Entry)>,
     host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
@@ -2705,6 +2713,19 @@ impl EngineBuilder {
     #[must_use]
     pub fn sense_leaks(mut self, sensor: LeakSensor) -> EngineBuilder {
         self.sense_leaks = sensor;
+        self
+    }
+
+    /// Where the engine end (ADR-0010) writes: what an extension's
+    /// engine-end function raises, displayed to `sink`'s body and logged
+    /// through its log, as `php_module_shutdown` serves `MSHUTDOWN` with
+    /// `php_output` not activated, so php displays through `php_output_direct`
+    /// to the process's stdout and logs through `sapi_module.log_message`.
+    /// The streams are the host's, so the host leaves them; an engine left
+    /// none ends with what it writes reaching no host.
+    #[must_use]
+    pub fn ends_into(mut self, sink: Box<dyn OutputSink + Send>) -> EngineBuilder {
+        self.ends_into = Some(sink);
         self
     }
 
@@ -2917,20 +2938,16 @@ impl EngineBuilder {
         extensions.extend(self.tier_extension);
         let additional = self.additional_functions;
         extensions.extend(self.additional_extension);
-        let registered = sort_modules(&mut extensions);
+        let mut registered = sort_modules(&mut extensions);
+        let unloaded = unload_unmet(&mut extensions, &mut registered);
         // Each extension's supplies taken out of it, by its number in
         // `module_registry`, which numbers Core 0 and the bundle from 1,
         // and installed by the phase it starts in.
-        let mut supplied = Resolved::resolve(extensions.iter_mut().zip(1u32..).map(|(e, at)| {
-            (
-                ExtensionId(at),
-                Phase::of(e),
-                std::mem::take(&mut e.supplies),
-            )
-        }));
+        let mut suppliers = Suppliers::take((1..).map(ExtensionId::at).zip(&mut extensions));
         if !self.cli_shell {
-            supplied.shell = Last::default();
+            suppliers = suppliers.without_shell();
         }
+        let supplied = suppliers.resolved();
         // What a `MINIT` registers into another extension's tables, as
         // `php_image_register_handler` adds `IMAGETYPE_SVG` to
         // `standard`'s constants: each extension's constants rewritten
@@ -3078,6 +3095,7 @@ impl EngineBuilder {
                 startup_raised: Vec::new(),
                 startup_shown: AtomicBool::new(false),
                 refused: None,
+                host: self.sapi_name,
                 configuration: configuration.table,
                 sections: configuration.sections,
                 ini_files,
@@ -3103,11 +3121,14 @@ impl EngineBuilder {
         engine.register_ini(
             held,
             startup,
-            &configuration.loads,
-            self.sapi_name,
+            Registry {
+                loads: &configuration.loads,
+                unloaded,
+                suppliers,
+            },
             self.bind_loops,
         );
-        engine.end.arm(&engine.shared, self.sapi_name);
+        engine.end.arm(&engine.shared, self.ends_into);
         engine
     }
 }
@@ -3400,6 +3421,65 @@ fn sort_modules(modules: &mut [Extension]) -> Vec<usize> {
     registered
 }
 
+/// `module_registry` as `php_module_startup` meets it beyond what the
+/// engine's tables hold: the dynamic libraries the ini asked to load,
+/// the extensions refused for a dependency ([`unload_unmet`]), and what
+/// every extension kept supplies ([`Suppliers`]).
+struct Registry<'a> {
+    loads: &'a Loads,
+    unloaded: Vec<Unloaded>,
+    suppliers: Suppliers,
+}
+
+/// An extension `zend_startup_module_ex` refused for a dependency: where
+/// in start order its check stood, as the place in `module_registry`
+/// (Core 0) of the extension that starts next, and php's warning.
+struct Unloaded {
+    before: usize,
+    message: String,
+}
+
+/// `zend_startup_module_ex`'s check (`Z/Zend/zend_API.c:2417-2447`), made
+/// over the sorted bundle before any `MINIT`: an extension one of whose
+/// `MODULE_DEP_REQUIRED` rows names no extension started before it,
+/// compared case-insensitively, is taken out of `modules`, with php's
+/// `E_CORE_WARNING` kept for the startup to raise in its place, so an
+/// extension requiring it is refused in turn; `registered` is renumbered
+/// to the places left. php registers a persistent extension's functions
+/// before the check and keeps them once it fails; here nothing of the
+/// refused extension stays, since none of it was started.
+fn unload_unmet(modules: &mut Vec<Extension>, registered: &mut Vec<usize>) -> Vec<Unloaded> {
+    let mut started: Vec<usize> = Vec::with_capacity(modules.len());
+    let mut unloaded = Vec::new();
+    for (at, module) in modules.iter().enumerate() {
+        let unmet = (module.dependencies.iter())
+            .filter(|dep| dep.kind == DependencyKind::Required)
+            .find(|dep| {
+                !dep.name.eq_ignore_ascii_case("Core")
+                    && !(started.iter()).any(|&s| modules[s].name.eq_ignore_ascii_case(&dep.name))
+            });
+        match unmet {
+            Some(dep) => unloaded.push(Unloaded {
+                before: started.len() + 1,
+                message: format!(
+                    "Cannot load module \"{}\" because required module \"{}\" is not loaded",
+                    module.name, dep.name
+                ),
+            }),
+            None => started.push(at),
+        }
+    }
+    if unloaded.is_empty() {
+        return unloaded;
+    }
+    let place = |old: usize| started.binary_search(&old).ok();
+    registered.retain_mut(|old| place(*old).inspect(|new| *old = *new).is_some());
+    *modules = (std::mem::take(modules).into_iter().enumerate())
+        .filter_map(|(at, module)| place(at).map(|_| module))
+        .collect();
+    unloaded
+}
+
 /// One extension's `MINIT` (ADR-0010): its process start, called once
 /// for the process and its outcome kept ([`crate::process_scope`]), its
 /// process state then handed to `start` for this engine start and every
@@ -3416,6 +3496,57 @@ fn start_module(
         states.push(build(start)?);
     }
     Ok(())
+}
+
+/// What the startup request meets as `zend_startup_modules` walks the
+/// bundle, before any engine start: each value the host set for an entry
+/// with an `on_modify` handed to it in `held`'s order, those it took
+/// added to `taken` at the startup stage and to `activated` at the
+/// activate stage, and each extension refused for a dependency raising as its
+/// turn comes ([`unload_unmet`]). The marks say where each extension's
+/// raising starts, by its place in `module_registry`: a refused start
+/// shows what php raised before it, which is nothing of a later
+/// extension's (`Engine::refused`).
+fn modules_startup(
+    req: &mut Request,
+    extensions: &[Extension],
+    held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+    unloaded: Vec<Unloaded>,
+    taken: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    activated: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
+) -> Vec<(usize, usize)> {
+    let mut marks = Vec::new();
+    let mut unloaded = unloaded.into_iter().peekable();
+    let mut refuse_until = |req: &mut Request, marks: &mut Vec<(usize, usize)>, owner| {
+        while let Some(refused) = unloaded.next_if(|refused| refused.before <= owner) {
+            marks.push((refused.before, req.startup_raised_len()));
+            crate::api::raising::raise(req, Level::CoreWarning, &refused.message);
+        }
+    };
+    for (name, value, activate) in held {
+        let owner = (extensions.iter())
+            .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name))
+            .unwrap_or(usize::MAX);
+        refuse_until(req, &mut marks, owner);
+        marks.push((owner, req.startup_raised_len()));
+        req.set_ini_stage(if activate {
+            IniStage::Activate
+        } else {
+            IniStage::Startup
+        });
+        let accepted = on_modify(extensions, &name)
+            .is_some_and(|handler| matches!(handler(req, Some(&value)), Ok(true)));
+        if accepted {
+            req.take_startup_value(&name, &value);
+            if activate {
+                activated.push((name, Some(value)));
+            } else {
+                taken.push((name, Some(value)));
+            }
+        }
+    }
+    refuse_until(req, &mut marks, usize::MAX);
+    marks
 }
 
 /// The `on_modify` an extension of `extensions` gave the entry `name`.
@@ -3447,13 +3578,19 @@ pub struct Engine {
 /// master's to end. Armed once the engine has started; an engine whose
 /// start was refused is not ended.
 #[derive(Default)]
-struct EngineEnd(OnceLock<(Arc<Shared>, &'static str)>);
+struct EngineEnd {
+    shared: OnceLock<Arc<Shared>>,
+    /// What the host left for the end to write to
+    /// ([`EngineBuilder::ends_into`]), taken once, by the drop.
+    sink: Mutex<Option<Box<dyn OutputSink + Send>>>,
+}
 
 impl EngineEnd {
-    /// From here the drop of the engine's last clone ends `shared`, on a
-    /// request under the host's name `sapi_name`.
-    fn arm(&self, shared: &Arc<Shared>, sapi_name: &'static str) {
-        self.0.set((Arc::clone(shared), sapi_name)).ok();
+    /// From here the drop of the engine's last clone ends `shared`,
+    /// writing to `sink` where the host left one.
+    fn arm(&self, shared: &Arc<Shared>, sink: Option<Box<dyn OutputSink + Send>>) {
+        self.shared.set(Arc::clone(shared)).ok();
+        *self.sink.lock().unwrap_or_else(PoisonError::into_inner) = sink;
     }
 }
 
@@ -3466,13 +3603,16 @@ impl Drop for EngineEnd {
     /// ([`end_phase`]), the request dropped with its states in reverse;
     /// and then, with the last owner of what every request shares, the
     /// engine states in reverse (`zend_destroy_modules`). What the
-    /// request writes reaches no host. A start an extension refused, or
+    /// request writes, a diagnostic an engine-end function raised among
+    /// it, goes to the sink the host left ([`EngineBuilder::ends_into`]),
+    /// as php writes it with `php_output` not activated, and reaches no host
+    /// where none was left. A start an extension refused, or
     /// the extensions' post-startup refused, ends nothing: a failed
     /// `MINIT` ends php's process from `php_error_cb` (`exit(-2)`), and no
     /// host of php's calls `php_module_shutdown` once
     /// `php_module_startup` failed.
     fn drop(&mut self) {
-        let Some((shared, sapi_name)) = self.0.take() else {
+        let Some(shared) = self.shared.take() else {
             return;
         };
         if shared.refused.is_some()
@@ -3485,12 +3625,21 @@ impl Drop for EngineEnd {
         }
         drop(shared.persistent.drain());
         let description = RequestDescription {
-            sapi_name: sapi_name.to_owned(),
+            sapi_name: shared.host.to_owned(),
             ..RequestDescription::default()
         };
         let mut req = Request::new(Arc::clone(&shared), description);
+        let mut sink = (self.sink.get_mut())
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(held) = sink.as_mut().and_then(|sink| sink.held()) {
+            req.hold(held);
+        }
         req.enter_phase(crate::api::request::Phase::EngineEnd);
         end_phase(&shared.extensions, &mut req, |e| e.engine_end);
+        if let Some(sink) = sink.as_mut() {
+            crate::preload::hand_over(&mut req, sink.as_mut());
+        }
     }
 }
 
@@ -3534,6 +3683,7 @@ impl Engine {
             cli_shell: false,
             configure: &[],
             trace_to: None,
+            ends_into: None,
             #[cfg(debug_assertions)]
             sense_leaks: LeakSensor::default(),
         }
@@ -3584,8 +3734,7 @@ impl Engine {
         &mut self,
         mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
         mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
-        loads: &Loads,
-        sapi_name: &'static str,
+        registry: Registry<'_>,
         bind_loops: BindLoops,
     ) {
         // `php_module_startup`'s `zend_reset_lc_ctype_locale`, before any
@@ -3607,6 +3756,7 @@ impl Engine {
         // A host's own entries after, at `ZEND_INI_STAGE_ACTIVATE`, as
         // php-fpm's child applies its pool's once php has started.
         held.sort_by_key(|(name, _, activate)| (*activate, declared_at(name)));
+        let sapi_name = self.shared.host;
         let description = RequestDescription {
             sapi_name: sapi_name.to_owned(),
             ..RequestDescription::default()
@@ -3614,32 +3764,21 @@ impl Engine {
         let mut req = Request::new(Arc::clone(&self.shared), description);
         req.begin_startup();
         let mut taken = core_startup(&mut req);
+        let Registry {
+            loads,
+            unloaded,
+            suppliers,
+        } = registry;
         let failed = register_extensions(&mut req, loads);
-        // Where each extension's handlers start raising, by its place in
-        // the bundle: a refused start shows what php raised before it,
-        // which is nothing of a later extension's (`Engine::refused`).
-        let mut marks = Vec::new();
         let mut activated = Vec::new();
-        for (name, value, activate) in held {
-            let owner = (self.shared.extensions.iter())
-                .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name));
-            marks.push((owner.unwrap_or(usize::MAX), req.startup_raised_len()));
-            req.set_ini_stage(if activate {
-                IniStage::Activate
-            } else {
-                IniStage::Startup
-            });
-            let accepted = on_modify(&self.shared.extensions, &name)
-                .is_some_and(|handler| matches!(handler(&mut req, Some(&value)), Ok(true)));
-            if accepted {
-                req.take_startup_value(&name, &value);
-                if activate {
-                    activated.push((name, Some(value)));
-                } else {
-                    taken.push((name, Some(value)));
-                }
-            }
-        }
+        let marks = modules_startup(
+            &mut req,
+            &self.shared.extensions,
+            held,
+            unloaded,
+            &mut taken,
+            &mut activated,
+        );
         req.set_ini_stage(IniStage::Startup);
         let encoding_at = req.startup_raised_len();
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
@@ -3703,7 +3842,8 @@ impl Engine {
             shown.raised = before.chain(encoding).cloned().collect();
             shown.raised.extend(refusal.raised);
             let failed = format!("Unable to start {} module", extension.name);
-            shared.refused = Some((sapi_name, shown.raise(Level::CoreError, failed)));
+            shared.refused = Some(shown.raise(Level::CoreError, failed));
+            shared.supplied = suppliers.refused_at(ExtensionId::at(at));
             break;
         }
         if shared.refused.is_none() {
@@ -3724,9 +3864,9 @@ impl Engine {
     /// `None` for an engine that started. Every request a refused engine
     /// is asked for is refused so.
     pub fn refused(&self, sink: &mut dyn OutputSink) -> Option<i32> {
-        let (host, refused) = self.shared.refused.as_ref()?;
+        let refused = self.shared.refused.as_ref()?;
         let description = RequestDescription {
-            sapi_name: (*host).to_owned(),
+            sapi_name: self.shared.host.to_owned(),
             ..RequestDescription::default()
         };
         let mut req = Request::new(Arc::clone(&self.shared), description);

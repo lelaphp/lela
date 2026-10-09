@@ -8,7 +8,7 @@ use php_ext::test::{Capture, Engine, LeakSensor};
 /// What one request of an armed engine with this extension alone wrote.
 fn armed(source: &str) -> String {
     let engine = Engine::builder()
-        .extensions(&[php_ext_uri::extension()])
+        .extensions(&[php_ext_lexbor::extension(), php_ext_uri::extension()])
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());

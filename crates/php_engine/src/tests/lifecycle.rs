@@ -711,9 +711,10 @@ fn the_built_in_server_ends_a_request_whose_start_failed() {
 /// request's, which the startup request builds too. The one engine
 /// state built drops with the engine. The `error` link of the extension
 /// that started is told both diagnostics, as php's `php_error_cb` is the
-/// error callback a link saved at `MINIT` while php starts; that the
-/// never-started extension's link is told too is #1953's, so the
-/// sequence is read without the error links.
+/// error callback a link saved at `MINIT` while php starts; the refused
+/// extension's and the never-started one's are told nothing, since no
+/// `MINIT` of theirs installed them (#1953), so the sequence is read
+/// without the error links and the links are read apart.
 #[test]
 fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_request() {
     let rec = Recording::start();
@@ -750,15 +751,19 @@ fn an_engine_start_that_refuses_starts_no_later_extension_and_refuses_every_requ
         [Ext(0, EngineStateBuilt(0)), Ext(1, EngineStartRefused)]
     );
     assert_eq!(requests("built", "served"), []);
-    let told: Vec<String> = (events.between("built", "served").0.into_iter())
-        .filter_map(|e| match e {
-            Ext(0, Error(message)) => Some(message),
-            _ => None,
-        })
-        .collect();
+    let told = |n: u8| -> Vec<String> {
+        (events.between("built", "served").0.into_iter())
+            .filter_map(|e| match e {
+                Ext(at, Error(message)) if at == n => Some(message),
+                _ => None,
+            })
+            .collect()
+    };
     let warning = "test_ext_1 refuses to start under 'cli'";
     let fatal = "Unable to start test_ext_1 module";
-    assert_eq!(told, [warning, fatal, warning, fatal]);
+    assert_eq!(told(0), [warning, fatal, warning, fatal]);
+    assert_eq!(told(1), [] as [String; 0]);
+    assert_eq!(told(2), [] as [String; 0]);
     assert_eq!(
         events.between("served", "dropped").0,
         [Ext(0, EngineStateDropped(0))]
@@ -901,4 +906,182 @@ fn two_extensions_with_one_process_state_type_are_each_started() {
         .build();
     let events = rec.events();
     assert_eq!(events.handed(&ProcessStateBuilt), [103, 103]);
+}
+
+/// `ZEND_MOD_REQUIRED(name)`, a row of an extension's `deps` table.
+fn required(name: &str) -> crate::api::abi::Dependency {
+    crate::api::abi::Dependency {
+        name: name.to_owned(),
+        kind: crate::api::abi::DependencyKind::Required,
+        rel: None,
+        version: None,
+    }
+}
+
+/// An extension named `name` declaring one empty class, `class`, and
+/// requiring each of `requires`.
+fn declaring(name: &str, class: &str, requires: &[&str]) -> Extension {
+    use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, Name};
+    let decl = ClassDecl {
+        name: Name(class.as_bytes().into()),
+        kind: ClassKind::Class,
+        flags: ClassFlags::default(),
+        parent: None,
+        interfaces: Vec::new(),
+        implementors: Vec::new(),
+        aliases: Vec::new(),
+        traits: Vec::new(),
+        adaptations: Vec::new(),
+        backing: EnumBacking::Pure,
+        constants: Vec::new(),
+        properties: Vec::new(),
+        methods: Vec::new(),
+        attributes: Vec::new(),
+        doc_comment: None,
+        file: Name(Box::new([])),
+        line: 0,
+        end_line: 0,
+        object_size: 0,
+        object_beside: Box::new([]),
+    };
+    ExtensionBuilder::default()
+        .dependencies(requires.iter().map(|name| required(name)).collect())
+        .classes(vec![(decl, Vec::new())])
+        .build(name)
+}
+
+/// `zend_startup_module_ex` (`Z/Zend/zend_API.c:2417-2447`): an
+/// extension whose `MODULE_DEP_REQUIRED` row names no extension started
+/// before it, compared case-insensitively, is not started and leaves
+/// `module_registry`, with php's `E_CORE_WARNING` among what the
+/// startup raised; so its classes never register, and an extension
+/// requiring it is refused in turn. `pdo` requires `spl`; with `SPL`
+/// beside it, the negative control, both start and nothing is raised.
+/// The warning stands where php raises it, after the dynamic-library
+/// warnings of `php_ini_register_extensions` and before
+/// `zend_disable_functions`' own.
+#[test]
+fn an_extension_whose_required_dependency_is_absent_is_not_started() {
+    let pdo = || declaring("PDO", "PDO", &["spl"]);
+    let pdo_driver = || declaring("pdo_driver", "PdoDriver", &["pdo"]);
+    let probe =
+        "<?php var_dump(class_exists('PDO'), extension_loaded('pdo'), class_exists('PdoDriver'));";
+    let control = Engine::cli_builder()
+        .extensions(&[declaring("SPL", "ArrayObject", &[]), pdo(), pdo_driver()])
+        .build();
+    let served = control.serve_capture(probe, Capture::default());
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "bool(true)\nbool(true)\nbool(true)\n"
+    );
+    let engine = Engine::cli_builder()
+        .ini("extension_dir", "/nope")
+        .ini("extension", "x")
+        .ini("disable_functions", "exit")
+        .extensions(&[pdo(), pdo_driver()])
+        .build();
+    let served = engine.serve_capture(probe, Capture::default());
+    let stdout = String::from_utf8_lossy(&served.stdout);
+    let refused = [
+        "\nWarning: Cannot load module \"PDO\" because required module \"spl\" is not loaded in Unknown on line 0\n",
+        "\nWarning: Cannot load module \"pdo_driver\" because required module \"pdo\" is not loaded in Unknown on line 0\n",
+    ]
+    .concat();
+    let at = stdout.find(&refused);
+    assert!(at.is_some(), "{stdout}");
+    let library = stdout.find("Unable to load dynamic library 'x'");
+    let disabled = stdout.find("Cannot disable function exit()");
+    assert!(library < at && at < disabled, "{stdout}");
+    assert!(
+        stdout.ends_with("bool(false)\nbool(false)\nbool(false)\n"),
+        "{stdout}"
+    );
+}
+
+/// What a host leaves with its engine for the engine end, kept where the
+/// test reads it once the engine is gone: the body and the log, each as
+/// written.
+#[derive(Clone, Default)]
+struct Left {
+    body: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    log: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl Left {
+    fn read(kept: &std::sync::Mutex<Vec<u8>>) -> String {
+        let kept = kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        String::from_utf8_lossy(&kept).into_owned()
+    }
+}
+
+impl crate::engine::OutputSink for Left {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), crate::engine::Aborted> {
+        let mut body = (self.body.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        body.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn flush(&mut self) {}
+
+    fn send_headers(&mut self, _: &crate::engine::ResponseHead) {}
+
+    fn log(&mut self, entry: &[u8]) {
+        let mut log = (self.log.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.extend_from_slice(entry);
+        log.push(b'\n');
+    }
+
+    fn write_stderr(&mut self, bytes: &[u8]) {
+        let mut log = (self.log.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);
+        log.extend_from_slice(bytes);
+    }
+}
+
+/// An engine-end function that raises a warning, as an `MSHUTDOWN` may
+/// through `php_error_docref`.
+fn warns_at_end<const N: u8>(req: &mut Request) {
+    record(N, EngineEnd(None));
+    crate::api::raising::docref(req, crate::api::raising::Level::Warning, "left unfinished");
+}
+
+/// `php_module_shutdown` serves `MSHUTDOWN` with `php_output` not activated: a
+/// diagnostic one raises is displayed through `php_output_direct`, which
+/// writes the process's stdout (`Z/main/output.c:250`), and, under
+/// `log_errors`, logged through `sapi_module.log_message`, since
+/// `module_initialized` still holds, labelled `PHP Shutdown`
+/// (`php_verror`, `Z/main/main.c:1088-1089`). Here the host leaves the
+/// engine a sink for its end ([`EngineBuilder::ends_into`]), as
+/// `php_sapi::start` leaves its process's streams and log, and the
+/// warning reaches it as php's CLI writes it, displayed and logged;
+/// without one, the negative control, it reaches nothing.
+#[test]
+fn a_diagnostic_raised_at_engine_end_is_displayed_and_logged_where_the_host_left() {
+    let rec = Recording::start();
+    let warning = || {
+        TestExt::<0>::builder()
+            .engine_end(warns_at_end::<0>)
+            .build("test_ext_0")
+    };
+    let left = Left::default();
+    let engine = Engine::cli_builder()
+        .ini("log_errors", "1")
+        .extensions(&[warning()])
+        .ends_into(Box::new(left.clone()))
+        .build();
+    serve(&engine);
+    drop(engine);
+    assert_eq!(
+        Left::read(&left.body),
+        "\nWarning: PHP Shutdown: left unfinished in Unknown on line 0\n"
+    );
+    assert_eq!(
+        Left::read(&left.log),
+        "PHP Warning:  PHP Shutdown: left unfinished in Unknown on line 0\n"
+    );
+    let unheard = Engine::cli_builder().extensions(&[warning()]).build();
+    serve(&unheard);
+    drop(unheard);
+    assert_eq!(rec.events().handed(&EngineEnd(None)), [0, 0]);
 }

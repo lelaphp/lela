@@ -10,7 +10,11 @@ use php_ext::test::{Capture, Engine, LeakSensor};
 /// to its standard stream and to its error stream.
 fn armed(source: &str) -> (String, String) {
     let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+        ])
         .sense_leaks(LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(source, Capture::default());

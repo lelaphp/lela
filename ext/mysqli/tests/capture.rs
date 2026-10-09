@@ -7,7 +7,15 @@ use php_ext::test::{Capture, Engine};
 #[test]
 fn the_extension_is_loaded() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_mysqli::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqli::extension(),
+        ])
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('mysqli'));", sink);
@@ -28,7 +36,15 @@ fn a_persistent_link_serves_the_next_request() {
         return;
     }
     let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ])
         .build();
     let connect = "mysqli_connect('p:127.0.0.1', 'root', '', 'test')";
     let first = format!("<?php $l = {connect}; echo mysqli_thread_id($l);");
@@ -64,6 +80,10 @@ fn a_persistent_link_keeps_its_socket_however_full_the_stream_pool_is() {
     }
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_mysqlnd::extension(),
             php_ext_mysqli::extension(),
@@ -101,7 +121,15 @@ fn a_link_from_init_connected_without_p_is_closed_as_the_request_ends() {
         return;
     }
     let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ])
         .build();
     let first = "<?php $l = mysqli_init(); $kept = $l; $l->real_connect('127.0.0.1', 'root', '', 'test'); echo $l->thread_id;";
     let served = engine.serve_capture(first, Capture::default());
@@ -137,6 +165,10 @@ fn a_session_written_at_the_request_end_still_has_the_link() {
     }
     let engine = Engine::builder()
         .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
             php_ext_standard::extension(),
             php_ext_session::extension(),
             php_ext_mysqlnd::extension(),
@@ -227,7 +259,15 @@ fn armed(extensions: &[Extension], ini: &[(&str, &str)]) -> Option<Engine> {
 #[test]
 fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
     let Some(engine) = armed(
-        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ],
         &[("mysqli.allow_local_infile", "1")],
     ) else {
         return;
@@ -274,7 +314,15 @@ fn an_armed_request_over_the_wire_leaves_none_of_its_packets_held() {
 #[test]
 fn an_armed_request_reading_its_warnings_leaves_none_held() {
     let Some(engine) = armed(
-        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ],
         &[],
     ) else {
         return;
@@ -303,6 +351,11 @@ fn an_armed_request_reading_its_warnings_leaves_none_held() {
 fn an_armed_request_refused_by_the_server_leaves_none_held() {
     let Some(engine) = armed(
         &[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
             php_ext_openssl::extension(),
             php_ext_mysqlnd::extension(),
             php_ext_mysqli::extension(),
@@ -329,7 +382,15 @@ fn an_armed_request_refused_by_the_server_leaves_none_held() {
 #[test]
 fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
     let Some(engine) = armed(
-        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ],
         &[],
     ) else {
         return;
@@ -353,7 +414,15 @@ fn an_armed_request_reading_a_statements_errors_leaves_none_held() {
 #[test]
 fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
     let Some(engine) = armed(
-        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ],
         &[],
     ) else {
         return;
@@ -380,7 +449,15 @@ fn an_armed_request_whose_text_arguments_are_converted_leaves_none_held() {
 #[test]
 fn an_armed_request_reading_the_servers_key_from_a_file_leaves_none_held() {
     let Some(engine) = armed(
-        &[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()],
+        &[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ],
         &[],
     ) else {
         return;
@@ -442,7 +519,15 @@ fn a_free_persistent_link_is_quit_as_the_engine_ends() {
         sent.send(seen).ok();
     });
     let engine = Engine::builder()
-        .extensions(&[php_ext_mysqlnd::extension(), php_ext_mysqli::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_json::extension(),
+            php_ext_standard::extension(),
+            php_ext_spl::extension(),
+            php_ext_uri::extension(),
+            php_ext_mysqlnd::extension(),
+            php_ext_mysqli::extension(),
+        ])
         .build();
     let script = format!(
         "<?php $l = mysqli_connect('p:127.0.0.1', 'root', '', 'test', {port}); echo $l ? 'connected' : 'refused';"

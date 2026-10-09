@@ -48,7 +48,11 @@ fn has_locale(engine: &Engine, name: &str) -> bool {
 #[test]
 fn two_requests_at_once_never_read_each_other_s_locale() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+        ])
         .build();
     if !has_locale(&engine, "de_DE") {
         return;

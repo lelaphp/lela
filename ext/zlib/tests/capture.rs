@@ -21,7 +21,12 @@ fn the_extension_is_loaded() {
 #[test]
 fn turning_output_compression_on_keeps_nothing_of_the_output_layer_s() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_standard::extension(), php_ext_zlib::extension()])
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            php_ext_zlib::extension(),
+        ])
         .sense_leaks(php_ext::test::LeakSensor::Armed)
         .build();
     let served = engine.serve_capture(

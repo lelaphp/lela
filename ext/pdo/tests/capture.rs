@@ -6,7 +6,11 @@ use php_ext::test::{Capture, Engine};
 #[test]
 fn the_extension_is_loaded() {
     let engine = Engine::builder()
-        .extensions(&[php_ext_pdo::extension()])
+        .extensions(&[
+            php_ext_json::extension(),
+            php_ext_spl::extension(),
+            php_ext_pdo::extension(),
+        ])
         .build();
     let sink = Capture::default();
     let served = engine.serve_capture("<?php var_dump(extension_loaded('pdo'));", sink);
