@@ -8,6 +8,15 @@
 //! handed; the tier is not in `enabled()` and is absent from
 //! `get_loaded_extensions()`, as php's compiled tier is.
 #![forbid(unsafe_code)]
+// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
 use php_ext::abi::Extension;
 

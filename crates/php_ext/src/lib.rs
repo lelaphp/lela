@@ -8,6 +8,15 @@
 //! the `Capture` sink and `Engine::serve_capture` for an extension's own
 //! tests. `api.lock` lists every public item here.
 #![forbid(unsafe_code)]
+// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
 pub use php_engine::api::{abi, call, coerce, decl, process, raising, syntax, values};
 
