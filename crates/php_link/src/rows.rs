@@ -212,6 +212,156 @@ impl<R, C: Case> Rows<R, C> {
     }
 }
 
+/// A declaration that carries its own name, as a row of
+/// `CG(function_table)`, `CG(class_table)` or `EG(zend_constants)` is
+/// filed under it.
+pub trait Named {
+    /// The name the row is filed under, as declared.
+    fn name(&self) -> &[u8];
+}
+
+impl Named for php_unit::decl::FunctionDecl {
+    fn name(&self) -> &[u8] {
+        &self.name.0
+    }
+}
+
+impl Named for php_unit::decl::ClassDecl {
+    fn name(&self) -> &[u8] {
+        &self.name.0
+    }
+}
+
+impl Named for php_unit::decl::ConstDecl {
+    fn name(&self) -> &[u8] {
+        &self.name.0
+    }
+}
+
+/// An index of a table's positions by name, the `HashTable` php keeps
+/// `CG(function_table)`, `CG(class_table)` and `EG(zend_constants)` in,
+/// over rows its holder keeps in order beside other columns of the same
+/// rows: the first row of a name is the one found, as `zend_hash_add`
+/// keeps the first, and every row stays where it stands. No name is
+/// held; each is read through the rows ([`Named`]).
+#[derive(Debug, Clone)]
+pub struct Names<C> {
+    index: HashTable<u32>,
+    case: PhantomData<C>,
+}
+
+impl<C> Names<C> {
+    /// The index of no rows.
+    #[must_use]
+    pub const fn new() -> Names<C> {
+        Names {
+            index: HashTable::new(),
+            case: PhantomData,
+        }
+    }
+}
+
+impl<C> Default for Names<C> {
+    fn default() -> Self {
+        Names::new()
+    }
+}
+
+impl<C: Case> Names<C> {
+    /// The index of `rows`, each under its name; a row past the
+    /// positions a `u32` numbers is not filed.
+    #[must_use]
+    pub fn over<R: Named>(rows: &[R]) -> Names<C> {
+        let hashes: Vec<u32> = rows.iter().map(|row| hash::<C>(row.name())).collect();
+        let mut index = HashTable::with_capacity(rows.len());
+        for (at, (row, &hash)) in rows.iter().zip(&hashes).enumerate() {
+            let Ok(position) = u32::try_from(at) else {
+                break;
+            };
+            let held = |&p: &u32| {
+                let p = usize::try_from(p).unwrap_or(usize::MAX);
+                rows.get(p)
+                    .is_some_and(|held| same::<C>(held.name(), row.name()))
+            };
+            if index.find(wide(hash), held).is_none() {
+                index.insert_unique(wide(hash), position, |&p| {
+                    wide(
+                        hashes
+                            .get(usize::try_from(p).unwrap_or(usize::MAX))
+                            .copied()
+                            .unwrap_or(0),
+                    )
+                });
+            }
+        }
+        Names {
+            index,
+            case: PhantomData,
+        }
+    }
+
+    /// The position among `rows`, the rows the index was made over, of
+    /// the first named `name`.
+    pub fn find<R: Named>(&self, rows: &[R], name: &[u8]) -> Option<usize> {
+        let found = self.index.find(wide(hash::<C>(name)), |&at| {
+            let at = usize::try_from(at).unwrap_or(usize::MAX);
+            rows.get(at).is_some_and(|row| same::<C>(row.name(), name))
+        })?;
+        usize::try_from(*found).ok()
+    }
+}
+
+/// A table's rows beside their [`Names`]: the view of one of the
+/// engine's declaration tables the compiler and the engine read a name
+/// through. A view of no rows has no index to read.
+#[derive(Debug)]
+pub struct Indexed<'a, R, C> {
+    rows: &'a [R],
+    names: Option<&'a Names<C>>,
+}
+
+impl<R, C> Clone for Indexed<'_, R, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R, C> Copy for Indexed<'_, R, C> {}
+
+impl<R, C> Default for Indexed<'_, R, C> {
+    /// No rows.
+    fn default() -> Self {
+        Indexed {
+            rows: &[],
+            names: None,
+        }
+    }
+}
+
+impl<'a, R: Named, C: Case> Indexed<'a, R, C> {
+    /// `rows` read through `names`, which was made over them.
+    #[must_use]
+    pub fn new(rows: &'a [R], names: &'a Names<C>) -> Indexed<'a, R, C> {
+        Indexed {
+            rows,
+            names: Some(names),
+        }
+    }
+
+    /// The rows in order.
+    #[must_use]
+    pub fn rows(self) -> &'a [R] {
+        self.rows
+    }
+
+    /// The first row named `name`, beside its position.
+    #[must_use]
+    pub fn find(self, name: &[u8]) -> Option<(usize, &'a R)> {
+        let at = self.names?.find(self.rows, name)?;
+        Some((at, self.rows.get(at)?))
+    }
+}
+
 /// Two names the same under `C`.
 fn same<C: Case>(a: &[u8], b: &[u8]) -> bool {
     if C::FOLDED {
@@ -273,6 +423,31 @@ mod tests {
         rows.add(b"k", b"k", named);
         assert_eq!(rows.rows().len(), 2);
         assert_eq!(rows.find(b"k", named), Some(&&b"k"[..]));
+    }
+
+    #[test]
+    fn an_index_finds_the_first_row_of_a_name_and_keeps_every_row() {
+        use super::{Indexed, Names};
+        use php_unit::decl::{ConstDecl, ConstExpr, Name};
+        let constant = |name: &str, value| ConstDecl {
+            name: Name(name.as_bytes().into()),
+            value: ConstExpr::long(value),
+            attributes: Vec::new(),
+        };
+        let rows = [
+            constant("A", 1),
+            constant("b", 2),
+            constant("A", 3),
+            constant("B", 4),
+        ];
+        let exact: Names<Exact> = Names::over(&rows);
+        let table = Indexed::new(&rows, &exact);
+        assert_eq!(table.find(b"A").map(|(at, _)| at), Some(0));
+        assert_eq!(table.find(b"B").map(|(at, _)| at), Some(3));
+        assert_eq!(table.find(b"a"), None);
+        let folded: Names<Folded> = Names::over(&rows);
+        assert_eq!(folded.find(&rows, b"B"), Some(1));
+        assert_eq!(Indexed::<ConstDecl, Exact>::default().find(b"A"), None);
     }
 
     #[test]

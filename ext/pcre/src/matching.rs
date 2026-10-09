@@ -16,7 +16,7 @@ use crate::constants::{
 };
 use crate::ffi::{self, Context, MatchData, Subject};
 use crate::pattern::{Pattern, compiled};
-use crate::{State, error_code, exec_error, ini_bool, ini_long, set_error};
+use crate::{State, error_code, exec_error, limits, set_error};
 
 /// `PHP_PCRE_PREALLOC_MDATA_SIZE`.
 const PREALLOC_PAIRS: u32 = 32;
@@ -34,9 +34,7 @@ impl Scratch {
     /// php's `mdata_used` test and `pcre2_match_data_create_from_pattern`;
     /// `None`, with `PREG_INTERNAL_ERROR`, where the library had no memory.
     pub(crate) fn take(req: &mut Request, pattern: &Pattern) -> Option<Scratch> {
-        let backtrack = limit(ini_long(req, "pcre.backtrack_limit"));
-        let recursion = limit(ini_long(req, "pcre.recursion_limit"));
-        let jit = ini_bool(req, "pcre.jit");
+        let limits = limits(req);
         let state = req.state::<State>();
         let context = state.context.take().or_else(Context::new);
         let fits = pattern.groups <= PREALLOC_PAIRS as usize;
@@ -55,7 +53,7 @@ impl Scratch {
             set_error(req, PREG_INTERNAL_ERROR);
             return None;
         };
-        context.configure(backtrack, recursion, jit);
+        context.configure(limits.backtrack, limits.recursion, limits.jit);
         Some(Scratch {
             data,
             context,
@@ -118,11 +116,6 @@ impl Scratch {
                 .unwrap_or(ffi::PCRE2_UNSET),
         )
     }
-}
-
-/// `(uint32_t)PCRE_G(backtrack_limit)`: the low 32 bits, as C's cast.
-fn limit(value: i64) -> u32 {
-    u32::try_from(value.rem_euclid(1 << 32)).unwrap_or(u32::MAX)
 }
 
 /// `calculate_unit_length`: one byte, or under `/u` the character that

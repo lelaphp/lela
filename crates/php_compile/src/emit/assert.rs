@@ -116,6 +116,7 @@ impl Emit<'_> {
         let served = if let Some(index) = native {
             let parameters = self
                 .functions
+                .rows()
                 .get(index)
                 .map(|decl| decl.parameters.as_slice())
                 .unwrap_or_default();

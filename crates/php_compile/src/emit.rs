@@ -100,6 +100,7 @@ use php_syntax::{Holder, Parsed, SyntaxKind, TokenValue};
 use php_heap::{
     Exponent, Fatal, Intern, Key, Number, Scalar, Zval, ZvalType, double_to_string, numeric_prefix,
 };
+use php_link::{Exact, Indexed};
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
@@ -108,7 +109,7 @@ use php_unit::decl::{
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
-    OpArray, Opcode, OperandKind, Opline, OplineIdx, TryCatch, Unit, frameless_table,
+    OpArray, Opcode, OperandKind, Opline, OplineIdx, TryCatch, Unit,
 };
 
 use php_syntax::magic_const_name;
@@ -383,11 +384,11 @@ pub(crate) struct Emit<'a> {
     /// What an `assert()` compiles to, [`Options::assertions`].
     assertions: assert::Assertions,
     /// The engine's persistent constants, [`Options::persistent`].
-    persistent: &'a [ConstDecl],
+    persistent: Indexed<'a, ConstDecl, Exact>,
     /// The engine's natives, [`Options::functions`].
-    functions: &'a [FunctionDecl],
+    functions: Indexed<'a, FunctionDecl, php_link::Folded>,
     /// The engine's classes, [`Options::classes`].
-    known_classes: &'a [ClassDecl],
+    known_classes: Indexed<'a, ClassDecl, php_link::Folded>,
     /// The hooks the host replaced, [`Options::hooked`].
     hooked: crate::Hooked,
     /// Whether the extended oplines are emitted,
@@ -395,9 +396,8 @@ pub(crate) struct Emit<'a> {
     extended_info: bool,
     /// The request's, [`Options::request_classes`].
     request_classes: crate::RequestClasses<'a>,
-    /// `zend_flf_functions` over them, what a `FRAMELESS_ICALL_*`'s
-    /// `extended_value` indexes (`find_frameless_function_offset`).
-    frameless: Vec<FramelessEntry>,
+    /// `zend_flf_functions` over them, [`Options::frameless`].
+    frameless: &'a [FramelessEntry],
     /// `FC(current_namespace)`: the namespace a `namespace` statement
     /// put what follows it in, and none before one.
     namespace: Option<Vec<u8>>,
@@ -1189,7 +1189,7 @@ impl<'a> Emit<'a> {
             hooked: options.hooked,
             extended_info: options.extended_info,
             request_classes: options.request_classes,
-            frameless: frameless_table(options.functions),
+            frameless: options.frameless,
             namespace: None,
             namespacing: Namespacing::Global,
             imports: Imports::default(),
@@ -6913,11 +6913,11 @@ impl Emit<'_> {
     /// engine declared, or one of the file's own that was bound early,
     /// which a class declared by a `DECLARE_CLASS` is not yet.
     pub(super) fn bound_class(&self, name: &[u8]) -> Option<&ClassDecl> {
-        let wanted = name.to_ascii_lowercase();
-        self.known_classes
-            .iter()
-            .chain(self.bound.iter().filter_map(|at| self.classes.get(*at)))
-            .find(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+        if let Some((_, decl)) = self.known_classes.find(name) {
+            return Some(decl);
+        }
+        (self.bound.iter().filter_map(|at| self.classes.get(*at)))
+            .find(|decl| decl.name.0.eq_ignore_ascii_case(name))
     }
 
     /// `ZEND_DECLARE_CLASS`, what php emits for a class it did not early
@@ -15707,6 +15707,7 @@ impl Emit<'_> {
                 }
                 let (parameters, flagged) = self
                     .functions
+                    .rows()
                     .get(index)
                     .map(|decl| {
                         (
@@ -16907,11 +16908,7 @@ impl Emit<'_> {
             .active_class
             .as_ref()
             .is_some_and(|active| active.name.to_ascii_lowercase() == class);
-        if let Some(decl) = self
-            .known_classes
-            .iter()
-            .find(|decl| decl.name.0.to_ascii_lowercase() == class)
-        {
+        if let Some((_, decl)) = self.known_classes.find(&class) {
             return decl
                 .methods
                 .iter()
@@ -17385,7 +17382,7 @@ impl Emit<'_> {
     /// count is at most the count, and a variadic native's entry is of
     /// the count exactly; a call of more than three arguments has none.
     fn frameless_arity(&self, index: usize, count: usize) -> Option<u32> {
-        let decl = self.functions.get(index)?;
+        let decl = self.functions.rows().get(index)?;
         if count > 3 || self.hooked.natives {
             return None;
         }
@@ -17446,6 +17443,7 @@ impl Emit<'_> {
             }
             let default = self
                 .functions
+                .rows()
                 .get(index)
                 .and_then(|decl| decl.parameters.get(at))
                 .and_then(|parameter| parameter.default.expr())
@@ -18390,9 +18388,7 @@ impl Emit<'_> {
     /// [`Self::native`] with the native's place in the table, php's
     /// `fbc`: what the frameless table is indexed by.
     fn native_index(&self, lowered: &[u8]) -> Option<usize> {
-        self.functions
-            .iter()
-            .position(|decl| decl.name.0.eq_ignore_ascii_case(lowered))
+        self.functions.find(lowered).map(|(at, _)| at)
     }
 
     /// `zend_try_ct_eval_const`: php substitutes a persistent constant's
@@ -18420,7 +18416,7 @@ impl Emit<'_> {
             b"NAN" => return Ok(Some(Zval::double(f64::NAN))),
             _ => {}
         }
-        let Some(declared) = self.persistent.iter().find(|c| c.name.0.as_ref() == name) else {
+        let Some((_, declared)) = self.persistent.find(name) else {
             return Ok(None);
         };
         // `can_ct_eval_const` (`Z/Zend/zend_compile.c:1650`) refuses a
@@ -18987,7 +18983,7 @@ mod tests {
             hooked: options.hooked,
             extended_info: options.extended_info,
             request_classes: options.request_classes,
-            frameless: Vec::new(),
+            frameless: options.frameless,
             namespace: Some(b"A".to_vec()),
             namespacing: Namespacing::Unbracketed,
             imports: Imports::default(),

@@ -58,18 +58,10 @@ impl Encoder {
             depth: 0,
             max_depth,
             error_code: JSON_ERROR_NONE,
-            precision: serialize_precision(req),
+            precision: req.serialize_precision(),
             serializable: call::lookup_class(req, b"JsonSerializable")?,
         })
     }
-}
-
-/// `PG(serialize_precision)`, the digits `zend_gcvt` is asked for.
-fn serialize_precision(req: &Request) -> i32 {
-    req.ini_get(b"serialize_precision")
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(|text| text.trim().parse().ok())
-        .unwrap_or(-1)
 }
 
 /// php's `SUCCESS` and `FAILURE` from one of the encoder's functions.

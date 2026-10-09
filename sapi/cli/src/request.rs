@@ -483,7 +483,7 @@ mod tests {
         };
         let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
         let mut builder = Engine::builder()
-            .extensions(&extensions)
+            .extensions(extensions)
             .configure(php_bundle::CONFIGURE)
             .tier::<php_bundle::Tier>();
         for (name, value) in &options.startup.ini {
@@ -627,7 +627,7 @@ mod tests {
             .build("failing");
         Engine::builder()
             .ini("html_errors", "0")
-            .extensions(&[failing])
+            .extensions([failing])
             .build()
     }
 

@@ -47,6 +47,7 @@ pub mod syntax {
 }
 
 use php_heap::Intern;
+use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
 use php_unit::{Diagnostic, Level, Unit};
@@ -102,7 +103,7 @@ pub struct Options<'a> {
     /// The persistent constants the engine's extensions declared
     /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
     /// where they are written; a name not here is fetched as the program serves.
-    pub persistent: &'a [ConstDecl],
+    pub persistent: Indexed<'a, ConstDecl, Exact>,
     /// The natives the engine's bundle declared, php's `CG(function_table)`
     /// as `zend_compile_call` reads it: what `zend_try_compile_special_func`
     /// requires a name to be one of before it serves the call itself
@@ -111,7 +112,12 @@ pub struct Options<'a> {
     /// `INIT_FCALL_BY_NAME`, resolved as the program serves. Every
     /// function here is a native; a user function is declared by nothing
     /// this compiler reads yet.
-    pub functions: &'a [FunctionDecl],
+    pub functions: Indexed<'a, FunctionDecl, Folded>,
+    /// `zend_flf_functions` over [`Options::functions`], what a
+    /// `FRAMELESS_ICALL_*`'s `extended_value` indexes
+    /// (`find_frameless_function_offset`): the engine computes it once,
+    /// with [`php_unit::frameless_table`], as it registers the natives.
+    pub frameless: &'a [php_unit::FramelessEntry],
     /// The classes the engine's bundle declared, php's `CG(class_table)`
     /// as `zend_compile_static_call` reads it: a class the table has
     /// with a public method of the name written is a callee the
@@ -119,7 +125,7 @@ pub struct Options<'a> {
     /// arguments are sent as a known callee's are; any other class or
     /// method is resolved as the program serves. Every class here is a
     /// native one; a class the file itself declares stands beside them.
-    pub classes: &'a [ClassDecl],
+    pub classes: Indexed<'a, ClassDecl, Folded>,
     /// The classes the request the source compiles for has declared by
     /// then, [`RequestClasses`].
     pub request_classes: RequestClasses<'a>,
@@ -167,9 +173,10 @@ impl Default for Options<'_> {
             short_open_tag: true,
             assertions: true,
             shebang: Shebang::Read,
-            persistent: &[],
-            functions: &[],
-            classes: &[],
+            persistent: Indexed::default(),
+            functions: Indexed::default(),
+            frameless: &[],
+            classes: Indexed::default(),
             request_classes: RequestClasses::default(),
             stack: StackLimit::UNCHECKED,
             keys_before: 0,
@@ -537,6 +544,7 @@ fn level_of(level: php_syntax::Level) -> Level {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use php_link::Names;
     use php_unit::decl::{ConstExpr, ConstantName, NameKind, Parameter, Type, Visibility};
     use php_unit::{AutoGlobal, Opcode, OperandKind, OplineIdx, frameless_table};
 
@@ -562,10 +570,11 @@ mod tests {
     /// `compile-identity`.
     fn dump_of(source: &[u8]) -> String {
         let (unit, _strings) = unit_and_strings(source);
-        let functions = bundled().functions;
-        let names: Vec<Name> = frameless_table(functions)
-            .iter()
-            .map(|entry| functions[entry.function as usize].name.clone())
+        let options = bundled();
+        let functions = options.functions.rows();
+        let names: Vec<Name> = (options.frameless.iter())
+            .filter_map(|entry| functions.get(entry.function as usize))
+            .map(|decl| decl.name.clone())
             .collect();
         unit.dump(&names)
     }
@@ -690,10 +699,22 @@ mod tests {
                 .chain(frameless_natives())
                 .collect()
         });
+        static NAMES: std::sync::LazyLock<Names<Folded>> =
+            std::sync::LazyLock::new(|| Names::over(&NATIVES));
+        static FRAMELESS: std::sync::LazyLock<Vec<php_unit::FramelessEntry>> =
+            std::sync::LazyLock::new(|| frameless_table(NATIVES.iter()));
         Options {
-            functions: &NATIVES,
+            functions: Indexed::new(&NATIVES, &NAMES),
+            frameless: &FRAMELESS,
             ..Options::default()
         }
+    }
+
+    /// `rows` as the engine hands a table to the compiler, held for the
+    /// rest of the test process.
+    fn indexed<R: php_link::Named, C: php_link::Case>(rows: Vec<R>) -> Indexed<'static, R, C> {
+        let rows: &'static [R] = Vec::leak(rows);
+        Indexed::new(rows, Box::leak(Box::new(Names::over(rows))))
     }
 
     #[test]
@@ -989,7 +1010,7 @@ mod tests {
         use php_unit::decl::ConstExpr;
         let mut strings = php_heap::Strings::new();
         let options = Options {
-            persistent: &[
+            persistent: indexed(vec![
                 ConstDecl {
                     name: Name(b"T_LNUMBER".to_vec().into_boxed_slice()),
                     value: ConstExpr::long(260),
@@ -1000,7 +1021,7 @@ mod tests {
                     value: ConstExpr::Str(b"Darwin".to_vec().into_boxed_slice()),
                     attributes: Vec::new(),
                 },
-            ],
+            ]),
             ..Options::default()
         };
         let compiled = compile(
@@ -5410,7 +5431,7 @@ mod tests {
     fn a_method_of_a_namespaced_class_is_a_known_callee_in_its_namespace() {
         use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, EnumBacking, MethodDecl};
         let options = Options {
-            classes: &[ClassDecl {
+            classes: indexed(vec![ClassDecl {
                 name: Name(b"A\\M".as_slice().into()),
                 kind: ClassKind::Class,
                 flags: ClassFlags::default(),
@@ -5450,7 +5471,7 @@ mod tests {
                 end_line: 0,
                 object_size: 0,
                 object_beside: Box::default(),
-            }],
+            }]),
             ..Options::default()
         };
         let mut strings = php_heap::Strings::new();
@@ -7134,7 +7155,7 @@ class C {
             tentative_return: false,
         };
         let options = Options {
-            classes: &[ClassDecl {
+            classes: indexed(vec![ClassDecl {
                 name: Name(b"PhpToken".as_slice().into()),
                 kind: ClassKind::Class,
                 flags: ClassFlags::default(),
@@ -7158,7 +7179,7 @@ class C {
                 end_line: 0,
                 object_size: 0,
                 object_beside: Box::default(),
-            }],
+            }]),
             ..Options::default()
         };
         let dump = |source: &[u8]| {

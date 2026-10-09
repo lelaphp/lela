@@ -17,7 +17,7 @@
 use std::any::{Any, TypeId};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use crate::api::abi::{Extension, Refusal};
+use crate::api::abi::{ExtensionEntry, Refusal};
 
 /// One extension's process state, as an engine start reaches it.
 pub(crate) type ProcessState = &'static (dyn Any + Send + Sync);
@@ -37,7 +37,7 @@ static HELD: Mutex<Vec<(String, TypeId, &'static OnceLock<Outcome>)>> = Mutex::n
 /// thread; `None` for an extension that declared none, and the kept
 /// refusal where its start refused. A start that builds an engine
 /// carrying its own extension waits on itself.
-pub(crate) fn reach(extension: &Extension) -> Result<Option<ProcessState>, &'static Refusal> {
+pub(crate) fn reach(extension: &ExtensionEntry) -> Result<Option<ProcessState>, &'static Refusal> {
     let Some((key, build)) = &extension.process_state else {
         return Ok(None);
     };

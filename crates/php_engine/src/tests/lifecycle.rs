@@ -54,7 +54,7 @@ fn serve(engine: &Engine) {
 #[test]
 fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_closed_last() {
     let rec = Recording::start();
-    let engine = Engine::cli_builder().extensions(&three()).build();
+    let engine = Engine::cli_builder().extensions(three()).build();
     rec.mark("built");
     serve(&engine);
     rec.mark("served");
@@ -94,7 +94,7 @@ fn a_request_starts_in_bundle_order_and_ends_in_reverse_with_its_resources_close
 #[test]
 fn an_engine_builds_engine_state_in_bundle_order_once_the_startup_request_is_gone() {
     let rec = Recording::start();
-    let _engine = Engine::cli_builder().extensions(&three()).build();
+    let _engine = Engine::cli_builder().extensions(three()).build();
     rec.mark("built");
     let events = rec.events().0;
     let engine_start = events
@@ -130,7 +130,7 @@ fn an_engine_builds_engine_state_in_bundle_order_once_the_startup_request_is_gon
 #[test]
 fn two_requests_on_one_engine_build_their_own_request_state_and_share_its_engine_state() {
     let rec = Recording::start();
-    let engine = Engine::cli_builder().extensions(&three()).build();
+    let engine = Engine::cli_builder().extensions(three()).build();
     rec.mark("built");
     serve(&engine);
     rec.mark("first");
@@ -270,7 +270,7 @@ fn a_refused_request_drops_its_request_state_in_reverse() {
 #[test]
 fn an_engine_ends_on_a_shutdown_request_and_drops_its_engine_state_in_reverse() {
     let rec = Recording::start();
-    let engine = Engine::cli_builder().extensions(&three()).build();
+    let engine = Engine::cli_builder().extensions(three()).build();
     serve(&engine);
     rec.mark("served");
     drop(engine);
@@ -782,9 +782,9 @@ fn two_engines_in_one_process_build_the_process_state_once_and_never_drop_it() {
     let rec = Recording::start();
     let bundle = || [TestExt::<0>::extension(), TestExt::<100>::with_process()];
     rec.mark("start");
-    let first = Engine::cli_builder().extensions(&bundle()).build();
+    let first = Engine::cli_builder().extensions(bundle()).build();
     rec.mark("first built");
-    let second = Engine::cli_builder().extensions(&bundle()).build();
+    let second = Engine::cli_builder().extensions(bundle()).build();
     rec.mark("second built");
     serve(&first);
     serve(&second);
@@ -872,7 +872,7 @@ fn a_refused_process_start_is_remembered_for_every_later_engine() {
     for _ in 0..2 {
         let engine = Engine::cli_builder()
             .sapi_name("cli")
-            .extensions(&bundle())
+            .extensions(bundle())
             .build();
         let served = engine.serve_capture("<?php echo 'ran';", Capture::default());
         assert_eq!(String::from_utf8_lossy(&served.stdout), refused);

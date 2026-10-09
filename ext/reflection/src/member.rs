@@ -240,19 +240,10 @@ fn this_global_constant(req: &mut Request, this: PhpObject) -> Result<Vec<u8>, T
 /// number that says which extension declared it.
 fn constant_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<String>, Thrown> {
     let name = this_global_constant(req, this)?;
-    for named in req.loaded_extensions() {
-        let Some(extension) = req.extension_named(named.as_bytes()) else {
-            continue;
-        };
-        if req
-            .extension_constants(extension)
-            .iter()
-            .any(|declared| declared.0.as_ref() == name.as_slice())
-        {
-            return Ok(req.extension_name(extension).map(str::to_owned));
-        }
-    }
-    Ok(None)
+    let extension = req.constant_extension(&name);
+    Ok(extension
+        .and_then(|at| req.extension_name(at))
+        .map(str::to_owned))
 }
 
 /// `reflection_property_set_raw_value`: `value`, the caller's to give

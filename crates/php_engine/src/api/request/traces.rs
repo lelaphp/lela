@@ -23,7 +23,7 @@ use crate::exec::{self, IncludeKind};
 
 use super::{
     DEBUG_BACKTRACE_IGNORE_ARGS, DEBUG_BACKTRACE_PROVIDE_OBJECT, Link, Request, Slots,
-    append_escaped, ini_atol, links_of,
+    append_escaped, links_of,
 };
 
 /// The parameters of one callee whose arguments a trace redacts:
@@ -1098,8 +1098,7 @@ impl Request {
     /// built without the frames' arguments, and whether
     /// `UnhandledMatchError` names its subject by type alone.
     pub(crate) fn exception_ignore_args(&self) -> bool {
-        self.ini_get(b"zend.exception_ignore_args")
-            .is_some_and(Request::ini_parse_bool)
+        self.typed_ini().exception_ignore_args
     }
 
     /// `zend.exception_string_param_max_len`: the bytes of a string
@@ -1121,8 +1120,7 @@ impl Request {
     ///   thrown in %s on line 3
     /// ```
     pub(crate) fn exception_string_param_max_len(&self) -> usize {
-        self.ini_get(b"zend.exception_string_param_max_len")
-            .map_or(15, |value| usize::try_from(ini_atol(value)).unwrap_or(0))
+        self.typed_ini().exception_string_param_max_len
     }
 
     /// A user frame's arguments for its trace row

@@ -4865,15 +4865,6 @@ fn kept_object(req: &Request, this: PhpObject) -> Option<PhpObject> {
     this.native::<Reflected>(req).and_then(|kept| kept.object)
 }
 
-/// `EG(precision)`, the `precision` ini entry, 14 where it does not read
-/// as a number.
-fn precision(req: &Request) -> i32 {
-    req.ini_get(b"precision")
-        .and_then(|text| std::str::from_utf8(text).ok())
-        .and_then(|text| text.trim().parse().ok())
-        .unwrap_or(14)
-}
-
 /// Core's classes and interfaces the reflectors extend, implement and
 /// hand out, named for `extends`, `implements` and the types that hold
 /// them.
@@ -5585,7 +5576,7 @@ fn value_string(req: &mut Request, value: &Value) -> String {
     match value.deref().as_ref() {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
-        ValueRef::Float(number) => float_format(number, precision(req), Exponent::Upper),
+        ValueRef::Float(number) => float_format(number, req.precision(), Exponent::Upper),
         _ => php_ext::coerce::with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())
             .unwrap_or_default(),
     }

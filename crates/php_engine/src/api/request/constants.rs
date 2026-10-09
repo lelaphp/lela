@@ -128,18 +128,11 @@ impl Request {
     /// a declared constant whose value the engine did not publish is no
     /// row.
     pub(crate) fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
-        let decls = self.shared.declared().constants;
-        let mut modules: Vec<&str> = Vec::with_capacity(decls.len());
-        for extension in &self.shared.extensions {
-            modules.extend(std::iter::repeat_n(
-                extension.name.as_str(),
-                extension.constants.len(),
-            ));
-        }
-        let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = decls
-            .iter()
+        let decls = self.shared.declared().constants.rows();
+        let modules = (self.shared.constant_modules.iter()).map(|&at| self.extension_name(at));
+        let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = (decls.iter().enumerate())
             .zip(modules)
-            .flat_map(|(decl, module)| {
+            .flat_map(|((at, decl), module)| {
                 // `PHP_SAPI` stands where php registers it, before
                 // `PHP_BINARY`, and is the request's.
                 let sapi = (decl.name.0.as_ref() == b"PHP_BINARY").then(|| {
@@ -149,9 +142,9 @@ impl Request {
                         self.constants.sapi_constant,
                     )
                 });
-                let value = self.shared.constant(&decl.name.0);
+                let value = self.shared.constant_at(at);
                 sapi.into_iter()
-                    .chain(value.map(|value| (Some(module), decl.name.0.to_vec(), value)))
+                    .chain(value.map(|value| (module, decl.name.0.to_vec(), value)))
             })
             .collect();
         rows.extend(self.constants.constants.iter().map(|row| {
@@ -494,9 +487,53 @@ impl Request {
         self.shared
             .declared()
             .constants
-            .iter()
-            .find(|decl| decl.name.0.as_ref() == name)
-            .map_or(&[], |decl| decl.attributes.as_slice())
+            .find(name)
+            .map_or(&[], |(_, decl)| decl.attributes.as_slice())
+    }
+
+    /// `ZEND_CONSTANT_MODULE_NUMBER(c)` of the constant the table holds
+    /// under `name`: the extension that registered it, `Core` for the
+    /// engine's own and a host's, and none for one a program defined
+    /// (`PHP_USER_CONSTANT`) or a name no table has. One lookup, as
+    /// `ReflectionConstant::getExtension` reads the number off the
+    /// constant:
+    ///
+    /// ```php
+    /// define('MINE', 1);
+    /// foreach (['E_ALL', 'PHP_SAPI', 'PHP_VERSION', 'PREG_SPLIT_NO_EMPTY', 'JSON_ERROR_NONE', 'STDIN', 'MINE'] as $name) {
+    ///     $c = new ReflectionConstant($name);
+    ///     var_dump($c->getExtensionName(), $c->getExtension()?->getName());
+    /// }
+    /// ```
+    /// ```expect capture
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "pcre"
+    /// string(4) "pcre"
+    /// string(4) "json"
+    /// string(4) "json"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// bool(false)
+    /// NULL
+    /// ```
+    #[must_use]
+    pub fn constant_extension(&self, name: &[u8]) -> Option<ExtensionId> {
+        if name == b"PHP_SAPI" {
+            return Some(ExtensionId::CORE);
+        }
+        if let Some(row) = self.constants.constants.iter().find(|row| row.name == name) {
+            return match row.owner {
+                ConstantOwner::Core => Some(ExtensionId::CORE),
+                ConstantOwner::Extension(extension) => Some(extension),
+                ConstantOwner::User(_) => None,
+            };
+        }
+        self.shared.constant_module(name)
     }
 
     /// `ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED` of the constant the

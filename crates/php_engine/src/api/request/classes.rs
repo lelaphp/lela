@@ -1389,19 +1389,12 @@ impl Request {
     /// `zend_hash_find(EG(function_table), lcname)`: the native of that
     /// name, or the user function a unit of this request declared.
     pub(crate) fn function_named(&self, name: &[u8]) -> Option<Function> {
-        let wanted = name.to_ascii_lowercase();
-        if let Some(i) = self
-            .shared
-            .functions
-            .iter()
-            .position(|decl| decl.name.0.eq_ignore_ascii_case(&wanted))
-        {
+        if let Some(i) = self.shared.function_at(name) {
             return u32::try_from(i).ok().map(Function);
         }
         self.function_table()
             .find(|(_, user)| {
-                user_function_decl(user)
-                    .is_some_and(|decl| decl.name.0.to_ascii_lowercase() == wanted)
+                user_function_decl(user).is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(name))
             })
             .map(|(function, _)| function)
     }

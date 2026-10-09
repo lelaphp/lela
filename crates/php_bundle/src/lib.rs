@@ -314,7 +314,7 @@ pub mod test {
     pub fn engine(ini: &[(&str, &str)], extended_info: bool) -> Engine {
         let extensions: Vec<_> = super::enabled().iter().map(|start| start()).collect();
         let mut builder = Engine::builder()
-            .extensions(&extensions)
+            .extensions(extensions)
             .configure(super::CONFIGURE)
             .tier::<super::Tier>()
             .extended_info(extended_info);

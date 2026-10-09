@@ -855,7 +855,7 @@ fn engine(
     let builder = Engine::builder()
         .ini_files(files)
         .sapi_name(NAME)
-        .extensions(&extensions)
+        .extensions(extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .extended_info(extended_info);

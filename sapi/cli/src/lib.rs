@@ -269,7 +269,7 @@ fn engine(startup: &Startup) -> Engine {
     let builder = cli_defaults(Engine::builder())
         .ini_files(php_sapi::ini::search(NAME, &startup.ini_search, true))
         .sapi_name(NAME)
-        .extensions(&extensions)
+        .extensions(extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang()
@@ -337,7 +337,7 @@ fn server_engine(startup: &Startup) -> Engine {
             true,
         ))
         .sapi_name(server::NAME)
-        .extensions(&extensions)
+        .extensions(extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .skip_shebang()
