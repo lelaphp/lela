@@ -10,12 +10,12 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
     Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error, while_pending,
 };
-use php_ext::request::{Request, Resolve, Streams as _};
+use php_ext::request::{Foreign, Request, Resolve, Streams as _};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
-    self, Db, Function, Handler, Registration, SQLITE_BUSY, SQLITE_LOCKED, SQLITE_OK,
-    SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE, Stmt,
+    self, Conn as Connection, Db, Function, Handler, Registration, SQLITE_BUSY, SQLITE_LOCKED,
+    SQLITE_OK, SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE, Stmt,
 };
 
 use crate::callbacks::serving;
@@ -56,12 +56,23 @@ pub(crate) enum Link {
 
 /// An open connection and what hangs off it.
 pub(crate) struct Open {
-    pub(crate) db: Db,
+    /// `db`, which the request keeps for the object (ADR-0013).
+    owner: Foreign<Connection>,
     /// `free_list`: each statement prepared, none for a text that held
     /// no statement, finalized when it leaves the list.
     stmts: BTreeMap<StmtId, Option<Stmt>>,
     /// `funcs` and `collations`.
     registrations: Vec<Registration>,
+    /// `authorizer_fcc`, the callable the connection's authorizer calls
+    /// through a view of it ([`Db::set_authorizer`]).
+    authorizer: Option<Handler>,
+}
+
+impl Open {
+    /// The connection's name.
+    pub(crate) fn db(&self) -> Db {
+        Db::of(&self.owner)
+    }
 }
 
 /// php's `Error` for an object a method cannot serve,
@@ -142,12 +153,12 @@ pub(crate) fn conn(req: &mut Request, object: PhpObject) -> Result<&mut Conn, Th
     object.native_mut_or_fatal::<Conn>(req)
 }
 
-/// The open connection of a `SQLite3`, an owner of it for the call, and
-/// whether its errors throw; php's `Error` where it is not open.
+/// The open connection of a `SQLite3`, its name, and whether its errors
+/// throw; php's `Error` where it is not open.
 pub(crate) fn open_db(req: &mut Request, object: PhpObject) -> Result<(Db, bool), Thrown> {
     let conn = conn(req, object)?;
     match &conn.link {
-        Link::Open(open) => Ok((open.db.clone(), conn.exceptions)),
+        Link::Open(open) => Ok((open.db(), conn.exceptions)),
         _ => Err(not_ready(req, "SQLite3")),
     }
 }
@@ -207,8 +218,8 @@ pub(crate) fn take(req: &mut Request, owner: PhpObject, id: StmtId) -> Option<Ta
 }
 
 /// The statement back in its list; finalized where the list is gone,
-/// which a statement out of it keeps from happening (the connection
-/// cannot close while the statement holds it).
+/// which a statement out of it keeps from happening (the library refuses
+/// to close a connection a statement still holds).
 pub(crate) fn give_back(req: &mut Request, taken: Taken) {
     let Taken {
         owner, id, stmt, ..
@@ -290,16 +301,15 @@ impl ObjectHandlers for Handlers {
         let mut handlers = std::mem::take(&mut conn.closed_handlers);
         if let Link::Open(open) = std::mem::take(&mut conn.link) {
             let Open {
-                db,
+                owner,
                 stmts,
                 registrations,
+                authorizer,
             } = *open;
             drop(stmts);
-            handlers.extend(db.set_authorizer(None));
-            for registration in registrations {
-                handlers.extend(registration.unregister());
-            }
-            drop(db);
+            Db::of(&owner).set_authorizer(req, None);
+            handlers.extend(authorizer);
+            handlers.extend(Db::release(req, owner, registrations));
         }
         for handler in handlers {
             handler.give_up(req);
@@ -316,7 +326,9 @@ impl ObjectHandlers for Handlers {
             handler.visit(visit);
         }
         if let Link::Open(open) = &conn.link {
-            open.db.visit_authorizer(visit);
+            if let Some(handler) = &open.authorizer {
+                handler.visit(visit);
+            }
             for registration in &open.registrations {
                 registration.visit(visit);
             }
@@ -349,9 +361,9 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
     let exceptions = conn(req, object)?.exceptions;
     // php hands the library its `zend_long` as an `int`.
     #[allow(clippy::cast_possible_truncation)]
-    let opened = Db::open(&path, flags as i32, serving(exceptions));
-    let db = match opened {
-        Ok(db) => db,
+    let opened = Db::open(req, &path, flags as i32, serving(exceptions));
+    let owner = match opened {
+        Ok(owner) => owner,
         Err((_, message)) => {
             conn(req, object)?.link = Link::Closed;
             let message = format!("Unable to open database: {}", text(&message));
@@ -362,13 +374,15 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
         .ini_get(b"sqlite3.defensive")
         .is_some_and(Request::ini_parse_bool)
     {
-        db.defensive();
+        Db::of(&owner).defensive(req);
     }
-    conn(req, object)?.link = Link::Open(Box::new(Open {
-        db,
+    let open = Link::Open(Box::new(Open {
+        owner,
         stmts: BTreeMap::new(),
         registrations: Vec::new(),
+        authorizer: None,
     }));
+    conn(req, object)?.link = open;
     Ok(())
 }
 
@@ -376,7 +390,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
 /// `SQLITE3_CHECK_INITIALIZED(db_obj, db_obj->db, ..)`, `None` once closed.
 fn ever_opened(req: &mut Request, object: PhpObject) -> Result<Option<Db>, Thrown> {
     match &conn(req, object)?.link {
-        Link::Open(open) => Ok(Some(open.db.clone())),
+        Link::Open(open) => Ok(Some(open.db())),
         Link::Closed => Ok(None),
         Link::Unopened => Err(not_ready(req, "SQLite3")),
     }
@@ -389,14 +403,14 @@ fn ever_opened(req: &mut Request, object: PhpObject) -> Result<Option<Db>, Throw
 fn register(
     req: &mut Request,
     object: PhpObject,
-    make: impl FnOnce(&Request, &Db) -> Result<Registration, Vec<Handler>>,
+    make: impl FnOnce(&mut Request, Db) -> Result<Registration, Vec<Handler>>,
 ) -> Result<bool, Thrown> {
     let db = match &conn(req, object)?.link {
-        Link::Open(open) => Some(open.db.clone()),
+        Link::Open(open) => Some(open.db()),
         _ => None,
     };
     let outcome = match db {
-        Some(db) => make(req, &db),
+        Some(db) => make(req, db),
         None => Err(Vec::new()),
     };
     match outcome {
@@ -437,7 +451,7 @@ fn run_query(
     let stmt = match prepared {
         Ok(stmt) => stmt,
         Err(code) => {
-            let message = format!("Unable to prepare statement: {}", text(&db.errmsg()));
+            let message = format!("Unable to prepare statement: {}", text(&db.errmsg(req)));
             stmt_owner.give_up(req);
             fail(req, exceptions, thrown, i64::from(code), &message)?;
             return Ok(None);
@@ -472,8 +486,9 @@ fn run_query(
     }
     let failed = thrown.map_or_else(
         || {
-            let message = format!("Unable to execute statement: {}", text(&db.errmsg()));
-            fail(req, exceptions, None, i64::from(db.errcode()), &message)
+            let message = format!("Unable to execute statement: {}", text(&db.errmsg(req)));
+            let code = i64::from(db.errcode(req));
+            fail(req, exceptions, None, code, &message)
         },
         Err,
     );
@@ -495,7 +510,7 @@ fn query_single(
     let stmt = match prepared {
         Ok(stmt) => stmt,
         Err(code) => {
-            let message = format!("Unable to prepare statement: {}", text(&db.errmsg()));
+            let message = format!("Unable to prepare statement: {}", text(&db.errmsg(req)));
             fail(req, exceptions, thrown, i64::from(code), &message)?;
             return Ok(Owner::bool(false));
         }
@@ -516,8 +531,9 @@ fn query_single(
         (Step::Done, _) => Owner::null(),
         _ => {
             if thrown.is_none() {
-                let message = format!("Unable to execute statement: {}", text(&db.errmsg()));
-                fail(req, exceptions, None, i64::from(db.errcode()), &message)?;
+                let message = format!("Unable to execute statement: {}", text(&db.errmsg(req)));
+                let code = i64::from(db.errcode(req));
+                fail(req, exceptions, None, code, &message)?;
             }
             Owner::bool(false)
         }
@@ -549,7 +565,7 @@ fn escape(bytes: &[u8]) -> Vec<u8> {
 /// `sqlite3.extension_dir`, and nowhere outside it.
 fn load_extension(
     req: &mut Request,
-    db: &Db,
+    db: Db,
     exceptions: bool,
     name: &[u8],
 ) -> Result<bool, Thrown> {
@@ -580,7 +596,7 @@ fn load_extension(
         fail(req, exceptions, None, 0, message)?;
         return Ok(false);
     }
-    match db.load_extension(&full) {
+    match db.load_extension(req, &full) {
         Ok(()) => Ok(true),
         Err(message) => {
             fail(req, exceptions, None, 0, &text(&message))?;
@@ -713,6 +729,31 @@ impl SQLite3 {
     /// int(0)
     /// string(0) ""
     /// ```
+    ///
+    /// From inside a user function or a collation the call in progress
+    /// holds the connection, so the close is refused as the library
+    /// refuses it for the statement the call runs, and the call runs to
+    /// its end:
+    ///
+    /// ```php
+    /// $db = new SQLite3(':memory:');
+    /// $db->createFunction('f', function ($x) use ($db) { var_dump($db->close()); return $x * 2; });
+    /// $db->createCollation('c', function ($a, $b) use ($db) { var_dump($db->close()); return strcmp($a, $b); });
+    /// var_dump($db->querySingle('SELECT f(21)'));
+    /// var_dump($db->querySingle("SELECT 'b' AS x UNION ALL SELECT 'a' ORDER BY x COLLATE c"));
+    /// var_dump($db->lastErrorMsg(), $db->close());
+    /// ```
+    /// ```expect
+    /// Warning: SQLite3::close(): Unable to close database: unable to close due to unfinalized statements or unfinished backups in %s on line 3
+    /// bool(false)
+    /// int(42)
+    ///
+    /// Warning: SQLite3::close(): Unable to close database: unable to close due to unfinalized statements or unfinished backups in %s on line 4
+    /// bool(false)
+    /// string(1) "a"
+    /// string(12) "not an error"
+    /// bool(true)
+    /// ```
     #[php(tentative)]
     fn close(req: &mut Request, this: This<Self>) -> Answer<bool> {
         let object = this.object();
@@ -726,28 +767,27 @@ impl SQLite3 {
             return Ok(true);
         };
         let Open {
-            db,
+            owner,
             stmts,
             registrations,
+            authorizer,
         } = *open;
         drop(stmts);
-        let authorizer = db.set_authorizer(None);
-        match db.close(registrations) {
+        match Db::close(req, owner, registrations) {
             Ok(handlers) => {
+                let conn = self::conn(req, object)?;
                 conn.closed_handlers.extend(authorizer);
                 conn.closed_handlers.extend(handlers);
                 Ok(true)
             }
             Err(unclosed) => {
                 let ffi::Unclosed {
-                    db,
+                    owner,
                     registrations,
-                    released,
                     code,
                     message,
                 } = *unclosed;
-                db.set_authorizer(authorizer);
-                conn_reopen(req, object, db, registrations, released)?;
+                conn_reopen(req, object, owner, registrations, authorizer)?;
                 let message = format!("Unable to close database: {}", text(&message));
                 fail(req, exceptions, None, i64::from(code), &message)?;
                 Ok(false)
@@ -794,7 +834,7 @@ impl SQLite3 {
     /// ```
     #[php(tentative)]
     fn lastInsertRowID(req: &mut Request, this: This<Self>) -> Answer<i64> {
-        Ok(open_db(req, this.object())?.0.last_insert_rowid())
+        Ok(open_db(req, this.object())?.0.last_insert_rowid(req))
     }
 
     /// `SQLite3::lastErrorCode()`.
@@ -809,7 +849,7 @@ impl SQLite3 {
     /// ```
     #[php(tentative)]
     fn lastErrorCode(req: &mut Request, this: This<Self>) -> Answer<i64> {
-        Ok(ever_opened(req, this.object())?.map_or(0, |db| i64::from(db.errcode())))
+        Ok(ever_opened(req, this.object())?.map_or(0, |db| i64::from(db.errcode(req))))
     }
 
     /// `SQLite3::lastExtendedErrorCode()`.
@@ -826,7 +866,7 @@ impl SQLite3 {
     /// ```
     #[php(tentative)]
     fn lastExtendedErrorCode(req: &mut Request, this: This<Self>) -> Answer<i64> {
-        Ok(ever_opened(req, this.object())?.map_or(0, |db| i64::from(db.extended_errcode())))
+        Ok(ever_opened(req, this.object())?.map_or(0, |db| i64::from(db.extended_errcode(req))))
     }
 
     /// `SQLite3::lastErrorMsg()`.
@@ -841,7 +881,7 @@ impl SQLite3 {
     #[php(tentative)]
     fn lastErrorMsg(req: &mut Request, this: This<Self>) -> Answer<Owner<PhpString>> {
         let message = ever_opened(req, this.object())?
-            .map(|db| db.errmsg())
+            .map(|db| db.errmsg(req))
             .unwrap_or_default();
         PhpString::new(req, &message)
     }
@@ -858,7 +898,7 @@ impl SQLite3 {
     /// ```
     #[php(tentative)]
     fn changes(req: &mut Request, this: This<Self>) -> Answer<i64> {
-        Ok(open_db(req, this.object())?.0.changes())
+        Ok(open_db(req, this.object())?.0.changes(req))
     }
 
     /// `SQLite3::busyTimeout()`.
@@ -873,7 +913,9 @@ impl SQLite3 {
     /// ```
     #[php(tentative)]
     fn busyTimeout(req: &mut Request, this: This<Self>, milliseconds: i64) -> Answer<bool> {
-        open_db(req, this.object())?.0.busy_timeout(milliseconds);
+        open_db(req, this.object())?
+            .0
+            .busy_timeout(req, milliseconds);
         Ok(true)
     }
 
@@ -892,7 +934,7 @@ impl SQLite3 {
     fn loadExtension(req: &mut Request, this: This<Self>, name: PhpString) -> Answer<bool> {
         let (db, exceptions) = open_db(req, this.object())?;
         let name = name.as_bytes().to_vec();
-        load_extension(req, &db, exceptions, &name)
+        load_extension(req, db, exceptions, &name)
     }
 
     /// `SQLite3::backup()`: the source database copied whole into the
@@ -919,7 +961,8 @@ impl SQLite3 {
         let (source, exceptions) = open_db(req, this.object())?;
         let (target, _) = open_db(req, destination.object())?;
         let rc = source.backup(
-            &target,
+            req,
+            target,
             sourceDatabase.0.as_bytes(),
             destinationDatabase.0.as_bytes(),
         );
@@ -929,7 +972,7 @@ impl SQLite3 {
         let message = match rc {
             SQLITE_BUSY => String::from("Backup failed: source database is busy"),
             SQLITE_LOCKED => String::from("Backup failed: source database is locked"),
-            _ => format!("Backup failed: {}", text(&source.errmsg())),
+            _ => format!("Backup failed: {}", text(&source.errmsg(req))),
         };
         fail(req, exceptions, None, i64::from(rc), &message)?;
         Ok(false)
@@ -999,7 +1042,10 @@ impl SQLite3 {
         if rc == SQLITE_OK {
             return thrown.map_or(Ok(true), Err);
         }
-        fail(req, exceptions, thrown, i64::from(rc), &text(&db.errmsg()))?;
+        {
+            let message = text(&db.errmsg(req));
+            fail(req, exceptions, thrown, i64::from(rc), &message)?;
+        }
         Ok(false)
     }
 
@@ -1033,7 +1079,10 @@ impl SQLite3 {
         if !req.return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
             if rc != SQLITE_OK {
-                fail(req, exceptions, thrown, i64::from(rc), &text(&db.errmsg()))?;
+                {
+                    let message = text(&db.errmsg(req));
+                    fail(req, exceptions, thrown, i64::from(rc), &message)?;
+                }
             } else if let Some(thrown) = thrown {
                 return Err(thrown);
             }
@@ -1079,7 +1128,10 @@ impl SQLite3 {
         if !req.return_value_used() {
             let (rc, thrown) = db.exec(req, &sql);
             if rc != SQLITE_OK {
-                fail(req, exceptions, thrown, i64::from(rc), &text(&db.errmsg()))?;
+                {
+                    let message = text(&db.errmsg(req));
+                    fail(req, exceptions, thrown, i64::from(rc), &message)?;
+                }
             } else if let Some(thrown) = thrown {
                 return Err(thrown);
             }
@@ -1140,13 +1192,9 @@ impl SQLite3 {
         // php hands the library its `zend_long`s as `int`s.
         #[allow(clippy::cast_possible_truncation)]
         register(req, object, |req, db| {
-            db.create_function(
-                &name,
-                argCount as i32,
-                flags as i32,
-                Function::Scalar(Owner::take(req, callback)),
-            )
-            .map_err(|(function, _)| function.into_handlers())
+            let function = Function::Scalar(Owner::take(req, callback));
+            db.create_function(req, &name, argCount as i32, flags as i32, function)
+                .map_err(|(function, _)| function.into_handlers())
         })
     }
 
@@ -1182,13 +1230,9 @@ impl SQLite3 {
         register(req, object, |req, db| {
             let step = Owner::take(req, stepCallback);
             let finalize = Owner::take(req, finalCallback);
-            db.create_function(
-                &name,
-                argCount as i32,
-                0,
-                Function::Aggregate { step, finalize },
-            )
-            .map_err(|(function, _)| function.into_handlers())
+            let function = Function::Aggregate { step, finalize };
+            db.create_function(req, &name, argCount as i32, 0, function)
+                .map_err(|(function, _)| function.into_handlers())
         })
     }
 
@@ -1220,7 +1264,8 @@ impl SQLite3 {
         }
         let name = name.as_bytes().to_vec();
         register(req, object, |req, db| {
-            db.create_collation(&name, Owner::take(req, callback))
+            let handler = Owner::take(req, callback);
+            db.create_collation(req, &name, handler)
                 .map_err(|(handler, _)| vec![handler])
         })
     }
@@ -1260,6 +1305,7 @@ impl SQLite3 {
         let (db, exceptions) = open_db(req, this.object())?;
         let writable = flags & i64::from(SQLITE_OPEN_READWRITE) != 0;
         let opened = db.blob_open(
+            req,
             database.0.as_bytes(),
             table.as_bytes(),
             column.as_bytes(),
@@ -1270,7 +1316,8 @@ impl SQLite3 {
             Ok(blob) => blob,
             Err(message) => {
                 let message = format!("Unable to open blob: {}", text(&message));
-                fail(req, exceptions, None, i64::from(db.errcode()), &message)?;
+                let code = i64::from(db.errcode(req));
+                fail(req, exceptions, None, code, &message)?;
                 return Ok(Untyped(Owner::bool(false)));
             }
         };
@@ -1314,7 +1361,7 @@ impl SQLite3 {
         let conn = conn(req, object)?;
         conn.exceptions = enable;
         if let Link::Open(open) = &conn.link {
-            open.db.serve_with(serving(enable));
+            open.db().serve_with(req, serving(enable));
         }
         Ok(was)
     }
@@ -1341,7 +1388,7 @@ impl SQLite3 {
         let Some(db) = ever_opened(req, this.object())? else {
             return Ok(false);
         };
-        db.extended_codes(i64::from(enable));
+        db.extended_codes(req, i64::from(enable));
         Ok(true)
     }
 
@@ -1370,29 +1417,32 @@ impl SQLite3 {
         let object = this.object();
         let (db, _) = open_db(req, object)?;
         let handler = callback.map(|callable| Owner::take(req, callable));
-        if let Some(old) = db.set_authorizer(handler) {
+        db.set_authorizer(req, handler.as_deref());
+        let old = match &mut conn(req, object)?.link {
+            Link::Open(open) => std::mem::replace(&mut open.authorizer, handler),
+            _ => handler,
+        };
+        if let Some(old) = old {
             old.give_up(req);
         }
         Ok(true)
     }
 }
 
-/// The connection put back after a close the library refused, and the
-/// callables of what the close had already taken off it kept on the
-/// object, as php's lists keep them.
+/// The connection put back after a close the library refused, with
+/// what hangs off it but the statements the close finalized.
 fn conn_reopen(
     req: &mut Request,
     object: PhpObject,
-    db: Db,
+    owner: Foreign<Connection>,
     registrations: Vec<Registration>,
-    released: Vec<Handler>,
+    authorizer: Option<Handler>,
 ) -> Result<(), Thrown> {
-    let conn = conn(req, object)?;
-    conn.closed_handlers.extend(released);
-    conn.link = Link::Open(Box::new(Open {
-        db,
+    conn(req, object)?.link = Link::Open(Box::new(Open {
+        owner,
         stmts: BTreeMap::new(),
         registrations,
+        authorizer,
     }));
     Ok(())
 }
