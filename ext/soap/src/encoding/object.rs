@@ -474,6 +474,27 @@ fn object_class(req: &mut Request, e: &Enc, pce: Option<ClassId>) -> Res<ClassId
 
 /// `to_zval_object_ex`: an extension of a complex type decoded into the
 /// class the classmap names for it, the base's converter handed that class.
+/// Where the base is decoded by its own converter instead, a typemap's
+/// `from_xml` for a base restricting `soapenc:Array` among them, the object
+/// it answers takes the class, the caller's own name for it too.
+///
+/// ```php
+/// $w = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:x="http://www.w3.org/2001/XMLSchema" xmlns:e="http://schemas.xmlsoap.org/soap/encoding/" xmlns:t="urn:t" targetNamespace="urn:t"><types><x:schema targetNamespace="urn:t"><x:complexType name="B"><x:complexContent><x:restriction base="e:Array"/></x:complexContent></x:complexType><x:complexType name="D"><x:complexContent><x:extension base="t:B"><x:sequence><x:element name="b" type="x:int"/></x:sequence></x:extension></x:complexContent></x:complexType></x:schema></types><message name="m"/><message name="r"><part name="o" type="t:D"/></message><portType name="P"><operation name="f"><input message="t:m"/><output message="t:r"/></operation></portType><binding name="N" type="t:P"><s:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/><operation name="f"><input><s:body use="literal" namespace="urn:t"/></input><output><s:body use="literal" namespace="urn:t"/></output></operation></binding><service name="S"><port name="p" binding="t:N"><s:address location="http://x/"/></port></service></definitions>';
+/// #[AllowDynamicProperties] class Y {}
+/// class C extends SoapClient { function __doRequest($r, $l, $a, $v, $o = false, ?string $u = null): string { return '<E:Envelope xmlns:E="http://schemas.xmlsoap.org/soap/envelope/"><E:Body><t:fResponse xmlns:t="urn:t"><o><b>7</b></o></t:fResponse></E:Body></E:Envelope>'; } }
+/// $kept = null;
+/// $c = new C('data://text/plain;base64,' . base64_encode($w), ['cache_wsdl' => WSDL_CACHE_NONE, 'classmap' => ['D' => 'Y'], 'typemap' => [['type_ns' => 'urn:t', 'type_name' => 'B', 'from_xml' => function ($x) use (&$kept) { return $kept = (object)['from' => 'xml']; }]]]);
+/// var_dump($c->f(), $kept instanceof Y);
+/// ```
+/// ```expect
+/// object(Y)#4 (2) {
+///   ["from"]=>
+///   string(3) "xml"
+///   ["b"]=>
+///   int(7)
+/// }
+/// bool(true)
+/// ```
 ///
 /// ```php
 /// $w = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:s="http://schemas.xmlsoap.org/wsdl/soap/" xmlns:x="http://www.w3.org/2001/XMLSchema" xmlns:t="urn:t" targetNamespace="urn:t"><types><x:schema targetNamespace="urn:t"><x:complexType name="B"><x:sequence><x:element name="a" type="x:string"/></x:sequence></x:complexType><x:complexType name="D"><x:complexContent><x:extension base="t:B"><x:sequence><x:element name="b" type="x:int"/></x:sequence></x:extension></x:complexContent></x:complexType></x:schema></types><message name="m"/><message name="r"><part name="o" type="t:D"/></message><portType name="P"><operation name="f"><input message="t:m"/><output message="t:r"/></operation></portType><binding name="N" type="t:P"><s:binding style="rpc" transport="http://schemas.xmlsoap.org/soap/http"/><operation name="f"><input><s:body use="literal" namespace="urn:t"/></input><output><s:body use="literal" namespace="urn:t"/></output></operation></binding><service name="S"><port name="p" binding="t:N"><s:address location="http://x/"/></port></service></definitions>';
@@ -555,9 +576,15 @@ fn to_zval_object_ex(
             };
             soap_add_xml_ref(req, cx, &ret, data);
             redo_any = get_zval_property(req, &ret, b"any").is_some();
-            // php then sets `zobj->ce = ce` on what the base made; an
-            // object made by another class's converter keeps that class
-            // here (#1593).
+            // `zobj->ce = ce` on what the base made, as far as
+            // `PhpObject::set_class` takes it; an object it does not
+            // take keeps its class here (#2399).
+            if ce != std
+                && let Some(o) = ret.as_object()
+                && o.class() != ce
+            {
+                o.set_class(req, ce);
+            }
             ret
         } else {
             if let Some(v) = soap_check_xml_ref(req, cx, data) {
