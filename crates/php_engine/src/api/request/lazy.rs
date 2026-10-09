@@ -395,10 +395,10 @@ impl Request {
                 && self.method_named(object.class(), b"__destruct").is_some()
             {
                 o.set_destructor_called(true);
-                self.addref(&object.as_value());
+                let held = Owner::take(self, object);
                 let table = self.object_handlers(o);
                 table.dtor_obj(self, object);
-                self.release(object.as_value());
+                held.give_up(self);
                 if let Some(pending) = self.take_pending_view() {
                     return Err(Thrown::of(Some(pending)));
                 }
