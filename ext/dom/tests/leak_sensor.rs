@@ -122,3 +122,38 @@ fn a_discarded_children_read_is_collected() {
         "Trying to clone an uncloneable object of class Dom\\HTMLCollection\n1\n",
     );
 }
+
+/// A function an evaluation calls evaluates on the same evaluator and
+/// registers on it, the evaluator staying on the object (#2318).
+#[test]
+fn an_xpath_callback_evaluates_and_registers_on_its_own_evaluator() {
+    served(
+        "<?php $d = new DOMDocument; $d->loadXML('<r><a>1</a><b>2</b></r>');\n\
+         $x = new DOMXPath($d);\n\
+         function inner($n) { global $x; var_dump($x->evaluate('count(//b)'), $x->registerNamespace('p', 'urn:p')); $x->registerPhpFunctions(['strtoupper']); return 'v'; }\n\
+         $x->registerNamespace('php', 'http://php.net/xpath'); $x->registerPhpFunctions(['inner']);\n\
+         var_dump($x->evaluate('string(php:function(\"inner\", //a))'), $x->evaluate('count(//p:z)'), $x->evaluate('php:function(\"strtoupper\", \"x\")'));\n",
+        "float(1)\nbool(true)\nstring(1) \"v\"\nfloat(0)\nstring(1) \"X\"\n",
+    );
+}
+
+/// `DOMXPath::__construct` from inside a function its own evaluation
+/// calls: the evaluation runs to its end on the evaluator it started with,
+/// which its hold keeps until then, and the object evaluates on the new
+/// one after. php frees the `xmlXPathContext` libxml is evaluating with
+/// (`xmlXPathFreeContext` in `dom_xpath_construct`) and reads it freed,
+/// answering `function count not found` and `false`; the engine's answer
+/// is the one an evaluator still open gives (proposed `php-ub` row
+/// `php-ub:dom-xpath-constructed-in-callback`, #2318).
+#[test]
+fn an_evaluator_constructed_anew_in_its_own_callback_evaluates_to_its_end() {
+    served(
+        "<?php $d = new DOMDocument; $d->loadXML('<r><a>1</a><b>2</b><b>3</b></r>');\n\
+         $e = new DOMDocument; $e->loadXML('<s><b>9</b></s>');\n\
+         $x = new DOMXPath($d);\n\
+         function inner($n) { global $x, $e; $x->__construct($e); return 'v'; }\n\
+         $x->registerNamespace('php', 'http://php.net/xpath'); $x->registerPhpFunctions(['inner']);\n\
+         var_dump($x->evaluate('concat(php:function(\"inner\", //a), count(//b))'), $x->evaluate('count(//b)'));\n",
+        "string(2) \"v2\"\nfloat(1)\n",
+    );
+}

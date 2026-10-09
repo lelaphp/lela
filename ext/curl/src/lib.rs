@@ -47,7 +47,7 @@ use php_ext::decl::{IniDecl, Name};
 #[derive(Default)]
 struct State {
     session: ffi::Session,
-    persistent: Lent<u8, ffi::Share>,
+    persistent: Lent<u8, ffi::Persistent>,
 }
 
 /// The constants `register_curl_symbols` registers, in the stub's order,
@@ -832,9 +832,20 @@ pub fn extension() -> Extension {
         .process_state(initialize)
         .request_state::<State>()
         .engine_state(|_| Ok(share::Pooled(Pool::new(share::POOLED))))
-        .post_deactivate(share::give_back)
+        .post_deactivate(post_deactivate)
         .info(version::curl_info)
         .build("curl")
+}
+
+/// `post_deactivate`, once the request's objects are freed and with
+/// them every `CURL *`: the file parts of the MIME trees the request's
+/// link kept closed, as their `free_cb` would have closed them, and the
+/// persistent shares given back to the engine's pool
+/// ([`share::give_back`]).
+fn post_deactivate(req: &mut php_ext::request::Request) {
+    let session = req.state::<State>().session.clone();
+    session.close_kept(req);
+    share::give_back(req);
 }
 
 /// The process scope's proof that libcurl's global state stands

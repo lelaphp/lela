@@ -16,10 +16,11 @@
 )]
 
 use std::ffi::{c_char, c_int, c_void};
+use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
 
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{Foreign, ForeignId, Held, Request};
 use php_ext_libxml::ffi::{Function, Handler, Node, Raised, XPath};
 
 type SecurityCheck = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> c_int;
@@ -198,16 +199,81 @@ impl Stylesheet {
         // SAFETY: the stylesheet's own document, live while it is.
         unsafe { Node::from_ptr(doc) }
     }
+}
 
+/// One compiled stylesheet the request keeps for an `XSLTProcessor`
+/// ([`Request::adopt`], ADR-0013): what its payload stores, given up by
+/// [`Sheet::close`]. A transformation holds it for its span
+/// ([`SheetId::held`]), so a callback's `importStylesheet()` that
+/// replaces it leaves its free to the transformation's end, where php's
+/// `xsltFreeStylesheet` frees the one libxslt is transforming with
+/// (#2319).
+pub(crate) struct Sheet(Foreign<Stylesheet>);
+
+/// The name of a [`Sheet`], copied freely.
+#[derive(Clone, Copy)]
+pub(crate) struct SheetId(ForeignId<Stylesheet>);
+
+/// A stylesheet held for the span `'h` of one [`SheetId::held`], which
+/// it cannot outlive, so the pointer it carries is live while it lives.
+#[derive(Clone, Copy)]
+pub(crate) struct Compiled<'h> {
+    raw: NonNull<c_void>,
+    span: PhantomData<Held<'h, Stylesheet>>,
+}
+
+impl Sheet {
+    /// `stylesheet` kept by the request.
+    pub(crate) fn adopt(req: &mut Request, stylesheet: Stylesheet) -> Sheet {
+        Sheet(req.adopt(stylesheet))
+    }
+
+    pub(crate) fn id(&self) -> SheetId {
+        SheetId(self.0.id())
+    }
+
+    /// Given up: freed now, or as the last transformation that holds it
+    /// ends.
+    pub(crate) fn close(self, req: &mut Request) {
+        drop(req.disown(self.0));
+    }
+}
+
+impl SheetId {
+    /// `body` served with the stylesheet held ([`Request::holding`]);
+    /// `None` where its owner gave it up before.
+    pub(crate) fn held<R>(
+        self,
+        req: &mut Request,
+        body: impl for<'h> FnOnce(&mut Request, Compiled<'h>) -> R,
+    ) -> Option<R> {
+        req.holding(self.0, |req, held| {
+            let raw = held.get(req)?.0;
+            let sheet = Compiled {
+                raw,
+                span: PhantomData,
+            };
+            Some(body(req, sheet))
+        })
+        .flatten()
+    }
+}
+
+impl Compiled<'_> {
     /// `xsltSaveResultToString`: the bytes, `None` where it failed, and
     /// empty where it wrote none.
     pub(crate) fn save_to_string(&self, result: Node) -> Option<Vec<u8>> {
         let mut out: *mut u8 = ptr::null_mut();
         let mut len: c_int = 0;
-        // SAFETY: a live result document and this stylesheet; the two out
+        // SAFETY: a live result document and the stylesheet held; the two out
         // pointers are this frame's.
         let ret = unsafe {
-            xsltSaveResultToString(&raw mut out, &raw mut len, result.as_ptr(), self.0.as_ptr())
+            xsltSaveResultToString(
+                &raw mut out,
+                &raw mut len,
+                result.as_ptr(),
+                self.raw.as_ptr(),
+            )
         };
         let bytes = if out.is_null() {
             Vec::new()
@@ -233,9 +299,9 @@ impl Stylesheet {
     ) -> (i64, Vec<Raised>, Option<Thrown>) {
         let u = cstr(uri);
         let (ret, raised, thrown) = Raised::capture_request(req, || {
-            // SAFETY: a NUL-terminated URI, a live result and this stylesheet.
+            // SAFETY: a NUL-terminated URI, a live result and the stylesheet held.
             unsafe {
-                xsltSaveResultToFilename(u.as_ptr().cast(), result.as_ptr(), self.0.as_ptr(), 0)
+                xsltSaveResultToFilename(u.as_ptr().cast(), result.as_ptr(), self.raw.as_ptr(), 0)
             }
         });
         (i64::from(ret), raised, thrown)
@@ -246,7 +312,7 @@ impl Stylesheet {
 /// with the security preferences set on it.
 pub(crate) struct Transform<'s> {
     ctxt: NonNull<c_void>,
-    sheet: &'s Stylesheet,
+    sheet: Compiled<'s>,
     doc: Node,
     prefs: Option<NonNull<c_void>>,
 }
@@ -268,10 +334,11 @@ const SECURITY: [(i64, c_int); 5] = [(2, 1), (4, 2), (8, 3), (16, 4), (32, 5)];
 
 impl<'s> Transform<'s> {
     /// `xsltNewTransformContext(sheet, doc)`.
-    pub(crate) fn new(sheet: &'s Stylesheet, doc: Node) -> Option<Transform<'s>> {
-        // SAFETY: a live stylesheet and document.
+    pub(crate) fn new(sheet: Compiled<'s>, doc: Node) -> Option<Transform<'s>> {
+        // SAFETY: a stylesheet held for the transformation, and a live
+        // document.
         let ctxt =
-            NonNull::new(unsafe { xsltNewTransformContext(sheet.0.as_ptr(), doc.as_ptr()) })?;
+            NonNull::new(unsafe { xsltNewTransformContext(sheet.raw.as_ptr(), doc.as_ptr()) })?;
         Some(Transform {
             ctxt,
             sheet,
@@ -349,7 +416,7 @@ impl<'s> Transform<'s> {
             // NUL-terminated path or null.
             unsafe {
                 php_xsl_apply(
-                    self.sheet.0.as_ptr(),
+                    self.sheet.raw.as_ptr(),
                     self.doc.as_ptr(),
                     self.ctxt.as_ptr(),
                     path_ptr,

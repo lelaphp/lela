@@ -9,7 +9,7 @@ use std::ptr::{self, NonNull};
 
 use super::{Alloc, Call, Io, Raised, cstr, loader, sys};
 use php_ext::raising::Thrown;
-use php_ext::request::Request;
+use php_ext::request::{ForeignId, Request};
 
 use super::tree::{Kind, Node, Ns};
 
@@ -209,14 +209,15 @@ impl XPath {
             io: &raw mut io,
         };
         // SAFETY: the caller's contract; the session outlives `f`, and the
-        // field is cleared before it goes.
-        unsafe { (*ctx).userData = ptr::from_mut(&mut session).cast() };
+        // field is put back before it goes.
+        let outer =
+            unsafe { std::mem::replace(&mut (*ctx).userData, ptr::from_mut(&mut session).cast()) };
         let (answer, raised) = {
             let _creators = loader::Creators::set();
             Call::run(None, &raw mut io, f)
         };
         // SAFETY: as above.
-        unsafe { (*ctx).userData = ptr::null_mut() };
+        unsafe { (*ctx).userData = outer };
         let thrown = session.thrown.take();
         (answer, raised, io.thrown.or(thrown))
     }
@@ -307,73 +308,112 @@ impl XPath {
         scope: Scope<'_>,
         handler: &mut Handler<'_>,
     ) -> (Option<Object>, Vec<Raised>, Option<Thrown>) {
-        let ctx = self.0.as_ptr();
-        let e = cstr(expr);
-        let mut session = Session {
-            req: ptr::from_mut(req),
-            handler,
-            thrown: None,
-            io: ptr::null_mut(),
-        };
-        // SAFETY: the live context this owns; the fields php sets for one
-        // evaluation.
-        let c = unsafe { &mut *ctx };
-        c.node = node.map_or(ptr::null_mut(), Node::raw);
-        let list = if let (Scope::InScope, Some(n)) = (&scope, node) {
-            let doc = n.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
-            // SAFETY: a live node and its document.
-            unsafe { sys::xmlGetNsList(doc, n.raw()) }
-        } else {
-            ptr::null_mut()
-        };
-        let mut given: Vec<*mut sys::xmlNs> = match scope {
-            Scope::List(list) if node.is_some() => list.iter().map(|ns| ns.raw()).collect(),
-            _ => Vec::new(),
-        };
-        if !given.is_empty() {
-            c.namespaces = given.as_mut_ptr();
-            c.nsNr = c_int::try_from(given.len()).unwrap_or(0);
-        }
-        if !list.is_null() {
-            let mut count = 0;
-            loop {
-                // SAFETY: within the NULL-terminated array libxml allocated,
-                // up to and including its terminator.
-                let at = unsafe { list.add(count) };
-                // SAFETY: as above.
-                if unsafe { *at }.is_null() {
-                    break;
-                }
-                count += 1;
-            }
-            c.namespaces = list;
-            c.nsNr = c_int::try_from(count).unwrap_or(0);
-        }
-        c.userData = ptr::from_mut(&mut session).cast();
-        let (object, raised) = Raised::capture(|| {
-            // SAFETY: a live context and a NUL-terminated expression; the
-            // session outlives the call.
-            unsafe { sys::xmlXPathEvalExpression(e.as_ptr(), ctx) }
-        });
-        // SAFETY: as above, the fields reset.
-        let c = unsafe { &mut *ctx };
-        c.userData = ptr::null_mut();
-        c.node = ptr::null_mut();
-        if !list.is_null() || !given.is_empty() {
-            c.namespaces = ptr::null_mut();
-            c.nsNr = 0;
-        }
-        if !list.is_null() {
-            // SAFETY: the array `xmlGetNsList` allocated, freed once.
-            unsafe { Alloc::free(list.cast()) };
-        }
-        drop(given);
-        (
-            NonNull::new(object).map(Object),
-            raised,
-            session.thrown.take(),
-        )
+        evaluate(self.0, req, expr, node, scope, handler)
     }
+
+    /// [`XPath::eval_scoped`] on the evaluator `id` names, which the
+    /// request keeps ([`Request::adopt`]) for an object PHP code reaches
+    /// during the evaluation, held for its span ([`Request::holding`],
+    /// ADR-0013): a function the expression calls may evaluate again,
+    /// register a namespace or a function on it, or replace it, as
+    /// `DOMXPath::__construct` does, and the evaluation runs to its end
+    /// on the one it started with. `None` where its owner gave it up.
+    pub fn eval_held(
+        req: &mut Request,
+        id: ForeignId<XPath>,
+        expr: &[u8],
+        node: Option<Node>,
+        scope: Scope<'_>,
+        handler: &mut Handler<'_>,
+    ) -> Option<(Option<Answer>, Vec<Raised>, Option<Thrown>)> {
+        req.holding(id, |req, held| {
+            let ctx = held.get(req)?.0;
+            let (object, raised, thrown) = evaluate(ctx, req, expr, node, scope, handler);
+            Some((object.map(|o| o.answer()), raised, thrown))
+        })
+        .flatten()
+    }
+}
+
+/// `xmlXPathEvalExpression(expr, ctx)` as [`XPath::eval_scoped`] makes it,
+/// on an evaluator open for the call: `node`, the declarations and the
+/// session set for the evaluation and the fields put back after, the
+/// session to the one an evaluation in progress on the same evaluator had
+/// set, so an evaluation a function makes nests in it.
+fn evaluate(
+    ctx: NonNull<sys::xmlXPathContext>,
+    req: &mut Request,
+    expr: &[u8],
+    node: Option<Node>,
+    scope: Scope<'_>,
+    handler: &mut Handler<'_>,
+) -> (Option<Object>, Vec<Raised>, Option<Thrown>) {
+    let ctx = ctx.as_ptr();
+    let e = cstr(expr);
+    let mut session = Session {
+        req: ptr::from_mut(req),
+        handler,
+        thrown: None,
+        io: ptr::null_mut(),
+    };
+    // SAFETY: a context open for the call; the fields php sets for one
+    // evaluation.
+    let c = unsafe { &mut *ctx };
+    c.node = node.map_or(ptr::null_mut(), Node::raw);
+    let list = if let (Scope::InScope, Some(n)) = (&scope, node) {
+        let doc = n.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
+        // SAFETY: a live node and its document.
+        unsafe { sys::xmlGetNsList(doc, n.raw()) }
+    } else {
+        ptr::null_mut()
+    };
+    let mut given: Vec<*mut sys::xmlNs> = match scope {
+        Scope::List(list) if node.is_some() => list.iter().map(|ns| ns.raw()).collect(),
+        _ => Vec::new(),
+    };
+    if !given.is_empty() {
+        c.namespaces = given.as_mut_ptr();
+        c.nsNr = c_int::try_from(given.len()).unwrap_or(0);
+    }
+    if !list.is_null() {
+        let mut count = 0;
+        loop {
+            // SAFETY: within the NULL-terminated array libxml allocated,
+            // up to and including its terminator.
+            let at = unsafe { list.add(count) };
+            // SAFETY: as above.
+            if unsafe { *at }.is_null() {
+                break;
+            }
+            count += 1;
+        }
+        c.namespaces = list;
+        c.nsNr = c_int::try_from(count).unwrap_or(0);
+    }
+    let outer = std::mem::replace(&mut c.userData, ptr::from_mut(&mut session).cast());
+    let (object, raised) = Raised::capture(|| {
+        // SAFETY: a live context and a NUL-terminated expression; the
+        // session outlives the call.
+        unsafe { sys::xmlXPathEvalExpression(e.as_ptr(), ctx) }
+    });
+    // SAFETY: as above, the fields reset.
+    let c = unsafe { &mut *ctx };
+    c.userData = outer;
+    c.node = ptr::null_mut();
+    if !list.is_null() || !given.is_empty() {
+        c.namespaces = ptr::null_mut();
+        c.nsNr = 0;
+    }
+    if !list.is_null() {
+        // SAFETY: the array `xmlGetNsList` allocated, freed once.
+        unsafe { Alloc::free(list.cast()) };
+    }
+    drop(given);
+    (
+        NonNull::new(object).map(Object),
+        raised,
+        session.thrown.take(),
+    )
 }
 
 /// The declarations one evaluation registers: none, the ones in scope at
