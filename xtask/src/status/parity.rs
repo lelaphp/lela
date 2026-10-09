@@ -24,7 +24,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::{Table, cell, outlived, standing};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, overlaps};
 use crate::phpt::row::{Row, Target};
 use crate::phpt::{self, Root, Subset};
 use crate::reading::Reading;
@@ -308,11 +308,10 @@ fn outside<'a>(
 /// or around a row's name or subset, and re-judges this section's list by
 /// it (#1865).
 fn owned(manifest: &Manifest, inside: &BTreeSet<PathBuf>, place: &Path) -> bool {
-    let overlaps = |owner: &Path| place.starts_with(owner) || owner.starts_with(place);
-    inside.iter().any(|suite| overlaps(suite))
+    inside.iter().any(|suite| overlaps(place, suite))
         || manifest.crates.iter().any(|krate| {
-            overlaps(Path::new(&krate.name))
-                || krate.subsets().iter().any(|subset| overlaps(subset))
+            overlaps(place, Path::new(&krate.name))
+                || krate.subsets().iter().any(|subset| overlaps(place, subset))
         })
 }
 

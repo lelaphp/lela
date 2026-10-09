@@ -92,27 +92,25 @@ fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
     let cases = [
         (
             "{ suites = [\"ext/ldap\"], ruling = 1167 }, { suites = [\"ext/ldap\"], ruling = 1168 }",
-            ["ext/ldap", "#1167", "ext/ldap", "#1168"],
+            "rules ext/ldap out under #1167, and ext/ldap under #1168",
         ),
         (
             "{ suites = [\"ext/ldap\", \"ext/snmp\", \"ext/ldap\"], ruling = 1167 }",
-            ["ext/ldap", "#1167", "ext/ldap", "#1167"],
+            "rules ext/ldap out under #1167, and ext/ldap under #1167",
         ),
         (
             "{ suites = [\"ext/x\"], ruling = 1167 }, { suites = [\"ext/x/tests\"], ruling = 1168 }",
-            ["ext/x", "#1167", "ext/x/tests", "#1168"],
+            "rules ext/x out under #1167, and ext/x/tests under #1168",
         ),
         (
             "{ suites = [\"ext/x/tests\"], ruling = 1168 }, { suites = [\"ext/x\"], ruling = 1167 }",
-            ["ext/x/tests", "#1168", "ext/x", "#1167"],
+            "rules ext/x/tests out under #1168, and ext/x under #1167",
         ),
     ];
     for (out, named) in cases {
         let text = format!("{MINIMAL}[parity]\nout = [{out}]\n");
         let refused = format!("{:#}", Manifest::parse(&text).unwrap_err());
-        for name in named {
-            assert!(refused.contains(name), "{out}: {name} in {refused}");
-        }
+        assert!(refused.contains(named), "{out}: {named} in {refused}");
     }
     let apart = format!(
         "{MINIMAL}[parity]\nout = [{{ suites = [\"ext/x\"], ruling = 1167 }}, {{ suites = [\"ext/xy\"], ruling = 1168 }}]\n"

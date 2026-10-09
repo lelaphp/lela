@@ -109,7 +109,6 @@ impl Parity {
     /// inside a row's subset is the row's, and so is a subset inside a
     /// suite.
     fn hold(&self, crates: &[Crate]) -> Result<()> {
-        let overlap = |a: &Path, b: &Path| a.starts_with(b) || b.starts_with(a);
         let ruled: Vec<(&Path, Ticket)> = self
             .out
             .iter()
@@ -117,7 +116,7 @@ impl Parity {
             .collect();
         for (at, &(suite, ruling)) in ruled.iter().enumerate() {
             if let Some((other, under)) =
-                ruled[..at].iter().find(|(other, _)| overlap(suite, other))
+                ruled[..at].iter().find(|(other, _)| overlaps(suite, other))
             {
                 bail!(
                     "[parity] out rules {} out under {under}, and {} under {ruling}; a suite is ruled out once, under one ruling, never twice or inside another",
@@ -129,7 +128,7 @@ impl Parity {
                 krate
                     .subsets()
                     .into_iter()
-                    .find(|subset| overlap(suite, subset))
+                    .find(|subset| overlaps(suite, subset))
                     .map(|subset| (krate, subset))
             });
             if let Some((krate, subset)) = owned {
@@ -143,6 +142,13 @@ impl Parity {
         }
         Ok(())
     }
+}
+
+/// Whether `a` and `b` are one place or one is a directory inside the
+/// other, component by component: the one rule parity's suites, rulings
+/// and rows overlap by, which `hold` and `status::parity::owned` both read.
+pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
 }
 
 /// `[oracle]`: the only place the manifest says where the pin is.
