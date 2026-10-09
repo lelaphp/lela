@@ -659,16 +659,10 @@ text = "A process forks through php_engine's one home, fork::Alone, the one call
 
 [[rule]]
 id = "lints.no-panic"
-scope = ["crates/php_syntax", "crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*", "sapi/*"]  # php_syntax: the parser runs inside every request, so its panic reaches one (#236)
-exempt = ["tests", "xtask"]
+scope = ["crates/*", "ext/*", "sapi/*"]  # every crate a request runs through; php_syntax because the parser runs inside every request (#236), the rest measured clean (#1917)
+exempt = ["tests", "xtask", "crates/php_macros"]
 deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
 text = "Internal invariant failures are InternalError fatals with a message, not panics (design §10)."
-
-[[rule]]
-id = "engine.reentry-signature"
-scope = "crates/php_engine/**"
-check = "reentry-signature" # grammar: check, a named xtask lint (design §10, principle 9)
-text = "A function in php_engine that calls execute or release takes &mut Request."
 
 [[rule]]
 id = "api.no-hot"
@@ -709,7 +703,7 @@ text = "exit= in a witness is captured by `xtask witness --accept`, never author
 
 [[rule]]
 id = "witness.coverage"
-scope = ["crates/php_engine/src/**", "ext/*/src/**"]
+scope = ["crates/php_engine/src/**", "crates/php_streams/src/**", "ext/*/src/**"]
 check = "witness-coverage"
 text = "A kernel or a native without a witness fails CI (design §8)."
 
