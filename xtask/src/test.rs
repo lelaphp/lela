@@ -21,6 +21,14 @@
 //! parallel as it always has. Last, one `cargo test --doc` runs the
 //! doctests of every crate that built, what it printed read back crate by crate
 //! from cargo's `Doc-tests` lines.
+//!
+//! **A pinned error code.** A `compile_fail,E0382` block passes the stable
+//! rustdoc when it fails to compile for any reason; only a nightly's
+//! checks the code (#2049). So the doctests of the files that pin one are
+//! run once more, one at a time with the compiler's words let through
+//! (`--nocapture`), and a block whose
+//! compile names no `error[E0382]` fails its crate's reading as a failed
+//! test, as the nightly's rustdoc would fail it ([`Pin`]).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -61,9 +69,13 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     }
     let built = Run::of(root, &["build", "--keep-going"], &crates, Targets::Tests)?;
     let docs = doctests(root, &built, &crates)?;
+    let missed = Pin::missed(root, &built, &crates)?;
     crates
         .iter()
-        .map(|krate| reading(&snapshot, krate, &built, docs.get(&krate.name)))
+        .map(|krate| {
+            let missed = missed.get(&krate.name).map_or(&[][..], Vec::as_slice);
+            reading(&snapshot, krate, &built, (docs.get(&krate.name), missed))
+        })
         .collect()
 }
 
@@ -105,9 +117,15 @@ struct Ran {
 }
 
 /// One crate's reading: pass when every test executable of the crate and
-/// its doctests ended well, fail with the tail of what the ones that did
-/// not printed otherwise, the numbers summed over all of them either way.
-fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run, doc: Option<&Ran>) -> Result<Reading> {
+/// its doctests ended well and no pinned code was `missed`, fail with the
+/// tail of what the ones that did not printed otherwise, each missed pin
+/// a failed test, the numbers summed over all of them either way.
+fn reading(
+    snapshot: &Snapshot,
+    krate: &Crate,
+    run: &Run,
+    (doc, missed): (Option<&Ran>, &[String]),
+) -> Result<Reading> {
     let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
     let name = &krate.name;
     let Some(built) = run.crates.get(name).filter(|b| b.whole) else {
@@ -141,6 +159,12 @@ fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run, doc: Option<&Ran>) -> 
             passed = false;
             failing.push_str(&doc.text);
         }
+    }
+    for pin in missed {
+        counts.failed += 1;
+        passed = false;
+        failing.push_str(pin);
+        failing.push('\n');
     }
     reading.count("passed", counts.passed)?;
     reading.count("failed", counts.failed)?;
@@ -365,6 +389,176 @@ fn doctests(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String
     Ok(ran)
 }
 
+/// A `compile_fail` block pinned to the error codes its compile must
+/// name: where it stands, as rustdoc names its test, and the codes.
+#[derive(Debug, PartialEq, Eq)]
+struct Pin {
+    file: String,
+    line: usize,
+    codes: Vec<String>,
+}
+
+impl Pin {
+    /// The pins of `text`, the source at `file`: each doc comment's fence
+    /// that opens a `compile_fail` block with a code among its words, at
+    /// the fence's own line, as rustdoc numbers the block's test.
+    fn of(file: &str, text: &str) -> Vec<Pin> {
+        let mut pins = Vec::new();
+        for (at, line) in text.lines().enumerate() {
+            let Some(words) = ["//!", "///"]
+                .iter()
+                .find_map(|doc| line.trim_start().strip_prefix(doc))
+                .and_then(|rest| rest.trim_start().strip_prefix("```"))
+            else {
+                continue;
+            };
+            let words: Vec<&str> = words
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .collect();
+            let codes: Vec<String> = words
+                .iter()
+                .filter(|w| {
+                    w.len() == 5 && w.starts_with('E') && w[1..].bytes().all(|b| b.is_ascii_digit())
+                })
+                .map(|w| (*w).to_owned())
+                .collect();
+            if words.contains(&"compile_fail") && !codes.is_empty() {
+                pins.push(Pin {
+                    file: file.to_owned(),
+                    line: at + 1,
+                    codes,
+                });
+            }
+        }
+        pins
+    }
+
+    /// Each pin of `crates` whose block's compile named none of its codes,
+    /// in words, by crate: the doctests of the files that pin a code, in
+    /// crates whose doctests built, run one at a time with the compiler's
+    /// words on the stream (`--nocapture`), and each `compile_fail`
+    /// block's codes read from its `error[E....]` lines, the words the
+    /// nightly's rustdoc reads them from.
+    fn missed(root: &Path, run: &Run, crates: &[&Crate]) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut pinned: Vec<(&Crate, Vec<Pin>)> = Vec::new();
+        for krate in crates {
+            if !run
+                .crates
+                .get(&krate.name)
+                .is_some_and(|b| b.whole && b.doctests)
+            {
+                continue;
+            }
+            let mut pins = Vec::new();
+            for file in sources::rust(root, krate)? {
+                let text = fs::read_to_string(root.join(&file))
+                    .with_context(|| format!("reading {file}"))?;
+                pins.extend(Pin::of(&file, &text));
+            }
+            if !pins.is_empty() {
+                pinned.push((krate, pins));
+            }
+        }
+        if pinned.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        // The two streams go to one file, so a test's line and its
+        // compile's words stand in the order they were written.
+        fs::create_dir_all(&run.target_dir)
+            .with_context(|| format!("creating {}", run.target_dir.display()))?;
+        let written = run
+            .target_dir
+            .join(format!("xtask-pinned-{}.out", std::process::id()));
+        let file =
+            File::create(&written).with_context(|| format!("creating {}", written.display()))?;
+        let mut command = Command::new("cargo");
+        command
+            .args(["test", "--doc", "--no-fail-fast", "--color", "never"])
+            .current_dir(root)
+            .stdout(Stdio::from(
+                file.try_clone()
+                    .context("sharing the pinned blocks' file")?,
+            ))
+            .stderr(Stdio::from(file));
+        for (krate, _) in &pinned {
+            command.args(["-p", &krate.package()]);
+        }
+        // A test's name is its file, its item and its line; `compile fail`
+        // is printed beside it and filters nothing, so the filters are the
+        // pinned files and every doctest of them runs.
+        command.args(["--", "--nocapture", "--test-threads=1"]);
+        let files: std::collections::BTreeSet<String> = pinned
+            .iter()
+            .flat_map(|(_, pins)| pins.iter().map(|pin| format!("{} - ", pin.file)))
+            .collect();
+        command.args(files);
+        batch::without_git(&mut command);
+        command
+            .status()
+            .context("running cargo test --doc over the pinned blocks")?;
+        let said = Pin::said(&fs::read_to_string(&written).unwrap_or_default());
+        fs::remove_file(&written).ok();
+        let mut missed = BTreeMap::new();
+        for (krate, pins) in pinned {
+            let words: Vec<String> = pins.iter().filter_map(|pin| pin.missed_in(&said)).collect();
+            if !words.is_empty() {
+                missed.insert(krate.name.clone(), words);
+            }
+        }
+        Ok(missed)
+    }
+
+    /// The codes each `compile fail` test's compile named in `text`, by
+    /// the file and line its name carries: `test <file> - <item> (line
+    /// <n>) - compile fail ... ` and every `error[E....]` after it until
+    /// the next test.
+    fn said(text: &str) -> BTreeMap<(String, usize), Vec<String>> {
+        let mut said: BTreeMap<(String, usize), Vec<String>> = BTreeMap::new();
+        let mut current: Option<(String, usize)> = None;
+        for line in text.lines() {
+            if let Some(name) = line.strip_prefix("test ") {
+                current = name.split_once(" - compile fail").and_then(|(name, _)| {
+                    let (file, rest) = name.split_once(" - ")?;
+                    let at = rest.rsplit_once("(line ")?.1.strip_suffix(')')?;
+                    Some((file.to_owned(), at.parse().ok()?))
+                });
+            }
+            let Some(at) = &current else {
+                continue;
+            };
+            let codes = said.entry(at.clone()).or_default();
+            for (from, _) in line.match_indices("error[E") {
+                let code = &line[from + "error[".len()..];
+                if let Some(end) = code.find(']') {
+                    codes.push(code[..end].to_owned());
+                }
+            }
+        }
+        said
+    }
+
+    /// This pin in words where the compile `said` names none of its codes,
+    /// or its block was not compiled at all.
+    fn missed_in(&self, said: &BTreeMap<(String, usize), Vec<String>>) -> Option<String> {
+        let at = format!("{}:{}", self.file, self.line);
+        let pinned = self.codes.join(", ");
+        match said.get(&(self.file.clone(), self.line)) {
+            None => Some(format!(
+                "{at}: a compile_fail block pinned to {pinned} was not compiled"
+            )),
+            Some(named) if !self.codes.iter().any(|c| named.contains(c)) => Some(format!(
+                "{at}: a compile_fail block pinned to {pinned} failed with {}",
+                if named.is_empty() {
+                    "no error code".to_owned()
+                } else {
+                    named.join(", ")
+                }
+            )),
+            Some(_) => None,
+        }
+    }
+}
+
 /// The sums over every `test result:` line cargo's harness prints, one
 /// per test binary run.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -419,7 +613,7 @@ impl Counts {
 
 #[cfg(test)]
 mod tests {
-    use super::Counts;
+    use super::{Counts, Pin};
 
     #[test]
     fn the_counts_are_summed_over_every_test_binary() {
@@ -441,6 +635,53 @@ mod tests {
         assert_eq!(
             Counts::of("error[E0425]: cannot find value `x`\n"),
             Counts::default()
+        );
+    }
+
+    /// A pin is a `compile_fail` fence of a doc comment with a code among
+    /// its words, at the fence's line; one with no code, or a code on a
+    /// fence that is not `compile_fail`, pins nothing (#2049).
+    #[test]
+    fn a_pin_is_a_compile_fail_fence_with_a_code_at_its_line() {
+        let text = "/// ```compile_fail,E0382\n/// x\n/// ```\n//! ```compile_fail\n//! ```\n    /// ```rust, compile_fail, E0277 E0308\n/// ```ignore,E0001\n";
+        let pin = |line, codes: &[&str]| Pin {
+            file: "src/a.rs".into(),
+            line,
+            codes: codes.iter().map(|c| (*c).to_owned()).collect(),
+        };
+        assert_eq!(
+            Pin::of("src/a.rs", text),
+            [pin(1, &["E0382"]), pin(6, &["E0277", "E0308"])]
+        );
+    }
+
+    /// The codes are read off each `compile_fail` test's words in the order
+    /// one process wrote them, and a pin is missed where its block's
+    /// compile named another code, none, or did not run: the mutation a
+    /// stable rustdoc passes (#2049).
+    #[test]
+    fn a_pin_its_compile_does_not_name_is_missed() {
+        let text = "running 2 tests\ntest crates/a/src/o.rs - o::T (line 115) - compile fail ... error[E0382]: use of moved value\nerror: aborting due to 1 previous error\n\nFor more information about this error, try `rustc --explain E0382`.\nok\ntest crates/a/src/o.rs - o::T (line 162) - compile fail ... error: cannot construct\nok\ntest result: ok. 2 passed\n";
+        let said = Pin::said(text);
+        let pin = |line, code: &str| Pin {
+            file: "crates/a/src/o.rs".into(),
+            line,
+            codes: vec![code.into()],
+        };
+        assert_eq!(pin(115, "E0382").missed_in(&said), None);
+        assert_eq!(
+            pin(115, "E0999").missed_in(&said).as_deref(),
+            Some("crates/a/src/o.rs:115: a compile_fail block pinned to E0999 failed with E0382")
+        );
+        assert_eq!(
+            pin(162, "E0451").missed_in(&said).as_deref(),
+            Some(
+                "crates/a/src/o.rs:162: a compile_fail block pinned to E0451 failed with no error code"
+            )
+        );
+        assert_eq!(
+            pin(9, "E0382").missed_in(&said).as_deref(),
+            Some("crates/a/src/o.rs:9: a compile_fail block pinned to E0382 was not compiled")
         );
     }
 }
