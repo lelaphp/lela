@@ -673,8 +673,11 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
             max_len: info.max_len,
             precision: info.precision,
         };
-        let unheld = write(req, object, |s| {
-            let name = info.name.as_bytes();
+        let mut info = Some(info);
+        write(req, object, |s| {
+            let Some(name) = info.as_ref().map(|i| i.name.as_bytes()) else {
+                return;
+            };
             if let Some(bound) = s
                 .columns_bound
                 .iter_mut()
@@ -682,15 +685,12 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
             {
                 bound.position = i64::try_from(column).unwrap_or(-1);
             }
-            match s.columns.as_mut() {
-                Some(columns) => {
-                    columns.list.push(info);
-                    None
-                }
-                None => Some(info),
+            if let Some(columns) = s.columns.as_mut() {
+                columns.list.extend(info.take());
             }
         });
-        if let Some(unheld) = unheld.flatten() {
+        // A statement with no columns to hold it gives the name back.
+        if let Some(unheld) = info {
             unheld.name.give_up(req);
         }
     }
