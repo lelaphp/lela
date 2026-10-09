@@ -21,25 +21,8 @@ use crate::error::{Done, Er, Status};
 use crate::read::Stdio;
 use crate::write::Hooks;
 
-/// A callable kept past the call that registered it, with one owner of
-/// the value it came from (`zend_fcc_dup`).
-pub(crate) struct Kept {
-    callable: Callable,
-    value: Value,
-}
-
-impl Kept {
-    fn keep(req: &mut Request, callable: Callable, position: u32) -> Kept {
-        let value = req.argument(position).unwrap_or_default().deref();
-        req.addref(&value);
-        Kept { callable, value }
-    }
-
-    /// `zend_fcc_dtor`.
-    fn release(self, req: &mut Request) {
-        req.release(self.value);
-    }
-}
+/// A callable kept past the call that registered it, `zend_fcc_dup`.
+pub(crate) type Kept = Box<Owner<Callable>>;
 
 /// `ze_zip_object.last_id`, `-1` until an add.
 pub(crate) struct LastId(pub(crate) i64);
@@ -58,8 +41,8 @@ pub(crate) struct Intern {
     pub(crate) filename: Option<Vec<u8>>,
     pub(crate) last_id: LastId,
     pub(crate) err: Status,
-    pub(crate) progress: Option<Box<Kept>>,
-    pub(crate) cancel: Option<Box<Kept>>,
+    pub(crate) progress: Option<Kept>,
+    pub(crate) cancel: Option<Kept>,
     /// The archive's number, which its entries' streams read by.
     pub(crate) id: u64,
 }
@@ -211,7 +194,7 @@ impl ObjectHandlers for Handlers {
             .map(|i| (i.progress.take(), i.cancel.take()));
         if let Some((p, c)) = kept {
             for k in [p, c].into_iter().flatten() {
-                k.release(req);
+                k.give_up(req);
             }
         }
         Std.free_obj(req, object);
@@ -495,8 +478,8 @@ fn close_with_hooks(
 ) -> (Result<(), ()>, Option<Thrown>) {
     let (progress, cancel) = object.native::<Intern>(req).map_or((None, None), |i| {
         (
-            i.progress.as_ref().map(|k| k.callable.clone()),
-            i.cancel.as_ref().map(|k| k.callable.clone()),
+            i.progress.as_deref().map(|k| (**k).clone()),
+            i.cancel.as_deref().map(|k| (**k).clone()),
         )
     });
     let umask = req.umask();
@@ -1097,7 +1080,7 @@ impl ZipArchive {
             (i.progress.take(), i.cancel.take())
         });
         for k in kept.into_iter().flat_map(|(p, c)| [p, c]).flatten() {
-            k.release(req);
+            k.give_up(req);
         }
         match thrown {
             Some(t) => Err(t),
@@ -2475,18 +2458,44 @@ impl ZipArchive {
     /// bool(true)
     /// Invalid or uninitialized Zip object
     /// ```
+    ///
+    /// The callables are kept as `zend_fcc_dup` keeps them, so a
+    /// `Class::method` string resolved with `$this` in scope keeps the
+    /// object it names until the close gives the callables up:
+    ///
+    /// ```php
+    /// class A { function __destruct(){ echo "dtor\n"; } function p($r){ echo "at $r\n"; } function c(){ echo "asked\n"; return 0; }
+    ///   function reg($z){ $z->registerProgressCallback(0.5, 'A::p'); $z->registerCancelCallback('A::c'); } }
+    /// $z = new ZipArchive; $z->open('kept-witness.zip', ZipArchive::CREATE); $z->addFromString('a', '1');
+    /// (new A)->reg($z);
+    /// echo "registered\n";
+    /// var_dump($z->close()); unlink('kept-witness.zip');
+    /// ```
+    /// ```expect
+    /// registered
+    /// at 0
+    /// asked
+    /// asked
+    /// at 1
+    /// asked
+    /// dtor
+    /// bool(true)
+    /// ```
     #[php(tentative)]
     fn registerProgressCallback(req: &mut Rq, this: Z, rate: f64, callback: Callable) -> R<bool> {
         archive!(req, this);
-        let kept = Kept::keep(req, callback, 2);
-        let old = this.object().native_mut::<Intern>(req).and_then(|i| {
-            if let Some(za) = &mut i.za {
-                za.progress = Some(rate);
+        let kept = Box::new(Owner::take(req, callback));
+        let old = match this.object().native_mut::<Intern>(req) {
+            Some(i) => {
+                if let Some(za) = &mut i.za {
+                    za.progress = Some(rate);
+                }
+                i.progress.replace(kept)
             }
-            i.progress.replace(Box::new(kept))
-        });
+            None => Some(kept),
+        };
         if let Some(old) = old {
-            old.release(req);
+            old.give_up(req);
         }
         Ok(true)
     }
@@ -2512,15 +2521,18 @@ impl ZipArchive {
     #[php(tentative)]
     fn registerCancelCallback(req: &mut Rq, this: Z, callback: Callable) -> R<bool> {
         archive!(req, this);
-        let kept = Kept::keep(req, callback, 1);
-        let old = this.object().native_mut::<Intern>(req).and_then(|i| {
-            if let Some(za) = &mut i.za {
-                za.cancel = true;
+        let kept = Box::new(Owner::take(req, callback));
+        let old = match this.object().native_mut::<Intern>(req) {
+            Some(i) => {
+                if let Some(za) = &mut i.za {
+                    za.cancel = true;
+                }
+                i.cancel.replace(kept)
             }
-            i.cancel.replace(Box::new(kept))
-        });
+            None => Some(kept),
+        };
         if let Some(old) = old {
-            old.release(req);
+            old.give_up(req);
         }
         Ok(true)
     }
