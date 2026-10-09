@@ -11640,7 +11640,7 @@ pub(crate) fn assign_obj<T: Tier>(
     // An undefined value's handler can free the table a VAR's INDIRECT
     // slot stands in, and the object with it: the object is held across
     // the read and given back after the write, as php guards a container
-    // its handlers can free (`trace:assign-obj-entry-container-under-a-handler`).
+    // its handlers can free (`php-ub:assign-obj-entry-container-under-a-handler`).
     let guard = early
         .filter(|_| {
             op.op1_type == OperandKind::Var
@@ -22735,7 +22735,7 @@ mod tests {
     }
 
     /// #1514: the program #1511 ruled on, which is held to the engine
-    /// alone, so no witness pins it (`trace:assign-obj-entry-container-under-a-handler`).
+    /// alone, so no witness pins it (`php-ub:assign-obj-entry-container-under-a-handler`).
     #[test]
     fn the_object_a_handler_frees_with_its_array_is_held_across_the_write() {
         let served = Engine::cli_builder().build().serve_capture(
