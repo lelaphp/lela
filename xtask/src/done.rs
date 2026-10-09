@@ -70,7 +70,9 @@
 //!    is not asked and has no store to answer from if it were. Beside
 //!    it, a ticket a merge since the base names and left open for want
 //!    of a ready record, `main`'s own merge at `HEAD` where the base is
-//!    `HEAD`, is unmet until a close replaces that reading (#2358).
+//!    `HEAD`, is unmet until a close replaces that reading (#2358); one
+//!    with a box unticked that an open ticket blocks is a partial landing
+//!    and is not (#2394).
 //!
 //! **What makes a `ticket` reading fresh** (#31). A ticket has no tree of
 //! its own, so the reading is stamped over the workspace, and it is fresh

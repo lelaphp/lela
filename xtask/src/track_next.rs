@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 
 use crate::census_weight::Weights;
 use crate::reading::Store;
-use crate::ticket::{Gh, Open, State};
+use crate::ticket::{BlockedBy, Gh, Open, State};
 use crate::track::{MAIN, Records, Ticket};
 use toml::value::Datetime;
 
@@ -195,7 +195,7 @@ impl Held {
     /// where an open blocker blocks it or nothing does.
     fn of(ticket: &Open, records: &Records) -> Option<Held> {
         let mut branches = Vec::new();
-        for wait in waits(ticket, records) {
+        for wait in waits(&ticket.blocked_by, records) {
             match wait {
                 Wait::Open(_) => return None,
                 Wait::Branch(_, branch) => branches.push(branch.to_owned()),
@@ -271,7 +271,7 @@ fn widest<'a>(
     records: &Records,
 ) -> Option<&'a Open> {
     workable(open, track, records)
-        .filter(|ticket| waits(ticket, records).next().is_none())
+        .filter(|ticket| waits(&ticket.blocked_by, records).next().is_none())
         .min_by_key(|ticket| {
             let weight = weights.weigh(&ticket.title).0;
             (std::cmp::Reverse(weight), ticket.number)
@@ -331,13 +331,16 @@ impl Wait<'_> {
     }
 }
 
-/// What still blocks `ticket`: each blocker open at the tracker, and each
+/// What still blocks a ticket blocked by `blocked_by`: each blocker open at the tracker, and each
 /// closed one recorded by a branch `main` does not contain yet (#1843,
 /// #1850), since its work is not in the `main` the ticket would be cut
-/// from until /specs merges that branch. The frontier, the held and the
-/// chains read the rule here.
-pub(crate) fn waits<'a>(ticket: &'a Open, records: &'a Records) -> impl Iterator<Item = Wait<'a>> {
-    ticket.blocked_by.nodes.iter().filter_map(|blocker| {
+/// from until /specs merges that branch. The frontier, the held, the
+/// chains and a merge's partial landing (#2394) read the rule here.
+pub(crate) fn waits<'a>(
+    blocked_by: &'a BlockedBy,
+    records: &'a Records,
+) -> impl Iterator<Item = Wait<'a>> {
+    blocked_by.nodes.iter().filter_map(|blocker| {
         if blocker.state == State::Open {
             return Some(Wait::Open(blocker.number));
         }
@@ -352,7 +355,7 @@ pub(crate) fn waits_on<'a>(
     ticket: &'a Open,
     records: &'a Records,
 ) -> impl Iterator<Item = u64> + 'a {
-    waits(ticket, records).map(Wait::number)
+    waits(&ticket.blocked_by, records).map(Wait::number)
 }
 
 /// `xtask track next`: the track named and the answer printed; no
