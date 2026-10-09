@@ -152,6 +152,7 @@ pub(crate) mod row;
 pub(crate) mod server;
 mod sysv;
 pub(crate) mod target;
+pub(crate) mod upstream;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -1509,6 +1510,18 @@ pub(crate) fn run_subset(
     subset: &Subset,
     under: Under<'_>,
 ) -> Result<(Tally, across::Waited)> {
+    run_tests(oracle, registry, subset, subset.tests()?, under)
+}
+
+/// Run `tests` of `subset` as [`run_subset`] runs the whole of it: what
+/// `--upstream` runs over the tests it names (the `upstream` module).
+fn run_tests(
+    oracle: &Oracle<'_>,
+    registry: &Registry,
+    subset: &Subset,
+    tests: Vec<PathBuf>,
+    under: Under<'_>,
+) -> Result<(Tally, across::Waited)> {
     let Under {
         runner,
         lane,
@@ -1517,7 +1530,6 @@ pub(crate) fn run_subset(
         served,
         locks,
     } = under;
-    let tests = subset.tests()?;
     let unrun = (Tally::found(tests.len()), across::Waited::default());
     let Some(binary) = runner.binary() else {
         return Ok(unrun);

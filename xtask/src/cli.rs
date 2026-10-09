@@ -533,6 +533,19 @@ pub(crate) struct Phpt {
     /// one that predates a test the subset has now, and say so of the rest.
     #[arg(long, requires = "engine")]
     pub unkept: bool,
+    /// php-src's own `run-tests.php` beside this runner, both under the
+    /// pinned oracle, over these `.phpt` files of the subset only, each
+    /// verdict printed beside the other; a test judged apart is the exit,
+    /// and nothing is recorded. A directory, a glob or no file is refused
+    /// (#1973).
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 1..,
+        requires = "subset",
+        conflicts_with_all = ["full", "jit", "engine", "census", "against", "base", "unkept"]
+    )]
+    pub upstream: Vec<PathBuf>,
 }
 
 /// What one `compile-identity` run is asked for, flattened onto the

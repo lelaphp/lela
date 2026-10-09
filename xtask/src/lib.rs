@@ -352,6 +352,9 @@ fn ticket_command(
 /// `xtask phpt`: the subsets asked for, each run and each written.
 fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt) -> Result<()> {
     let registry = Registry::load(root)?;
+    if let (Some(subset), false) = (&ask.subset, ask.upstream.is_empty()) {
+        return phpt::upstream::compare(manifest, &registry, subset, &ask.upstream, ask.jobs);
+    }
     let since = ask.base;
     let ask = phpt::Ask {
         subset: ask.subset,

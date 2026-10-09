@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cargo xtask phpt --subset ext/pdo_mysql --upstream ext/pdo_mysql/tests/pdo_mysql___construct.phpt","description":"Run one named test under upstream's runner and this one (#1973)"}}

@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"php -n run-tests.php -q ext/pdo_mysql/tests/pdo_mysql___construct.phpt","description":"Run upstream's runner over one named test, which only xtask phpt --upstream may (#1973)"}}
