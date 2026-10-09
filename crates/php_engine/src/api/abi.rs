@@ -162,7 +162,13 @@ pub enum IniVerdict {
 /// `ReflectionExtension::getDependencies` reads. The engine starts its
 /// extensions in the order `zend_sort_modules` leaves by the required
 /// and optional rows, and starts none whose required one has not
-/// started before it, as `zend_startup_module_ex` refuses it.
+/// started before it, as `zend_startup_module_ex` refuses it. That a
+/// build carries a required one at all is `api-check`'s reading of the
+/// `Required` rows each extension hands
+/// [`ExtensionBuilder::dependencies`], read from its sources and held
+/// against `php_bundle`'s features: each feature switches on the
+/// extensions its own declares required, and a crate's Cargo link with
+/// no such row requires nothing (#1915).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dependency {
     pub name: String,
