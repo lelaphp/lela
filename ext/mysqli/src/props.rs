@@ -164,20 +164,22 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
-        let mut table = PhpArray::new(req)?;
-        for name in P::NAMES {
-            if let Some(value) = P::read(req, object, name, true)? {
-                // The table's row takes the value's owner.
-                let key = match PhpString::new(req, name.as_bytes()) {
-                    Ok(key) => key.into_key(),
-                    Err(thrown) => {
-                        value.give_up(req);
-                        return Err(thrown);
-                    }
-                };
-                table.set(req, key, value)?;
+        let table = PhpArray::filled(req, |req, table| {
+            for name in P::NAMES {
+                if let Some(value) = P::read(req, object, name, true)? {
+                    // The table's row takes the value's owner.
+                    let key = match PhpString::new(req, name.as_bytes()) {
+                        Ok(key) => key.into_key(),
+                        Err(thrown) => {
+                            value.give_up(req);
+                            return Err(thrown);
+                        }
+                    };
+                    table.set(req, key, value)?;
+                }
             }
-        }
+            Ok(())
+        })?;
         Ok(Some(DebugInfo::from(table)))
     }
 }

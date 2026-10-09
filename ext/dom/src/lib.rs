@@ -1029,21 +1029,41 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
     // `zend_array_dup(zend_std_get_properties(object))`.
     let own = object.property_table(req)?;
     let own: Vec<(Key, Value)> = walk::rows(req, own).collect();
-    let mut out = PhpArray::new(req)?;
-    for (key, value) in own {
-        let value = Owner::take(req, value);
-        out.set(req, Owner::take(req, key), value)?;
-    }
-    let Some(table) = table_of(req, object) else {
-        return Ok(Some(out.into()));
-    };
     let mut pending: Option<Thrown> = None;
-    let omitted = string(req, b"(object value omitted)")?;
-    req.state::<State>().suppress_warnings = true;
+    let out = PhpArray::filled(req, |req, out| {
+        for (key, value) in own {
+            let value = Owner::take(req, value);
+            out.set(req, Owner::take(req, key), value)?;
+        }
+        let Some(table) = table_of(req, object) else {
+            return Ok(());
+        };
+        let omitted = string(req, b"(object value omitted)")?;
+        req.state::<State>().suppress_warnings = true;
+        let read = prop_rows(req, object, table, out, *omitted, &mut pending);
+        req.state::<State>().suppress_warnings = false;
+        omitted.give_up(req);
+        read
+    })?;
+    Ok(Some(DebugInfo {
+        table: out,
+        thrown: pending,
+    }))
+}
+
+/// The rows `dom_get_debug_info_helper` reads off the property table:
+/// each reader's value, an object shown as `omitted`. A reader that
+/// fails is left out, its throwable kept in `pending` for the dumper; a
+/// fatal or an exit ends the dump, handed on with what was pending.
+fn prop_rows(
+    req: &mut Request,
+    object: PhpObject,
+    table: &[&[Prop]],
+    out: &mut Owner<PhpArray>,
+    omitted: Value,
+    pending: &mut Option<Thrown>,
+) -> Result<(), Thrown> {
     for prop in table.iter().flat_map(|t| t.iter()) {
-        // A reader that fails is left out, as `dom_get_debug_info_helper`
-        // leaves it out, its throwable kept for the dumper; a fatal or an
-        // exit ends the dump.
         let read = match (prop.read)(req, object) {
             Ok(Some(v)) => v,
             Ok(None) => continue,
@@ -1053,30 +1073,22 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
                     None => thrown,
                 };
                 if thrown.exception().is_none() {
-                    req.state::<State>().suppress_warnings = false;
-                    omitted.give_up(req);
-                    out.give_up(req);
                     return Err(thrown);
                 }
-                pending = Some(thrown);
+                *pending = Some(thrown);
                 continue;
             }
         };
         let shown = if read.as_object().is_some() {
             read.give_up(req);
-            Owner::take(req, *omitted)
+            Owner::take(req, omitted)
         } else {
             read
         };
         let key = PhpString::new(req, prop.name)?.into_key();
         out.set(req, key, shown)?;
     }
-    omitted.give_up(req);
-    req.state::<State>().suppress_warnings = false;
-    Ok(Some(DebugInfo {
-        table: out,
-        thrown: pending,
-    }))
+    Ok(())
 }
 
 /// `DOM_PROP_NODE`: the node, php's "Invalid State Error" where the object

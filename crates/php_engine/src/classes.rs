@@ -332,66 +332,9 @@ impl ObjectHandlers for ClosureHandlers {
         let Some(decl) = req.function_decl(closure.function).cloned() else {
             return PhpArray::new(req).map(|table| Some(table.into()));
         };
-        let mut out = PhpArray::new(req)?;
-        let written = String::from_utf8_lossy(&decl.name.0).into_owned();
-        if closure.fake {
-            let named = match closure.scope {
-                Some(scope) => format!("{}::{written}", req.class_name(scope)),
-                None => written,
-            };
-            let named = PhpString::new(req, named.as_bytes())?.into_value();
-            set_row(req, &mut out, b"function", named)?;
-        } else {
-            let named = PhpString::new(req, written.as_bytes())?.into_value();
-            set_row(req, &mut out, b"name", named)?;
-            let file = PhpString::new(req, &decl.file.0)?.into_value();
-            set_row(req, &mut out, b"file", file)?;
-            set_row(req, &mut out, b"line", Owner::int(i64::from(decl.line)))?;
-        }
-        // The whole table, the `use` variables and the body's `static`s.
-        let bound = req.closure_bound(object, false);
-        if !bound.is_empty() {
-            let mut statics = PhpArray::new(req)?;
-            for (name, value) in bound {
-                let name = PhpString::new(req, &name)?;
-                // `Z_ISREF_P(var) && Z_REFCOUNT_P(var) == 1`: a reference
-                // the table alone holds shows its value.
-                let value = if value.as_php_ref().is_some() && value.refcount() == 1 {
-                    value.deref()
-                } else {
-                    value
-                };
-                let name = Key::from_string(req, name);
-                statics.set(req, name, Owner::take(req, value))?;
-            }
-            set_row(req, &mut out, b"static", statics.into_value())?;
-        }
-        if let Some(this) = closure.this {
-            let this = Owner::take(req, this.as_value());
-            set_row(req, &mut out, b"this", this)?;
-        }
-        if !decl.parameters.is_empty() {
-            let required = decl
-                .parameters
-                .iter()
-                .position(|p| !p.is_required())
-                .unwrap_or(decl.parameters.len());
-            let mut parameters = PhpArray::new(req)?;
-            for (at, parameter) in decl.parameters.iter().enumerate() {
-                let amp = if parameter.by_ref { "&" } else { "" };
-                let name = format!("{amp}${}", String::from_utf8_lossy(&parameter.name.0));
-                let stands = if at >= required {
-                    &b"<optional>"[..]
-                } else {
-                    b"<required>"
-                };
-                let key = PhpString::new(req, name.as_bytes())?;
-                let key = Key::from_string(req, key);
-                let stands = PhpString::new(req, stands)?;
-                parameters.set(req, key, stands.into_value())?;
-            }
-            set_row(req, &mut out, b"parameter", parameters.into_value())?;
-        }
+        let out = PhpArray::filled(req, |req, out| {
+            closure_rows(req, out, object, &closure, &decl)
+        })?;
         Ok(Some(out.into()))
     }
 
@@ -461,6 +404,81 @@ impl ObjectHandlers for ClosureHandlers {
             && req.function_name(x.function) == req.function_name(y.function);
         Ok(same.then_some(Ordering::Equal))
     }
+}
+
+/// The rows of a closure's debug table, `zend_closure_get_debug_info`,
+/// into `out`; each nested table is given up where a step of it throws.
+fn closure_rows(
+    req: &mut Request,
+    out: &mut Owner<PhpArray>,
+    object: PhpObject,
+    closure: &ClosureInfo,
+    decl: &FunctionDecl,
+) -> Result<(), Thrown> {
+    let written = String::from_utf8_lossy(&decl.name.0).into_owned();
+    if closure.fake {
+        let named = match closure.scope {
+            Some(scope) => format!("{}::{written}", req.class_name(scope)),
+            None => written,
+        };
+        let named = PhpString::new(req, named.as_bytes())?.into_value();
+        set_row(req, out, b"function", named)?;
+    } else {
+        let named = PhpString::new(req, written.as_bytes())?.into_value();
+        set_row(req, out, b"name", named)?;
+        let file = PhpString::new(req, &decl.file.0)?.into_value();
+        set_row(req, out, b"file", file)?;
+        set_row(req, out, b"line", Owner::int(i64::from(decl.line)))?;
+    }
+    // The whole table, the `use` variables and the body's `static`s.
+    let bound = req.closure_bound(object, false);
+    if !bound.is_empty() {
+        let statics = PhpArray::filled(req, |req, statics| {
+            for (name, value) in bound {
+                let name = PhpString::new(req, &name)?;
+                // `Z_ISREF_P(var) && Z_REFCOUNT_P(var) == 1`: a reference
+                // the table alone holds shows its value.
+                let value = if value.as_php_ref().is_some() && value.refcount() == 1 {
+                    value.deref()
+                } else {
+                    value
+                };
+                let name = Key::from_string(req, name);
+                statics.set(req, name, Owner::take(req, value))?;
+            }
+            Ok(())
+        })?;
+        set_row(req, out, b"static", statics.into_value())?;
+    }
+    if let Some(this) = closure.this {
+        let this = Owner::take(req, this.as_value());
+        set_row(req, out, b"this", this)?;
+    }
+    if !decl.parameters.is_empty() {
+        let required = decl
+            .parameters
+            .iter()
+            .position(|p| !p.is_required())
+            .unwrap_or(decl.parameters.len());
+        let parameters = PhpArray::filled(req, |req, parameters| {
+            for (at, parameter) in decl.parameters.iter().enumerate() {
+                let amp = if parameter.by_ref { "&" } else { "" };
+                let name = format!("{amp}${}", String::from_utf8_lossy(&parameter.name.0));
+                let stands = if at >= required {
+                    &b"<optional>"[..]
+                } else {
+                    b"<required>"
+                };
+                let key = PhpString::new(req, name.as_bytes())?;
+                let key = Key::from_string(req, key);
+                let stands = PhpString::new(req, stands)?;
+                parameters.set(req, key, stands.into_value())?;
+            }
+            Ok(())
+        })?;
+        set_row(req, out, b"parameter", parameters.into_value())?;
+    }
+    Ok(())
 }
 
 /// `zend_hash_update(debug_info, ZSTR_KNOWN(...), &val)`: one row of a

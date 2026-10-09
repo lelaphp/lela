@@ -832,7 +832,7 @@ fn double_range(
     } else {
         (1, false)
     };
-    filled(req, |req, out| {
+    PhpArray::filled(req, |req, out| {
         let mut i = 0u32;
         let mut element = start;
         while i < size && if down { element >= end } else { element <= end } {
@@ -890,7 +890,7 @@ fn long_range(
     } else {
         (1, false)
     };
-    filled(req, |req, out| {
+    PhpArray::filled(req, |req, out| {
         for i in 0..size {
             let distance = i.wrapping_mul(step).cast_signed();
             let element = if down {
@@ -902,23 +902,6 @@ fn long_range(
         }
         Ok(())
     })
-}
-
-/// A fresh array the fill writes, given up where the fill raises, as
-/// php's `RETURN_THROWS` after `array_init` leaves the return value to
-/// the engine's free.
-fn filled(
-    req: &mut Request,
-    fill: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<(), Thrown>,
-) -> Result<Owner<PhpArray>, Thrown> {
-    let mut out = PhpArray::new(req)?;
-    match fill(req, &mut out) {
-        Ok(()) => Ok(out),
-        Err(thrown) => {
-            out.give_up(req);
-            Err(thrown)
-        }
-    }
 }
 
 /// `shuffle(array &$array): true`, php's `php_array_data_shuffle`

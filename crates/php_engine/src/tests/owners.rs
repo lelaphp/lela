@@ -89,6 +89,17 @@ fn as_object(req: &mut Request, value: Value) -> Owner<Value> {
     }
 }
 
+/// `filled_past_a_throw(mixed $value): array`: a table filled with
+/// `$value` whose next step throws, the table given up by
+/// [`PhpArray::filled`] as the throwable is handed on.
+#[php_function]
+fn filled_past_a_throw(req: &mut Request, value: Value) -> Result<Owner<PhpArray>, Thrown> {
+    PhpArray::filled(req, |req, table| {
+        table.append(req, Owner::take(req, value))?;
+        Err(crate::api::raising::throw_error(req, "Error", "thrown"))
+    })
+}
+
 /// The line of `held_past_a_throw`'s [`Owner::take`].
 const THROWN_AT: u32 = line!() + 6;
 
@@ -115,6 +126,7 @@ fn owners() -> Extension {
             held_past_the_limit::declared(),
             held_past_a_throw::declared(),
             as_object::declared(),
+            filled_past_a_throw::declared(),
         ])
         .build("owners")
 }
@@ -272,5 +284,20 @@ fn an_owner_of_an_object_value_is_recast_with_its_count() {
         String::from_utf8_lossy(&served.stdout),
         "D\nd\nend\nNULL\nNULL\n"
     );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A table [`PhpArray::filled`] makes is given up where a step of its
+/// fill throws: nothing is reported, and what it held is freed with it,
+/// the object's destructor served once the throwable, whose trace holds
+/// the argument, is let go.
+#[test]
+fn a_filled_table_is_given_up_where_its_fill_throws() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        "<?php class D { function __destruct() { echo \"d\\n\"; } }\ntry { filled_past_a_throw(new D); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; unset($e); }\necho 'end', \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "thrown\nd\nend\n");
     assert_eq!(served.exit_code, 0);
 }

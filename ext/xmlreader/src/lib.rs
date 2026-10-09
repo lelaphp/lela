@@ -205,33 +205,35 @@ impl ObjectHandlers for Handlers {
         // `zend_array_dup(zend_std_get_properties(object))`.
         let own = object.property_table(req)?;
         let own: Vec<(Key, Value)> = walk::rows(req, own).collect();
-        let mut table = PhpArray::new(req)?;
-        for (key, value) in own {
-            table.set(req, Owner::take(req, key), Owner::take(req, value))?;
-        }
         let mut thrown: Option<Thrown> = None;
-        for (name, p) in Property::ALL {
-            match p.read(req, object) {
-                Ok(Some(value)) => {
-                    // The table's row takes the value's owner.
-                    let key = match PhpString::new(req, name) {
-                        Ok(key) => key.into_key(),
-                        Err(thrown) => {
-                            value.give_up(req);
-                            return Err(thrown);
-                        }
-                    };
-                    table.set(req, key, value)?;
-                }
-                Ok(None) => {}
-                Err(t) => {
-                    thrown = Some(match thrown.take() {
-                        Some(earlier) => earlier.chain(req, t),
-                        None => t,
-                    });
+        let table = PhpArray::filled(req, |req, table| {
+            for (key, value) in own {
+                table.set(req, Owner::take(req, key), Owner::take(req, value))?;
+            }
+            for (name, p) in Property::ALL {
+                match p.read(req, object) {
+                    Ok(Some(value)) => {
+                        // The table's row takes the value's owner.
+                        let key = match PhpString::new(req, name) {
+                            Ok(key) => key.into_key(),
+                            Err(thrown) => {
+                                value.give_up(req);
+                                return Err(thrown);
+                            }
+                        };
+                        table.set(req, key, value)?;
+                    }
+                    Ok(None) => {}
+                    Err(t) => {
+                        thrown = Some(match thrown.take() {
+                            Some(earlier) => earlier.chain(req, t),
+                            None => t,
+                        });
+                    }
                 }
             }
-        }
+            Ok(())
+        })?;
         Ok(Some(DebugInfo { table, thrown }))
     }
 

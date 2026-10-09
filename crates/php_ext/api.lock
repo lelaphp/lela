@@ -1212,6 +1212,7 @@ values::PhpArray::cursor_next
 values::PhpArray::cursor_prev
 values::PhpArray::cursor_reset
 values::PhpArray::empty
+values::PhpArray::filled
 values::PhpArray::find
 values::PhpArray::get
 values::PhpArray::init_size

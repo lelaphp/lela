@@ -531,15 +531,15 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
     } else {
         0
     };
-    let answer = match kind {
-        Fs::Perms => Value::int(mode),
-        Fs::Inode => Value::int(sb[1]),
-        Fs::Size => Value::int(sb[7]),
-        Fs::Owner => Value::int(sb[4]),
-        Fs::Group => Value::int(sb[5]),
-        Fs::Atime => Value::int(sb[8]),
-        Fs::Mtime => Value::int(sb[9]),
-        Fs::Ctime => Value::int(sb[10]),
+    Ok(match kind {
+        Fs::Perms => Owner::int(mode),
+        Fs::Inode => Owner::int(sb[1]),
+        Fs::Size => Owner::int(sb[7]),
+        Fs::Owner => Owner::int(sb[4]),
+        Fs::Group => Owner::int(sb[5]),
+        Fs::Atime => Owner::int(sb[8]),
+        Fs::Mtime => Owner::int(sb[9]),
+        Fs::Ctime => Owner::int(sb[10]),
         Fs::Type => {
             let name: &[u8] = if is(0o120_000) {
                 b"link"
@@ -555,15 +555,14 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
                 );
                 b"unknown"
             };
-            return Ok(PhpString::new(req, name)?.into_value());
+            PhpString::new(req, name)?.into_value()
         }
-        Fs::IsW => Value::bool(mode & (0o2 << triad) != 0),
-        Fs::IsR => Value::bool(mode & (0o4 << triad) != 0),
-        Fs::IsX => Value::bool(mode & (0o1 << triad) != 0 && !is(0o040_000)),
-        Fs::IsDir => Value::bool(is(0o040_000)),
-        Fs::Exists => Value::bool(true),
-        Fs::Lstat | Fs::Stat => {
-            let mut out = PhpArray::new(req)?;
+        Fs::IsW => Owner::bool(mode & (0o2 << triad) != 0),
+        Fs::IsR => Owner::bool(mode & (0o4 << triad) != 0),
+        Fs::IsX => Owner::bool(mode & (0o1 << triad) != 0 && !is(0o040_000)),
+        Fs::IsDir => Owner::bool(is(0o040_000)),
+        Fs::Exists => Owner::bool(true),
+        Fs::Lstat | Fs::Stat => PhpArray::filled(req, |req, out| {
             for field in sb {
                 out.append(req, Owner::int(field))?;
             }
@@ -571,10 +570,10 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
                 let key = PhpString::new(req, name)?.into_key();
                 out.set(req, key, Owner::int(field))?;
             }
-            return Ok(out.into_value());
-        }
-    };
-    Ok(Owner::take(req, answer))
+            Ok(())
+        })?
+        .into_value(),
+    })
 }
 
 /// The shift of the permission triad an access check reads of an entry

@@ -462,6 +462,25 @@ impl PhpArray {
         Ok(Owner::adopt(req, made))
     }
 
+    /// A new array [`PhpArray::new`] makes and `fill` writes, given up
+    /// where a step of `fill` throws, so the throwable is handed on and
+    /// nothing is held: php's `array_init` into a return value or a
+    /// debug table, which `RETURN_THROWS` leaves to the engine's free.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn filled(
+        req: &mut Request,
+        fill: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<(), Thrown>,
+    ) -> Result<Owner<PhpArray>, Thrown> {
+        let mut table = PhpArray::new(req)?;
+        match fill(req, &mut table) {
+            Ok(()) => Ok(table),
+            Err(thrown) => {
+                table.give_up(req);
+                Err(thrown)
+            }
+        }
+    }
+
     /// `zend_new_array(size)` and `zend_hash_init(ht, size, ...)`, an
     /// empty array whose first write lays its table down for `size`
     /// elements, the size held to `zend_hash_check_size`: the header
