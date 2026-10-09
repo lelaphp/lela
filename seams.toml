@@ -737,8 +737,8 @@ text = "A ticket closes through `xtask ticket close`, the instrument that read i
 [[rule]]
 id = "ticket.close-api"
 tool = "Bash"
-deny_pattern = '''gh\s+api\b[^|;&]*([\s'"]state=(closed|open)\b|"state"\s*:\s*"(closed|open)"|--input\b|(close|reopen)Issue\(|=@-|=["']?\$\()'''
-text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else."
+deny_pattern = '''gh\s+api\b(?:[^|;&]*issues/\d+(?:['"\s]|$)[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()|[^|;&]*(?:[\s'"]state=(?:closed|open)\b|"state"\s*:\s*"(?:closed|open)"|--input\b|=@-|=["']?\$\()[^|;&]*issues/\d+(?:['"\s]|$)|[^|;&]*\bgraphql\b[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()|[^|;&]*(?:(?:close|reopen)Issue\(|--input\b|=@-|=["']?\$\()[^|;&]*\bgraphql\b)'''
+text = "The same act through `gh api`: an issue's state is set by `xtask ticket close` and by nothing else. A write to an issue's comments, labels or other sub-resources sets no state and is not this rule's (#2390)."
 
 [[rule]]
 id = "ticket.reply-unfiled"
