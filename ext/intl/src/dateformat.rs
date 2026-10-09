@@ -11,7 +11,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
-use php_ext::coerce::{BinaryOp, binary_op, numeric_string, to_long, value_name, with_string};
+use php_ext::coerce::{self, to_long, value_name, with_string};
 use php_ext::raising::{Thrown, argument_error, arity, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -922,14 +922,17 @@ fn parse(
             Parse::Calendar => try_long(req, &given)?,
             _ => to_long(req, &given)?,
         };
-        let Ok(pos) = i32::try_from(read) else {
+        // `ZEND_LONG_INT_OVFL`, which refuses past `INT_MAX` alone, then
+        // C's `(int32_t)`: a long below `INT_MIN` keeps its low half.
+        if read > i64::from(i32::MAX) {
             error::set(
                 req,
                 Code::ILLEGAL_ARGUMENT,
                 "String index is out of valid range.",
             )?;
             return Ok(OrFalse::False);
-        };
+        }
+        let pos = crate::truncated(read);
         let past = usize::try_from(pos).map_or(true, |p| p > text.len());
         if past && !(how == Parse::Calendar && pos == -1) {
             return Ok(OrFalse::False);
@@ -947,36 +950,43 @@ fn parse(
 
 /// `zval_try_get_long`, as `parseToCalendar` reads its offset: php's
 /// `TypeError` for a value no integer can be read from.
+///
+/// ```php
+/// $f = new IntlDateFormatter('en_US', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'UTC', null, "'x'yyyy");
+/// foreach (['3abc', 'abc', ' 1', "\v1", '1.5', '9999999999999999999', 2.5e30, PHP_INT_MIN, -5, null, []] as $offset) {
+///     try { $at = $f->parseToCalendar('x2020', $offset); echo $at === false ? 'false' : 'parsed', ' ', var_export($offset, true), "\n"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// $offset = PHP_INT_MIN;
+/// var_dump($f->parse('x2020', $offset), $offset);
+/// ```
+/// ```expect
+/// Warning: A non-numeric value encountered in %s on line 4
+/// parsed 5
+/// IntlDateFormatter::parseToCalendar(): Argument #2 ($offset) must be of type int, string given
+/// parsed 5
+/// parsed 5
+///
+/// Deprecated: Implicit conversion from float-string "1.5" to int loses precision in %s on line 4
+/// parsed 5
+///
+/// Deprecated: Implicit conversion from float-string "9999999999999999999" to int loses precision in %s on line 4
+/// false '9999999999999999999'
+///
+/// Warning: The float 2.5E+30 is not representable as an int, cast occurred in %s on line 4
+/// parsed 5
+/// parsed 5
+/// false -5
+/// parsed 5
+/// IntlDateFormatter::parseToCalendar(): Argument #2 ($offset) must be of type int, array given
+/// int(1577836800)
+/// int(5)
+/// ```
 fn try_long(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
-    let value = value.deref();
-    let numeric = match value.as_ref() {
-        ValueRef::Array(_) | ValueRef::Object(_) | ValueRef::Resource(_) => false,
-        ValueRef::Str(text) => leading_number(text.as_bytes()),
-        _ => true,
-    };
-    if !numeric {
-        let tail = format!("must be of type int, {} given", value_name(req, &value));
-        return Err(argument_error(req, "TypeError", 2, &tail));
+    if let Some(n) = coerce::try_long(req, value)? {
+        return Ok(n);
     }
-    let read = binary_op(req, BinaryOp::BitwiseOr, &value, &Value::int(0))?;
-    let n = read.as_int().unwrap_or(0);
-    read.give_up(req);
-    Ok(n)
-}
-
-/// Whether a string opens with a number, as `is_numeric_string_ex`
-/// with `allow_errors` reads one.
-fn leading_number(bytes: &[u8]) -> bool {
-    if numeric_string(bytes).is_some() {
-        return true;
-    }
-    let rest = bytes.trim_ascii_start();
-    let rest = rest
-        .strip_prefix(b"-")
-        .or_else(|| rest.strip_prefix(b"+"))
-        .unwrap_or(rest);
-    let rest = rest.strip_prefix(b".").unwrap_or(rest);
-    rest.first().is_some_and(u8::is_ascii_digit)
+    let tail = format!("must be of type int, {} given", value_name(req, value));
+    Err(argument_error(req, "TypeError", 2, &tail))
 }
 
 /// `internal_parse_to_timestamp` and `internal_parse_to_localtime`.
