@@ -64,11 +64,8 @@ fn socket_import_stream(
     };
     let owner = made(req, b"Socket")?;
     let object = *owner;
-    let family = match ffi::name(fd, false) {
-        Ok(ffi::Addr::V4(_)) => libc::AF_INET,
-        Ok(ffi::Addr::V6(_)) => libc::AF_INET6,
-        Ok(ffi::Addr::Unix(_)) => libc::AF_UNIX,
-        Ok(ffi::Addr::Other(family)) => family,
+    let family = match ffi::family(fd) {
+        Ok(family) => family,
         Err(errno) => {
             socket_error(req, object, "Unable to obtain socket family", errno as i32);
             owner.give_up(req);

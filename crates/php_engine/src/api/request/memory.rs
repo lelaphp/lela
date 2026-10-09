@@ -231,6 +231,20 @@ impl Request {
         self.fatal_of(written)
     }
 
+    /// `zend_hash_str_update` over `a`, which has one owner: `value` is
+    /// the array's from here, what the key held is released, and a key
+    /// the array lacks is made after the table has room.
+    pub(crate) fn array_str_update(
+        &mut self,
+        a: Arr,
+        name: &[u8],
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let z = value.into_zval();
+        let written = Heap::array_str_update(&mut Hooks(self), a, name, z);
+        self.fatal_of(written)
+    }
+
     /// `zend_hash_add_new` or `zend_hash_index_add_new` over `a`, which
     /// has one owner: `value` is the array's from here and a string key
     /// one more owner, appended without the lookup.
