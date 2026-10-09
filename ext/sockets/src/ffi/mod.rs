@@ -418,6 +418,27 @@ fn is_set(set: &libc::fd_set, fd: RawFd) -> bool {
     (0..FD_SETSIZE).contains(&fd) && unsafe { libc::FD_ISSET(fd, set) }
 }
 
+/// C's `time_t`, the type of `struct timeval`'s `tv_sec` as the libc
+/// crate binds it. The crate deprecates the alias on musl, whose 1.2.0
+/// made `time_t` 64 bits on every target, a width the crate has yet to
+/// follow on 32-bit ones (rust-lang/libc#1848). Every value reaches it
+/// through `try_from` and every width is read with `size_of`, right at
+/// either width, so the deprecation is expected on musl and nowhere
+/// else; once the crate lifts it, the unmet expectation fails the build.
+#[cfg_attr(
+    target_env = "musl",
+    expect(deprecated, reason = "read through try_from and size_of")
+)]
+pub(crate) type TimeT = libc::time_t;
+
+/// C's `suseconds_t`, the type of `struct timeval`'s `tv_usec`,
+/// deprecated on musl as [`TimeT`] is.
+#[cfg_attr(
+    target_env = "musl",
+    expect(deprecated, reason = "read through try_from and size_of")
+)]
+pub(crate) type SusecondsT = libc::suseconds_t;
+
 /// `select(max_fd + 1, &rfds, &wfds, &efds, tv_p)`: the count, and for
 /// each set whether each of its fds is left set.
 pub(crate) fn select(
@@ -427,8 +448,8 @@ pub(crate) fn select(
     let max_fd = sets.iter().copied().flatten().copied().max().unwrap_or(0);
     let mut built = sets.map(fd_set);
     let mut tv = timeout.map(|(sec, usec)| libc::timeval {
-        tv_sec: libc::time_t::try_from(sec).unwrap_or(libc::time_t::MAX),
-        tv_usec: libc::suseconds_t::try_from(usec).unwrap_or(0),
+        tv_sec: TimeT::try_from(sec).unwrap_or(TimeT::MAX),
+        tv_usec: SusecondsT::try_from(usec).unwrap_or(0),
     });
     let tv_p = tv.as_mut().map_or(ptr::null_mut(), ptr::from_mut);
     let [r, w, e] = &mut built;
