@@ -353,18 +353,19 @@ impl Outside<'_> {
         set(req, code, message)
     }
 
-    /// [`Outside::set`] with `pending` already thrown: the
-    /// `IntlException` chained to it, or it handed on; `Err` always.
+    /// [`Outside::set`] with what may already be thrown, as php's C runs
+    /// on past a throw: the `IntlException` chained to it, or it handed
+    /// on; `Ok` only where nothing was pending and nothing thrown.
     pub(crate) fn set_over(
         &mut self,
         req: &mut Request,
-        pending: Thrown,
+        pending: Option<Thrown>,
         code: Code,
         message: impl AsRef<[u8]>,
     ) -> Result<(), Thrown> {
         self.keep(req, code, message.as_ref());
         set_code(req, code);
-        custom_msg(req, Some(pending), message.as_ref())
+        custom_msg(req, pending, message.as_ref())
     }
 
     /// The outside error's code and message.

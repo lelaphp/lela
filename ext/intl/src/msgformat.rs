@@ -15,7 +15,7 @@ use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, This, Union
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_string};
-use php_ext::raising::{Thrown, arity, fatal, throw_error};
+use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -185,11 +185,43 @@ fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObje
     Err(throw_error(req, "Error", message))
 }
 
-/// `MSG_FORMAT_METHOD_INIT_VARS` and `MSG_FORMAT_METHOD_FETCH_OBJECT`:
-/// the request's error and the object's reset, and php's `Error` where
-/// no constructor opened a formatter.
+/// `MSG_FORMAT_METHOD_FETCH_OBJECT`: the object's error reset, and
+/// php's `Error` where no constructor opened a formatter. The request's
+/// was reset before the arguments were held (`MSG_FORMAT_METHOD_INIT_VARS`,
+/// [`error::init_vars`]), so a `TypeError` leaves no earlier failure
+/// standing.
+///
+/// ```php
+/// $f = new MessageFormatter('en', '{0}');
+/// $f->format([-1 => 1]);
+/// try { $f->format(1); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// $f->format([-1 => 1]);
+/// try { $f->setPattern([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// $f->format([-1 => 1]);
+/// try { $f->getLocale(1); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// msgfmt_format($f, [-1 => 1]);
+/// try { msgfmt_parse($f, []); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// msgfmt_format($f, [-1 => 1]);
+/// try { msgfmt_get_pattern(new stdClass); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(intl_get_error_code());
+/// ```
+/// ```expect
+/// MessageFormatter::format(): Argument #1 ($values) must be of type array, int given
+/// int(0)
+/// MessageFormatter::setPattern(): Argument #1 ($pattern) must be of type string, array given
+/// int(0)
+/// MessageFormatter::getLocale() expects exactly 0 arguments, 1 given
+/// int(0)
+/// msgfmt_parse(): Argument #2 ($string) must be of type string, array given
+/// int(0)
+/// msgfmt_get_pattern(): Argument #1 ($formatter) must be of type MessageFormatter, stdClass given
+/// int(0)
+/// ```
 fn fetch(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
-    error::reset(req);
     error::reset_object::<MessageFormatterObject>(req, object);
     let opened = object
         .native::<MessageFormatterObject>(req)
@@ -211,8 +243,7 @@ fn arguments(
     locale: &Raw<PhpString>,
     pattern: &Raw<PhpString>,
 ) -> Result<(PhpString, PhpString), Thrown> {
-    error::reset(req);
-    arity(req, 2, Some(2))?;
+    error::init_vars(req, 2, 2)?;
     Ok((locale.hold(req)?, pattern.hold(req)?))
 }
 
@@ -560,7 +591,7 @@ fn date_arg(req: &mut Request, site: &mut Site, value: Value, name: &[u16]) -> A
         Ok(_) => site.set(req, code, message).map(|()| None),
         Err(thrown) => site
             .outside()
-            .set_over(req, thrown, code, message)
+            .set_over(req, Some(thrown), code, message)
             .map(|()| None),
     }
 }
@@ -993,12 +1024,14 @@ impl MessageFormatter {
         create(req, &locale, &pattern)
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn format(
         req: &mut Request,
         this: This<Self>,
-        values: PhpArray,
+        values: Raw<PhpArray>,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
+        error::init_vars(req, 1, 1)?;
+        let values = values.hold(req)?;
         format(req, this.object(), values).map(or_false)
     }
 
@@ -1012,12 +1045,14 @@ impl MessageFormatter {
         format_message(req, locale.as_bytes(), pattern.as_bytes(), values)
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn parse(
         req: &mut Request,
         this: This<Self>,
-        string: PhpString,
+        string: Raw<PhpString>,
     ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
+        error::init_vars(req, 1, 1)?;
+        let string = string.hold(req)?;
         parse(req, this.object(), string).map(or_false)
     }
 
@@ -1036,21 +1071,29 @@ impl MessageFormatter {
         )
     }
 
-    #[php(tentative)]
-    fn setPattern(req: &mut Request, this: This<Self>, pattern: PhpString) -> Result<bool, Thrown> {
+    #[php(tentative, arity = manual)]
+    fn setPattern(
+        req: &mut Request,
+        this: This<Self>,
+        pattern: Raw<PhpString>,
+    ) -> Result<bool, Thrown> {
+        error::init_vars(req, 1, 1)?;
+        let pattern = pattern.hold(req)?;
         set_pattern(req, this.object(), pattern).map(|a| a.is_some())
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn getPattern(
         req: &mut Request,
         this: This<Self>,
     ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
+        error::init_vars(req, 0, 0)?;
         get_pattern(req, this.object()).map(or_false)
     }
 
-    #[php(tentative)]
+    #[php(tentative, arity = manual)]
     fn getLocale(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        error::init_vars(req, 0, 0)?;
         get_locale(req, this.object())
     }
 
@@ -1110,13 +1153,15 @@ fn msgfmt_create(
 /// bool(false)
 /// string(86) "msgfmt_format(): Inconsistent types declared for an argument: U_ARGUMENT_TYPE_MISMATCH"
 /// ```
-#[php_function]
+#[php_function(arity = manual)]
 fn msgfmt_format(
     req: &mut Request,
-    formatter: Fmt,
-    values: PhpArray,
+    formatter: Raw<Fmt>,
+    values: Raw<PhpArray>,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    format(req, formatter.object(), values).map(or_false)
+    let object = held(req, &formatter, 2)?;
+    let values = values.hold(req)?;
+    format(req, object, values).map(or_false)
 }
 
 /// `msgfmt_format_message`: the pattern opened for one call.
@@ -1159,13 +1204,15 @@ fn msgfmt_format_message(
 /// bool(false)
 /// string(53) "msgfmt_parse(): Parsing failed: U_MESSAGE_PARSE_ERROR"
 /// ```
-#[php_function]
+#[php_function(arity = manual)]
 fn msgfmt_parse(
     req: &mut Request,
-    formatter: Fmt,
-    string: PhpString,
+    formatter: Raw<Fmt>,
+    string: Raw<PhpString>,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
-    parse(req, formatter.object(), string).map(or_false)
+    let object = held(req, &formatter, 2)?;
+    let string = string.hold(req)?;
+    parse(req, object, string).map(or_false)
 }
 
 /// `msgfmt_parse_message`: the pattern opened for one call.
@@ -1214,13 +1261,15 @@ fn msgfmt_parse_message(
 /// string(92) "msgfmt_set_pattern(): Error setting symbol value at line 0, offset 1: U_PATTERN_SYNTAX_ERROR"
 /// string(11) "{0} and {1}"
 /// ```
-#[php_function]
+#[php_function(arity = manual)]
 fn msgfmt_set_pattern(
     req: &mut Request,
-    formatter: Fmt,
-    pattern: PhpString,
+    formatter: Raw<Fmt>,
+    pattern: Raw<PhpString>,
 ) -> Result<bool, Thrown> {
-    set_pattern(req, formatter.object(), pattern).map(|a| a.is_some())
+    let object = held(req, &formatter, 2)?;
+    let pattern = pattern.hold(req)?;
+    set_pattern(req, object, pattern).map(|a| a.is_some())
 }
 
 /// `msgfmt_get_pattern`.
@@ -1232,12 +1281,13 @@ fn msgfmt_set_pattern(
 /// string(5) "{0} x"
 /// bool(false)
 /// ```
-#[php_function]
+#[php_function(arity = manual)]
 fn msgfmt_get_pattern(
     req: &mut Request,
-    formatter: Fmt,
+    formatter: Raw<Fmt>,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    get_pattern(req, formatter.object()).map(or_false)
+    let object = held(req, &formatter, 1)?;
+    get_pattern(req, object).map(or_false)
 }
 
 /// `msgfmt_get_locale`, the request's error reset as every method's is.
@@ -1251,9 +1301,18 @@ fn msgfmt_get_pattern(
 /// string(18) "de_DE@currency=EUR"
 /// int(0)
 /// ```
-#[php_function]
-fn msgfmt_get_locale(req: &mut Request, formatter: Fmt) -> Result<Owner<PhpString>, Thrown> {
-    get_locale(req, formatter.object())
+#[php_function(arity = manual)]
+fn msgfmt_get_locale(req: &mut Request, formatter: Raw<Fmt>) -> Result<Owner<PhpString>, Thrown> {
+    let object = held(req, &formatter, 1)?;
+    get_locale(req, object)
+}
+
+/// `MSG_FORMAT_METHOD_INIT_VARS` and a function's first argument,
+/// `MessageFormatter $formatter`, held after the reset; `count` is the
+/// function's whole arity.
+fn held(req: &mut Request, formatter: &Raw<Fmt>, count: usize) -> Result<PhpObject, Thrown> {
+    error::init_vars(req, count, count)?;
+    Ok(formatter.hold(req)?.object())
 }
 
 /// `msgfmt_get_error_code`.
