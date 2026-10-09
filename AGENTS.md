@@ -130,9 +130,9 @@ third-engine-design.md
 | sapi | sapi.lock | 47 |  | no reading |
 | tier | tier.lock | 32 |  | no reading |
 | layer | layer.lock | 37 |  | no reading |
-| harness | xtask.lock | 396 |  | no reading |
+| harness | xtask.lock | 403 |  | no reading |
 
-<!-- /computed in=76f742bc91771a8558dbc96c94b448805af3502c36c41f770f731dab3d74adf4 out=22829579adcba8e4f28704a4557b1cbdfc5ed1dc8918c203caa9d160f4df4a6b -->
+<!-- /computed in=d550cf44eb2af87ad742b57b3e97a4c6b5b2770c9e2bb34483834b2227f34fd4 out=6eddec8edaf37248493119834a36db53c430a7c105b71a7c6780404bb363c3e8 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |

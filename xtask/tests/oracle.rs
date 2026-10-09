@@ -898,6 +898,93 @@ fn the_pin_refuses_a_key_outside_its_grammar() {
     assert!(err.contains("extra"), "the offending key is named: {err}");
 }
 
+/// The tracked pin with its `[fastcgi]` replaced by one of `params`, held
+/// to `md5` where named and to the params' own md5 otherwise.
+fn with_fastcgi(params: &str, md5: Option<&str>) -> anyhow::Result<Pin> {
+    let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
+    let mut pin: toml::Table = toml::from_str(&text).unwrap();
+    let digest = md5.map_or_else(|| format!("{:x}", md5::compute(params)), str::to_owned);
+    let fastcgi: toml::Table = [
+        ("nginx", "1.30.5"),
+        ("source", "https://example.org/fastcgi_params"),
+        ("md5", &digest),
+        ("script_filename", "$document_root$fastcgi_script_name"),
+        ("params", params),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.into()))
+    .collect();
+    pin.insert("fastcgi".to_owned(), fastcgi.into());
+    Pin::parse(&pin.to_string())
+}
+
+/// `[fastcgi]` (#2334): nginx's `fastcgi_param` lines read as typed
+/// parameters in the order nginx sends them, `SCRIPT_FILENAME` first, a
+/// value's text apart from its variables, blank lines and comments
+/// skipped; the copy held to its md5, and a variable, a directive or a
+/// line the reader does not know refused by name. A pin without the
+/// table says so when asked for the mapping.
+#[test]
+fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
+    use oracle::{Param, Piece, Variable};
+    let params = "\nfastcgi_param  QUERY_STRING  $query_string;\n\nfastcgi_param  HTTPS  $https if_not_empty;\n# PHP only\nfastcgi_param  SERVER_SOFTWARE  nginx/$nginx_version;\nfastcgi_param  REDIRECT_STATUS  200;\n";
+    let pin = with_fastcgi(params, None).unwrap();
+    let mapping = pin.fastcgi().unwrap();
+    let param = |name: &str, value: &[Piece], if_not_empty| Param {
+        name: name.to_owned(),
+        value: value.to_vec(),
+        if_not_empty,
+    };
+    let var = Piece::Variable;
+    let text = |t: &str| Piece::Text(t.to_owned());
+    assert_eq!(mapping.nginx, "1.30.5");
+    assert_eq!(
+        mapping.params,
+        [
+            param(
+                "SCRIPT_FILENAME",
+                &[var(Variable::DocumentRoot), var(Variable::FastcgiUri)],
+                false
+            ),
+            param("QUERY_STRING", &[var(Variable::QueryString)], false),
+            param("HTTPS", &[var(Variable::Https)], true),
+            param(
+                "SERVER_SOFTWARE",
+                &[text("nginx/"), var(Variable::NginxVersion)],
+                false
+            ),
+            param("REDIRECT_STATUS", &[text("200")], false),
+        ]
+    );
+
+    let refused =
+        |params: &str, md5: Option<&str>| with_fastcgi(params, md5).unwrap_err().to_string();
+    let err = refused(params, Some("00000000000000000000000000000000"));
+    assert!(err.contains("md5") && err.contains("verbatim"), "{err}");
+    for (line, says) in [
+        ("fastcgi_param  X  $not_nginx_s;\n", "$not_nginx_s"),
+        ("include  fastcgi_params;\n", "fastcgi_param <name>"),
+        ("fastcgi_param  X  \"a b\";\n", "fastcgi_param <name>"),
+        ("fastcgi_param  X  ${https};\n", "syntax"),
+        ("fastcgi_param  X  200\n", "`;`"),
+    ] {
+        let err = refused(line, None);
+        assert!(
+            err.contains("line 1") && err.contains(says),
+            "{line}: {err}"
+        );
+    }
+
+    let text = std::fs::read_to_string(workspace().join("oracle.toml")).unwrap();
+    let mut bare: toml::Table = toml::from_str(&text).unwrap();
+    bare.remove("fastcgi");
+    let err = Pin::parse(&bare.to_string())
+        .unwrap()
+        .fastcgi()
+        .unwrap_err();
+    assert!(err.to_string().contains("[fastcgi]"), "{err}");
+}
+
 #[test]
 fn compare_is_same_on_equal_bytes() {
     let verdict = oracle::compare(&registry(), "witness:abc", b"x\n", b"x\n");
