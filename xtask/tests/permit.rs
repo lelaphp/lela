@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use xtask::divergence::Registry;
 use xtask::manifest::{Manifest, OneOrMany, Rule, Where};
 use xtask::oracle::Promise;
-use xtask::permit::{Call, Kind, judge, judged_at_the_call};
+use xtask::permit::{Call, Finding, Kind, judge, judged_at_the_call};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::witness::{self, Accept, Ask};
@@ -45,12 +45,16 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
     // A rule scoped by `where` is judged in a checkout whose branch
     // records a ticket, which the tree the tests run in need not be.
     let ticketed = checkout("fixtures-ticketed", Some(1));
+    // One scoped to `where = "operating"` in a checkout whose merge no
+    // session of the fixture's started (#2476).
+    let merging = operating("fixtures-operating");
     for rule in judged {
         let dir = fixtures().join("rules").join(&rule.id);
         let kind = Kind::of(rule);
         let workspace = || match rule.within {
             Where::Anywhere => workspace(),
             Where::Ticketed => ticketed.path(),
+            Where::Operating => merging.path(),
         };
         // Every control of the rule's directory: each `deny*.json` (or
         // `note*.json`) must fire, each `allow*.json` must not (#625).
@@ -221,7 +225,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
     for line in [
         "git add .",
         "git add -u",
-        "git commit --amend --no-edit",
+        "git commit -a -m msg",
         "git add -- .",
         "git -C /Users/x/dax-php commit -F /tmp/msg",
     ] {
@@ -234,7 +238,7 @@ fn the_proposed_git_pathspec_rule_denies_its_fixture_and_not_its_neighbour() {
     }
     for line in [
         "git add -- AGENTS.md",
-        "git commit --amend -F /tmp/msg -- xtask/src",
+        "git commit -F /tmp/msg -- xtask/src",
         "git add -A -- xtask/fixtures/rules/git.pathspec",
         "git worktree add -b t/x .claude/worktrees/t/x main",
         "cargo add serde",
@@ -2789,6 +2793,94 @@ fn checkout(name: &str, ticket: Option<u32>) -> Tree {
     dir
 }
 
+/// A scratch checkout with a merge in progress, as git leaves one stopped
+/// before its commit: `MERGE_HEAD` in its git dir.
+fn operating(name: &str) -> Tree {
+    let dir = checkout(name, None);
+    let git_dir = Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let git_dir = PathBuf::from(String::from_utf8_lossy(&git_dir.stdout).trim());
+    std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
+    dir
+}
+
+/// The `git.operation` row #2476 proposes, as the tracked manifest
+/// carries it or as the constructors build it.
+fn with_the_operation_rule(mut manifest: Manifest) -> Manifest {
+    if manifest.rule("git.operation").is_none() {
+        let mut rule = Rule::named("git.operation", "");
+        rule.scope = OneOrMany::None;
+        rule.tool = OneOrMany::One("Bash".to_owned());
+        rule.within = Where::Operating;
+        rule.predicate.deny = None;
+        rule.predicate.deny_argv = Some(
+            ["add", "stage", "commit", "rm", "mv"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        rule.predicate.with = OneOrMany::One("git".to_owned());
+        "A merge, cherry-pick, revert or rebase in progress commits the whole index, so what you stage lands in its commit: wait for it to end, or stage and commit in a worktree (#2476)."
+            .clone_into(&mut rule.text);
+        manifest.rules.push(rule);
+    }
+    manifest
+}
+
+/// The rule #2476 proposes, `git.operation`, judged before a person lands
+/// its row: `git add -- <path>` and a commit by pathspec are refused in a
+/// checkout with `MERGE_HEAD` present, the denial naming the merge and the
+/// checkout, and both are let through in one without it; a leading `cd`
+/// into the merging checkout is refused from anywhere, and what reads the
+/// index is let through. Once the tracked manifest carries the row, the
+/// walk above holds its fixtures and this adds the checkout without one.
+#[test]
+fn the_proposed_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
+    let manifest = with_the_operation_rule(Manifest::load(workspace()).unwrap());
+    let merging = operating("operation-merging");
+    let quiet = checkout("operation-quiet", None);
+    let rule = |root: &Path, line: &str| {
+        let judged = judge(&manifest, root, &bash(line)).unwrap();
+        judged.denial().map(Finding::reason)
+    };
+    let dir = fixtures().join("rules/git.operation");
+    for name in ["deny.json", "deny-commit.json"] {
+        let judged = judge(&manifest, merging.path(), &call(&dir.join(name))).unwrap();
+        let denial = judged
+            .denial()
+            .unwrap_or_else(|| panic!("{name}: {judged:?}"));
+        assert_eq!(denial.rule, "git.operation", "{name}");
+        let reason = denial.reason();
+        assert!(
+            reason.contains(&format!(
+                "a merge is in progress in {}",
+                merging.path().display()
+            )),
+            "{reason}"
+        );
+        let judged = judge(&manifest, quiet.path(), &call(&dir.join(name))).unwrap();
+        assert!(
+            judged.denial().is_none(),
+            "{name} without a merge: {judged:?}"
+        );
+    }
+    let allowed = judge(&manifest, merging.path(), &call(&dir.join("allow.json"))).unwrap();
+    assert!(allowed.denial().is_none(), "{allowed:?}");
+    let add = "git add -- AGENTS.md";
+    assert!(rule(quiet.path(), add).is_none());
+    let moved = format!("cd {} && {add}", merging.path().display());
+    assert!(rule(quiet.path(), &moved).is_some_and(|r| r.contains("git.operation")));
+    for line in [
+        "git status --short",
+        "git diff --cached -- AGENTS.md",
+        "git log --grep add",
+    ] {
+        assert!(rule(merging.path(), line).is_none(), "{line}");
+    }
+}
+
 /// A `Bash` rule denying `xtask phpt`, with its qualifiers set by `with`.
 fn probe(with: impl FnOnce(&mut Rule)) -> Manifest {
     let mut manifest = Manifest::load(workspace()).unwrap();
@@ -2960,6 +3052,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
     let manifest = Manifest::load(workspace()).unwrap();
     let ticketed = checkout("bash-fixtures-ticketed", Some(1832));
     let main = checkout("bash-fixtures-main", None);
+    let merging = operating("bash-fixtures-operating");
     let rules: Vec<&Rule> = manifest
         .rules
         .iter()
@@ -2987,6 +3080,7 @@ fn every_bash_rule_holds_to_each_of_its_fixtures() {
                 Where::Ticketed if name.starts_with("allow-main") => main.path(),
                 Where::Ticketed => ticketed.path(),
                 Where::Anywhere => workspace(),
+                Where::Operating => merging.path(),
             };
             let judged = judge(&manifest, root, &call(&dir.join(name))).unwrap();
             let fired = judged
