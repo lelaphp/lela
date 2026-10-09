@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
+#[cfg(target_os = "linux")]
+use php_ext::abi::OrFalse;
 use php_ext::abi::{Beneath, Passed, Ref, Untyped, chain};
 use php_ext::attr::php_function;
 use php_ext::call::call;
@@ -16,9 +18,9 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal, leave_pending,
 };
 use php_ext::request::{Receiving, Request, Siginfo, take_signals};
-use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef, walk};
 
-use crate::ffi::{self, Disposition};
+use crate::ffi::{self, Disposition, SignalSet};
 use crate::{State, failed};
 
 /// `PCNTL_G(num_signals)`: one past the last signal number, `NSIG` where
@@ -349,6 +351,7 @@ pub(crate) fn siginfo(
         Owner::take(req, Value::int(posted.code.into())),
     )?;
     let Ok(signal) = Signal::try_from(number) else {
+        realtime(req, &mut info, number, posted)?;
         return Ok(info);
     };
     match signal {
@@ -359,6 +362,12 @@ pub(crate) fn siginfo(
                 b"status",
                 Owner::take(req, Value::int(posted.status.into())),
             )?;
+            #[cfg(target_os = "linux")]
+            for (key, ticks) in [(&b"utime"[..], posted.utime), (b"stime", posted.stime)] {
+                #[allow(clippy::cast_precision_loss)]
+                let ticks = Value::float(ticks as f64);
+                put(req, &mut info, key, Owner::take(req, ticks))?;
+            }
             put(
                 req,
                 &mut info,
@@ -396,9 +405,50 @@ pub(crate) fn siginfo(
                 Owner::take(req, Value::float(addr)),
             )?;
         }
+        #[cfg(target_os = "linux")]
+        Signal::SIGIO => {
+            let band = Value::int(posted.band);
+            put(req, &mut info, b"band", Owner::take(req, band))?;
+            let fd = Value::int(posted.fd.into());
+            put(req, &mut info, b"fd", Owner::take(req, fd))?;
+        }
         _ => {}
     }
     Ok(info)
+}
+
+/// The members a real-time signal carries, the sender's `pid` and
+/// `uid`, where the platform has real-time signals: php's
+/// `SIGRTMIN <= signo && signo <= SIGRTMAX` after its switch.
+#[cfg(target_os = "linux")]
+fn realtime(
+    req: &mut Request,
+    info: &mut Owner<PhpArray>,
+    number: i32,
+    posted: &Siginfo,
+) -> Result<(), Thrown> {
+    if (libc::SIGRTMIN()..=libc::SIGRTMAX()).contains(&number) {
+        put(
+            req,
+            info,
+            b"pid",
+            Owner::take(req, Value::int(posted.pid.into())),
+        )?;
+        put(
+            req,
+            info,
+            b"uid",
+            Owner::take(req, Value::int(posted.uid.into())),
+        )?;
+    }
+    Ok(())
+}
+
+/// [`realtime`] where there are no real-time signals.
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)]
+fn realtime(_: &mut Request, _: &mut Owner<PhpArray>, _: i32, _: &Siginfo) -> Result<(), Thrown> {
+    Ok(())
 }
 
 /// `add_assoc_long_ex` and its kin: one string key.
@@ -447,32 +497,29 @@ pub(crate) fn pcntl_sigprocmask(
     signals: PhpArray,
     #[php(default = null)] old_signals: Ref<Untyped<Value>>,
 ) -> Result<bool, Thrown> {
-    let how = match i32::try_from(mode) {
-        Ok(libc::SIG_BLOCK) => SigmaskHow::SIG_BLOCK,
-        Ok(libc::SIG_UNBLOCK) => SigmaskHow::SIG_UNBLOCK,
-        Ok(libc::SIG_SETMASK) => SigmaskHow::SIG_SETMASK,
-        _ => {
-            return Err(arg_value_error(
-                req,
-                1,
-                "be one of SIG_BLOCK, SIG_UNBLOCK, or SIG_SETMASK",
-            ));
+    let Ok(how @ (libc::SIG_BLOCK | libc::SIG_UNBLOCK | libc::SIG_SETMASK)) = i32::try_from(mode)
+    else {
+        return Err(arg_value_error(
+            req,
+            1,
+            "be one of SIG_BLOCK, SIG_UNBLOCK, or SIG_SETMASK",
+        ));
+    };
+    let Some(set) = signal_set(req, signals, 2, how == libc::SIG_SETMASK)? else {
+        return Ok(false);
+    };
+    let old = match ffi::mask(how, &set) {
+        Ok(old) => old,
+        Err(errno) => {
+            failed(req, errno);
+            docref(req, Level::Warning, errno.desc());
+            return Ok(false);
         }
     };
-    let set = signal_set(req, signals, 2, how == SigmaskHow::SIG_SETMASK)?;
-    let mut old = SigSet::empty();
-    if let Err(errno) = sigprocmask(how, Some(&set), Some(&mut old)) {
-        failed(req, errno);
-        docref(req, Level::Warning, errno.desc());
-        return Ok(false);
-    }
     if old_signals.is_given() {
         let mut numbers = PhpArray::new(req)?;
         for number in 1..NUMBERS {
-            let member = i32::try_from(number)
-                .ok()
-                .and_then(|n| Signal::try_from(n).ok())
-                .is_some_and(|signal| old.contains(signal));
+            let member = i32::try_from(number).is_ok_and(|n| old.contains(n));
             if member {
                 numbers.append(req, Owner::take(req, Value::int(number)))?;
             }
@@ -482,20 +529,95 @@ pub(crate) fn pcntl_sigprocmask(
     Ok(true)
 }
 
+/// `pcntl_sigwaitinfo(array $signals, &$info = []): int|false`: the
+/// calling thread waits for one of the signals, which it should have
+/// blocked, and takes it without a handler; `$info` is what its
+/// `siginfo_t` said.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_sigwaitinfo(
+    req: &mut Request,
+    signals: PhpArray,
+    #[php(default = [])] info: Ref<Untyped<Value>>,
+) -> Result<OrFalse<i64>, Thrown> {
+    waited(req, signals, &info, None)
+}
+
+/// `pcntl_sigtimedwait(array $signals, &$info = [], int $seconds = 0, int
+/// $nanoseconds = 0): int|false`: [`pcntl_sigwaitinfo`] for at most the
+/// time given, `false` with no warning where none came.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_sigtimedwait(
+    req: &mut Request,
+    signals: PhpArray,
+    #[php(default = [])] info: Ref<Untyped<Value>>,
+    #[php(default = 0)] seconds: i64,
+    #[php(default = 0)] nanoseconds: i64,
+) -> Result<OrFalse<i64>, Thrown> {
+    waited(req, signals, &info, Some((seconds, nanoseconds)))
+}
+
+/// The two waits: the set read and checked as php checks it, then the
+/// timeout, then the wait, its signal number answered and its
+/// `siginfo_t` written into `$info` where it was passed.
+#[cfg(target_os = "linux")]
+fn waited(
+    req: &mut Request,
+    signals: PhpArray,
+    info: &Ref<Untyped<Value>>,
+    timeout: Option<(i64, i64)>,
+) -> Result<OrFalse<i64>, Thrown> {
+    let Some(set) = signal_set(req, signals, 1, false)? else {
+        return Ok(OrFalse::False);
+    };
+    if let Some((seconds, nanoseconds)) = timeout {
+        if seconds < 0 {
+            return Err(arg_value_error(req, 3, "be greater than or equal to 0"));
+        }
+        if !(0..1_000_000_000).contains(&nanoseconds) {
+            return Err(arg_value_error(req, 4, "be between 0 and 1e9"));
+        }
+        if seconds == 0 && nanoseconds == 0 {
+            return Err(php_ext::raising::throw_error(
+                req,
+                "ValueError",
+                "pcntl_sigtimedwait(): At least one of argument #3 ($seconds) or argument #4 ($nanoseconds) must be greater than 0",
+            ));
+        }
+    }
+    let (number, posted) = match ffi::wait_info(&set, timeout) {
+        Ok(taken) => taken,
+        Err(nix::errno::Errno::EAGAIN) if timeout.is_some() => return Ok(OrFalse::False),
+        Err(errno) => {
+            failed(req, errno);
+            docref(req, Level::Warning, errno.desc());
+            return Ok(OrFalse::False);
+        }
+    };
+    if number > 0 && info.is_given() {
+        let array = siginfo(req, number, &posted)?;
+        info.set(req, Untyped(array.into_value()))?;
+    }
+    Ok(OrFalse::Value(number.into()))
+}
+
 /// `php_pcntl_set_user_signal_infos`: the array's values as a signal
 /// set, each read as `zval_try_get_long` reads it and held to
-/// `1..NUMBERS`.
+/// `1..NUMBERS`, and added with `sigaddset(3)`; `None` after php's
+/// warning where the C library refused a number.
 fn signal_set(
     req: &mut Request,
     signals: PhpArray,
     position: u32,
     allow_empty: bool,
-) -> Result<SigSet, Thrown> {
+) -> Result<Option<SignalSet>, Thrown> {
     if !allow_empty && signals.is_empty() {
         return Err(arg_value_error(req, position, "not be empty"));
     }
-    let mut set = SigSet::empty();
-    for (_, value) in &signals {
+    let mut set = SignalSet::empty();
+    let values: Vec<Value> = walk::rows(req, signals).map(|(_, value)| value).collect();
+    for value in values {
         let Some(number) = try_long(&value.deref()) else {
             let given = value_name(req, &value);
             return Err(argument_error(
@@ -505,12 +627,11 @@ fn signal_set(
                 &format!("signals must be of type int, {given} given"),
             ));
         };
-        let signal = (1..NUMBERS)
+        let number = (1..NUMBERS)
             .contains(&number)
             .then(|| i32::try_from(number).ok())
-            .flatten()
-            .and_then(|n| Signal::try_from(n).ok());
-        let Some(signal) = signal else {
+            .flatten();
+        let Some(number) = number else {
             return Err(argument_error(
                 req,
                 "ValueError",
@@ -518,9 +639,13 @@ fn signal_set(
                 &format!("signals must be between 1 and {}", NUMBERS - 1),
             ));
         };
-        set.add(signal);
+        if let Err(errno) = set.add(number) {
+            failed(req, errno);
+            docref(req, Level::Warning, errno.desc());
+            return Ok(None);
+        }
     }
-    Ok(set)
+    Ok(Some(set))
 }
 
 /// `zval_try_get_long`: an integer, a float that fits, a bool or null,
