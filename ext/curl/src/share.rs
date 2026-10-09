@@ -6,11 +6,11 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Instance, Pool, Refusals};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::write_prop;
-use php_ext::coerce::{numeric_string, to_long, value_name};
+use php_ext::coerce::{to_long, try_long, value_name};
 use php_ext::raising::{Thrown, argument_error, throw};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::State;
 use crate::constants as c;
@@ -221,19 +221,6 @@ fn curl_share_strerror(
     }
 }
 
-/// `zval_try_get_long`: the integer a value is, `None` where it is none.
-fn try_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
-    Ok(match value.as_ref() {
-        ValueRef::Int(n) => Some(n),
-        ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => Some(to_long(req, value)?),
-        ValueRef::Str(text) => match numeric_string(text.as_bytes()) {
-            Some(number) => Some(to_long(req, &number)?),
-            None => None,
-        },
-        _ => None,
-    })
-}
-
 /// `CURL_G(persistent_curlsh)` as the engine keeps it (design §4.10,
 /// #1172): the persistent shares no request holds, each under the bits
 /// of the options it was made with, lent to one request at a time.
@@ -304,6 +291,35 @@ const LOCKS: [(i64, u8); 4] = [
 /// ValueError: curl_share_init_persistent(): Argument #1 ($share_options) must not contain CURL_LOCK_DATA_COOKIE because sharing cookies across PHP requests is unsafe
 /// ValueError: curl_share_init_persistent(): Argument #1 ($share_options) must contain only CURL_LOCK_DATA_* constants
 /// TypeError: curl_share_init_persistent(): Argument #1 ($share_options) must contain only int values, string given
+/// ```
+///
+/// Each option is read as `zval_try_get_long` reads it
+/// ([`try_long`]): a leading-numeric string with php's warning, a
+/// fractional float with its deprecation, where `curl_share_setopt`
+/// reads its value silently, as `zval_get_long`.
+///
+/// ```php
+/// $s = curl_share_init();
+/// var_dump(curl_share_setopt($s, CURLSHOPT_SHARE, "3abc"));
+/// var_dump(curl_share_init_persistent(["3abc", 3.0])->options);
+/// try { curl_share_init_persistent(["2abc"]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { curl_share_init_persistent([3.5]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { curl_share_init_persistent(["x"]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+///
+/// Warning: A non-numeric value encountered in %s on line 4
+/// array(1) {
+///   [0]=>
+///   int(3)
+/// }
+///
+/// Warning: A non-numeric value encountered in %s on line 5
+/// curl_share_init_persistent(): Argument #1 ($share_options) must not contain CURL_LOCK_DATA_COOKIE because sharing cookies across PHP requests is unsafe
+///
+/// Deprecated: Implicit conversion from float 3.5 to int loses precision in %s on line 6
+/// curl_share_init_persistent(): Argument #1 ($share_options) must contain only int values, string given
 /// ```
 #[php_function]
 fn curl_share_init_persistent(
