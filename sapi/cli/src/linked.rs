@@ -9,7 +9,8 @@
 //! request is named; `cwd`, the directory it is served in; `ini`, one
 //! `name=value` per line, laid over the CLI's own defaults as `-d` lays
 //! them; and `extended`, `1` where it is compiled with extended info as
-//! `-e` builds it. It serves the request with a fresh engine of the
+//! `-e` builds it. It serves the request under this process's
+//! environment, as the CLI does, with a fresh engine of the
 //! bundle's `linked` set, the isolation a process of its own gave, and
 //! writes `stdout`, `stderr`, `exit` and `entered`, the natives the
 //! request entered one per line as the trace file holds them, into the
@@ -57,6 +58,14 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// The CLI's environment, the process's: what the harness started this
+/// binary under, the recipe's (#1077).
+fn environ() -> Vec<(Vec<u8>, Vec<u8>)> {
+    std::env::vars_os()
+        .map(|(name, value)| (name.into_encoded_bytes(), value.into_encoded_bytes()))
+        .collect()
+}
+
 /// The request `dir` holds, served, and what it did written beside it;
 /// the status it ended on.
 fn serve(dir: &Path) -> i32 {
@@ -77,6 +86,7 @@ fn serve(dir: &Path) -> i32 {
             Path::new(cwd.trim_end_matches('\n')),
             name.as_bytes(),
             &source,
+            environ(),
             Capture::default(),
         )
     }));

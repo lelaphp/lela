@@ -20,7 +20,12 @@
 //! laid over the engine's defaults, so `precision`, `error_reporting` and
 //! the rest are the pin's, and a named `[regime.<name>]` of the pin lays
 //! its own after them, in the order the fresh-process adapter passes the
-//! two as `-d` (harness-design.md §8, ledger 55); of a regime's `args`
+//! two as `-d` (harness-design.md §8, ledger 55); the binary's process
+//! runs under the recipe's environment, cleared and rebuilt from
+//! `[recipe.env]` as the fresh-process adapter's is ([`Recipe::environ`]),
+//! and its request reads that environment, so `getenv()`, `$_ENV` and the
+//! C library's time code read the recipe's `TZ` and not the shell's
+//! (#1077, #1130); of a regime's `args`
 //! this adapter takes `-e`, building the engine with extended info as a
 //! host's `-e` builds it, and refuses any other, since it has no command
 //! line to hand them (#1780, #1822, [`Linked`]). An entry the engine has
@@ -58,6 +63,7 @@
 //! a stack overflow or a signal, borks naming how it ended, and the next
 //! snippet is served by a binary started again.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -146,7 +152,7 @@ fn run(
     write("ini", ini.as_bytes())?;
     write("extended", if linked.extended_info { b"1" } else { b"0" })?;
     let started = Instant::now();
-    ask(&request, server)?;
+    ask(&request, server, recipe)?;
     let wall = started.elapsed();
     if request.join("panicked").exists() {
         bail!("the linked engine panicked; the panic itself is on the harness's second stream");
@@ -174,21 +180,25 @@ fn run(
 static IDLE: Mutex<Vec<Server>> = Mutex::new(Vec::new());
 
 /// The request at `dir` served by an idle `server`, the built binary
-/// where none is named, or one started where none is idle; one the
-/// request ended is dropped, so the next starts afresh.
-fn ask(dir: &Path, server: Option<&Path>) -> Result<()> {
+/// where none is named, started under `recipe`'s environment, or one
+/// started so where none is idle; one the request ended is dropped, so
+/// the next starts afresh.
+fn ask(dir: &Path, server: Option<&Path>, recipe: &Recipe) -> Result<()> {
     let binary = match server {
         Some(path) => path.to_path_buf(),
         None => binary()?,
     };
+    let environ = Environ::of(recipe);
     let idle = {
         let mut idle = IDLE.lock().unwrap_or_else(PoisonError::into_inner);
-        let at = idle.iter().position(|server| server.binary == binary);
+        let at = idle
+            .iter()
+            .position(|server| server.binary == binary && server.environ == environ);
         at.map(|at| idle.swap_remove(at))
     };
     let mut server = match idle {
         Some(server) => server,
-        None => Server::start(binary)?,
+        None => Server::start(binary, recipe, environ)?,
     };
     server.ask(dir)?;
     IDLE.lock()
@@ -197,19 +207,38 @@ fn ask(dir: &Path, server: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// A running `php-linked --serve`, the binary it runs, and the two ends
-/// of its pipes.
+/// The environment a server's process was started under, what every
+/// request it serves reads: a server serves only a recipe that names the
+/// same, and the pool keeps it for the next such snippet at no cost.
+#[derive(PartialEq, Eq)]
+struct Environ {
+    clear: bool,
+    env: BTreeMap<String, String>,
+}
+
+impl Environ {
+    fn of(recipe: &Recipe) -> Environ {
+        Environ {
+            clear: recipe.env_clear,
+            env: recipe.env.clone(),
+        }
+    }
+}
+
+/// A running `php-linked --serve`, the binary it runs and the environment
+/// it runs under, and the two ends of its pipes.
 struct Server {
     binary: PathBuf,
+    environ: Environ,
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
 }
 
 impl Server {
-    fn start(binary: PathBuf) -> Result<Server> {
-        let mut child = Command::new(&binary)
-            .arg("--serve")
+    fn start(binary: PathBuf, recipe: &Recipe, environ: Environ) -> Result<Server> {
+        let mut child = recipe
+            .environ(Command::new(&binary).arg("--serve"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -218,6 +247,7 @@ impl Server {
         let stdout = child.stdout.take().context("the server's stdout")?;
         Ok(Server {
             binary,
+            environ,
             child,
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),

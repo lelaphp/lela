@@ -222,11 +222,8 @@ pub(crate) fn served_by_server(
             .arg(format!("127.0.0.1:{port}"))
             .arg("-t")
             .arg(own.path());
-        if recipe.env_clear {
-            server.env_clear();
-        }
-        server
-            .envs(&recipe.env)
+        recipe
+            .environ(&mut server)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());

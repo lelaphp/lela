@@ -20,7 +20,7 @@ use super::{Ask, Judgement, Tally, capture, judge};
 use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
-use crate::oracle::{Observation, Promise};
+use crate::oracle::{Observation, Program, Promise};
 use crate::scratch::Tree;
 
 fn workspace() -> PathBuf {
@@ -267,6 +267,45 @@ fn the_linked_snippet_is_served_in_the_tree_its_file_stands_in() {
         String::from_utf8_lossy(&served.stdout),
         recipe.normalise.scratch_token
     );
+}
+
+#[test]
+fn the_linked_engine_runs_under_the_recipes_environment_alone() {
+    // The linked engine's process is started under `[recipe.env]`, cleared
+    // and rebuilt as the oracle's run is, and its request reads that
+    // environment, so `getenv()` answers the recipe's variables and none
+    // of the harness's, the oracle's where it is here (the system adds
+    // its own at exec to both, `__CF_USER_TEXT_ENCODING` on macOS), and
+    // the C library's time code reads the recipe's `TZ` (#1077, #1130). A
+    // recipe that names another environment is served by a binary
+    // started under it, never one the pool kept.
+    let snippet = r#"foreach (getenv() as $n => $v) echo "$n=$v\n";"#;
+    let read = |ran: Observation| {
+        String::from_utf8_lossy(&ran.stdout)
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let mut pin = manifest().pin;
+    for another in [false, true] {
+        if another {
+            pin.recipe
+                .env
+                .insert("WITNESS_ENVIRONMENT".to_owned(), "another".to_owned());
+        }
+        let linked = read(crate::oracle::linked::serve(&pin.recipe, None, snippet).unwrap());
+        for (name, value) in &pin.recipe.env {
+            assert_eq!(linked.get(name), Some(value), "{linked:#?}");
+        }
+        for own in ["PATH", "CARGO_PKG_NAME"] {
+            assert!(!linked.contains_key(own), "{own}: {linked:#?}");
+        }
+        if oracle().is_some() {
+            let oracle = pin.oracle().run(Program::Snippet(snippet), None).unwrap();
+            assert_eq!(linked, read(oracle));
+        }
+    }
 }
 
 /// A fence that names a regime of the pin runs under the recipe's ini and
