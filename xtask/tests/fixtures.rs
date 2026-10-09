@@ -214,3 +214,63 @@ fn a_quote_in_a_character_literal_and_a_comment_marker_in_a_raw_string_are_count
     assert_eq!(heap.numbers["lines"], 6.into(), "{heap:#?}");
     assert_eq!(heap.status, Status::Fail, "{heap:#?}");
 }
+
+/// The generated file's reading in a fixture whose copy is current, so
+/// what fails it is what stands between the copy and the crates below it.
+fn current_generated_reading(name: &str) -> Reading {
+    let root = fixture("budget", name);
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = budget::run(&root, &manifest).unwrap();
+    let clippy = readings
+        .into_iter()
+        .find(|r| r.scope == "ext/clippy.toml")
+        .unwrap();
+    assert_eq!(clippy.status, Status::Fail, "{clippy:#?}");
+    assert_eq!(clippy.rule, "generated.committed");
+    assert!(
+        !clippy.message.contains("differs from its rendering"),
+        "the fixture's copy is the rendering: {}",
+        clippy.message
+    );
+    clippy
+}
+
+/// Clippy reads the nearest configuration alone and merges nothing, a
+/// `.clippy.toml` before a `clippy.toml` in one directory (#2475): a crate
+/// carrying either of its own is held to none of the rules the generated
+/// file above it carries, and each such file fails the generated file's
+/// reading, naming itself and every rule it hides.
+#[test]
+fn a_clippy_configuration_nearer_than_a_generated_one_fails_naming_the_file_and_the_rules_it_hides()
+{
+    let clippy = current_generated_reading("nearer-clippy");
+    for named in [
+        "ext/pcre/clippy.toml",
+        "ext/json/.clippy.toml",
+        "ext.no-locks",
+        "fork.threads",
+        "(fixture)",
+    ] {
+        assert!(
+            clippy.message.contains(named),
+            "{named}: {}",
+            clippy.message
+        );
+    }
+}
+
+/// `CLIPPY_CONF_DIR` points clippy at one directory for every crate, past
+/// each generated file, and cargo hands its `[env]` to clippy-driver
+/// whatever the environment says (#2475): a cargo configuration of the
+/// checkout that sets it fails the generated file's reading, naming it.
+#[test]
+fn a_cargo_configuration_setting_clippy_conf_dir_fails_naming_it() {
+    let clippy = current_generated_reading("clippy-conf-dir");
+    for named in [".cargo/config.toml", "CLIPPY_CONF_DIR", "ext.no-locks"] {
+        assert!(
+            clippy.message.contains(named),
+            "{named}: {}",
+            clippy.message
+        );
+    }
+}

@@ -1,0 +1,2 @@
+# The dotted name clippy also reads, which hides ext/clippy.toml as well.
+too-many-arguments-threshold = 9

@@ -27,5 +27,5 @@ text = "A process forks through php_engine's one home alone (fixture)."
 
 [[rule]]
 id = "generated.committed"
-generated = { "crates/clippy.toml" = "fork.threads" }
+generated = ["crates/clippy.toml"]
 text = "crates/clippy.toml is generated and committed (fixture)."

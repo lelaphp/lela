@@ -63,5 +63,5 @@ text = "Internal invariant failures are InternalError fatals with a message, not
 
 [[rule]]
 id = "generated.committed"
-generated = { "ext/clippy.toml" = "ext.no-locks" }
+generated = ["ext/clippy.toml"]
 text = "ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget."

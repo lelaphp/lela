@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=877620d162d4c4db3b10ac74e12ccd1c0f3e4c022e03c504c47c12af11392c86 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=9df6e618d339a7e6cf9e90b95042a5d18882ddcfbf3579e9a1733f31f30d3f3d out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=8a2d84ddd3cfb0cc931ae61d205f6237924906cdfed64d5e76c228b99ef1a341 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=781eba596fa5e9aaa6cb5f4f692f743177038ea3d38a227bb516a5152d8634fb out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -130,9 +130,9 @@ third-engine-design.md
 | sapi | sapi.lock | 45 |  | no reading |
 | tier | tier.lock | 32 |  | no reading |
 | layer | layer.lock | 37 |  | no reading |
-| harness | xtask.lock | 388 |  | no reading |
+| harness | xtask.lock | 396 |  | no reading |
 
-<!-- /computed in=9fd45e1da5f9e1b1c46b577262b94bfe611eda172aa834b64dd8da3d5671ce95 out=98c4732f70a5668d3012577389758671194066658369c2e439ddf50c51bab6b5 -->
+<!-- /computed in=4fd2f967b9011def30dde5e4187e3720406e80df18d93857bbe6281016ec5b47 out=fac98c071f973e2c2b3fead0e0f912957ff12db31e191288f3aa4d8676de3b27 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -167,7 +167,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern | no reading |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=4b1969874ed8f720b901ef4e921715ebcd0cb3b65c1b90330b66c0ab7a5f9d06 out=9e41c88846f9205321377215b3c283712138042314d0b10d6de8e940afcf6681 -->
+<!-- /computed in=29c4cbaaebe61724c35aeba399f94d617478ed2a4196f8b17ea0d34260a21b9a out=9e41c88846f9205321377215b3c283712138042314d0b10d6de8e940afcf6681 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

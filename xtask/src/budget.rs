@@ -18,7 +18,7 @@ use crate::key::Snapshot;
 use crate::layout;
 use crate::lines;
 use crate::lock::CargoLock;
-use crate::manifest::{self, Budget, Crate, Manifest};
+use crate::manifest::{self, Budget, Crate, Generated, Manifest};
 use crate::reading::{Number, Reading, Status, Store};
 use crate::sources::{self, Standing};
 
@@ -271,13 +271,7 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
             "{name} has no [[crate]] row in seams.toml, so no ceiling"
         ));
     }
-    let exceptions: Vec<&str> = manifest
-        .rules
-        .iter()
-        .flat_map(|r| r.predicate.generated.iter().flatten())
-        .map(|(file, _)| file.as_str())
-        .collect();
-    for path in committed_generated(root, &exceptions)? {
+    for path in committed_generated(root, &manifest.generated_files())? {
         failures.push(format!(
             "{path} is committed generated code; generated code is generated in build.rs and never committed (design §10)"
         ));
@@ -298,21 +292,29 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
 }
 
 /// Each generated, committed file against its rendering
-/// (`generated.committed`). The reading's ADR is the source rule's, which
-/// decided the list the file carries, beside the generated rule's own.
+/// (`generated.committed`), and against what would stand between it and
+/// the crates below it: a clippy configuration nearer to one of them, or
+/// a cargo configuration that sets `CLIPPY_CONF_DIR` (#2475;
+/// [`generated::nearer`], [`generated::conf_dir_set`]). The reading's ADRs
+/// are the rules the file carries, which decided its lists, beside the
+/// generated rule's own.
 fn generated_readings(snapshot: &Snapshot, manifest: &Manifest) -> Result<Vec<Reading>> {
     let root = snapshot.root();
+    let files = manifest.generated_files();
+    let conf_dir = generated::conf_dir_set(root)?;
     let mut readings = Vec::new();
     for rule in &manifest.rules {
-        for (file, from) in rule.predicate.generated.iter().flatten() {
+        for file in rule.predicate.generated.iter().flat_map(Generated::files) {
             let mut reading = Reading::for_scope(INSTRUMENT, file, manifest, snapshot)?;
             reading.rule.clone_from(&rule.id);
-            let source = manifest.rule(from);
-            let adrs: Vec<&str> = source
-                .into_iter()
+            let carried = generated::carried(manifest, generated::dir_of(file))?;
+            let mut adrs: Vec<&str> = carried
+                .iter()
                 .flat_map(|r| r.adr.iter())
                 .chain(rule.adr.iter())
                 .collect();
+            adrs.sort_unstable();
+            adrs.dedup();
             reading.adr = adrs.join(", ");
             let cited = if adrs.is_empty() {
                 String::new()
@@ -325,24 +327,42 @@ fn generated_readings(snapshot: &Snapshot, manifest: &Manifest) -> Result<Vec<Re
                         .join(", ")
                 )
             };
-            let want = generated::render(root, manifest, file, from)?;
-            let have = std::fs::read_to_string(root.join(file)).ok();
-            let stale = match have {
-                Some(have) if have == want => None,
-                Some(_) => Some(format!(
-                    "{file} differs from its rendering from rule {from}"
-                )),
-                None => Some(format!("{file} is not committed")),
+            let from = format!(
+                "rule{} {}",
+                if carried.len() == 1 { "" } else { "s" },
+                carried
+                    .iter()
+                    .map(|r| r.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let want = generated::render(root, manifest, file)?;
+            let mut failures = match std::fs::read_to_string(root.join(file)) {
+                Ok(have) if have == want => Vec::new(),
+                Ok(_) => vec![format!(
+                    "{file} differs from its rendering from {from}; run `xtask generate`"
+                )],
+                Err(_) => vec![format!("{file} is not committed; run `xtask generate`")],
             };
-            match stale {
-                None => {
-                    reading.status = Status::Pass;
-                    reading.message = format!("{file} matches its rendering from rule {from}");
-                }
-                Some(what) => {
-                    reading.status = Status::Fail;
-                    reading.message = format!("{what}; run `xtask generate`. {}{cited}", rule.text);
-                }
+            for path in generated::nearer(root, &files, file)? {
+                failures.push(format!(
+                    "{path} is nearer than {file} to the crates below it, and clippy reads the nearest configuration alone, so it hides {from} from them; remove it"
+                ));
+            }
+            for config in &conf_dir {
+                failures.push(format!(
+                    "{config} sets {} in [env], which cargo hands to clippy, so no crate reads {file} and none is held to {from}; remove it",
+                    generated::CONF_DIR
+                ));
+            }
+            if failures.is_empty() {
+                reading.status = Status::Pass;
+                reading.message = format!(
+                    "{file} matches its rendering from {from}, and no clippy configuration stands nearer to a crate below it"
+                );
+            } else {
+                reading.status = Status::Fail;
+                reading.message = format!("{}. {}{cited}", failures.join("; "), rule.text);
             }
             readings.push(reading);
         }

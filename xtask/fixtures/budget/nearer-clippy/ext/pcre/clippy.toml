@@ -1,0 +1,2 @@
+# A crate-level setting, which hides every rule ext/clippy.toml carries.
+msrv = "1.80"
