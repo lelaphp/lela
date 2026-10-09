@@ -1,7 +1,8 @@
 //! The divergence registry, `docs/divergence.toml` (harness-design.md §4.3):
 //! one row per accepted difference from the oracle, keyed by a witness hash,
-//! a phpt path, a compile-identity path, an extension's name or a trace
-//! site. A row's `kind` says which lane reads it and its `cause` whether it
+//! a phpt path, a compile-identity path, an extension's name, a trace site
+//! or, for a difference on the wire, which the RFCs judge through a
+//! conformance suite rather than the oracle, a suite's case (#2334). A row's `kind` says which lane reads it and its `cause` whether it
 //! is parity debt, counted against the manifest's day-30 target, or a
 //! difference that does not count (#2460, #2462). A row whose one reason
 //! holds for many ids of its kind names them in `covers`, and
@@ -39,7 +40,7 @@ pub const FILE: &str = "docs/divergence.toml";
 pub const INSTRUMENT: &str = "divergence-reason";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
-/// `crosscheck:<name>` or `trace:<site>`, or `php-ub:<site>` on a row the
+/// `crosscheck:<name>`, `trace:<site>` or `wire:<suite>/<case>`, or `php-ub:<site>` on a row the
 /// file still spells in #2220's shape ([`LEGACY_PHP_UB`]). Only
 /// [`Id::of`] makes one, so an id in hand carries the prefix of the kind it
 /// was decoded under.
@@ -56,10 +57,14 @@ impl Id {
     }
 
     /// `text` as an id of the kind the file spells `kind`, whose ids start
-    /// with `prefix`.
+    /// with `prefix`; a `wire:` id names a suite and a case after it.
     fn under(kind: &str, prefix: &str, text: &str) -> Result<Id> {
-        if !text.starts_with(prefix) {
+        let Some(rest) = text.strip_prefix(prefix) else {
             bail!("the id {text:?} is of kind {kind}, whose ids start with {prefix:?}");
+        };
+        let named = |(suite, case): (&str, &str)| !suite.is_empty() && !case.is_empty();
+        if prefix == Kind::Wire.prefix() && !rest.split_once('/').is_some_and(named) {
+            bail!("the id {text:?} is of kind {kind}, whose ids are {prefix:?}<suite>/<case>");
         }
         Ok(Id(text.to_owned()))
     }
@@ -230,17 +235,23 @@ pub enum Kind {
     /// rendering differs from the oracle's (harness §7).
     Crosscheck,
     Trace,
+    /// A `wire:<suite>/<case>` id: one case of a conformance suite the
+    /// production server's wire is held to, which the RFCs judge and php
+    /// does not, since php ships no such server (#2334). The case may
+    /// carry slashes of its own, as h2spec's `http2/6.5.3/1` does.
+    Wire,
 }
 
 impl Kind {
-    /// The six kinds, in the registry's order.
-    pub const ALL: [Kind; 6] = [
+    /// The seven kinds, in the registry's order.
+    pub const ALL: [Kind; 7] = [
         Kind::Witness,
         Kind::Phpt,
         Kind::Runner,
         Kind::Compile,
         Kind::Crosscheck,
         Kind::Trace,
+        Kind::Wire,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -251,6 +262,7 @@ impl Kind {
             Kind::Compile => "compile",
             Kind::Crosscheck => "crosscheck",
             Kind::Trace => "trace",
+            Kind::Wire => "wire",
         }
     }
 
@@ -262,6 +274,7 @@ impl Kind {
             Kind::Compile => "compile:",
             Kind::Crosscheck => "crosscheck:",
             Kind::Trace => "trace:",
+            Kind::Wire => "wire:",
         }
     }
 }
