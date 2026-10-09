@@ -301,6 +301,7 @@ Options:
 ├── cli
 ├── clippy.toml
 ├── fpm
+├── makala
 └── phpdbg
 ```
-<!-- /computed in=ff00b725fd502477c2e4da95e2f546d1a2daa4725e817a07230b65b5537a6789 out=a74b6afe808770cee178a25fa61f1bf0a1ddcaca7f2c84945037c021d4df5015 -->
+<!-- /computed in=cf19cb953ba961646d8d1eac4d4757e95e4fa1762a6cd992f3c664f2492477bc out=4554d325a05a615057f5f927a90ad2bc6dbd301ef02efcaff91e57313fa259ae -->
