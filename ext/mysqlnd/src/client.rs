@@ -678,19 +678,19 @@ impl ResultSet {
             value.give_up(req);
             return Err(thrown);
         }
-        let key = match field.and_then(|f| f.num_key) {
-            Some(n) => Owner::take(req, php_ext::values::Key::Int(n)),
-            None => match php_ext::values::PhpString::new(
-                req,
-                field.map(|f| f.name.as_slice()).unwrap_or_default(),
-            ) {
-                Ok(name) => name.into_key(),
-                Err(thrown) => {
-                    value.give_up(req);
-                    return Err(thrown);
-                }
-            },
+        // `zend_hash_update(row_ht, meta->fields[i].sname, data)`: the
+        // interned name itself, which costs the row nothing.
+        let key = match field {
+            Some(Field {
+                num_key: Some(n), ..
+            }) => php_ext::values::Key::Int(*n),
+            Some(f) => php_ext::values::Key::Str(f.name),
+            None => {
+                value.give_up(req);
+                return Ok(());
+            }
         };
+        let key = Owner::take(req, key);
         array.set(req, key, value)
     }
 

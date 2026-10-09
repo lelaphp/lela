@@ -351,10 +351,10 @@ impl Statement for Stmt {
         let name = if h.fetch_table_names {
             let mut name = field.table.clone();
             name.push(b'.');
-            name.extend_from_slice(&field.name);
+            name.extend_from_slice(field.name.as_bytes());
             name
         } else {
-            field.name.clone()
+            field.name.as_bytes().to_vec()
         };
         Ok(Column {
             name,

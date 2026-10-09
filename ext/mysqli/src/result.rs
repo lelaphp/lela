@@ -471,7 +471,7 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
 fn field_object(req: &mut Request, field: &Field) -> Result<Owner<PhpObject>, Thrown> {
     let object = crate::std_object(req)?;
     let facts = [
-        ("name", crate::Fact::Text(&field.name)),
+        ("name", crate::Fact::Str(field.name)),
         ("orgname", crate::Fact::Text(&field.org_name)),
         ("table", crate::Fact::Text(&field.table)),
         ("orgtable", crate::Fact::Text(&field.org_table)),

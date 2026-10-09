@@ -665,6 +665,8 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Th
 /// `add_property_stringl` and `add_property_long` write it.
 pub(crate) enum Fact<'a> {
     Text(&'a [u8]),
+    /// A string shared, one more owner of it: `zend_string_copy`.
+    Str(PhpString),
     Int(i64),
 }
 
@@ -678,6 +680,7 @@ pub(crate) fn add_facts(
     for (name, fact) in facts {
         let value = match fact {
             Fact::Text(bytes) => string(req, bytes)?,
+            Fact::Str(s) => Owner::take(req, Value::string(*s)),
             Fact::Int(n) => Owner::take(req, Value::int(*n)),
         };
         php_ext::call::write_prop(req, &object, name.as_bytes(), value)?;
