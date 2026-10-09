@@ -118,6 +118,10 @@ mod tests {
     /// for, the one set where it was made and not the one standing where
     /// the request ends; a small slot, a `run` and a huge block alike.
     #[test]
+    #[cfg_attr(
+        all(miri, target_os = "macos"),
+        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
+    )]
     fn a_leak_names_the_origin_its_block_was_allocated_for() {
         let _alone = alone();
         for size in [7, 5000, 3 * 1024 * 1024] {
@@ -143,6 +147,10 @@ mod tests {
     /// With allocations traced, the leak names the line that allocated the
     /// block, past the heap's own frames.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the traced backtrace resolves its frames' file names through `getcwd`, which Miri's isolation refuses"
+    )]
     fn a_traced_leak_names_the_line_that_allocated_it() {
         let _alone = alone();
         let mut heap = Heap::new();

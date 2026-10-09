@@ -842,6 +842,10 @@ mod tests {
     /// and every size lands in the bin, `run` or huge block php's
     /// arithmetic puts it in.
     #[test]
+    #[cfg_attr(
+        all(miri, target_os = "macos"),
+        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
+    )]
     fn what_a_request_allocates_and_frees_reads_back_where_it_started() {
         let _alone = alone();
         let mut heap = Heap::new();
@@ -1006,6 +1010,10 @@ mod tests {
     /// nothing. The peak is the node and then the block, so it reads the
     /// same sum, and freeing the block gives the node back with it.
     #[test]
+    #[cfg_attr(
+        all(miri, target_os = "macos"),
+        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
+    )]
     fn a_huge_block_rounds_to_the_page_the_machine_reports() {
         let _alone = alone();
         let page = mm::real_page_size();

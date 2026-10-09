@@ -271,6 +271,10 @@ mod tests {
     const SIZE: usize = 256 * 1024;
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "corosensei maps a fiber's stack with a guard page Miri's `mmap` does not take, and switches onto it in assembly Miri does not run"
+    )]
     fn a_body_suspends_and_returns_in_the_order_it_is_resumed() -> Result<(), Fatal> {
         let mut probe = Probe::default();
         let Ok(mut fiber) = FiberStack::new(SIZE, |probe: &mut Probe, first| {
@@ -297,6 +301,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "corosensei maps a fiber's stack with a guard page Miri's `mmap` does not take, and switches onto it in assembly Miri does not run"
+    )]
     fn a_suspend_leaves_the_innermost_fiber_and_nothing_below_it() -> Result<(), Fatal> {
         let mut probe = Probe::default();
         let Ok(mut outer) = FiberStack::new(SIZE, |probe: &mut Probe, _| {

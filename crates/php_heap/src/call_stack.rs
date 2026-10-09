@@ -774,6 +774,10 @@ mod tests {
     /// twin of this test in `php_compile` read a 1 MiB thread as 2 MiB
     /// on the runner. A size no cached stack reaches is served fresh.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "Miri keeps a frame's locals in allocations of its own, not on the machine stack whose bounds the probe answers"
+    )]
     fn a_local_lies_within_the_bounds_the_platform_answers() {
         if !ARMED {
             assert_eq!(call_stack_bounds(), None);
@@ -802,6 +806,10 @@ mod tests {
     /// platform, and the platform's default for the main thread where
     /// the design names one.
     #[test]
+    #[cfg_attr(
+        all(miri, target_os = "macos"),
+        ignore = "the pinned nightly's Miri has no `pthread_main_np` on macOS, which the probe asks whether the thread is the main one"
+    )]
     fn the_default_size_is_the_platforms() {
         let size = call_stack_default_size();
         assert!(size >= 32 * 1024 && size.is_multiple_of(1024));
