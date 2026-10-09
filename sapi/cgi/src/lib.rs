@@ -557,7 +557,7 @@ fn describe(
     }
     let web = WebRequest {
         query,
-        body: php_sapi::Body::Read(body),
+        body: php_sapi::Body::from(body),
         no_headers: invocation.head == Head::Quiet,
         response_code: info.response_code,
         ..php_sapi::cgi::web(&env, &info)
