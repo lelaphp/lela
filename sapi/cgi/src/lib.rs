@@ -478,6 +478,30 @@ consult the installation file that came with this distribution, or visit \n\
 /// `SERVER_NAME` and its `[PATH=]` tables along the path's directory
 /// ([`Engine::activated_ini`]), then each `.user.ini` from
 /// `DOCUMENT_ROOT` down to it ([`php_sapi::cgi::user_ini`]).
+///
+/// `cgi.fix_pathinfo` off in the engine's ini, as a php.ini sets it, is
+/// php's behaviour before 4.3 (`Z/sapi/cgi/cgi_main.c:1426`): the request
+/// URI is `PATH_INFO` where the server sets one, and `PHP_SELF` that URI
+/// alone, where with the entry on it is `SCRIPT_NAME` and `PATH_INFO`
+/// together (`/witness.php/extra`):
+///
+/// ```php
+/// echo ini_get('cgi.fix_pathinfo'), "\n", $_SERVER['PHP_SELF'], "\n";
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// --ENV--
+/// SCRIPT_NAME=/witness.php
+/// PATH_INFO=/extra
+/// ```
+/// ```expect regime=cgi-fix-pathinfo-off
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// 0
+/// /extra
+/// ```
 fn describe(
     engine: &Engine,
     invocation: &Invocation,

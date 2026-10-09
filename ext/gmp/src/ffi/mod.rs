@@ -608,6 +608,12 @@ pub(crate) fn version() -> String {
 pub(crate) fn entropy() -> Option<u64> {
     let mut seed = [0u8; 8];
     // SAFETY: `seed` holds the eight bytes asked for.
-    let done = unsafe { libc::getentropy(seed.as_mut_ptr().cast(), seed.len()) };
+    let done = unsafe { getentropy(seed.as_mut_ptr().cast(), seed.len()) };
     (done == 0).then(|| u64::from_ne_bytes(seed))
+}
+
+// `getentropy(3)`, which macOS, glibc and musl each give in `unistd.h`;
+// declared here because the libc crate leaves it out for musl (#2308).
+unsafe extern "C" {
+    fn getentropy(buffer: *mut c_void, length: libc::size_t) -> c_int;
 }

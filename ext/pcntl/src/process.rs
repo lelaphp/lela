@@ -154,7 +154,7 @@ fn waited(
     let given = status.get().map_or(Value::null(), |held| held.0);
     let mut word = i32::try_from(to_long(req, &given)?).unwrap_or_default();
     let options = i32::try_from(flags).unwrap_or_default();
-    let mut usage = resource_usage.is_given().then(zeroed_usage);
+    let mut usage = resource_usage.is_given().then(ffi::zeroed_usage);
     let child = match ffi::wait(pid, &mut word, options, usage.as_mut()) {
         Ok(child) => child,
         Err(errno) => {
@@ -171,34 +171,6 @@ fn waited(
     }
     status.set(req, Untyped(Value::int(word.into())))?;
     Ok(child.into())
-}
-
-/// An `rusage` of zeroes, php's `memset`.
-fn zeroed_usage() -> ffi::Usage {
-    ffi::Usage {
-        ru_utime: libc::timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        ru_stime: libc::timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        ru_maxrss: 0,
-        ru_ixrss: 0,
-        ru_idrss: 0,
-        ru_isrss: 0,
-        ru_minflt: 0,
-        ru_majflt: 0,
-        ru_nswap: 0,
-        ru_inblock: 0,
-        ru_oublock: 0,
-        ru_msgsnd: 0,
-        ru_msgrcv: 0,
-        ru_nsignals: 0,
-        ru_nvcsw: 0,
-        ru_nivcsw: 0,
-    }
 }
 
 /// One `rusage` member as php's `zend_long`, whatever C type the

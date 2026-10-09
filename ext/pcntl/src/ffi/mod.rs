@@ -93,6 +93,15 @@ extern "C" fn handler(number: c_int, info: *mut libc::siginfo_t, _context: *mut 
 /// A child's resource usage, as `wait4(2)` reports it.
 pub(crate) type Usage = libc::rusage;
 
+/// An `rusage` of zeroes, php's `memset`. Made as php makes it, and not
+/// field by field: musl's carries a private reserved tail that no struct
+/// expression can fill (#2308).
+pub(crate) fn zeroed_usage() -> Usage {
+    // SAFETY: `rusage` is plain integers and `timeval`s, for which all
+    // zeroes is a value.
+    unsafe { std::mem::zeroed() }
+}
+
 /// `waitpid(2)`, or `wait4(2)` where `usage` asks for the child's
 /// resource usage: the child's id and the status word as the kernel
 /// wrote it. `status` goes in as the caller's word, as php's goes in.
