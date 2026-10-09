@@ -1960,10 +1960,19 @@ impl Generator {
                 "Cannot resume an already running generator",
             ));
         }
-        // Told from the caller's frame, where php switches to the
-        // generator's before it throws (`Z/Zend/zend_generators.c:524-531`),
-        // so a link reading the trace sees the caller on top, not the generator.
-        let thrown = crate::api::raising::throw_object(req, throwable.hand_on());
+        // Told with the generator's frame current, its
+        // `prev_execute_data` the caller's, as php switches to it before
+        // it throws (`Z/Zend/zend_generators.c:524-531`), so a link
+        // reading the trace sees the generator on top at its `yield`.
+        let thrown = in_context(req, root, |req| {
+            crate::api::raising::throw_object(req, throwable.hand_on())
+        });
+        let Some(thrown) = thrown else {
+            return Err(crate::api::raising::fatal(
+                req,
+                "InternalError: a generator's frame not suspended again after Generator::throw() told its links",
+            ));
+        };
         req.leave_pending(&thrown);
         resumed(req, this)?;
         Ok(yielded_now(req, this, |g| g.value))
