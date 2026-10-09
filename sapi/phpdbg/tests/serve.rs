@@ -3,6 +3,11 @@
 //! handlers, `ev` evaluated in the frame stopped in, and the run ended
 //! as phpdbg ends one.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 

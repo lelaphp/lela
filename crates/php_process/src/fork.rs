@@ -52,6 +52,7 @@ impl Pid {
 /// The OS error `fork(2)` failed with, `EAGAIN` and `ENOMEM` among them,
 /// which php's `pcntl_fork` renders as its warning; no process was made.
 pub fn fork() -> io::Result<Forked> {
+    #[expect(clippy::disallowed_methods, reason = "the home of fork(2)")]
     // SAFETY: `fork` takes no argument and writes no memory of this
     // process. In the child the calling thread alone runs, so nothing
     // this thread reaches there is written by another, and what another
@@ -73,6 +74,10 @@ pub fn fork() -> io::Result<Forked> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
 mod tests {
     use super::{Forked, fork};
 

@@ -1,6 +1,11 @@
 //! The binary tests its configuration as `-t` asks, and serves a request
 //! handed to it as `FastCGI` records under php-fpm's name.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};

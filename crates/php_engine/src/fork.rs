@@ -97,6 +97,10 @@ pub(crate) struct Thread {
 /// until it is joined; `None` where the system refuses a thread.
 pub(crate) fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Option<Thread> {
     let inside = Inside::enter();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the home: every thread the engine owns starts here, counted until it is joined"
+    )]
     let handle = thread::Builder::new()
         .name(name.to_owned())
         .spawn(body)
@@ -173,6 +177,10 @@ impl Alone {
     /// `php_process::fork`: in both processes the hold is let go once it
     /// returns, the child's copy of the number being the caller's own.
     fn fork(self) -> io::Result<Forked> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the home: Alone is php_process::fork's one caller"
+        )]
         let forked = php_process::fork();
         drop(self);
         forked

@@ -118,7 +118,7 @@ fn every_judged_rule_fires_on_its_fixture_and_not_on_its_neighbour() {
 }
 
 /// Every rule with a `tool` or a `scope` is either judged here, with its
-/// fixture, or carries one of the four predicates that read the tree after
+/// fixture, or carries one of the five predicates that read the tree after
 /// the write, or is read at the Stop alone (`tool = "Stop"`, #32), which
 /// `permit` never judges and no after-the-write sensor reads; a fourth
 /// kind cannot fall between the three.
@@ -131,7 +131,8 @@ fn every_rule_with_a_tool_or_a_scope_is_judged_or_is_an_after_the_write_sensor()
         .filter(|r| !r.tool.is_empty() || !r.scope.is_empty())
     {
         let p = &rule.predicate;
-        let after_the_write = p.check.is_some()
+        let after_the_write = p.deny_methods.is_some()
+            || p.check.is_some()
             || p.deny_lints.is_some()
             || p.avoid_from.is_some()
             || p.generated.is_some();

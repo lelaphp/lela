@@ -774,6 +774,10 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
 mod tests {
     use std::sync::{Arc, mpsc};
 

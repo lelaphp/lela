@@ -240,10 +240,15 @@ fn the_committed_clippy_toml_is_the_manifests_rendering() {
         .iter()
         .filter(|r| r.rule == "generated.committed")
         .collect();
-    assert_eq!(generated.len(), 1, "{generated:#?}");
-    let clippy = generated[0];
-    assert_eq!(clippy.scope, "ext/clippy.toml");
-    assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
+    let scopes: Vec<&str> = generated.iter().map(|r| r.scope.as_str()).collect();
+    assert_eq!(
+        scopes,
+        ["crates/clippy.toml", "ext/clippy.toml", "sapi/clippy.toml"],
+        "{generated:#?}"
+    );
+    for clippy in generated {
+        assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
+    }
 }
 
 /// The rendering is read as committed, which the test above holds equal
@@ -549,6 +554,40 @@ fn clippy_refuses_each_denied_method_under_the_generated_file() {
         !stderr.contains("does not refer to a reachable"),
         "every entry resolves or is allow-invalid: {stderr}"
     );
+}
+
+/// Every path a `deny_methods` rule of the workspace's manifest denies is
+/// one the fixture's row denies and has its source beside it, so a path
+/// added to the row is refused under clippy by the test above.
+#[test]
+fn every_method_the_manifest_denies_has_a_fixture() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let fixture = Manifest::load(&methods_fixture()).unwrap();
+    let mut seen = 0;
+    for rule in &manifest.rules {
+        let Some(methods) = &rule.predicate.deny_methods else {
+            continue;
+        };
+        let fixed = fixture
+            .rule(&rule.id)
+            .and_then(|r| r.predicate.deny_methods.as_ref());
+        for path in methods {
+            seen += 1;
+            assert!(
+                fixed.is_some_and(|f| f.contains(path)),
+                "{}: {path} is not in the fixture's row",
+                rule.id
+            );
+            let source = methods_fixture().join(format!("{}.rs", path.replace("::", "-")));
+            assert!(
+                source.is_file(),
+                "{}: no fixture {}",
+                rule.id,
+                source.display()
+            );
+        }
+    }
+    assert!(seen >= 8, "#1950's eight paths are denied");
 }
 
 /// A clippy rule clippy cannot hold as written is refused by `generate`,

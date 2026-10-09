@@ -646,6 +646,17 @@ deny_pattern = '\b(unistd|libc)::v?fork\b'
 text = "fork has one home, php_process, and php_engine's fork policy is its only caller (#1779)."
 
 [[rule]]
+id = "fork.threads"
+scope = ["crates/*", "ext/*", "sapi/*"]
+deny_methods = ["php_process::fork::fork", "std::thread::spawn", "std::thread::Builder::spawn", "std::thread::scope",
+                "libc::fork", "libc::vfork", "nix::unistd::fork", "nix::unistd::daemon"]   # grammar: deny_methods, #1950
+adr = "0010"
+text = "A process forks through php_engine's one home, fork::Alone, the one caller of php_process::fork, itself the one caller of fork(2); every thread of the engine's process starts through fork::spawn, so it is counted and a fork waits for it, and an extension owns none (#1807, #1950). The home's call carries #[expect(clippy::disallowed_methods)], a test its allow."
+# Renders to the generated, committed `crates/clippy.toml`, `ext/clippy.toml`
+# and `sapi/clippy.toml` (`disallowed-methods`); a path of libc or nix is
+# `allow-invalid`, since each is declared for some targets and features only.
+
+[[rule]]
 id = "lints.no-panic"
 scope = ["crates/php_syntax", "crates/php_heap", "crates/php_unit", "crates/php_compile", "crates/php_engine", "crates/php_jit", "crates/php_sapi", "ext/*", "sapi/*"]  # php_syntax: the parser runs inside every request, so its panic reaches one (#236)
 exempt = ["tests", "xtask"]
@@ -715,7 +726,7 @@ text = "The Harness section's _Avoid_ words appear in no public item name or rus
 
 [[rule]]
 id = "generated.committed"
-generated = { "ext/clippy.toml" = "ext.no-locks" } # grammar: generated, design §10
+generated = { "ext/clippy.toml" = "ext.no-locks", "crates/clippy.toml" = "fork.threads", "sapi/clippy.toml" = "fork.threads" } # grammar: generated, design §10
 text = "ext/clippy.toml is generated from the manifest and committed; a stale copy fails budget."
 
 [[rule]]

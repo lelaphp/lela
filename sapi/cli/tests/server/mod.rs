@@ -2,6 +2,10 @@
 //! own on a free port, its log collected line by line as it is written,
 //! and stopped by `SIGINT`, as php's own server tests drive it.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader, Read, Write};

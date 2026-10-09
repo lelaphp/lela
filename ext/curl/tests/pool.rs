@@ -6,6 +6,11 @@
 //! reports the connections it accepts and closes, so the test reads which
 //! share each request held without looking inside libcurl.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver, Sender};

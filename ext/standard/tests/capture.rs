@@ -1,6 +1,11 @@
 //! The extension through the `Capture` sink (design §4.10, ADR-0002): a
 //! fresh engine with this crate alone, never the bundle.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use php_ext::test::{Capture, Engine};
 
 /// What the engine wrote and what ended it, for one source, under an
