@@ -1394,24 +1394,6 @@ impl PhpObject {
         req.object_entries(self.0)
     }
 
-    /// `zend_get_properties_for(obj, ZEND_PROP_PURPOSE_DEBUG)`'s first
-    /// step, `zend_std_get_properties_for`'s call of the class's
-    /// `get_debug_info` (`Z/Zend/zend_object_handlers.c:2179`): the
-    /// table a class shows in place of its properties, with one owner,
-    /// the caller's, which is php's `*is_temp` one and is released once
-    /// the rows have been read. `None` for a class that shows its
-    /// members. [`PhpObject::properties_for`] under the same purpose asks
-    /// this first and reads the members where it answers none, so a
-    /// typed property nothing has written still shows as one. The throwable
-    /// the class left pending while it built the table rides beside it,
-    /// for the dumper to hand on after the rows are printed.
-    pub fn debug_info(
-        &self,
-        req: &mut Request,
-    ) -> Result<Option<crate::api::abi::DebugInfo>, Thrown> {
-        req.object_handlers(self.0).get_debug_info(req, *self)
-    }
-
     /// `zend_get_properties_for(obj, purpose)`, php's second entry point
     /// to an object's properties, held until
     /// [`HeldProperties::release`], `zend_release_properties`: the table
