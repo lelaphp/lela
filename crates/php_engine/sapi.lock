@@ -11,6 +11,7 @@ FileHandles
 Forked
 HostPage
 HostServes
+HostThread
 HostValue
 IniEvent
 IniFile
@@ -44,3 +45,4 @@ getopt::Opt
 getopt::OptError
 getopt::Stopped
 getopt::Taken
+host_thread

@@ -37,11 +37,11 @@ use php_engine::LeakSensor;
 
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
-    FileHandles, Forked, HostPage, HostServes, HostValue, IniEvent, IniFile, IniFiles, IniOrigin,
-    IniValue, Method, NotAlone, Observables, OutputSink, PHP_CONFIG_FILE_PATH,
+    FileHandles, Forked, HostPage, HostServes, HostThread, HostValue, IniEvent, IniFile, IniFiles,
+    IniOrigin, IniValue, Method, NotAlone, Observables, OutputSink, PHP_CONFIG_FILE_PATH,
     PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid,
     Primary, ProcessTitle, ProgramFile, RequestDescription, ResponseHead, Routed, Uncaught,
-    WebRequest, fork,
+    WebRequest, fork, host_thread,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
