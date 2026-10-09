@@ -1,0 +1,1 @@
+{"tool_name": "Edit", "tool_input": {"file_path": "ext/pcre/src/lib.rs", "old_string": "/// string(1) \"1\"\n/// ```\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\nstruct Limits {", "new_string": "/// string(1) \"1\"\n/// ```\n/// ```stderr\n/// typed\n/// ```\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\nstruct Limits {"}}

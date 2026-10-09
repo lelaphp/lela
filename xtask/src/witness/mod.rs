@@ -167,6 +167,8 @@ pub(crate) mod numbers {
     pub(crate) const FAILED: &str = "failed";
     /// Witnesses that differ under an accepted registry row.
     pub(crate) const DIVERGED: &str = "diverged";
+    /// Witnesses a `trace:` row covers, held to the engine alone (#1650).
+    pub(crate) const COVERED: &str = "covered";
     /// Witnesses with no verdict pinned yet.
     pub(crate) const UNPINNED: &str = "unpinned";
     /// Witnesses the lane skipped.
@@ -196,6 +198,11 @@ pub(crate) enum Judgement {
     Pass,
     /// The bytes differ and an accepted registry row says so.
     Diverged,
+    /// A fence an accepted `trace:` row covers, which the engine met: it
+    /// is held to its pinned `expect` against the engine alone, and the
+    /// note records how the oracle's run ended, not judged (harness §4.3,
+    /// §8; #1650).
+    Covered,
     /// The bytes differ and nothing accepts it.
     Fail,
     /// A bare `exit`: the run has no status to hold the snippet to until
@@ -216,6 +223,7 @@ impl tally::Judgement for Judgement {
         match self {
             Judgement::Pass => "pass",
             Judgement::Diverged => "diverged",
+            Judgement::Covered => "covered",
             Judgement::Fail => "fail",
             Judgement::Unpinned => "unpinned",
             Judgement::Bork => "bork",
@@ -232,7 +240,10 @@ impl tally::Judgement for Judgement {
     }
 
     fn met(self) -> bool {
-        matches!(self, Judgement::Pass | Judgement::Diverged)
+        matches!(
+            self,
+            Judgement::Pass | Judgement::Diverged | Judgement::Covered
+        )
     }
 }
 
@@ -316,34 +327,7 @@ pub(crate) fn reading(
         // the reading is a pass or a fail on what the engine wrote.
         run.outcome(&Runner::Linked)
     };
-    // What did not run for want of the oracle, and what the engine did
-    // not serve for its trace there, as a message's tail.
-    let unrun = match (&tally.oracle_absent, run.not_run()) {
-        (Some(why), n) if n > 0 => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("; {n} witness{s} did not run, {why}")
-        }
-        _ => String::new(),
-    };
-    let unrun = match tally.unserved.len() {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "s" };
-            format!(
-                "{unrun}; {n} fence{s} the engine did not serve: {}",
-                tally.unserved.join("; ")
-            )
-        }
-    };
-    // What a `locale=<name>` the host lacks kept from running, as a
-    // message's tail (#1678).
-    let unrun = match run.count(Judgement::Skipped) {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("{unrun}; {n} witness{s} skipped for a locale this host lacks")
-        }
-    };
+    let unrun = tail(tally);
     let message = match &outcome {
         Outcome::Failed => {
             let uncovered = if tally.missing.is_empty() {
@@ -410,6 +394,7 @@ pub(crate) fn reading(
     reading.count(numbers::PASSED, run.count(Judgement::Pass))?;
     reading.count(numbers::FAILED, run.against().len() as u64)?;
     reading.count(numbers::DIVERGED, run.count(Judgement::Diverged))?;
+    reading.count(numbers::COVERED, run.count(Judgement::Covered))?;
     reading.count(numbers::UNPINNED, run.count(Judgement::Unpinned))?;
     reading.count(numbers::SKIPPED, run.count(Judgement::Skipped))?;
     reading.count(numbers::SUBJECTS, tally.subjects as u64)?;
@@ -420,6 +405,60 @@ pub(crate) fn reading(
     reading.count(numbers::UNSERVED, tally.unserved.len() as u64)?;
     reading.count(numbers::WALL_MS, declared_ms(tally.wall))?;
     Ok(reading)
+}
+
+/// What the reading's message says after its verdict: the witnesses that
+/// did not run for want of the oracle, the fences the engine did not
+/// serve, those skipped for a locale the host lacks, and what the oracle
+/// did on each fence a `trace:` row holds to the engine alone.
+fn tail(tally: &Tally) -> String {
+    let run = &tally.witnesses;
+    // What did not run for want of the oracle, and what the engine did
+    // not serve for its trace there, as a message's tail.
+    let unrun = match (&tally.oracle_absent, run.not_run()) {
+        (Some(why), n) if n > 0 => {
+            let s = if n == 1 { "" } else { "es" };
+            format!("; {n} witness{s} did not run, {why}")
+        }
+        _ => String::new(),
+    };
+    let unrun = match tally.unserved.len() {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "s" };
+            format!(
+                "{unrun}; {n} fence{s} the engine did not serve: {}",
+                tally.unserved.join("; ")
+            )
+        }
+    };
+    // What a `locale=<name>` the host lacks kept from running, as a
+    // message's tail (#1678).
+    let unrun = match run.count(Judgement::Skipped) {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "es" };
+            format!("{unrun}; {n} witness{s} skipped for a locale this host lacks")
+        }
+    };
+    // What the oracle did on each fence a `trace:` row holds to the engine
+    // alone, recorded and not judged (harness §4.3, §8; #1650).
+    let covered: Vec<String> = run
+        .judged
+        .iter()
+        .filter(|j| j.judgement == Judgement::Covered)
+        .map(|j| format!("{}: {}", j.id, j.note))
+        .collect();
+    match covered.len() {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "s" };
+            format!(
+                "{unrun}; {n} fence{s} held to the engine alone: {}",
+                covered.join("; ")
+            )
+        }
+    }
 }
 
 /// The reading under the coverage rule, when the manifest has one: the
