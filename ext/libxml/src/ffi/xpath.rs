@@ -532,7 +532,7 @@ fn session<'a>(ctxt: *mut sys::xmlXPathParserContext) -> Option<&'a mut Session<
 fn serve(ctxt: *mut sys::xmlXPathParserContext, nargs: c_int, called: Called, strings: bool) {
     let n = usize::try_from(nargs).unwrap_or(0);
     let Some(session) = session(ctxt) else {
-        let _ = pop_args(ctxt, n, strings);
+        drop(pop_args(ctxt, n, strings));
         return;
     };
     let args = pop_args(ctxt, n, strings);

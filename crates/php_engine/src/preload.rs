@@ -178,7 +178,9 @@ impl Engine {
                 }
             }
         }
-        let _ = self.shutdown_request(&mut req, sink);
+        // The preload's request reports to no host: what it observed
+        // and the natives it entered end with it.
+        drop(self.shutdown_request(&mut req, sink));
         if failed {
             Started::Refused(1)
         } else {

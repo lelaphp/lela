@@ -677,7 +677,10 @@ fn release_callbacks(req: &mut Request) {
     let callbacks = std::mem::take(&mut req.state::<State>().callbacks);
     for callback in callbacks {
         drop(callback.closure);
-        let _ = callback.callable;
+        // The callable names its value and holds no owner of it; the
+        // owner `create_callback` took is the value's, released next, as
+        // `zend_ffi_callback_hash_dtor` releases a closure's object.
+        drop(callback.callable);
         req.release(callback.value);
     }
 }

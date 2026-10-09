@@ -81,7 +81,7 @@ pub(crate) fn check_bytes(input: &[u8], expected: &[(SyntaxKind, &[u8])]) {
 /// invariant honest.
 pub(crate) fn diags(input: &[u8]) -> Vec<(String, u32, u32)> {
     let lexed = lex(F, input, &LexOptions::default());
-    let _ = pairs(&lexed, input);
+    pairs(&lexed, input);
     lexed
         .diagnostics
         .iter()

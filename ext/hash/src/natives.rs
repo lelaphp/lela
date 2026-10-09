@@ -1237,7 +1237,7 @@ fn hash_pbkdf2(
         return Err(arg_value_error(req, 5, "be greater than or equal to 0"));
     }
     // `ops->hash_init(context, args)`: what the options may raise, raised.
-    let _ = (algo.init)(req, Options(Some(options)))?;
+    drop((algo.init)(req, Options(Some(options)))?);
     let k1 = hmac_key(req, algo, password)?;
     let size = algo.digest;
     if length == 0 {
