@@ -435,6 +435,8 @@ decl::Type::mask
 decl::Visibility
 decl::class_attribute_refusal
 decl::hook_attribute_refusal
+process::egid
+process::euid
 process::gid
 process::groups
 process::uid

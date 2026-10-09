@@ -25,6 +25,8 @@ post::WakeSet
 post::WakeSet::new
 post::WakeSet::raise
 post::WakeSet::register
+process::egid
+process::euid
 process::gid
 process::groups
 process::uid
