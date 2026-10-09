@@ -373,9 +373,9 @@ impl Request {
         hook: Function,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
-        self.addref(&object.as_value());
+        let held = Owner::take(self, object);
         let served = self.serve_method_made(hook, Some(object), object.class(), arguments, &[]);
-        self.release(object.as_value());
+        held.give_up(self);
         served
     }
 
@@ -952,10 +952,30 @@ fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     Ok(returned)
 }
 
-/// One row of [`Request::hooked_object_rows`]: the name as declared,
-/// the value, one owner the caller's, and for a declared row the class
+/// One row of [`Request::hooked_object_rows`]: the name as declared and
+/// the value, each the caller's owner, and for a declared row the class
 /// that declared it and its visibility, none for a dynamic one.
-pub(crate) type HookedRow = (Key, Value, Option<(ClassId, Visibility)>);
+pub(crate) struct HookedRow {
+    pub(crate) key: Owner<Key>,
+    pub(crate) value: Owner<Value>,
+    pub(crate) declared: Option<(ClassId, Visibility)>,
+}
+
+impl HookedRow {
+    /// The row's owners given up, `zval_ptr_dtor` over each.
+    pub(crate) fn give_up(self, req: &mut Request) {
+        self.value.give_up(req);
+        self.key.give_up(req);
+    }
+
+    /// Every row's owners given up, what a reader that stops part way
+    /// leaves.
+    pub(crate) fn give_up_all(req: &mut Request, rows: impl IntoIterator<Item = HookedRow>) {
+        for row in rows {
+            row.give_up(req);
+        }
+    }
+}
 
 /// Whose a key of `zho_build_properties_ex`'s table is: php keys the
 /// table by the mangled name, so a public property, the protected one
@@ -1190,23 +1210,33 @@ impl Request {
         }
         let object = self.lazy_init(object)?;
         let keys = self.hooked_object_keys(class);
-        let mut rows = Vec::with_capacity(keys.len());
+        let mut rows: Vec<HookedRow> = Vec::with_capacity(keys.len());
         for (name, declaring, visibility) in keys {
-            let interned = Key::Str(self.interned(&name)?);
+            let interned = match self.interned(&name) {
+                Ok(interned) => Key::Str(interned),
+                Err(thrown) => {
+                    HookedRow::give_up_all(self, rows);
+                    return Err(thrown);
+                }
+            };
+            let declared = Some((declaring, visibility));
             if let Some(hooked) = self.row_hooked(declaring, &name) {
                 if hooked.is_virtual && hooked.get.is_none() {
                     continue;
                 }
                 let value = match self.read_hooked(object, &name, hooked, PropertyRead::Silent) {
-                    Ok(value) => value,
+                    Ok(value) => Owner::adopt(self, value),
                     Err(thrown) => {
-                        for (_, value, _) in rows {
-                            self.release(value);
-                        }
+                        HookedRow::give_up_all(self, rows);
                         return Err(thrown);
                     }
                 };
-                rows.push((interned, value, Some((declaring, visibility))));
+                let key = Owner::take(self, interned);
+                rows.push(HookedRow {
+                    key,
+                    value,
+                    declared,
+                });
                 continue;
             }
             let Some(slot) = self.slot_declared_by(class, declaring, &name) else {
@@ -1216,9 +1246,13 @@ impl Request {
             if z.is_undef() {
                 continue;
             }
-            let value = Value::of_zval(z);
-            self.addref(&value);
-            rows.push((interned, value, Some((declaring, visibility))));
+            let key = Owner::take(self, interned);
+            let value = Owner::take(self, Value::of_zval(z));
+            rows.push(HookedRow {
+                key,
+                value,
+                declared,
+            });
         }
         if let Some(table) = object.heap().properties() {
             let dynamic: Vec<(Key, Value)> = table
@@ -1226,11 +1260,13 @@ impl Request {
                 .map(|(key, z)| (Key::of(key), Value::of_zval(z)))
                 .collect();
             for (key, value) in dynamic {
-                self.addref(&value);
-                if let Key::Str(name) = key {
-                    self.addref(&Value::string(name));
-                }
-                rows.push((key, value, None));
+                let key = Owner::take(self, key);
+                let value = Owner::take(self, value);
+                rows.push(HookedRow {
+                    key,
+                    value,
+                    declared: None,
+                });
             }
         }
         Ok(Some(rows))
@@ -1288,28 +1324,24 @@ impl Request {
         let mut table = match PhpArray::new(self) {
             Ok(table) => table,
             Err(thrown) => {
-                self.give_up_hooked(rows);
+                HookedRow::give_up_all(self, rows);
                 return Err(thrown);
             }
         };
-        while let Some((key, value, declared)) = rows.next() {
-            let value = Owner::adopt(self, value);
-            let key = match key {
-                Key::Str(name) => {
-                    let name = Owner::adopt(self, name);
-                    let prefix =
-                        declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
-                    match prefix {
-                        Some(prefix) => {
-                            let mangled =
-                                self.interned(&[prefix.as_slice(), name.as_bytes()].concat());
-                            name.give_up(self);
-                            mangled.map(|mangled| Owner::take(self, Key::Str(mangled)))
-                        }
-                        None => Ok(name.into_key()),
-                    }
+        while let Some(HookedRow {
+            key,
+            value,
+            declared,
+        }) = rows.next()
+        {
+            let prefix = declared.and_then(|(declaring, v)| self.property_prefix(declaring, v));
+            let key = match (&*key, prefix) {
+                (Key::Str(name), Some(prefix)) => {
+                    let mangled = self.interned(&[prefix.as_slice(), name.as_bytes()].concat());
+                    key.give_up(self);
+                    mangled.map(|mangled| Owner::take(self, Key::Str(mangled)))
                 }
-                Key::Int(_) => Ok(Owner::take(self, key)),
+                _ => Ok(key),
             };
             let laid = match key {
                 Ok(key) => table.add_new(self, key, value),
@@ -1319,23 +1351,12 @@ impl Request {
                 }
             };
             if let Err(thrown) = laid {
-                self.give_up_hooked(rows);
+                HookedRow::give_up_all(self, rows);
                 table.give_up(self);
                 return Err(thrown);
             }
         }
         Ok(Some(table))
-    }
-
-    /// The owners [`Request::hooked_object_rows`] took for `rows` given
-    /// back: each value's, and a dynamic row's name's.
-    fn give_up_hooked(&mut self, rows: impl Iterator<Item = HookedRow>) {
-        for (key, value, _) in rows {
-            self.release(value);
-            if let Key::Str(name) = key {
-                Owner::adopt(self, name).give_up(self);
-            }
-        }
     }
 }
 

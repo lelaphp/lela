@@ -122,7 +122,7 @@ use php_unit::Unit;
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ChainFrame, FrameView, Request, TimeLimitSuspended};
-use crate::api::values::{ClassId, PhpObject, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, Value};
 
 pub(crate) use opcodes::{Declared, ObservedOpcodes, OpcodeObserver, Telling, Untold, tell_before};
 pub use opcodes::{OpcodeHandler, Opcodes, OpcodesDeclared};
@@ -583,9 +583,9 @@ pub(crate) fn generator_yielded(req: &mut Request, frame: FrameRef, generator: P
 #[inline(never)]
 fn end_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
     let value = crate::generator::value(req, generator);
-    req.addref(&value);
-    end(req, Observable::Code(frame), Some(&value));
-    req.release(value);
+    let value = Owner::take(req, value);
+    end(req, Observable::Code(frame), Some(&*value));
+    value.give_up(req);
 }
 
 /// `zend_observer_fcall_begin_prechecked` (`Z/Zend/zend_observer.c:257-281`)

@@ -13,7 +13,7 @@ use crate::api::abi::{
     OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
 };
 use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, throw_error, warning};
-use crate::api::request::Request;
+use crate::api::request::{HookedRow, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -380,6 +380,47 @@ fn get_class_vars(req: &mut Request, class: PhpString) -> Result<Owner<PhpArray>
     Ok(array)
 }
 
+/// One row of a hooked object's table into `get_object_vars`' answer:
+/// an integer key php's table holds already is skipped, a declared row
+/// the scope cannot see is left out, and a dynamic row's name is keyed
+/// as php's `zend_symtable_add_new` keys it. The row's owners are the
+/// array's or given up here.
+fn add_hooked_var(
+    req: &mut Request,
+    array: &mut Owner<PhpArray>,
+    row: HookedRow,
+    scope: Option<ClassId>,
+) -> Result<(), Thrown> {
+    let HookedRow {
+        key,
+        value,
+        declared,
+    } = row;
+    let name = match &*key {
+        Key::Int(_) if array.contains(&key) => {
+            value.give_up(req);
+            key.give_up(req);
+            return Ok(());
+        }
+        Key::Int(_) => return array.add_new(req, key, value),
+        Key::Str(name) => *name,
+    };
+    let seen =
+        declared.is_none_or(|(declaring, visibility)| visible(req, declaring, visibility, scope));
+    if !seen {
+        value.give_up(req);
+        key.give_up(req);
+        return Ok(());
+    }
+    if declared.is_some() {
+        return array.add_new(req, key, value);
+    }
+    let name = Owner::take(req, name);
+    key.give_up(req);
+    let key = Key::from_string(req, name);
+    array.add_new(req, key, value)
+}
+
 /// `get_object_vars(object $object): array`, php's
 /// `ZEND_FUNCTION(get_object_vars)` (`Z/Zend/zend_builtin_functions.c:832`):
 /// the object's properties the executed scope may read, each named as
@@ -490,33 +531,20 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     // row stands for, php's `IS_PTR`.
     let overloaded = req.object_handlers(object.heap()).properties_overloaded();
     if !overloaded && let Some(rows) = req.hooked_object_rows(object)? {
-        let mut array = PhpArray::new(req)?;
-        for (key, value, declared) in rows {
-            let value = Owner::adopt(req, value);
-            let name = match key {
-                Key::Int(_) if array.contains(&key) => {
-                    value.give_up(req);
-                    continue;
-                }
-                Key::Int(_) => {
-                    array.add_new(req, Owner::take(req, key), value)?;
-                    continue;
-                }
-                Key::Str(name) => Owner::adopt(req, name),
-            };
-            let seen = declared
-                .is_none_or(|(declaring, visibility)| visible(req, declaring, visibility, scope));
-            if !seen {
-                value.give_up(req);
-                name.give_up(req);
-                continue;
+        let mut rows = rows.into_iter();
+        let mut array = match PhpArray::new(req) {
+            Ok(array) => array,
+            Err(thrown) => {
+                HookedRow::give_up_all(req, rows);
+                return Err(thrown);
             }
-            let key = if declared.is_some() {
-                name.into_key()
-            } else {
-                Key::from_string(req, name)
-            };
-            array.add_new(req, key, value)?;
+        };
+        while let Some(row) = rows.next() {
+            if let Err(thrown) = add_hooked_var(req, &mut array, row, scope) {
+                HookedRow::give_up_all(req, rows);
+                array.give_up(req);
+                return Err(thrown);
+            }
         }
         return Ok(array);
     }

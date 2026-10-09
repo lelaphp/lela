@@ -1915,19 +1915,20 @@ impl Generator {
         this: This<Self>,
         exception: Instance<Throwable>,
     ) -> Result<Value, Thrown> {
-        let throwable = exception.object();
-        req.addref(&throwable.as_value());
+        // The pending slot's owner, taken first as php's `Z_ADDREF_P`
+        // takes it, and handed to the throw or given up on every path.
+        let throwable = Owner::take(req, exception.object());
         let this = this.object();
         if let Err(thrown) = ensure_initialized(req, this) {
-            req.release(throwable.as_value());
+            throwable.give_up(req);
             return Err(thrown);
         }
         if !has_frame(req, this) {
-            return Err(crate::api::raising::throw_object(req, throwable));
+            return Err(crate::api::raising::throw_object(req, throwable.hand_on()));
         }
         let root = current(req, this);
         if is_running(req, root) {
-            req.release(throwable.as_value());
+            throwable.give_up(req);
             return Err(throw_error(
                 req,
                 "Error",
@@ -1937,7 +1938,7 @@ impl Generator {
         // Told from the caller's frame, where php switches to the
         // generator's before it throws (`Z/Zend/zend_generators.c:524-531`),
         // so a link reading the trace sees the caller on top, not the generator.
-        let thrown = crate::api::raising::throw_object(req, throwable);
+        let thrown = crate::api::raising::throw_object(req, throwable.hand_on());
         req.leave_pending(&thrown);
         resumed(req, this)?;
         Ok(yielded_now(req, this, |g| g.value))

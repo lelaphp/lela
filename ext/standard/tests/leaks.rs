@@ -129,3 +129,20 @@ echo "after\n";
         "object(C)#1 (1) {\n  [\"p\"]=>\n  int(1)\n}\ndestructed\nint(42)\nafter\n"
     );
 }
+
+/// `unserialize` offers what it answers to the cycle collector as a
+/// possible root, as `php_unserialize_with_options` calls
+/// `gc_check_possible_root` over its return value
+/// (`Z/ext/standard/var.c:1483`): a cycle handed straight to a native,
+/// whose argument is freed with no root offered, is collected at the
+/// request's end and leaves no block behind (#2444).
+#[test]
+fn unserialize_offers_its_answer_to_the_collector() {
+    let (stdout, fatal) = armed(
+        r#"<?php
+var_dump(is_object(unserialize('O:8:"stdClass":1:{s:1:"b";r:1;}')));
+"#,
+    );
+    assert_eq!(fatal, None);
+    assert_eq!(stdout, "bool(true)\n");
+}

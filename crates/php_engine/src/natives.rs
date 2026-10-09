@@ -28,18 +28,19 @@
 use std::ops::ControlFlow;
 
 use php_macros::php_function;
-use php_unit::decl::{ClassKind, Type, Visibility};
+use php_unit::decl::ClassKind;
 
-use crate::api::abi::{Callable, Entry, Never, OrFalse, Passed, Raw, Union, Variadic};
-use crate::api::coerce::declared_type_name;
+use crate::api::abi::{
+    Callable, Entry, Never, OrFalse, Passed, PropertyPurpose, Raw, Union, Variadic,
+};
 use crate::api::coerce::to_string;
 use crate::api::raising::{
     Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
 };
 use crate::api::request::Request;
-use crate::api::values::walk::{self, Hold};
+use crate::api::values::walk::{self, Hold, Unwritten};
 use crate::api::values::{
-    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
+    Key, Laziness, Owner, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
 };
 use php_unit::decl::FunctionDecl;
 
@@ -1331,12 +1332,12 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
 /// }
 /// ```
 ///
-/// The walk holds what it walks, as php's does (GH-19801): an array
-/// its own owner across the rows, so an element's `__debugInfo` that
-/// frees the array's last other owner leaves it standing, and an
-/// object's dynamic rows theirs, so a nested `__debugInfo` that unsets
-/// a sibling leaves this walk printing what it had, the next one
-/// printing what is left.
+/// The walk holds what php's holds (GH-19801): an array its own owner
+/// across the rows, so an element's `__debugInfo` that frees the
+/// array's last other owner leaves it standing, and an object's table
+/// the owner `zend_get_properties_for` takes, `GC_TRY_ADDREF`, so a
+/// nested `__debugInfo` that unsets a sibling separates the table and
+/// this walk prints what it had, the next one what is left.
 ///
 /// ```php
 /// $a = [new class { function __debugInfo() { global $b; $b->a = null; gc_collect_cycles(); return []; } }];
@@ -1416,9 +1417,16 @@ fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
             .argument(at)
             .filter(|passed| passed.tag() == crate::api::values::TypeTag::Undef)
             .unwrap_or(coerced);
-        let mut out = Vec::new();
-        dump(req, &mut out, &value, 1);
-        req.write(&out);
+        dump(req, &value, 1);
+    }
+}
+
+/// php's `php_printf("%*c", width, ' ')`: `width` blanks, written as
+/// one piece; nothing for a width of zero, which is php's `level > 1`
+/// test before it.
+fn blanks(req: &mut Request, width: usize) {
+    if width > 0 {
+        req.write(" ".repeat(width).as_bytes());
     }
 }
 
@@ -1426,6 +1434,37 @@ fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
 /// `level - 1` blanks before it past the first level, and an array's
 /// elements each through `php_array_element_dump`, the key at `level + 1`
 /// and the value at `level + 2`.
+///
+/// Each piece is written to the request as php's `php_printf`,
+/// `PHPWRITE` and `PUTS` write it, one write per call of php's, so what
+/// code the dump runs writes, a `__debugInfo` method, a destructor or a
+/// handler, lands where php's lands, and an `ob_start` callback with a
+/// chunk size of one is handed php's pieces:
+///
+/// ```php
+/// class C { function __debugInfo() { echo "in debugInfo\n"; return []; } }
+/// var_dump([new C, 1]);
+/// ob_start(function ($chunk) { return $chunk === '' ? '' : "<$chunk>"; }, 1);
+/// var_dump([1, "a"]);
+/// ob_end_flush();
+/// ```
+/// ```expect
+/// array(2) {
+///   [0]=>
+///   in debugInfo
+/// object(C)#1 (0) {
+///   }
+///   [1]=>
+///   int(1)
+/// }
+/// <array(2) {
+/// ><  [0]=>
+/// ><  ><int(1)
+/// ><  [1]=>
+/// ><  ><string(1) "><a><"
+/// ><}
+/// >
+/// ```
 ///
 /// The array and the object arms carry php's recursion guard: the walk
 /// marks what it is inside with `Z_PROTECT_RECURSION_P` and clears the
@@ -1435,97 +1474,33 @@ fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
 /// returns there ahead of `COMMON`. Without it a value that holds
 /// itself is unbounded recursion, which is a panic reaching a request
 /// (design §10).
-fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) {
-    dump_held(req, out, value, level, Held::Viewed);
-}
-
-/// Whether `var_dump` holds an owner of the value it prints beside the
-/// names php's own table would count: a member of an object it took an
-/// owner of to keep it alive across user code ([`MemberRow`]), where
-/// php's walk holds none.
-#[derive(Clone, Copy)]
-enum Held {
-    Viewed,
-    Owned,
-}
-
-/// [`dump`] over a value `var_dump` may hold an owner of itself, which
-/// php's `COMMON` never sees and so does not count.
-fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, held: Held) {
+fn dump(req: &mut Request, value: &Value, level: usize) {
+    blanks(req, level - 1);
     // `COMMON`: php's `&` stands before the value a shared cell holds and
     // before nothing else, so a cell one name holds prints as the value
-    // does; a cell is never in a cell, so this is read once, less
-    // `var_dump`'s own owner where it holds one.
-    let walk = match held {
-        Held::Viewed => 0,
-        Held::Owned => 1,
-    };
+    // does; a cell is never in a cell, so this is read once.
     let common = match value.as_ref() {
-        ValueRef::Reference(cell) if cell.heap().refcount() > 1 + walk => "&",
+        ValueRef::Reference(cell) if cell.heap().refcount() > 1 => "&",
         _ => "",
     };
     let value = &value.deref();
-    if level > 1 {
-        out.extend(std::iter::repeat_n(b' ', level - 1));
-    }
     if let Some(b) = value.as_bool() {
-        out.extend_from_slice(format!("{common}bool({b})\n").as_bytes());
+        req.write(format!("{common}bool({b})\n").as_bytes());
     } else if let Some(n) = value.as_int() {
-        out.extend_from_slice(format!("{common}int({n})\n").as_bytes());
+        req.write(format!("{common}int({n})\n").as_bytes());
     } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
         let text =
             php_heap::double_to_string(f, req.serialize_precision(), php_heap::Exponent::Upper);
-        out.extend_from_slice(format!("{common}float({text})\n").as_bytes());
+        req.write(format!("{common}float({text})\n").as_bytes());
     } else if let Some(s) = value.as_php_string() {
-        out.extend_from_slice(format!("{common}string({}) \"", s.len()).as_bytes());
-        out.extend_from_slice(s.as_bytes());
-        out.extend_from_slice(b"\"\n");
+        req.write(format!("{common}string({}) \"", s.len()).as_bytes());
+        req.write(s.as_bytes());
+        req.write(b"\"\n");
     } else if let Some(array) = value.as_array().copied() {
-        // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` beside
-        // `GC_PROTECT_RECURSION(myht)` (`Z/ext/standard/var.c:152`,
-        // GH-19801), which php takes only where the array is refcounted:
-        // the walk holds an owner of its own, so an element's
-        // `__debugInfo` that gives up the array's last other owner leaves
-        // it standing until the walk is done, and a write through another
-        // name separates rather than changing the rows under the walk.
-        // The walk's owner is given up as `GC_DTOR_NO_REF(myht)` frees
-        // the array where it was the last. The header is laid down before
-        // the walk and taken back where the walk found the array marked,
-        // since php prints `*RECURSION*` in its place.
-        let opened = out.len();
-        out.extend_from_slice(format!("{common}array({}) {{\n", array.len()).as_bytes());
-        let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
-            if too_deep(out, level, req.stack_limit().exhausted()) {
-                return Ok(ControlFlow::Continue(()));
-            }
-            out.extend(std::iter::repeat_n(b' ', level + 1));
-            match row.key() {
-                Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
-                Key::Str(s) => {
-                    out.extend_from_slice(b"[\"");
-                    out.extend_from_slice(s.as_bytes());
-                    out.extend_from_slice(b"\"]=>\n");
-                }
-            }
-            dump(req, out, row.value(), level + 2);
-            Ok(ControlFlow::Continue(()))
-        });
-        match walked {
-            Ok(walk::Guarded::Recursive) => {
-                out.truncate(opened);
-                out.extend_from_slice(b"*RECURSION*\n");
-                return;
-            }
-            // The body answers no throwable.
-            Ok(walk::Guarded::Walked(_)) | Err(_) => {}
-        }
-        if level > 1 {
-            out.extend(std::iter::repeat_n(b' ', level - 1));
-        }
-        out.extend_from_slice(b"}\n");
+        dump_array(req, common, array, level);
     } else if let Some(object) = value.as_object() {
-        dump_object(req, out, common, *object, level);
+        dump_object(req, common, *object, level);
     } else if let Some(resource) = value.as_resource() {
         // `IS_RESOURCE`: the list's id and the type's name through
         // `zend_rsrc_list_get_rsrc_type`, which is `Unknown` once
@@ -1534,24 +1509,66 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
             || String::from("Unknown"),
             |name| String::from_utf8_lossy(name).into_owned(),
         );
-        out.extend_from_slice(
-            format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes(),
-        );
+        req.write(format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes());
     } else if value.tag() == crate::api::values::TypeTag::Undef {
         // `php_var_dump`'s `default:` arm.
-        out.extend_from_slice(format!("{common}UNKNOWN:0\n").as_bytes());
+        req.write(format!("{common}UNKNOWN:0\n").as_bytes());
     } else {
-        out.extend_from_slice(format!("{common}NULL\n").as_bytes());
+        req.write(format!("{common}NULL\n").as_bytes());
     }
 }
 
+/// `php_var_dump`'s `IS_ARRAY` arm: `GC_IS_RECURSIVE`, then
+/// `GC_ADDREF(myht)` beside `GC_PROTECT_RECURSION(myht)`
+/// (`Z/ext/standard/var.c:152`, GH-19801), which php takes only where the
+/// array is refcounted: the walk holds an owner of its own, so an
+/// element's `__debugInfo` that gives up the array's last other owner
+/// leaves it standing until the walk is done, and a write through another
+/// name separates rather than changing the rows under the walk. The
+/// walk's owner is given up as `GC_DTOR_NO_REF(myht)` frees the array
+/// where it was the last. The mark is asked before the header is
+/// written, as php asks it, so a marked array writes `*RECURSION*` alone.
+fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
+    if array.is_recursive() {
+        req.write(b"*RECURSION*\n");
+        return;
+    }
+    req.write(format!("{common}array({}) {{\n", array.len()).as_bytes());
+    let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
+        if too_deep(req, level, req.stack_limit().exhausted()) {
+            return Ok(ControlFlow::Continue(()));
+        }
+        // `php_array_element_dump`.
+        match row.key() {
+            Key::Int(n) => req.write(format!("{:w$}[{n}]=>\n", "", w = level + 1).as_bytes()),
+            Key::Str(s) => {
+                req.write(format!("{:w$}[\"", "", w = level + 1).as_bytes());
+                req.write(s.as_bytes());
+                req.write(b"\"]=>\n");
+            }
+        }
+        dump(req, row.value(), level + 2);
+        Ok(ControlFlow::Continue(()))
+    });
+    match walked {
+        // Asked above, before anything was written; the body answers no
+        // throwable.
+        Ok(walk::Guarded::Recursive | walk::Guarded::Walked(_)) | Err(_) => {}
+    }
+    blanks(req, level - 1);
+    req.write(b"}\n");
+}
+
 /// `php_var_dump`'s `IS_OBJECT` arm: `object(Class)#handle (count) {`,
-/// then each property as `php_object_property_dump` prints it, the
-/// declared ones in declaration order with the visibility php mangles
-/// into the name, `["p":protected]` and `["q":"Class":private]`, and a
-/// typed one nothing has written as `uninitialized(type)`, which is in
-/// the listing and not in the count (`zend_array_count` over a table
-/// with an empty `IS_INDIRECT`); then the dynamic ones.
+/// then each row of the table `zend_get_properties_for(struc,
+/// ZEND_PROP_PURPOSE_DEBUG)` holds as `php_object_property_dump` prints
+/// it: a class's own table where it shows one, which is what
+/// `__debugInfo` and a `Closure` do, and every other class's members,
+/// the declared ones in declaration order with the visibility php
+/// mangles into the name, `["p":protected]` and `["q":"Class":private]`,
+/// and a typed one nothing has written as `uninitialized(type)`, which
+/// is in the listing and not in the count (`zend_array_count` over a
+/// table with an empty `IS_INDIRECT`); then the dynamic ones.
 ///
 /// php marks the object before it reads its properties and clears the
 /// mark after the last one, so an object reached twice down one path is
@@ -1592,13 +1609,66 @@ fn dump_held(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize, 
 ///   string(7) "dynamic"
 /// }
 /// ```
-fn dump_object(
-    req: &mut Request,
-    out: &mut Vec<u8>,
-    common: &str,
-    object: crate::api::values::PhpObject,
-    level: usize,
-) {
+///
+/// A class's own table is read as any: a string key is unmangled as any
+/// property name is, so a table that carries `\0*\0p` shows
+/// `["p":protected]`, and a reference row is shown as `COMMON` shows
+/// one, `&` before a value another name shares:
+///
+/// ```php
+/// class D { function __debugInfo() { global $y; return ['a' => &$y, 'c' => 'z']; } }
+/// $y = 5; var_dump(new D);
+/// ```
+/// ```expect
+/// object(D)#1 (2) {
+///   ["a"]=>
+///   &int(5)
+///   ["c"]=>
+///   string(1) "z"
+/// }
+/// ```
+///
+/// The rows are lent as they stand, as php's `ZEND_HASH_FOREACH_KEY_VAL`
+/// lends them, with no owner taken of any, so a count the program reads
+/// while the dump runs is php's; and the header is written after the
+/// table is asked for, so what a member's `__debugInfo` writes lands
+/// after its indent and before its `object(`:
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class O { public $n; }
+/// class N { function __debugInfo() { global $o; debug_zval_dump($o->d, $o->n); return []; } }
+/// $o = new O; $o->d = str_repeat('d', 3); $o->n = new N;
+/// var_dump($o);
+/// ```
+/// ```expect
+/// object(O)#1 (2) {
+///   ["n"]=>
+///   string(3) "ddd" refcount(2)
+/// *RECURSION*
+/// object(N)#2 (0) {
+///   }
+///   ["d"]=>
+///   string(3) "ddd"
+/// }
+/// ```
+///
+/// ```php
+/// #[AllowDynamicProperties]
+/// class O { public $n; }
+/// class N { function __debugInfo() { echo "inside\n"; return []; } }
+/// $o = new O; $o->n = new N;
+/// var_dump($o);
+/// ```
+/// ```expect
+/// object(O)#1 (1) {
+///   ["n"]=>
+///   inside
+/// object(N)#2 (0) {
+///   }
+/// }
+/// ```
+fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize) {
     // `php_var_dump`'s `ZEND_ACC_ENUM` arm, ahead of the recursion
     // guard as php has it: a case is its class and its case name,
     // `zend_enum_fetch_case_name`, and none of its properties.
@@ -1611,7 +1681,7 @@ fn dump_object(
             .prop(req, b"name")
             .and_then(|name| name.as_str_bytes().map(<[u8]>::to_vec))
             .unwrap_or_default();
-        out.extend_from_slice(
+        req.write(
             format!(
                 "{common}enum({class}::{})\n",
                 String::from_utf8_lossy(&case)
@@ -1621,40 +1691,67 @@ fn dump_object(
         return;
     }
     if object.is_recursive_in(req, RecursionGuard::Debug) {
-        out.extend_from_slice(b"*RECURSION*\n");
+        req.write(b"*RECURSION*\n");
         return;
     }
     object.protect_in(req, RecursionGuard::Debug);
-    // `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_DEBUG)`: a class
-    // that shows a table of its own shows it here, which is what
-    // `__debugInfo` and a `Closure` do. Every other class shows its
-    // members, which are the slots walked below, where a typed property
-    // nothing has written still shows as one.
-    let own = match object.debug_info(req) {
-        Ok(own) => own,
+    let held = match object.properties_for(req, PropertyPurpose::Debug) {
+        Ok(held) => held,
         Err(thrown) => {
             object.unprotect_in(req, RecursionGuard::Debug);
             req.leave_pending(&thrown);
             return;
         }
     };
+    // `Z_OBJ_HANDLER_P(struc, get_class_name)`, then
     // `php_var_dump_object_prefix`, read after the table as php reads
-    // it: what a lazy object is, before `object(`.
-    let prefix = match object.heap().laziness() {
-        php_heap::Laziness::Eager => "",
-        php_heap::Laziness::Ghost => "lazy ghost ",
-        php_heap::Laziness::Proxy | php_heap::Laziness::Forwarding => "lazy proxy ",
+    // them: what a lazy object is, before `object(`. The name as its
+    // bytes stand, as php's `%s` prints `ZSTR_VAL`.
+    let name = object.handlers(req).get_class_name(req, object);
+    let prefix = match object.laziness() {
+        Laziness::Eager => "",
+        Laziness::Ghost => "lazy ghost ",
+        Laziness::Proxy | Laziness::Forwarding => "lazy proxy ",
     };
-    let common = format!("{common}{prefix}");
-    if let Some(own) = own {
-        dump_rows(req, out, &common, object, own.table, level);
-        if let Some(thrown) = own.thrown {
-            leave_chained(req, thrown);
+    let mut header = format!("{common}{prefix}object(").into_bytes();
+    header.extend_from_slice(php_unit::decl::shown_bytes(&name));
+    header.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), held.count()).as_bytes());
+    req.write(&header);
+    // `ZEND_HASH_FOREACH_KEY_VAL(myht, num, key, val)`
+    // (`Z/ext/standard/var.c:196`) over the table held until
+    // `zend_release_properties`: the walk takes no owner of its own.
+    let walked = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
+        if too_deep(req, level, req.stack_limit().overflowed()) {
+            return Ok(ControlFlow::Continue(()));
         }
-    } else {
-        dump_members(req, out, &common, object, level);
+        match row.key() {
+            Key::Int(at) => req.write(format!("{:w$}[{at}]=>\n", "", w = level + 1).as_bytes()),
+            Key::Str(name) => dump_property_name(req, level, name.as_bytes()),
+        }
+        match row.uninitialized() {
+            Some(ty) => {
+                let line = format!("{:w$}uninitialized({ty})\n", "", w = level + 1);
+                req.write(line.as_bytes());
+            }
+            None => dump(req, row.value(), level + 2),
+        }
+        Ok(ControlFlow::Continue(()))
+    });
+    match walked {
+        // The body answers no throwable.
+        Ok(_) | Err(_) => {}
     }
+    // `zend_release_properties`, then the closing brace, then
+    // `ZEND_GUARD_OR_GC_UNPROTECT_RECURSION`, php's order, so what the
+    // release's destructor writes lands before the brace and finds the
+    // object still marked.
+    let left = held.release(req);
+    blanks(req, level - 1);
+    req.write(b"}\n");
     object.unprotect_in(req, RecursionGuard::Debug);
+    if let Err(thrown) = left {
+        leave_chained(req, thrown);
+    }
 }
 
 /// What a class's debug table raised, left in `EG(exception)` once its
@@ -1700,200 +1797,6 @@ fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
     req.leave_pending(&thrown);
 }
 
-/// One row of [`dump_members`]'s walk, as php's rebuilt property table
-/// holds it: a declared slot is an `IS_INDIRECT` read when it prints,
-/// and a dynamic row is a name and a value the walk holds an owner of.
-enum MemberRow {
-    Declared {
-        mangled: Vec<u8>,
-        slot: u32,
-        ty: Option<Type>,
-    },
-    Dynamic {
-        key: Key,
-        value: Value,
-    },
-}
-
-/// `php_var_dump`'s object arm over the members themselves, which is
-/// what every class that shows no table of its own shows: the declared
-/// slots in `ce->properties_info_table` order, each name with the
-/// visibility php spells beside it, then the dynamic ones, and a typed
-/// slot nothing has written as `uninitialized(T)`, which is the row
-/// php's `prop_info` keeps for an `IS_UNDEF` value.
-fn dump_members(
-    req: &mut Request,
-    out: &mut Vec<u8>,
-    common: &str,
-    object: crate::api::values::PhpObject,
-    level: usize,
-) {
-    let class = object.class();
-    // `zend_std_get_debug_info`'s `get_properties`, or for a lazy object
-    // `zend_get_properties_no_lazy_init`: the table laid down as php's
-    // walk reads it, what a ghost's initializer later shares.
-    if let Err(thrown) = req.lay_properties_no_lazy_init(object) {
-        req.leave_pending(&thrown);
-        return;
-    }
-    // `ce->properties_info_table` in slot order, which is what
-    // `rebuild_object_properties_internal` walks: an inherited property
-    // before the class's own, and a private one named by the class that
-    // declared it (`zend_mangle_property_name`).
-    // A table that holds copies of the declared rows is dumped as it
-    // stands, its plain values in place of the slots.
-    let declared: Vec<(Vec<u8>, ClassId, Visibility, Option<Type>)> =
-        match object.heap().declared_rows() {
-            php_heap::DeclaredRows::Slots => req
-                .placed(class)
-                .map(|(_, declaring, p)| (p.name.0.to_vec(), declaring, p.visibility, p.ty.clone()))
-                .collect(),
-            php_heap::DeclaredRows::Copied => Vec::new(),
-        };
-    // Each row's key as php's property table holds it, mangled by
-    // `zend_mangle_property_name` for a declared one, so every name is
-    // printed through the one unmangling below.
-    let mut rows: Vec<MemberRow> = declared
-        .iter()
-        .enumerate()
-        .filter_map(|(at, (name, declaring, visibility, ty))| {
-            let slot = u32::try_from(at).unwrap_or(u32::MAX);
-            if object.slot(slot).is_none() && ty.is_none() {
-                return None;
-            }
-            let mangled = match visibility {
-                Visibility::Public => name.clone(),
-                Visibility::Protected => [&b"\0*\0"[..], name].concat(),
-                Visibility::Private => {
-                    let class = req.class_name_bytes(*declaring);
-                    [&b"\0"[..], &class, b"\0", name].concat()
-                }
-            };
-            Some(MemberRow::Declared {
-                mangled,
-                slot,
-                ty: ty.clone(),
-            })
-        })
-        .collect();
-    // `zend_std_get_properties_for`'s `GC_TRY_ADDREF` over the table the
-    // walk reads, which `zend_release_properties` gives up after it: the
-    // dynamic rows are the walk's to hold, so a nested `__debugInfo` that
-    // unsets one leaves this walk printing what it had, as php's
-    // separated table does.
-    // The dynamic table alone, which may hold a name a parent declared
-    // private: that one is its own row, `["c"]` beside `["c":"P":private]`;
-    // and an integer key, which `$ao[]` through an `ArrayObject` over the
-    // object appends, is `[0]`.
-    let dynamic: Vec<(Key, Value)> = object
-        .heap()
-        .properties()
-        .map(|table| {
-            table
-                .iter()
-                .map(|(key, held)| (Key::of(key), Value::of_zval(held)))
-                .collect()
-        })
-        .unwrap_or_default();
-    for (key, value) in dynamic {
-        if let Key::Str(name) = key {
-            req.addref(&Value::string(name));
-        }
-        req.addref(&value);
-        rows.push(MemberRow::Dynamic { key, value });
-    }
-    let count = member_count(req, object, &rows);
-    // The name as its bytes stand, as php's `%s` prints `ZSTR_VAL`.
-    out.extend_from_slice(format!("{common}object(").as_bytes());
-    // `Z_OBJ_HANDLER_P(struc, get_class_name)`.
-    let name = object.handlers(req).get_class_name(req, object);
-    out.extend_from_slice(php_unit::decl::shown_bytes(&name));
-    out.extend_from_slice(format!(")#{} ({count}) {{\n", object.index()).as_bytes());
-    for row in rows {
-        match row {
-            // `IS_INDIRECT`: the slot is read as the row prints, so one a
-            // nested `__debugInfo` unset is skipped, or `uninitialized`
-            // where it is typed, as php's `prop_info` row is. The value is
-            // held while it prints, since its own dump may run user code
-            // that overwrites the slot.
-            MemberRow::Declared { .. } | MemberRow::Dynamic { .. }
-                if too_deep(out, level, req.stack_limit().overflowed()) =>
-            {
-                if let MemberRow::Dynamic { key, value } = row {
-                    req.release(value);
-                    if let Key::Str(name) = key {
-                        req.release(Value::string(name));
-                    }
-                }
-            }
-            MemberRow::Declared { mangled, slot, ty } => match object.slot(slot) {
-                Some(value) => {
-                    dump_property_name(req, out, level, &mangled);
-                    req.addref(&value);
-                    dump_held(req, out, &value, level + 2, Held::Owned);
-                    req.release(value);
-                }
-                None if ty.is_some() => {
-                    dump_property_name(req, out, level, &mangled);
-                    out.extend(std::iter::repeat_n(b' ', level + 1));
-                    let ty = ty.as_ref().map(declared_type_name).unwrap_or_default();
-                    out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
-                }
-                None => {}
-            },
-            MemberRow::Dynamic { key, value } => {
-                dump_row_key(req, out, level, &key);
-                dump_held(req, out, &value, level + 2, Held::Owned);
-                req.release(value);
-                if let Key::Str(name) = key {
-                    req.release(Value::string(name));
-                }
-            }
-        }
-    }
-    if level > 1 {
-        out.extend(std::iter::repeat_n(b' ', level - 1));
-    }
-    out.extend_from_slice(b"}\n");
-}
-
-/// The count `php_var_dump` prints over an object's members:
-/// `zend_array_count` over the table `zend_std_get_properties` built,
-/// for an object that is not lazy ([`Request::property_count`]), and
-/// the rows that hold a value for one that is.
-fn member_count(
-    req: &mut Request,
-    object: crate::api::values::PhpObject,
-    rows: &[MemberRow],
-) -> usize {
-    let held = rows
-        .iter()
-        .filter(|row| match row {
-            MemberRow::Declared { slot, .. } => object.slot(*slot).is_some(),
-            MemberRow::Dynamic { .. } => true,
-        })
-        .count();
-    if object.heap().laziness() != php_heap::Laziness::Eager {
-        return held;
-    }
-    match req.property_count(object) {
-        Ok(count) => count,
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            held
-        }
-    }
-}
-
-/// `php_object_property_dump`'s string key: the indent, then the name
-/// between `[` and `]=>` as `zend_unmangle_property_name` reads it,
-/// `"p":protected` for a class part of `*`, `"p":"Class":private` for
-/// any other, and `"p"` for a name with no class part; the property and
-/// the class are printed with `%s`, so each stops at a `\0` of its own.
-/// A name php cannot unmangle is its bytes in quotes, after the notice
-/// `zend_unmangle_property_name_ex` raises for it, which php prints
-/// where the row is, ahead of the indent, so what the walk has rendered
-/// so far is written before the notice is.
 /// `php_object_property_dump`'s `ZEND_CHECK_STACK_LIMIT` arm
 /// (`Z/ext/standard/var.c:59`): where the stack has passed
 /// `zend.max_allowed_stack_size`, the property is `nesting level too
@@ -1925,53 +1828,48 @@ fn member_count(
 /// ```expect regime=small-stack
 /// nesting level too deep
 /// ```
-fn too_deep(out: &mut Vec<u8>, level: usize, past: bool) -> bool {
+fn too_deep(req: &mut Request, level: usize, past: bool) -> bool {
     if !past {
         return false;
     }
-    out.extend(std::iter::repeat_n(b' ', level + 1));
-    out.extend_from_slice(b"nesting level too deep");
+    req.write(format!("{:w$}nesting level too deep", "", w = level + 1).as_bytes());
     true
 }
 
-/// `php_object_property_dump`'s key: `[0]=>` for an integer one, after
-/// the indent, and a string one as [`dump_property_name`] prints it.
-fn dump_row_key(req: &mut Request, out: &mut Vec<u8>, level: usize, key: &Key) {
-    match key {
-        Key::Int(at) => {
-            out.extend(std::iter::repeat_n(b' ', level + 1));
-            out.extend_from_slice(format!("[{at}]=>\n").as_bytes());
-        }
-        Key::Str(name) => dump_property_name(req, out, level, name.as_bytes()),
-    }
-}
-
-fn dump_property_name(req: &mut Request, out: &mut Vec<u8>, level: usize, name: &[u8]) {
+/// `php_object_property_dump`'s string key: the name between `[` and
+/// `]=>` as `zend_unmangle_property_name` reads it, `"p":protected` for
+/// a class part of `*`, `"p":"Class":private` for any other, and `"p"`
+/// for a name with no class part; the property and the class are
+/// printed with `%s`, so each stops at a `\0` of its own. A name php
+/// cannot unmangle is its bytes in quotes, after the notice
+/// `zend_unmangle_property_name_ex` raises for it, which php raises
+/// before the row's indent.
+fn dump_property_name(req: &mut Request, level: usize, name: &[u8]) {
     let unmangled = unmangle_property_name(name);
     if let Unmangled::Illegal(notice) = unmangled {
-        req.write(out);
-        out.clear();
         crate::api::raising::notice(req, notice);
     }
-    out.extend(std::iter::repeat_n(b' ', level + 1));
-    out.extend_from_slice(b"[\"");
+    req.write(format!("{:w$}[", "", w = level + 1).as_bytes());
     match unmangled {
         Unmangled::Mangled { class, prop } => {
-            out.extend_from_slice(c_string(prop));
+            let mut shown = b"\"".to_vec();
+            shown.extend_from_slice(c_string(prop));
             if class.first() == Some(&b'*') {
-                out.extend_from_slice(b"\":protected");
+                shown.extend_from_slice(b"\":protected");
             } else {
-                out.extend_from_slice(b"\":\"");
-                out.extend_from_slice(c_string(class));
-                out.extend_from_slice(b"\":private");
+                shown.extend_from_slice(b"\":\"");
+                shown.extend_from_slice(c_string(class));
+                shown.extend_from_slice(b"\":private");
             }
+            req.write(&shown);
         }
         Unmangled::Plain | Unmangled::Illegal(_) => {
-            out.extend_from_slice(name);
-            out.extend_from_slice(b"\"");
+            req.write(b"\"");
+            req.write(name);
+            req.write(b"\"");
         }
     }
-    out.extend_from_slice(b"]=>\n");
+    req.write(b"]=>\n");
 }
 
 /// What `zend_unmangle_property_name_ex` answers for one name.
@@ -2021,63 +1919,6 @@ fn c_string(bytes: &[u8]) -> &[u8] {
         .iter()
         .position(|&b| b == 0)
         .map_or(bytes, |at| &bytes[..at])
-}
-
-/// `php_var_dump`'s object arm over the table a class showed in place
-/// of its properties: the header with the table's count, then each row
-/// as `php_object_property_dump` prints one, `[0]=>` for an integer key
-/// and `["name"]=>` for a string one, with the value under it. A string
-/// key is unmangled as any property name is, so a table that carries
-/// `\0*\0p` shows `["p":protected]`. The table has one owner and is
-/// given up last. A reference row is shown as `COMMON` shows one, `&`
-/// before a value another name shares:
-///
-/// ```php
-/// class D { function __debugInfo() { global $y; return ['a' => &$y, 'c' => 'z']; } }
-/// $y = 5; var_dump(new D);
-/// ```
-/// ```expect
-/// object(D)#1 (2) {
-///   ["a"]=>
-///   &int(5)
-///   ["c"]=>
-///   string(1) "z"
-/// }
-/// ```
-fn dump_rows(
-    req: &mut Request,
-    out: &mut Vec<u8>,
-    common: &str,
-    object: crate::api::values::PhpObject,
-    rows: Owner<PhpArray>,
-    level: usize,
-) {
-    out.extend_from_slice(format!("{common}object(").as_bytes());
-    // `Z_OBJ_HANDLER_P(struc, get_class_name)`.
-    let name = object.handlers(req).get_class_name(req, object);
-    out.extend_from_slice(php_unit::decl::shown_bytes(&name));
-    out.extend_from_slice(format!(")#{} ({}) {{\n", object.index(), rows.len()).as_bytes());
-    // `ZEND_HASH_FOREACH_KEY_VAL(myht, num, key, val)`
-    // (`Z/ext/standard/var.c:196`) over the table `zend_get_properties_for`
-    // answered, which this arm's owner holds until
-    // `zend_release_properties`: the walk takes none of its own.
-    let walked = walk::foreach(req, *rows, Hold::None, |req, row| -> walk::Step {
-        if too_deep(out, level, req.stack_limit().overflowed()) {
-            return Ok(ControlFlow::Continue(()));
-        }
-        dump_row_key(req, out, level, row.key());
-        dump(req, out, row.value(), level + 2);
-        Ok(ControlFlow::Continue(()))
-    });
-    match walked {
-        // The body answers no throwable.
-        Ok(_) | Err(_) => {}
-    }
-    rows.give_up(req);
-    if level > 1 {
-        out.extend(std::iter::repeat_n(b' ', level - 1));
-    }
-    out.extend_from_slice(b"}\n");
 }
 
 /// `memory_get_usage(bool $real_usage = false): int`, php's

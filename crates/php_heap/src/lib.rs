@@ -80,7 +80,7 @@ pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, Slot, VmStack};
 pub use string::{FreshStr, Intern, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
-use gc::Refcounted;
+use gc::Counted;
 use std::ptr::NonNull;
 
 /// The per-request heap (design §5.13): the allocator every string,
@@ -592,7 +592,7 @@ impl Heap {
     #[must_use = "the last owner kept is the caller's InternalError"]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_held(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
-        if counted_header(z, Refcounted::refcount).is_some_and(|count| count <= 1) {
+        if counted_header(z).is_some_and(|header| header.refcount() <= 1) {
             return false;
         }
         Heap::release(hooks, z);
@@ -626,7 +626,7 @@ impl Heap {
         }
         // At zero the block is destroyed whether or not a pin stands:
         // a pin keeps only its bytes ([`Heap::give_back`]).
-        match counted_header(z, Refcounted::release) {
+        match counted_header(z).map(Counted::release) {
             Some(gc::Release::Owned) => GivenUp::Owned,
             Some(gc::Release::Last) => {
                 if let Some(a) = z.as_arr() {
@@ -709,7 +709,7 @@ impl Heap {
             o.pin();
             return true;
         }
-        counted_header(z, Refcounted::pin).unwrap_or(false)
+        counted_header(z).is_some_and(Counted::pin)
     }
 
     /// The pin [`Heap::pin_block`] set over `z` let go: where the block
@@ -722,7 +722,7 @@ impl Heap {
             self.unpin(o);
             return;
         }
-        if counted_header(z, Refcounted::unpin) != Some(0) {
+        if counted_header(z).map(Counted::unpin) != Some(0) {
             return;
         }
         if let Some(s) = z.as_str()
@@ -733,7 +733,7 @@ impl Heap {
             // A resource its owners took off the list has its bytes
             // retired while it lives ([`Heap::resource_unlist`]): they go
             // back with its last owner, not with a pin.
-        } else if let Some(at) = counted_header(z, |header| NonNull::from(header).cast()) {
+        } else if let Some(at) = counted_header(z).map(Counted::block) {
             // SAFETY: where it is retired, the block's last owner went
             // while the pin stood, its destruction is done, and the pin
             // was the last thing naming it.
@@ -742,22 +742,22 @@ impl Heap {
     }
 }
 
-/// `f` over the refcounted header of the block `z` names, `Z_COUNTED`;
-/// none for a value that carries no count.
-fn counted_header<R>(z: Zval, f: impl FnOnce(&Refcounted) -> R) -> Option<R> {
+/// The refcounted header of the block `z` names, `Z_COUNTED`; none for
+/// a value that carries no count.
+fn counted_header(z: Zval) -> Option<Counted> {
     if !z.is_refcounted() {
         return None;
     }
     if let Some(s) = z.as_str() {
-        (!s.is_interned()).then(|| f(s.gc()))
+        (!s.is_interned()).then(|| s.gc())
     } else if let Some(a) = z.as_arr() {
-        Some(f(a.gc()))
+        Some(a.gc())
     } else if let Some(o) = z.as_obj() {
-        Some(f(o.gc()))
+        Some(o.gc())
     } else if let Some(r) = z.as_resource() {
-        Some(f(r.gc()))
+        Some(r.gc())
     } else {
-        z.as_reference().map(|r| f(r.gc()))
+        z.as_reference().map(Ref::gc)
     }
 }
 
