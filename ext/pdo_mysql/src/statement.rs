@@ -471,7 +471,24 @@ impl Statement for Stmt {
         }
     }
 
-    /// `pdo_mysql_stmt_col_meta`.
+    /// `pdo_mysql_stmt_col_meta`: each string `add_assoc_string`'s, an
+    /// allocation of its own, the empty table of a `SELECT` without one
+    /// too.
+    ///
+    /// ```php
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// $st = $p->query("SELECT 1 AS firstcol, 2 AS secondcol");
+    /// $st->getColumnMeta(1);
+    /// $m = memory_get_usage();
+    /// $meta = $st->getColumnMeta(0);
+    /// echo memory_get_usage() - $m, "\n";
+    /// var_dump($meta['table'], $meta['native_type']);
+    /// ```
+    /// ```expect mysql
+    /// 952
+    /// string(0) ""
+    /// string(8) "LONGLONG"
+    /// ```
     fn column_meta(
         &mut self,
         req: &mut Request,
@@ -493,7 +510,7 @@ impl Statement for Stmt {
                 meta.set(req, key, value)
             };
         if let Some(def) = &field.def {
-            let text = PhpString::new(req, def)?.into_value();
+            let text = string_init(req, def)?;
             set(req, &mut meta, b"mysql:def", text)?;
         }
         for (bit, name) in [
@@ -504,13 +521,13 @@ impl Statement for Stmt {
             (column::BLOB, b"blob"),
         ] {
             if field.flags & bit != 0 {
-                let text = PhpString::new(req, name)?.into_value();
+                let text = string_init(req, name)?;
                 flags.append(req, text)?;
             }
         }
         let ty = field.field_type();
         if let Some(name) = native_type(ty) {
-            let text = PhpString::new(req, name.as_bytes())?.into_value();
+            let text = string_init(req, name.as_bytes())?;
             set(req, &mut meta, b"native_type", text)?;
         }
         let pdo_type = match ty {
@@ -530,7 +547,7 @@ impl Statement for Stmt {
             Owner::take(req, Value::int(pdo_type)),
         )?;
         set(req, &mut meta, b"flags", flags.into_value())?;
-        let table = PhpString::new(req, &field.table)?.into_value();
+        let table = string_init(req, &field.table)?;
         set(req, &mut meta, b"table", table)?;
         Ok(meta)
     }
@@ -581,4 +598,14 @@ impl Statement for Stmt {
             held.free(req);
         }
     }
+}
+
+/// `ZVAL_STRING`'s `zend_string_init`, which `add_assoc_string` and
+/// `add_next_index_string` make their value with: an allocation of its
+/// own whatever the length, the empty table of a `SELECT` without one
+/// too, where [`PhpString::new`] hands out the interned empty and
+/// one-byte strings.
+fn string_init(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    let made = PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes))?;
+    Ok(made.into_value())
 }

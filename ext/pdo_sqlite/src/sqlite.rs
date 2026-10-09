@@ -749,7 +749,34 @@ impl Statement for Stmt {
         Ok(Some(Owner::take(req, value)))
     }
 
-    /// `pdo_sqlite_stmt_col_meta`.
+    /// `pdo_sqlite_stmt_col_meta`: the native type php's own interned
+    /// string, `ZSTR_KNOWN`, and every other string `add_assoc_string`'s,
+    /// an allocation of its own.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $st = $db->query("SELECT 1 AS aaaa, 2 AS bb");
+    /// $st->getColumnMeta(1);
+    /// $m = memory_get_usage();
+    /// $meta = $st->getColumnMeta(0);
+    /// echo memory_get_usage() - $m, "\n";
+    /// $db->exec('CREATE TABLE t (i INTEGER, f REAL, x CHAR(1))');
+    /// $db->exec("INSERT INTO t VALUES (1, 1.5, 'z')");
+    /// $st = $db->query('SELECT i, f, x FROM t');
+    /// $st->fetch();
+    /// foreach ([0, 1, 2] as $i) {
+    ///     $m = memory_get_usage();
+    ///     $meta = $st->getColumnMeta($i);
+    ///     echo memory_get_usage() - $m, " ", $meta['native_type'], " ", $meta['sqlite:decl_type'], "\n";
+    ///     unset($meta);
+    /// }
+    /// ```
+    /// ```expect
+    /// 648
+    /// 112 integer INTEGER
+    /// 792 double REAL
+    /// 792 string CHAR(1)
+    /// ```
     fn column_meta(
         &mut self,
         req: &mut Request,
@@ -768,14 +795,17 @@ impl Statement for Stmt {
             ffi::SQLITE_NULL => (b"null", 0),
             ffi::SQLITE_FLOAT => (b"double", 2),
             ffi::SQLITE_BLOB => {
-                let blob = PhpString::new(req, b"blob")?;
-                flags.append(req, blob.into_value())?;
+                let blob = string_init(req, b"blob")?;
+                flags.append(req, blob)?;
                 (b"string", 2)
             }
             ffi::SQLITE_INTEGER => (b"integer", 1),
             _ => (b"string", 2),
         };
-        set(req, &mut out, b"native_type", Some(native))?;
+        // `add_assoc_str(..., ZSTR_KNOWN(...))`: php's own interned string.
+        let native = PhpString::interned(req, native)?;
+        let key = PhpString::new(req, b"native_type")?.into_key();
+        out.set(req, key, Owner::take(req, native).into_value())?;
         let key = PhpString::new(req, b"pdo_type")?.into_key();
         out.set(req, key, Owner::take(req, Value::int(pdo_type)))?;
         set(
@@ -820,9 +850,18 @@ fn set(
     let Some(value) = value else {
         return Ok(());
     };
-    let value = PhpString::new(req, value)?.into_value();
+    let value = string_init(req, value)?;
     let key = PhpString::new(req, key)?.into_key();
     out.set(req, key, value)
+}
+
+/// `ZVAL_STRING`'s `zend_string_init`, which `add_assoc_string` and
+/// `add_next_index_string` make their value with: an allocation of its
+/// own whatever the length, where [`PhpString::new`] hands out the
+/// interned empty and one-byte strings.
+fn string_init(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    let made = PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes))?;
+    Ok(made.into_value())
 }
 
 /// `pdo_sqlite_create_function_internal` and its two kin: a function
