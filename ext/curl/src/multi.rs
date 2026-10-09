@@ -10,7 +10,7 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 use crate::State;
 use crate::constants as c;
-use crate::ffi::{Cx, Easy, EasyId, Multi, multi_strerror};
+use crate::ffi::{Address, Cx, Easy, EasyId, Multi, MultiId, multi_strerror};
 use crate::handle::{
     Curl, CurlHandle, Handler, WriteTo, cast_object, cleanup_handle, copy_handlers, curl, easy_of,
     made, verify_handlers,
@@ -78,7 +78,6 @@ impl ObjectHandlers for Handlers {
             return;
         };
         if let Some(multi) = mh.multi {
-            multi.forget_object();
             let _ = multi.close(req);
         }
         for easy in mh.easy {
@@ -124,10 +123,10 @@ fn handles(mh: &Mh) -> Vec<PhpObject> {
     mh.easy.iter().map(|handle| **handle).collect()
 }
 
-/// The library's `CURLM *` of an argument.
-fn multi_of(req: &mut Request, multi: Instance<CurlMultiHandle>) -> Result<Multi, Thrown> {
+/// The library's `CURLM *` of an argument, by name.
+fn multi_of(req: &mut Request, multi: Instance<CurlMultiHandle>) -> Result<MultiId, Thrown> {
     match &mh(req, multi)?.multi {
-        Some(handle) => Ok(handle.clone()),
+        Some(handle) => Ok(handle.id()),
         None => Err(php_ext::raising::fatal(
             req,
             "InternalError: a CurlMultiHandle with no multi handle",
@@ -147,7 +146,7 @@ fn multi_of(req: &mut Request, multi: Instance<CurlMultiHandle>) -> Result<Multi
 fn curl_multi_init(req: &mut Request) -> Result<Owner<Instance<CurlMultiHandle>>, Thrown> {
     let object = made(req, b"CurlMultiHandle")?;
     let session = req.state::<State>().session.clone();
-    let Some(multi) = Multi::init(session, *object) else {
+    let Some(multi) = Multi::init(req, session, *object) else {
         object.give_up(req);
         return Err(throw_error(
             req,
@@ -155,8 +154,9 @@ fn curl_multi_init(req: &mut Request) -> Result<Owner<Instance<CurlMultiHandle>>
             "curl_multi_init(): Could not initialize a new cURL multi handle",
         ));
     };
-    if let Some(mh) = object.native_mut::<Mh>(req) {
-        mh.multi = Some(multi);
+    match object.native_mut::<Mh>(req) {
+        Some(mh) => mh.multi = Some(multi),
+        None => drop(multi.close(req)),
     }
     Ok(object.into_instance())
 }
@@ -184,7 +184,7 @@ fn curl_multi_add_handle(
     cleanup_handle(req, object);
     let multi = multi_of(req, multi_handle)?;
     let easy = easy_of(req, object)?;
-    let code = multi.add(&easy);
+    let code = multi.add(req, easy);
     mh(req, multi_handle)?.err = code;
     if code == 0 {
         let held = Owner::take(req, object);
@@ -220,7 +220,7 @@ fn curl_multi_remove_handle(
     let object = handle.object();
     let multi = multi_of(req, multi_handle)?;
     let easy = easy_of(req, object)?;
-    let code = multi.remove(&easy);
+    let code = multi.remove(req, easy);
     let mh = mh(req, multi_handle)?;
     mh.err = code;
     if code == 0
@@ -287,7 +287,7 @@ fn curl_multi_select(
     }
     let multi = multi_of(req, multi_handle)?;
     #[allow(clippy::cast_possible_truncation)]
-    let (code, numfds) = multi.wait((timeout * 1000.0) as i32);
+    let (code, numfds) = multi.wait(req, (timeout * 1000.0) as i32);
     if code != 0 {
         mh(req, multi_handle)?.err = code;
         return Ok(-1);
@@ -321,7 +321,7 @@ fn curl_multi_exec(
     still_running: Ref<Untyped<Value>>,
 ) -> Result<i64, Thrown> {
     let handles = handles(mh(req, multi_handle)?);
-    let mut held: Vec<Easy> = Vec::with_capacity(handles.len());
+    let mut held: Vec<EasyId> = Vec::with_capacity(handles.len());
     for handle in &handles {
         verify_handlers(req, *handle, true);
         if let Ok(easy) = easy_of(req, *handle) {
@@ -334,8 +334,7 @@ fn curl_multi_exec(
     };
     let multi = multi_of(req, multi_handle)?;
     #[allow(clippy::cast_possible_truncation)]
-    let ((code, running), thrown) = multi.perform(req, running as i32);
-    drop(held);
+    let ((code, running), thrown) = multi.perform(req, &held, running as i32);
     if let Some(thrown) = thrown {
         return Err(thrown);
     }
@@ -407,7 +406,7 @@ fn curl_multi_info_read(
     #[php(default = null)] queued_messages: Ref<Untyped<Value>>,
 ) -> Result<Union2, Thrown> {
     let multi = multi_of(req, multi_handle)?;
-    let Some(done) = multi.info_read() else {
+    let Some(done) = multi.info_read(req) else {
         return Ok(Union2::False);
     };
     if queued_messages.is_given() {
@@ -428,15 +427,23 @@ fn curl_multi_info_read(
 /// `array|false`.
 type Union2 = php_ext::abi::OrFalse<Owner<PhpArray>>;
 
-/// `_php_curl_multi_find_easy_handle`.
-fn find(req: &mut Request, multi: PhpObject, easy: EasyId) -> Option<PhpObject> {
+/// `_php_curl_multi_find_easy_handle`: the `CurlHandle` added whose
+/// `CURL *` is the one the library named.
+fn find(req: &mut Request, multi: PhpObject, easy: Address) -> Option<PhpObject> {
     let handles = handles(multi.native::<Mh>(req)?);
     handles.into_iter().find(|handle| {
-        handle
+        let held = handle
             .native::<Curl>(req)
-            .and_then(|curl| curl.easy.as_ref())
-            .is_some_and(|held| held.id() == easy)
+            .and_then(|curl| curl.easy.as_ref().map(Easy::id));
+        held.and_then(|held| held.address(req)) == Some(easy)
     })
+}
+
+/// The `CURL *` of a `CurlHandle` found, by name.
+fn easy_id(req: &Request, handle: PhpObject) -> Option<EasyId> {
+    handle
+        .native::<Curl>(req)
+        .and_then(|curl| curl.easy.as_ref().map(Easy::id))
 }
 
 /// `curl_multi_close(CurlMultiHandle $multi_handle): void`: every `CurlHandle`
@@ -452,6 +459,34 @@ fn find(req: &mut Request, multi: PhpObject, easy: EasyId) -> Option<PhpObject> 
 /// array(0) {
 /// }
 /// ```
+///
+/// From inside a transfer's write callback it gives up the `CurlHandle`
+/// whose callback it is: the transfer holds its `CURL *`, which is
+/// cleaned up as `curl_multi_exec` ends, and the transfer runs to its end
+/// (#2317).
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// file_put_contents($f, str_repeat('x', 40000));
+/// $m = curl_multi_init();
+/// $d = curl_init("file://$f");
+/// curl_setopt($d, CURLOPT_WRITEFUNCTION, function ($h, $data) use ($m) {
+///     static $n = 0;
+///     if ($n++ === 0) { curl_multi_close($m); echo "closed\n"; }
+///     return strlen($data);
+/// });
+/// curl_multi_add_handle($m, $d);
+/// unset($d);
+/// do { $status = curl_multi_exec($m, $active); } while ($active && $status == CURLM_OK);
+/// var_dump($status, curl_multi_get_handles($m));
+/// unlink($f);
+/// ```
+/// ```expect
+/// closed
+/// int(0)
+/// array(0) {
+/// }
+/// ```
 #[php_function]
 fn curl_multi_close(
     req: &mut Request,
@@ -462,7 +497,7 @@ fn curl_multi_close(
     for handle in handles {
         verify_handlers(req, *handle, true);
         if let Ok(easy) = easy_of(req, *handle) {
-            multi.remove(&easy);
+            multi.remove(req, easy);
         }
         handle.give_up(req);
     }
@@ -545,7 +580,7 @@ fn curl_multi_setopt(
             if option == c::CURLMOPT_PIPELINING && n & 1 != 0 {
                 docref(req, Level::Warning, "CURLPIPE_HTTP1 is no longer supported");
             }
-            multi.set_long(option, n)
+            multi.set_long(req, option, n)
         }
         c::CURLMOPT_PUSHFUNCTION => {
             if let Some(old) = mh(req, multi_handle)?.push.take() {
@@ -563,7 +598,7 @@ fn curl_multi_setopt(
                 }
             };
             mh(req, multi_handle)?.push = Some(Handler::keep(req, callable, &value));
-            let code = multi.set_push();
+            let code = multi.set_push(req);
             if code != 0 {
                 return Ok(false);
             }
@@ -586,17 +621,22 @@ fn curl_multi_setopt(
 /// `_php_server_push_callback`: a new `CurlHandle` over the pushed
 /// transfer, its parent's channels copied, handed to the push callable
 /// with the push's headers; kept by the `CURLM *` where the callable
-/// accepts it.
+/// accepts it. The library made the pushed `CURL *` a copy of its
+/// parent's, which points at the parent's lists and file parts from
+/// then on.
 pub(crate) fn push(
     cx: &mut Cx<'_>,
     multi: PhpObject,
-    parent: EasyId,
-    made_easy: impl FnOnce(PhpObject) -> Option<Easy>,
+    parent: Address,
+    made_easy: impl FnOnce(&mut Request, PhpObject) -> Option<Easy>,
     headers: &[Vec<u8>],
 ) -> bool {
     let Some(parent) = find(cx.req, multi, parent) else {
         return false;
     };
+    if let Some(easy) = easy_id(cx.req, parent) {
+        easy.copied(cx.req);
+    }
     let Some(callable) = multi
         .native::<Mh>(cx.req)
         .and_then(|mh| mh.push.as_ref().map(|push| push.callable.clone()))
@@ -606,14 +646,23 @@ pub(crate) fn push(
     let Ok(pushed) = made(cx.req, b"CurlHandle") else {
         return false;
     };
-    let Some(easy) = made_easy(*pushed) else {
+    let Some(easy) = made_easy(cx.req, *pushed) else {
         pushed.give_up(cx.req);
         return false;
     };
-    let copied = copy_handlers(cx.req, parent);
-    if let (Ok(mut copied), Some(curl)) = (copied, pushed.native_mut::<Curl>(cx.req)) {
-        copied.easy = Some(easy);
-        *curl = copied;
+    match copy_handlers(cx.req, parent) {
+        Ok(mut copied) => {
+            if let Some(curl) = pushed.native_mut::<Curl>(cx.req) {
+                copied.easy = Some(easy);
+                *curl = copied;
+            } else {
+                let _ = easy.close(cx.req);
+                copied.release_values(cx.req);
+            }
+        }
+        Err(_) => {
+            let _ = easy.close(cx.req);
+        }
     }
     let Ok(list) = crate::info::list(cx.req, headers) else {
         pushed.give_up(cx.req);
@@ -633,12 +682,8 @@ pub(crate) fn push(
         pushed.give_up(cx.req);
         return false;
     }
-    let adopted = pushed
-        .native_mut::<Curl>(cx.req)
-        .and_then(|curl| curl.easy.take())
-        .and_then(Easy::accept);
-    if let Some(curl) = pushed.native_mut::<Curl>(cx.req) {
-        curl.easy = adopted;
+    if let Some(easy) = easy_id(cx.req, *pushed) {
+        easy.accept(cx.req);
     }
     match multi.native_mut::<Mh>(cx.req) {
         Some(mh) => mh.easy.push(pushed),

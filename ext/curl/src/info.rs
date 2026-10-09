@@ -8,7 +8,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::constants as c;
-use crate::ffi::{Easy, Info};
+use crate::ffi::{EasyId, Info};
 use crate::handle::{CurlHandle, curl, easy_of};
 
 /// An array of the request's being filled with `add_assoc_*`.
@@ -205,12 +205,12 @@ const TAIL: &[(&str, i64, Row)] = &[
 /// Each row the library answers, added as `row` reads it.
 fn rows(
     req: &mut Request,
-    easy: &Easy,
+    easy: EasyId,
     out: &mut Assoc,
     rows: &[(&str, i64, Row)],
 ) -> Result<(), Thrown> {
     for (key, info, row) in rows {
-        let value = match (easy.info(*info), row) {
+        let value = match (easy.info(req, *info), row) {
             (Some(Info::Str(None)), Row::OrNull) => Owner::take(req, Value::null()),
             (Some(Info::Str(text)), _) => {
                 PhpString::new(req, &text.unwrap_or_default())?.into_value()
@@ -255,17 +255,17 @@ fn curl_getinfo(
     let easy = easy_of(req, object)?;
     let Some(option) = option else {
         let mut out = Assoc::new(req)?;
-        rows(req, &easy, &mut out, HEAD)?;
-        if let Some(Info::Certs(certs)) = easy.info(c::CURLINFO_CERTINFO) {
+        rows(req, easy, &mut out, HEAD)?;
+        if let Some(Info::Certs(certs)) = easy.info(req, c::CURLINFO_CERTINFO) {
             let mut array = PhpArray::new(req)?;
             certinfo(req, &certs, &mut array)?;
             out.add(req, "certinfo", array.into_value())?;
         }
-        rows(req, &easy, &mut out, MIDDLE)?;
+        rows(req, easy, &mut out, MIDDLE)?;
         if let Some(header) = curl(req, handle)?.header_out.clone() {
             out.add_str(req, "request_header", &header)?;
         }
-        rows(req, &easy, &mut out, TAIL)?;
+        rows(req, easy, &mut out, TAIL)?;
         return Ok(out.value());
     };
     let value = match option {
@@ -277,7 +277,7 @@ fn curl_getinfo(
             Some(private) => Owner::take(req, private),
             None => Owner::take(req, Value::bool(false)),
         },
-        _ => match easy.info(option) {
+        _ => match easy.info(req, option) {
             Some(Info::Str(Some(text))) => PhpString::new(req, &text)?.into_value(),
             Some(Info::Long(n) | Info::OffT(n)) => Owner::take(req, Value::int(n)),
             Some(Info::Double(f)) => Owner::take(req, Value::float(f)),

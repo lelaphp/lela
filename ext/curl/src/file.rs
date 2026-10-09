@@ -329,7 +329,7 @@ pub(crate) fn build_mime(
     array: PhpArray,
 ) -> Result<bool, Thrown> {
     let easy = easy_of(req, object)?;
-    let Some(mut mime) = easy.mime() else {
+    let Some(mut mime) = easy.mime(req) else {
         return Ok(false);
     };
     let mut error = 0;

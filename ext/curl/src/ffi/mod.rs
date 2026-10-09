@@ -3,19 +3,24 @@
 //! `curl_file.c` make and nothing beside them, over the platform's
 //! library the oracle links.
 //!
-//! **Owners.** An `CURL *` is an [`Easy`], a `CURLM *` a [`Multi`],
-//! a `CURLSH *` a [`Share`], each an `Arc` over the library's pointer
-//! so a native holds one while it calls in with the request. What the
-//! library keeps a pointer to past the call that set it (the error buffer,
-//! the `CURLOPT_STDERR` file, a header list, a MIME tree, a share) is
-//! held by the `CURL *`'s [`Tag`], which is freed after `curl_easy_cleanup`,
-//! and a copy made by `curl_easy_duphandle` holds what the library copied
-//! the pointer of. Nothing here is shared with another request: every
-//! owner belongs to one request, which is single-threaded and moves
-//! between threads only whole (ADR-0005), which is what the `Send` and
-//! `Sync` below rest on. A persistent share passes from one request to
+//! **Owners.** The request keeps each `CURL *`, `CURLM *` and
+//! request-scoped `CURLSH *` ([`Request::adopt`], ADR-0013): the
+//! object's payload stores the one owner, an [`Easy`], a [`Multi`] or a
+//! [`Share`], a native reaches the library's pointer through its copied name, and a
+//! call that serves PHP code (a transfer, a pause, a MIME tree's free)
+//! holds what it calls in with ([`Request::holding`]), so a callback
+//! that frees the object of a `CURL *` leaves the cleanup to the call's end.
+//! What the library keeps a pointer to past the call that set it (the
+//! error buffer, the `CURLOPT_STDERR` file, a header list, a MIME tree)
+//! is held by the `CURL *`'s `Tag`, freed after `curl_easy_cleanup`.
+//! `curl_easy_duphandle` copies the pointers to the lists and the MIME
+//! tree's file parts, as php's copies share `to_free` with its `clone`
+//! count: from then on the original lets nothing of the kind go before
+//! the request's [`Session`] does, which outlives every `CURL *`. A
+//! persistent share is not the request's: it passes from one request to
 //! the next through the engine's pool, one request at a time, and only
-//! once nothing of the request that held it does ([`Share::alone`]).
+//! once no `CURL *` of the request that held it points at it
+//! ([`Persistent::alone`]).
 //!
 //! **Callbacks.** libcurl calls back from inside `curl_easy_perform`,
 //! `curl_multi_perform`, `curl_easy_pause` and the calls that free a MIME
@@ -36,16 +41,15 @@ mod sys;
 
 use std::ffi::{CStr, CString, c_char, c_long, c_void};
 use std::ptr::{self, NonNull};
-use std::sync::Arc;
 
 use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::raising::{Cause, Thrown};
-use php_ext::request::Request;
+use php_ext::request::{ForeignId, Request};
 use php_ext::values::{Owner, Value};
 
-pub(crate) use easy::{Easy, EasyId, Hook, Info, MimeBuilder};
-pub(crate) use multi::{Multi, Share};
+pub(crate) use easy::{Address, Easy, EasyId, Hook, Info, MimeBuilder};
+pub(crate) use multi::{Multi, MultiId, Persistent, Share, ShareRef, Shared};
 
 use sys::CURL_ERROR_SIZE as ERROR_SIZE;
 
@@ -93,9 +97,11 @@ fn slice<'a>(data: *const c_char, len: usize) -> &'a [u8] {
 }
 
 /// What the request's calls into the library share: the request of the
-/// call in progress and what a callback threw during it. One per request,
-/// held by its state and by every `CURL *`, MIME part and callback argument
-/// made in it.
+/// call in progress and what a callback threw during it, and what a
+/// `CURL *` let go of that the library may still read. One per request,
+/// held by its state and by every `CURL *`, `CURLM *` and MIME tree
+/// being built in it; a file part's callback argument names it without
+/// holding it, as the part is held by a tree held by one of them.
 struct Link {
     owners: usize,
     /// The request of the call in progress, where a callback reaches it;
@@ -103,19 +109,32 @@ struct Link {
     req: *mut Request,
     /// What a callback threw during the call in progress, the first one.
     pending: Option<Thrown>,
+    /// The lists and MIME trees a `CURL *` let go of where a copy of it
+    /// may still point at them, or where the file parts could not be
+    /// closed for want of a request, freed with the link.
+    kept: Kept,
+}
+
+/// The lists and trees [`Link`] keeps to its own end.
+#[derive(Default)]
+struct Kept {
+    lists: Vec<Slist>,
+    trees: Vec<easy::Mime>,
 }
 
 /// One owner of the request's [`Link`].
-pub(crate) struct Session(NonNull<Link>);
+pub(crate) struct Session(Lent);
+
+/// The request's [`Link`], named, not owned: what a file part's callback
+/// argument and a callback's [`Cx`] reach it through.
+#[derive(Clone, Copy)]
+struct Lent(NonNull<Link>);
 
 // SAFETY: every owner of one `Session` belongs to the request that made
 // it, which is served by one thread at a time and moves between threads
 // only whole, so the count and the fields behind the pointer are never
-// touched from two threads at once.
+// touched from two threads at once. It is not `Sync`: nothing shares one.
 unsafe impl Send for Session {}
-// SAFETY: as for `Send`; a shared `Session` is only read or written by
-// the thread serving its request.
-unsafe impl Sync for Session {}
 
 impl Default for Session {
     fn default() -> Session {
@@ -123,9 +142,10 @@ impl Default for Session {
             owners: 1,
             req: ptr::null_mut(),
             pending: None,
+            kept: Kept::default(),
         }));
         // SAFETY: `into_raw` never answers null.
-        Session(unsafe { NonNull::new_unchecked(link) })
+        Session(Lent(unsafe { NonNull::new_unchecked(link) }))
     }
 }
 
@@ -133,33 +153,82 @@ impl Clone for Session {
     fn clone(&self) -> Session {
         // SAFETY: `self` is an owner, so the allocation is live, and no
         // other reference to it is held across this write.
-        unsafe { (*self.0.as_ptr()).owners += 1 };
+        unsafe { (*self.0.0.as_ptr()).owners += 1 };
         Session(self.0)
     }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        let link = self.0.0.as_ptr();
         // SAFETY: as in `clone`.
         let left = unsafe {
-            let link = &mut *self.0.as_ptr();
+            let link = &mut *link;
             link.owners -= 1;
             link.owners
         };
-        if left == 0 {
-            // SAFETY: the allocation `default` leaked, freed by its last
-            // owner.
-            drop(unsafe { Box::from_raw(self.0.as_ptr()) });
+        if left > 0 {
+            return;
         }
+        // The kept trees are freed while the link stands, so a file
+        // part's `free_cb` finds it; with no call in progress it serves
+        // nothing.
+        // SAFETY: the last owner's allocation; the field is taken alone.
+        let kept = unsafe { std::mem::take(&mut (*link).kept) };
+        drop(kept);
+        // SAFETY: the allocation `default` leaked, freed by its last
+        // owner.
+        drop(unsafe { Box::from_raw(link) });
     }
 }
 
 impl Session {
+    fn lent(&self) -> Lent {
+        self.0
+    }
+
+    /// `trees` and `lists` let go of by a `CURL *` whose copies may still
+    /// point at them, or with no request to close a file part through:
+    /// kept to the link's end, their file parts closed by
+    /// [`Session::close_kept`].
+    fn keep(&self, lists: Vec<Slist>, trees: Vec<easy::Mime>) {
+        // SAFETY: an owner's allocation; the field is written alone.
+        let kept = unsafe { &mut (*self.0.0.as_ptr()).kept };
+        kept.lists.extend(lists);
+        kept.trees.extend(trees);
+    }
+
+    /// What `curl_easy_cleanup` and `curl_mime_free` would have closed of
+    /// the kept trees' file parts, closed with the request at its end,
+    /// once no `CURL *` that may read them is left (`post_deactivate`);
+    /// the memory goes with the link.
+    pub(crate) fn close_kept(&self, req: &mut Request) {
+        // SAFETY: an owner's allocation; the trees are taken off it alone
+        // and put back after, so closing a stream reaches no field.
+        let trees = unsafe { std::mem::take(&mut (*self.0.0.as_ptr()).kept.trees) };
+        for tree in &trees {
+            tree.close_files(req);
+        }
+        self.keep(Vec::new(), trees);
+    }
+
     /// `f` served with the request left where a callback finds it, and
     /// what a callback threw meanwhile handed back beside `f`'s answer.
     /// `f` cannot reach the request itself: it is borrowed here for the
     /// length of the call.
     pub(crate) fn enter<R>(&self, req: &mut Request, f: impl FnOnce() -> R) -> (R, Option<Thrown>) {
+        self.0.enter(req, f)
+    }
+
+    /// Whether a call is in progress, so a callback reaches the request.
+    fn entered(&self) -> bool {
+        self.0.request().is_some()
+    }
+}
+
+impl Lent {
+    /// [`Session::enter`].
+    fn enter<R>(self, req: &mut Request, f: impl FnOnce() -> R) -> (R, Option<Thrown>) {
         let slot = self.0.as_ptr();
         // SAFETY: an owner's allocation; the write is the only access.
         let outer = unsafe { std::mem::replace(&mut (*slot).req, ptr::from_mut(req)) };
@@ -175,7 +244,7 @@ impl Session {
     }
 
     /// The request of the call in progress, `None` outside one.
-    fn request<'a>(&self) -> Option<&'a mut Request> {
+    fn request<'a>(self) -> Option<&'a mut Request> {
         // SAFETY: an owner's allocation; the field is read, nothing held.
         let req = unsafe { (*self.0.as_ptr()).req };
         // SAFETY: set by `enter` from the `&mut Request` it was given,
@@ -184,12 +253,12 @@ impl Session {
         unsafe { req.as_mut() }
     }
 
-    fn pending(&self) -> bool {
+    fn pending(self) -> bool {
         // SAFETY: an owner's allocation; the field is read, nothing held.
         unsafe { (*self.0.as_ptr()).pending.is_some() }
     }
 
-    fn keep(&self, thrown: Thrown) {
+    fn hand_back(self, thrown: Thrown) {
         // SAFETY: an owner's allocation; no other reference to the field
         // is held across this write.
         let slot = unsafe { &mut (*self.0.as_ptr()).pending };
@@ -200,7 +269,7 @@ impl Session {
 
     /// Whether what a callback threw is a fatal, `zend_bailout`, which
     /// leaves php's transfer at once where a throwable lets it go on.
-    fn fatal(&self, req: &Request) -> bool {
+    fn fatal(self, req: &Request) -> bool {
         // SAFETY: an owner's allocation; the field is read, nothing held.
         let pending = unsafe { &(*self.0.as_ptr()).pending };
         pending
@@ -210,11 +279,11 @@ impl Session {
 
     /// `f` served with the request of the call in progress: `idle` where
     /// there is none, `abort` where a callback left a fatal behind.
-    fn serve<T>(&self, idle: T, abort: T, f: impl FnOnce(&mut Cx<'_>) -> T) -> T {
+    fn serve<T>(self, idle: T, abort: T, f: impl FnOnce(&mut Cx<'_>) -> T) -> T {
         let Some(req) = self.request() else {
             return idle;
         };
-        let mut cx = Cx { req, session: self };
+        let mut cx = Cx { req, link: self };
         let answered = f(&mut cx);
         if self.fatal(cx.req) { abort } else { answered }
     }
@@ -225,7 +294,7 @@ impl Session {
 /// pending.
 pub(crate) struct Cx<'a> {
     pub(crate) req: &'a mut Request,
-    session: &'a Session,
+    link: Lent,
 }
 
 impl Cx<'_> {
@@ -237,13 +306,13 @@ impl Cx<'_> {
         callable: &Callable,
         arguments: &[Value],
     ) -> Option<Owner<Value>> {
-        if self.session.pending() {
+        if self.link.pending() {
             return None;
         }
         match call(self.req, callable, arguments) {
             Ok(returned) => Some(returned),
             Err(thrown) => {
-                self.session.keep(thrown);
+                self.link.hand_back(thrown);
                 None
             }
         }
@@ -252,7 +321,24 @@ impl Cx<'_> {
     /// A throwable raised by the callback's own code, `zend_throw_error`
     /// after the call, kept for the call to hand back.
     pub(crate) fn raise(&mut self, thrown: Thrown) {
-        self.session.keep(thrown);
+        self.link.hand_back(thrown);
+    }
+}
+
+/// `body` served with each object `ids` names held ([`Request::holding`]),
+/// the ones no owner keeps any more passed over: what a call into the
+/// library holds of the handles it may reach.
+fn holding_all<T: Send + 'static, R>(
+    req: &mut Request,
+    ids: &[ForeignId<T>],
+    body: &mut Option<impl FnOnce(&mut Request) -> R>,
+) -> Option<R> {
+    let Some((first, rest)) = ids.split_first() else {
+        return body.take().map(|body| body(req));
+    };
+    match req.holding(*first, |req, _| holding_all(req, rest, body)) {
+        Some(answer) => answer,
+        None => holding_all(req, rest, body),
     }
 }
 
@@ -260,14 +346,12 @@ impl Cx<'_> {
 /// `PHP_STREAM_AS_STDIO` makes of a plain file, for `CURLOPT_STDERR`.
 pub(crate) struct CFile(NonNull<libc::FILE>);
 
-// SAFETY: as for `Session`: one request's.
+// SAFETY: as for `Session`: one request's, held by one `CURL *`.
 unsafe impl Send for CFile {}
-// SAFETY: as for `Session`.
-unsafe impl Sync for CFile {}
 
 impl CFile {
     /// `fdopen(dup(fd), "a")`, `None` where either fails.
-    pub(crate) fn open(fd: i32) -> Option<Arc<CFile>> {
+    pub(crate) fn open(fd: i32) -> Option<CFile> {
         // SAFETY: `dup` of a descriptor the stream holds open.
         let own = unsafe { libc::dup(fd) };
         if own < 0 {
@@ -276,7 +360,7 @@ impl CFile {
         // SAFETY: a descriptor this call owns and a NUL-terminated mode.
         let file = unsafe { libc::fdopen(own, c"a".as_ptr()) };
         if let Some(file) = NonNull::new(file) {
-            return Some(Arc::new(CFile(file)));
+            return Some(CFile(file));
         }
         // SAFETY: the descriptor `dup` made, which nothing else holds.
         unsafe { libc::close(own) };
@@ -287,6 +371,16 @@ impl CFile {
     pub(crate) fn flush(&self) {
         // SAFETY: an open `FILE` this value owns.
         unsafe { libc::fflush(self.0.as_ptr()) };
+    }
+
+    /// The same file opened again for a copy of the `CURL *`, which
+    /// writes to it and flushes it as its own: what the original wrote
+    /// flushed first, so the two keep their order.
+    fn reopen(&self) -> Option<CFile> {
+        self.flush();
+        // SAFETY: an open `FILE` this value owns.
+        let fd = unsafe { libc::fileno(self.0.as_ptr()) };
+        CFile::open(fd)
     }
 }
 
@@ -303,13 +397,11 @@ pub(crate) struct Slist(NonNull<sys::curl_slist>);
 
 // SAFETY: as for `Session`: one request's, never changed once built.
 unsafe impl Send for Slist {}
-// SAFETY: as above.
-unsafe impl Sync for Slist {}
 
 impl Slist {
     /// `curl_slist_append` over each line; `Ok(None)` for none, `Err` for
     /// the append that failed.
-    pub(crate) fn of(lines: &[Vec<u8>]) -> Result<Option<Arc<Slist>>, ()> {
+    pub(crate) fn of(lines: &[Vec<u8>]) -> Result<Option<Slist>, ()> {
         let mut list: *mut sys::curl_slist = ptr::null_mut();
         for line in lines {
             let line = c_string(line);
@@ -323,7 +415,7 @@ impl Slist {
             }
             list = grown;
         }
-        Ok(NonNull::new(list).map(|list| Arc::new(Slist(list))))
+        Ok(NonNull::new(list).map(Slist))
     }
 }
 
