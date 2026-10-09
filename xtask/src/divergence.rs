@@ -1,9 +1,10 @@
 //! The divergence registry, `docs/divergence.toml` (harness-design.md §4.3):
 //! one row per accepted difference from the oracle, keyed by a witness hash,
-//! a phpt path, a compile-identity path, an extension's name or a trace
-//! site. A row whose one reason holds for many ids of its kind names them in
-//! `covers`, and [`Registry::row`] answers each of them with the row as it
-//! answers the row's own id; the row counts once (revision 62). A person
+//! a phpt path, a compile-identity path, an extension's name, a trace site
+//! or a site where php's own behaviour is undefined. A row whose one reason
+//! holds for many ids of its kind names them in `covers`, and
+//! [`Registry::row`] answers each of them with the row as it answers the
+//! row's own id; the row counts once (revision 62). A person
 //! writes a row and its reason; `compare`'s caller or the fuzzer may propose
 //! one with status `open` and an empty reason; the `divergence-reason`
 //! instrument fails an accepted row without a reason. The TOML is the truth;
@@ -30,8 +31,9 @@ pub const FILE: &str = "docs/divergence.toml";
 pub const INSTRUMENT: &str = "divergence-reason";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
-/// `crosscheck:<name>` or `trace:<site>`. Only [`Id::of`] makes one, so an
-/// id in hand carries the prefix of the kind it was decoded under.
+/// `crosscheck:<name>`, `trace:<site>` or `php-ub:<site>`. Only [`Id::of`]
+/// makes one, so an id in hand carries the prefix of the kind it was
+/// decoded under.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Id(String);
@@ -157,17 +159,26 @@ pub enum Kind {
     /// rendering differs from the oracle's (harness §7).
     Crosscheck,
     Trace,
+    /// A `php-ub:<site>` id: a place where php's own behaviour
+    /// is not defined, and the
+    /// engine does something defined instead, its `covers` naming the
+    /// fixture that holds the engine's side. Not parity debt, so counted
+    /// apart from the day-30 target (#2220).
+    #[serde(rename = "php-ub")]
+    PhpUb,
 }
 
 impl Kind {
-    /// The six kinds, in the registry's order.
-    pub const ALL: [Kind; 6] = [
+    /// The seven kinds, in the registry's order: the parity kinds, then
+    /// the one counted apart.
+    pub const ALL: [Kind; 7] = [
         Kind::Witness,
         Kind::Phpt,
         Kind::Runner,
         Kind::Compile,
         Kind::Crosscheck,
         Kind::Trace,
+        Kind::PhpUb,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -178,7 +189,16 @@ impl Kind {
             Kind::Compile => "compile",
             Kind::Crosscheck => "crosscheck",
             Kind::Trace => "trace",
+            Kind::PhpUb => "php-ub",
         }
+    }
+
+    /// Whether a row of this kind is parity debt, counted against the
+    /// day-30 target of under 20 rows (harness-design.md §4.3): every kind
+    /// but `php-ub`, whose rows record php's undefined behaviour rather
+    /// than a difference the engine owes (#2220).
+    pub fn is_parity(self) -> bool {
+        self != Kind::PhpUb
     }
 
     /// The prefix an id of this kind carries, colon included.
@@ -189,6 +209,7 @@ impl Kind {
             Kind::Compile => "compile:",
             Kind::Crosscheck => "crosscheck:",
             Kind::Trace => "trace:",
+            Kind::PhpUb => "php-ub:",
         }
     }
 }
@@ -377,6 +398,16 @@ pub struct Counts {
 impl Counts {
     pub fn cell(&self, kind: Kind, status: Status) -> u64 {
         self.cells.get(&(kind, status)).copied().unwrap_or(0)
+    }
+
+    /// The parity rows of one status, every kind [`Kind::is_parity`]
+    /// summed: the total the day-30 target reads.
+    pub fn parity(&self, status: Status) -> u64 {
+        self.cells
+            .iter()
+            .filter(|((kind, s), _)| kind.is_parity() && *s == status)
+            .map(|(_, n)| n)
+            .sum()
     }
 }
 

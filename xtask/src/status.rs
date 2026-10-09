@@ -28,7 +28,7 @@ pub(crate) use every::PerReading;
 use crate::api_check::{self, lock::Lock};
 use crate::cli::{Format, Section};
 use crate::crosscheck;
-use crate::divergence::{Kind, Registry, Status};
+use crate::divergence::{Counts, Kind, Registry, Status};
 use crate::git::git;
 use crate::layout;
 use crate::manifest::{LockCeiling, Manifest, Measure, SCRIPTS, Seam, Week};
@@ -447,6 +447,11 @@ pub(crate) fn local_template() -> String {
 const EVERY_ROW: &str = "Every row with its reason whole: \
 `cargo xtask status --section divergence --uncut`, which `docs/divergence.md` renders.";
 
+/// What the divergence section says under its counts when a kind that is
+/// not parity debt has rows: that the total leaves them out (#2220).
+const APART: &str = "The total is the parity rows, what the day-30 target of under 20 reads; \
+a `php-ub` row records php's undefined behaviour or crash and is counted on its own line after it.";
+
 /// The widest a reading's message renders in a Markdown cell, in
 /// characters. A Markdown table is what a session scans, and the local
 /// facts it is handed at start are eight sections under the engine's cap
@@ -715,8 +720,11 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 
 /// The divergence section: the registry's rows, a covering row's id with
 /// how many ids it covers beside its own, then counts by kind (rows) and status (columns)
-/// with a total, a covering row counted once. It reads no reading; the
-/// registry is the truth and this is its view (harness-design.md §4.3).
+/// with a total, a covering row counted once. The total is the parity
+/// rows', what the day-30 target reads, and a kind that is not parity
+/// debt (`php-ub`, #2220) is counted on its own line after it. It reads no
+/// reading; the registry is the truth and this is its view
+/// (harness-design.md §4.3).
 ///
 /// Under `uncut` the rows are every row with its reason whole, which is
 /// what `docs/divergence.md` renders. Without it they are the `open` rows
@@ -725,10 +733,6 @@ fn fold_uncreated(rows: Vec<Row>, key: &str) -> Result<Vec<Row>> {
 /// with the kinds and not with each accepted row (#821).
 fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String> {
     let counts = registry.counts();
-    let kinds = Kind::ALL
-        .into_iter()
-        .filter(|k| counts.by_kind.contains_key(k));
-    let of = |status: Status| counts.by_status.get(&status).copied().unwrap_or(0);
     match format {
         Table::Json => {
             let rows: Vec<Value> = registry
@@ -746,7 +750,7 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
                 })
                 .collect();
             let mut by_kind = Map::new();
-            for kind in kinds {
+            for kind in kinds(&counts) {
                 let cells: Map<String, Value> = Status::ALL
                     .into_iter()
                     .map(|s| (s.as_str().to_owned(), json!(counts.cell(kind, s))))
@@ -755,7 +759,7 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
             }
             let total: Map<String, Value> = Status::ALL
                 .into_iter()
-                .map(|s| (s.as_str().to_owned(), json!(of(s))))
+                .map(|s| (s.as_str().to_owned(), json!(counts.parity(s))))
                 .collect();
             by_kind.insert("total".to_owned(), Value::Object(total));
             Ok(serde_json::to_string_pretty(&json!({
@@ -793,34 +797,49 @@ fn divergence(registry: &Registry, format: Table, uncut: bool) -> Result<String>
             if !shown.is_empty() {
                 writeln!(out).ok();
             }
-            writeln!(out, "| kind | open | accepted | fixed | rows |").ok();
-            writeln!(out, "|---|---|---|---|---|").ok();
-            for kind in kinds {
-                writeln!(
-                    out,
-                    "| {} | {} | {} | {} | {} |",
-                    kind.as_str(),
-                    counts.cell(kind, Status::Open),
-                    counts.cell(kind, Status::Accepted),
-                    counts.cell(kind, Status::Fixed),
-                    counts.by_kind[&kind]
-                )
-                .ok();
-            }
-            writeln!(
-                out,
-                "| total | {} | {} | {} | {} |",
-                of(Status::Open),
-                of(Status::Accepted),
-                of(Status::Fixed),
-                registry.rows().len()
-            )
-            .ok();
+            counts_table(&counts, &mut out);
             if !uncut {
                 writeln!(out, "\n{EVERY_ROW}").ok();
             }
             Ok(out)
         }
+    }
+}
+
+/// The kinds the registry has a row of, in the registry's order.
+fn kinds(counts: &Counts) -> impl Iterator<Item = Kind> + '_ {
+    Kind::ALL
+        .into_iter()
+        .filter(|k| counts.by_kind.contains_key(k))
+}
+
+/// The divergence section's counts: a line per parity kind the registry
+/// has, the total of those, which the day-30 target reads, then a line per
+/// kind counted apart from it and the sentence saying so (#2220).
+fn counts_table(counts: &Counts, out: &mut String) {
+    let line = |out: &mut String, name: &str, of: &dyn Fn(Status) -> u64| {
+        let rows: u64 = Status::ALL.into_iter().map(of).sum();
+        writeln!(
+            out,
+            "| {name} | {} | {} | {} | {rows} |",
+            of(Status::Open),
+            of(Status::Accepted),
+            of(Status::Fixed)
+        )
+        .ok();
+    };
+    let (parity, apart): (Vec<Kind>, Vec<Kind>) = kinds(counts).partition(|k| k.is_parity());
+    writeln!(out, "| kind | open | accepted | fixed | rows |").ok();
+    writeln!(out, "|---|---|---|---|---|").ok();
+    for kind in parity {
+        line(out, kind.as_str(), &|s| counts.cell(kind, s));
+    }
+    line(out, "total", &|s| counts.parity(s));
+    for kind in &apart {
+        line(out, kind.as_str(), &|s| counts.cell(*kind, s));
+    }
+    if !apart.is_empty() {
+        writeln!(out, "\n{APART}").ok();
     }
 }
 
