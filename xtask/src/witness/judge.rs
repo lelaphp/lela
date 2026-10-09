@@ -212,7 +212,14 @@ fn ran_by_oracle(oracle: &Oracle<'_>, witness: &Witness) -> Result<Observation> 
             let Some(cgi) = &oracle.pin().sapi.cgi else {
                 anyhow::bail!("oracle.toml's [sapi] names no php-cgi to serve the request");
             };
-            process::served_as_cgi(oracle, &cgi.path, &witness.snippet, request, &[])
+            process::served_as_cgi(
+                oracle,
+                &cgi.path,
+                &witness.snippet,
+                request,
+                witness.regime.as_deref(),
+                &[],
+            )
         }),
         None => oracle.run(
             Program::Snippet(&witness.snippet),
@@ -347,6 +354,7 @@ pub(super) fn serve(
                 oracle,
                 &witness.snippet,
                 witness.request.as_deref().unwrap_or_default(),
+                witness.regime.as_deref(),
             )
             .context("the php-cgi binary did not serve it"),
         Served::Fpm => binary

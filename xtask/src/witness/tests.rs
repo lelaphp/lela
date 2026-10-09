@@ -394,9 +394,11 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
 /// `process`, read off the pin before anything runs: the line names the
 /// regime, its arguments and the mark that serves it. Marked `process`,
 /// the fence stands under the regime, whose arguments the binary's run
-/// and the oracle's are both handed. A request host is handed no regime
-/// on either side, of ini or of arguments, so a `request` fence naming
-/// one is such a line too, never a run under the recipe alone (#1932).
+/// and the oracle's are both handed, and so does a `request` fence, whose
+/// php-cgi takes them on its command line on both sides (#1729). php-fpm
+/// and phpdbg are handed no regime on either side, of ini or of
+/// arguments, so a `request fpm` or `request phpdbg` fence naming one is
+/// such a line too, never a run under the recipe alone (#1932).
 #[test]
 fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
     let mut pin = manifest().pin;
@@ -436,13 +438,19 @@ fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
             "/// ```request\n/// --GET--\n/// q=1\n/// ```\n/// ```expect regime={name}\n/// 1\n/// ```\n"
         ));
         assert_eq!(request.served, fence::Served::Cgi);
-        let refused = super::under(&pin, &request).unwrap_err();
-        assert!(
-            refused.contains("ext/fixture/src/lib.rs:1")
-                && refused.contains(&format!("[regime.{name}]"))
-                && refused.contains("no request host"),
-            "{refused}"
-        );
+        assert!(super::under(&pin, &request).unwrap().is_some());
+        for host in ["fpm", "phpdbg"] {
+            let request = witness(&format!(
+                "/// ```request {host}\n/// --GET--\n/// q=1\n/// ```\n/// ```expect regime={name}\n/// 1\n/// ```\n"
+            ));
+            let refused = super::under(&pin, &request).unwrap_err();
+            assert!(
+                refused.contains("ext/fixture/src/lib.rs:1")
+                    && refused.contains(&format!("[regime.{name}]"))
+                    && refused.contains("reaches neither php-fpm nor phpdbg"),
+                "{host}: {refused}"
+            );
+        }
     }
     let process = witness("/// ```expect process regime=hide-args\n/// 1\n/// ```\n");
     let regime = super::under(&pin, &process).unwrap().unwrap();
@@ -450,6 +458,52 @@ fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
     // A regime of ini alone is the linked engine's as it was.
     let short_tags = witness("/// ```expect regime=short-tags\n/// 1\n/// ```\n");
     assert!(super::under(&pin, &short_tags).unwrap().is_some());
+}
+
+/// A regime names a file of the workspace by `{workspace}` (#1634), and
+/// the pin as it is loaded hands the oracle and the engine the one path:
+/// a regime whose `auto_prepend_file` is `{workspace}/prepend.php`, in a
+/// pin standing in a tree of its own beside that file, prepends it in the
+/// oracle's run and the linked engine's, and in php-cgi's on both sides
+/// for a `request` fence (#1729). The recipe pins `auto_prepend_file`
+/// empty, so a pass is the expanded path reaching every run.
+#[test]
+fn a_regimes_workspace_token_is_the_workspace_in_every_run() {
+    if oracle().is_none() {
+        return;
+    }
+    let tree = Tree::new("witness-workspace-token").unwrap();
+    let pin = format!(
+        "{}\n[regime.at-home]\nini = [\"auto_prepend_file={{workspace}}/prepend.php\"]\n",
+        fs::read_to_string(workspace().join("oracle.toml")).unwrap()
+    );
+    fs::write(tree.join("oracle.toml"), pin).unwrap();
+    fs::write(tree.join("prepend.php"), "<?php echo \"home \";").unwrap();
+    let pin = crate::oracle::Pin::load(&tree.join("oracle.toml")).unwrap();
+    assert_eq!(
+        pin.regime("at-home").unwrap().ini,
+        [format!(
+            "auto_prepend_file={}",
+            tree.join("prepend.php").display()
+        )]
+    );
+    for fences in [
+        "/// ```expect regime=at-home\n/// home 1\n/// ```\n",
+        "/// ```request\n/// --GET--\n/// q=1\n/// ```\n/// ```expect regime=at-home\n/// X-Powered-By: PHP/%s\n/// Content-type: text/html; charset=UTF-8\n///\n/// home 1\n/// ```\n",
+    ] {
+        let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &block(fences));
+        let tally = judge(
+            &pin.oracle(),
+            &binary(),
+            &registry(""),
+            &Ask::default(),
+            &found,
+            None,
+        )
+        .unwrap();
+        let (judgement, note) = only(&tally);
+        assert_eq!(judgement, Judgement::Pass, "{fences}: {note}");
+    }
 }
 
 #[test]

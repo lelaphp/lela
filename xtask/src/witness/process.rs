@@ -121,13 +121,15 @@ impl Binary {
 
 impl Binary {
     /// `snippet` served as the request `request` describes by the CGI's
-    /// binary run under the name php-cgi, as [`Binary::serve`] serves a
-    /// `process` fence; with the natives it entered.
+    /// binary run under the name php-cgi, under `regime` where the fence
+    /// names one, as [`Binary::serve`] serves a `process` fence; with the
+    /// natives it entered.
     pub(crate) fn serve_cgi(
         &self,
         oracle: &Oracle<'_>,
         snippet: &str,
         request: &str,
+        regime: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
         let binary = self.cgi_path()?;
         let hosts = Tree::new("witness-cgi")?;
@@ -135,7 +137,7 @@ impl Binary {
         let traces = Tree::new("witness-trace")?;
         let trace = traces.join("entered");
         let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
-        let observed = served_as_cgi(oracle, &host, snippet, request, &env)?;
+        let observed = served_as_cgi(oracle, &host, snippet, request, regime, &env)?;
         let text = fs::read_to_string(&trace).unwrap_or_default();
         Ok((observed, text.lines().filter_map(Entry::parse).collect()))
     }
@@ -203,14 +205,16 @@ pub(crate) fn served_as_phpdbg(
 /// with the recipe's preamble; the request `request`'s sections describe
 /// translated as the phpt lane translates a CGI-shaped test's
 /// ([`cgi::request`]), over `env` with the request's `--ENV--` after it;
-/// and the program run under the recipe by its path with `-C -f` before
-/// it, the body on stdin. What the oracle
-/// and the engine are each held to for a fence with a `request`.
+/// and the program run under the recipe and `regime`, whose arguments and
+/// ini php-cgi takes on its command line as `php` does (#1729), by its
+/// path with `-C -f` before it, the body on stdin. What the oracle and the
+/// engine are each held to for a fence with a `request`.
 pub(crate) fn served_as_cgi(
     oracle: &Oracle<'_>,
     host: &Path,
     snippet: &str,
     request: &str,
+    regime: Option<&str>,
     env: &[(String, std::ffi::OsString)],
 ) -> Result<Observation> {
     let recipe = &oracle.pin().recipe;
@@ -228,6 +232,7 @@ pub(crate) fn served_as_cgi(
         .map_err(|(_, why)| anyhow!("the request fence describes no request: {why}"))?;
     let flags = [String::from("-C"), String::from("-f")];
     oracle.run_under(&Invocation {
+        regimes: regime.as_slice(),
         flags: &flags,
         args: &described.args,
         env: described.env.entries(),
