@@ -467,7 +467,21 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
     Ok(AsIs::new(value))
 }
 
-/// `php_add_field_properties`: one column's description as an object.
+/// `php_add_field_properties`: one column's description as an object,
+/// its name the column's interned string and each other string made for
+/// its property, the empty ones too:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $r = mysqli_query($l, "SELECT 1 AS a");
+/// $m = memory_get_usage();
+/// $f = mysqli_fetch_field($r);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 1376
+/// ```
 fn field_object(req: &mut Request, field: &Field) -> Result<Owner<PhpObject>, Thrown> {
     let object = crate::std_object(req)?;
     let facts = [

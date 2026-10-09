@@ -669,6 +669,10 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Th
 /// One property of an object that describes something, as
 /// `add_property_stringl` and `add_property_long` write it.
 pub(crate) enum Fact<'a> {
+    /// A string made for the property, `ZVAL_STRINGL`'s
+    /// `zend_string_init`: allocated whatever its length, the empty
+    /// string too, where `ZVAL_STRINGL_FAST` would hand out the interned
+    /// one.
     Text(&'a [u8]),
     /// A string shared, one more owner of it: `zend_string_copy`.
     Str(PhpString),
@@ -684,7 +688,9 @@ pub(crate) fn add_facts(
 ) -> Result<(), Thrown> {
     for (name, fact) in facts {
         let value = match fact {
-            Fact::Text(bytes) => string(req, bytes)?,
+            Fact::Text(bytes) => {
+                PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes))?.into_value()
+            }
             Fact::Str(s) => Owner::take(req, Value::string(*s)),
             Fact::Int(n) => Owner::take(req, Value::int(*n)),
         };
