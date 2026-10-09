@@ -127,12 +127,12 @@ third-engine-design.md
 | link | link.lock | 48 |  | no reading |
 | ops | ops.lock | 209 |  | no reading |
 | api | api.lock | 1391 | 1500 | no reading |
-| sapi | sapi.lock | 45 |  | no reading |
+| sapi | sapi.lock | 47 |  | no reading |
 | tier | tier.lock | 32 |  | no reading |
 | layer | layer.lock | 37 |  | no reading |
 | harness | xtask.lock | 396 |  | no reading |
 
-<!-- /computed in=86b6daf15cca8f57487ad2bf68341c41761c1f6645de14c297455cfa331ccd9f out=08a3aafb691a836260ea3a0b60f1277a754a56bed8138c472247053fe37806f3 -->
+<!-- /computed in=76f742bc91771a8558dbc96c94b448805af3502c36c41f770f731dab3d74adf4 out=22829579adcba8e4f28704a4557b1cbdfc5ed1dc8918c203caa9d160f4df4a6b -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -301,6 +301,7 @@ Options:
 ├── cli
 ├── clippy.toml
 ├── fpm
+├── makala
 └── phpdbg
 ```
-<!-- /computed in=ff00b725fd502477c2e4da95e2f546d1a2daa4725e817a07230b65b5537a6789 out=a74b6afe808770cee178a25fa61f1bf0a1ddcaca7f2c84945037c021d4df5015 -->
+<!-- /computed in=cf19cb953ba961646d8d1eac4d4757e95e4fa1762a6cd992f3c664f2492477bc out=4554d325a05a615057f5f927a90ad2bc6dbd301ef02efcaff91e57313fa259ae -->

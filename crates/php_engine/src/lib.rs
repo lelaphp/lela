@@ -90,5 +90,5 @@ pub use engine::{
     IniOrigin, Method, NotAlone, Observables, OutputSink, Primary, ProcessTitle, ProgramFile,
     RequestDescription, ResponseHead, Routed, Uncaught, WebRequest,
 };
-pub use fork::{Forked, Pid, fork};
+pub use fork::{Forked, HostThread, Pid, fork, host_thread};
 pub use ini_syntax::{IniEvent, IniValue};
