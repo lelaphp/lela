@@ -760,14 +760,8 @@ impl Request {
                 Some((from, at))
             })?,
         };
-        Some((
-            Arc::clone(&from.unit),
-            exec::Body::Hook {
-                class: from.at,
-                property: u32::try_from(at).ok()?,
-                kind,
-            },
-        ))
+        let body = exec::Body::hook(&from.unit, from.at, u32::try_from(at).ok()?, kind)?;
+        Some((Arc::clone(&from.unit), body))
     }
 
     /// Where the op array of the method at `method` of a class the
@@ -823,13 +817,8 @@ impl Request {
         method: u32,
     ) -> Option<(Arc<Unit>, exec::Body)> {
         let Some(composed) = &declared.composed else {
-            return Some((
-                Arc::clone(&declared.unit),
-                exec::Body::Method {
-                    class: declared.at,
-                    method,
-                },
-            ));
+            let body = exec::Body::method(&declared.unit, declared.at, method)?;
+            return Some((Arc::clone(&declared.unit), body));
         };
         let body = composed.bodies.get(usize::try_from(method).ok()?)?;
         let own = composed.decl.name.0.eq_ignore_ascii_case(&body.class.0);
@@ -839,13 +828,8 @@ impl Request {
             let holder = self.class_named(&body.class.0)?;
             self.declared_row(holder)?
         };
-        Some((
-            Arc::clone(&from.unit),
-            exec::Body::Method {
-                class: from.at,
-                method: body.method,
-            },
-        ))
+        let body = exec::Body::method(&from.unit, from.at, body.method)?;
+        Some((Arc::clone(&from.unit), body))
     }
 
     /// `do_bind_class` at a `ZEND_DECLARE_CLASS`: the declaration the

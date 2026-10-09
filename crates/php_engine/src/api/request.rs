@@ -674,7 +674,7 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
             .dynamic
             .get(usize::try_from(at).ok()?)
             .map(|(decl, _)| decl),
-        exec::Body::Main | exec::Body::Method { .. } | exec::Body::Hook { .. } => None,
+        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => None,
     }
 }
 

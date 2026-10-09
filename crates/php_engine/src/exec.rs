@@ -30,22 +30,41 @@ use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 /// one of the unit's functions, the body of a function no name bound
 /// while the file compiled and a `DECLARE_FUNCTION` bound where it
 /// stands ([`Unit::dynamic`]), the body of one of its classes'
-/// methods, or of one of their properties' hooks ([`Unit::hooks`]),
-/// each by index, as `EX(func)` names one `zend_op_array`.
+/// methods ([`Unit::methods`]), or of one of their properties' hooks
+/// ([`Unit::hooks`]), each by its place in the table that holds it, as
+/// `EX(func)` points at one `zend_op_array`: reading the op array is
+/// one index, never a search. A method's or a hook's place is found
+/// once, where its class binds it ([`Body::method`], [`Body::hook`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Body {
     Main,
     Function(u32),
     Dynamic(u32),
-    Method {
-        class: u32,
-        method: u32,
-    },
-    Hook {
-        class: u32,
-        property: u32,
-        kind: HookKind,
-    },
+    Method(u32),
+    Hook(u32),
+}
+
+impl Body {
+    /// The body of method `method` of class `class` of `unit`, by its
+    /// place among the unit's method bodies; none where the class
+    /// declares no body for it.
+    pub(crate) fn method(unit: &Unit, class: u32, method: u32) -> Option<Body> {
+        let at = unit
+            .methods
+            .iter()
+            .position(|m| m.class == class && m.method == method)?;
+        u32::try_from(at).ok().map(Body::Method)
+    }
+
+    /// The body of the `kind` hook of property `property` of class
+    /// `class` of `unit`, by its place among the unit's hook bodies.
+    pub(crate) fn hook(unit: &Unit, class: u32, property: u32, kind: HookKind) -> Option<Body> {
+        let at = unit
+            .hooks
+            .iter()
+            .position(|h| h.class == class && h.property == property && h.kind == kind)?;
+        u32::try_from(at).ok().map(Body::Hook)
+    }
 }
 
 /// Which construct an `INCLUDE_OR_EVAL` is, php's `ZEND_INCLUDE`,
@@ -1373,20 +1392,8 @@ pub(crate) fn body_of(unit: &Unit, body: Body) -> Option<&OpArray> {
         Body::Main => Some(&unit.main),
         Body::Function(at) => unit.functions.get(at as usize).map(|(_, code)| code),
         Body::Dynamic(at) => unit.dynamic.get(at as usize).map(|(_, code)| code),
-        Body::Method { class, method } => unit
-            .methods
-            .iter()
-            .find(|m| m.class == class && m.method == method)
-            .map(|m| &m.body),
-        Body::Hook {
-            class,
-            property,
-            kind,
-        } => unit
-            .hooks
-            .iter()
-            .find(|h| h.class == class && h.property == property && h.kind == kind)
-            .map(|h| &h.body),
+        Body::Method(at) => unit.methods.get(at as usize).map(|m| &m.body),
+        Body::Hook(at) => unit.hooks.get(at as usize).map(|h| &h.body),
     }
 }
 
