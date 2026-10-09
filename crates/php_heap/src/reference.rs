@@ -20,7 +20,7 @@
 use std::cell::Cell;
 use std::ptr::NonNull;
 
-use crate::gc::{self, Refcounted};
+use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::{Arr, Heap, Zval, ZvalRef, ZvalType};
 
@@ -123,8 +123,10 @@ impl Ref {
 
     /// `zend_refcounted_h gc`: the header the cycle collector colours
     /// as it walks through the cell, never a root of its own.
-    pub(crate) fn gc(&self) -> &Refcounted {
-        &self.header().gc
+    pub(crate) fn gc(self) -> Counted {
+        // SAFETY: the block starts with its header, and stands while
+        // its owner holds the handle, as `header` reads it.
+        unsafe { Counted::new(self.address()) }
     }
 
     /// Write the zval held as it stands, no owner touched.
@@ -157,7 +159,7 @@ impl Ref {
     /// `GC_ADDREF`.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self) {
-        self.header().gc.addref();
+        self.gc().addref();
     }
 
     /// Whether two names name one reference, php's pointer equality.

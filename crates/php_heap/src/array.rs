@@ -39,7 +39,7 @@ use std::cmp::Ordering;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
-use crate::gc::{self, Refcounted};
+use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::iterators::Iterators;
 use crate::mm::Mm;
@@ -746,8 +746,10 @@ impl Arr {
     }
 
     /// `zend_refcounted_h gc`: the header the cycle collector colours.
-    pub(crate) fn gc(&self) -> &Refcounted {
-        &self.header().gc
+    pub(crate) fn gc(self) -> Counted {
+        // SAFETY: the block starts with its header, and stands while
+        // its owner holds the handle, as `header` reads it.
+        unsafe { Counted::new(self.address()) }
     }
 
     /// What the collector walks of a table (`Z/Zend/zend_gc.c:1161-1199`):
@@ -785,7 +787,7 @@ impl Arr {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self) {
         if !self.is_immutable() {
-            self.header().gc.addref();
+            self.gc().addref();
         }
     }
 
@@ -819,7 +821,7 @@ impl Arr {
         if self.is_immutable() {
             return 1;
         }
-        self.header().gc.delref()
+        self.gc().delref()
     }
 
     // ------------------------------------------------------ the data

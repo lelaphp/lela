@@ -47,7 +47,7 @@ use std::ptr::NonNull;
 use crate::array::{
     Allocate, Arr, Key, System, free_table_header, index_add_new, index_del, table_header,
 };
-use crate::gc::{self, Refcounted};
+use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::payload::{Payload, payload_of};
@@ -77,6 +77,11 @@ pub(crate) struct ResHeader {
     /// in the same word: the last release frees it with no entry to
     /// delete.
     unlisted: Cell<bool>,
+    /// The rest of that word, written zero: no byte of the header's
+    /// second and third words is padding, so the debug build's freed-use
+    /// guard reads them all initialised as it looks for the freed-block
+    /// mark there ([`crate::mm::freed::is_freed`], #2414).
+    spare: [u8; 2],
     /// `ptr`: the payload allocation, none for a resource of no payload
     /// and none once closed.
     ptr: Cell<Option<NonNull<PayloadBox>>>,
@@ -123,8 +128,10 @@ impl Res {
     }
 
     /// `zend_refcounted_h gc`: the count and the flags.
-    pub(crate) fn gc(&self) -> &Refcounted {
-        &self.header().gc
+    pub(crate) fn gc(self) -> Counted {
+        // SAFETY: the block starts with its header, and stands while
+        // its owner holds the handle, as `header` reads it.
+        unsafe { Counted::new(self.address()) }
     }
 
     /// Where the header sits, which is where the allocation starts, for
@@ -172,6 +179,7 @@ impl Res {
                 kind: Cell::new(i32::try_from(kind.0).unwrap_or(i32::MAX)),
                 home,
                 unlisted: Cell::new(false),
+                spare: [0; 2],
                 ptr: Cell::new(ptr),
             });
         }
@@ -209,7 +217,7 @@ impl Res {
     /// `GC_ADDREF`.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self) {
-        self.header().gc.addref();
+        self.gc().addref();
     }
 
     /// Whether two names name one resource, php's pointer equality.

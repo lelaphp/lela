@@ -58,7 +58,7 @@ pub(crate) struct Refcounted {
 /// `GC_FLAGS_MASK` spans is taken by some kind (`IS_STR_VALID_UTF8`,
 /// `IS_OBJ_FREE_CALLED`, `GC_PROTECTED`), and the collector's
 /// twenty-two are all its own once an address is compressed. The bit is no count: [`Refcounted::refcount`]
-/// and [`Refcounted::delref`] read the count beneath it, so the pin shows
+/// and [`Counted::delref`] read the count beneath it, so the pin shows
 /// in no count php's would differ from, and a release that takes the
 /// count to zero asks it once there, from the word it has in hand.
 const PINNED: u32 = 1 << 31;
@@ -66,7 +66,7 @@ const PINNED: u32 = 1 << 31;
 const COUNT: u32 = !PINNED;
 
 /// What one owner given up left of a block's count
-/// ([`Refcounted::release`]).
+/// ([`Counted::release`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Release {
     /// Owners are left.
@@ -177,22 +177,6 @@ impl Refcounted {
         self.refcount.get() & COUNT
     }
 
-    /// `GC_ADDREF`: one more owner. This and [`Refcounted::delref`] are
-    /// the chokepoint every refcount change reaches, whichever type's or
-    /// the heap's own addref asked for it, so a debug build's freed-use
-    /// guard ([`refuses_freed`]) sits here: an addref of a block the heap has
-    /// freed is recorded and does nothing.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn addref(&self) {
-        #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::Use::Addref) {
-            return;
-        }
-        // The count saturates beneath the pin's bit ([`PINNED`]).
-        let word = self.refcount.get();
-        self.refcount.set(word + u32::from(word & COUNT != COUNT));
-    }
-
     /// `GC_SET_REFCOUNT`: the count as `zend_objects_store_del` holds it
     /// at one across a destructor, a pin kept.
     pub(crate) fn set_refcount(&self, count: u32) {
@@ -200,88 +184,11 @@ impl Refcounted {
         self.refcount.set((word & PINNED) | (count & COUNT));
     }
 
-    /// `GC_DELREF`: one owner fewer, and the count that is left. A count
-    /// already at zero stays there, so a double release cannot wrap. A
-    /// debug build refuses a decrement of a block the heap has freed as
-    /// it refuses the increment, and answers one owner left, so no
-    /// caller frees the block a second time.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn delref(&self) -> u32 {
-        #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::Use::Release) {
-            return 1;
-        }
-        let word = self.refcount.get();
-        let count = (word & COUNT).saturating_sub(1);
-        self.refcount.set((word & PINNED) | count);
-        count
-    }
-
-    /// One owner given up as a release gives it up, `GC_DELREF`: what it
-    /// left of the count. A count already at zero has no owner to give
-    /// up: the block's destruction is under way, or done under a pin, and
-    /// a place that still names it, as a release in place leaves one
-    /// (#2245), is released again; it is left as it stands, so nothing
-    /// destroys it twice, where php's count wraps and does the same.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn release(&self) -> Release {
-        if self.refcount() == 0 {
-            Release::Ownerless
-        } else if self.delref() == 0 {
-            Release::Last
-        } else {
-            Release::Owned
-        }
-    }
-
     /// Whether a walk pins the block ([`PINNED`]): what the end of its
     /// destruction asks before it gives the bytes back
     /// ([`crate::Heap::give_back`]).
     pub(crate) fn pinned(&self) -> bool {
         self.refcount.get() & PINNED != 0
-    }
-
-    /// The pin set; whether it was not set already. A block pinned
-    /// already is kept by the pin that set it, which is let go after
-    /// this one, as a walk's steps nest. A debug build's freed-use guard
-    /// refuses a pin of a block the heap has freed, as it refuses an
-    /// addref, and sets nothing.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn pin(&self) -> bool {
-        #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::Use::Addref) {
-            return false;
-        }
-        let word = self.refcount.get();
-        self.refcount.set(word | PINNED);
-        word & PINNED == 0
-    }
-
-    /// The pin let go; the count beneath it, which is zero where the
-    /// block's last owner went while it stood. A debug build's freed-use
-    /// guard refuses it over a block the heap has freed, as it refuses a
-    /// release, and answers one owner left, so nothing is freed twice.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn unpin(&self) -> u32 {
-        #[cfg(debug_assertions)]
-        if self.refuses(crate::sensed::Use::Release) {
-            return 1;
-        }
-        let count = self.refcount.get() & COUNT;
-        self.refcount.set(count);
-        count
-    }
-
-    /// The freed-use guard over this header, which is the first eight
-    /// bytes of its block, for the line that asked.
-    #[cfg(debug_assertions)]
-    #[track_caller]
-    fn refuses(&self, op: crate::sensed::Use) -> bool {
-        refuses_freed(
-            std::ptr::NonNull::from(self).cast(),
-            op,
-            std::panic::Location::caller(),
-        )
     }
 
     /// `GC_FLAGS`.
@@ -366,5 +273,134 @@ impl Refcounted {
     /// `gc_possible_root` may take.
     pub(crate) fn may_leak(&self) -> bool {
         self.type_info.get() & ((!0 << INFO_SHIFT) | NOT_COLLECTABLE) == 0
+    }
+}
+
+/// php's `zend_refcounted *`: the header of a refcounted block, named
+/// by the block's own pointer. Every refcount move goes through it, so
+/// the debug build's freed-use guard ([`refuses_freed`]) reads the
+/// block's mark, past the header's eight bytes, with the provenance of
+/// the whole block, which a `&Refcounted` does not carry (#2414). It
+/// reads as the header it points at for everything else.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Counted(std::ptr::NonNull<Refcounted>);
+
+impl Counted {
+    /// The header of the block at `block`.
+    ///
+    /// # Safety
+    ///
+    /// `block` is where a refcounted block of this heap or of the
+    /// process's allocator starts, its first eight bytes its header, and
+    /// it stands while the `Counted` is used: the contract php's
+    /// `zend_refcounted *` carries.
+    pub(crate) const unsafe fn new(block: std::ptr::NonNull<u8>) -> Counted {
+        Counted(block.cast())
+    }
+
+    /// Where the block starts, for the heap that frees it.
+    pub(crate) const fn block(self) -> std::ptr::NonNull<u8> {
+        self.0.cast()
+    }
+
+    /// `GC_ADDREF`: one more owner. This and [`Counted::delref`] are
+    /// the chokepoint every refcount change reaches, whichever type's or
+    /// the heap's own addref asked for it, so a debug build's freed-use
+    /// guard ([`refuses_freed`]) sits here: an addref of a block the heap has
+    /// freed is recorded and does nothing.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn addref(self) {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::Use::Addref) {
+            return;
+        }
+        // The count saturates beneath the pin's bit ([`PINNED`]).
+        let word = self.refcount.get();
+        self.refcount.set(word + u32::from(word & COUNT != COUNT));
+    }
+
+    /// `GC_DELREF`: one owner fewer, and the count that is left. A count
+    /// already at zero stays there, so a double release cannot wrap. A
+    /// debug build refuses a decrement of a block the heap has freed as
+    /// it refuses the increment, and answers one owner left, so no
+    /// caller frees the block a second time.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn delref(self) -> u32 {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::Use::Release) {
+            return 1;
+        }
+        let word = self.refcount.get();
+        let count = (word & COUNT).saturating_sub(1);
+        self.refcount.set((word & PINNED) | count);
+        count
+    }
+
+    /// One owner given up as a release gives it up, `GC_DELREF`: what it
+    /// left of the count. A count already at zero has no owner to give
+    /// up: the block's destruction is under way, or done under a pin, and
+    /// a place that still names it, as a release in place leaves one
+    /// (#2245), is released again; it is left as it stands, so nothing
+    /// destroys it twice, where php's count wraps and does the same.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn release(self) -> Release {
+        if self.refcount() == 0 {
+            Release::Ownerless
+        } else if self.delref() == 0 {
+            Release::Last
+        } else {
+            Release::Owned
+        }
+    }
+
+    /// The pin set; whether it was not set already. A block pinned
+    /// already is kept by the pin that set it, which is let go after
+    /// this one, as a walk's steps nest. A debug build's freed-use guard
+    /// refuses a pin of a block the heap has freed, as it refuses an
+    /// addref, and sets nothing.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn pin(self) -> bool {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::Use::Addref) {
+            return false;
+        }
+        let word = self.refcount.get();
+        self.refcount.set(word | PINNED);
+        word & PINNED == 0
+    }
+
+    /// The pin let go; the count beneath it, which is zero where the
+    /// block's last owner went while it stood. A debug build's freed-use
+    /// guard refuses it over a block the heap has freed, as it refuses a
+    /// release, and answers one owner left, so nothing is freed twice.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn unpin(self) -> u32 {
+        #[cfg(debug_assertions)]
+        if self.refuses(crate::sensed::Use::Release) {
+            return 1;
+        }
+        let count = self.refcount.get() & COUNT;
+        self.refcount.set(count);
+        count
+    }
+
+    /// The freed-use guard over this header's block, for the line that
+    /// asked: handed the block's own pointer, whose provenance covers
+    /// the mark the guard reads past the header's eight bytes, as php's
+    /// guard reads it through a `zend_refcounted *` (#2414).
+    #[cfg(debug_assertions)]
+    #[track_caller]
+    fn refuses(self, op: crate::sensed::Use) -> bool {
+        refuses_freed(self.block(), op, std::panic::Location::caller())
+    }
+}
+
+impl std::ops::Deref for Counted {
+    type Target = Refcounted;
+
+    fn deref(&self) -> &Refcounted {
+        // SAFETY: `Counted::new`'s contract: the block stands, and its
+        // first eight bytes are the header.
+        unsafe { self.0.as_ref() }
     }
 }

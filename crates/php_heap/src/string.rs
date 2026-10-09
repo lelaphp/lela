@@ -43,7 +43,7 @@ use crate::array::{
     Arr, Key, add_interned, free_persistent_array, free_table_header, persistent_array,
     table_header,
 };
-use crate::gc::{self, Refcounted};
+use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::Fatal;
 use crate::mm::Mm;
 use crate::{Zval, ZvalType};
@@ -398,8 +398,10 @@ impl Str {
     }
 
     /// `zend_refcounted_h gc`: the count and the flags.
-    pub(crate) fn gc(&self) -> &Refcounted {
-        &self.header().gc
+    pub(crate) fn gc(self) -> Counted {
+        // SAFETY: the block starts with its header, and stands while
+        // its owner holds the handle, as `header` reads it.
+        unsafe { Counted::new(self.address()) }
     }
 
     /// The bytes, `ZSTR_VAL` over `ZSTR_LEN`, without the NUL.
@@ -575,7 +577,7 @@ impl Str {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self) {
         if !self.is_interned() {
-            self.header().gc.addref();
+            self.gc().addref();
         }
     }
 
@@ -586,7 +588,7 @@ impl Str {
         if self.is_interned() {
             return 1;
         }
-        self.header().gc.delref()
+        self.gc().delref()
     }
 
     /// The payload word of a zval naming this string. php stores the
