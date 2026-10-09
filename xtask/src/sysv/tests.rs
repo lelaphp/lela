@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Claim, Clock, Ctime, Kind, Namespace, Object, Runner, Standing, Swept, abandoned, claimed,
-    left, offset, reclaim, second_of_day, unnamed_left,
+    Claim, Clock, Ctime, Kind, Namespace, Object, Runner, STARTED, Standing, Swept, abandoned,
+    claimed, left, offset, reclaim, second_of_day, started, unnamed_left,
 };
 use crate::oracle::Ran;
 
@@ -528,6 +528,72 @@ fn a_claim_left_unsettled_is_reclaimed_with_what_was_made_under_it() {
             .iter()
             .any(|o| o.kind == Kind::Queue && o.id == id),
         "queue {id} stands after the reclaim"
+    );
+    assert!(!path.exists(), "the claim is taken with what it claimed");
+}
+
+/// A claim's journal names the processes of its [`STARTED`] lines alone:
+/// an ended line, a witness run's JSON line and a torn last line name none.
+#[test]
+fn a_claims_journal_names_the_processes_it_started() {
+    let journal = format!(
+        "{STARTED} 0 4242\nended 0\n{{\"entry\":\"serving\"}}\n{STARTED} 1 4243\n{STARTED} 2"
+    );
+    assert_eq!(started(&journal).collect::<Vec<u32>>(), [4242, 4243]);
+}
+
+/// A claim a phpt subset's run never settled, its journal naming the
+/// programs it started, is taken with the objects those programs left
+/// whatever their key, as the run's own sweep would have taken them
+/// (#2448): a keyed queue a gone process sent to and its journal names is
+/// removed, while the same queue of a process no journal names stands.
+#[test]
+fn a_claim_left_unsettled_takes_what_its_journaled_programs_left() {
+    let claim = Claim::new("sysv-test").unwrap();
+    let path = claim.path().to_path_buf();
+    let queue = || {
+        let made = std::process::Command::new("perl")
+            .args([
+                "-MIPC::SysV=IPC_CREAT",
+                "-e",
+                "my $id = msgget(0x5d000000 + $$, IPC_CREAT | 0600) // die $!; msgsnd($id, pack('l! a*', 1, 'x'), 0) or die $!; print \"$$ $id\"",
+            ])
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let printed = String::from_utf8(made.stdout).unwrap();
+        let (pid, id) = printed.split_once(' ').unwrap();
+        (pid.to_owned(), id.parse::<u64>().unwrap())
+    };
+    let (pid, journaled) = queue();
+    let (_, unjournaled) = queue();
+    std::fs::write(&path, format!("{STARTED} 0 {pid}\nended 0\n")).unwrap();
+    drop(claim);
+    for _ in 0..20 {
+        reclaim(Duration::from_secs(1)).unwrap();
+        if !path.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let standing = Standing::now().unwrap();
+    let stands = |id: u64| {
+        standing
+            .0
+            .iter()
+            .any(|o| o.kind == Kind::Queue && o.id == id)
+    };
+    std::process::Command::new("ipcrm")
+        .args(["-q", &unjournaled.to_string()])
+        .status()
+        .ok();
+    assert!(
+        !stands(journaled),
+        "queue {journaled} stands after the reclaim"
+    );
+    assert!(
+        stands(unjournaled),
+        "queue {unjournaled}, no journal's, was taken"
     );
     assert!(!path.exists(), "the claim is taken with what it claimed");
 }

@@ -55,6 +55,16 @@
 //! nothing attaches, which a phpt run killed before its sweep leaves too:
 //! the segments are the table that fills first (#2115).
 //!
+//! **A System V subset's.** A phpt subset of [`SUBSETS`] holds a claim
+//! too, for its length, and reclaims before it starts as a witness run
+//! does (#2448). Its oracle writes the claim a line as each program starts,
+//! naming its process, and as it ends, so a subset killed before its sweep
+//! leaves a window ending a recipe's timeout past its last program's start
+//! or end, and the next run takes, beside what the window takes, every
+//! object in it that names a process the claim started and no living one,
+//! under a key or not, as the subset's own sweep would have. A subset not
+//! cut off settles its claim by that sweep, so its rule is unchanged.
+//!
 //! **On Linux.** The System V subsets run in a private IPC namespace where
 //! `unshare` permits, so nothing they make outlives its program, and the
 //! sweep there is a check that finds nothing ([`Namespace`]).
@@ -397,11 +407,16 @@ pub(crate) fn left<'a>(
     after
         .0
         .iter()
-        .filter(|o| !stood.contains(&(o.kind, o.id)))
-        .filter(|o| o.attached == 0)
-        .filter(|o| o.named.iter().any(|pid| spawned.contains(pid)))
-        .filter(|o| !o.named.iter().any(|pid| alive(*pid)))
+        .filter(|o| !stood.contains(&(o.kind, o.id)) && spawned_left(o, spawned, &alive))
         .collect()
+}
+
+/// Whether `object` is attached to nothing, names a process of `spawned`,
+/// and names none `alive` says still runs.
+fn spawned_left(object: &Object, spawned: &BTreeSet<u32>, alive: impl Fn(u32) -> bool) -> bool {
+    object.attached == 0
+        && object.named.iter().any(|pid| spawned.contains(pid))
+        && !object.named.iter().any(|pid| alive(*pid))
 }
 
 /// `H:MM:SS` as the second of the day it names; anything else, `ipcs`'s
@@ -587,6 +602,23 @@ pub(crate) fn claimed<'a>(
         .collect()
 }
 
+/// The objects of `standing` the programs a cut-off run's journals name
+/// left, as [`left`] tells them, and made inside one of `windows`: what a
+/// phpt subset killed before its sweep left that names one of its
+/// programs, under a key or not (#2448).
+pub(crate) fn journaled<'a>(
+    standing: &'a Standing,
+    spawned: &BTreeSet<u32>,
+    (windows, clock): (&[(i64, i64)], &Clock),
+    alive: impl Fn(u32) -> bool,
+) -> Vec<&'a Object> {
+    standing
+        .0
+        .iter()
+        .filter(|o| spawned_left(o, spawned, &alive) && made_within(o, windows, clock))
+        .collect()
+}
+
 /// The segments of `standing` forsaken by `runner` that name a process:
 /// private ones nothing attaches whose creator and last user are dead,
 /// whatever run made them (#2115).
@@ -740,9 +772,28 @@ fn claims() -> PathBuf {
 /// [`reclaim`] passes over, as a scratch tree's is ([`crate::scratch`]).
 const TAKING: &str = "taking";
 
-/// A witness run's claim on the System V objects made while it runs
-/// (#2115): a file of the claims directory, locked for as long as this
-/// value lives, which the run writes to as it goes. Settled, what the run
+/// The first word of a claim's line for a program started, its number and
+/// its process after it, as a phpt subset's oracle writes one (#2448):
+/// the processes [`reclaim`] holds a cut-off run's objects by.
+pub(crate) const STARTED: &str = "started";
+
+/// The first word of a claim's line for a program ended, its number after.
+pub(crate) const ENDED: &str = "ended";
+
+/// The processes a claim's `journal` names started, by its [`STARTED`]
+/// lines; a witness run's lines name none.
+fn started(journal: &str) -> impl Iterator<Item = u32> + '_ {
+    journal.lines().filter_map(|line| {
+        let mut words = line.split(' ');
+        (words.next()? == STARTED).then_some(())?;
+        words.nth(1)?.parse().ok()
+    })
+}
+
+/// A run's claim on the System V objects made while it runs, a witness
+/// run's (#2115) or a System V subset's (#2448): a file of the claims
+/// directory, locked for as long as this value lives, which the run
+/// writes to as it goes. Settled, what the run
 /// left is removed and the file goes; a run that ends without settling
 /// leaves the file with its lock released, for the next run's
 /// [`reclaim`].
@@ -784,29 +835,107 @@ impl Claim {
         &self.path
     }
 
+    /// A claim of `lane`'s from now, taken once what runs cut off left
+    /// is reclaimed ([`reclaim`], over `grace`) and said in `removed`:
+    /// how every lane that holds one starts (#2115, #2448).
+    pub(crate) fn taken(lane: &str, grace: Duration, removed: &mut Removed) -> Result<Claim> {
+        removed.add("before the run, of what runs cut off left", reclaim(grace));
+        Claim::new(lane)
+    }
+
+    /// The claim's file opened for appending, a handle apart from the
+    /// lock's, for a lane that writes to it as each program starts and
+    /// ends (#2448).
+    pub(crate) fn journal(&self) -> Result<File> {
+        File::options()
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("opening the claim {}", self.path.display()))
+    }
+
     /// What the run left removed: every object forsaken by the runner and
     /// made from the claim's making until now. The claim goes with it.
     pub(crate) fn settle(self) -> Result<Swept> {
-        let clock = Clock::now()?;
-        let standing = Standing::now()?;
-        let windows = [window(self.from, None, &clock)];
-        let mut swept = Swept::default();
-        remove(
-            claimed(&standing, &windows, (&Runner::now(), &clock), alive),
-            &mut swept,
-        )?;
+        let from = self.from;
+        self.settled_by(|| {
+            let clock = Clock::now()?;
+            let standing = Standing::now()?;
+            let windows = [window(from, None, &clock)];
+            let mut swept = Swept::default();
+            remove(
+                claimed(&standing, &windows, (&Runner::now(), &clock), alive),
+                &mut swept,
+            )?;
+            Ok(swept)
+        })
+    }
+
+    /// The claim settled by `sweep`, the lane's own rule for what its run
+    /// left, as a phpt subset sweeps by the processes it spawned (#2448):
+    /// the claim goes once the sweep has done, and stands, its lock
+    /// released, for the next run's [`reclaim`] where the sweep failed.
+    pub(crate) fn settled_by(self, sweep: impl FnOnce() -> Result<Swept>) -> Result<Swept> {
+        let swept = sweep()?;
         fs::remove_file(&self.path).ok();
         Ok(swept)
     }
 }
 
+/// What the readings of a run count the System V objects removed around
+/// it as, a witness run's and a phpt subset's alike.
+pub(crate) const REMOVED: &str = "sysv_removed";
+
+/// What the sweeps around one run removed, each said on a line of the
+/// lane's as it is done and kept for the run's readings: the count, and
+/// each sweep's words (#2115, #2448).
+#[derive(Debug)]
+pub(crate) struct Removed {
+    line: String,
+    pub count: u64,
+    pub words: Vec<String>,
+}
+
+impl Removed {
+    /// None yet, each line said under `line`, as `witness` or
+    /// `phpt: ext/sysvmsg`.
+    pub(crate) fn new(line: impl Into<String>) -> Removed {
+        Removed {
+            line: line.into(),
+            count: 0,
+            words: Vec::new(),
+        }
+    }
+
+    /// What `swept`, the sweep `when`, did: said now where it did
+    /// anything, and kept where it removed anything; a sweep that could
+    /// not read the machine is said and keeps nothing.
+    pub(crate) fn add(&mut self, when: &str, swept: Result<Swept>) {
+        let line = &self.line;
+        match swept {
+            Ok(swept) => {
+                if swept.removed() > 0 || swept.unnamed > 0 {
+                    println!("{line}: {when}, {swept}");
+                }
+                if swept.removed() > 0 {
+                    self.count += swept.removed() as u64;
+                    self.words.push(format!("{when}, {swept}"));
+                }
+            }
+            Err(why) => println!("{line}: System V IPC not swept {when}: {why:#}"),
+        }
+    }
+}
+
 /// What runs that ended without settling their claims left, removed
 /// before a run starts (#2115): each such claim's window from its making
-/// to `grace` past its last write, and every segment [`abandoned`]. The
+/// to `grace` past its last write, what is [`claimed`] in it and what the
+/// processes its journal started left in it ([`journaled`], #2448), and
+/// every segment [`abandoned`]. The
 /// claims go with it; a claim whose lock will not come is a run still
 /// going, and is passed over.
 pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
     let mut ended = Vec::new();
+    let mut spawned = BTreeSet::new();
     for entry in fs::read_dir(claims()).into_iter().flatten().flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == TAKING) {
@@ -824,6 +953,7 @@ pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
         let Ok(last) = meta.modified() else {
             continue;
         };
+        spawned.extend(started(&fs::read_to_string(&path).unwrap_or_default()));
         ended.push((path, meta.created().unwrap_or(last), last + grace, file));
     }
     let clock = Clock::now()?;
@@ -834,6 +964,7 @@ pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
         .map(|(_, from, to, _)| window(*from, Some(*to), &clock))
         .collect();
     let mut gone = claimed(&standing, &windows, (&runner, &clock), alive);
+    gone.extend(journaled(&standing, &spawned, (&windows, &clock), alive));
     gone.extend(abandoned(&standing, &runner, alive));
     let mut seen = BTreeSet::new();
     gone.retain(|o| seen.insert((o.kind, o.id)));

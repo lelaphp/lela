@@ -99,8 +99,11 @@
 //! them, and one that names none by its maker, its private key and the
 //! second it was made in, inside one of the subset's programs' runs; the
 //! reading counts them as `sysv_removed` (the `sysv` module, #1412,
-//! #1482). On Linux a System V subset's programs run in a private IPC
-//! namespace where `unshare` permits, and the run's line says so.
+//! #1482). A System V subset holds a claim while it runs and first takes
+//! what subsets and witness runs killed before their sweeps left, which
+//! its reading names (#2448). On Linux a System V subset's programs run in
+//! a private IPC namespace where `unshare` permits, and the run's line
+//! says so.
 //!
 //! **Which subsets a lane runs.** The `[[crate]]` row, and nothing here:
 //! a crate owns the directories of the corpus its row names, an extension
@@ -1029,12 +1032,13 @@ pub fn run(
         let beside = own.pin.as_ref().map(|pin| side.oracle.beside(pin));
         let oracle = beside.as_ref().unwrap_or(side.oracle);
         let under = side.under(ask.lane, jobs, own.served.as_deref(), &locks);
-        let ((tally, waited), removed) = swept_around(oracle, scope, running, || {
+        let claims = sysv::SUBSETS.contains(&subset.scope.as_str());
+        let ((tally, waited), removed) = swept_around(oracle, (scope, claims), running, || {
             let within = tree.filter(|_| running).map(|copy| subset.rooted(copy));
             run_subset(oracle, registry, within.as_ref().unwrap_or(subset), under)
         })?;
         let mut reading = reading(&tally, runs.snapshot(), manifest, &source, subset, under)?;
-        around(&mut reading, runner, removed, waited)?;
+        around(&mut reading, runner, &removed, waited)?;
         let pin = side.oracle.pin();
         let (target, kept) = runs.target_of(pin, &subset.scope, (&tally, runner), ask.lane)?;
         let run = runs.run_kept_at(held_as, (&tally, runner));
@@ -1488,52 +1492,57 @@ impl<'o> Own<'o> {
 }
 
 /// One subset run by `run`, and where its tests run, what its processes
-/// left of System V IPC removed after it, the line that says so printed:
-/// the objects standing are read before it, and the processes spawned
-/// before it forgotten (the `sysv` module, #1412). The count is none
-/// where nothing was removed, and where the machine could not be read,
-/// which the line printed says.
+/// left of System V IPC removed after it, each sweep said on a line: the
+/// objects standing are read before it, and the processes spawned before
+/// it forgotten (the `sysv` module, #1412). A System V subset holds a
+/// claim for its length, written to as each program starts and ends, and
+/// takes what subsets and witness runs cut off left before it starts, so
+/// a run killed before its sweep leaves nothing the next one does not
+/// remove (#2448); its own sweep settles the claim.
 fn swept_around<T>(
     oracle: &Oracle<'_>,
-    scope: &str,
+    (scope, claims): (&str, bool),
     runs: bool,
     run: impl FnOnce() -> Result<T>,
-) -> Result<(T, Option<u64>)> {
+) -> Result<(T, sysv::Removed)> {
+    let mut removed = sysv::Removed::new(format!("{INSTRUMENT}: {scope}"));
     if !runs {
-        return Ok((run()?, None));
+        return Ok((run()?, removed));
     }
+    let grace = Duration::from_secs(oracle.pin().recipe.limits.timeout_s);
+    let claim = claims
+        .then(|| sysv::Claim::taken(INSTRUMENT, grace, &mut removed))
+        .transpose()?;
+    oracle.journal(claim.as_ref().map(sysv::Claim::journal).transpose()?);
     oracle.take_spawned();
     let before = sysv::Standing::now();
-    let tally = run()?;
-    let swept = before.and_then(|before| sysv::sweep(&before, &oracle.take_spawned()));
-    let removed = match swept {
-        Ok(swept) => {
-            if swept.removed() > 0 || swept.unnamed > 0 {
-                println!("phpt: {scope}: of what its tests left, {swept}");
-            }
-            Some(swept.removed() as u64).filter(|n| *n > 0)
-        }
-        Err(why) => {
-            println!("phpt: {scope}: what its tests left of System V IPC is not removed: {why:#}");
-            None
-        }
+    let ran = run();
+    oracle.journal(None);
+    let tally = ran?;
+    let sweep = || before.and_then(|before| sysv::sweep(&before, &oracle.take_spawned()));
+    let swept = match claim {
+        Some(claim) => claim.settled_by(sweep),
+        None => sweep(),
     };
+    removed.add("of what its tests left", swept);
     Ok((tally, removed))
 }
 
 /// What the run around a subset adds to its reading: the System V objects
-/// its tests left and the run removed (the `sysv` module, #1412), and the
+/// removed around it, what its tests left (the `sysv` module, #1412) and
+/// what runs cut off before it left (#2448), each sweep's words told, and the
 /// tests that waited for a key another run on the machine held, and for
 /// how long, in its numbers and the tail of its message (the `across`
 /// module, #1313); each only where there was any.
 fn around(
     reading: &mut Reading,
     runner: &Runner,
-    removed: Option<u64>,
+    removed: &sysv::Removed,
     waited: across::Waited,
 ) -> Result<()> {
-    if let Some(removed) = removed {
-        reading.count("sysv_removed", removed)?;
+    if removed.count > 0 {
+        reading.count(sysv::REMOVED, removed.count)?;
+        told(reading, runner, &removed.words.join("; "));
     }
     if waited.tests == 0 {
         return Ok(());
