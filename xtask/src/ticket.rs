@@ -181,8 +181,8 @@ use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status};
 use crate::steer::STEERABLE;
-use crate::track::{MAIN, Records, Ticket, Track};
-use crate::track_next::{READY, TRACK_LABEL, tracks_of, waits};
+use crate::track::{MAIN, Ticket, Track};
+use crate::track_next::{READY, TRACK_LABEL, tracks_of};
 
 /// The instrument name every reading of ticket carries.
 pub(crate) const INSTRUMENT: &str = "ticket";
@@ -943,6 +943,19 @@ pub struct BlockedBy {
     pub nodes: Vec<Blocker>,
 }
 
+impl BlockedBy {
+    /// The blockers still open, by number: what blocks a ticket, since a
+    /// ticket closes when its work is on `main` (#2270, #2326). The
+    /// frontier, the chains and a merge's partial landing (#2394) read
+    /// the rule here.
+    pub(crate) fn open(&self) -> impl Iterator<Item = u64> + '_ {
+        self.nodes
+            .iter()
+            .filter(|blocker| blocker.state == State::Open)
+            .map(|blocker| blocker.number)
+    }
+}
+
 /// One ticket in a blocking relation: its number and whether it is open.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Blocker {
@@ -1464,23 +1477,22 @@ pub fn merged(root: &Path, manifest: &Manifest, gh: &Gh, since: &str) -> Result<
     }
     // The commit `since` names now, for a message read after `HEAD` moves.
     let parent = crate::git::git(root, &["rev-parse", "--short", since], None)?;
-    let records = Records::read(root)?;
     for issue in unready.into_iter().filter_map(open) {
-        readings.push(left_open(root, &issue, &records, parent.trim())?);
+        readings.push(left_open(root, &issue, parent.trim())?);
     }
     Ok(readings)
 }
 
 /// The reading of a ticket a merge names with no ready record, which it
 /// leaves open. It is a partial landing (#2394) while a box stands
-/// unticked and something still blocks it as the frontier reads a
-/// blocker ([`waits`]): the build skill leaves a ticket
+/// unticked and an open ticket still blocks it ([`BlockedBy::open`]):
+/// the build skill leaves a ticket
 /// whose last box waits on another open and wires that one on, so the
 /// reading skips the close, saying so and what holds it. Otherwise it
 /// fails, named, the merge stands, and `done` names it ([`stranded`])
 /// until a close, or [`merged`] run again once the blocker is wired,
 /// replaces it.
-fn left_open(root: &Path, issue: &Issue, records: &Records, parent: &str) -> Result<Reading> {
+fn left_open(root: &Path, issue: &Issue, parent: &str) -> Result<Reading> {
     let ticket = Ticket::new(issue.number);
     let mut left = Reading::stamped_over(
         INSTRUMENT,
@@ -1488,8 +1500,10 @@ fn left_open(root: &Path, issue: &Issue, records: &Records, parent: &str) -> Res
         &Snapshot::disk(root)?,
         Path::new(STAMPED_OVER),
     )?;
-    let blockers: Vec<String> = waits(&issue.blocked_by, records)
-        .map(|wait| Ticket::new(wait.number()).to_string())
+    let blockers: Vec<String> = issue
+        .blocked_by
+        .open()
+        .map(|number| Ticket::new(number).to_string())
         .collect();
     if blockers.is_empty() || Criteria::parse(&issue.body).unticked.is_empty() {
         left.status = Status::Fail;

@@ -761,64 +761,37 @@ fn a_tracker_that_stops_answering_stops_the_run_named() {
     );
 }
 
-/// A run that closes a blocker does not lay its dependent down in the
-/// same run (#1843, #1850): #21 is blocked by #20, the session closes
-/// #20 and the tracker then counts #20 closed, but `t20` waits for /specs
-/// and `main` does not contain it, so the run ends at "none" with #21
-/// never laid down. Once `main` holds `t20`, the next run names #21 and
-/// cuts `t21` from that `main`, which holds what it waited on.
+/// A run that readies a blocker does not lay its dependent down in the
+/// same run (#2270, #2326): #21 is blocked by #20, the session writes
+/// #20's ready record, and #20 stays open at the tracker until /specs
+/// merges `t20`, so the run ends at "none" with #21 never laid down. Once
+/// the merge holds `t20` in `main` and closes #20, the next run names #21
+/// and cuts `t21` from that `main`, which holds what it waited on.
 #[test]
-fn a_run_that_closes_a_blocker_does_not_lay_down_its_dependent() {
+fn a_run_that_readies_a_blocker_does_not_lay_down_its_dependent() {
     let scratch = Scratch::lay("blocker");
-    let ticket = |number: u64, state: &str| {
-        serde_json::json!({
-            "number": number,
-            "title": format!("ticket {number}"),
-            "url": format!("https://example.invalid/issues/{number}"),
-            "labels": [{"name": "ready-for-agent"}],
-            "blockedBy": if number == 21 {
-                serde_json::json!({"nodes": [{"number": 20, "state": state}], "totalCount": 1})
-            } else {
-                serde_json::json!({"nodes": [], "totalCount": 0})
-            },
-        })
-    };
-    let list = |rows: Vec<serde_json::Value>| serde_json::Value::Array(rows).to_string();
-    fs::write(
-        scratch.dir.join("list.json"),
-        list(vec![ticket(21, "OPEN"), ticket(20, "OPEN")]),
-    )
-    .unwrap();
-    fs::write(
-        scratch.dir.join("list.after.json"),
-        list(vec![ticket(21, "CLOSED")]),
-    )
-    .unwrap();
+    let open = |blocker: &str| blocked(&[(21, &[], &[(20, blocker)]), (20, &[], &[])]);
+    fs::write(scratch.dir.join("list.json"), open("OPEN")).unwrap();
     scratch.viewed(20);
     scratch.viewed(21);
-    scratch.act_on(20, "commit close");
+    scratch.act_on(20, "commit ready");
     scratch.act_on(21, "commit");
-    scratch.session_then(&format!(
-        "cp '{}' '{}'",
-        scratch.dir.join("list.after.json").display(),
-        scratch.dir.join("list.json").display()
-    ));
     let (code, out) = scratch.work(&[]);
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("#20 closed at"), "{out}");
+    assert!(out.contains("#20 ready at"), "{out}");
     assert!(
         !has_ref(&scratch.root, "refs/heads/t21"),
-        "#21 is not laid down off a main without t20: {out}"
-    );
-    assert!(
-        out.contains(
-            "the frontier of main is empty, #21 waiting on t20, after 1 ticket: #20 closed"
-        ),
-        "{out}"
+        "#21 is not laid down while #20 is open: {out}"
     );
 
-    // /specs merges t20; the next run names #21 and cuts it from that main.
+    // /specs merges t20 and the merge closes #20; the next run names #21
+    // and cuts it from that main.
     sh(&scratch.root, &["git", "merge", "-q", "--ff-only", "t20"]);
+    fs::write(
+        scratch.dir.join("list.json"),
+        blocked(&[(21, &[], &[(20, "CLOSED")])]),
+    )
+    .unwrap();
     let (code, out) = scratch.work(&["--one"]);
     assert_eq!(code, 1, "#21 is left open: {out}");
     assert!(out.contains("track work: #21 ticket 21: on t21"), "{out}");
@@ -860,76 +833,15 @@ fn blocked(rows: &[Row]) -> String {
     serde_json::Value::Array(rows).to_string()
 }
 
-/// With `--fill`, a frontier emptied only by a held ticket does not plan
-/// (#1855, #1857): #21 is blocked by #20, the session closes #20, and
-/// `t20` waits for /specs, so the frontier is empty while #21 is held
-/// behind `t20`. The run ends there with no `/frontier` session, the
-/// step's line and the closing line each naming #21 and `t20`.
+/// With `--fill`, an empty frontier starts the `/frontier` session in
+/// the checkout (#85): #22 waits on #23, open and a person's, so it is
+/// blocked, and the planner is started in the checkout.
 #[test]
-fn a_frontier_emptied_by_a_held_ticket_ends_the_fill_run_naming_it() {
-    let scratch = Scratch::lay("held");
+fn an_empty_frontier_starts_the_fill_session_in_the_checkout() {
+    let scratch = Scratch::lay("fill-checkout");
     fs::write(
         scratch.dir.join("list.json"),
-        blocked(&[(21, &[], &[(20, "OPEN")]), (20, &[], &[])]),
-    )
-    .unwrap();
-    fs::write(
-        scratch.dir.join("list.after.json"),
-        blocked(&[(21, &[], &[(20, "CLOSED")])]),
-    )
-    .unwrap();
-    scratch.viewed(20);
-    scratch.act_on(20, "commit close");
-    scratch.session_then(&format!(
-        "cp '{}' '{}'",
-        scratch.dir.join("list.after.json").display(),
-        scratch.dir.join("list.json").display()
-    ));
-    scratch.frontier_files(&[(22, &["ready-for-agent"])]);
-    let (code, out) = scratch.work(&["--fill"]);
-    assert_eq!(code, 0, "{out}");
-    assert!(out.contains("#20 closed at"), "{out}");
-    assert_eq!(
-        scratch.wrote("session.args"),
-        "-p --model claude-opus-5 --permission-mode auto --effort high /build 20",
-        "no /frontier session: {out}"
-    );
-    assert!(!scratch.dir.join("planned").exists(), "no planner: {out}");
-    assert!(!has_ref(&scratch.root, "refs/heads/t21"), "{out}");
-
-    let lines: Vec<&str> = out.lines().collect();
-    assert!(
-        lines.contains(
-            &"track work: none: the frontier of main is empty, 1 ticket held until main contains the branch it waits on; nothing laid down:"
-        ),
-        "{out}"
-    );
-    assert!(lines.contains(&"  #21 ticket 21, waiting on t20"), "{out}");
-    assert_eq!(
-        lines.last(),
-        Some(
-            &"track work: the frontier of main is empty, #21 waiting on t20, after 1 ticket: #20 closed"
-        ),
-        "{out}"
-    );
-}
-
-/// With `--fill`, a frontier empty with nothing held starts the
-/// `/frontier` session as before (#85, #1857): #22 waits on #23, open
-/// and a person's, and on #20, closed on `t20`, which `main` contains, so
-/// it is blocked and not held, and the planner is started in the
-/// checkout.
-#[test]
-fn a_frontier_empty_with_nothing_held_starts_the_fill_session() {
-    let scratch = Scratch::lay("unheld");
-    sh(&scratch.root, &["git", "branch", "t20"]);
-    sh(&scratch.root, &["git", "config", "branch.t20.ticket", "20"]);
-    fs::write(
-        scratch.dir.join("list.json"),
-        blocked(&[
-            (22, &[], &[(23, "OPEN"), (20, "CLOSED")]),
-            (23, &["for-a-person"], &[]),
-        ]),
+        blocked(&[(22, &[], &[(23, "OPEN")]), (23, &["for-a-person"], &[])]),
     )
     .unwrap();
     scratch.frontier_files(&[(23, &["for-a-person"])]);
@@ -945,7 +857,6 @@ fn a_frontier_empty_with_nothing_held_starts_the_fill_session() {
         scratch.dir.join("planned").exists(),
         "the planner ran: {out}"
     );
-    assert!(!out.contains("waiting on"), "nothing held: {out}");
     assert!(
         out.contains(
             "track work: none: the frontier of main is still empty after the /frontier session; nothing laid down; the track waits on 1 for-a-person ticket:"
