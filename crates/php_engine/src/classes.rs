@@ -101,9 +101,21 @@ impl ObjectHandlers for ClosureHandlers {
         ))
     }
 
-    /// `zend_closure_free_storage`: the bound `$this` given back; the
-    /// payload's drop is the heap's.
+    /// `zend_closure_free_storage`: `zend_object_std_dtor` first, which
+    /// tells the weak references, then the bound variables and the bound
+    /// `$this` given back; the payload's drop is the heap's.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n, "\n"; } }
+    /// class T { function f() { return function () {}; } function __destruct() { echo "this\n"; } }
+    /// $c = (new T)->f(); $wm = new WeakMap; $wm[$c] = new D('map value'); unset($c);
+    /// ```
+    /// ```expect
+    /// map value
+    /// this
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        req.free_members(object);
         if let Some(bound) = object
             .native_mut::<ClosureInfo>(req)
             .and_then(|closure| closure.bound.take())

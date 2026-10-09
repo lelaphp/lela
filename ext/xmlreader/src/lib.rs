@@ -105,9 +105,11 @@ impl ObjectHandlers for Handlers {
         REFUSALS
     }
 
+    /// `xmlreader_objects_free_storage`: `zend_object_std_dtor`, then
+    /// the reader's resources.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        free_resources(req, object);
         Std.free_obj(req, object);
+        free_resources(req, object);
     }
 
     fn read_property(

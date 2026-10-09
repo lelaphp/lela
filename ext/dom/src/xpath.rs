@@ -3,7 +3,7 @@
 //! expression may call through `php:function`, `php:functionString` and
 //! the names `registerPhpFunctionNS` registered.
 
-use php_ext::abi::{Callable, Instance, Passed, Path, Raw, Refusals, This, Union};
+use php_ext::abi::{Callable, Instance, Passed, Path, Raw, Refusals, Std, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, with_string};
@@ -1369,9 +1369,11 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         crate::debug_info(req, object)
     }
 
-    /// `dom_xpath_objects_free_storage`: `xmlXPathFreeContext`, then the
-    /// document let go of.
+    /// `dom_xpath_objects_free_storage`: `zend_object_std_dtor`, then
+    /// `xmlXPathFreeContext`, the document let go of and the callbacks
+    /// given up.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
         discard(req, object);
         crate::release_libxml(req, object);
     }

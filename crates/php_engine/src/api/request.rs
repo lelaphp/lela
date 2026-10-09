@@ -803,6 +803,13 @@ impl Request {
         self.start_stack_limit();
     }
 
+    /// `zend_object_std_dtor` over an object being freed, which `Std`'s
+    /// `free_obj` is ([`php_heap::Heap::object_std_dtor`]): its weak
+    /// references told and its members freed, once.
+    pub(crate) fn free_members(&mut self, object: PhpObject) {
+        Heap::object_std_dtor(&mut Hooks(self), object.heap());
+    }
+
     /// The slot for a throwable PHP code served by a stream's kind, a
     /// filter or a user-space wrapper raised inside an operation whose
     /// answer has no room for it: php's `EG(exception)` standing until

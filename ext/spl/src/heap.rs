@@ -891,7 +891,20 @@ fn extracted(req: &mut Request, elem: (Value, Value), flags: i64) -> Result<Owne
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_heap_object_free_storage`: `zend_object_std_dtor`, then the
+    /// heap destroyed.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n, "\n"; } }
+    /// class H extends SplPriorityQueue { public $p; }
+    /// $o = new H; $o->insert(new D('element'), 1); $o->p = new D('prop'); unset($o);
+    /// ```
+    /// ```expect
+    /// prop
+    /// element
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
         let elements = object
             .native_mut::<Heap>(req)
             .map(|h| std::mem::take(&mut h.elements));

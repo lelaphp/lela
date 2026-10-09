@@ -203,8 +203,10 @@ impl ObjectHandlers for Handlers {
         Ok(())
     }
 
-    /// `xsl_objects_free_storage`.
+    /// `xsl_objects_free_storage`: `zend_object_std_dtor`, then the
+    /// callbacks given up and the sheet let go of.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
         if let Some(i) = intern(req, object) {
             let (sheet, callbacks) = (i.sheet.take(), std::mem::take(&mut i.callbacks));
             if let Some(sheet) = sheet {
@@ -212,7 +214,6 @@ impl ObjectHandlers for Handlers {
             }
             callbacks.release(req);
         }
-        Std.free_obj(req, object);
     }
 
     /// `xsl_objects_read_property`: a write fetch of a validated property

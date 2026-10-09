@@ -3,7 +3,7 @@
 //! object a libxml node answers as (`php_dom_create_object`), and the
 //! helpers every native reads its receiver and arguments through.
 
-use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest};
+use php_ext::abi::{CloneObj, ObjectHandlers, PropertyPlace, PropertyRead, PropertyTest, Std};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
@@ -202,10 +202,12 @@ impl ObjectHandlers for NodeHandlers {
             _ => None,
         });
         // `dom_object_namespace_node_free_storage`: the parent given up
-        // first, then `dom_objects_free_storage`.
+        // first, then `dom_objects_free_storage`, which is
+        // `zend_object_std_dtor` and then the node let go of.
         if let Some(parent) = parent {
             parent.give_up(req);
         }
+        Std.free_obj(req, object);
         crate::release_libxml(req, object);
     }
 }

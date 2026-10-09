@@ -10,7 +10,7 @@
 
 use std::ops::ControlFlow;
 
-use php_ext::abi::{ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, This, Untyped};
+use php_ext::abi::{ClassIterator, CloneObj, ExtensionBuilder, ObjectHandlers, Std, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::to_long;
@@ -899,9 +899,22 @@ impl ObjectHandlers for Handlers {
         104
     }
 
+    /// `spl_dllist_object_free_storage`: `zend_object_std_dtor`, then the
+    /// list popped from the tail, each element given up as it comes off,
+    /// then the list destroyed.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n, "\n"; } }
+    /// class Q extends SplQueue { public $p; }
+    /// $o = new Q; $o->push(new D('first')); $o->push(new D('last')); $o->p = new D('prop'); unset($o);
+    /// ```
+    /// ```expect
+    /// prop
+    /// last
+    /// first
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        // `spl_dllist_object_free_storage`: popped from the tail, each
-        // element given up as it comes off, then the list destroyed.
+        Std.free_obj(req, object);
         while let Some(value) = object.native_mut::<Llist>(req).and_then(|l| l.pop()) {
             value.give_up(req);
         }

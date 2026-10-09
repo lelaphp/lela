@@ -2266,11 +2266,18 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `free_obj` for the native payload: what the payload names of the
-    /// heap given back before the payload is dropped, with the members
-    /// already freed and the object's bucket already invalid. `Std`
-    /// releases nothing, a class with no payload naming nothing.
+    /// heap given back before the payload is dropped, with the object's
+    /// bucket already invalid and its members still standing, so PHP
+    /// code the release serves reads the object whole, as a subclass's
+    /// `toUCallback` reads it under `ucnv_close`. `Std`'s body is
+    /// `zend_object_std_dtor`: the weak references told and the members
+    /// freed. The members are freed after the slot returns, as php's
+    /// handlers call `zend_object_std_dtor` last; a table whose php
+    /// handler calls it first, as `spl_array_object_free_storage` does,
+    /// calls `Std.free_obj` where php's does, and nothing is left to free
+    /// after.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let _ = (req, object);
+        req.free_members(object);
     }
 
     /// `dtor_obj`, `zend_objects_destroy_object`: the class's

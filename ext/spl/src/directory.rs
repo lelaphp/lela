@@ -2109,10 +2109,13 @@ fn extension(name: &[u8]) -> Vec<u8> {
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_filesystem_object_free_storage`: the other handler's `dtor`,
+    /// then `zend_object_std_dtor`, then what the object opened.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if let Some(other) = object.native_mut::<Fs>(req).and_then(|it| it.oth.take()) {
             other.dtor(req);
         }
+        Std.free_obj(req, object);
         let held = object
             .native_mut::<Fs>(req)
             .map(|it| (it.dir.take(), it.stream.take(), it.csv.take()));
