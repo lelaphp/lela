@@ -10,13 +10,15 @@
 //! changed after a prepare reaches the statement's next `executer` as php's
 //! does.
 
+use std::borrow::Cow;
+
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
-    BindType, Cause, Connection, Connector, Failure, OnError, Placeholders, Prepared, Scanner,
-    Source, SqlError, SqlState, Statement as _, bool_attribute, long_attribute, option_long,
-    option_string, parse_data_source, rewrite_named,
+    BindType, Cause, Connection, Connector, Failure, OnError, ParameterMap, Placeholders, Prepared,
+    Scanner, Source, SqlError, SqlState, Statement as _, bool_attribute, long_attribute,
+    option_long, option_string, parse_data_source, rewrite_named,
 };
 
 use crate::Mysql;
@@ -410,12 +412,13 @@ impl Connector for Driver {
     }
 }
 
-/// What `mysql_handle_preparer` made of a query: a server-side statement,
-/// with the parameter map where the query's named placeholders were
-/// rewritten, or one PDO emulates.
+/// What `mysql_handle_preparer` made of a query: a server-side statement
+/// or one PDO emulates, with the parameter map where the query's named
+/// placeholders were rewritten, which the statement keeps either way, as
+/// php's `fallback` keeps `stmt->bound_param_map`.
 enum Native {
-    Prepared(Option<Vec<(i64, Vec<u8>)>>),
-    Emulated,
+    Prepared(Option<ParameterMap>),
+    Emulated(Option<ParameterMap>),
 }
 
 /// `mysql_handle_preparer` past the emulated case: the query's named
@@ -429,19 +432,37 @@ fn prepare_native(
     sql: &[u8],
     options: Option<php_ext::values::PhpArray>,
 ) -> Result<Native, Failure> {
-    let rewritten = rewrite_named(sql, Some(crate::scanner::scan as Scanner))?;
-    let (sent, map) = match &rewritten {
-        Some(rewritten) => (
-            rewritten.sql.as_slice(),
-            Some(rewritten.parameter_map.clone()),
-        ),
-        None => (sql, None),
+    let (sent, map) = match rewrite_named(req, sql, Some(crate::scanner::scan as Scanner))? {
+        Some(rewritten) => (Cow::Owned(rewritten.sql), Some(rewritten.parameter_map)),
+        None => (Cow::Borrowed(sql), None),
     };
+    match prepare_server(req, h, id, stmt, &sent, options) {
+        Ok(true) => Ok(Native::Prepared(map)),
+        Ok(false) => Ok(Native::Emulated(map)),
+        Err(failure) => {
+            if let Some(map) = map {
+                map.give_up(req);
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// `mysql_stmt_init` and `mysql_stmt_prepare` of the query as sent:
+/// `false` where the server cannot prepare it (1295) and PDO emulates it.
+fn prepare_server(
+    req: &mut Request,
+    h: H,
+    id: usize,
+    stmt: &mut Stmt,
+    sent: &[u8],
+    options: Option<php_ext::values::PhpArray>,
+) -> Result<bool, Failure> {
     let mut ps = Ps::init(req, h.server)?;
     if !ps.prepare(req, sent)? {
         if h.server.status(req).errno == 1295 {
             ps.close(req, true)?;
-            return Ok(Native::Emulated);
+            return Ok(false);
         }
         let failure = conn_error(req, id, h.server);
         ps.close(req, true)?;
@@ -451,7 +472,7 @@ fn prepare_native(
     stmt.ps = Some(ps);
     update(req, id, |h| h.own_columns = true);
     stmt.max_length = option_long(req, options, attr::MAX_COLUMN_LEN, 0)? & 1 != 0;
-    Ok(Native::Prepared(map))
+    Ok(true)
 }
 
 /// The `driver_options` half of `pdo_mysql_handle_factory`: the `H`'s
@@ -618,7 +639,7 @@ impl Connection for Db {
         let id = self.id().ok_or_else(Failure::silent)?;
         let mut stmt = Stmt::new(req, id)?;
         let native = if h.emulate_prepare || h.server.status(req).server_version < 40100 {
-            Ok(Native::Emulated)
+            Ok(Native::Emulated(None))
         } else {
             prepare_native(req, h, id, &mut stmt, sql, options)
         };
@@ -631,10 +652,10 @@ impl Connection for Db {
                 },
                 parameter_map: map,
             }),
-            Ok(Native::Emulated) => Ok(Prepared {
+            Ok(Native::Emulated(map)) => Ok(Prepared {
                 statement: Box::new(stmt),
                 placeholders: Placeholders::Emulated,
-                parameter_map: None,
+                parameter_map: map,
             }),
             Err(failure) => {
                 stmt.close(req);

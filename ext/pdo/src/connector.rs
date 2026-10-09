@@ -379,9 +379,8 @@ pub struct Prepared {
     pub statement: Box<dyn Statement>,
     pub placeholders: Placeholders,
     /// `stmt->bound_param_map` where the connector rewrote the query with
-    /// [`rewrite_named`]: each placeholder's number and the name it stood
-    /// for.
-    pub parameter_map: Option<Vec<(i64, Vec<u8>)>>,
+    /// [`rewrite_named`].
+    pub parameter_map: Option<ParameterMap>,
 }
 
 /// What a statement's start leaves: the column count `php_pdo_stmt_set_column_count`
@@ -676,18 +675,116 @@ pub type Scanner = fn(&[u8], usize) -> Option<(Token, usize)>;
 /// `pdo_parse_params` for a connector that takes positional placeholders
 /// natively: each `:name` rewritten to `?`, and the number each stood
 /// for mapped to its name; `None` where the query has no named one; the
-/// mix of the two kinds refused as php refuses it.
-pub fn rewrite_named(sql: &[u8], scanner: Option<Scanner>) -> Result<Option<Rewritten>, Failure> {
-    crate::parser::rewrite_named(sql, scanner)
+/// mix of the two kinds refused as php refuses it. The map is the
+/// request's, as php's is ([`ParameterMap`]); a `Failure` carrying a throw
+/// is the memory limit's fatal.
+pub fn rewrite_named(
+    req: &mut Request,
+    sql: &[u8],
+    scanner: Option<Scanner>,
+) -> Result<Option<Rewritten>, Failure> {
+    crate::parser::rewrite_named(req, sql, scanner)
 }
 
 /// A query [`rewrite_named`] rewrote: the query with `?` in each name's
-/// place, and `stmt->bound_param_map`, each placeholder's number and the
-/// name it stood for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// place, and `stmt->bound_param_map`.
 pub struct Rewritten {
     pub sql: Vec<u8>,
-    pub parameter_map: Vec<(i64, Vec<u8>)>,
+    pub parameter_map: ParameterMap,
+}
+
+/// `stmt->bound_param_map` of a query whose `:name`s were rewritten to
+/// `?`: each placeholder's number keys the name it stood for, a
+/// `zend_string_init` of its own, in a table `ALLOC_HASHTABLE` and
+/// `zend_hash_init(map, 13, ...)` made, all of it on the request's heap
+/// until `php_pdo_free_statement` destroys it. A parameter bound by
+/// position over the rewritten query takes one more owner of its name
+/// (`rewrite_name_to_position`'s `zend_string_copy`), so its name costs
+/// nothing of its own:
+///
+/// ```php
+/// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_EMULATE_PREPARES => false]);
+/// $p->prepare('SELECT ?, ?');
+/// $m = memory_get_usage();
+/// $s = $p->prepare('SELECT ?, ?');
+/// echo memory_get_usage() - $m, "\n";
+/// unset($s);
+/// $m = memory_get_usage();
+/// $s = $p->prepare('SELECT :a, :b');
+/// echo memory_get_usage() - $m, "\n";
+/// $n = memory_get_usage();
+/// $s->bindValue(1, 5);
+/// echo memory_get_usage() - $n, "\n";
+/// unset($s);
+/// echo memory_get_usage() - $m, "\n";
+/// $q = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+/// $s = $q->prepare('SELECT ?');
+/// $m = memory_get_usage();
+/// $s->execute([12345]);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 21760
+/// 22200
+/// 776
+/// 0
+/// 16984
+/// ```
+pub struct ParameterMap {
+    table: Owner<PhpArray>,
+}
+
+impl ParameterMap {
+    /// `ALLOC_HASHTABLE` and `zend_hash_init` at 13, the size php gives
+    /// it; the `Err` is the memory limit's fatal.
+    pub(crate) fn new(req: &mut Request) -> Result<ParameterMap, Thrown> {
+        Ok(ParameterMap {
+            table: PhpArray::init_size(req, 13)?,
+        })
+    }
+
+    /// `zend_hash_index_update_ptr(map, bindno, zend_string_init(name))`;
+    /// the `Err` is the memory limit's fatal.
+    pub(crate) fn insert(
+        &mut self,
+        req: &mut Request,
+        bindno: i64,
+        name: &[u8],
+    ) -> Result<(), Thrown> {
+        let name = PhpString::filled(req, name.len(), |to| to.copy_from_slice(name))?;
+        let key = Owner::take(req, Key::Int(bindno));
+        self.table.set(req, key, name.into_value())
+    }
+
+    /// `zend_hash_index_find_ptr(map, paramno)`: the name placeholder
+    /// `position` stood for, a view the caller takes an owner of.
+    pub(crate) fn name(&self, position: i64) -> Option<PhpString> {
+        match self.table.get(&Key::Int(position))?.as_ref() {
+            ValueRef::Str(name) => Some(*name),
+            _ => None,
+        }
+    }
+
+    /// `ZEND_HASH_FOREACH_PTR(map, name)` counting to the first name
+    /// equal to `name`: the position its placeholder took.
+    pub(crate) fn position(&self, name: &[u8]) -> Option<usize> {
+        let mut at = 0;
+        let mut position = 0;
+        while let Some((bucket, _, value)) = self.table.live_from(at) {
+            if matches!(value.as_ref(), ValueRef::Str(s) if s.as_bytes() == name) {
+                return Some(position);
+            }
+            position += 1;
+            at = bucket + 1;
+        }
+        None
+    }
+
+    /// `zend_hash_destroy` and `FREE_HASHTABLE`: each name released, then
+    /// the table.
+    pub fn give_up(self, req: &mut Request) {
+        self.table.give_up(req);
+    }
 }
 
 /// `php_pdo_parse_data_source`: each `name=value;` of the DSN found

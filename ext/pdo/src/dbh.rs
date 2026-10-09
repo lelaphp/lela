@@ -1981,9 +1981,7 @@ impl PDO {
             dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None));
         let owner = instantiate(req, this, class, args.is_some(), query)?;
         let stmt = *owner;
-        if let Some(s) = stmt.native_mut::<Stmt>(req) {
-            s.active = crate::stmt::Active::Same;
-        }
+        crate::stmt::set_active(req, stmt, None);
         let prepared = with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, None)));
         let prepared = match prepared {
             Ok(Ok(prepared)) => prepared,
