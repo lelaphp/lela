@@ -2480,7 +2480,8 @@ impl Ops for Stdio {
     /// was bad, `EBADF`; the
     /// stat cache cleared after it, since the file's atime moved.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        let read = self.file.as_mut()?.read(buf);
+        let file = self.file.as_mut()?;
+        let read = req.blocking(|| file.read(buf));
         req.forget_stats();
         match read {
             Ok(0) => {

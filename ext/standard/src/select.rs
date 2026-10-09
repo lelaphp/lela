@@ -294,18 +294,19 @@ fn stream_select(
         }
     }
     let [read_set, write_set, except_set] = &sets;
-    let (retval, ready) = match crate::ffi::select([read_set, write_set, except_set], timeout) {
-        Ok(answered) => answered,
-        Err(error) => {
-            let text = format!(
-                "Unable to select [{}]: {} (max_fd={max_fd})",
-                error.raw_os_error().unwrap_or(0),
-                req.os_error_text(error.raw_os_error().unwrap_or(0))
-            );
-            docref(req, Level::Warning, &text);
-            return Ok(OrFalse::False);
-        }
-    };
+    let (retval, ready) =
+        match req.blocking(|| crate::ffi::select([read_set, write_set, except_set], timeout)) {
+            Ok(answered) => answered,
+            Err(error) => {
+                let text = format!(
+                    "Unable to select [{}]: {} (max_fd={max_fd})",
+                    error.raw_os_error().unwrap_or(0),
+                    req.os_error_text(error.raw_os_error().unwrap_or(0))
+                );
+                docref(req, Level::Warning, &text);
+                return Ok(OrFalse::False);
+            }
+        };
     for ((target, array), set) in [&read, &write, &except]
         .into_iter()
         .zip([r_array, w_array, e_array])

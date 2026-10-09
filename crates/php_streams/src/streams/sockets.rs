@@ -474,8 +474,12 @@ impl Ops for Socket {
             dont_wait = has_buffered_data || self.timeout == Some(Duration::ZERO);
             if !dont_wait {
                 self.timeout_event = false;
+                let timeout = self.timeout;
                 loop {
-                    match crate::api::net::poll_fd(sock.fd(), Readiness::Readable, self.timeout) {
+                    let polled = req.blocking(|| {
+                        crate::api::net::poll_fd(sock.fd(), Readiness::Readable, timeout)
+                    });
+                    match polled {
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Ok(true) | Err(_) => break,
                         Ok(false) => {
@@ -489,7 +493,7 @@ impl Ops for Socket {
         let read = if dont_wait {
             Socket::read_now(sock, buf)
         } else {
-            sock.read(buf)
+            req.blocking(|| sock.read(buf))
         };
         match read {
             Ok(0) => {
