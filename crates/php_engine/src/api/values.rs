@@ -1036,8 +1036,8 @@ impl ArrayIter {
 /// table or one the class keeps by the owner `GC_TRY_ADDREF` takes, or
 /// a table built for the reader by its one owner, php's `*is_temp`.
 /// [`walk::properties`] walks it; [`HeldProperties::release`] gives it
-/// back, after the reader has cleared its recursion guard, as php
-/// releases it after `ZEND_GUARD_OR_GC_UNPROTECT_RECURSION`.
+/// back where php's reader calls `zend_release_properties`, before or
+/// after it clears its recursion guard as that reader does.
 #[derive(Debug)]
 #[must_use = "the table is held until it is released"]
 pub struct HeldProperties {
