@@ -576,8 +576,9 @@ fn to_zval_object_ex(
             };
             soap_add_xml_ref(req, cx, &ret, data);
             redo_any = get_zval_property(req, &ret, b"any").is_some();
-            // `zobj->ce = ce` on what the base made; where either class
-            // lays down a slot the object keeps its class here (#2399).
+            // `zobj->ce = ce` on what the base made, as far as
+            // `PhpObject::set_class` takes it; an object it does not
+            // take keeps its class here (#2399).
             if ce != std
                 && let Some(o) = ret.as_object()
                 && o.class() != ce
