@@ -24,7 +24,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::{Table, cell, outlived, standing};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, overlaps};
 use crate::phpt::row::{Row, Target};
 use crate::phpt::{self, Root, Subset};
 use crate::reading::Reading;
@@ -263,7 +263,8 @@ fn inside(manifest: &Manifest) -> BTreeSet<PathBuf> {
 }
 
 /// The suites outside parity: every one `[parity] out` names, under its
-/// ruling, whether a reading measured it or not; then the suite of each
+/// one ruling (`Parity::hold` refuses a suite ruled twice or inside
+/// another, #1930), whether a reading measured it or not; then the suite of each
 /// place nothing owns, a run a reading measured or a subset of the pinned
 /// tree's corpus, by the suite its first two segments name under `ext/` or
 /// `sapi/`, as not built.
@@ -307,11 +308,10 @@ fn outside<'a>(
 /// or around a row's name or subset, and re-judges this section's list by
 /// it (#1865).
 fn owned(manifest: &Manifest, inside: &BTreeSet<PathBuf>, place: &Path) -> bool {
-    let overlaps = |owner: &Path| place.starts_with(owner) || owner.starts_with(place);
-    inside.iter().any(|suite| overlaps(suite))
+    inside.iter().any(|suite| overlaps(place, suite))
         || manifest.crates.iter().any(|krate| {
-            overlaps(Path::new(&krate.name))
-                || krate.subsets().iter().any(|subset| overlaps(subset))
+            overlaps(place, Path::new(&krate.name))
+                || krate.subsets().iter().any(|subset| overlaps(place, subset))
         })
 }
 

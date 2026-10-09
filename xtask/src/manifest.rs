@@ -101,33 +101,54 @@ pub(crate) struct RuledOut {
 }
 
 impl Parity {
-    /// Refuse a suite ruled out that a `[[crate]]` row's subsets own,
+    /// Refuse a suite ruled out twice, or inside or around another ruled
+    /// suite, naming both entries and their rulings: a suite is ruled out
+    /// once, under one ruling, so every reader names it once (#1930). Then
+    /// refuse a suite ruled out that a `[[crate]]` row's subsets own,
     /// naming both: a suite is measured or ruled out, never both. A suite
     /// inside a row's subset is the row's, and so is a subset inside a
     /// suite.
     fn hold(&self, crates: &[Crate]) -> Result<()> {
-        for ruled in &self.out {
-            for suite in &ruled.suites {
-                let owned = crates.iter().find_map(|krate| {
-                    krate
-                        .subsets()
-                        .into_iter()
-                        .find(|subset| suite.starts_with(subset) || subset.starts_with(suite))
-                        .map(|subset| (krate, subset))
-                });
-                if let Some((krate, subset)) = owned {
-                    bail!(
-                        "[parity] out rules {} out under {}, and the [[crate]] row {} owns {} among its subsets; a suite parity does not count is no row's to measure",
-                        suite.display(),
-                        ruled.ruling,
-                        krate.name,
-                        subset.display()
-                    );
-                }
+        let ruled: Vec<(&Path, Ticket)> = self
+            .out
+            .iter()
+            .flat_map(|out| out.suites.iter().map(|suite| (suite.as_path(), out.ruling)))
+            .collect();
+        for (at, &(suite, ruling)) in ruled.iter().enumerate() {
+            if let Some((other, under)) =
+                ruled[..at].iter().find(|(other, _)| overlaps(suite, other))
+            {
+                bail!(
+                    "[parity] out rules {} out under {under}, and {} under {ruling}; a suite is ruled out once, under one ruling, never twice or inside another",
+                    other.display(),
+                    suite.display()
+                );
+            }
+            let owned = crates.iter().find_map(|krate| {
+                krate
+                    .subsets()
+                    .into_iter()
+                    .find(|subset| overlaps(suite, subset))
+                    .map(|subset| (krate, subset))
+            });
+            if let Some((krate, subset)) = owned {
+                bail!(
+                    "[parity] out rules {} out under {ruling}, and the [[crate]] row {} owns {} among its subsets; a suite parity does not count is no row's to measure",
+                    suite.display(),
+                    krate.name,
+                    subset.display()
+                );
             }
         }
         Ok(())
     }
+}
+
+/// Whether `a` and `b` are one place or one is a directory inside the
+/// other, component by component: the one rule parity's suites, rulings
+/// and rows overlap by, which `hold` and `status::parity::owned` both read.
+pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
 }
 
 /// `[oracle]`: the only place the manifest says where the pin is.
