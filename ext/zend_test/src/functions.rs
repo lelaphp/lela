@@ -981,6 +981,68 @@ fn throwing_resource(req: &mut Request) -> ResourceType {
 
 /// `le_throwing_resource_dtor`: `Exception`, "Throwing resource
 /// destructor called", left pending where the release stood.
+///
+/// Released at the request's end, by `zend_close_rsrc_list`, no frame
+/// stands to take it: the handler `set_exception_handler()` set is
+/// handed it, as `zend_throw_exception_internal` hands it with
+/// `EG(current_execute_data)` empty, and the throwable names no file.
+///
+/// ```php
+/// set_exception_handler(function (Throwable $e) {
+///     echo $e::class, ": ", $e->getMessage(), " in ", $e->getFile(), ":", $e->getLine(), "\n";
+/// });
+/// $a = zend_test_create_throwing_resource();
+/// $b = zend_test_create_throwing_resource();
+/// echo "end\n";
+/// ```
+/// ```expect
+/// end
+/// Exception: Throwing resource destructor called in [no active file]:0
+/// Exception: Throwing resource destructor called in [no active file]:0
+/// ```
+///
+/// A handler that throws is the uncaught fatal, and php's
+/// `zend_bailout` out of it leaves the handler taken down: the next resource's throwable
+/// is rendered uncaught, and the walk goes on after each.
+///
+/// ```php
+/// set_exception_handler(function (Throwable $e) {
+///     echo "handler: ", $e->getMessage(), "\n";
+///     throw new Exception('Caught');
+/// });
+/// $a = zend_test_create_throwing_resource();
+/// $b = zend_test_create_throwing_resource();
+/// ```
+/// ```expect exit=255
+/// handler: Throwing resource destructor called
+///
+/// Fatal error: Uncaught Exception: Caught in %s:4
+/// Stack trace:
+/// #0 [internal function]: {closure:%s:2}(Object(Exception))
+/// #1 {main}
+///   thrown in %s on line 4
+///
+/// Fatal error: Uncaught Exception: Throwing resource destructor called in [no active file]:0
+/// Stack trace:
+/// #0 {main}
+///   thrown in [no active file] on line 0
+/// ```
+///
+/// Released with a returning or an unwinding frame's variables, it is
+/// raised with the caller current, as `zend_leave_helper` moves
+/// `EG(current_execute_data)` before `i_free_compiled_variables`: the
+/// caller's line, and the frame left off the trace.
+///
+/// ```php
+/// function f() { $r = zend_test_create_throwing_resource(); return 1; }
+/// function u() { $r = zend_test_create_throwing_resource(); throw new LogicException("first"); }
+/// try { f(); } catch (Exception $e) { echo $e->getLine(), " ", $e->getTraceAsString(), "\n"; }
+/// try { u(); } catch (Exception $e) { echo $e->getLine(), " ", $e->getTraceAsString(), " ", $e->getPrevious()->getLine(), "\n"; }
+/// ```
+/// ```expect
+/// 4 #0 {main}
+/// 5 #0 {main} 3
+/// ```
 fn throw_from_dtor(req: &mut Request, _resource: Resource) -> Result<(), Thrown> {
     Err(throw(
         req,

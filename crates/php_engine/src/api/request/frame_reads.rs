@@ -216,26 +216,21 @@ impl<'a> FrameView<'a> {
     pub fn caller(&self) -> Option<FrameView<'a>> {
         let mut stack = self.stack;
         let mut vm = self.vm;
-        let mut at = self.at.0 as usize;
-        loop {
-            if let Some(lower) = vm.below(at) {
-                at = lower;
-            } else {
-                stack += 1;
-                vm = self.req.executions().nth(stack)?.1;
-                at = vm.frames().len();
-                continue;
+        let mut above = self.at.0 as usize;
+        let at = loop {
+            if let Some(lower) = vm.below(above) {
+                break lower;
             }
-            let frame = FrameRef(u32::try_from(at).ok()?);
-            if vm.at(frame).is_some_and(|state| !state.leaving) {
-                return Some(FrameView {
-                    req: self.req,
-                    stack,
-                    vm,
-                    at: frame,
-                });
-            }
-        }
+            stack += 1;
+            vm = self.req.executions().nth(stack)?.1;
+            above = vm.frames().len();
+        };
+        Some(FrameView {
+            req: self.req,
+            stack,
+            vm,
+            at: FrameRef(u32::try_from(at).ok()?),
+        })
     }
 }
 
@@ -537,9 +532,7 @@ impl Request {
     /// on a fiber whose callable is a native the resumer's.
     pub(crate) fn innermost_frame_view(&self) -> Option<FrameView<'_>> {
         self.executions().enumerate().find_map(|(stack, (_, vm))| {
-            let at = vm
-                .chained()
-                .find(|&at| vm.frames().get(at).is_some_and(|state| !state.leaving))?;
+            let at = vm.innermost_at()?;
             Some(FrameView {
                 req: self,
                 stack,

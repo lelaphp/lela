@@ -919,14 +919,14 @@ impl Request {
     /// frame, and nothing while a native is being served above it or
     /// no frame stands.
     pub(crate) fn current_user_frame(&self) -> Option<FrameRef> {
-        let innermost = self.vm.innermost()?;
+        let at = self.vm.innermost_at()?;
+        let innermost = self.vm.frames().get(at)?;
         let floor = usize::try_from(innermost.calls_below).unwrap_or(usize::MAX);
         let serving = self.vm.calls().get(floor..).is_some_and(|above| {
             above
                 .iter()
                 .any(|call| call.stage == exec::CallStage::Serving)
         });
-        let at = self.vm.frames().len().checked_sub(1)?;
         (!serving).then(|| FrameRef(u32::try_from(at).unwrap_or(u32::MAX)))
     }
 
