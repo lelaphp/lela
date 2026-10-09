@@ -684,6 +684,105 @@ fn a_port_taken_before_the_master_binds_it_is_given_up_for_another() {
     assert_eq!(lines, QUIT_AT_DEBUG);
 }
 
+/// What a request answered and the line the master logged for the child
+/// that served it, the child sent `SIGQUIT` on its own, as a master
+/// finishing sends it, while the request runs (`busy`) or once it is
+/// served and the child waits in `accept`.
+fn quit_child(name: &str, busy: bool) -> (String, String) {
+    let dir = tree(name);
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    let pid = dir.join("pid");
+    let script = dir.join("index.php");
+    std::fs::write(
+        &script,
+        format!(
+            "<?php file_put_contents('{}', getmypid()); {} echo 'served';",
+            pid.display(),
+            if busy { "usleep(500000);" } else { "" }
+        ),
+    )
+    .unwrap();
+    let mut master = php_fpm()
+        .args(["-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stream = connect(&socket, Instant::now());
+    let served =
+        std::thread::spawn(move || stream.map(|s| response(s, &script)).unwrap_or_default());
+    let started = Instant::now();
+    let mut child = String::new();
+    while child.is_empty() && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(10));
+        child = std::fs::read_to_string(&pid).unwrap_or_default();
+    }
+    let body = if busy {
+        Command::new("kill").args(["-QUIT", &child]).status().ok();
+        served.join().unwrap()
+    } else {
+        let body = served.join().unwrap();
+        Command::new("kill").args(["-QUIT", &child]).status().ok();
+        body
+    };
+    let log = dir.join("fpm.log");
+    let exited = format!("child {child} exited");
+    let started = Instant::now();
+    let mut line = None;
+    while line.is_none() && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+        line = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.contains(&exited))
+            .and_then(|l| l.split_once("] "))
+            .map(|(_, rest)| rest.to_owned());
+    }
+    Command::new("kill")
+        .args(["-TERM", &master.id().to_string()])
+        .status()
+        .ok();
+    master.wait().ok();
+    std::fs::remove_dir_all(&dir).ok();
+    let body = String::from_utf8_lossy(&body);
+    let body = body
+        .rsplit("\r\n\r\n")
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    (body, line.unwrap_or_default())
+}
+
+/// A child sent `SIGQUIT` as it waits in `accept` ends on its own with
+/// code 0, as the oracle's does, and never aborts (#2400): the listening
+/// socket its handler closes is closed by nothing else.
+#[test]
+fn a_child_sent_sigquit_while_it_waits_exits_with_code_0() {
+    let (body, line) = quit_child("quit-idle", false);
+    assert_eq!(body, "served");
+    assert!(
+        line.starts_with("NOTICE: [pool www] child ")
+            && line.contains(" exited with code 0 after "),
+        "{line}"
+    );
+}
+
+/// A child sent `SIGQUIT` mid-request serves the request, then ends with
+/// code 0, as the oracle's does (#2400).
+#[test]
+fn a_child_sent_sigquit_mid_request_serves_it_and_exits_with_code_0() {
+    let (body, line) = quit_child("quit-busy", true);
+    assert_eq!(body, "served");
+    assert!(
+        line.starts_with("NOTICE: [pool www] child ")
+            && line.contains(" exited with code 0 after "),
+        "{line}"
+    );
+}
+
 #[test]
 fn a_request_body_file_that_does_not_open_is_a_warning_the_pool_logs() {
     let dir = tree("body-file");
