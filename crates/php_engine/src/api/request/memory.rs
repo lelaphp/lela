@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
 use php_heap::{Arr, Fatal, Heap, Intern, Ref, SortEntry, ZvalRef};
 
+use crate::api::abi::{Beneath, chain};
 use crate::api::raising::Thrown;
 use crate::api::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, adopted};
 
@@ -492,15 +493,16 @@ impl Request {
         self.heap.unobserve_allocations(at)
     }
 
-    /// `gc_collect_cycles()` through php's pointer: the top link the
-    /// bundle supplied ([`ExtensionBuilder::gc_collect`]), or with none
-    /// `zend_gc_collect_cycles` over the request's heap (design §5.12);
-    /// the values the collection freed, as php 8.5 counts them.
+    /// `gc_collect_cycles()` through php's pointer: the chain the
+    /// bundle supplied entered from the top
+    /// ([`ExtensionBuilder::gc_collect`]), with `zend_gc_collect_cycles`
+    /// over the request's heap beneath every link (design §5.12); the
+    /// values the collection freed, as php 8.5 counts them.
     ///
     /// [`ExtensionBuilder::gc_collect`]: crate::api::abi::ExtensionBuilder::gc_collect
     pub fn gc_collect(&mut self) -> i64 {
         let shared = Arc::clone(&self.shared);
-        crate::supplied::GcBeneath(shared.supplied.gc_collect.links()).collect(self)
+        Beneath::<chain::GcCollect>::top(shared.supplied.gc_collect.links(), ()).serve(self)
     }
 
     /// `zend_gc_collect_cycles`, the heap's own collection beneath every

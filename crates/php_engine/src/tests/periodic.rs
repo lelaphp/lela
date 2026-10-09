@@ -63,14 +63,14 @@ macro_rules! sampling {
                     noted(&$seen).interrupt = Some(req.interrupt().clone());
                     Ok(())
                 })
-                .interrupt(|req| {
+                .interrupt(|req, beneath| {
                     if let Some(periodic) = req.state::<Sampler>().0 {
                         match req.periods_elapsed(periodic) {
                             0 => {}
                             periods => noted(&$seen).periods.push(periods),
                         }
                     }
-                    Ok(())
+                    beneath.serve(req)
                 })
                 .rshutdown(|req| noted(&$seen).at_rshutdown = req.interrupt().holders())
                 .build("sampler")])

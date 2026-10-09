@@ -12,8 +12,10 @@ use php_compile::{CompileError, SourceKind};
 use php_heap::Fatal;
 use php_unit::Unit;
 
+use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
 use crate::exec::IncludeKind;
+use crate::supplied::chain::StringArgs;
 
 use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
 
@@ -54,18 +56,12 @@ impl Request {
         self.included_files.paths()
     }
 
-    /// The source an extension's `zend_compile_file` answers for `path`
-    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]), the first
-    /// link to answer from the top of the chain; `None` where none
-    /// replaces it.
+    /// The source the `zend_compile_file` chain answers for `path`
+    /// ([`crate::api::abi::ExtensionBuilder::compile_file`]), entered
+    /// from the top; `None` where no link replaces it.
     pub(crate) fn compile_file_source(&mut self, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.supplied.compile_file.top_down() {
-            if let Some(source) = hook(self, path)? {
-                return Ok(Some(source));
-            }
-        }
-        Ok(None)
+        Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), path).serve(self)
     }
 
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
@@ -521,14 +517,10 @@ impl Request {
         position: php_compile::syntax::Position,
     ) -> Result<Result<Arc<Unit>, CompileError>, Thrown> {
         let shared = Arc::clone(&self.shared);
-        let links = shared.supplied.compile_string.links();
-        let top = crate::supplied::StringBeneath {
-            links,
-            source: code,
-            name,
-            position,
-        };
-        Ok(top.compile(self, code)?.0)
+        let args = StringArgs::new(code, name, position);
+        let top =
+            Beneath::<chain::CompileString>::top(shared.supplied.compile_string.links(), args);
+        Ok(top.serve(self)?.0)
     }
 
     /// `compile_string(source, name, position)` and `zend_execute` of
@@ -649,20 +641,24 @@ impl Request {
             .map_err(|refused| self.refused_include(&refused, name, SourceKind::EVAL))
     }
 
-    /// `zend_resolve_path`: each extension's override asked first, in
-    /// bundle order ([`crate::api::abi::ExtensionBuilder::resolve_path`]),
-    /// then the stream layer's `php_resolve_path` over the ini's
-    /// `include_path` ([`crate::layer::StreamHooks::resolve_path`]), or,
-    /// with no stream layer, Zend's own `VCWD_REALPATH`. The `Err` is the
-    /// last attempt's reason, which the stream warning prints, or the
-    /// throwable an override or a wrapper's `url_stat` raised.
+    /// `zend_resolve_path`: the chain of the extensions' overrides
+    /// entered from the top
+    /// ([`crate::api::abi::ExtensionBuilder::resolve_path`]), with the
+    /// engine's own resolution beneath every link
+    /// ([`Request::resolve_path_own`]). The `Err` is the last attempt's
+    /// reason, which the stream warning prints, or the throwable an
+    /// override or a wrapper's `url_stat` raised.
     pub fn resolve_path(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.supplied.resolve_path.top_down() {
-            if let Some(path) = hook(self, written).map_err(Unresolved::Threw)? {
-                return Ok(path);
-            }
-        }
+        Beneath::<chain::ResolvePath>::top(shared.supplied.resolve_path.links(), written)
+            .serve(self)
+    }
+
+    /// The `zend_resolve_path` beneath every override: the stream layer's
+    /// `php_resolve_path` over the ini's `include_path`
+    /// ([`crate::layer::StreamHooks::resolve_path`]), or, with no stream
+    /// layer, Zend's own `VCWD_REALPATH`.
+    pub(crate) fn resolve_path_own(&mut self, written: &[u8]) -> Result<Vec<u8>, Unresolved> {
         match self.stream_hooks() {
             Some(hooks) => (hooks.resolve_path)(self, written),
             // `zend_resolve_path_func`: `VCWD_REALPATH` and nothing else.

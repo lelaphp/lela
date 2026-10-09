@@ -32,8 +32,8 @@
 use std::fmt::Write as _;
 
 use php_ext::abi::{
-    ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers, Opcodes,
-    Refusal, Start,
+    Beneath, ExtensionBuilder, FiberStatus, IniStage, Observed, ObservedFiber, ObserverHandlers,
+    Opcodes, Refusal, Start, chain,
 };
 use php_ext::call::{Function, lookup_function};
 use php_ext::coerce::type_name;
@@ -225,14 +225,17 @@ fn observed_opcodes(start: &Start) -> Opcodes {
 
 /// `observer_show_opcode_in_user_handler`: under `show_output`,
 /// `<!-- opcode: 'ZEND_ECHO' in user handler -->` at the depth the
-/// frames stand, then the opcode's handler, which always runs.
-fn show_opcode_in_user_handler(observed: &mut Observed<'_>, opcode: &'static str) {
+/// frames stand, then the opcode's handler, which always runs. php's
+/// is set over whatever handler stood and saves none
+/// (`Z/ext/zend_test/observer.c:28-35`), so the ones beneath are not
+/// served.
+fn show_opcode_in_user_handler(observed: &mut Observed<'_>, beneath: Beneath<'_, chain::Opcode>) {
     if !Switches::of(observed).show_output {
         return;
     }
     let mut line = indent(observed.state::<crate::State>().observer.depth);
     line.extend_from_slice(b"<!-- opcode: '");
-    line.extend_from_slice(opcode.as_bytes());
+    line.extend_from_slice(beneath.opcode().as_bytes());
     line.extend_from_slice(b"' in user handler -->\n");
     observed.write(&line);
 }

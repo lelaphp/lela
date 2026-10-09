@@ -6,6 +6,7 @@
 //! (`phar_create_or_parse_filename`, `phar_open_or_create_filename`).
 //! An error is php's message, `None` where php sets none.
 
+use php_ext::abi::{Beneath, chain};
 use php_ext::raising::Thrown;
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Owner, Value};
@@ -708,7 +709,7 @@ pub(crate) fn open_executed(
 /// says `.phar`, and no `://`, opened as an archive; a tar or zip one
 /// compiles from its `.phar/stub.php`, a whole-file compressed one from
 /// its decompressed bytes, under the file's own name, and any other
-/// file as it stands. The witness includes a tar-based archive built by
+/// file left to the one it saved, `phar_orig_compile_file`. The witness includes a tar-based archive built by
 /// hand, which the recipe's `phar.readonly` forbids `Phar` to write.
 ///
 /// ```php
@@ -727,7 +728,19 @@ pub(crate) fn open_executed(
 /// ```expect
 /// tar stub in compile-witness.phar.tar
 /// ```
-pub(crate) fn compile_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+pub(crate) fn compile_file(
+    req: &mut Request,
+    beneath: Beneath<'_, chain::CompileFile>,
+) -> Result<Option<Vec<u8>>, Thrown> {
+    match archive_source(req, beneath.path())? {
+        Some(source) => Ok(Some(source)),
+        None => beneath.serve(req),
+    }
+}
+
+/// The source [`compile_file`] compiles the archive at `path` from, or
+/// `None` where it is no archive phar serves.
+fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
     if path::find(path, b".phar").is_none() || path::find(path, b"://").is_some() {
         return Ok(None);
     }

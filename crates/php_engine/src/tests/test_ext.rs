@@ -31,9 +31,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::api::abi::{
-    Compiled, ErrorBeneath, ErrorNotice, Extension, ExtensionBuilder, FiberStatus, GcBeneath,
-    Observed, ObservedFiber, ObserverHandlers, Refusal, Start, Statement, StringBeneath,
-    ZendExtension,
+    Beneath, Compiled, ErrorNotice, Extension, ExtensionBuilder, FiberStatus, Observed,
+    ObservedFiber, ObserverHandlers, Refusal, Start, Statement, ZendExtension, chain,
 };
 use super::api::call::Function;
 use super::api::decl::{IniDecl, Name};
@@ -715,26 +714,30 @@ impl<const N: u8> TestExt<N> {
         Ok(())
     }
 
-    fn error(req: &mut Request, beneath: ErrorBeneath<'_>) {
+    fn error(req: &mut Request, beneath: Beneath<'_, chain::Error>) {
         let message = String::from_utf8_lossy(beneath.message()).into_owned();
         record(N, Phase::Error(message));
         beneath.serve(req);
     }
 
-    fn gc_collect(req: &mut Request, beneath: GcBeneath<'_>) -> i64 {
+    fn gc_collect(req: &mut Request, beneath: Beneath<'_, chain::GcCollect>) -> i64 {
         record(N, Phase::Collect);
-        let collected = beneath.collect(req);
+        let collected = beneath.serve(req);
         record(N, Phase::Collected(collected));
         collected
     }
 
-    fn thrown(req: &mut Request, throwable: PhpObject) {
-        record(N, Phase::Thrown(message_of(req, throwable)));
+    fn thrown(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
+        record(N, Phase::Thrown(message_of(req, beneath.throwable())));
+        beneath.serve(req);
     }
 
-    fn compile_string(req: &mut Request, beneath: StringBeneath<'_>) -> Result<Compiled, Thrown> {
+    fn compile_string(
+        req: &mut Request,
+        beneath: Beneath<'_, chain::CompileString>,
+    ) -> Result<Compiled, Thrown> {
         let source = String::from_utf8_lossy(beneath.source()).into_owned();
         record(N, Phase::CompileString(source));
-        beneath.compile(req, beneath.source())
+        beneath.serve(req)
     }
 }

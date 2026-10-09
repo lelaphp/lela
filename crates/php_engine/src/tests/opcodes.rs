@@ -13,7 +13,7 @@ use php_unit::decl::{IniDecl, Name};
 use super::observer::{scratch, serve_main};
 use super::stepped::Stepper;
 use super::test_ext::observed_name;
-use crate::api::abi::{Extension, ExtensionBuilder, Observed, Opcodes, Start};
+use crate::api::abi::{Beneath, Extension, ExtensionBuilder, Observed, Opcodes, Start, chain};
 use crate::engine::{Engine, EngineBuilder};
 use crate::observer::{Declared, Untold};
 use crate::tier::{Loop, Nop, Opcode, execute};
@@ -64,7 +64,8 @@ impl<const N: u8> Shows<N> {
     /// `<!-- opcode: 'ZEND_ECHO' in user handler -->` for the first
     /// extension, as `zend_test` writes it; the others name themselves
     /// and where the frame stands.
-    fn told(observed: &mut Observed<'_>, opcode: &'static str) {
+    fn told(observed: &mut Observed<'_>, beneath: Beneath<'_, chain::Opcode>) {
+        let opcode = beneath.opcode();
         let line = if N == 0 {
             format!("<!-- opcode: '{opcode}' in user handler -->\n")
         } else {
@@ -73,6 +74,7 @@ impl<const N: u8> Shows<N> {
             format!("<!-- {N}: '{opcode}' {name}:{at} -->\n")
         };
         observed.write(line.as_bytes());
+        beneath.serve(observed);
     }
 }
 

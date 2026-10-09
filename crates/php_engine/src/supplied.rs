@@ -10,7 +10,9 @@
 //!   keeps as the one beneath (`zend_interrupt_function`,
 //!   `zend_compile_file`, `zend_compile_string`, `zend_resolve_path`,
 //!   `zend_error_cb`, `gc_collect_cycles`, `zend_throw_exception_hook`,
-//!   `zend_post_startup_cb`, `php_rfc1867_callback`);
+//!   `zend_post_startup_cb`, `php_rfc1867_callback`,
+//!   `zend_user_opcode_handlers`), every one entered from the top with
+//!   each link handed the ones beneath ([`chain`]);
 //! - [`Listed`]: a list each supplier appends to (`PG(tick_functions)`,
 //!   `zend_observers_fcall_list`, the observer's three notice lists and
 //!   its three fiber lists, the statement handlers of `zend_extensions`);
@@ -43,12 +45,14 @@ use crate::api::abi::{
     InterruptHook, ObserverInit, PostStartupHook, ResolvePathHook, Shell, ThrownHook, TicksHook,
     TreatDataHook, UploadHook,
 };
-use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ExtensionId, Request};
-use crate::api::values::PhpString;
 use crate::layer::StreamHooks;
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared, OpcodeObserver};
 use crate::statement::StatementHandler;
+
+pub(crate) mod chain;
+
+pub use chain::{Beneath, ChainKind};
 
 /// A value one extension hands the extension that reads every value of
 /// its type ([`ExtensionBuilder::register`](crate::api::abi::ExtensionBuilder::register)).
@@ -193,44 +197,40 @@ impl Suppliers {
 /// built: each kind as php's rule for it combines every supplier.
 #[derive(Default)]
 pub(crate) struct Resolved {
-    /// `zend_interrupt_function`, served from the top, every link, as
-    /// pcntl's dispatches and then calls the one it saved
+    /// `zend_interrupt_function` ([`chain::Interrupt`]): pcntl's link
+    /// dispatches and then calls the one it saved
     /// (`Z/ext/pcntl/pcntl.c:1922-1927`).
     pub(crate) interrupt: Chain<InterruptHook>,
-    /// `zend_compile_file`, from the top until a link answers, as
-    /// phar's falls through to `phar_orig_compile_file` for a file it
-    /// does not serve (`Z/ext/phar/phar.c:3248-3256`).
+    /// `zend_compile_file` ([`chain::CompileFile`]): phar's link falls
+    /// through to `phar_orig_compile_file` for a file it does not serve
+    /// (`Z/ext/phar/phar.c:3248-3256`).
     pub(crate) compile_file: Chain<CompileFileHook>,
-    /// `zend_compile_string` (`Z/Zend/zend_compile.c:88`), from the top,
-    /// each link handed the ones beneath ([`StringBeneath`]): the tracers' and the profilers'
-    /// links do their work on both sides of the one they saved, as
+    /// `zend_compile_string` ([`chain::CompileString`]): the tracers' and
+    /// the profilers' links do their work on both sides of the one they
+    /// saved, as
     /// dd-trace's `zai_interceptor_compile_string` notes the tables'
     /// ends, compiles and resolves what the string declared.
     pub(crate) compile_string: Chain<CompileStringHook>,
-    /// `zend_error_cb` (`Z/Zend/zend.c:90`), from the top, each link
-    /// handed the ones beneath ([`ErrorBeneath`]), php's own `php_error_cb` beneath every link:
-    /// most links serve before the one they saved, as New Relic's
+    /// `zend_error_cb` ([`chain::Error`]): most links serve before the
+    /// one they saved, as New Relic's
     /// `nr_php_error_cb` records and then calls it, but soap's
     /// `soap_error_handler` serves a client's fatal itself, throwing its
     /// fault, and wraps a server's in its own response
-    /// (`Z/ext/soap/soap.c:1885-1966`), so no walk from one end serves
-    /// every link.
+    /// (`Z/ext/soap/soap.c:1885-1966`).
     pub(crate) error: Chain<ErrorHook>,
-    /// The `gc_collect_cycles` pointer (`Z/Zend/zend_gc.c:254`), from the
-    /// top, each link handed the ones beneath ([`GcBeneath`]): a link measures the collection it
-    /// serves, as xdebug's `xdebug_gc_collect_cycles` reads the status,
+    /// The `gc_collect_cycles` pointer ([`chain::GcCollect`]): a link
+    /// measures the collection it serves, as xdebug's `xdebug_gc_collect_cycles` reads the status,
     /// the time and the memory before the one it saved and records the
     /// collection after it.
     pub(crate) gc_collect: Chain<GcCollectHook>,
-    /// `zend_throw_exception_hook` (`Z/Zend/zend_exceptions.c:60`),
-    /// from the top, every link: nothing of php's stands beneath the
-    /// links, and each serves before the one it saved, as dd-trace's
+    /// `zend_throw_exception_hook` ([`chain::Throw`]): each link serves
+    /// before the one it saved, as dd-trace's
     /// `zai_interceptor_exception_hook` and the Datadog profiler's
     /// `exception_profiling_throw_exception_hook` do; xdebug's installs
     /// over whatever stood and saves none.
     pub(crate) thrown: Chain<ThrownHook>,
-    /// `zend_resolve_path`, from the top until a link answers, as
-    /// phar's falls through to `phar_save_resolve_path`
+    /// `zend_resolve_path` ([`chain::ResolvePath`]): phar's link falls
+    /// through to `phar_save_resolve_path` for a path it does not find
     /// (`Z/ext/phar/phar.c:3239-3246`).
     pub(crate) resolve_path: Chain<ResolvePathHook>,
     /// `zend_stream_open_function` and the `zend_resolve_path` beneath
@@ -238,14 +238,13 @@ pub(crate) struct Resolved {
     /// streams once (`Z/main/main.c`); the stream layer's, handed by the
     /// extension that registers the plain files wrapper.
     pub(crate) stream_hooks: Last<StreamHooks>,
-    /// `zend_post_startup_cb`, from the bottom until a link does not
-    /// serve, as opcache's calls the one it saved before its own work
-    /// and fails where it failed (`Z/ext/opcache/ZendAccelerator.c:3234-3241`);
-    /// ffi's serves its own first (`Z/ext/ffi/ffi.c:5461-5476`), work
-    /// that cannot fail, so one walk is both links'.
+    /// `zend_post_startup_cb` ([`chain::PostStartup`]): opcache's link
+    /// calls the one it saved before its own work and fails where it
+    /// failed (`Z/ext/opcache/ZendAccelerator.c:3234-3241`); ffi's serves
+    /// its own first (`Z/ext/ffi/ffi.c:5461-5476`).
     pub(crate) post_startup: Chain<PostStartupHook>,
-    /// `php_rfc1867_callback`, from the bottom, every link, as session's
-    /// calls the one it saved first and keeps its answer
+    /// `php_rfc1867_callback` ([`chain::Upload`]): session's link calls
+    /// the one it saved first and keeps its answer
     /// (`Z/ext/session/session.c:3174-3176`).
     pub(crate) upload: Chain<UploadHook>,
     /// `PG(tick_functions)`, as `php_add_tick_function` appends and
@@ -280,9 +279,10 @@ pub(crate) struct Resolved {
     pub(crate) fiber_destroy: Listed<FiberHandler>,
     /// `zend_user_opcode_handlers`, one handler per opcode, which an
     /// extension that sets one over another's saves and calls after its
-    /// own, as xdebug's `xdebug_set_opcode_handler` does: from the top,
-    /// every link, each declaring at engine start the opcodes it
-    /// observes ([`crate::observer::ObservedOpcodes`]).
+    /// own, as xdebug's `xdebug_set_opcode_handler` does
+    /// ([`chain::Opcode`]): each link declaring at engine start the
+    /// opcodes it observes, which the engine's start makes the chain's
+    /// links ([`crate::observer::ObservedOpcodes`]).
     pub(crate) opcodes: Chain<OpcodeObserver>,
     /// `zend_extensions` as `ZEND_EXT_STMT` walks it, each one's
     /// `statement_handler` in the order they were registered
@@ -369,13 +369,10 @@ impl Resolved {
 }
 
 /// php's saved pointer: each supplier installs over the one before and
-/// keeps it as the one beneath. Which end a walk starts from is what
-/// php's links do with the one beneath: a link that serves before
-/// calling it is walked from the top, one that calls it first from the
-/// bottom, and a kind whose links do their work on both sides of it
-/// hands each link the ones beneath ([`Chain::links`]). php lets every
-/// link choose for itself; a kind here chooses once for all its links,
-/// by what the links php-src and the tools that override it install do.
+/// keeps it as the one beneath. The chain is entered from the top, each
+/// link handed the ones beneath ([`Beneath`]), so each link chooses
+/// where its work stands against them, as each of php's chooses where
+/// it calls the pointer it saved.
 pub(crate) struct Chain<H>(Vec<H>);
 
 impl<H: Copy> Chain<H> {
@@ -383,142 +380,17 @@ impl<H: Copy> Chain<H> {
         self.0.extend(hook);
     }
 
-    /// The links as php enters the chain: the last supplier's first.
-    pub(crate) fn top_down(&self) -> impl Iterator<Item = H> + '_ {
-        self.0.iter().rev().copied()
-    }
-
-    /// The links as their work is done where each calls the one beneath
-    /// before its own: the first supplier's first.
-    pub(crate) fn bottom_up(&self) -> impl Iterator<Item = H> + '_ {
-        self.0.iter().copied()
-    }
-
-    /// Every link, the first supplier's first, for a kind whose links
-    /// are each handed the ones beneath.
+    /// Every link, the first supplier's first: what [`Beneath::top`]
+    /// enters from the last.
     pub(crate) fn links(&self) -> &[H] {
         &self.0
     }
-}
-
-/// What a link of `gc_collect_cycles` holds of the pointer it saved:
-/// every link beneath it and, beneath them all, the heap's own
-/// collection, `zend_gc_collect_cycles` (design §5.12).
-#[derive(Clone, Copy)]
-pub struct GcBeneath<'a>(pub(crate) &'a [GcCollectHook]);
-
-impl GcBeneath<'_> {
-    /// The one beneath served: the next link down, or the heap's own
-    /// collection; the values the collection freed, as php 8.5 counts them.
-    pub fn collect(self, req: &mut Request) -> i64 {
-        match self.0.split_last() {
-            Some((link, beneath)) => link(req, GcBeneath(beneath)),
-            None => req.gc_collect_own(),
-        }
-    }
-}
-
-/// What a link of `zend_compile_string` holds of the pointer it saved:
-/// the string, the name it compiles under, and every link beneath it
-/// and, beneath them all, php's own `compile_string`.
-#[derive(Clone, Copy)]
-pub struct StringBeneath<'a> {
-    pub(crate) links: &'a [CompileStringHook],
-    pub(crate) source: &'a [u8],
-    pub(crate) name: &'a [u8],
-    /// Where `compile_string`'s scanner begins, after an open tag for an
-    /// `eval`.
-    pub(crate) position: php_compile::syntax::Position,
 }
 
 /// What a string's compile answered: the unit, or the compiler's
 /// refusal, which the engine raises where the string was to compile. A
 /// link of `zend_compile_string` answers what the one beneath answered.
 pub struct Compiled(pub(crate) Result<Arc<Unit>, CompileError>);
-
-impl<'a> StringBeneath<'a> {
-    /// The string the link was handed.
-    #[must_use]
-    pub fn source(&self) -> &'a [u8] {
-        self.source
-    }
-
-    /// The name the string compiles under, `eval()'d code` after the
-    /// file and line of the `eval`, or the CLI's `Command line code`.
-    #[must_use]
-    pub fn name(&self) -> &'a [u8] {
-        self.name
-    }
-
-    /// The one beneath served over `source`, the string handed or one
-    /// the link made: the next link down, or php's own compile.
-    pub fn compile(self, req: &mut Request, source: &[u8]) -> Result<Compiled, Thrown> {
-        match self.links.split_last() {
-            Some((link, links)) => link(
-                req,
-                StringBeneath {
-                    links,
-                    source,
-                    ..self
-                },
-            ),
-            None => Ok(Compiled(req.compile_string_own(
-                source,
-                self.name,
-                self.position,
-            ))),
-        }
-    }
-}
-
-/// What a link of `zend_error_cb` holds of the pointer it saved: the
-/// diagnostic, and every link beneath it and, beneath them all, php's
-/// own `php_error_cb`.
-#[derive(Clone, Copy)]
-pub struct ErrorBeneath<'a> {
-    pub(crate) links: &'a [ErrorHook],
-    pub(crate) level: Level,
-    pub(crate) bail: Bail,
-    pub(crate) string: PhpString,
-    pub(crate) message: &'a str,
-    pub(crate) file: &'a [u8],
-    pub(crate) line: u32,
-}
-
-impl<'a> ErrorBeneath<'a> {
-    /// The level the diagnostic was raised at.
-    #[must_use]
-    pub fn level(&self) -> Level {
-        self.level
-    }
-
-    /// The message, its bytes as raised.
-    #[must_use]
-    pub fn message(&self) -> &[u8] {
-        self.string.as_bytes()
-    }
-
-    /// The file the diagnostic names, `Unknown` where nothing executes.
-    #[must_use]
-    pub fn file(&self) -> &'a [u8] {
-        self.file
-    }
-
-    /// The line the diagnostic names.
-    #[must_use]
-    pub fn line(&self) -> u32 {
-        self.line
-    }
-
-    /// The one beneath served: the next link down, or php's own
-    /// `php_error_cb`, which stores, logs and displays the diagnostic.
-    pub fn serve(self, req: &mut Request) {
-        match self.links.split_last() {
-            Some((link, links)) => link(req, ErrorBeneath { links, ..self }),
-            None => req.php_error_cb(self),
-        }
-    }
-}
 
 /// Whether `php_error_cb` bails out of a level it cannot recover from,
 /// php's `E_DONT_BAIL` bit on the type it is handed: set by
@@ -657,15 +529,15 @@ mod tests {
         }
         let extensions = [
             ExtensionBuilder::default()
-                .interrupt(|_| {
+                .interrupt(|req, beneath| {
                     note("earlier");
-                    Ok(())
+                    beneath.serve(req)
                 })
                 .build("earlier"),
             ExtensionBuilder::default()
-                .interrupt(|_| {
+                .interrupt(|req, beneath| {
                     note("later");
-                    Ok(())
+                    beneath.serve(req)
                 })
                 .build("later"),
         ];
@@ -676,6 +548,51 @@ mod tests {
         assert_eq!(served(&LOG), ["later", "earlier"]);
     }
 
+    /// A link's work stands where it serves the one beneath, before it
+    /// or after it, and a link that does not serve it has answered for
+    /// every link under it, as php leaves each link to call the pointer
+    /// it saved where it will: `php_rfc1867_callback` here, the later
+    /// link serving the earlier first as session's does
+    /// (`Z/ext/session/session.c:3174-3176`), then one that answers
+    /// php's `FAILURE` alone.
+    #[test]
+    fn a_link_chooses_where_the_one_beneath_is_served() {
+        static LOG: Served = Mutex::new(Vec::new());
+        fn note(name: &'static str) {
+            if let Ok(mut log) = LOG.lock() {
+                log.push(name);
+            }
+        }
+        let earlier = ExtensionBuilder::default()
+            .upload(|_, _| {
+                note("earlier");
+                Ok(true)
+            })
+            .build("earlier");
+        let after = ExtensionBuilder::default()
+            .upload(|req, beneath| {
+                let went_on = beneath.serve(req)?;
+                note("after");
+                Ok(went_on)
+            })
+            .build("after");
+        let alone = ExtensionBuilder::default()
+            .upload(|_, _| {
+                note("alone");
+                Ok(false)
+            })
+            .build("alone");
+        let start = crate::api::request::Upload::Start { content_length: 0 };
+        let mut answers = Vec::new();
+        for extensions in [[earlier.clone(), after], [earlier, alone]] {
+            let engine = Engine::cli_builder().extensions(&extensions).build();
+            let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+            answers.push(req.upload_event(&start).ok());
+        }
+        assert_eq!(answers, [Some(true), Some(false)]);
+        assert_eq!(served(&LOG), ["earlier", "after", "alone"]);
+    }
+
     /// A chained kind whose link answers or passes, `zend_resolve_path`
     /// as phar's `phar_resolve_path` falls through to the one it saved
     /// (`Z/ext/phar/phar.c:3239-3246`): the later extension answers
@@ -684,10 +601,13 @@ mod tests {
     fn a_chained_kind_falls_through_to_the_one_beneath() {
         let extensions = [
             ExtensionBuilder::default()
-                .resolve_path(|_, _| Ok(Some(b"/beneath".to_vec())))
+                .resolve_path(|_, _| Ok(b"/beneath".to_vec()))
                 .build("earlier"),
             ExtensionBuilder::default()
-                .resolve_path(|_, written| Ok((written == b"a").then(|| b"/above".to_vec())))
+                .resolve_path(|req, beneath| match beneath.path() {
+                    b"a" => Ok(b"/above".to_vec()),
+                    _ => beneath.serve(req),
+                })
                 .build("later"),
         ];
         let engine = Engine::cli_builder().extensions(&extensions).build();
@@ -927,14 +847,17 @@ mod tests {
     fn a_minit_s_post_startup_link_is_asked_before_a_zend_extension_s() {
         let extensions = [
             zend(
-                ExtensionBuilder::default().post_startup(|req| {
-                    req.write_stderr(b"preloading\n");
-                    crate::api::abi::PostStartup::Preload(b"/nowhere".to_vec())
+                ExtensionBuilder::default().post_startup(|req, beneath| match beneath.serve(req) {
+                    crate::api::abi::PostStartup::Serve => {
+                        req.write_stderr(b"preloading\n");
+                        crate::api::abi::PostStartup::Preload(b"/nowhere".to_vec())
+                    }
+                    refused => refused,
                 }),
                 "opcache",
             ),
             ExtensionBuilder::default()
-                .post_startup(|req| {
+                .post_startup(|req, _| {
                     req.write_stderr(b"refused\n");
                     crate::api::abi::PostStartup::Refuse { status: -2 }
                 })
@@ -970,10 +893,10 @@ mod tests {
     /// leaves the earlier link and php's display unserved.
     #[test]
     fn an_error_link_serves_the_ones_beneath_where_it_will() {
-        use crate::api::abi::ErrorBeneath;
+        use crate::api::abi::{Beneath, chain};
         use crate::api::raising::Level;
         use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, record};
-        fn notices_kept(req: &mut Request, beneath: ErrorBeneath<'_>) {
+        fn notices_kept(req: &mut Request, beneath: Beneath<'_, chain::Error>) {
             let message = String::from_utf8_lossy(beneath.message()).into_owned();
             record(2, Phase::Error(message));
             if beneath.level() != Level::UserNotice {
@@ -1067,15 +990,18 @@ mod tests {
     /// throws is raised where the `eval` stands.
     #[test]
     fn a_string_compile_link_hands_the_ones_beneath_its_source() {
-        use crate::api::abi::{Compiled, StringBeneath};
+        use crate::api::abi::{Beneath, Compiled, chain};
         use crate::api::raising::Thrown;
         use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, record};
-        fn rewritten(req: &mut Request, beneath: StringBeneath<'_>) -> Result<Compiled, Thrown> {
+        fn rewritten(
+            req: &mut Request,
+            beneath: Beneath<'_, chain::CompileString>,
+        ) -> Result<Compiled, Thrown> {
             let source = String::from_utf8_lossy(beneath.source()).into_owned();
             record(6, Phase::CompileString(source));
             match beneath.source() {
                 b"refused;" => Err(crate::api::raising::throw(req, "Exception", "refused")),
-                _ => beneath.compile(req, b"echo 'b';"),
+                _ => beneath.with_source(b"echo 'b';").serve(req),
             }
         }
         let recording = Recording::start();
@@ -1110,13 +1036,14 @@ mod tests {
     /// (`Z/Zend/zend_fibers.c:641-646`).
     #[test]
     fn a_thrown_link_is_told_of_every_throw_before_the_unwind() {
-        use crate::api::values::PhpObject;
+        use crate::api::abi::{Beneath, chain};
         use crate::tests::test_ext::{Event::Ext, Phase, Recording, TestExt, message_of, record};
         const TYPE: &str = "strlen(): Argument #1 ($string) must be of type string, array given";
-        fn shown(req: &mut Request, throwable: PhpObject) {
-            let message = message_of(req, throwable);
+        fn shown(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
+            let message = message_of(req, beneath.throwable());
             req.write(format!("[{message}]").as_bytes());
             record(8, Phase::Thrown(message));
+            beneath.serve(req);
         }
         let recording = Recording::start();
         let extensions = [

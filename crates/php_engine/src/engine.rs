@@ -5675,7 +5675,7 @@ mod tests {
                 protection: 0,
                 file_cache: None,
             })
-            .post_startup(|req| {
+            .post_startup(|req, _| {
                 let script = req.ini_get(b"t.preload").unwrap_or_default().to_vec();
                 if script.is_empty() {
                     crate::api::abi::PostStartup::Serve
@@ -5844,7 +5844,7 @@ mod tests {
     #[test]
     fn a_refused_startup_serves_nothing() {
         let refusing = crate::api::abi::ExtensionBuilder::default()
-            .post_startup(|req| {
+            .post_startup(|req, _| {
                 req.write_stderr(b"refused\n");
                 crate::api::abi::PostStartup::Refuse { status: -2 }
             })
