@@ -561,7 +561,7 @@ enum Lookup {
 impl Lookup {
     /// What `callbacks` answers for `name` in `ns`, php's namespace where
     /// none is given.
-    fn of(callbacks: Option<&mut XPathCallbacks>, ns: Option<&[u8]>, name: &[u8]) -> Lookup {
+    fn of(callbacks: Option<&XPathCallbacks>, ns: Option<&[u8]>, name: &[u8]) -> Lookup {
         let namespace = match (ns, callbacks) {
             (_, None) => None,
             (None, Some(callbacks)) => callbacks.php_ns.as_deref(),
@@ -610,7 +610,8 @@ fn dispatch(
         Called::Custom { ns, name } => (Some(ns), name, operands),
     };
     let args = operand_values(req, proxy, operands)?;
-    let callable = match Lookup::of(at.get(req), mode_ns.as_deref(), &name) {
+    let callbacks = at.get(req).map(|callbacks| &*callbacks);
+    let callable = match Lookup::of(callbacks, mode_ns.as_deref(), &name) {
         Lookup::NoTable => Err(throw_error(req, "Error", "No callbacks were registered")),
         Lookup::Any => {
             let name_value = string(req, &name)?;
