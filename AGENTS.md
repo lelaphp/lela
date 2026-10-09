@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=56c045ab149a93bf545192094060678cf04db64e9acb1387cbe9ff4d58541bc3 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=6f41319c21f7cfa94df8172fefb82a57a8d9882d7b3ae1f33ee607ad5f274c93 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 36 |  | no reading |
 | harness | xtask.lock | 388 |  | no reading |
 
-<!-- /computed in=9f5836bc53538dff121ea1966aab8d50a73717897110a5beb8ff0919471343c1 out=ed2a2c497dbaca34acea4872b234be871a1348055f303b3e50a06df81e011cf1 -->
+<!-- /computed in=29a0fd1cbcb1a017377897ab86affa13b9626536507afbfa5c563dccc07e3f3b out=ed2a2c497dbaca34acea4872b234be871a1348055f303b3e50a06df81e011cf1 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -166,7 +166,7 @@ third-engine-design.md
 | harness.transcript |  | deny_pattern | no reading |
 | divergence.reason |  | check | no reading |
 
-<!-- /computed in=4871fec7add0851df2973d6311de7500b25da5d66d0f57539c3ee5d26df46955 out=f32f5aa3257d9c258d9f7f780a1c29cca3180823dcf6cefde7b27d6ff1d707b7 -->
+<!-- /computed in=d8743eca695e010ea5a479f91d463340c22b1effaca84dbb5fee1d86e9701812 out=f32f5aa3257d9c258d9f7f780a1c29cca3180823dcf6cefde7b27d6ff1d707b7 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
