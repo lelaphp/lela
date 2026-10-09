@@ -239,11 +239,11 @@ struct Uids {
     effective: u32,
 }
 
-/// `getuid()`, the engine's, and `geteuid()`.
+/// `getuid()` and `geteuid()`, the engine's (`php_ext::process`).
 fn uids() -> Uids {
     Uids {
         real: process::uid(),
-        effective: crate::ffi::euid(),
+        effective: process::euid(),
     }
 }
 

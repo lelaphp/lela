@@ -15,11 +15,28 @@
 //! start is a no, as `AC_RUN_IFELSE` takes it. Cross-compiling, where the
 //! program cannot start on the build host, the answer is `configure`'s:
 //! yes on the CPUs its `host_cpu` list names.
+//!
+//! `PCRE_VERSION_MAJOR` and `PCRE_VERSION_MINOR` are `@cvalue PCRE2_MAJOR`
+//! and `@cvalue PCRE2_MINOR` (`Z/ext/pcre/php_pcre.stub.php`), the header
+//! a build compiles against, not the library it later loads (#1978, as
+//! #1974 reads the other header macros). They are read here, as the C
+//! preprocessor expands the two macros of the `pcre2.h` that
+//! `config0.m4`'s program compiles against, under the include directories
+//! `pkg-config` found, never from `pcre2-sys`, whose pregenerated bindings
+//! carry a header of their own. Both are written to `$OUT_DIR/header.rs` as Rust constants,
+//! and a header that cannot be read fails the build.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+
+/// The lines the preprocessor expands: the marker, then the two macros.
+const HEADER: &str = "#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
+php_pcre2_header PCRE2_MAJOR PCRE2_MINOR
+";
 
 /// `config0.m4`'s program, its exit 0 where the library was built with
 /// `SUPPORT_JIT`.
@@ -48,6 +65,10 @@ fn main() {
             return;
         }
     };
+    if let Err(error) = header(&library) {
+        println!("cargo::error={error}");
+        return;
+    }
     let jit = jit(&library).unwrap_or_else(|why| {
         println!("cargo::warning=whether external PCRE2 library has JIT supported: no ({why})");
         false
@@ -55,6 +76,85 @@ fn main() {
     if jit {
         println!("cargo::rustc-cfg=pcre_jit");
     }
+}
+
+/// A C build against the library `pkg-config` found, as php's
+/// `configure` compiles its test programs: its include directories and
+/// defines.
+fn c_build(library: &pkg_config::Library) -> cc::Build {
+    let mut build = cc::Build::new();
+    // php compiles C and C++ with -DNDEBUG unless it is built with
+    // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
+    // two builds that set ZEND_DEBUG, as debug assertions are this build's:
+    // assert() is live exactly where Rust's debug_assertions is (#1903).
+    if env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
+        build.define("NDEBUG", None);
+    }
+    build.cargo_metadata(false);
+    for include in &library.include_paths {
+        build.include(include);
+    }
+    for (name, value) in &library.defines {
+        build.define(name, value.as_deref());
+    }
+    build
+}
+
+/// `PCRE2_MAJOR` and `PCRE2_MINOR` of the `pcre2.h` [`c_build`] finds,
+/// written to `$OUT_DIR/header.rs`.
+fn header(library: &pkg_config::Library) -> Result<(), String> {
+    let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is unset")?);
+    let source = out.join("pcre2_h.c");
+    fs::write(&source, HEADER).map_err(|error| format!("{}: {error}", source.display()))?;
+    let expanded = c_build(library)
+        .file(&source)
+        .try_expand()
+        .map_err(|error| format!("preprocessing <pcre2.h>: {error}"))?;
+    let expanded = String::from_utf8_lossy(&expanded);
+    // The header the preprocessor read, from its line markers, so that a
+    // changed header rebuilds the crate as it would rebuild php.
+    let read: BTreeSet<&str> = expanded
+        .lines()
+        .filter(|line| line.starts_with('#'))
+        .filter_map(|line| line.split('"').nth(1))
+        .filter(|path| path.ends_with("/pcre2.h"))
+        .collect();
+    for path in read {
+        println!("cargo::rerun-if-changed={path}");
+    }
+    let (major, minor) = after_marker(&expanded, "php_pcre2_header")
+        .as_deref()
+        .and_then(numbers)
+        .ok_or("<pcre2.h> defines no integer PCRE2_MAJOR and PCRE2_MINOR")?;
+    let header = format!(
+        "/// `PCRE2_MAJOR` of the `pcre2.h` this build compiled against.\n\
+         pub(crate) const PCRE2_MAJOR: i64 = {major};\n\
+         /// `PCRE2_MINOR` of the same header.\n\
+         pub(crate) const PCRE2_MINOR: i64 = {minor};\n"
+    );
+    fs::write(out.join("header.rs"), header).map_err(|error| format!("header.rs: {error}"))
+}
+
+/// The expansion of `PCRE2_MAJOR PCRE2_MINOR`: two decimal integers.
+fn numbers(tokens: &str) -> Option<(i64, i64)> {
+    let mut words = tokens.split_whitespace();
+    let major = words.next()?.parse().ok()?;
+    let minor = words.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// The tokens the preprocessor wrote after `marker`, the line markers
+/// dropped and the rest joined: GCC breaks a line where a macro from a
+/// system header expands, writing `# 2 "file" 3 4` before the expansion,
+/// where clang keeps it on the marker's line.
+fn after_marker(expanded: &str, marker: &str) -> Option<String> {
+    let joined = expanded
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let at = joined.rfind(marker)?;
+    Some(joined[at + marker.len()..].trim().to_owned())
 }
 
 /// `AC_RUN_IFELSE` over [`PROGRAM`]: `Ok` with its answer, `Err` with why
@@ -67,22 +167,7 @@ fn jit(library: &pkg_config::Library) -> Result<bool, String> {
     let source = out.join("pcre2_jit.c");
     let program = out.join("pcre2_jit");
     fs::write(&source, PROGRAM).map_err(|error| format!("{}: {error}", source.display()))?;
-    let mut build = cc::Build::new();
-    // php compiles C and C++ with -DNDEBUG unless it is built with
-    // --enable-debug or --enable-debug-assertions (Z/configure.ac:840), the
-    // two builds that set ZEND_DEBUG, as debug assertions are this build's:
-    // assert() is live exactly where Rust's debug_assertions is (#1903).
-    if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none() {
-        build.define("NDEBUG", None);
-    }
-    build.cargo_metadata(false);
-    for include in &library.include_paths {
-        build.include(include);
-    }
-    for (name, value) in &library.defines {
-        build.define(name, value.as_deref());
-    }
-    let compiler = build
+    let compiler = c_build(library)
         .try_get_compiler()
         .map_err(|error| error.to_string())?;
     if compiler.is_like_msvc() {
