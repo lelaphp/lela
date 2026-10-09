@@ -8,7 +8,7 @@ use std::ops::ControlFlow;
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Hold};
+use php_ext::values::walk::{self, GiveUp, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, ValueRef};
 use php_ext_standard::{Serializer, Unserializer};
 
@@ -81,8 +81,9 @@ fn encode_through(
     // `ZEND_HASH_FOREACH_KEY` over the copy, a numeric key skipped with
     // php's warning, and each variable read again from the session's
     // array as it now stands (`php_get_session_var`), so one a `__sleep`
-    // unset is left out.
-    let refused = walk::foreach(req, array, Hold::Owner, |req, row| -> walk::Step {
+    // unset is left out. The copy is given up as `zval_ptr_dtor(&_zv)`.
+    let held = Hold::Owner(GiveUp::Dtor);
+    let refused = walk::foreach(req, array, held, |req, row| -> walk::Step {
         let name = match row.key() {
             Key::Str(name) => name.as_bytes().to_vec(),
             Key::Int(n) => {

@@ -15,7 +15,7 @@ use crate::api::abi::{Callable, Extension, ExtensionBuilder, Ref};
 use crate::api::call::call;
 use crate::api::raising::{Thrown, throw_error};
 use crate::api::request::Request;
-use crate::api::values::walk::{self, Guarded, Hold};
+use crate::api::values::walk::{self, GiveUp, Guarded, Hold};
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use crate::engine::{Engine, LeakSensor};
 use crate::test::Capture;
@@ -30,7 +30,11 @@ fn table(req: &mut Request, array: &Ref<PhpArray>) -> Result<PhpArray, Thrown> {
 
 /// The hold the test natives' `$owner` names: [`Hold::Owner`] where true.
 fn hold(owner: bool) -> Hold {
-    if owner { Hold::Owner } else { Hold::None }
+    if owner {
+        Hold::Owner(GiveUp::Dtor)
+    } else {
+        Hold::None
+    }
 }
 
 /// `foreach_rows(array &$array, int $stop, bool $owner): int`: the rows a
@@ -73,17 +77,25 @@ fn foreach_throws(req: &mut Request, array: Ref<PhpArray>, owner: bool) -> Resul
 #[php_function]
 fn guarded_throws(req: &mut Request, array: Ref<PhpArray>) -> Result<(), Thrown> {
     let table = table(req, &array)?;
-    let walked = walk::foreach_guarded(req, table, Hold::Owner, |req, _| -> walk::Step {
-        let inner = walk::foreach_guarded(req, table, Hold::Owner, |_, _| -> walk::Step {
-            Ok(ControlFlow::Continue(()))
-        })?;
-        let said = if inner == Guarded::Recursive {
-            "inside"
-        } else {
-            "not inside"
-        };
-        Err(throw_error(req, "Exception", said))
-    })?;
+    let walked = walk::foreach_guarded(
+        req,
+        table,
+        Hold::Owner(GiveUp::Dtor),
+        |req, _| -> walk::Step {
+            let inner = walk::foreach_guarded(
+                req,
+                table,
+                Hold::Owner(GiveUp::Dtor),
+                |_, _| -> walk::Step { Ok(ControlFlow::Continue(())) },
+            )?;
+            let said = if inner == Guarded::Recursive {
+                "inside"
+            } else {
+                "not inside"
+            };
+            Err(throw_error(req, "Exception", said))
+        },
+    )?;
     let Guarded::Walked(_) = walked else {
         return Err(throw_error(req, "Exception", "recursive at the start"));
     };
@@ -95,9 +107,12 @@ fn guarded_throws(req: &mut Request, array: Ref<PhpArray>) -> Result<(), Thrown>
 #[php_function]
 fn guarded(req: &mut Request, array: Ref<PhpArray>) -> Result<bool, Thrown> {
     let table = table(req, &array)?;
-    let walked = walk::foreach_guarded(req, table, Hold::Owner, |_, _| -> walk::Step {
-        Ok(ControlFlow::Continue(()))
-    })?;
+    let walked = walk::foreach_guarded(
+        req,
+        table,
+        Hold::Owner(GiveUp::Dtor),
+        |_, _| -> walk::Step { Ok(ControlFlow::Continue(())) },
+    )?;
     Ok(walked == Guarded::Recursive)
 }
 
@@ -234,12 +249,20 @@ fn object_guarded(req: &mut Request, o: Ref<PhpObject>) -> Result<Owner<PhpStrin
     };
     let table = object.property_table(req)?;
     let inner = table.clone();
-    let walked = walk::foreach_guarded(req, table, Hold::Owner, |req, _| -> walk::Step<bool> {
-        let again = walk::foreach_guarded(req, inner.clone(), Hold::Owner, |_, _| -> walk::Step {
-            Ok(ControlFlow::Continue(()))
-        })?;
-        Ok(ControlFlow::Break(again == Guarded::Recursive))
-    })?;
+    let walked = walk::foreach_guarded(
+        req,
+        table,
+        Hold::Owner(GiveUp::Dtor),
+        |req, _| -> walk::Step<bool> {
+            let again = walk::foreach_guarded(
+                req,
+                inner.clone(),
+                Hold::Owner(GiveUp::Dtor),
+                |_, _| -> walk::Step { Ok(ControlFlow::Continue(())) },
+            )?;
+            Ok(ControlFlow::Break(again == Guarded::Recursive))
+        },
+    )?;
     let said = match walked {
         Guarded::Walked(Some(true)) => "inside",
         Guarded::Walked(_) => "not inside",

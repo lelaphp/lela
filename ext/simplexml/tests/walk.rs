@@ -12,7 +12,7 @@ use php_ext::call::call;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine, LeakSensor};
-use php_ext::values::walk::{self, Hold};
+use php_ext::values::walk::{self, GiveUp, Hold};
 use php_ext::values::{Key, Owner, PhpObject, PhpString, Value};
 
 /// `built_rows(object $o, callable $f): string`: a foreach walk holding
@@ -22,18 +22,23 @@ use php_ext::values::{Key, Owner, PhpObject, PhpString, Value};
 fn built_rows(req: &mut Request, o: PhpObject, f: Callable) -> Result<Owner<PhpString>, Thrown> {
     let table = o.property_table(req)?;
     let mut read = String::new();
-    walk::foreach(req, table, Hold::Owner, |req, row| -> walk::Step {
-        let key = match row.key() {
-            Key::Int(n) => Value::int(*n),
-            Key::Str(s) => Value::string(*s),
-        };
-        let answer = call(req, &f, &[key])?;
-        answer.give_up(req);
-        let bytes = row.value().as_str_bytes().unwrap_or_default();
-        read.push_str(&String::from_utf8_lossy(bytes));
-        read.push(' ');
-        Ok(ControlFlow::Continue(()))
-    })?;
+    walk::foreach(
+        req,
+        table,
+        Hold::Owner(GiveUp::Dtor),
+        |req, row| -> walk::Step {
+            let key = match row.key() {
+                Key::Int(n) => Value::int(*n),
+                Key::Str(s) => Value::string(*s),
+            };
+            let answer = call(req, &f, &[key])?;
+            answer.give_up(req);
+            let bytes = row.value().as_str_bytes().unwrap_or_default();
+            read.push_str(&String::from_utf8_lossy(bytes));
+            read.push(' ');
+            Ok(ControlFlow::Continue(()))
+        },
+    )?;
     PhpString::new(req, read.as_bytes())
 }
 

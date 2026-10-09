@@ -1178,6 +1178,7 @@ values::Owner::cursor_next
 values::Owner::cursor_prev
 values::Owner::cursor_reset
 values::Owner::give_up
+values::Owner::give_up_nogc
 values::Owner::into_instance
 values::Owner::into_key
 values::Owner::into_raw
@@ -1362,6 +1363,7 @@ values::Value::type_name
 values::Value::unpassed
 values::ValueRef
 values::View
+values::walk::GiveUp
 values::walk::Guarded
 values::walk::Hold
 values::walk::ObjectTable

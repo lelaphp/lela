@@ -242,9 +242,13 @@ impl<T: View> Owner<T> {
     /// The owner given up as `zval_ptr_dtor_nogc` gives one up: the value
     /// destroyed at its last owner, and where owners are left no possible
     /// root of the cycle collector (design §5.12). What a walk gives up of
-    /// what it held where php's held nothing, and `zend_array_release`.
+    /// what it held where php's held nothing, `zend_array_release`, and
+    /// what a native gives up where php's gives up its `ZVAL_COPY` with
+    /// `zval_ptr_dtor_nogc` (`json_encode`).
+    // Taking the owner is the point, as `give_up`'s.
+    #[allow(clippy::needless_pass_by_value)]
     #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn give_up_nogc(mut self, req: &mut Request) {
+    pub fn give_up_nogc(mut self, req: &mut Request) {
         self.consume();
         req.release_nogc(self.counted);
     }

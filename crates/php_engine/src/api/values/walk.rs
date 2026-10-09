@@ -202,13 +202,38 @@ pub enum Hold {
     /// `ZVAL_COPY` into a local or `GC_ADDREF`: the walk holds one owner
     /// until it ends, so code the body runs that writes the table
     /// separates it and the walk reads the rows it began with, and
-    /// nothing the program does frees the table under the walk.
-    Owner,
+    /// nothing the program does frees the table under the walk. The
+    /// owner is given up as the native gives it up ([`GiveUp`]), named
+    /// beside the hold.
+    Owner(GiveUp),
     /// php's native takes none and counts on what holds the table: the
     /// walk reads the rows as they stand, so a row the body's code
     /// rewrites in place is read as it now is, and a table the program
     /// gives up mid-walk is destroyed where php destroys it.
     None,
+}
+
+/// How php's native gives up the owner of the table it held for its walk
+/// ([`Hold::Owner`]), which decides whether the table, where owners are
+/// left, is a possible root of the cycle collector (design §5.12): the
+/// count of roots `gc_status()` reads after the call is php's.
+///
+/// `var_export` gives its `GC_ADDREF` up with `GC_DELREF`
+/// (`Z/ext/standard/var.c:587`) and leaves no root, where `var_dump`'s
+/// `GC_DTOR_NO_REF` (`Z/ext/standard/var.c:162`) leaves one per array it
+/// walked that owners are left of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiveUp {
+    /// `zval_ptr_dtor`, `GC_DTOR` or `GC_DTOR_NO_REF`: the table
+    /// destroyed at its last owner, and where owners are left a possible
+    /// root ([`Owner::give_up`]).
+    Dtor,
+    /// `zval_ptr_dtor_nogc`, `GC_DELREF` or `zend_array_release`: the
+    /// table destroyed at its last owner, and no possible root
+    /// ([`Owner::give_up_nogc`]). `GC_DELREF` alone destroys nothing at
+    /// zero; a native that gives up with it holds an owner it never
+    /// gives up last, so the two read alike.
+    DtorNogc,
 }
 
 /// How a walk that guards its recursion ended ([`foreach_guarded`]).
@@ -256,7 +281,7 @@ pub enum Unwritten {
 ///
 /// `hold` is php's native's choice ([`Hold`]). Under [`Hold::Owner`] the
 /// walk holds one owner of the table until it ends, given up as php's
-/// `zval_ptr_dtor` gives it up, and lends each row as a view, which the
+/// native gives it up ([`GiveUp`]), and lends each row as a view, which the
 /// table it holds keeps. Under [`Hold::None`] it holds none, as php's
 /// holds none, and pins each row it lends: where code the body runs
 /// gives up the row's last owner, its free, and an object's destructor
@@ -689,8 +714,9 @@ fn held_at(table: PropertyTable, mut pos: u32, end: u32) -> Option<(u32, TableRo
 /// so that it knows when the table no longer does, given back as the
 /// walk ends.
 enum Standing {
-    /// [`Hold::Owner`]: the walk's owner of the table.
-    Held(Owner<PhpArray>),
+    /// [`Hold::Owner`]: the walk's owner of the table, and how it is
+    /// given up.
+    Held(Owner<PhpArray>, GiveUp),
     /// [`Hold::None`] over a table the program can destroy: the walk's
     /// hash iterator registered at it.
     Watched(u32),
@@ -703,7 +729,7 @@ impl Standing {
     fn taken(req: &mut Request, table: &Table, hold: Hold) -> Standing {
         let table = table.array();
         match hold {
-            Hold::Owner => Standing::Held(Owner::take(req, table)),
+            Hold::Owner(give_up) => Standing::Held(Owner::take(req, table), give_up),
             Hold::None if table.heap().is_immutable() => Standing::Immutable,
             Hold::None => Standing::Watched(req.heap_mut().iterator_add(table.heap(), 0)),
         }
@@ -712,17 +738,18 @@ impl Standing {
     /// How each row the walk lends knows its table still stands.
     fn watch(&self) -> Watch {
         match self {
-            Standing::Held(owner) => Watch::over(**owner),
+            Standing::Held(owner, _) => Watch::over(**owner),
             Standing::Watched(at) => Watch::Iterator(*at),
             Standing::Immutable => Watch::Immutable,
         }
     }
 
-    /// What the walk took given back: the owner given up, `zval_ptr_dtor`,
-    /// or the iterator, `zend_hash_iterator_del`.
+    /// What the walk took given back: the owner given up as the native
+    /// gives it up ([`GiveUp`]), or the iterator, `zend_hash_iterator_del`.
     fn given_up(self, req: &mut Request) {
         match self {
-            Standing::Held(owner) => owner.give_up(req),
+            Standing::Held(owner, GiveUp::Dtor) => owner.give_up(req),
+            Standing::Held(owner, GiveUp::DtorNogc) => owner.give_up_nogc(req),
             Standing::Watched(at) => req.heap_mut().iterator_del(at),
             Standing::Immutable => {}
         }
