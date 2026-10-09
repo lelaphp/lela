@@ -670,6 +670,7 @@ request::Request::clear_last_error
 request::Request::closure_refuses_receiver
 request::Request::connection_status
 request::Request::constant_attributes
+request::Request::constant_extension
 request::Request::constant_file
 request::Request::constants
 request::Request::constants_in_order

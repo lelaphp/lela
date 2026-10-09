@@ -1656,6 +1656,14 @@ impl Shared {
         Some(exec::value_of(*z))
     }
 
+    /// `ZEND_CONSTANT_MODULE_NUMBER` of the constant `name` an extension
+    /// or the engine declared with a value.
+    pub(crate) fn constant_module(&self, name: &[u8]) -> Option<ExtensionId> {
+        let at = self.constant_names.find(&self.constants, name)?;
+        self.constant_values.get(at)?.as_ref()?;
+        self.constant_modules.get(at).copied()
+    }
+
     /// `CONST_DEPRECATED` of an extension's or the engine's constant,
     /// none for a name no extension declared.
     pub(crate) fn constant_deprecated(&self, name: &[u8]) -> Option<bool> {

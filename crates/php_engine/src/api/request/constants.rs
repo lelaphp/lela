@@ -491,6 +491,51 @@ impl Request {
             .map_or(&[], |(_, decl)| decl.attributes.as_slice())
     }
 
+    /// `ZEND_CONSTANT_MODULE_NUMBER(c)` of the constant the table holds
+    /// under `name`: the extension that registered it, `Core` for the
+    /// engine's own and a host's, and none for one a program defined
+    /// (`PHP_USER_CONSTANT`) or a name no table has. One lookup, as
+    /// `ReflectionConstant::getExtension` reads the number off the
+    /// constant:
+    ///
+    /// ```php
+    /// define('MINE', 1);
+    /// foreach (['E_ALL', 'PHP_SAPI', 'PHP_VERSION', 'PREG_SPLIT_NO_EMPTY', 'JSON_ERROR_NONE', 'STDIN', 'MINE'] as $name) {
+    ///     $c = new ReflectionConstant($name);
+    ///     var_dump($c->getExtensionName(), $c->getExtension()?->getName());
+    /// }
+    /// ```
+    /// ```expect capture
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// string(4) "pcre"
+    /// string(4) "pcre"
+    /// string(4) "json"
+    /// string(4) "json"
+    /// string(4) "Core"
+    /// string(4) "Core"
+    /// bool(false)
+    /// NULL
+    /// ```
+    #[must_use]
+    pub fn constant_extension(&self, name: &[u8]) -> Option<ExtensionId> {
+        if name == b"PHP_SAPI" {
+            return Some(ExtensionId::CORE);
+        }
+        if let Some(row) = self.constants.constants.iter().find(|row| row.name == name) {
+            return match row.owner {
+                ConstantOwner::Core => Some(ExtensionId::CORE),
+                ConstantOwner::Extension(extension) => Some(extension),
+                ConstantOwner::User(_) => None,
+            };
+        }
+        self.shared.constant_module(name)
+    }
+
     /// `ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED` of the constant the
     /// table holds under `name`, and whether a program defined it,
     /// `PHP_USER_CONSTANT`: what a fetch reads before it words a
