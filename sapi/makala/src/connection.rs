@@ -24,7 +24,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use php_sapi::ResponseHead;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::config::{Config, Limits};
+use crate::options::{Limits, Options};
 use crate::request::{Head, Job, Sink};
 
 /// How many pieces of a request's body wait for the request to read them.
@@ -33,15 +33,16 @@ const BODY_PIECES: usize = 8;
 /// How many pieces of a response wait for the client to take them.
 const RESPONSE_PIECES: usize = 8;
 
-/// The connection side, on this thread until the listener fails: every
-/// connection accepted on `listener` served on its own task, its requests
-/// put on `queue`.
+/// The connection side, on this thread for as long as the process serves:
+/// every connection accepted on `listener` served on its own task, its
+/// requests put on `queue`. It returns only where it could not start; the
+/// drain that ends it is #2344's.
 ///
 /// # Errors
 ///
-/// What the runtime or the listener failed with.
+/// What the runtime or the listener could not start with.
 pub(crate) fn run(
-    config: &Config,
+    options: &Options,
     listener: std::net::TcpListener,
     queue: mpsc::Sender<Job>,
 ) -> std::io::Result<()> {
@@ -49,7 +50,7 @@ pub(crate) fn run(
         .enable_io()
         .enable_time()
         .build()?;
-    runtime.block_on(accept(config.limits, listener, queue))
+    runtime.block_on(accept(options.limits, listener, queue))
 }
 
 /// The accept loop: each connection on a task of its own, its requests
@@ -183,17 +184,17 @@ fn response(head: &ResponseHead, written: mpsc::Receiver<Bytes>) -> Response<Rep
 
 /// A response of the server's own, with no body.
 fn plain(status: StatusCode) -> Response<Reply> {
-    let mut response = Response::new(Reply::Whole(None));
+    let mut response = Response::new(Reply::Empty);
     *response.status_mut() = status;
     response
 }
 
 /// A response's body: what a request writes, piece by piece as it writes
-/// it, ending when its sink is dropped with the request; or the server's
-/// own, whole.
+/// it, ending when its sink is dropped with the request; or none, the
+/// server's own answer.
 pub(crate) enum Reply {
     Written(mpsc::Receiver<Bytes>),
-    Whole(Option<Bytes>),
+    Empty,
 }
 
 impl hyper::body::Body for Reply {
@@ -208,22 +209,18 @@ impl hyper::body::Body for Reply {
             Reply::Written(written) => written
                 .poll_recv(cx)
                 .map(|piece| piece.map(|piece| Ok(Frame::data(piece)))),
-            Reply::Whole(whole) => Poll::Ready(whole.take().map(|whole| Ok(Frame::data(whole)))),
+            Reply::Empty => Poll::Ready(None),
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(self, Reply::Whole(None))
+        matches!(self, Reply::Empty)
     }
 
     fn size_hint(&self) -> SizeHint {
         match self {
             Reply::Written(_) => SizeHint::default(),
-            Reply::Whole(whole) => SizeHint::with_exact(
-                whole
-                    .as_ref()
-                    .map_or(0, |whole| u64::try_from(whole.len()).unwrap_or(u64::MAX)),
-            ),
+            Reply::Empty => SizeHint::with_exact(0),
         }
     }
 }

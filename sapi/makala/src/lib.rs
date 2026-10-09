@@ -26,8 +26,8 @@
     clippy::unimplemented
 )]
 
-pub mod config;
 mod connection;
+pub mod options;
 mod request;
 
 use std::ffi::OsString;
@@ -36,7 +36,7 @@ use std::process::ExitCode;
 
 use php_sapi::Engine;
 
-use crate::config::Config;
+use crate::options::Options;
 
 /// `sapi_module.name`: what `php_sapi_name()` answers (#2335).
 pub const NAME: &str = "makala";
@@ -44,31 +44,31 @@ pub const NAME: &str = "makala";
 /// `SERVER_SOFTWARE`, `makala/<version>` (#2335).
 pub const SERVER_SOFTWARE: &str = concat!("makala/", env!("CARGO_PKG_VERSION"));
 
-/// The host's `main`: the line read into a [`Config`], one engine of the
-/// bundle's enabled set started, the listening socket bound, the request
-/// threads started, and the connection side run on this thread until its
-/// listener fails.
+/// The host's `main`: the line read into its [`Options`], one engine of
+/// the bundle's enabled set started, the listening socket bound, the
+/// request threads started, and the connection side run on this thread
+/// for as long as the process serves (the drain that ends it is #2344's).
 pub fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let config = match Config::parse(&argv) {
-        Ok(config) => config,
+    let options = match Options::parse(&argv) {
+        Ok(options) => options,
         Err(refusal) => {
-            say(&format!("makala: {refusal}\n{}", config::USAGE));
+            say(&format!("makala: {refusal}\n{}", options::USAGE));
             return php_sapi::exit_code(1);
         }
     };
-    let engine = engine(&config);
-    let listener = match std::net::TcpListener::bind(config.listen) {
+    let engine = engine(&options);
+    let listener = match std::net::TcpListener::bind(options.listen) {
         Ok(listener) => listener,
         Err(e) => {
             say(&format!(
                 "makala: cannot listen on {}: {e}\n",
-                config.listen
+                options.listen
             ));
             return php_sapi::exit_code(1);
         }
     };
-    let (queue, pool) = match request::Pool::start(&engine, &config) {
+    let (queue, pool) = match request::Pool::start(&engine, &options) {
         Ok(started) => started,
         Err(e) => {
             say(&format!("makala: cannot start a request thread: {e}\n"));
@@ -78,10 +78,10 @@ pub fn main() -> ExitCode {
     if let Ok(local) = listener.local_addr() {
         say(&format!(
             "{SERVER_SOFTWARE} listening on http://{local}, document root {}\n",
-            config.document_root.display()
+            options.document_root.display()
         ));
     }
-    let ended = connection::run(&config, listener, queue);
+    let ended = connection::run(&options, listener, queue);
     pool.join();
     match ended {
         Ok(()) => php_sapi::exit_code(0),
@@ -96,15 +96,15 @@ pub fn main() -> ExitCode {
 /// ini files the line's `-n` and `-c` leave and its `-d` entries over
 /// them; a startup php refuses ends the process here, before the socket
 /// is bound ([`php_sapi::start`]).
-fn engine(config: &Config) -> Engine {
+fn engine(options: &Options) -> Engine {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     let builder = Engine::builder()
-        .ini_files(php_sapi::ini::search(NAME, &config.ini_search, true))
+        .ini_files(php_sapi::ini::search(NAME, &options.ini_search, true))
         .sapi_name(NAME)
         .extensions(&extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>();
-    php_sapi::start(builder, &config.ini, log)
+    php_sapi::start(builder, &options.ini, log)
 }
 
 /// The error log, until the server's own (#2345): one entry on the

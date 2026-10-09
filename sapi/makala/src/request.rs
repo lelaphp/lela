@@ -17,7 +17,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hyper::body::Bytes;
-use php_proto::cgi::{Environment, Files, RequestInfo};
+use php_proto::cgi::{Environment, RequestInfo};
 use php_sapi::cgi::Disk;
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostThread, OutputSink, RequestDescription,
@@ -25,7 +25,7 @@ use php_sapi::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::config::Config;
+use crate::options::Options;
 
 /// One request as its connection hands it over: the head as hyper read
 /// it, the body still arriving, and where the response goes.
@@ -55,23 +55,29 @@ pub(crate) struct Pool {
 }
 
 impl Pool {
-    /// `config.request_threads` threads, each with `config.stack_size`
+    /// `options.request_threads` threads, each with `options.stack_size`
     /// of stack, serving the requests the returned queue carries; the
-    /// queue holds `config.request_queue` of them before its sender
+    /// queue holds `options.request_queue` of them before its sender
     /// waits.
     pub(crate) fn start(
         engine: &Engine,
-        config: &Config,
+        options: &Options,
     ) -> std::io::Result<(mpsc::Sender<Job>, Pool)> {
-        let (queue, jobs) = mpsc::channel(config.request_queue);
+        let (queue, jobs) = mpsc::channel(options.request_queue);
         let jobs = Arc::new(Mutex::new(jobs));
-        let root = Arc::new(config.document_root.as_os_str().as_encoded_bytes().to_vec());
-        let mut threads = Vec::with_capacity(config.request_threads);
-        for n in 0..config.request_threads {
+        let root = Arc::new(
+            options
+                .document_root
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec(),
+        );
+        let mut threads = Vec::with_capacity(options.request_threads);
+        for n in 0..options.request_threads {
             let (engine, jobs, root) = (engine.clone(), Arc::clone(&jobs), Arc::clone(&root));
             threads.push(php_sapi::host_thread(
                 &format!("makala-request-{n}"),
-                config.stack_size,
+                options.stack_size,
                 move || serve_each(&engine, &jobs, &root),
             )?);
         }
@@ -144,12 +150,14 @@ fn serve(engine: &Engine, root: &[u8], job: Job) {
     engine.serve_started(description, &mut sink, || look(&info));
 }
 
-/// What the request serves once it has started: the file its path names
-/// where that is a `.php` file under the root, as php-fpm's
-/// `security.limit_extensions` keeps it; php-fpm's `File not found.` where
-/// the path names no file, and its `Access denied.` for a file of another
-/// kind, which no server of PHP runs as a program (static files are
-/// #2346's).
+/// What the request serves once it has started, in php-fpm's order
+/// (`Z/sapi/fpm/fpm/fpm_main.c:1854-1888`): `File not found.` with a 404
+/// where the path names no script; `Access denied.` with a 403 for a
+/// script whose name does not end in `.php`, the default of its
+/// `security.limit_extensions`, so no file of another kind runs as a
+/// program (static files are #2346's); for one that does not open,
+/// `Access denied.` with a 403 where it may not be read and `No input
+/// file specified.` with a 404 otherwise; and else the program.
 fn look(info: &RequestInfo) -> HostServes {
     let refused = |code, body: &[u8]| {
         HostServes::Page(HostPage {
@@ -158,19 +166,28 @@ fn look(info: &RequestInfo) -> HostServes {
             body: body.to_vec(),
         })
     };
-    match &info.path_translated {
-        Some(path) if Disk.is_file(path) && path.ends_with(b".php") => HostServes::Program,
-        Some(path) if Disk.is_file(path) => refused(403, b"Access denied.\n"),
-        _ => refused(404, b"File not found.\n"),
+    let Some(path) = &info.path_translated else {
+        return refused(404, b"File not found.\n");
+    };
+    if !(path.len() > b".php".len() && path.ends_with(b".php")) {
+        return refused(403, b"Access denied.\n");
+    }
+    match std::fs::File::open(php_sapi::cgi::path_of(path)) {
+        Ok(_) => HostServes::Program,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            refused(403, b"Access denied.\n")
+        }
+        Err(_) => refused(404, b"No input file specified.\n"),
     }
 }
 
 /// The CGI environment a web server hands php-fpm for `head`, after
 /// nginx's stock `fastcgi_params`: the script the path names under the
 /// root, the request's own variables, and each header field as an
-/// `HTTP_` variable. The path is `php -S`'s `normalize_vpath` of it,
-/// percent-decoded with `..` held at the root, so no request names a file
-/// outside it; a path that ends in `/` names its directory's `index.php`.
+/// `HTTP_` variable. The path is `php -S`'s `normalize_vpath` of it
+/// (`Z/sapi/cli/php_cli_server.c:1538`), percent-decoded with `..` held at
+/// the root, so no request names a file outside it; a path that ends in
+/// `/` names its directory's `index.php`.
 fn environment(head: &Head, root: &[u8]) -> Environment {
     let (path, query) = match head.target.iter().position(|b| *b == b'?') {
         Some(at) => (&head.target[..at], &head.target[at + 1..]),
@@ -263,7 +280,8 @@ fn environment(head: &Head, root: &[u8]) -> Environment {
 /// The body as the connection reads it: each read hands out what is left
 /// of the piece it holds, and waits for the next where it holds none; the
 /// channel closed, at the body's end or with its connection gone, is the
-/// end (`Body::Stream`).
+/// end (`Body::Stream`). A body cut short reads as short, as php-fpm's
+/// `sapi_cgi_read_post` ends where `fcgi_read` answers less.
 struct Arriving {
     pieces: mpsc::Receiver<Bytes>,
     held: Bytes,
@@ -333,7 +351,9 @@ impl OutputSink for Sink {
     }
 
     /// The request holds the sink while it runs, so each write reaches
-    /// the connection as it is made.
+    /// the connection as it is made: the channels move to the sink the
+    /// request holds, which the engine asks for once, as the request
+    /// begins.
     fn held(&mut self) -> Option<Box<dyn OutputSink + Send>> {
         Some(Box::new(Sink {
             head: self.head.take(),

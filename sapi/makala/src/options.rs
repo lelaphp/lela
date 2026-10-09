@@ -1,8 +1,9 @@
-//! What the operator configures, read from the line: where the server
-//! listens, the document root, the request pool and its queue, the php
-//! ini the engine starts with, and the table of limits (#2337's
-//! Implementation Decisions), each overridable. The connection side reads
-//! the limits it applies; the rest of the table is what #2341 enforces.
+//! What the operator sets on the line: where the server listens, the
+//! document root, the request pool and its queue, and the php ini the
+//! engine starts with; and the table of limits (#2337's Implementation
+//! Decisions) at its defaults. The connection side applies the header
+//! timeout, the header count and the head's size from it today; #2341
+//! enforces the rest and makes each overridable.
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -19,9 +20,9 @@ pub const USAGE: &str = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --list
 /// bounds for php's "Maximum call stack size", so a program sees this.
 pub const REQUEST_STACK: usize = 8 << 20;
 
-/// The server as the operator configured it.
+/// The server as the operator's line set it.
 #[derive(Debug, Clone)]
-pub struct Config {
+pub struct Options {
     /// The address the listening socket binds; port 0 takes one the
     /// system picks, which the started line names.
     pub listen: SocketAddr,
@@ -89,7 +90,7 @@ impl Default for Limits {
     }
 }
 
-impl Config {
+impl Options {
     /// The line, past the binary's name: php's `-n`, `-c` and `-d`, and
     /// the server's own options; a refusal says what was wrong.
     ///
@@ -97,7 +98,7 @@ impl Config {
     ///
     /// What the line got wrong: an unknown option, a value missing or not
     /// read, or no `--listen` or `--root`.
-    pub fn parse(argv: &[OsString]) -> Result<Config, String> {
+    pub fn parse(argv: &[OsString]) -> Result<Options, String> {
         let mut words = argv.iter();
         let mut listen = None;
         let mut root = None;
@@ -132,7 +133,7 @@ impl Config {
         let request_threads = threads.unwrap_or_else(|| {
             std::thread::available_parallelism().map_or(4, std::num::NonZero::get)
         });
-        Ok(Config {
+        Ok(Options {
             listen,
             document_root,
             request_threads,
@@ -165,14 +166,14 @@ fn count(name: &str, value: &[u8]) -> Result<usize, String> {
 mod tests {
     use super::*;
 
-    fn parse(words: &[&str]) -> Result<Config, String> {
-        Config::parse(&words.iter().map(OsString::from).collect::<Vec<_>>())
+    fn parse(words: &[&str]) -> Result<Options, String> {
+        Options::parse(&words.iter().map(OsString::from).collect::<Vec<_>>())
     }
 
     #[test]
     fn the_line_sets_the_server_and_php_s_ini() -> Result<(), String> {
         let root = std::env::temp_dir();
-        let config = parse(&[
+        let options = parse(&[
             "-n",
             "-d",
             "memory_limit=64M",
@@ -183,12 +184,12 @@ mod tests {
             "--threads",
             "3",
         ])?;
-        assert!(config.ini_search.ignore);
-        assert_eq!(config.ini, [(b"memory_limit".to_vec(), b"64M".to_vec())]);
-        assert_eq!(config.request_threads, 3);
-        assert_eq!(config.request_queue, 12);
-        assert_eq!(config.stack_size, 8 << 20);
-        assert_eq!(config.limits, Limits::default());
+        assert!(options.ini_search.ignore);
+        assert_eq!(options.ini, [(b"memory_limit".to_vec(), b"64M".to_vec())]);
+        assert_eq!(options.request_threads, 3);
+        assert_eq!(options.request_queue, 12);
+        assert_eq!(options.stack_size, 8 << 20);
+        assert_eq!(options.limits, Limits::default());
         Ok(())
     }
 

@@ -184,24 +184,27 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
     );
 }
 
-/// A path that names no file is php-fpm's `File not found.` with a 404,
-/// one that climbs out of the root stays under it, and one that names a
-/// file other than PHP's is refused, never served as a program.
+/// A path that names no script is php-fpm's 404; one that climbs out of
+/// the root to a PHP file beside it stays under the root and finds
+/// nothing there; and one that names a file other than PHP's is its 403
+/// `Access denied.`, never served as a program.
 #[test]
 fn a_path_with_no_php_file_is_not_served_as_a_program() {
     let root = root("missing", &[("notes.txt", "<?php echo 'ran';")]);
+    let outside = Path::new(env!("CARGO_TARGET_TMPDIR")).join("makala-outside.php");
+    std::fs::write(&outside, "<?php echo 'escaped';").unwrap_or_else(|e| panic!("{e}"));
     let server = Server::start(&root);
     for (path, status, body) in [
         (
             "/nothing.php",
             "HTTP/1.1 404 Not Found",
-            "File not found.\n",
+            "No input file specified.\n",
         ),
         ("/notes.txt", "HTTP/1.1 403 Forbidden", "Access denied.\n"),
         (
-            "/../../../../etc/passwd",
+            "/../makala-outside.php",
             "HTTP/1.1 404 Not Found",
-            "File not found.\n",
+            "No input file specified.\n",
         ),
     ] {
         let mut stream = server.connect();
@@ -216,15 +219,75 @@ fn a_path_with_no_php_file_is_not_served_as_a_program() {
     }
 }
 
-/// A `POST` body reaches `php://input` and `$_POST` through the stream as
-/// it arrives (#2338): sent in two writes with a pause between, past
-/// `SAPI_POST_BLOCK_SIZE`, and read back whole by both.
+/// A body reaches `php://input` through the stream while the program
+/// runs (#2338): the program answers before it reads the input, and the
+/// client sends the second half of the body only once it has that answer,
+/// so a server that read the body before running the program would wait
+/// on the client forever, which the read's timeout fails. The request is
+/// a `PUT`, since php's default reader swallows a `POST`'s body of any
+/// type at request startup (`php_default_post_reader`,
+/// `Z/main/php_content_types.c:35`).
 #[test]
 fn a_post_body_reaches_php_input_through_the_stream() {
     let root = root(
         "post",
         &[(
             "post.php",
+            "<?php echo \"ready\\n\"; flush(); $in = file_get_contents('php://input'); \
+             echo strlen($in), ' ', $in === str_repeat('y', 40000) ? 'same' : 'differs', ' ', count($_POST);",
+        )],
+    );
+    let server = Server::start(&root);
+    let body = vec![b'y'; 40_000];
+    let mut stream = server.connect();
+    write!(
+        stream,
+        "PUT /post.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Content-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let (first, rest) = body.split_at(10_000);
+    stream.write_all(first).unwrap_or_else(|e| panic!("{e}"));
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !seen.windows(6).any(|w| w == b"ready\n") {
+        let n = stream.read(&mut buf).unwrap_or_else(|e| panic!("{e}"));
+        assert!(n > 0, "closed before the program answered");
+        seen.extend_from_slice(&buf[..n]);
+    }
+    stream.write_all(rest).unwrap_or_else(|e| panic!("{e}"));
+    stream
+        .read_to_end(&mut seen)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let mut whole = seen.as_slice();
+    let response = {
+        let end = whole
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap_or_else(|| panic!("no head"));
+        let chunked = String::from_utf8_lossy(&whole[..end])
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked");
+        whole = &whole[end + 4..];
+        if chunked {
+            unchunked(whole)
+        } else {
+            whole.to_vec()
+        }
+    };
+    assert_eq!(String::from_utf8_lossy(&response), "ready\n40000 same 0");
+}
+
+/// A form `POST` that arrives in two writes with a pause between, past
+/// `SAPI_POST_BLOCK_SIZE`, is `$_POST` and `php://input` whole, read
+/// through the stream at request startup as php's form reader reads it.
+#[test]
+fn a_form_post_is_post_and_input_whole() {
+    let root = root(
+        "form",
+        &[(
+            "form.php",
             "<?php $in = file_get_contents('php://input'); \
              echo strlen($in), ' ', $_POST['a'], ' ', strlen($_POST['big']), ' ', \
              $in === 'a=1&big=' . str_repeat('y', 40000) ? 'same' : 'differs';",
@@ -236,7 +299,7 @@ fn a_post_body_reaches_php_input_through_the_stream() {
     let mut stream = server.connect();
     write!(
         stream,
-        "POST /post.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+        "POST /form.php HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
          Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
         body.len()
     )
