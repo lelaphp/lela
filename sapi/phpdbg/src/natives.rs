@@ -17,6 +17,7 @@ use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, raise};
 use php_ext::request::Opcode;
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::bp::At;
@@ -483,9 +484,12 @@ fn phpdbg_get_executable(
         .filter(|files| !files.is_empty())
     {
         let mut files = Vec::new();
-        for (_, file) in named {
-            files.push(with_string(req, &file, <[u8]>::to_vec)?);
-        }
+        // Holding nothing, the option holds the array: a conversion may
+        // serve `__toString`.
+        walk::foreach(req, *named, Hold::None, |req, row| -> walk::Step {
+            files.push(with_string(req, row.value(), <[u8]>::to_vec)?);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
         files
     } else {
         // `file_sources`: each file compiled, which the loop records as it

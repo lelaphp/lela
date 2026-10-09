@@ -14,7 +14,7 @@ use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value
 use crate::State;
 use crate::conv::put;
 use crate::ffi::{self, Addr};
-use crate::natives::string;
+use crate::natives::{c_int, eth_proto, string};
 use crate::socket::{Sock, Socket, made, socket_error, strerror};
 use php_ext::raising::{Level, docref};
 
@@ -303,7 +303,8 @@ fn open(
     let info = entry(req, address)?;
     let owner = made(req, b"Socket")?;
     let object = *owner;
-    let fd = match ffi::socket(info.family, info.socktype, info.protocol) {
+    let protocol = eth_proto(i64::from(info.protocol), i64::from(info.family));
+    let fd = match ffi::socket(info.family, info.socktype, c_int(protocol)) {
         Ok(fd) => fd,
         Err(errno) => {
             let code = errno as i32;

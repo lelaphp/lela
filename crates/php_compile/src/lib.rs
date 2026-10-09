@@ -577,6 +577,17 @@ fn compile_scanned<'p>(
 /// cache's unit is read back with its names interned again, as its
 /// constants are.
 pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
+    for name in op_array_names(unit) {
+        strings.intern(name)?;
+    }
+    Ok(())
+}
+
+/// The names a unit's op arrays carry, the ones [`intern_names`]
+/// interns: its file's, `op_array->filename`, each function's, method's,
+/// hook's and closure's, `function_name`, and each class's, `ce->name`.
+/// A name two op arrays share stands once for each.
+pub fn op_array_names(unit: &Unit) -> impl Iterator<Item = &[u8]> {
     let functions = unit
         .functions
         .iter()
@@ -594,13 +605,10 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
             .chain(hooks)
             .map(|method| &method.function)
     });
-    let names = std::iter::once(&unit.main.filename)
+    std::iter::once(&unit.main.filename)
         .chain(functions.chain(methods).map(|decl| &decl.name))
-        .chain(unit.classes.iter().map(|class| &class.name));
-    for name in names {
-        strings.intern(&name.0)?;
-    }
-    Ok(())
+        .chain(unit.classes.iter().map(|class| &class.name))
+        .map(|name| &*name.0)
 }
 
 /// php's level for what the scanner or the parser raised: the same

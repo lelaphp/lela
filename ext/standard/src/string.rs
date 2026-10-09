@@ -1612,7 +1612,9 @@ fn implode_array(
     glue: &[u8],
     pieces: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let elements: Vec<Value> = pieces.iter().map(|(_, value)| value).collect();
+    let elements: Vec<Value> = php_ext::values::walk::rows(req, pieces)
+        .map(|(_, value)| value)
+        .collect();
     if elements.len() == 1
         && let Some(s) = elements[0].deref().as_php_string()
     {

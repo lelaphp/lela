@@ -539,8 +539,7 @@ fn sort(
     let Some(given) = array.get() else {
         return Ok(true);
     };
-    let invalid = given
-        .iter()
+    let invalid = walk::rows(req, *given)
         .find_map(|(_, value)| value.as_str_bytes().and_then(|b| to_utf16(b).err()));
     if let Some(status) = invalid {
         check(

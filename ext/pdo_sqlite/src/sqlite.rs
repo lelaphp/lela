@@ -3,6 +3,7 @@
 //! SQLSTATE mapping of `pdo_sqlite_error` and the column types of
 //! `pdo_sqlite_stmt_get_col`.
 
+use php_ext::abi::Callable;
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
@@ -14,7 +15,7 @@ use php_ext_pdo::connector::{
 };
 
 use crate::Sqlite;
-use crate::ffi::{self, Db, Function, Handler, Registration};
+use crate::ffi::{self, Db, Function, Registration};
 
 /// `PDO_ATTR_TIMEOUT` and `PDO_ATTR_CURSOR`, which the connector reads.
 const ATTR_TIMEOUT: i64 = 2;
@@ -431,24 +432,20 @@ impl Connection for Handle {
     /// callables given up, so none lingers for the next request.
     fn persistent_shutdown(&mut self, req: &mut Request) {
         if let Some(handler) = self.db.set_authorizer(None) {
-            handler.release(req);
+            handler.give_up(req);
         }
         for registration in std::mem::take(&mut self.registrations) {
             for handler in registration.unregister() {
-                handler.release(req);
+                handler.give_up(req);
             }
         }
     }
 
     /// `pdo_sqlite_get_gc`.
     fn gc(&self, visit: &mut dyn FnMut(Value)) {
-        if let Some(handler) = self.db.authorizer() {
-            visit(handler.value);
-        }
+        self.db.visit_authorizer(visit);
         for registration in &self.registrations {
-            for handler in registration.handlers() {
-                visit(handler.value);
-            }
+            registration.visit(visit);
         }
     }
 
@@ -749,7 +746,34 @@ impl Statement for Stmt {
         Ok(Some(Owner::take(req, value)))
     }
 
-    /// `pdo_sqlite_stmt_col_meta`.
+    /// `pdo_sqlite_stmt_col_meta`: the native type php's own interned
+    /// string, `ZSTR_KNOWN`, and every other string `add_assoc_string`'s,
+    /// an allocation of its own.
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// $st = $db->query("SELECT 1 AS aaaa, 2 AS bb");
+    /// $st->getColumnMeta(1);
+    /// $m = memory_get_usage();
+    /// $meta = $st->getColumnMeta(0);
+    /// echo memory_get_usage() - $m, "\n";
+    /// $db->exec('CREATE TABLE t (i INTEGER, f REAL, x CHAR(1))');
+    /// $db->exec("INSERT INTO t VALUES (1, 1.5, 'z')");
+    /// $st = $db->query('SELECT i, f, x FROM t');
+    /// $st->fetch();
+    /// foreach ([0, 1, 2] as $i) {
+    ///     $m = memory_get_usage();
+    ///     $meta = $st->getColumnMeta($i);
+    ///     echo memory_get_usage() - $m, " ", $meta['native_type'], " ", $meta['sqlite:decl_type'], "\n";
+    ///     unset($meta);
+    /// }
+    /// ```
+    /// ```expect
+    /// 648
+    /// 112 integer INTEGER
+    /// 792 double REAL
+    /// 792 string CHAR(1)
+    /// ```
     fn column_meta(
         &mut self,
         req: &mut Request,
@@ -768,14 +792,17 @@ impl Statement for Stmt {
             ffi::SQLITE_NULL => (b"null", 0),
             ffi::SQLITE_FLOAT => (b"double", 2),
             ffi::SQLITE_BLOB => {
-                let blob = PhpString::new(req, b"blob")?;
-                flags.append(req, blob.into_value())?;
+                let blob = string_init(req, b"blob")?;
+                flags.append(req, blob)?;
                 (b"string", 2)
             }
             ffi::SQLITE_INTEGER => (b"integer", 1),
             _ => (b"string", 2),
         };
-        set(req, &mut out, b"native_type", Some(native))?;
+        // `add_assoc_str(..., ZSTR_KNOWN(...))`: php's own interned string.
+        let native = PhpString::interned(req, native)?;
+        let key = PhpString::new(req, b"native_type")?.into_key();
+        out.set(req, key, Owner::take(req, native).into_value())?;
         let key = PhpString::new(req, b"pdo_type")?.into_key();
         out.set(req, key, Owner::take(req, Value::int(pdo_type)))?;
         set(
@@ -820,9 +847,18 @@ fn set(
     let Some(value) = value else {
         return Ok(());
     };
-    let value = PhpString::new(req, value)?.into_value();
+    let value = string_init(req, value)?;
     let key = PhpString::new(req, key)?.into_key();
     out.set(req, key, value)
+}
+
+/// `ZVAL_STRING`'s `zend_string_init`, which `add_assoc_string` and
+/// `add_next_index_string` make their value with: an allocation of its
+/// own whatever the length, where [`PhpString::new`] hands out the
+/// interned empty and one-byte strings.
+fn string_init(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    let made = PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes))?;
+    Ok(made.into_value())
 }
 
 /// `pdo_sqlite_create_function_internal` and its two kin: a function
@@ -833,13 +869,14 @@ pub(super) fn register(
     name: &[u8],
     argc: i64,
     flags: i64,
-    function: Function,
+    function: impl FnOnce(&Request) -> Function,
 ) -> Result<bool, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
-            function.release(req);
             return Ok(false);
         };
+        // `zend_fcc_dup` once the connection stands.
+        let function = function(req);
         // php hands the library its `zend_long`s as `int`s.
         #[allow(clippy::cast_possible_truncation)]
         match handle
@@ -863,20 +900,21 @@ pub(super) fn register_collation(
     req: &mut Request,
     this: php_ext::values::PhpObject,
     name: &[u8],
-    handler: Handler,
+    callback: Callable,
 ) -> Result<bool, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
-            handler.release(req);
             return Ok(false);
         };
+        // `zend_fcc_dup` once the connection stands.
+        let handler = Owner::take(req, callback);
         match handle.db.create_collation(name, handler) {
             Ok(registration) => {
                 handle.registrations.push(registration);
                 Ok(true)
             }
             Err((handler, _)) => {
-                handler.release(req);
+                handler.give_up(req);
                 Ok(false)
             }
         }

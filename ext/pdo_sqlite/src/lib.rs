@@ -42,7 +42,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_pdo::connector::Connector;
 
-use ffi::{Function, Handler};
+use ffi::Function;
 
 /// The extension value (design §7.1): the connector registered, `Pdo\Sqlite`,
 /// the connector's methods and the aliases laid on `PDO`, `pdo` as the one
@@ -188,6 +188,27 @@ impl Sqlite {
     /// }
     /// Exception: boom
     /// ```
+    ///
+    /// The callback is kept as `zend_fcc_dup` keeps it, so a
+    /// `Class::method` string resolved with `$this` in scope keeps that
+    /// object until the connection gives the function up:
+    ///
+    /// ```php
+    /// class B { public $n = 'held'; function __destruct(){ echo "dtor\n"; } function f($x){ return $this->n . $x; }
+    ///   function reg($pdo){ $pdo->createFunction('f', 'B::f'); } }
+    /// $pdo = PDO::connect('sqlite::memory:');
+    /// (new B)->reg($pdo);
+    /// echo "registered\n";
+    /// var_dump($pdo->query("SELECT f('2')")->fetchColumn());
+    /// $pdo = null;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// registered
+    /// string(5) "held2"
+    /// dtor
+    /// end
+    /// ```
     fn createFunction(
         req: &mut Request,
         this: This<Self>,
@@ -323,12 +344,9 @@ impl Sqlite {
             else {
                 return Ok(());
             };
-            let handler = callback.map(|callable| {
-                let value = req.argument(1).unwrap_or_default();
-                Handler::keep(req, callable, value)
-            });
+            let handler = callback.map(|callable| Owner::take(req, callable));
             if let Some(old) = handle.db.set_authorizer(handler) {
-                old.release(req);
+                old.give_up(req);
             }
             Ok(())
         })
@@ -448,13 +466,6 @@ impl PDO {
 
 // ---- the bodies each method shares with its deprecated twin
 
-/// A callable argument at `position` kept past the call: the callable
-/// and one more owner of the value it came from.
-fn kept(req: &mut Request, callable: Callable, position: u32) -> Handler {
-    let value = req.argument(position).unwrap_or_default();
-    Handler::keep(req, callable, value)
-}
-
 fn create_function_as(
     req: &mut Request,
     this: PhpObject,
@@ -462,9 +473,10 @@ fn create_function_as(
     callback: Callable,
     (argc, flags): (i64, i64),
 ) -> Result<bool, Thrown> {
-    let handler = kept(req, callback, 2);
     let name = name.as_bytes().to_vec();
-    sqlite::register(req, this, &name, argc, flags, Function::Scalar(handler))
+    sqlite::register(req, this, &name, argc, flags, |req| {
+        Function::Scalar(Owner::take(req, callback))
+    })
 }
 
 fn create_aggregate_as(
@@ -474,17 +486,11 @@ fn create_aggregate_as(
     (step, finalize): (Callable, Callable),
     argc: i64,
 ) -> Result<bool, Thrown> {
-    let step = kept(req, step, 2);
-    let finalize = kept(req, finalize, 3);
     let name = name.as_bytes().to_vec();
-    sqlite::register(
-        req,
-        this,
-        &name,
-        argc,
-        0,
-        Function::Aggregate { step, finalize },
-    )
+    sqlite::register(req, this, &name, argc, 0, |req| Function::Aggregate {
+        step: Owner::take(req, step),
+        finalize: Owner::take(req, finalize),
+    })
 }
 
 fn create_collation_as(
@@ -493,7 +499,6 @@ fn create_collation_as(
     name: PhpString,
     callback: Callable,
 ) -> Result<bool, Thrown> {
-    let handler = kept(req, callback, 2);
     let name = name.as_bytes().to_vec();
-    sqlite::register_collation(req, this, &name, handler)
+    sqlite::register_collation(req, this, &name, callback)
 }

@@ -10,13 +10,15 @@
 //! changed after a prepare reaches the statement's next `executer` as php's
 //! does.
 
+use std::borrow::Cow;
+
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
-    BindType, Connection, Connector, Failure, OnError, Placeholders, Prepared, Scanner, Source,
-    SqlError, SqlState, Statement as _, bool_attribute, long_attribute, option_long, option_string,
-    parse_data_source, rewrite_named,
+    BindType, Cause, Connection, Connector, Failure, OnError, ParameterMap, Placeholders, Prepared,
+    Scanner, Source, SqlError, SqlState, Statement as _, bool_attribute, long_attribute,
+    option_long, option_string, parse_data_source, rewrite_named,
 };
 
 use crate::Mysql;
@@ -93,14 +95,110 @@ pub(crate) struct State {
 struct Row {
     h: H,
     held: Option<Emalloc>,
+    /// `H->einfo.errmsg`.
+    errmsg: Errmsg,
 }
 
 impl State {
     /// The `pdo_mysql_db_handle` held at a new number.
     fn hold(&mut self, h: H, held: Option<Emalloc>) -> usize {
-        self.handles.push(Some(Row { h, held }));
+        self.handles.push(Some(Row {
+            h,
+            held,
+            errmsg: Errmsg::default(),
+        }));
         self.handles.len() - 1
     }
+}
+
+/// `pdo_mysql_error_info`'s `errmsg`: the message `_pdo_mysql_error`
+/// `pestrdup`s, on the request's heap for a connection that is not
+/// persistent, and `malloc`'s, which no request counts, for one that
+/// is; freed at the next error and by the closer or the statement's
+/// `dtor`. PDO keeps the code and the text it reports
+/// (`Connector::errors_per_statement`); this is what php's heap holds
+/// for them. A failed query keeps mysqlnd's list element and this
+/// message, the next error replaces both, and a query that succeeds
+/// frees them:
+///
+/// ```php
+/// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+/// $p->query('SELEC 1'); $p->query('SELECT 1');
+/// $m = memory_get_usage();
+/// $p->query('SELEC 1');
+/// echo memory_get_usage() - $m, "\n";
+/// $p->query('SELEC 1 ' . str_repeat('x', 200));
+/// echo memory_get_usage() - $m, "\n";
+/// $p->query('SELECT 1');
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 528
+/// 912
+/// 32
+/// ```
+#[derive(Default)]
+pub(crate) struct Errmsg(Option<Emalloc>);
+
+impl Errmsg {
+    /// `_pdo_mysql_error`'s `pefree` of the message kept, then the
+    /// `pestrdup` of the one `failure` reports where it carries an error;
+    /// the memory limit's fatal rides on the failure as its throwable.
+    pub(crate) fn keep(
+        &mut self,
+        req: &mut Request,
+        failure: Failure,
+        persistent: bool,
+    ) -> Failure {
+        self.free(req);
+        let message = match &failure.cause {
+            Cause::Error(e) if e.code != 0 && !persistent => &e.message,
+            _ => return failure,
+        };
+        match Emalloc::new(req, message.len() + 1) {
+            Ok(mut held) => {
+                if let Some(at) = held.bytes_mut().get_mut(..message.len()) {
+                    at.copy_from_slice(message);
+                }
+                self.0 = Some(held);
+                failure
+            }
+            Err(thrown) => Failure {
+                thrown: Some(thrown),
+                ..failure
+            },
+        }
+    }
+
+    /// `pefree(einfo->errmsg, dbh->is_persistent)`.
+    pub(crate) fn free(&mut self, req: &mut Request) {
+        if let Some(held) = self.0.take() {
+            held.free(req);
+        }
+    }
+}
+
+/// `_pdo_mysql_error(dbh, NULL)`: the connection's error as [`error_of`]
+/// reads it, its message kept on `H->einfo`.
+pub(crate) fn conn_error(req: &mut Request, id: usize, server: Mysqlnd) -> Failure {
+    let failure = error_of(req, server, None);
+    let (mut errmsg, persistent) = match req.state::<State>().handles.get_mut(id) {
+        Some(Some(row)) => (std::mem::take(&mut row.errmsg), row.held.is_none()),
+        _ => return failure,
+    };
+    let failure = errmsg.keep(req, failure, persistent);
+    if let Some(Some(row)) = req.state::<State>().handles.get_mut(id) {
+        row.errmsg = errmsg;
+    } else {
+        errmsg.free(req);
+    }
+    failure
+}
+
+/// Whether the connection numbered `id` is persistent, its
+/// `pdo_mysql_db_handle` `malloc`'s.
+pub(crate) fn persistent(req: &mut Request, id: usize) -> bool {
+    matches!(req.state::<State>().handles.get(id), Some(Some(row)) if row.held.is_none())
 }
 
 /// The `pdo_mysql_db_handle` numbered `id`.
@@ -117,18 +215,19 @@ fn update(req: &mut Request, id: usize, f: impl FnOnce(&mut H)) {
 }
 
 /// The `pdo_mysql_db_handle` numbered `id` out of the request's table, its allocation
-/// freed, `mysql_handle_closer`'s `pefree(H, dbh->is_persistent)`.
+/// freed, `mysql_handle_closer`'s `pefree(H->einfo.errmsg, ...)` and
+/// `pefree(H, dbh->is_persistent)`.
 fn unhold(req: &mut Request, id: usize) {
     let row = req
         .state::<State>()
         .handles
         .get_mut(id)
         .and_then(Option::take);
-    if let Some(Row {
-        held: Some(held), ..
-    }) = row
-    {
-        held.free(req);
+    if let Some(mut row) = row {
+        row.errmsg.free(req);
+        if let Some(held) = row.held {
+            held.free(req);
+        }
     }
 }
 
@@ -313,12 +412,13 @@ impl Connector for Driver {
     }
 }
 
-/// What `mysql_handle_preparer` made of a query: a server-side statement,
-/// with the parameter map where the query's named placeholders were
-/// rewritten, or one PDO emulates.
+/// What `mysql_handle_preparer` made of a query: a server-side statement
+/// or one PDO emulates, with the parameter map where the query's named
+/// placeholders were rewritten, which the statement keeps either way, as
+/// php's `fallback` keeps `stmt->bound_param_map`.
 enum Native {
-    Prepared(Option<Vec<(i64, Vec<u8>)>>),
-    Emulated,
+    Prepared(Option<ParameterMap>),
+    Emulated(Option<ParameterMap>),
 }
 
 /// `mysql_handle_preparer` past the emulated case: the query's named
@@ -332,21 +432,39 @@ fn prepare_native(
     sql: &[u8],
     options: Option<php_ext::values::PhpArray>,
 ) -> Result<Native, Failure> {
-    let rewritten = rewrite_named(sql, Some(crate::scanner::scan as Scanner))?;
-    let (sent, map) = match &rewritten {
-        Some(rewritten) => (
-            rewritten.sql.as_slice(),
-            Some(rewritten.parameter_map.clone()),
-        ),
-        None => (sql, None),
+    let (sent, map) = match rewrite_named(req, sql, Some(crate::scanner::scan as Scanner))? {
+        Some(rewritten) => (Cow::Owned(rewritten.sql), Some(rewritten.parameter_map)),
+        None => (Cow::Borrowed(sql), None),
     };
+    match prepare_server(req, h, id, stmt, &sent, options) {
+        Ok(true) => Ok(Native::Prepared(map)),
+        Ok(false) => Ok(Native::Emulated(map)),
+        Err(failure) => {
+            if let Some(map) = map {
+                map.give_up(req);
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// `mysql_stmt_init` and `mysql_stmt_prepare` of the query as sent:
+/// `false` where the server cannot prepare it (1295) and PDO emulates it.
+fn prepare_server(
+    req: &mut Request,
+    h: H,
+    id: usize,
+    stmt: &mut Stmt,
+    sent: &[u8],
+    options: Option<php_ext::values::PhpArray>,
+) -> Result<bool, Failure> {
     let mut ps = Ps::init(req, h.server)?;
     if !ps.prepare(req, sent)? {
         if h.server.status(req).errno == 1295 {
             ps.close(req, true)?;
-            return Ok(Native::Emulated);
+            return Ok(false);
         }
-        let failure = error_of(req, h.server, None);
+        let failure = conn_error(req, id, h.server);
         ps.close(req, true)?;
         return Err(failure);
     }
@@ -354,7 +472,7 @@ fn prepare_native(
     stmt.ps = Some(ps);
     update(req, id, |h| h.own_columns = true);
     stmt.max_length = option_long(req, options, attr::MAX_COLUMN_LEN, 0)? & 1 != 0;
-    Ok(Native::Prepared(map))
+    Ok(true)
 }
 
 /// The `driver_options` half of `pdo_mysql_handle_factory`: the `H`'s
@@ -491,6 +609,15 @@ impl Db {
         }
     }
 
+    /// `pdo_mysql_error(dbh)`: the connection's error, its message kept
+    /// on its `pdo_mysql_db_handle`.
+    fn error(&self, req: &mut Request, server: Mysqlnd) -> Failure {
+        match self.id() {
+            Some(id) => conn_error(req, id, server),
+            None => error_of(req, server, None),
+        }
+    }
+
     /// Its `pdo_mysql_db_handle`, refusing a closed connection as `Silent`.
     fn h(&self, req: &mut Request) -> Result<H, Failure> {
         self.handle(req).ok_or_else(Failure::silent)
@@ -512,7 +639,7 @@ impl Connection for Db {
         let id = self.id().ok_or_else(Failure::silent)?;
         let mut stmt = Stmt::new(req, id)?;
         let native = if h.emulate_prepare || h.server.status(req).server_version < 40100 {
-            Ok(Native::Emulated)
+            Ok(Native::Emulated(None))
         } else {
             prepare_native(req, h, id, &mut stmt, sql, options)
         };
@@ -525,10 +652,10 @@ impl Connection for Db {
                 },
                 parameter_map: map,
             }),
-            Ok(Native::Emulated) => Ok(Prepared {
+            Ok(Native::Emulated(map)) => Ok(Prepared {
                 statement: Box::new(stmt),
                 placeholders: Placeholders::Emulated,
-                parameter_map: None,
+                parameter_map: map,
             }),
             Err(failure) => {
                 stmt.close(req);
@@ -542,11 +669,11 @@ impl Connection for Db {
     fn exec(&mut self, req: &mut Request, sql: &[u8]) -> Result<i64, Failure> {
         let h = self.h(req)?;
         if !h.server.query(req, sql)? {
-            return Err(error_of(req, h.server, None));
+            return Err(self.error(req, h.server));
         }
         let affected = h.server.status(req).affected_rows;
         if affected == u64::MAX {
-            let failure = error_of(req, h.server, None);
+            let failure = self.error(req, h.server);
             return match &failure.cause {
                 php_ext_pdo::connector::Cause::Error(e) if e.code != 0 => Err(failure),
                 _ => Ok(0),
@@ -554,7 +681,7 @@ impl Connection for Db {
         }
         while h.server.status(req).more_results {
             if !h.server.next_rowset(req)? {
-                return Err(error_of(req, h.server, None));
+                return Err(self.error(req, h.server));
             }
             if let Some(result) = h.server.store(req)? {
                 result.free(req, false)?;
@@ -620,7 +747,7 @@ impl Connection for Db {
         if done {
             Ok(())
         } else {
-            Err(error_of(req, h.server, None))
+            Err(self.error(req, h.server))
         }
     }
 
@@ -637,7 +764,7 @@ impl Connection for Db {
         if done {
             Ok(())
         } else {
-            Err(error_of(req, h.server, None))
+            Err(self.error(req, h.server))
         }
     }
 
@@ -685,7 +812,7 @@ impl Connection for Db {
                 let on = bool_attribute(req, value)?;
                 let h = self.h(req)?;
                 if !h.server.option(req, ClientOption::IntAndFloatNative(!on))? {
-                    return Err(error_of(req, h.server, None));
+                    return Err(self.error(req, h.server));
                 }
             }
             _ => return Err(Failure::silent()),
@@ -713,7 +840,7 @@ impl Connection for Db {
             }
             attr::SERVER_INFO => match h.server.stat(req)? {
                 Some(text) => return string(req, &text),
-                None => return Err(error_of(req, h.server, None)),
+                None => return Err(self.error(req, h.server)),
             },
             attr::AUTOCOMMIT => Value::bool(h.auto_commit),
             attr::DEFAULT_STR_PARAM => Value::int(if h.assume_national_character_set_strings {
@@ -848,7 +975,7 @@ impl Db {
     fn set_attribute_autocommit(&self, req: &mut Request) -> Result<(), Failure> {
         let h = self.h(req)?;
         if !h.server.command(req, Command::Autocommit(h.auto_commit))? {
-            return Err(error_of(req, h.server, None));
+            return Err(self.error(req, h.server));
         }
         Ok(())
     }

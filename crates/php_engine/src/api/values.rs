@@ -419,10 +419,11 @@ impl Key {
 /// `try_append` take an [`Owner`] of the value they write, and `set` one
 /// of the key: the value is the array's from that moment, as
 /// `ZVAL_COPY_VALUE` into the bucket makes it php's, and so is a string
-/// key. A native builds a string with [`PhpString::new`], hands its
-/// owner to `set`, and never names it again, which is `add_assoc_*`'s
-/// shape; a value it was handed, a view, it hands on with
-/// [`Owner::take`], `Z_TRY_ADDREF` first as php's natives do. A view
+/// key. A native adds a row under a name it has as bytes with
+/// [`PhpArray::set_str`], which is `add_assoc_*`'s shape and makes the
+/// key where php's does; a key that is a string already it hands to
+/// `set` and never names again. A value it was handed, a view, it hands
+/// on with [`Owner::take`], `Z_TRY_ADDREF` first as php's natives do. A view
 /// handed as it stands does not compile:
 ///
 /// ```compile_fail,E0308
@@ -662,6 +663,32 @@ impl PhpArray {
         written
     }
 
+    /// Write `value` under the string key of these bytes,
+    /// `zend_hash_str_update` after `SEPARATE_ARRAY`: the bytes are the
+    /// key as written, an option's or a field's name, no integer read out
+    /// of them, as [`PhpArray::find`] reads them. A present key keeps its
+    /// string and its place, its old value released; an absent one is
+    /// made only after the table has room for it, so a write that
+    /// doubles the table never holds the new key beside the old data and
+    /// the new, as php's never does. That is `add_assoc_*`'s write, which
+    /// `memory_get_peak_usage()` reads, and why a native adds a row under
+    /// a name it has as bytes here, never through a [`PhpString`] key
+    /// made first and handed to [`PhpArray::set`]. The value is the
+    /// array's from here.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_str(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        if let Err(thrown) = self.separate(req) {
+            value.give_up(req);
+            return Err(thrown);
+        }
+        req.array_str_update(self.0, name, value.hand_on())
+    }
+
     /// Lay `value` down at `key` as `zend_hash_add_new` and
     /// `zend_symtable_add_new` do after `SEPARATE_ARRAY`: a string key
     /// appended without the lookup, so a key the array holds already is
@@ -803,15 +830,6 @@ impl PhpArray {
     pub fn copy(&self, req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let made = req.array_dup(self.0).map(PhpArray::of)?;
         Ok(Owner::adopt(req, made))
-    }
-
-    /// An iterator over the elements in order.
-    #[must_use]
-    pub fn iter(&self) -> ArrayIter {
-        ArrayIter {
-            inner: self.0.iter(),
-            at: None,
-        }
     }
 
     /// The first live element at or past the bucket `position`, with
@@ -991,44 +1009,21 @@ impl PhpArray {
 /// reads once both sides are arrays (`zend_hash_compare` ordered).
 impl PartialEq for PhpArray {
     fn eq(&self, other: &PhpArray) -> bool {
-        self.len() == other.len() && self.iter().eq(other.iter())
+        self.len() == other.len() && self.0.iter().map(view).eq(other.0.iter().map(view))
     }
+}
+
+/// One of a table's rows as `php_heap` reads it, as the views a reader
+/// is lent: what the rows walk ([`walk::rows`]), `==` between two
+/// arrays and the debug rendering read, none of which runs code of the
+/// program.
+fn view((key, value): (php_heap::Key, php_heap::Zval)) -> (Key, Value) {
+    (Key::of(key), Value::of_zval(value))
 }
 
 impl std::fmt::Debug for PhpArray {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
-    }
-}
-
-/// A position in a [`PhpArray`]: before the first element until
-/// [`ArrayIter::advance`] is called.
-#[derive(Debug)]
-pub struct ArrayIter {
-    inner: php_heap::ArrIter,
-    at: Option<(Key, Value)>,
-}
-
-impl ArrayIter {
-    /// Advance one element; `false` past the end.
-    pub fn advance(&mut self) -> bool {
-        self.at = self
-            .inner
-            .next()
-            .map(|(k, z)| (Key::of(k), Value::of_zval(z)));
-        self.at.is_some()
-    }
-
-    /// The key at the position.
-    #[must_use]
-    pub fn key(&self) -> Option<Key> {
-        self.at.as_ref().map(|(k, _)| k.clone())
-    }
-
-    /// The value at the position.
-    #[must_use]
-    pub fn value(&self) -> Option<&Value> {
-        self.at.as_ref().map(|(_, v)| v)
+        f.debug_map().entries(self.0.iter().map(view)).finish()
     }
 }
 
@@ -1167,26 +1162,6 @@ impl PhpArray {
     /// `foreach` by reference over the array goes on in `rebuilt`.
     pub fn iterators_carry(&self, req: &mut Request, rebuilt: &PhpArray) {
         req.heap_mut().iterators_carry(self.0, rebuilt.0);
-    }
-}
-
-impl IntoIterator for &PhpArray {
-    type Item = (Key, Value);
-    type IntoIter = ArrayIter;
-
-    fn into_iter(self) -> ArrayIter {
-        self.iter()
-    }
-}
-
-impl Iterator for ArrayIter {
-    type Item = (Key, Value);
-
-    fn next(&mut self) -> Option<(Key, Value)> {
-        if !self.advance() {
-            return None;
-        }
-        self.at.take()
     }
 }
 
@@ -3004,9 +2979,8 @@ mod tests {
         assert_eq!(a.cursor_key(), Some(Key::Int(5)));
         a.cursor_next();
         assert_eq!(a.cursor_current(), Some(Value::int(2)));
-        let mut it = a.iter();
-        assert!(it.advance());
-        assert_eq!(it.key(), Some(Key::Int(5)));
+        let first = walk::rows(&req, *a).next().map(|(key, _)| key);
+        assert_eq!(first, Some(Key::Int(5)));
         assert_eq!(a.unset(&mut req, &Key::Int(5)), Ok(true));
         assert_eq!(a.len(), 2);
         assert_eq!(a.cursor_current(), Some(Value::int(2)));

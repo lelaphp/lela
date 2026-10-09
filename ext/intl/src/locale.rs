@@ -8,7 +8,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::decl::{ClassConstDecl, ConstExpr, Name, Type, Visibility};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, walk};
 
 use crate::error;
 use crate::ffi::locale::{self as uloc, Part, Shown};
@@ -381,7 +381,7 @@ fn append_key_value(out: &mut Vec<u8>, array: PhpArray, key: &str) -> Appended {
 
 /// `append_multiple_key_values`: a variant, extlang or private subtag
 /// list, as a string, an array, or `key0`, `key1`, ...
-fn append_multiple(out: &mut Vec<u8>, array: PhpArray, key: &str) -> Appended {
+fn append_multiple(req: &Request, out: &mut Vec<u8>, array: PhpArray, key: &str) -> Appended {
     let prefix = |out: &mut Vec<u8>| {
         if key == PRIVATE {
             out.extend_from_slice(b"_x");
@@ -401,7 +401,7 @@ fn append_multiple(out: &mut Vec<u8>, array: PhpArray, key: &str) -> Appended {
     };
     if let Some(value) = array.find(key.as_bytes()).map(|v| v.deref()) {
         if let Some(list) = value.as_array() {
-            for (_, element) in list {
+            for (_, element) in walk::rows(req, *list) {
                 if !add(out, element) {
                     return Appended::NotString;
                 }
@@ -471,7 +471,7 @@ fn compose(req: &mut Request, subtags: PhpArray) -> Result<OrFalse<Owner<PhpStri
         (PRIVATE, true),
     ] {
         let appended = if multiple {
-            append_multiple(&mut out, subtags, key)
+            append_multiple(req, &mut out, subtags, key)
         } else {
             append_key_value(&mut out, subtags, key)
         };
@@ -630,8 +630,13 @@ fn lookup_range(
         let text = format!("unable to canonicalize {what}");
         error::set(req, Code::ILLEGAL_ARGUMENT, &text).map(|()| None)
     };
-    for (_, value) in &tags {
-        let Some(original) = value.deref().as_str_bytes().map(<[u8]>::to_vec) else {
+    // Read under the rows walk, each row's bytes copied, and refused
+    // after it, where a diagnostic can reach the program.
+    let read: Vec<Option<Vec<u8>>> = walk::rows(req, tags)
+        .map(|(_, value)| value.deref().as_str_bytes().map(<[u8]>::to_vec))
+        .collect();
+    for original in read {
+        let Some(original) = original else {
             return Err(arg_type_error(req, 2, "only contain string values"));
         };
         if original.contains(&0) {

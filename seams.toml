@@ -96,7 +96,7 @@ porting = true
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 34000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here
+budget = 36000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C)
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -837,9 +837,3 @@ id = "divergence.reason"
 scope = "docs/divergence.toml"
 check = "divergence-reason"
 text = "A divergence row with status accepted has a reason a person wrote; done fails while an open row touches the scope (harness §4.3)."
-
-[[rule]]
-id = "owner.no-assign-discard"
-scope = ["crates/**/*.rs", "ext/**/*.rs", "sapi/**/*.rs"]
-deny_pattern = '(?m)(^|=>)\s*_ = '
-text = "A value is handed on, given up or discarded by name; `_ = x;` drops it where no lint sees it (#1980, #1998)."

@@ -365,7 +365,9 @@ fn vsprintf(
 /// copies them into, which stands across the format and its throws
 /// until the caller's `efree(args)`.
 fn values_of(req: &mut Request, array: PhpArray) -> Result<(Vec<Value>, Emalloc), Thrown> {
-    let values: Vec<Value> = array.iter().map(|(_, value)| value).collect();
+    let values: Vec<Value> = php_ext::values::walk::rows(req, array)
+        .map(|(_, value)| value)
+        .collect();
     let args = Emalloc::new(req, values.len() * 16)?;
     Ok((values, args))
 }

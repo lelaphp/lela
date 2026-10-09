@@ -16,7 +16,7 @@ use super::Request;
 /// this one reads.
 #[derive(Default)]
 pub(super) struct Autoload {
-    autoloaders: Vec<Callable>,
+    autoloaders: Vec<Owner<Callable>>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading,
     /// each a key of php's table, which the first lookup that may
     /// autoload lays down on the request's heap and which stands, its
@@ -29,14 +29,14 @@ impl Request {
     /// `PHP_RSHUTDOWN(spl)` destroys `spl_autoload_functions`.
     pub(super) fn free_autoloaders(&mut self) {
         for loader in std::mem::take(&mut self.autoload.autoloaders) {
-            loader.release(self);
+            loader.give_up(self);
         }
     }
 
     /// `spl_autoload_register()`: the callable onto the stack, at its
     /// head under `prepend`, and nothing where one of the same target
     /// is there already (`spl_find_registered_function`). The stack
-    /// takes the callable's owners, [`Callable::addref`], as
+    /// takes an [`Owner`] of the callable, as
     /// `autoload_func_info_from_fci` takes one of its object and closure,
     /// and gives them up when the callable leaves the stack or the
     /// request ends.
@@ -71,7 +71,7 @@ impl Request {
         {
             return Ok(());
         }
-        loader.addref(self);
+        let loader = Owner::take(self, loader);
         if prepend {
             self.autoload.autoloaders.insert(0, loader);
         } else {
@@ -90,14 +90,17 @@ impl Request {
         else {
             return false;
         };
-        self.autoload.autoloaders.remove(at).release(self);
+        self.autoload.autoloaders.remove(at).give_up(self);
         true
     }
 
     /// The autoloader at `at` on the stack, what `spl_perform_autoload`
     /// serves next.
     pub(crate) fn autoloader(&self, at: usize) -> Option<Callable> {
-        self.autoload.autoloaders.get(at).cloned()
+        self.autoload
+            .autoloaders
+            .get(at)
+            .map(|loader| (**loader).clone())
     }
 
     /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`, the

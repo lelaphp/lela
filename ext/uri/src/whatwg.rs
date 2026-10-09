@@ -8,7 +8,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object, write_prop};
 use php_ext::raising::{Thrown, arg_value_error, fatal, new_throwable, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, walk};
 use php_ext_lexbor::ffi::url::{self as lxb, ErrorKind, Host, Url as LxbUrl, ValidationError};
 
 use crate::{
@@ -422,7 +422,7 @@ fn is_list_of_errors(req: &mut Request, array: PhpArray) -> Result<bool, Thrown>
     let Some(class) = lookup_class(req, b"Uri\\WhatWg\\UrlValidationError")? else {
         return Ok(false);
     };
-    Ok(array.iter().all(|(_, value)| {
+    Ok(walk::rows(req, array).all(|(_, value)| {
         value
             .as_object()
             .is_some_and(|object| object.instance_of(req, class))

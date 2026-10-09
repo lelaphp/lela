@@ -536,7 +536,7 @@ impl Request {
         };
         let o = object.heap();
         let mut table = table.hand_on();
-        if table.iter().any(|(key, _)| matches!(key, Key::Int(_))) {
+        if crate::api::values::walk::rows(self, table).any(|(key, _)| matches!(key, Key::Int(_))) {
             let mut spelt = self.array()?;
             // `zend_symtable_to_proptable`'s copy, which no code of the
             // program reaches: the rows read under the borrowed request,

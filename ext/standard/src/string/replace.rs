@@ -539,10 +539,13 @@ pub(super) fn substr_replace(
             };
             let out = match replace {
                 Union::B(r) => splice(r.as_bytes()),
-                Union::A(array) => match array.iter().next() {
-                    Some((_, value)) => with_string(req, &value, splice)?,
-                    None => splice(b""),
-                },
+                Union::A(array) => {
+                    let first = walk::rows(req, array).next();
+                    match first {
+                        Some((_, value)) => with_string(req, &value, splice)?,
+                        None => splice(b""),
+                    }
+                }
             };
             PhpString::new(req, &out).map(Union::B)
         }

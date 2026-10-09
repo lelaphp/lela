@@ -48,12 +48,14 @@ fn search(
     haystack: PhpArray,
     strict: bool,
 ) -> Result<Option<Key>, Thrown> {
-    for (key, element) in &haystack {
-        if matches(req, needle, &element, strict)? {
-            return Ok(Some(key));
+    // `ZEND_HASH_FOREACH_KEY_VAL`, holding nothing: `==` may serve
+    // `__toString`.
+    walk::foreach(req, haystack, Hold::None, |req, row| -> walk::Step<Key> {
+        if matches(req, needle, row.value(), strict)? {
+            return Ok(ControlFlow::Break(row.key().clone()));
         }
-    }
-    Ok(None)
+        Ok(ControlFlow::Continue(()))
+    })
 }
 
 /// `in_array(mixed $needle, array $haystack, bool $strict = false): bool`,
@@ -247,15 +249,16 @@ fn array_keys(
         return Ok(Owner::take(req, array));
     }
     let mut out = PhpArray::new(req)?;
-    for (key, element) in &array {
+    walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         if let Some(filter) = &filter
-            && !matches(req, filter, &element, strict)?
+            && !matches(req, filter, row.value(), strict)?
         {
-            continue;
+            return Ok(ControlFlow::Continue(()));
         }
-        let value = key_value(&key);
+        let value = key_value(row.key());
         out.append(req, Owner::take(req, value))?;
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     Ok(out)
 }
 
@@ -273,7 +276,7 @@ fn array_keys(
 /// ```
 #[php_function]
 fn array_key_first(req: &mut Request, array: PhpArray) -> Option<Union<Owner<PhpString>, i64>> {
-    let first = array.iter().next();
+    let first = walk::rows(req, array).next();
     key_or_null(req, first.map(|(key, _)| key))
 }
 
@@ -318,8 +321,8 @@ pub(super) fn key_return(req: &mut Request, key: &Key) -> Union<Owner<PhpString>
 /// NULL
 /// ```
 #[php_function]
-fn array_first(array: PhpArray) -> Value {
-    let first = array.iter().next();
+fn array_first(req: &mut Request, array: PhpArray) -> Value {
+    let first = walk::rows(req, array).next();
     value_or_null(first.map(|(_, value)| value))
 }
 

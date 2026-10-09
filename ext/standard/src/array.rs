@@ -249,7 +249,7 @@ fn array_merge(
         // `HT_IS_PACKED` without holes, or every key a string: what a
         // merge would lay down as it stands.
         if let Some(kept) = kept
-            && (kept.is_list() || kept.iter().all(|(key, _)| matches!(key, Key::Str(_))))
+            && (kept.is_list() || rows::rows(req, kept).all(|(key, _)| matches!(key, Key::Str(_))))
         {
             return Ok(returned(Owner::take(req, Value::array(kept))));
         }
@@ -766,15 +766,15 @@ fn count_recursive(req: &mut Request, array: PhpArray) -> Result<i64, Thrown> {
     }
     call_stack_end(req)?;
     array.protect();
-    let mut count = Ok(i64::try_from(array.len()).unwrap_or(i64::MAX));
-    for (_, element) in &array {
-        if let Some(nested) = element.deref().as_array() {
-            count = count.and_then(|sum| Ok(sum.saturating_add(count_recursive(req, *nested)?)));
-            if count.is_err() {
-                break;
-            }
+    let mut count = i64::try_from(array.len()).unwrap_or(i64::MAX);
+    // `ZEND_HASH_FOREACH_VAL` under `GC_PROTECT_RECURSION`, holding
+    // nothing: a nested warning can reach a handler.
+    let walked = rows::foreach(req, array, Hold::None, |req, row| -> rows::Step {
+        if let Some(nested) = row.value().deref().as_array() {
+            count = count.saturating_add(count_recursive(req, *nested)?);
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    });
     array.unprotect();
-    count
+    walked.map(|_| count)
 }

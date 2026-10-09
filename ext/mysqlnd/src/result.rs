@@ -325,7 +325,7 @@ impl Res {
         stmt_id: u32,
         decode: bool,
     ) -> Result<Result<Option<Row>, ()>, Thrown> {
-        conn.error.reset();
+        conn.error.reset(req);
         let mut payload = stmt_id.to_le_bytes().to_vec();
         payload.extend_from_slice(&1u32.to_le_bytes());
         if !conn.send_command(req, crate::consts::Com::StmtFetch, &payload, false)? {
@@ -426,7 +426,7 @@ impl Res {
         self.pool
             .get_chunk(req, (self.field_count as usize + 1) * FIELD)?;
         for _ in 0..self.field_count {
-            let Some(body) = conn.read_packet(req, Prot::RsetField) else {
+            let Some(body) = conn.read_packet(req, Prot::RsetField)? else {
                 self.fields.clear();
                 return Ok(false);
             };
@@ -448,7 +448,7 @@ impl Res {
                     self.fields.push(field);
                 }
                 FieldPacket::Error(e) => {
-                    e.set_on(&mut conn.error);
+                    e.set_on(req, &mut conn.error)?;
                     self.fields.clear();
                     return Ok(false);
                 }
@@ -543,7 +543,7 @@ impl Res {
         let mut rows = RowBuffers::default();
         let read = self.store_rows(req, conn, ps, &mut rows);
         self.rows = Rows::Buffered { rows, current: 0 };
-        let (failed, error) = read?;
+        let (failed, mut error) = read?;
         let count = match &self.rows {
             Rows::Buffered { rows, .. } => rows.len() as u64,
             _ => 0,
@@ -567,8 +567,16 @@ impl Res {
         } else {
             ConnState::Ready
         };
+        // `COPY_CLIENT_ERROR(conn->error_info, stored_data->error_info)`,
+        // and the set's error info freed with the set.
+        let copied = if failed {
+            conn.error.copy_from(req, &error)
+        } else {
+            Ok(())
+        };
+        error.reset(req);
+        copied?;
         if failed {
-            conn.error.copy_from(&error);
             return Ok(false);
         }
         conn.upsert.affected_rows = count;
@@ -584,12 +592,12 @@ impl Res {
         ps: bool,
         rows: &mut RowBuffers,
     ) -> Result<(bool, ErrorInfo), Thrown> {
-        let mut error = ErrorInfo::default();
+        let mut error = ErrorInfo::new(false);
         loop {
             match read_row(req, conn, &mut self.pool, ps)? {
                 RowPacket::Row(chunk) => {
                     if !rows.push(req, chunk)? {
-                        error.client(cr::OUT_OF_MEMORY, OUT_OF_MEMORY);
+                        error.client(req, cr::OUT_OF_MEMORY, OUT_OF_MEMORY)?;
                         return Ok((true, error));
                     }
                 }
@@ -603,11 +611,11 @@ impl Res {
                     return Ok((false, error));
                 }
                 RowPacket::Error(e) => {
-                    e.set_on(&mut error);
+                    e.set_on(req, &mut error)?;
                     return Ok((true, error));
                 }
                 RowPacket::Fail => {
-                    error.copy_from(&conn.error);
+                    error.copy_from(req, &conn.error)?;
                     return Ok((true, error));
                 }
             }
@@ -701,7 +709,8 @@ impl Res {
                     return Ok(Ok(None));
                 }
                 if conn.state != ConnState::FetchingData {
-                    conn.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+                    conn.error
+                        .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
                     return Ok(Err(()));
                 }
                 let saved = self.pool.enter();
@@ -774,7 +783,7 @@ impl Res {
                 Ok(Ok(None))
             }
             RowPacket::Error(e) => {
-                e.set_on(&mut conn.error);
+                e.set_on(req, &mut conn.error)?;
                 if conn.state != ConnState::QuitSent {
                     conn.state = ConnState::Ready;
                 }
@@ -1094,12 +1103,13 @@ pub(crate) enum RowPacket {
     Fail,
 }
 
-/// The connection gone under a read, as php marks it.
-fn gone(conn: &mut ConnData) -> RowPacket {
+/// The connection gone under a read, as php marks it; the `Err` is the
+/// memory limit's fatal.
+fn gone(req: &mut Request, conn: &mut ConnData) -> Result<RowPacket, Thrown> {
     conn.state = ConnState::QuitSent;
     conn.error
-        .client(cr::SERVER_GONE_ERROR, crate::error::SERVER_GONE);
-    RowPacket::Fail
+        .client(req, cr::SERVER_GONE_ERROR, crate::error::SERVER_GONE)?;
+    Ok(RowPacket::Fail)
 }
 
 /// `php_mysqlnd_rowp_read` with `php_mysqlnd_read_row_ex`: a row's
@@ -1114,7 +1124,7 @@ fn read_row(
     binary: bool,
 ) -> Result<RowPacket, Thrown> {
     let Some(mut size) = conn.net.read_header(req, &mut conn.stats, &mut conn.error) else {
-        return Ok(gone(conn));
+        return gone(req, conn);
     };
     let mut joined: Option<Emalloc> = None;
     let mut data_size = 0;
@@ -1136,7 +1146,7 @@ fn read_row(
             if let Some(buf) = joined {
                 buf.free(req);
             }
-            return Ok(gone(conn));
+            return gone(req, conn);
         };
         size = next;
     }
@@ -1147,7 +1157,7 @@ fn read_row(
     }
     let into = &mut pool.bytes_mut(chunk)[data_size..data_size + size];
     if !conn.net.receive_into(req, into, &mut conn.stats) {
-        return Ok(gone(conn));
+        return gone(req, conn);
     }
     let row = chunk.prefix(data_size + size);
     conn.stats.add(

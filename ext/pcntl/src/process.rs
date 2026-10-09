@@ -8,6 +8,7 @@
 //! succeeds) happens in a forked child whose status the parent reads.
 
 use std::ffi::CString;
+use std::ops::ControlFlow;
 
 use nix::errno::Errno;
 use php_ext::abi::{False, OrFalse, Passed, Path, Ref, Untyped};
@@ -21,6 +22,7 @@ use php_ext::raising::arity;
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{Forked, Request};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::{State, failed, ffi};
@@ -152,7 +154,7 @@ fn waited(
     let given = status.get().map_or(Value::null(), |held| held.0);
     let mut word = i32::try_from(to_long(req, &given)?).unwrap_or_default();
     let options = i32::try_from(flags).unwrap_or_default();
-    let mut usage = resource_usage.is_given().then(zeroed_usage);
+    let mut usage = resource_usage.is_given().then(ffi::zeroed_usage);
     let child = match ffi::wait(pid, &mut word, options, usage.as_mut()) {
         Ok(child) => child,
         Err(errno) => {
@@ -169,34 +171,6 @@ fn waited(
     }
     status.set(req, Untyped(Value::int(word.into())))?;
     Ok(child.into())
-}
-
-/// An `rusage` of zeroes, php's `memset`.
-fn zeroed_usage() -> ffi::Usage {
-    ffi::Usage {
-        ru_utime: libc::timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        ru_stime: libc::timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        ru_maxrss: 0,
-        ru_ixrss: 0,
-        ru_idrss: 0,
-        ru_isrss: 0,
-        ru_minflt: 0,
-        ru_majflt: 0,
-        ru_nswap: 0,
-        ru_inblock: 0,
-        ru_oublock: 0,
-        ru_msgsnd: 0,
-        ru_msgrcv: 0,
-        ru_nsignals: 0,
-        ru_nvcsw: 0,
-        ru_nivcsw: 0,
-    }
 }
 
 /// One `rusage` member as php's `zend_long`, whatever C type the
@@ -444,8 +418,11 @@ pub(crate) fn pcntl_exec(
 ) -> Result<False, Thrown> {
     let program = CString::new(path.0.as_bytes()).unwrap_or_default();
     let mut arguments = vec![program.clone()];
-    for (_, element) in &args {
-        let Ok(argument) = with_string(req, &element, |bytes| CString::new(bytes))? else {
+    // `ZEND_HASH_FOREACH_VAL(args_hash, element)` and `zval_get_string`,
+    // which may serve `__toString`: a foreach walk holding nothing, the
+    // argument holding the array.
+    walk::foreach(req, args, Hold::None, |req, row| -> walk::Step {
+        let Ok(argument) = with_string(req, row.value(), |bytes| CString::new(bytes))? else {
             return Err(argument_error(
                 req,
                 "ValueError",
@@ -454,12 +431,13 @@ pub(crate) fn pcntl_exec(
             ));
         };
         arguments.push(argument);
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     let executed = match env_vars {
         Passed::Given(env_vars) => {
             let mut envp = Vec::new();
-            for (key, element) in &env_vars {
-                let value = with_string(req, &element, <[u8]>::to_vec)?;
+            walk::foreach(req, env_vars, Hold::None, |req, row| -> walk::Step {
+                let value = with_string(req, row.value(), <[u8]>::to_vec)?;
                 if value.contains(&0) {
                     return Err(argument_error(
                         req,
@@ -468,7 +446,7 @@ pub(crate) fn pcntl_exec(
                         "value for environment variable must not contain null bytes",
                     ));
                 }
-                let mut pair = match key {
+                let mut pair = match row.key() {
                     Key::Int(n) => n.to_string().into_bytes(),
                     Key::Str(name) => name.as_bytes().to_vec(),
                 };
@@ -483,7 +461,8 @@ pub(crate) fn pcntl_exec(
                 pair.push(b'=');
                 pair.extend_from_slice(&value);
                 envp.push(CString::new(pair).unwrap_or_default());
-            }
+                Ok(ControlFlow::Continue(()))
+            })?;
             nix::unistd::execve(&program, &arguments, &envp)
         }
         Passed::Omitted => nix::unistd::execv(&program, &arguments),
@@ -726,6 +705,158 @@ pub(crate) fn pcntl_strerror(
     #[allow(clippy::cast_possible_truncation)]
     let sentence = strerror(error_code as i32);
     PhpString::new(req, sentence.as_bytes())
+}
+
+/// `pcntl_unshare(int $flags): bool`: `unshare(2)`, with php's
+/// `ValueError` for flags the kernel refuses and its warning for any
+/// other failure.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_unshare(req: &mut Request, flags: i64) -> Result<bool, Thrown> {
+    let Err(errno) = ffi::unshare(flags) else {
+        return Ok(true);
+    };
+    failed(req, errno);
+    let n = errno as i32;
+    let text = match errno {
+        Errno::EINVAL => {
+            let tail = "be a combination of CLONE_* flags, or at least one flag is unsupported by the kernel";
+            return Err(arg_value_error(req, 1, tail));
+        }
+        Errno::ENOMEM => format!("Error {n}: Insufficient memory for unshare"),
+        Errno::EPERM => format!("Error {n}: No privilege to use these flags"),
+        Errno::ENOSPC => format!(
+            "Error {n}: Reached the maximum nesting limit for one of the specified namespaces"
+        ),
+        Errno::EUSERS => {
+            format!("Error {n}: Reached the maximum nesting limit for the user namespace")
+        }
+        _ => format!("Unknown error {n} has occurred"),
+    };
+    docref(req, Level::Warning, &text);
+    Ok(false)
+}
+
+/// `pcntl_getcpuaffinity(?int $process_id = null): array|false`: the
+/// CPUs the process may be scheduled on, the calling one for `null`.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_getcpuaffinity(
+    req: &mut Request,
+    #[php(default = null)] process_id: Option<i64>,
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
+    let pid = process_id.unwrap_or(0);
+    let cpus = match ffi::cpu_affinity(pid, ffi::cpus_configured()) {
+        Ok(cpus) => cpus,
+        Err(errno) => {
+            affinity_refused(req, errno, pid, None)?;
+            return Ok(OrFalse::False);
+        }
+    };
+    let mut out = PhpArray::new(req)?;
+    for cpu in cpus {
+        let cpu = i64::try_from(cpu).unwrap_or(i64::MAX);
+        out.append(req, Owner::take(req, Value::int(cpu)))?;
+    }
+    Ok(OrFalse::Value(out))
+}
+
+/// `pcntl_setcpuaffinity(?int $process_id = null, array $cpu_ids = []):
+/// bool`: the process held to the CPUs given, each an int or a string
+/// holding one, below the CPUs the system has configured.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_setcpuaffinity(
+    req: &mut Request,
+    #[php(default = null)] process_id: Option<i64>,
+    #[php(default = [])] cpu_ids: PhpArray,
+) -> Result<bool, Thrown> {
+    if cpu_ids.is_empty() {
+        return Err(arg_value_error(req, 2, "not be empty"));
+    }
+    let pid = process_id.unwrap_or(0);
+    let configured = ffi::cpus_configured();
+    let values: Vec<Value> = php_ext::values::walk::rows(req, cpu_ids)
+        .map(|(_, value)| value.deref())
+        .collect();
+    let mut cpus = Vec::new();
+    for value in values {
+        let cpu = match value.as_ref() {
+            php_ext::values::ValueRef::Int(n) => n,
+            php_ext::values::ValueRef::Str(s) => match Key::lookup(*s) {
+                Key::Int(n) => n,
+                Key::Str(_) => {
+                    let shown = String::from_utf8_lossy(s.as_bytes()).into_owned();
+                    let tail = format!("cpu id invalid value ({shown})");
+                    return Err(argument_error(req, "ValueError", 2, &tail));
+                }
+            },
+            _ => {
+                let given = php_ext::coerce::value_name(req, &value);
+                let tail = format!("value must be of type int|string, {given} given");
+                return Err(argument_error(req, "TypeError", 2, &tail));
+            }
+        };
+        if !(0..configured).contains(&cpu) {
+            let tail = format!("cpu id must be between 0 and {configured} ({cpu})");
+            return Err(argument_error(req, "ValueError", 2, &tail));
+        }
+        cpus.push(usize::try_from(cpu).unwrap_or(0));
+    }
+    match ffi::set_cpu_affinity(pid, &cpus) {
+        Ok(()) => Ok(true),
+        Err(errno) => {
+            affinity_refused(req, errno, pid, Some(2))?;
+            Ok(false)
+        }
+    }
+}
+
+/// What `sched_getaffinity` and `sched_setaffinity` refused, as php says
+/// it: a `ValueError` for a process that is not there and for a mask the
+/// kernel will not take, at the CPU ids where the call was a set, and a
+/// warning otherwise.
+#[cfg(target_os = "linux")]
+fn affinity_refused(
+    req: &mut Request,
+    errno: Errno,
+    pid: i64,
+    cpu_ids_at: Option<u32>,
+) -> Result<(), Thrown> {
+    failed(req, errno);
+    match errno {
+        Errno::ESRCH => {
+            let tail = format!("invalid process ({pid})");
+            Err(argument_error(req, "ValueError", 1, &tail))
+        }
+        Errno::EINVAL => Err(match cpu_ids_at {
+            Some(at) => argument_error(
+                req,
+                "ValueError",
+                at,
+                "invalid cpu affinity mask size or unmapped cpu id(s)",
+            ),
+            None => {
+                php_ext::raising::throw_error(req, "ValueError", "invalid cpu affinity mask size")
+            }
+        }),
+        Errno::EPERM => {
+            let text = "Calling process not having the proper privileges";
+            docref(req, Level::Warning, text);
+            Ok(())
+        }
+        _ => {
+            docref(req, Level::Warning, &format!("Error {}", errno as i32));
+            Ok(())
+        }
+    }
+}
+
+/// `pcntl_getcpu(): int`: the CPU the calling thread runs on.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_getcpu() -> i64 {
+    ffi::current_cpu().into()
 }
 
 /// `strerror(3)`, as the standard library reads it through

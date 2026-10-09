@@ -1647,8 +1647,10 @@ mod tests {
     /// A pinned block whose last owner goes is destroyed then, as php
     /// destroys it, and its bytes are counted off then: an object's
     /// destructor is served and a table's rows released, and only the
-    /// bytes wait for the pin. A second pin over a pinned table sets
-    /// nothing, so only the pin that set it lets it go.
+    /// bytes wait for the pins. A second pin over a pinned table is
+    /// counted, so the bytes wait for whichever of the two is let go
+    /// last, the first taken let go first here, as a fiber lets go a
+    /// pin it took after the one let go outside it (#2291).
     #[test]
     fn a_pinned_block_is_destroyed_at_its_last_release_and_only_its_bytes_wait() {
         let _alone = alone();
@@ -1664,9 +1666,9 @@ mod tests {
         assert_eq!(r.heap.array_append(a, Zval::string(s)), Ok(true));
         let (object, table) = (Zval::object(o), Zval::array(a));
         o.addref();
-        assert!(Heap::pin_block(object));
-        assert!(Heap::pin_block(table));
-        assert!(!Heap::pin_block(table), "a pinned table is pinned once");
+        r.heap.pin_block(object);
+        r.heap.pin_block(table);
+        r.heap.pin_block(table);
         assert_eq!(o.refcount(), 2, "the pin is no count");
         Heap::release(&mut r, object);
         Heap::release(&mut r, object);
@@ -1686,6 +1688,11 @@ mod tests {
             !r.heap.mm.is_retired(o.address()),
             "the bytes go back with the pin"
         );
+        assert!(
+            r.heap.mm.is_retired(a.address()),
+            "the second pin keeps the table's"
+        );
+        r.heap.unpin_block(table);
         assert!(!r.heap.mm.is_retired(a.address()));
         assert_eq!(r.heap.memory_usage(false), start, "counted once");
     }
@@ -1704,7 +1711,7 @@ mod tests {
         };
         assert_eq!(r.heap.array_append(a, Zval::string(s)), Ok(true));
         let table = Zval::array(a);
-        assert!(Heap::pin_block(table));
+        r.heap.pin_block(table);
         Heap::release(&mut r, table);
         assert_eq!(r.heap.memory_usage(false), start);
         r.heap.addref(table);
@@ -1729,7 +1736,7 @@ mod tests {
         let mut r = Recorder::new();
         let start = r.heap.memory_usage(false);
         let Some((a, b)) = pair(&mut r) else { return };
-        assert!(Heap::pin_block(Zval::object(a)));
+        r.heap.pin_block(Zval::object(a));
         Heap::release(&mut r, Zval::object(a));
         Heap::release(&mut r, Zval::object(b));
         assert_eq!(Heap::gc_collect_cycles(&mut r), 2);

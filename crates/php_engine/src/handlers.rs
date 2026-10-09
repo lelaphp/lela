@@ -3370,6 +3370,8 @@ fn included(
         let value = exec::constant(main, ConstIdx(only.op1));
         req.addref(&value);
         copy.free(req);
+        // `destroy_op_array`: its names go with it.
+        req.release_unit_names(Some(&unit));
         return answered(req, frame, returns_to, value);
     }
     let callee = req.push_code_frame(unit, frame, returns_to)?;
@@ -17487,12 +17489,12 @@ struct BoundRw {
     owned: bool,
 }
 
-/// `FE_FETCH_RW` over the array a reference holds: the iterator's
-/// position (`zend_hash_iterator_pos_ex`), which separates an array the
-/// body shared and moves the walk onto a table the body replaced; the
-/// first live element from there; the iterator one past it; and the
-/// element made a reference in place where it is not one
-/// (`ZVAL_NEW_EMPTY_REF`).
+/// `FE_FETCH_RW` over the array a reference holds: one step of the
+/// loop's hash iterator ([`walk::array_step`]), which separates an
+/// array the body shared and moves the walk onto a table the body
+/// replaced, finds the first live element from there and leaves the
+/// iterator one past it; and the element made a reference in place
+/// where it is not one (`ZVAL_NEW_EMPTY_REF`).
 fn fe_walk_array_rw(
     req: &mut Request,
     op: &Opline,
@@ -17500,17 +17502,10 @@ fn fe_walk_array_rw(
     array: PhpArray,
     walk: HashIter,
 ) -> FoundRw {
-    let (pos, walked) = req.heap_mut().iterator_pos_ex(walk.0, array.heap())?;
-    if !walked.is_same(array.heap()) {
-        // `ZVAL_ARR(array, zend_array_dup(ht))`: the reference holds
-        // the copy from here, the shared original one owner fewer.
-        cell.heap().val_ref().write(php_heap::Zval::array(walked));
-    }
-    let Some((found, key, value)) = walked.live_from(pos) else {
+    let stepped = walk::array_step(req, cell, array, walk.0, walk::Advance::Past)?;
+    let Some((walked, _, key, value)) = stepped else {
         return Ok(Ok(None));
     };
-    req.heap_mut()
-        .iterator_set_pos(walk.0, found.saturating_add(1));
     let value = exec::value_of(value);
     let element = if let Some(element) = value.as_php_ref() {
         *element
@@ -17536,7 +17531,20 @@ fn fe_walk_array_rw(
 /// `FE_FETCH_RW` over an object walked by its properties: the next one
 /// the scope may see ([`Request::object_walk`]), bound through
 /// [`Request::walked_reference`], which gives a declared property's cell
-/// its type or refuses a `readonly` one.
+/// its type or refuses a `readonly` one. Where the body put another
+/// object in the loop's variable, the walk goes on in it from its
+/// table's pointer, as `zend_hash_iterator_pos` moves the iterator, and
+/// from an array's pointer as the array arm does:
+///
+/// ```php
+/// class P { public $x = 1; public $y = 2; public $z = 3; }
+/// $c = [1, 2]; foreach ($c as $k => &$v) { echo " $k=$v"; if ($k === 0) { $p = new P; @next($p); $c = $p; } } echo "\n";
+/// $o = new P; $c = $o; foreach ($c as $k => &$v) { echo " $k=$v"; if ($k === 'x') { $q = new P; @next($q); @next($q); $c = $q; } } echo "\n";
+/// ```
+/// ```expect
+///  0=1 y=2 z=3
+///  x=1 z=3
+/// ```
 fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: HashIter) -> FoundRw {
     let (key, walked) = match req.object_walk(object, walk.0, true) {
         Ok(Some(walked)) => walked,
@@ -18052,16 +18060,18 @@ pub(crate) fn rope_end<T: Tier>(
         req.release(held);
         return threw(req, frame, &thrown);
     }
-    let len: usize = rope
-        .iter()
+    // `zend_string_alloc` of the pieces' joined length, then each
+    // piece's bytes copied in, as php's `memcpy` loop copies them.
+    let len: usize = walk::rows(req, rope)
         .map(|(_, v)| {
             v.as_php_string()
                 .map_or(0, crate::api::values::PhpString::len)
         })
         .sum();
-    let joined = req.string_with(len, |bytes| {
+    let joined = crate::api::values::FreshString::new(req, len).map(|mut fresh| {
+        let bytes = fresh.bytes_mut();
         let mut at: usize = 0;
-        for (_, v) in &rope {
+        for (_, v) in walk::rows(req, rope) {
             let Some(s) = v.as_php_string() else {
                 continue;
             };
@@ -18071,6 +18081,7 @@ pub(crate) fn rope_end<T: Tier>(
             }
             at = end;
         }
+        fresh.finish(req).hand_on()
     });
     let held = req.take_slot(frame, rope_slot);
     req.release(held);

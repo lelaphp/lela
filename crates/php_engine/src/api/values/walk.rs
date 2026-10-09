@@ -55,7 +55,7 @@ use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{
-    ArrayIter, HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
+    HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
 };
 
 /// What a walk's body answers for one row: `Continue` to go on to the
@@ -142,7 +142,7 @@ pub type Step<B = ()> = Result<ControlFlow<B>, Thrown>;
 /// ```
 pub fn rows(_request: &Request, table: impl Into<Table>) -> Rows<'_> {
     let rows = match table.into() {
-        Table::Array(array) => Walked::Array(array.iter()),
+        Table::Array(array) => Walked::Array(array.heap().iter()),
         Table::Object(table) => Walked::Positions {
             end: table.table.used(),
             table,
@@ -169,7 +169,7 @@ pub struct Rows<'r> {
 /// Where a [`Rows`] walk stands.
 #[derive(Debug)]
 enum Walked {
-    Array(ArrayIter),
+    Array(php_heap::ArrIter),
     /// The next position of an object's table to read, and the end.
     Positions {
         table: ObjectTable,
@@ -183,7 +183,7 @@ impl Iterator for Rows<'_> {
 
     fn next(&mut self) -> Option<(Key, Value)> {
         match &mut self.rows {
-            Walked::Array(rows) => rows.next(),
+            Walked::Array(rows) => rows.next().map(super::view),
             Walked::Positions { table, pos, end } => {
                 let (found, key, value, _) = table.held_from(*pos, *end)?;
                 *pos = found.saturating_add(1);
@@ -202,13 +202,38 @@ pub enum Hold {
     /// `ZVAL_COPY` into a local or `GC_ADDREF`: the walk holds one owner
     /// until it ends, so code the body runs that writes the table
     /// separates it and the walk reads the rows it began with, and
-    /// nothing the program does frees the table under the walk.
-    Owner,
+    /// nothing the program does frees the table under the walk. The
+    /// owner is given up as the native gives it up ([`GiveUp`]), named
+    /// beside the hold.
+    Owner(GiveUp),
     /// php's native takes none and counts on what holds the table: the
     /// walk reads the rows as they stand, so a row the body's code
     /// rewrites in place is read as it now is, and a table the program
     /// gives up mid-walk is destroyed where php destroys it.
     None,
+}
+
+/// How php's native gives up the owner of the table it held for its walk
+/// ([`Hold::Owner`]), which decides whether the table, where owners are
+/// left, is a possible root of the cycle collector (design §5.12): the
+/// count of roots `gc_status()` reads after the call is php's.
+///
+/// `var_export` gives its `GC_ADDREF` up with `GC_DELREF`
+/// (`Z/ext/standard/var.c:587`) and leaves no root, where `var_dump`'s
+/// `GC_DTOR_NO_REF` (`Z/ext/standard/var.c:162`) leaves one per array it
+/// walked that owners are left of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GiveUp {
+    /// `zval_ptr_dtor`, `GC_DTOR` or `GC_DTOR_NO_REF`: the table
+    /// destroyed at its last owner, and where owners are left a possible
+    /// root ([`Owner::give_up`]).
+    Dtor,
+    /// `zval_ptr_dtor_nogc`, `GC_DELREF` or `zend_array_release`: the
+    /// table destroyed at its last owner, and no possible root
+    /// ([`Owner::give_up_nogc`]). `GC_DELREF` alone destroys nothing at
+    /// zero; a native that gives up with it holds an owner it never
+    /// gives up last, so the two read alike.
+    DtorNogc,
 }
 
 /// How a walk that guards its recursion ended ([`foreach_guarded`]).
@@ -256,7 +281,7 @@ pub enum Unwritten {
 ///
 /// `hold` is php's native's choice ([`Hold`]). Under [`Hold::Owner`] the
 /// walk holds one owner of the table until it ends, given up as php's
-/// `zval_ptr_dtor` gives it up, and lends each row as a view, which the
+/// native gives it up ([`GiveUp`]), and lends each row as a view, which the
 /// table it holds keeps. Under [`Hold::None`] it holds none, as php's
 /// holds none, and pins each row it lends: where code the body runs
 /// gives up the row's last owner, its free, and an object's destructor
@@ -689,8 +714,9 @@ fn held_at(table: PropertyTable, mut pos: u32, end: u32) -> Option<(u32, TableRo
 /// so that it knows when the table no longer does, given back as the
 /// walk ends.
 enum Standing {
-    /// [`Hold::Owner`]: the walk's owner of the table.
-    Held(Owner<PhpArray>),
+    /// [`Hold::Owner`]: the walk's owner of the table, and how it is
+    /// given up.
+    Held(Owner<PhpArray>, GiveUp),
     /// [`Hold::None`] over a table the program can destroy: the walk's
     /// hash iterator registered at it.
     Watched(u32),
@@ -703,7 +729,7 @@ impl Standing {
     fn taken(req: &mut Request, table: &Table, hold: Hold) -> Standing {
         let table = table.array();
         match hold {
-            Hold::Owner => Standing::Held(Owner::take(req, table)),
+            Hold::Owner(give_up) => Standing::Held(Owner::take(req, table), give_up),
             Hold::None if table.heap().is_immutable() => Standing::Immutable,
             Hold::None => Standing::Watched(req.heap_mut().iterator_add(table.heap(), 0)),
         }
@@ -712,17 +738,18 @@ impl Standing {
     /// How each row the walk lends knows its table still stands.
     fn watch(&self) -> Watch {
         match self {
-            Standing::Held(owner) => Watch::over(**owner),
+            Standing::Held(owner, _) => Watch::over(**owner),
             Standing::Watched(at) => Watch::Iterator(*at),
             Standing::Immutable => Watch::Immutable,
         }
     }
 
-    /// What the walk took given back: the owner given up, `zval_ptr_dtor`,
-    /// or the iterator, `zend_hash_iterator_del`.
+    /// What the walk took given back: the owner given up as the native
+    /// gives it up ([`GiveUp`]), or the iterator, `zend_hash_iterator_del`.
     fn given_up(self, req: &mut Request) {
         match self {
-            Standing::Held(owner) => owner.give_up(req),
+            Standing::Held(owner, GiveUp::Dtor) => owner.give_up(req),
+            Standing::Held(owner, GiveUp::DtorNogc) => owner.give_up_nogc(req),
             Standing::Watched(at) => req.heap_mut().iterator_del(at),
             Standing::Immutable => {}
         }
@@ -746,11 +773,11 @@ fn foreach_steps<B>(
         // takes is off the stack while the body runs: a walk the body
         // re-enters, a nested array compared or dumped, costs a level
         // only what this loop keeps.
-        let Some((found, mut row)) = next_lent(req, table, (pos, end), watch, unwritten) else {
+        let mut lent = next_lent(req, table, (&mut pos, end), watch, unwritten);
+        let Some(row) = lent.as_mut() else {
             break;
         };
-        pos = found.saturating_add(1);
-        let step = body(req, &mut row);
+        let step = body(req, row);
         row.let_go(req);
         if let ControlFlow::Break(broke) = step? {
             return Ok(Some(broke));
@@ -760,32 +787,32 @@ fn foreach_steps<B>(
 }
 
 /// The row a [`foreach`] walk lends next, at or after `pos` below `end`,
-/// with its position, its key and value kept for the step as [`Lent::of`]
-/// says; `None` past the last.
+/// its key and value kept for the step as [`Lent::of`] says, and `pos`
+/// left one past it; `None` past the last.
 #[inline(never)]
 fn next_lent(
-    req: &Request,
+    req: &mut Request,
     table: &Table,
-    (pos, end): (u32, u32),
+    (pos, end): (&mut u32, u32),
     watch: Watch,
     unwritten: Unwritten,
-) -> Option<(u32, Row)> {
+) -> Option<Row> {
     let found = match (table, unwritten) {
-        (Table::Object(object), Unwritten::Shown) => object.shown_from(req, pos, end),
+        (Table::Object(object), Unwritten::Shown) => object.shown_from(req, *pos, end),
         _ => table
-            .held_from(pos, end)
+            .held_from(*pos, end)
             .map(|(found, key, value, at)| (found, key, value, at, None)),
     };
     let (found, key, value, at, uninitialized) = found?;
+    *pos = found.saturating_add(1);
     let lent = Lent::of(watch, at);
-    let row = Row {
+    Some(Row {
         key: Keep::lent(req, key, lent),
         value: Keep::lent(req, Value::of_zval(value), lent),
         at,
         watch,
         uninitialized,
-    };
-    Some((found, row))
+    })
 }
 
 /// How a callback walk keeps the rows it lends for their step: php's
@@ -834,25 +861,22 @@ impl Lent {
 #[derive(Debug)]
 struct Pin<T: View> {
     view: T,
-    /// Whether this pin set the block's, which a pin taken over a block
-    /// pinned already did not: the pin that set it, let go after this
-    /// one, keeps the block.
-    set: bool,
 }
 
 impl<T: View> Pin<T> {
-    /// A pin over what `view` names.
-    fn take(view: T) -> Pin<T> {
-        let set = php_heap::Heap::pin_block(view.counted().to_zval());
-        Pin { view, set }
+    /// A pin over what `view` names, one of its pins however many stand,
+    /// so a walk's pin and a walk's pin in a fiber suspended inside it
+    /// are let go in either order (#2291).
+    fn take(req: &mut Request, view: T) -> Pin<T> {
+        req.heap_mut().pin_block(view.counted().to_zval());
+        Pin { view }
     }
 
     /// The pin let go: the bytes of what the view names given back
-    /// where it was destroyed while the pin stood.
+    /// where it was destroyed while the pins stood and this one was the
+    /// last.
     fn let_go(self, req: &mut Request) {
-        if self.set {
-            req.heap_mut().unpin_block(self.view.counted().to_zval());
-        }
+        req.heap_mut().unpin_block(self.view.counted().to_zval());
     }
 }
 
@@ -866,10 +890,10 @@ enum Keep<T: View> {
 
 impl<T: View> Keep<T> {
     /// `view` kept as `lent` says.
-    fn lent(req: &Request, view: T, lent: Lent) -> Keep<T> {
+    fn lent(req: &mut Request, view: T, lent: Lent) -> Keep<T> {
         match lent {
             Lent::Owned => Keep::Owned(Owner::take(req, view)),
-            Lent::Pinned => Keep::Pinned(Pin::take(view)),
+            Lent::Pinned => Keep::Pinned(Pin::take(req, view)),
             Lent::Viewed => Keep::Viewed(view),
         }
     }
@@ -895,9 +919,12 @@ impl<T: View> Keep<T> {
     /// What the walk took for the step given back: an owner as
     /// `zval_ptr_dtor_nogc` gives one up, since php's walk holds none
     /// and so leaves no possible root of the cycle collector; a pin let
-    /// go.
-    fn let_go(self, req: &mut Request) {
-        match self {
+    /// go. The view is left, which nothing keeps from here. In place, so
+    /// a walk keeps its row in one place across the body's call, which a
+    /// recursion through the walk pays for at every level.
+    fn let_go(&mut self, req: &mut Request) {
+        let view = self.get().clone();
+        match std::mem::replace(self, Keep::Viewed(view)) {
             Keep::Owned(owner) => owner.give_up_nogc(req),
             Keep::Pinned(pin) => pin.let_go(req),
             Keep::Viewed(_) => {}
@@ -1079,16 +1106,14 @@ impl Row {
     /// holds.
     fn lend(&mut self, req: &mut Request, cell: PhpRef) -> PhpRef {
         let kept = Keep::lent(req, cell.as_value(), self.value.lent_as());
-        let value = std::mem::replace(&mut self.value, kept);
+        let mut value = std::mem::replace(&mut self.value, kept);
         value.let_go(req);
         cell
     }
 
     /// What the walk kept of the row given back as the step ends
-    /// ([`Keep::let_go`]): the value first and then the key, so a key
-    /// and a value that are one string are kept by the pin that set it
-    /// until both are let go.
-    fn let_go(self, req: &mut Request) {
+    /// ([`Keep::let_go`]), the value and then the key, each left a view.
+    fn let_go(&mut self, req: &mut Request) {
         self.value.let_go(req);
         self.key.let_go(req);
     }
@@ -1181,10 +1206,11 @@ fn steps<B>(
     body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
     loop {
-        let Some(mut row) = next_row(req, holder, at)? else {
+        let mut lent = next_row(req, holder, at)?;
+        let Some(row) = lent.as_mut() else {
             return Ok(None);
         };
-        let step = body(req, &mut row);
+        let step = body(req, row);
         row.let_go(req);
         let thrown = match step {
             Ok(ControlFlow::Break(broke)) => return Ok(Some(broke)),
@@ -1206,25 +1232,134 @@ fn steps<B>(
 /// php's `TypeError` once a live walk's holder holds no array or object.
 const NO_TABLE: &str = "Iterated value is no longer an array or object";
 
+/// Where a hash iterator's step leaves it past the row it found: php's
+/// two ways, which differ where a row lands in a hole the step passed
+/// over, as one appended after the last row was unset does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Advance {
+    /// One past the row, `pos++` in `FE_FETCH_RW`'s loop
+    /// (`Z/Zend/zend_vm_def.h`, `ZEND_FE_FETCH_RW`).
+    Past,
+    /// The next live row, `zend_hash_move_forward_ex`, as
+    /// `php_array_walk` moves before its call.
+    NextLive,
+}
+
+/// One step of hash iterator `at` over the array the reference `holder`
+/// holds, `array`: its position (`zend_hash_iterator_pos_ex`), which
+/// separates an array the program shared and moves the iterator onto
+/// an array the program put in the reference, the reference made to
+/// hold the copy (`ZVAL_ARR(array, zend_array_dup(ht))`); the first
+/// live row from there; and the iterator left past it as `advance`
+/// says. The table the row is in, its position, its key and its value,
+/// or `None` past the last row. `FE_FETCH_RW` and the Live walk both
+/// step through it.
+pub(crate) fn array_step(
+    req: &mut Request,
+    holder: PhpRef,
+    array: PhpArray,
+    at: u32,
+    advance: Advance,
+) -> Result<Option<(Arr, u32, php_heap::Key, Zval)>, php_heap::Fatal> {
+    let (pos, table) = req.heap_mut().iterator_pos_ex(at, array.heap())?;
+    if !table.is_same(array.heap()) {
+        holder.heap().val_ref().write(Zval::array(table));
+    }
+    let Some((found, key, value)) = table.live_from(pos) else {
+        return Ok(None);
+    };
+    let past = found.saturating_add(1);
+    let next = match advance {
+        Advance::Past => past,
+        Advance::NextLive => table.live_from(past).map_or(past, |(next, _, _)| next),
+    };
+    req.heap_mut().iterator_set_pos(at, next);
+    Ok(Some((table, found, key, value)))
+}
+
+/// One step of hash iterator `at` over an object's property table in
+/// php's positions, the declared slots and then the dynamic table: the
+/// iterator moved onto `table` first (`zend_hash_iterator_pos`), so
+/// one the program left on another object's table stands at this
+/// table's pointer, and only then its place read, among the slots its
+/// lead and in the table its position; the first row from there that
+/// holds a value and that `admits` (php's scope check, or none), a slot
+/// nothing holds stepped over as php steps over an `IS_UNDEF` behind an
+/// `IS_INDIRECT`; and the iterator left past it as `advance` says. Its
+/// position, what stands there and its value, or `None` past the last,
+/// the iterator then at the end. `stepped` says whether the declared
+/// slots are walked from the lead or the dynamic table alone
+/// ([`Stepped`]). `FE_FETCH_RW` and `FE_FETCH_R` over an object
+/// ([`Request::object_walk`]) and the Live walk step through it.
+pub(crate) fn object_step(
+    req: &mut Request,
+    at: u32,
+    (table, stepped): (PropertyTable, Stepped),
+    advance: Advance,
+    mut admits: impl FnMut(&Request, &TableRow) -> bool,
+) -> Option<(u32, TableRow, Zval)> {
+    let declared = table.declared();
+    let pos = req.heap_mut().iterator_pos(at, table.table());
+    let lead = req.heap_mut().iterator_lead(at);
+    let mut from = match stepped {
+        Stepped::Positions if lead < declared => lead,
+        Stepped::Positions | Stepped::Dynamic => declared + pos,
+    };
+    let end = table.used();
+    let found = loop {
+        let Some((found, row, value)) = held_at(table, from, end) else {
+            break None;
+        };
+        from = found.saturating_add(1);
+        if admits(req, &row) {
+            break Some((found, row, value));
+        }
+    };
+    let next = match (found, advance) {
+        (None, _) => end,
+        (Some((found, ..)), Advance::Past) => found.saturating_add(1),
+        (Some((found, ..)), Advance::NextLive) => {
+            let mut next = found.saturating_add(1);
+            while next < end && table.row_at(next).is_none() {
+                next = next.saturating_add(1);
+            }
+            next
+        }
+    };
+    let heap = req.heap_mut();
+    if next < declared {
+        heap.iterator_set_lead(at, next);
+    } else {
+        if stepped == Stepped::Positions {
+            heap.iterator_set_lead(at, declared);
+        }
+        heap.iterator_set_pos(at, next - declared);
+    }
+    found
+}
+
+/// What an [`object_step`] walks of an object's positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stepped {
+    /// The declared slots from the iterator's lead, then the dynamic
+    /// table.
+    Positions,
+    /// The dynamic table alone, the lead left as it stands: a hooked
+    /// class's walk keeps its own place among its declared rows
+    /// (`zend_hooked_object_get_iterator`).
+    Dynamic,
+}
+
 /// The row iterator `at` stands at in what `holder` holds now, the
-/// iterator moved past it; `None` past the last row.
+/// iterator moved past it ([`array_step`], [`object_step`]); `None`
+/// past the last row.
 fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, Thrown> {
     let now = holder.get();
     if let Some(array) = now.as_array().copied() {
-        let moved = req.heap_mut().iterator_pos_ex(at, array.heap());
-        let (pos, table) = req.fatal_of(moved)?;
-        if !table.is_same(array.heap()) {
-            // `ZVAL_ARR(array, zend_array_dup(ht))`: the reference holds
-            // the copy from here, the shared table one owner fewer.
-            holder.heap().val_ref().write(php_heap::Zval::array(table));
-        }
-        let Some((found, key, value)) = table.live_from(pos) else {
+        let stepped = array_step(req, holder, array, at, Advance::NextLive);
+        let Some((table, found, key, value)) = req.fatal_of(stepped)? else {
             return Ok(None);
         };
-        // `zend_hash_move_forward_ex`: the next live bucket, or the end.
-        let next = found.saturating_add(1);
-        let next = table.live_from(next).map_or(next, |(next, _, _)| next);
-        req.heap_mut().iterator_set_pos(at, next);
         return Ok(Some(Row {
             key: Keep::lent(req, Key::of(key), Lent::Owned),
             value: Keep::lent(req, Value::of_zval(value), Lent::Owned),
@@ -1240,11 +1375,9 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
     Err(throw_error(req, "TypeError", NO_TABLE))
 }
 
-/// [`next_row`] over an object's property table in php's positions: the
-/// declared slots, then the dynamic table, the iterator's place among
-/// the slots its lead and its place in the table its position. A slot
-/// nothing holds is stepped over, as php steps over an `IS_UNDEF` behind
-/// an `IS_INDIRECT`; a declared row's key is its mangled name.
+/// [`next_row`] over an object's property table in php's positions
+/// ([`object_step`]), every row admitted, as `php_array_walk` reads the
+/// table with no scope check; a declared row's key is its mangled name.
 fn object_row(
     req: &mut Request,
     holder: PhpRef,
@@ -1253,29 +1386,15 @@ fn object_row(
     owner: PhpObject,
     table: PropertyTable,
 ) -> Result<Option<Row>, Thrown> {
-    let declared = table.declared();
-    let pos = req.heap_mut().iterator_pos(iterator, table.table());
-    let lead = req.heap_mut().iterator_lead(iterator);
-    let from = if lead < declared {
-        lead
-    } else {
-        declared + pos
-    };
-    let Some((found, row, value)) = held_at(table, from, table.used()) else {
+    let Some((found, row, value)) = object_step(
+        req,
+        iterator,
+        (table, Stepped::Positions),
+        Advance::NextLive,
+        |_, _| true,
+    ) else {
         return Ok(None);
     };
-    // `zend_hash_move_forward_ex`: the next live position, or the end.
-    let mut next = found.saturating_add(1);
-    while next < table.used() && table.row_at(next).is_none() {
-        next = next.saturating_add(1);
-    }
-    let heap = req.heap_mut();
-    if next < declared {
-        heap.iterator_set_lead(iterator, next);
-    } else {
-        heap.iterator_set_lead(iterator, declared);
-        heap.iterator_set_pos(iterator, next - declared);
-    }
     let (key, at) = match row {
         TableRow::Slot(slot) => {
             let Some(name) = req.slot_name(owner.class(), slot)? else {
@@ -1292,7 +1411,10 @@ fn object_row(
             };
             (Key::Str(PhpString::of(name)), at)
         }
-        TableRow::Entry(key) => (Key::of(key), At::Bucket(table.table(), found - declared)),
+        TableRow::Entry(key) => (
+            Key::of(key),
+            At::Bucket(table.table(), found - table.declared()),
+        ),
     };
     Ok(Some(Row {
         key: Keep::lent(req, key, Lent::Owned),

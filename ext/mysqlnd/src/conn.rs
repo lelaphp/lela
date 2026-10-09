@@ -4,7 +4,7 @@
 
 use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, walk};
 
 use crate::alloc::{
     Alloc, CONN_DATA, MYSQLND, PAYLOAD_DECODER_FACTORY, PFC, PLUGIN_ROOM, Pstr, STATS, VIO,
@@ -168,7 +168,7 @@ impl ConnectAttr {
     fn clean(&mut self, req: &mut Request) -> Result<(), Thrown> {
         match self {
             ConnectAttr::Heap(attrs) => {
-                let keys: Vec<Key> = attrs.iter().map(|(key, _)| key).collect();
+                let keys: Vec<Key> = walk::rows(req, **attrs).map(|(key, _)| key).collect();
                 for key in keys {
                     attrs.unset(req, &key)?;
                 }
@@ -190,10 +190,9 @@ impl ConnectAttr {
     }
 
     /// The attributes in order, as the handshake sends them.
-    pub(crate) fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(crate) fn pairs(&self, req: &Request) -> Vec<(Vec<u8>, Vec<u8>)> {
         match self {
-            ConnectAttr::Heap(attrs) => attrs
-                .iter()
+            ConnectAttr::Heap(attrs) => walk::rows(req, **attrs)
                 .map(|(key, value)| {
                     let key = match key {
                         Key::Str(s) => s.as_bytes().to_vec(),
@@ -301,7 +300,7 @@ impl ConnData {
             }),
             mysqlnd: Some(mysqlnd),
             net,
-            error: ErrorInfo::default(),
+            error: ErrorInfo::new(persistent),
             upsert,
             state: ConnState::default(),
             stats: Stats::default(),
@@ -324,12 +323,13 @@ impl ConnData {
         })
     }
 
-    /// `mysqlnd_conn_data::dtor`: the contents and the options freed, then
-    /// the frame codec's buffer and the structures `get_connection`
+    /// `mysqlnd_conn_data::dtor`: the contents, the options and the error
+    /// info freed, then the frame codec's buffer and the structures `get_connection`
     /// allocated.
     pub(crate) fn dtor(mut self, req: &mut Request) {
         self.free_contents(req);
         self.free_options(req);
+        self.error.reset(req);
         if let Some(buffer) = self.net.cmd_buffer.take() {
             buffer.free(req);
         }
@@ -482,7 +482,7 @@ impl ConnData {
             ClientOption::SetCharsetName(name) => {
                 if charset::by_name(name).is_none() {
                     self.error
-                        .client(cr::CANT_FIND_CHARSET, "Unknown character set");
+                        .client(req, cr::CANT_FIND_CHARSET, "Unknown character set")?;
                     return Ok(false);
                 }
                 set(req, &mut self.options.charset_name, Some(name))?;
@@ -543,16 +543,17 @@ impl ConnData {
         match self.state {
             ConnState::Ready => {}
             ConnState::QuitSent => {
-                self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
+                self.error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
                 return Ok(false);
             }
             _ => {
-                self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+                self.error
+                    .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
                 return Ok(false);
             }
         }
         self.upsert.affected_rows_to_error();
-        self.error.reset();
+        self.error.reset(req);
         // `STAT_COM_QUIT + command - 1`.
         self.stats.inc(com_stat(command));
         // `php_mysqlnd_cmd_write`.
@@ -566,7 +567,7 @@ impl ConnData {
         }
         let sent = self
             .net
-            .send(req, &payload, &mut self.stats, &mut self.error);
+            .send(req, &payload, &mut self.stats, &mut self.error)?;
         if sent == 0 {
             self.state = ConnState::QuitSent;
             if !silent && self.error.errno != cr::SERVER_GONE_ERROR {
@@ -593,14 +594,15 @@ impl ConnData {
         req: &mut Request,
         ignore_upsert: bool,
     ) -> Result<bool, Thrown> {
-        let Some(ok) = self.read_ok(req) else {
+        let Some(ok) = self.read_ok(req)? else {
             if self.error.errno != cr::SERVER_GONE_ERROR {
-                self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
+                self.error
+                    .client(req, cr::MALFORMED_PACKET, "Malformed packet")?;
             }
             return Ok(false);
         };
         if let Some(e) = ok.error {
-            e.set_on(&mut self.error);
+            e.set_on(req, &mut self.error)?;
             self.upsert.server_status &= !status::MORE_RESULTS_EXISTS;
             self.upsert.affected_rows_to_error();
             return Ok(false);
@@ -617,16 +619,18 @@ impl ConnData {
     }
 
     /// `send_command_handle_EOF`.
-    pub(crate) fn handle_eof(&mut self, req: &mut Request) -> bool {
-        let Some(eof) = self.read_eof(req) else {
-            self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
-            return false;
+    pub(crate) fn handle_eof(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        let Some(eof) = self.read_eof(req)? else {
+            self.error
+                .client(req, cr::MALFORMED_PACKET, "Malformed packet")?;
+            return Ok(false);
         };
         if let Some(e) = eof.error {
-            e.set_on(&mut self.error);
+            e.set_on(req, &mut self.error)?;
             self.upsert.affected_rows_to_error();
         } else if eof.field_count != crate::wire::EODATA_MARKER {
-            self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
+            self.error
+                .client(req, cr::MALFORMED_PACKET, "Malformed packet")?;
             docref(
                 req,
                 Level::Warning,
@@ -636,7 +640,7 @@ impl ConnData {
                 ),
             );
         }
-        true
+        Ok(true)
     }
 
     /// `send_command_handle_response`: the OK or EOF read, and php's
@@ -650,7 +654,7 @@ impl ConnData {
         ignore_upsert: bool,
     ) -> Result<bool, Thrown> {
         let ok = if eof {
-            self.handle_eof(req)
+            self.handle_eof(req)?
         } else {
             self.handle_ok(req, ignore_upsert)?
         };
@@ -778,7 +782,7 @@ impl ConnData {
         mut flags: u32,
     ) -> Result<bool, Thrown> {
         let mut reconnect = false;
-        self.error.reset();
+        self.error.reset(req);
         self.upsert.affected_rows_to_error();
         if self.state > ConnState::Alloced {
             if self.state < ConnState::QuitSent {
@@ -816,9 +820,10 @@ impl ConnData {
             if self.error.errno == 0 {
                 let via = String::from_utf8_lossy(&transport).into_owned();
                 self.error.client(
+                    req,
                     cr::CONNECTION_ERROR,
                     &format!("Unknown error while trying to connect via {via}"),
-                );
+                )?;
             }
             self.free_contents(req);
             self.stats.inc(Stat::ConnectFailure);
@@ -838,13 +843,14 @@ impl ConnData {
         };
         let info = Pstr::dup(req, &info, self.persistent)?;
         Pstr::put(req, &mut self.host_info, Some(info));
-        self.error.reset();
+        self.error.reset(req);
         if !self.execute_init_commands(req)? {
             if self.error.errno == 0 {
                 self.error.client(
+                    req,
                     cr::CONNECTION_ERROR,
                     "Unknown error while trying to connect",
-                );
+                )?;
             }
             self.free_contents(req);
             self.stats.inc(Stat::ConnectFailure);
@@ -872,7 +878,7 @@ impl ConnData {
         db: &[u8],
         flags: u32,
     ) -> Result<bool, Thrown> {
-        let Some(greet) = self.read_greet(req) else {
+        let Some(greet) = self.read_greet(req)? else {
             docref(
                 req,
                 Level::Warning,
@@ -885,7 +891,7 @@ impl ConnData {
             return Ok(false);
         };
         if let Some(e) = &greet.error {
-            e.set_on(&mut self.error);
+            e.set_on(req, &mut self.error)?;
             self.server_capabilities = 0;
             return Ok(false);
         }
@@ -893,9 +899,10 @@ impl ConnData {
             let version = String::from_utf8_lossy(&greet.server_version);
             let shown: String = version.chars().take(32).collect();
             self.error.client(
+                req,
                 cr::NOT_IMPLEMENTED,
                 &format!("Connecting to 3.22, 3.23 & 4.0 is not supported. Server is {shown}"),
-            );
+            )?;
             self.server_capabilities = 0;
             return Ok(false);
         }
@@ -1005,7 +1012,7 @@ impl ConnData {
         stmt: Option<&mut Option<Box<Res>>>,
     ) -> Result<bool, Thrown> {
         self.upsert.affected_rows_to_error();
-        let Some(header) = self.read_rset_header(req) else {
+        let Some(header) = self.read_rset_header(req)? else {
             if self.error.errno != cr::SERVER_GONE_ERROR
                 && self.error.errno != cr::CLIENT_INTERACTION_TIMEOUT
             {
@@ -1016,7 +1023,7 @@ impl ConnData {
         match header {
             RsetHeader::Error(e) => {
                 self.upsert.server_status &= !status::MORE_RESULTS_EXISTS;
-                e.set_on(&mut self.error);
+                e.set_on(req, &mut self.error)?;
                 self.state = ConnState::Ready;
                 Ok(false)
             }
@@ -1096,7 +1103,7 @@ impl ConnData {
             }
             return Ok(false);
         }
-        let Some(eof) = self.read_eof(req) else {
+        let Some(eof) = self.read_eof(req)? else {
             result.release(req);
             if let Some(held) = stmt {
                 *held = None;
@@ -1131,7 +1138,7 @@ impl ConnData {
 
     /// `mysqlnd_conn_data::next_result`.
     pub(crate) fn next_rowset(&mut self, req: &mut Request) -> Result<bool, Thrown> {
-        self.error.reset();
+        self.error.reset(req);
         if self.state != ConnState::NextResultPending {
             return Ok(false);
         }
@@ -1161,7 +1168,8 @@ impl ConnData {
             return Ok(None);
         }
         if self.last_query_type != QueryType::Select || self.state != ConnState::FetchingData {
-            self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+            self.error
+                .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
             return Ok(None);
         }
         self.stats.inc(Stat::UnbufferedSets);
@@ -1179,7 +1187,8 @@ impl ConnData {
             return Ok(None);
         }
         if self.last_query_type != QueryType::Select || self.state != ConnState::FetchingData {
-            self.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+            self.error
+                .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
             return Ok(None);
         }
         self.stats.inc(Stat::BufferedSets);
@@ -1216,7 +1225,7 @@ impl ConnData {
         if !self.send_command(req, Com::Statistics, &[], false)? {
             return Ok(None);
         }
-        Ok(self.read_stats(req))
+        self.read_stats(req)
     }
 
     /// `mysqlnd_conn_data::kill`: killing one's own connection reads no
@@ -1239,8 +1248,11 @@ impl ConnData {
     /// `mysqlnd_conn_data::set_charset`.
     pub(crate) fn set_charset(&mut self, req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
         let Some(found) = charset::by_name(name) else {
-            self.error
-                .client(cr::CANT_FIND_CHARSET, "Invalid character set was provided");
+            self.error.client(
+                req,
+                cr::CANT_FIND_CHARSET,
+                "Invalid character set was provided",
+            )?;
             return Ok(false);
         };
         let mut sql = b"SET NAMES ".to_vec();
@@ -1352,9 +1364,10 @@ impl ConnData {
             && self.error.errno == 1064
         {
             self.error.client(
+                req,
                 cr::NOT_IMPLEMENTED,
                 "This server version doesn't support 'READ WRITE' and 'READ ONLY'. Minimum 5.6.5 is required",
-            );
+            )?;
         }
         Ok(ok)
     }
@@ -1368,7 +1381,7 @@ impl ConnData {
     ) -> Result<bool, Thrown> {
         let Some(name) = name else {
             self.error
-                .client(cr::UNKNOWN_ERROR, "Savepoint name not provided");
+                .client(req, cr::UNKNOWN_ERROR, "Savepoint name not provided")?;
             return Ok(false);
         };
         let mut sql = if release {
@@ -1390,7 +1403,7 @@ impl ConnData {
         db: Option<&[u8]>,
         silent: bool,
     ) -> Result<bool, Thrown> {
-        self.error.reset();
+        self.error.reset(req);
         self.upsert.affected_rows_to_error();
         let user = user.unwrap_or_default();
         let password = password.unwrap_or_default();

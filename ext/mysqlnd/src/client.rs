@@ -296,7 +296,7 @@ impl Mysqlnd {
                 unix_socket: conn.net.unix,
                 error_list: conn
                     .error
-                    .list
+                    .list()
                     .iter()
                     .map(|e| (e.errno, e.sqlstate, e.error.clone()))
                     .collect(),
@@ -421,15 +421,15 @@ impl Mysqlnd {
     }
 
     /// The connection's error kept across `f` and put back after it, the
-    /// list `f` grew dropped: what mysqli does where it closes a statement
+    /// list `f` grew freed: what mysqli does where it closes a statement
     /// or turns multi statements off after a failure it has reported
-    /// (`MYSQLND_ERROR_INFO error_info = *conn->error_info; ...;
-    /// *conn->error_info = error_info`).
+    /// (`MYSQLND_ERROR_INFO error_info = *conn->error_info`, the list's
+    /// head cleared; `zend_llist_clean`; `*conn->error_info = error_info`).
     pub fn keeping_error<R>(self, req: &mut Request, f: impl FnOnce(&mut Request) -> R) -> R {
-        let kept = self.0.with(req, |_, conn| conn.error.clone());
+        let kept = self.0.with(req, |_, conn| conn.error.keep());
         let answered = f(req);
         if let Some(kept) = kept {
-            let _ = self.0.with(req, |_, conn| conn.error = kept);
+            let _ = self.0.with(req, |req, conn| conn.error.restore(req, kept));
         }
         answered
     }
@@ -620,7 +620,7 @@ impl ResultSet {
         // "We clean the error here because in unbuffered mode we could
         // receive a new error and therefore consumers of this method are
         // checking for errors."
-        let _ = self.conn.0.with(req, |_, conn| conn.error.reset());
+        let _ = self.conn.0.with(req, |req, conn| conn.error.reset(req));
         let row = match self.fetch(req)? {
             Fetched::Row(row) => row,
             Fetched::Done => return Ok(Owner::take(req, Value::null())),

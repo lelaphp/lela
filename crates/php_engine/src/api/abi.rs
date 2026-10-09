@@ -1875,9 +1875,76 @@ impl Callable {
 
     /// The value the callable came from, a view and no owner taken. A
     /// list that holds the callable past the call frame it was read off
-    /// takes its owners with [`Callable::addref`], not of this alone.
-    pub(crate) const fn value(&self) -> Value {
+    /// holds an [`Owner`] of the callable, not of this alone.
+    #[must_use]
+    pub const fn value(&self) -> Value {
         self.value
+    }
+
+    /// `zend_get_callable_zval_from_fcc` (`Z/Zend/zend_API.c:4447`): the
+    /// value php makes again of what the callable resolved to, not the
+    /// value it came from. A closure is itself; a method is the pair of
+    /// its receiver, or of its scope's name where it has none, and its
+    /// name; a function is its name. So a `Class::method` string resolved
+    /// with `$this` in scope is made again as `[$this, 'method']`, which
+    /// resolves in any scope, as `RecursiveCallbackFilterIterator`'s
+    /// children are made with it:
+    ///
+    /// ```php
+    /// class A { function __destruct(){ echo "dtor\n"; } function f($v, $k, $it){ echo "f $k\n"; return true; }
+    ///   function make(){ return new RecursiveIteratorIterator(new RecursiveCallbackFilterIterator(new RecursiveArrayIterator([1, [2, 3]]), 'A::f')); } }
+    /// $it = (new A)->make();
+    /// foreach ($it as $v) echo $v, "\n";
+    /// unset($it);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// f 0
+    /// 1
+    /// f 1
+    /// f 0
+    /// 2
+    /// f 1
+    /// 3
+    /// dtor
+    /// end
+    /// ```
+    pub fn made_again(&self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        let (function, first) = match self.target {
+            Target::Closure(closure) => return Ok(Owner::take(req, Value::object(closure))),
+            Target::Function(function) => (function, None),
+            Target::Method {
+                function,
+                scope,
+                this,
+            } => (function, Some(this.ok_or(scope))),
+        };
+        let name = req
+            .function_decl(function)
+            .map(|decl| decl.name.0.clone())
+            .unwrap_or_default();
+        let name = Value::string(PhpString::interned(req, &name)?);
+        let Some(first) = first else {
+            return Ok(Owner::take(req, name));
+        };
+        let first = match first {
+            Ok(this) => this.as_value(),
+            Err(scope) => {
+                let class = req
+                    .class_decl(scope)
+                    .map(|decl| decl.name.0.clone())
+                    .unwrap_or_default();
+                Value::string(PhpString::interned(req, &class)?)
+            }
+        };
+        let mut pair = PhpArray::new(req)?;
+        for value in [first, name] {
+            if let Err(thrown) = pair.append(req, Owner::take(req, value)) {
+                pair.give_up(req);
+                return Err(thrown);
+            }
+        }
+        Ok(pair.into_value())
     }
 
     pub(crate) fn into_value(self) -> Value {
@@ -1948,36 +2015,6 @@ impl Callable {
                 .rposition(php_unit::decl::Parameter::is_required)
                 .map_or(0, |at| at + 1)
         })
-    }
-
-    /// `zend_fcc_addref` (`Z/Zend/zend_API.h:773`): the owners a list
-    /// that keeps the callable past the frame it was read off takes, its
-    /// value's and, `GC_ADDREF(fcc->object)`, the receiver's it resolved
-    /// to. A `Class::method` string taken with `$this` in scope names an
-    /// object the string does not own, so the list owns it itself. A
-    /// closure's owner is its value's, since `fcc->closure` is the value.
-    /// Given up by [`Callable::release`].
-    pub(crate) fn addref(&self, req: &Request) {
-        req.addref(&self.value);
-        if let Target::Method {
-            this: Some(this), ..
-        } = self.target
-        {
-            req.addref(&this.as_value());
-        }
-    }
-
-    /// `zend_fcc_dtor` (`Z/Zend/zend_API.h:798`): the owners
-    /// [`Callable::addref`] took given up, the receiver's first,
-    /// `OBJ_RELEASE(fcc->object)`, and then the value's.
-    pub(crate) fn release(self, req: &mut Request) {
-        if let Target::Method {
-            this: Some(this), ..
-        } = self.target
-        {
-            req.release(this.as_value());
-        }
-        req.release(self.value);
     }
 }
 

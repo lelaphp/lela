@@ -14,11 +14,14 @@
 use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpObject, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
-use crate::connector::{BindKind, BindType, Failure, OnError, Rewritten, Scanner, SqlState, Token};
+use crate::bound::{Bound, BoundKey, BoundTable};
+use crate::connector::{
+    BindKind, BindType, Failure, OnError, ParameterMap, Rewritten, Scanner, SqlState, Token,
+};
 use crate::error::{self, On};
-use crate::stmt::{self, Bound, BoundKey};
+use crate::stmt;
 
 /// `default_scanner`: the token at `at` and where it ends; `None` at the
 /// end of the query or at a NUL, re2c's `PDO_PARSER_EOI`.
@@ -94,7 +97,8 @@ struct Placeholder {
 /// statement (`-1`).
 pub(crate) enum Parsed {
     Unchanged,
-    Rewritten(Vec<u8>),
+    /// The query PDO made, `zend_string_alloc`'d on the request's heap.
+    Rewritten(Owner<PhpString>),
     Failed,
 }
 
@@ -149,7 +153,8 @@ pub(super) fn parse_params(
     let params: Vec<Seen> = stmt::read(req, object, |s| {
         s.params
             .iter()
-            .map(|b| (b.key.clone(), b.ty, *b.value))
+            .flat_map(BoundTable::iter)
+            .map(|b| (b.key(), b.ty, *b.value))
             .collect()
     })
     .unwrap_or_default();
@@ -186,19 +191,51 @@ pub(super) fn parse_params(
             }
         }
     }
-    let mut out = Vec::with_capacity(sql.len());
-    let mut from = 0;
-    for placeholder in &placeholders {
-        out.extend_from_slice(&sql[from..placeholder.at]);
-        if params.is_empty() {
-            out.extend_from_slice(&sql[placeholder.at..placeholder.at + placeholder.len]);
+    Ok(Parsed::Rewritten(build(
+        req,
+        sql,
+        &placeholders,
+        !params.is_empty(),
+    )?))
+}
+
+/// The `rewrite:` arm: `newbuffer_len`, then the query built into
+/// `zend_string_alloc`'s string of that length, each placeholder's text
+/// kept or, where values are `quoted`, its quoted value in its place.
+fn build(
+    req: &mut Request,
+    sql: &[u8],
+    placeholders: &[Placeholder],
+    quoted: bool,
+) -> Result<Owner<PhpString>, Thrown> {
+    let text = |placeholder: &Placeholder| -> usize {
+        if quoted {
+            placeholder.quoted.len()
         } else {
-            out.extend_from_slice(&placeholder.quoted);
+            placeholder.len
         }
-        from = placeholder.at + placeholder.len;
-    }
-    out.extend_from_slice(&sql[from..]);
-    Ok(Parsed::Rewritten(out))
+    };
+    let len = placeholders
+        .iter()
+        .fold(sql.len(), |len, p| len - p.len + text(p));
+    PhpString::filled(req, len, |to| {
+        let mut put = 0;
+        let mut copy = |bytes: &[u8]| {
+            to[put..put + bytes.len()].copy_from_slice(bytes);
+            put += bytes.len();
+        };
+        let mut from = 0;
+        for placeholder in placeholders {
+            copy(&sql[from..placeholder.at]);
+            if quoted {
+                copy(&placeholder.quoted);
+            } else {
+                copy(&sql[placeholder.at..placeholder.at + placeholder.len]);
+            }
+            from = placeholder.at + placeholder.len;
+        }
+        copy(&sql[from..]);
+    })
 }
 
 /// The entry held under `key`.
@@ -276,36 +313,30 @@ pub(super) fn name_to_position(
     object: PhpObject,
     bound: &mut Bound,
 ) -> Result<bool, Thrown> {
-    let Some(map) = stmt::read(req, object, |s| s.param_map.clone()).flatten() else {
+    let named = bound.name_bytes().map(<[u8]>::to_vec);
+    // A view of the map's string, or the position a name took: no PHP
+    // code runs between the read and the owner taken of it.
+    let found = stmt::read(req, object, |s| {
+        s.param_map.as_ref().map(|map| match &named {
+            None => map.name(bound.position).map(Found::Name),
+            Some(name) => map.position(name).map(Found::Position),
+        })
+    })
+    .flatten();
+    let Some(found) = found else {
         return Ok(true);
     };
     let Some(dbh) = stmt::dbh_of(req, object) else {
         return Ok(true);
     };
-    let undefined = |req: &mut Request| -> Result<bool, Thrown> {
-        error::raise_impl(
-            req,
-            dbh,
-            On::Stmt(object),
-            SqlState(*b"HY093"),
-            Some("parameter was not defined"),
-        )?;
-        Ok(false)
-    };
-    let Some(name) = bound.name.clone() else {
-        return match map.iter().find(|(key, _)| *key == Key::Int(bound.position)) {
-            Some((_, name)) => {
-                bound.name = Some(name.clone());
-                Ok(true)
-            }
-            None => undefined(req),
-        };
-    };
-    for (position, (_, mapped)) in map.iter().enumerate() {
-        if *mapped != name {
-            continue;
+    match found {
+        // `param->name = zend_string_copy(name)`: one more owner of the
+        // map's string.
+        Some(Found::Name(name)) => {
+            bound.name = Some(Owner::take(req, name));
+            Ok(true)
         }
-        if bound.position >= 0 {
+        Some(Found::Position(_)) if bound.position >= 0 => {
             error::raise_impl(
                 req,
                 dbh,
@@ -315,12 +346,30 @@ pub(super) fn name_to_position(
                     "PDO refuses to handle repeating the same :named parameter for multiple positions with this driver, as it might be unsafe to do so.  Consider using a separate name for each parameter instead",
                 ),
             )?;
-            return Ok(true);
+            Ok(true)
         }
-        bound.position = i64::try_from(position).unwrap_or(-1);
-        return Ok(true);
+        Some(Found::Position(position)) => {
+            bound.position = i64::try_from(position).unwrap_or(-1);
+            Ok(true)
+        }
+        None => {
+            error::raise_impl(
+                req,
+                dbh,
+                On::Stmt(object),
+                SqlState(*b"HY093"),
+                Some("parameter was not defined"),
+            )?;
+            Ok(false)
+        }
     }
-    undefined(req)
+}
+
+/// What `rewrite_name_to_position` finds in the map: the name a
+/// position stood for, or the position a name took.
+enum Found {
+    Name(PhpString),
+    Position(usize),
 }
 
 /// The positional rewrite of `pdo_parse_params`, for a connector that
@@ -328,6 +377,7 @@ pub(super) fn name_to_position(
 /// `?`, its number mapped to its name; `None` where there is none; named
 /// and positional together refused with php's `HY093`.
 pub(crate) fn rewrite_named(
+    req: &mut Request,
     sql: &[u8],
     scanner: Option<Scanner>,
 ) -> Result<Option<Rewritten>, Failure> {
@@ -360,15 +410,16 @@ pub(crate) fn rewrite_named(
         return Ok(None);
     }
     let mut out = Vec::with_capacity(sql.len());
-    let mut map = Vec::with_capacity(found.len());
+    let mut map = ParameterMap::new(req)?;
     let mut from = 0;
     for (bindno, (start, end)) in found.into_iter().enumerate() {
         out.extend_from_slice(&sql[from..start]);
         out.push(b'?');
-        map.push((
-            i64::try_from(bindno).unwrap_or(i64::MAX),
-            sql[start..end].to_vec(),
-        ));
+        let bindno = i64::try_from(bindno).unwrap_or(i64::MAX);
+        if let Err(thrown) = map.insert(req, bindno, &sql[start..end]) {
+            map.give_up(req);
+            return Err(thrown.into());
+        }
         from = end;
     }
     out.extend_from_slice(&sql[from..]);

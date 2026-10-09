@@ -707,7 +707,7 @@ impl Request {
         if let Some(path) = held {
             self.addref(&Value::string(path));
         }
-        if let Some(file) = held.map_or_else(|| self.interned(file).ok(), Some) {
+        if let Some(file) = held.map_or_else(|| self.op_array_string(file).ok(), Some) {
             self.addref(&Value::string(string));
             self.diagnostics.last_error = Some(LastError {
                 level,
@@ -1340,7 +1340,7 @@ impl Request {
         // header block was never sent.
         self.free_tick_functions();
         if let Some(callback) = self.take_header_callback() {
-            callback.release(self);
+            callback.give_up(self);
         }
     }
 
@@ -1398,8 +1398,8 @@ impl Request {
         };
         let arguments = (|| -> Result<[Value; 4], Thrown> {
             // `ZVAL_STR_COPY(&params[2], error_filename)`: the op array's
-            // file name, interned as a trace row's is, not a copy.
-            let file = Value::string(self.interned(file)?);
+            // file name, one more owner of it as a trace row takes.
+            let file = Value::string(self.op_array_string(file)?);
             // `ZVAL_STR_COPY(&params[1], message)`.
             self.addref(&Value::string(message));
             Ok([

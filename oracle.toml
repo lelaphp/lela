@@ -204,6 +204,13 @@ args = ["-e"]
 # opcache.preload is PHP_INI_SYSTEM: a witness of a preloaded caller (#1614) names this regime.
 ini = ["opcache.enable=1", "opcache.preload={workspace}/ext/ffi/tests/preload.php"]
 
+[regime.cgi-fix-pathinfo-off]
+# php-cgi reads `cgi.fix_pathinfo` from the engine's ini at startup, so a
+# php.ini's value changes how it splits SCRIPT_FILENAME and PATH_INFO; a
+# request fence witnessing that host reads its ini, not the `-d` list alone,
+# names this regime (#1693, settled on #2268).
+ini = ["cgi.fix_pathinfo=0"]
+
 [variant.zend-test]
 # The pinned tag with the main oracle's configure line plus --enable-zend-test (#1782),
 # built by scripts/oracle-build.py (#1889) to the fixed prefix; image is the base

@@ -26,6 +26,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod bound;
 pub mod connector;
 mod dbh;
 mod error;

@@ -1026,7 +1026,7 @@ fn send_headers(req: &mut Request) -> bool {
             Ok(returned) => returned.give_up(req),
             Err(thrown) => req.leave_pending(&thrown),
         }
-        callback.release(req);
+        callback.give_up(req);
     }
     req.output_mut().headers_sent = true;
     req.send_header_block();

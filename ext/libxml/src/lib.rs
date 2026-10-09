@@ -55,7 +55,7 @@ struct State {
     buffer: Vec<u8>,
     /// `LIBXML(entity_loader_callback)`, and the value it was read off,
     /// and its owner.
-    entity_loader: Option<(Callable, Owner<Value>)>,
+    entity_loader: Option<Owner<Callable>>,
     /// `LIBXML(entity_loader_disabled)`.
     entity_loader_disabled: bool,
     /// `LIBXML(stream_context)`, its owner.
@@ -157,8 +157,8 @@ fn rshutdown(req: &mut Request) {
     let state = req.state::<State>();
     let loader = state.entity_loader.take();
     let context = state.stream_context.take();
-    if let Some((_, value)) = loader {
-        value.give_up(req);
+    if let Some(loader) = loader {
+        loader.give_up(req);
     }
     if let Some(value) = context {
         value.give_up(req);
@@ -904,20 +904,20 @@ fn libxml_set_external_entity_loader(
     req: &mut Request,
     resolver_function: Raw<Option<Callable>>,
 ) -> Result<True, Thrown> {
-    let given = resolver_function.value();
     let callable = resolver_function.hold(req)?;
-    if let Some((_, old)) = req.state::<State>().entity_loader.take() {
+    if let Some(old) = req.state::<State>().entity_loader.take() {
         old.give_up(req);
     }
     if let Some(callable) = callable {
-        let given = Owner::take(req, given);
-        req.state::<State>().entity_loader = Some((callable, given));
+        let kept = Owner::take(req, callable);
+        req.state::<State>().entity_loader = Some(kept);
     }
     Ok(True)
 }
 
-/// `libxml_get_external_entity_loader(): ?callable`: the value the loader
-/// was set from, or `null`.
+/// `libxml_get_external_entity_loader(): ?callable`: the loader made
+/// again from what it resolved to ([`Callable::made_again`],
+/// `zend_get_callable_zval_from_fcc`), or `null`.
 ///
 /// ```php
 /// $f = fn($p, $s, $c) => null;
@@ -927,10 +927,37 @@ fn libxml_set_external_entity_loader(
 /// ```expect
 /// bool(true)
 /// ```
+///
+/// The loader is kept as `zend_fcc_dup` keeps it, so a `Class::method`
+/// string set with `$this` in scope keeps that object, and is answered
+/// as the pair it resolved to:
+///
+/// ```php
+/// class A { function __destruct(){ echo "dtor\n"; } function l($p, $s, $c){ return null; } function set(){ libxml_set_external_entity_loader('A::l'); } }
+/// (new A)->set();
+/// echo "set\n";
+/// var_dump(libxml_get_external_entity_loader());
+/// libxml_set_external_entity_loader(null);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// set
+/// array(2) {
+///   [0]=>
+///   object(A)#1 (0) {
+///   }
+///   [1]=>
+///   string(1) "l"
+/// }
+/// dtor
+/// end
+/// ```
 #[php_function]
-fn libxml_get_external_entity_loader(req: &mut Request) -> Option<Callable> {
-    req.state::<State>()
-        .entity_loader
-        .as_ref()
-        .map(|(callable, _)| callable.clone())
+fn libxml_get_external_entity_loader(
+    req: &mut Request,
+) -> Result<Option<Owner<Raw<Callable>>>, Thrown> {
+    let Some(loader) = req.state::<State>().entity_loader.as_deref().cloned() else {
+        return Ok(None);
+    };
+    Ok(Some(loader.made_again(req)?.into_raw()))
 }

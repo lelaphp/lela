@@ -9,7 +9,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, lookup_class};
 use php_ext::raising::{Thrown, arg_value_error, clear, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::converter::{
@@ -1019,7 +1019,11 @@ impl Served<'_> {
                 }
             }
             ValueRef::Array(array) => {
-                for (_, value) in array {
+                // Read first: the appends write the converter, which
+                // holds the request the rows walk borrows; no code of
+                // the program runs in them.
+                let values: Vec<Value> = walk::rows(self.req, *array).map(|(_, v)| v).collect();
+                for value in values {
                     self.append_to_unicode(value, target);
                 }
             }
@@ -1045,7 +1049,9 @@ impl Served<'_> {
                 }
             }
             ValueRef::Array(array) => {
-                for (_, value) in array {
+                // Read first, as `append_to_unicode` reads them.
+                let values: Vec<Value> = walk::rows(self.req, *array).map(|(_, v)| v).collect();
+                for value in values {
                     self.append_from_unicode(value, target);
                 }
             }

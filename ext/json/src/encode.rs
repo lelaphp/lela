@@ -122,7 +122,20 @@ pub(super) fn encode(
 
 /// `php_json_encode_zval`'s `IS_ARRAY` and `IS_OBJECT` arms, which copy
 /// the value before they walk it (`ZVAL_COPY`) so nothing a callback
-/// does can free what is being written out.
+/// does can free what is being written out, and give the copy up with
+/// `zval_ptr_dtor_nogc` (`Z/ext/json/json_encoder.c:672`), so an array
+/// or object owners are left of is no possible root of the cycle
+/// collector, as php's is not:
+///
+/// ```php
+/// $a = [range(1, 2), range(3, 4)]; $b = [$a, new stdClass];
+/// gc_collect_cycles(); $r = gc_status()['roots'];
+/// json_encode($b);
+/// echo gc_status()['roots'] - $r, "\n";
+/// ```
+/// ```expect
+/// 0
+/// ```
 fn held(
     req: &mut Request,
     buf: &mut Vec<u8>,
@@ -132,7 +145,7 @@ fn held(
 ) -> Wrote {
     let held = Owner::take(req, *value);
     let wrote = encode_array(req, buf, value, options, enc);
-    held.give_up(req);
+    held.give_up_nogc(req);
     wrote
 }
 

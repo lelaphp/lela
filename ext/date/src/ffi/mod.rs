@@ -38,7 +38,7 @@
 )]
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString, c_char, c_int};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
@@ -441,14 +441,70 @@ impl Zone {
 /// bool(false)
 /// int(1)
 /// ```
+///
+/// php's table is on the request's heap: `ALLOC_HASHTABLE` at the first
+/// ask, its data at the first zone, doubled at the ninth, and a
+/// `zend_string` key per zone. So the first zone a request parses counts
+/// the table's 424 bytes beside the zone's own, and the ninth the growth
+/// from 8 slots to 16:
+///
+/// ```php
+/// $m = memory_get_usage(); $a = new DateTimeZone('Europe/Amsterdam'); var_dump(memory_get_usage() - $m);
+/// $m = memory_get_usage(); $b = new DateTimeZone('America/New_York'); var_dump(memory_get_usage() - $m);
+/// $c = new DateTimeZone('Asia/Tokyo'); $d = new DateTimeZone('Europe/London'); $e = new DateTimeZone('Australia/Sydney');
+/// $f = new DateTimeZone('Africa/Cairo'); $g = new DateTimeZone('America/Chicago'); $h = new DateTimeZone('Europe/Paris');
+/// $m = memory_get_usage(); $i = new DateTimeZone('Asia/Kolkata'); var_dump(memory_get_usage() - $m);
+/// $m = memory_get_usage(); $j = new DateTimeZone('Pacific/Auckland'); var_dump(memory_get_usage() - $m);
+/// $m = memory_get_usage(); $k = new DateTimeZone('Europe/Amsterdam'); var_dump(memory_get_usage() - $m);
+/// ```
+/// ```expect capture
+/// int(2144)
+/// int(2440)
+/// int(1008)
+/// int(1584)
+/// int(80)
+/// ```
 #[derive(Default)]
-pub(crate) struct Zones(HashMap<Vec<u8>, Arc<Zone>>);
+pub(crate) struct Zones {
+    /// The zones by the name each was asked for, each with its key.
+    zones: HashMap<Vec<u8>, Cached>,
+    /// The table's own blocks, made at the first ask.
+    table: Option<Table>,
+}
+
+/// One entry of `DATEG(tzcache)`: the zone, and the block its
+/// `zend_string` key stands in.
+struct Cached {
+    zone: Arc<Zone>,
+    _key: Option<Block>,
+}
+
+/// The blocks of `DATEG(tzcache)`'s `HashTable` itself.
+struct Table {
+    /// `ALLOC_HASHTABLE`: the `HashTable` struct.
+    _header: Option<Block>,
+    /// The buckets and hash slots `zend_hash` allocates at the first
+    /// insert and doubles when they are full; none before the first zone.
+    data: Option<Block>,
+}
+
+impl Table {
+    /// `sizeof(HashTable)`.
+    const HEADER: usize = 56;
+
+    /// `HT_SIZE_EX(n, HT_SIZE_TO_MASK(n))` for the table size that holds
+    /// `entries`: a 32-byte bucket and two 4-byte hash slots per entry
+    /// of a size `zend_hash_init(4)` starts at 8 and doubles.
+    fn data_size(entries: usize) -> usize {
+        entries.next_power_of_two().max(8) * 40
+    }
+}
 
 impl Zones {
     /// How many names the request has parsed a zone for.
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.0.len()
+        self.zones.len()
     }
 }
 
@@ -456,17 +512,83 @@ impl Lent<'_> {
     /// `php_date_parse_tzfile(name, tzdb)`: the cached zone, or the one
     /// the database parses the first time it is asked for, on the
     /// request's heap as php's `DATEG(tzcache)` entry is; none for a name
-    /// the database has not, which is not kept.
+    /// the database has not, which is not kept. The table's blocks are
+    /// made in php's order: the header before the first lookup, then the
+    /// zone, then the data grown before the key is made.
     pub(crate) fn zone(&mut self, name: &[u8]) -> Option<Arc<Zone>> {
-        if let Some(zone) = self.state().zones.0.get(name) {
-            return Some(Arc::clone(zone));
+        if self.state().zones.table.is_none() {
+            let header = Block::new(self, Table::HEADER);
+            self.state().zones.table = Some(Table {
+                _header: header,
+                data: None,
+            });
+        }
+        if let Some(cached) = self.state().zones.zones.get(name) {
+            return Some(Arc::clone(&cached.zone));
         }
         let zone = Arc::new(Zone::parse(self, name)?);
-        self.state()
+        let size = Table::data_size(self.state().zones.zones.len() + 1);
+        let grown = self
+            .state()
             .zones
-            .0
-            .insert(name.to_vec(), Arc::clone(&zone));
+            .table
+            .as_ref()
+            .and_then(|t| t.data.as_ref())
+            .map(Block::size);
+        if grown != Some(size) {
+            let data = Block::new(self, size);
+            if let Some(table) = &mut self.state().zones.table {
+                table.data = data;
+            }
+        }
+        let key = Block::new(self, string_size(name.len()));
+        let cached = Cached {
+            zone: Arc::clone(&zone),
+            _key: key,
+        };
+        self.state().zones.zones.insert(name.to_vec(), cached);
         Some(zone)
+    }
+}
+
+/// `_ZSTR_STRUCT_SIZE(len)`: a `zend_string`'s 24-byte header, its bytes
+/// and the NUL, aligned to 8.
+fn string_size(len: usize) -> usize {
+    (24 + len + 1).next_multiple_of(8)
+}
+
+/// One block timelib's allocator made on the request's heap for a struct
+/// php keeps there and this crate keeps as a Rust value: freed by its
+/// drop, which under a lend gives it back.
+struct Block {
+    at: NonNull<c_void>,
+    size: usize,
+}
+
+// SAFETY: the block is owned here alone and never read or written; only
+// its address travels, to the free.
+unsafe impl Send for Block {}
+
+impl Block {
+    /// `timelib_malloc(size)`; none where the allocator answered none.
+    fn new(_: &Lent<'_>, size: usize) -> Option<Block> {
+        // SAFETY: an allocation of `size` bytes under the lend, this
+        // block's alone.
+        let at = unsafe { sys::timelib_malloc(size) };
+        NonNull::new(at).map(|at| Block { at, size })
+    }
+
+    /// The size the block was asked for.
+    fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl Drop for Block {
+    fn drop(&mut self) {
+        // SAFETY: the block `timelib_malloc` answered, and this its one
+        // owner.
+        unsafe { sys::timelib_free(self.at.as_ptr()) };
     }
 }
 
