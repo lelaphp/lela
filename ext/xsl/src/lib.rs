@@ -737,11 +737,15 @@ impl XSLTProcessor {
             return Ok(OrFalse::False);
         };
         let Some(class) = class else {
-            let value = php_ext_dom::create_object(req, result, None)?;
-            let object = value.as_object().copied();
-            let answer = object.map_or(OrFalse::False, |o| OrFalse::Value(Owner::take(req, o)));
-            value.give_up(req);
-            return Ok(answer);
+            return Ok(
+                match php_ext_dom::create_object(req, result, None)?.into_object() {
+                    Ok(object) => OrFalse::Value(object),
+                    Err(value) => {
+                        value.give_up(req);
+                        OrFalse::False
+                    }
+                },
+            );
         };
         if !compatible(req, class, document.class())? {
             result.free_document();

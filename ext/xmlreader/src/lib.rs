@@ -1241,13 +1241,13 @@ impl XMLReader {
             }
             Expanded::Copy(node) => {
                 let made = php_ext_dom::create_object(req, node, base)?;
-                let object = made.as_object().copied();
-                let answer = match object {
-                    Some(object) => OrFalse::Value(Owner::take(req, Instance::of(object))),
-                    None => OrFalse::False,
-                };
-                made.give_up(req);
-                Ok(answer)
+                Ok(match made.into_object() {
+                    Ok(object) => OrFalse::Value(object.into_instance()),
+                    Err(other) => {
+                        other.give_up(req);
+                        OrFalse::False
+                    }
+                })
             }
         }
     }
@@ -1255,15 +1255,15 @@ impl XMLReader {
 
 /// A new object a factory made, as `static`.
 fn static_of(req: &mut Request, made: Owner<Value>) -> Result<Owner<Static>, Thrown> {
-    let object = made.as_object().copied();
-    let made_static = object.map(|object| Owner::take(req, Static(object)));
-    made.give_up(req);
-    match made_static {
-        Some(object) => Ok(object),
-        None => Err(fatal(
-            req,
-            "InternalError: XMLReader factory made no object",
-        )),
+    match made.into_object() {
+        Ok(object) => Ok(object.into_static()),
+        Err(other) => {
+            other.give_up(req);
+            Err(fatal(
+                req,
+                "InternalError: XMLReader factory made no object",
+            ))
+        }
     }
 }
 

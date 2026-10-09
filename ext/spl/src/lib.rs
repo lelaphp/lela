@@ -325,6 +325,26 @@ pub(crate) fn give_up<T: View>(req: &mut Request, old: Option<Owner<T>>) {
     give_up_all(req, old);
 }
 
+/// The object a call answered where it is a `class`, as the owner the
+/// call answered, the one the native keeps; anything else given up.
+pub(crate) fn object_answered(
+    req: &mut Request,
+    answered: Owner<Value>,
+    class: &[u8],
+) -> Option<Owner<PhpObject>> {
+    match answered.into_object() {
+        Ok(object) if is_a(req, object.class(), class) => Some(object),
+        Ok(object) => {
+            object.give_up(req);
+            None
+        }
+        Err(other) => {
+            other.give_up(req);
+            None
+        }
+    }
+}
+
 /// Each owner given up, in order.
 pub(crate) fn give_up_all<T: View>(req: &mut Request, owners: impl IntoIterator<Item = Owner<T>>) {
     for owner in owners {

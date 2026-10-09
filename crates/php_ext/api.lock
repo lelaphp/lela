@@ -1182,6 +1182,7 @@ values::Owner::give_up_nogc
 values::Owner::int
 values::Owner::into_instance
 values::Owner::into_key
+values::Owner::into_object
 values::Owner::into_raw
 values::Owner::into_resource
 values::Owner::into_static

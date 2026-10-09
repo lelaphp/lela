@@ -75,6 +75,20 @@ fn held_past_the_limit(req: &mut Request, value: Value, bytes: i64) -> Result<()
     Ok(())
 }
 
+/// `as_object(mixed $value): ?object`: the object `$value` is, returned
+/// as the owner taken of `$value` recast; `null`, that owner given up,
+/// where it is no object.
+#[php_function]
+fn as_object(req: &mut Request, value: Value) -> Owner<Value> {
+    match Owner::take(req, value).into_object() {
+        Ok(object) => object.into_value(),
+        Err(other) => {
+            other.give_up(req);
+            Owner::null()
+        }
+    }
+}
+
 /// The line of `held_past_a_throw`'s [`Owner::take`].
 const THROWN_AT: u32 = line!() + 6;
 
@@ -100,6 +114,7 @@ fn owners() -> Extension {
             appended::declared(),
             held_past_the_limit::declared(),
             held_past_a_throw::declared(),
+            as_object::declared(),
         ])
         .build("owners")
 }
@@ -240,4 +255,22 @@ fn an_owner_dropped_on_an_exceptions_path_is_reported() {
     );
     assert!(!stdout.contains("went on"), "{stdout}");
     assert_eq!(served.exit_code, 255);
+}
+
+/// An owner of a value recast to an owner of the object it is keeps the
+/// one count: the object is destroyed at its last PHP owner's unset, not
+/// before and not at the request's end; anything else is handed back and
+/// given up, a counted string freed with it.
+#[test]
+fn an_owner_of_an_object_value_is_recast_with_its_count() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        &format!("<?php {COUNTED} class D {{ function __destruct() {{ echo \"d\\n\"; }} }}\n$o = as_object(new D);\necho get_class($o), \"\\n\";\nunset($o);\necho 'end', \"\\n\";\nvar_dump(as_object(1), as_object(s('x')));\n"),
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "D\nd\nend\nNULL\nNULL\n"
+    );
+    assert_eq!(served.exit_code, 0);
 }

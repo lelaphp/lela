@@ -789,12 +789,7 @@ impl IteratorIterator {
                 Some(callable) => call(req, &callable, &[])?,
                 None => call_method(req, &given, b"getIterator", &[])?,
             };
-            let Some(iterator) = answered
-                .as_object()
-                .copied()
-                .filter(|o| crate::is_a(req, o.class(), b"Traversable"))
-            else {
-                answered.give_up(req);
+            let Some(held) = crate::object_answered(req, answered, b"Traversable") else {
                 let name = String::from_utf8_lossy(&crate::class_name(req, cast)).into_owned();
                 return Err(throw(
                     req,
@@ -804,9 +799,7 @@ impl IteratorIterator {
                     ),
                 ));
             };
-            // The object the call answered, the iterator's to hold.
-            let held = Owner::take(req, iterator);
-            answered.give_up(req);
+            let iterator = *held;
             let old = dual(req, this, |it| {
                 it.kind = Kind::IteratorIterator;
                 it.inner.replace(held)
@@ -3123,14 +3116,14 @@ fn append_next_iterator(req: &mut Request, this: PhpObject) -> Result<bool, Thro
     if !crate::valid(req, list)? {
         return Ok(false);
     }
-    let current = crate::method(req, list, b"current")?;
-    let Some(next) = current.as_object().copied() else {
-        current.give_up(req);
-        return Ok(false);
+    let held = match crate::method(req, list, b"current")?.into_object() {
+        Ok(held) => held,
+        Err(current) => {
+            current.give_up(req);
+            return Ok(false);
+        }
     };
-    // The object `current()` answered, the append iterator's to hold.
-    let held = Owner::take(req, next);
-    current.give_up(req);
+    let next = *held;
     let old = dual(req, this, |it| it.inner.replace(held))?;
     crate::give_up(req, old);
     inner_iterate(req, this, next)?;
@@ -3520,21 +3513,14 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                             continue;
                         }
                     };
-                    let Some(object) = child
-                        .as_object()
-                        .copied()
-                        .filter(|o| crate::is_a(req, o.class(), b"RecursiveIterator"))
+                    let Some(held) = crate::object_answered(req, child, b"RecursiveIterator")
                     else {
-                        child.give_up(req);
                         return Err(throw(
                             req,
                             "UnexpectedValueException",
                             "Objects returned by RecursiveIterator::getChildren() must implement RecursiveIterator",
                         ));
                     };
-                    // The child the call answered, the level's to hold.
-                    let held = Owner::take(req, object);
-                    child.give_up(req);
                     let mode = rec(req, this, |it| it.mode)?;
                     set_state(
                         req,
@@ -3843,26 +3829,15 @@ fn rec_construct(
 ) -> Result<(), Thrown> {
     let root = if crate::is_a(req, given.class(), b"IteratorAggregate") {
         let answered = call_method(req, &given, b"getIterator", &[])?;
-        match answered.as_object().copied() {
-            Some(o) if crate::is_a(req, o.class(), b"Traversable") => {
-                // The object the call answered, the level's to hold.
-                let held = Owner::take(req, o);
-                answered.give_up(req);
-                held
-            }
-            _ => {
-                answered.give_up(req);
-                let name =
-                    String::from_utf8_lossy(&crate::class_name(req, given.class())).into_owned();
-                return Err(throw(
-                    req,
-                    "LogicException",
-                    &format!(
-                        "{name}::getIterator() must return an object that implements Traversable"
-                    ),
-                ));
-            }
-        }
+        let Some(held) = crate::object_answered(req, answered, b"Traversable") else {
+            let name = String::from_utf8_lossy(&crate::class_name(req, given.class())).into_owned();
+            return Err(throw(
+                req,
+                "LogicException",
+                &format!("{name}::getIterator() must return an object that implements Traversable"),
+            ));
+        };
+        held
     } else {
         Owner::take(req, given)
     };

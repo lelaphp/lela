@@ -1445,19 +1445,15 @@ pub(super) fn fetch_object(
         func: None,
     };
     if let Some((value, _)) = shaped(req, object, 8, Orientation::Forward, 0, false, &with)? {
-        // The row's object, its owner taken as the object it is.
-        let made = value
-            .as_object()
-            .copied()
-            .map(|made| Owner::take(req, made));
-        value.give_up(req);
-        if let Some(made) = made {
-            Ok(OrFalse::Value(made))
-        } else {
-            Err(php_ext::raising::fatal(
-                req,
-                "InternalError: PDOStatement::fetchObject() made no object",
-            ))
+        match value.into_object() {
+            Ok(made) => Ok(OrFalse::Value(made)),
+            Err(value) => {
+                value.give_up(req);
+                Err(php_ext::raising::fatal(
+                    req,
+                    "InternalError: PDOStatement::fetchObject() made no object",
+                ))
+            }
         }
     } else {
         stmt::handle_error(req, object, false)?;

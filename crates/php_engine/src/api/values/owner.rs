@@ -511,6 +511,18 @@ impl Owner<Value> {
         }
     }
 
+    /// The owner of the object the value is, the same count: what a
+    /// native keeps of a call's answer it holds as an object
+    /// (`getIterator()`, a factory's), where php keeps the `zval` it was
+    /// handed. The owner is handed back as it is where the value is no
+    /// object.
+    pub fn into_object(self) -> Result<Owner<PhpObject>, Owner<Value>> {
+        match self.view.as_object().copied() {
+            Some(object) => Ok(self.recast(object, ())),
+            None => Err(self),
+        }
+    }
+
     /// The owner of the value returned as it is under `T`'s declaration,
     /// the same count ([`Raw`]).
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
