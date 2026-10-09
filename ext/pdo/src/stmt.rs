@@ -212,9 +212,6 @@ pub(crate) struct StmtState {
     placeholders: Option<Placeholders>,
     /// `stmt->bound_params`, `None` until the first is registered.
     pub(crate) params: Option<BoundTable>,
-    /// The statement's own native code and text, for a connector that
-    /// keeps them per statement (`Connector::errors_per_statement`).
-    pub(crate) native_error: Option<(i64, Vec<u8>)>,
     /// `stmt->bound_param_map`, for a query the connector rewrote.
     pub(crate) param_map: Option<ParameterMap>,
     /// `stmt->bound_columns`, likewise.
@@ -637,6 +634,19 @@ pub(super) fn with_driver<R>(
     let answered = f(req, &mut *driver);
     write(req, object, |s| s.slot = Slot::Ready(driver));
     Ok(answered)
+}
+
+/// The connector's statement lent to `f` for one call and put back, as
+/// [`with_driver`] lends it, `None` for a statement no prepare gave one.
+pub(super) fn with_statement<R>(
+    req: &mut Request,
+    object: PhpObject,
+    f: impl FnOnce(&mut Request, Option<&dyn Statement>) -> R,
+) -> Result<R, Thrown> {
+    if read(req, object, |s| matches!(s.slot, Slot::None)).unwrap_or(true) {
+        return Ok(f(req, None));
+    }
+    with_driver(req, object, |req, driver| f(req, Some(&*driver)))
 }
 
 /// A prepared statement's connector half laid down on the new statement.

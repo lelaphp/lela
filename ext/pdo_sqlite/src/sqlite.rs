@@ -10,8 +10,8 @@ use php_ext::request::{Request, Stream};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
     BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, Executed, Failure,
-    OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState, Statement,
-    long_attribute, option_long,
+    NativeError, OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState,
+    Statement, long_attribute, option_long,
 };
 
 use crate::Sqlite;
@@ -44,22 +44,109 @@ const METHODS: [&[u8]; 3] = [
     b"sqlitecreatecollation",
 ];
 
-/// `_pdo_sqlite_error`: the SQLSTATE the connection's last error code
-/// maps to, with the code and the message, or `00000` and nothing where
-/// the code is `SQLITE_OK`.
-pub(super) fn error_of(db: &Db) -> SqlError {
-    let code = db.errcode();
-    if code == ffi::SQLITE_OK {
-        return SqlError {
-            state: SqlState::NONE,
-            code: 0,
-            message: Vec::new(),
-        };
+/// `pdo_sqlite_error_info`: the code `_pdo_sqlite_error` last read and the
+/// message it `pestrdup`'d, on the request's heap for a connection that is
+/// not persistent and `malloc`'s for one that is. A code of `SQLITE_OK`
+/// keeps the message there was, which only the next error replaces and
+/// the closer frees, so `errorInfo()` shows nothing after it while the
+/// text stays on the heap:
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+/// $m = memory_get_usage();
+/// $db->exec('NOPE');
+/// echo memory_get_usage() - $m, " ", json_encode($db->errorInfo()), "\n";
+/// $db->exec('SELECT 1');
+/// var_dump($db->prepare('SELECT 1', [PDO::ATTR_CURSOR => PDO::CURSOR_SCROLL]));
+/// echo memory_get_usage() - $m, " ", json_encode($db->errorInfo()), "\n";
+/// $db->exec('SELECT * FROM ' . str_repeat('x', 100));
+/// echo memory_get_usage() - $m, " ", json_encode($db->errorInfo()), "\n";
+/// $db = null;
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32 ["HY000",1,"near \"NOPE\": syntax error"]
+/// bool(false)
+/// 64 ["00000",null,null]
+/// 160 ["HY000",1,"no such table: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"]
+/// -344
+/// ```
+#[derive(Default)]
+pub(crate) struct Einfo {
+    /// `dbh->is_persistent`, where `pestrdup` puts the message.
+    persistent: bool,
+    /// `einfo->errcode`.
+    code: i32,
+    /// `einfo->errmsg`.
+    message: Option<Errmsg>,
+}
+
+/// Where `pestrdup` put a message: the request's heap, with the NUL php
+/// copies, or the process's.
+enum Errmsg {
+    Request(Emalloc),
+    Process(Box<[u8]>),
+}
+
+impl Einfo {
+    /// `pefree(einfo->errmsg, dbh->is_persistent)`.
+    fn free(&mut self, req: &mut Request) {
+        if let Some(Errmsg::Request(held)) = self.message.take() {
+            held.free(req);
+        }
     }
-    SqlError {
-        state: state_for(code),
-        code: i64::from(code),
-        message: db.errmsg(),
+
+    /// `pestrdup(message, dbh->is_persistent)` over the message kept; the
+    /// `Err` is the memory limit's fatal.
+    fn keep(&mut self, req: &mut Request, message: &[u8]) -> Result<(), Thrown> {
+        self.free(req);
+        if self.persistent {
+            self.message = Some(Errmsg::Process(message.into()));
+            return Ok(());
+        }
+        let mut held = Emalloc::new(req, message.len() + 1)?;
+        if let Some(at) = held.bytes_mut().get_mut(..message.len()) {
+            at.copy_from_slice(message);
+        }
+        self.message = Some(Errmsg::Request(held));
+        Ok(())
+    }
+
+    /// `pdo_sqlite_fetch_error_func`: the code and the message where the
+    /// code is not `SQLITE_OK`.
+    fn fetch(&self, req: &mut Request) -> Result<Option<NativeError>, Thrown> {
+        if self.code == ffi::SQLITE_OK {
+            return Ok(None);
+        }
+        let message = match &self.message {
+            Some(Errmsg::Request(held)) => held.bytes().split_last().map_or(&[][..], |(_, m)| m),
+            Some(Errmsg::Process(bytes)) => bytes,
+            None => &[],
+        };
+        Ok(Some(NativeError {
+            code: i64::from(self.code),
+            message: PhpString::new(req, message)?,
+        }))
+    }
+}
+
+/// `_pdo_sqlite_error`: the connection's last code recorded on its
+/// `H->einfo`, with its message where it is an error; the SQLSTATE the code
+/// maps to, `00000` for `SQLITE_OK`, with what a callback threw, or the
+/// memory limit's fatal where the message could not be kept.
+fn failed(req: &mut Request, db: &Db, thrown: Option<Thrown>) -> Failure {
+    let code = db.errcode();
+    let mut einfo = db.replace_einfo(Einfo::default());
+    einfo.code = code;
+    let (state, kept) = if code == ffi::SQLITE_OK {
+        (SqlState::NONE, Ok(()))
+    } else {
+        (state_for(code), einfo.keep(req, &db.errmsg()))
+    };
+    db.replace_einfo(einfo);
+    Failure {
+        thrown: kept.err().or(thrown),
+        ..Failure::error(state)
     }
 }
 
@@ -73,14 +160,6 @@ fn state_for(code: i32) -> SqlState {
         ffi::SQLITE_CONSTRAINT => *b"23000",
         _ => *b"HY000",
     })
-}
-
-/// The connection's error as a failure, with what a callback threw.
-fn failed(db: &Db, thrown: Option<Thrown>) -> Failure {
-    Failure {
-        thrown,
-        ..Failure::error(error_of(db))
-    }
 }
 
 impl Connector for Driver {
@@ -108,12 +187,18 @@ impl Connector for Driver {
             Some(Emalloc::new(req, DB_HANDLE)?)
         };
         match open_db(req, source) {
-            Ok(db) => Ok(Box::new(Handle {
-                db,
-                registrations: Vec::new(),
-                transaction_mode: 0,
-                allocation,
-            })),
+            Ok(db) => {
+                db.replace_einfo(Einfo {
+                    persistent: source.persistent,
+                    ..Einfo::default()
+                });
+                Ok(Box::new(Handle {
+                    db,
+                    registrations: Vec::new(),
+                    transaction_mode: 0,
+                    allocation,
+                }))
+            }
             Err(failure) => {
                 if let Some(allocation) = allocation {
                     allocation.free(req);
@@ -152,7 +237,7 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Db, Failure> {
         let db = match Db::open(&filename, flags, &crate::callbacks::PDO_SQLITE) {
             Ok(db) => db,
             Err((code, message)) => {
-                return Err(Failure::error(SqlError {
+                return Err(Failure::refused(SqlError {
                     state: state_for(code),
                     code: i64::from(code),
                     message,
@@ -232,7 +317,7 @@ impl Handle {
         match self.db.exec(req, sql) {
             (ffi::SQLITE_OK, None) => Ok(()),
             (ffi::SQLITE_OK, Some(thrown)) => Err(Failure::from(thrown)),
-            (_, thrown) => Err(failed(&self.db, thrown)),
+            (_, thrown) => Err(failed(req, &self.db, thrown)),
         }
     }
 }
@@ -273,7 +358,7 @@ impl Connection for Handle {
         let held = Emalloc::new(req, PDO_SQLITE_STMT)?;
         if scrollable {
             held.free(req);
-            return Err(failed(&self.db, None));
+            return Err(failed(req, &self.db, None));
         }
         match self.db.prepare(req, sql) {
             (Ok(Some(stmt)), thrown) => {
@@ -298,7 +383,7 @@ impl Connection for Handle {
             }
             (Ok(None) | Err(_), thrown) => {
                 held.free(req);
-                Err(failed(&self.db, thrown))
+                Err(failed(req, &self.db, thrown))
             }
         }
     }
@@ -413,6 +498,44 @@ impl Connection for Handle {
         }
     }
 
+    /// `pdo_sqlite_fetch_error_func`: the connection's `H->einfo`, which
+    /// a statement's error writes too, so the latest error on either is
+    /// what both answer:
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $db->exec('CREATE TABLE t (a UNIQUE)');
+    /// $db->exec('INSERT INTO t VALUES (1)');
+    /// $db->exec('NOPE');
+    /// echo json_encode($db->errorInfo()), "\n";
+    /// $s = $db->query('SELECT 1');
+    /// $t = $db->prepare('INSERT INTO t VALUES (1)');
+    /// $t->execute();
+    /// echo json_encode($t->errorInfo()), "\n";
+    /// $db->exec('NOPE');
+    /// echo json_encode($t->errorInfo()), "\n";
+    /// $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    /// try { $t->execute(); } catch (PDOException $e) { echo $e->getMessage(), "\n", json_encode($e->errorInfo), "\n"; }
+    /// ```
+    /// ```expect
+    /// ["HY000",1,"near \"NOPE\": syntax error"]
+    /// ["23000",19,"UNIQUE constraint failed: t.a"]
+    /// ["23000",1,"near \"NOPE\": syntax error"]
+    /// SQLSTATE[23000]: Integrity constraint violation: 19 UNIQUE constraint failed: t.a
+    /// ["23000",19,"UNIQUE constraint failed: t.a"]
+    /// ```
+    fn fetch_err(
+        &self,
+        req: &mut Request,
+        stmt: Option<&dyn Statement>,
+    ) -> Result<Option<NativeError>, Thrown> {
+        let _ = stmt;
+        let einfo = self.db.replace_einfo(Einfo::default());
+        let native = einfo.fetch(req);
+        self.db.replace_einfo(einfo);
+        native
+    }
+
     /// `pdo_sqlite_last_insert_id`.
     fn last_insert_id(
         &mut self,
@@ -453,6 +576,7 @@ impl Connection for Handle {
     /// allocation given back.
     fn close(&mut self, req: &mut Request) {
         self.persistent_shutdown(req);
+        self.db.replace_einfo(Einfo::default()).free(req);
         if let Some(allocation) = self.allocation.take() {
             allocation.free(req);
         }
@@ -475,8 +599,10 @@ struct Stmt {
 }
 
 impl Stmt {
-    fn failed(&self, thrown: Option<Thrown>) -> Failure {
-        failed(self.handle.db(), thrown)
+    /// `pdo_sqlite_error_stmt`: the error recorded on the connection's
+    /// `H->einfo`, which every statement on it shares.
+    fn failed(&self, req: &mut Request, thrown: Option<Thrown>) -> Failure {
+        failed(req, self.handle.db(), thrown)
     }
 
     /// `sqlite3_reset` with what an aggregate's final threw carried.
@@ -521,11 +647,11 @@ impl Statement for Stmt {
                 Ok(done)
             }
             ffi::SQLITE_ERROR => {
-                let failure = self.failed(thrown);
+                let failure = self.failed(req, thrown);
                 let _ = self.handle.reset(req);
                 return Err(failure);
             }
-            _ => return Err(self.failed(thrown)),
+            _ => return Err(self.failed(req, thrown)),
         };
         match thrown {
             Some(thrown) => Err(Failure::from(thrown)),
@@ -563,11 +689,11 @@ impl Statement for Stmt {
                 }
             }
             ffi::SQLITE_ERROR => {
-                let failure = self.failed(thrown);
+                let failure = self.failed(req, thrown);
                 let _ = self.handle.reset(req);
                 Err(failure)
             }
-            _ => Err(self.failed(thrown)),
+            _ => Err(self.failed(req, thrown)),
         }
     }
 
@@ -575,7 +701,7 @@ impl Statement for Stmt {
     /// string of the request's whatever its length.
     fn describe(&mut self, req: &mut Request, column: usize) -> Result<Column, Failure> {
         if column >= self.handle.column_count() {
-            return Err(self.failed(None));
+            return Err(self.failed(req, None));
         }
         let name = self.handle.column_name(column).unwrap_or_default();
         Ok(Column {
@@ -595,7 +721,7 @@ impl Statement for Stmt {
     ) -> Result<Owner<Value>, Failure> {
         let _ = ty;
         if column >= self.handle.data_count() {
-            return Err(self.failed(None));
+            return Err(self.failed(req, None));
         }
         let scalar = match self.handle.column_type(column) {
             ffi::SQLITE_NULL => Value::null(),
@@ -664,7 +790,7 @@ impl Statement for Stmt {
                         return if rc == ffi::SQLITE_OK {
                             Ok(())
                         } else {
-                            Err(self.failed(None))
+                            Err(self.failed(req, None))
                         };
                     }
                     _ => {
@@ -699,7 +825,7 @@ impl Statement for Stmt {
         if rc == ffi::SQLITE_OK {
             Ok(())
         } else {
-            Err(self.failed(None))
+            Err(self.failed(req, None))
         }
     }
 
@@ -783,7 +909,7 @@ impl Statement for Stmt {
             return Err(Failure::silent());
         }
         if column >= self.handle.column_count() {
-            return Err(self.failed(None));
+            return Err(self.failed(req, None));
         }
         let mut out = PhpArray::new(req)?;
         let mut flags = PhpArray::new(req)?;

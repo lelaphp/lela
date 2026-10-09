@@ -27,6 +27,7 @@ layer::bind_fd
 layer::connect_fd
 layer::dup_fd
 layer::fd_table_size
+layer::inherit_fd
 layer::listen_fd
 layer::new_socket
 layer::peek_fd

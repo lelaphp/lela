@@ -6,14 +6,18 @@
 //! a [`Connection`], php's `pdo_dbh_methods`, and a connection prepares
 //! [`Statement`]s, php's `pdo_stmt_methods`.
 //!
-//! **Errors are values.** Where a php connector writes an SQLSTATE into
-//! `dbh->error_code` or `stmt->error_code` and its native code and text
-//! into its own `einfo` for `fetch_err` to read back, a connector here
-//! answers a [`Failure`], and PDO keeps what it says: the SQLSTATE on the
-//! connection or the statement it was raised on, and the native code and
-//! text on the connection, where `pdo_sqlite_fetch_error_func` reads
-//! them. So the error state has one home, PDO's, and `errorInfo()`,
-//! `errorCode()` and the error handling read it there.
+//! **Errors are values, the native ones the connector's.** Where a php
+//! connector writes an SQLSTATE into `dbh->error_code` or
+//! `stmt->error_code` and its native code and text into its own `einfo`,
+//! a connector here keeps its `einfo` as php's does and answers a
+//! [`Failure`] carrying the SQLSTATE alone, which PDO records on the
+//! connection or the statement it was raised on. The native code and text
+//! are read back through [`Connection::fetch_err`] wherever php calls
+//! `fetch_err`: `errorInfo()` and the message and `errorInfo` of the error
+//! PDO raises. So each connector says when its text goes, as
+//! `_pdo_mysql_error` and `_pdo_sqlite_error` differ, and PDO holds no
+//! copy of it. A factory's error is the one that carries its text, a
+//! [`Cause::Refused`], there being no connection yet to keep it on.
 //!
 //! **An optional slot stays optional.** A slot php lets a connector leave
 //! null has a default body here answering [`Cause::Unsupported`], and
@@ -48,16 +52,8 @@ pub trait Connector: Send + Sync {
         &[]
     }
 
-    /// Whether `fetch_err` reads a statement's error from the statement
-    /// itself, as `pdo_mysql_fetch_error_func` reads `S->einfo`, and not
-    /// from the connection, as `pdo_sqlite_fetch_error_func` reads
-    /// `H->einfo` for both.
-    fn errors_per_statement(&self) -> bool {
-        false
-    }
-
     /// `db_handle_factory`: a connection opened from `source`. A
-    /// [`Cause::Error`] here is what `pdo_throw_exception` words, the
+    /// [`Cause::Refused`] here is what `pdo_throw_exception` words, the
     /// native code in brackets, since PDO has no connection to record it on
     /// yet.
     fn open(&self, req: &mut Request, source: &Source<'_>) -> Result<Box<dyn Connection>, Failure>;
@@ -155,10 +151,10 @@ impl SqlState {
     }
 }
 
-/// What a connector's own error function records: the SQLSTATE it maps
-/// its library's code to, the library's code and the library's text,
-/// php's `einfo`. A code of zero is no native error, which `fetch_err`
-/// adds nothing for.
+/// What a connector's error function found in its factory, where php's
+/// `_pdo_mysql_error` and `_pdo_sqlite_error` call `pdo_throw_exception`
+/// for want of a connection's methods: the SQLSTATE it maps its library's
+/// code to, the library's code and the library's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlError {
     pub state: SqlState,
@@ -166,12 +162,26 @@ pub struct SqlError {
     pub message: Vec<u8>,
 }
 
+/// What [`Connection::fetch_err`] adds to an `errorInfo`: the code and the
+/// text of the connector's last error, php's `einfo->errcode` and
+/// `einfo->errmsg`, the text a string of the request's as
+/// `add_next_index_string` makes it.
+#[derive(Debug)]
+pub struct NativeError {
+    pub code: i64,
+    pub message: Owner<PhpString>,
+}
+
 /// Why a connector's call did not succeed.
 #[derive(Debug)]
 pub enum Cause {
-    /// The connector's error function ran: the SQLSTATE and the native
-    /// error it recorded.
-    Error(SqlError),
+    /// The connector's error function ran on a connection or a statement:
+    /// the SQLSTATE it set, its native code and text kept in its own
+    /// `einfo` for [`Connection::fetch_err`].
+    Error(SqlState),
+    /// The connector's error function ran in its factory: what
+    /// `pdo_throw_exception` words. Only [`Connector::open`] answers it.
+    Refused(SqlError),
     /// `pdo_raise_impl_error` from inside the connector: an SQLSTATE and
     /// PDO's supplementary text, no native error.
     Impl { state: SqlState, message: String },
@@ -193,11 +203,20 @@ pub struct Failure {
 }
 
 impl Failure {
-    /// The connector's error function ran.
+    /// The connector's error function ran, setting `state`.
     #[must_use]
-    pub fn error(error: SqlError) -> Failure {
+    pub fn error(state: SqlState) -> Failure {
         Failure {
-            cause: Cause::Error(error),
+            cause: Cause::Error(state),
+            thrown: None,
+        }
+    }
+
+    /// The connector's error function ran in its factory.
+    #[must_use]
+    pub fn refused(error: SqlError) -> Failure {
+        Failure {
+            cause: Cause::Refused(error),
             thrown: None,
         }
     }
@@ -497,6 +516,22 @@ pub trait Connection: Any + Send {
     /// the statement's first start rather than at the first fetch.
     fn describes_at_execute(&self) -> bool {
         false
+    }
+
+    /// `fetch_err`: the native code and text of the error the connector
+    /// last recorded, the connection's own or, for `stmt`, the statement's
+    /// where the connector keeps one per statement
+    /// (`pdo_mysql_fetch_error_func` reads `S->einfo`,
+    /// `pdo_sqlite_fetch_error_func` `H->einfo` for both); `None` where its
+    /// code is zero, which php's slot adds nothing for, and for php's null
+    /// slot. The `Err` is the memory limit's fatal, met making the text.
+    fn fetch_err(
+        &self,
+        req: &mut Request,
+        stmt: Option<&dyn Statement>,
+    ) -> Result<Option<NativeError>, Thrown> {
+        let _ = (req, stmt);
+        Ok(None)
     }
 
     /// `get_gc`: the values the connection owns, for the cycle

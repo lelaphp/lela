@@ -8,7 +8,7 @@ use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_value};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, Value};
 
-use crate::connector::{Cause, Failure, OnError, SqlState};
+use crate::connector::{Cause, Failure, NativeError, OnError, SqlError, SqlState};
 use crate::stmt::Stmt;
 
 /// `err_initializer`, each state's five characters and its description,
@@ -253,35 +253,44 @@ pub(super) fn raise_impl(
     Err(throw_pdo(req, &message, code, Some(info)))
 }
 
-/// `dbh->methods->fetch_err` over what the connector recorded: the
-/// native code and text appended to `info` where there is one, the
-/// statement's own for a connector that keeps one per statement.
+/// `dbh->methods->fetch_err(dbh, stmt, info)`: the native code and text
+/// the connector recorded, read from the connector itself, the statement
+/// handed to it for an error on one.
+fn fetch_err(req: &mut Request, dbh: PhpObject, on: On) -> Result<Option<NativeError>, Thrown> {
+    crate::dbh::with_connection(req, dbh, |req, conn| match on {
+        On::Dbh => conn.fetch_err(req, None),
+        On::Stmt(stmt) => {
+            crate::stmt::with_statement(req, stmt, |req, statement| conn.fetch_err(req, statement))?
+        }
+    })
+}
+
+/// `fetch_err` over `info`: the native code and text appended where the
+/// connector recorded some.
 pub(super) fn fetch_error(
     req: &mut Request,
     dbh: PhpObject,
     on: On,
     info: &mut Owner<PhpArray>,
 ) -> Result<(), Thrown> {
-    let recorded = match on {
-        On::Stmt(stmt) if per_statement(req, dbh) => stmt
-            .native::<Stmt>(req)
-            .and_then(|s| s.native_error.clone()),
-        _ => crate::dbh::state(req, dbh).and_then(|h| h.native_error.clone()),
-    };
-    if let Some((code, message)) = recorded {
-        info.append(req, Owner::int(code))?;
-        let text = crate::string(req, &message)?;
-        info.append(req, text)?;
+    match fetch_err(req, dbh, on)? {
+        Some(native) => append_native(req, info, native),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Whether the connection's connector keeps a statement's error on the
-/// statement.
-fn per_statement(req: &mut Request, dbh: PhpObject) -> bool {
-    crate::dbh::state(req, dbh)
-        .and_then(|h| h.driver)
-        .is_some_and(crate::connector::Connector::errors_per_statement)
+/// `add_next_index_long(info, einfo->errcode)` and
+/// `add_next_index_string(info, einfo->errmsg)`.
+fn append_native(
+    req: &mut Request,
+    info: &mut Owner<PhpArray>,
+    native: NativeError,
+) -> Result<(), Thrown> {
+    if let Err(thrown) = info.append(req, Owner::int(native.code)) {
+        native.message.give_up(req);
+        return Err(thrown);
+    }
+    info.append(req, native.message.into_value())
 }
 
 /// `pdo_handle_error(dbh, stmt)`: nothing under `ERRMODE_SILENT`;
@@ -304,19 +313,14 @@ pub(super) fn handle(
     let mut info = PhpArray::new(req)?;
     let text = crate::string(req, state.as_str().as_bytes())?;
     info.append(req, text)?;
-    fetch_error(req, dbh, on, &mut info)?;
-    let code = info
-        .get(&php_ext::values::Key::Int(1))
-        .and_then(|v| v.as_int())
-        .unwrap_or(0);
-    let supp = info.get(&php_ext::values::Key::Int(2)).and_then(|v| {
-        v.as_str_bytes()
-            .map(|b| String::from_utf8_lossy(b).into_owned())
-    });
     let s = state.as_str();
-    let message = match supp {
-        Some(supp) if code != 0 => format!("SQLSTATE[{s}]: {description}: {code} {supp}"),
-        Some(supp) => format!("SQLSTATE[{s}]: {description}: {supp}"),
+    let message = match fetch_err(req, dbh, on)? {
+        Some(native) => {
+            let supp = String::from_utf8_lossy(native.message.as_bytes()).into_owned();
+            let message = format!("SQLSTATE[{s}]: {description}: {} {supp}", native.code);
+            append_native(req, &mut info, native)?;
+            message
+        }
         None => format!("SQLSTATE[{s}]: {description}"),
     };
     if mode == OnError::Warn {
@@ -358,7 +362,7 @@ pub(super) fn settle(
 }
 
 /// A cause written where php's connector writes it: an error's state on
-/// `on` and its native code and text on the connection; an
+/// `on`, its native code and text being the connector's own; an
 /// implementation error raised as the connector raises it.
 pub(super) fn record(
     req: &mut Request,
@@ -367,21 +371,8 @@ pub(super) fn record(
     cause: Cause,
 ) -> Result<(), Thrown> {
     match cause {
-        Cause::Error(error) => {
-            set_state(req, dbh, on, error.state);
-            let native = (error.code != 0).then_some((error.code, error.message));
-            match on {
-                On::Stmt(stmt) if per_statement(req, dbh) => {
-                    if let Some(s) = stmt.native_mut::<Stmt>(req) {
-                        s.native_error = native;
-                    }
-                }
-                _ => {
-                    if let Some(h) = crate::dbh::state(req, dbh) {
-                        h.native_error = native;
-                    }
-                }
-            }
+        Cause::Error(state) | Cause::Refused(SqlError { state, .. }) => {
+            set_state(req, dbh, on, state);
             Ok(())
         }
         Cause::Impl { state, message } => raise_impl(req, dbh, on, state, Some(&message)),
@@ -396,7 +387,7 @@ pub(super) fn throw_connect(req: &mut Request, failure: Failure) -> Thrown {
     if let Some(thrown) = failure.thrown {
         return thrown;
     }
-    let Cause::Error(error) = failure.cause else {
+    let Cause::Refused(error) = failure.cause else {
         return php_ext::raising::throw(req, "PDOException", "Constructor failed");
     };
     let text = String::from_utf8_lossy(&error.message).into_owned();

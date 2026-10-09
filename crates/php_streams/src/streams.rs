@@ -2743,6 +2743,22 @@ fn open_options(mode: &[u8]) -> Option<std::fs::OpenOptions> {
 /// `Err` is what `php_stream_display_wrapper_errors` prints after
 /// `Failed to open stream: `.
 ///
+/// The fd is a process's the request execs, as php's `open(2)` with no
+/// `O_CLOEXEC` leaves it, unless `$mode` carries `e`; an include's open
+/// keeps `O_CLOEXEC`, since php closes the file once it has compiled it
+/// (`zend_destroy_file_handle`) and nothing runs between:
+///
+/// ```php
+/// $path = __DIR__ . '/held.inc'; file_put_contents($path, '<?php ');
+/// $f = fopen($path, 'r'); $e = fopen($path, 're'); $c = fopen($path, 'r'); fclose($c); include $path;
+/// preg_match_all('/^ *' . fileinode($path) . ' /m', shell_exec('ls -iLd /dev/fd/* 2>/dev/null'), $held);
+/// unlink($path);
+/// var_dump(count($held[0]));
+/// ```
+/// ```expect
+/// int(1)
+/// ```
+///
 /// The stream costs the request what php's does: the
 /// `php_stdio_stream_data`, the `php_stream` and its resource, and the
 /// path `estrdup`'d as `orig_path` at the open; the read buffer of one
@@ -2763,7 +2779,12 @@ fn open_options(mode: &[u8]) -> Option<std::fs::OpenOptions> {
 /// int(8232)
 /// int(-8656)
 /// ```
-fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStream, String> {
+fn plain_open(
+    req: &mut Request,
+    path: &HostPath,
+    mode: &[u8],
+    for_include: bool,
+) -> Result<PhpStream, String> {
     let Some(options) = open_options(mode) else {
         return Err(format!(
             "`{}' is not a valid mode for fopen",
@@ -2786,6 +2807,9 @@ fn plain_open(req: &mut Request, path: &HostPath, mode: &[u8]) -> Result<PhpStre
     let mut file = options.open(&host).map_err(|error| strerror(&error))?;
     if creates {
         req.apply_umask(&host, 0o666);
+    }
+    if !for_include && !mode.contains(&b'e') {
+        crate::api::layer::inherit_fd(file.as_fd()).map_err(|error| strerror(&error))?;
     }
     let is_seekable = file.metadata().map_or(true, |meta| {
         use std::os::unix::fs::FileTypeExt;
@@ -4001,7 +4025,7 @@ impl StreamLayer for Request {
             self.check_open_basedir(path, true)
         };
         match guarded {
-            Ok(host) => plain_open(self, &host, mode),
+            Ok(host) => plain_open(self, &host, mode, options.for_include),
             Err(refused) => Err(strerror(&refused.into())),
         }
     }

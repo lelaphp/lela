@@ -40,7 +40,8 @@ pub use php_engine::{
     FileHandles, Forked, HostPage, HostServes, HostValue, IniEvent, IniFile, IniFiles, IniOrigin,
     IniValue, Method, NotAlone, Observables, OutputSink, PHP_CONFIG_FILE_PATH,
     PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid,
-    Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork,
+    Primary, ProcessTitle, ProgramFile, RequestDescription, ResponseHead, Routed, Uncaught,
+    WebRequest, fork,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host

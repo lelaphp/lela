@@ -17,6 +17,7 @@ connector::Connection::close
 connector::Connection::commit
 connector::Connection::describes_at_execute
 connector::Connection::exec
+connector::Connection::fetch_err
 connector::Connection::gc
 connector::Connection::give_back
 connector::Connection::in_transaction
@@ -29,7 +30,6 @@ connector::Connection::scanner
 connector::Connection::set_attribute
 connector::Connector
 connector::Connector::class
-connector::Connector::errors_per_statement
 connector::Connector::methods
 connector::Connector::name
 connector::Connector::open
@@ -37,8 +37,10 @@ connector::Executed
 connector::Failure
 connector::Failure::error
 connector::Failure::raised
+connector::Failure::refused
 connector::Failure::silent
 connector::Failure::unsupported
+connector::NativeError
 connector::OnError
 connector::Orientation
 connector::Orientation::of

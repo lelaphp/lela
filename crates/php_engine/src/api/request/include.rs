@@ -12,6 +12,7 @@ use php_compile::{CompileError, SourceKind};
 use php_heap::Fatal;
 use php_unit::Unit;
 
+use crate::ProgramFile;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
 use crate::exec::IncludeKind;
@@ -19,7 +20,8 @@ use crate::supplied::chain::StringArgs;
 
 use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
 
-/// Which include is being opened, whose field no file but this one reads.
+/// Which include is being opened, and the primary file held open, whose
+/// fields no file but this one reads.
 #[derive(Default)]
 pub(super) struct Include {
     /// The include opening a file through a stream wrapper, and how many
@@ -28,6 +30,9 @@ pub(super) struct Include {
     /// raises under it, and a native a user-space wrapper serves from
     /// inside it is one call deeper.
     including: Option<(IncludeKind, usize)>,
+    /// The primary file as the host's `zend_file_handle` holds it open
+    /// ([`ProgramFile`]), inherited by a process the request execs.
+    primary: Option<std::fs::File>,
 }
 
 impl Request {
@@ -73,6 +78,50 @@ impl Request {
         if let Some(real) = self.realpath(script) {
             // The memory limit's fatal is recorded and ends the request.
             self.note_included(real.as_os_str().as_encoded_bytes()).ok();
+        }
+    }
+
+    /// The host's `zend_file_handle` of the program the request names,
+    /// opened before `auto_prepend_file` runs, as the host opens it before
+    /// `php_execute_script`, and with no `O_CLOEXEC`, as php's `fopen` and
+    /// `zend_stream_open` open it, so a process the program execs holds
+    /// it ([`ProgramFile`]); not opened where the host hands only its name
+    /// and opcache holds the file, which answers the open without making it.
+    /// An included file is closed once it has compiled, and is not held:
+    ///
+    /// ```php
+    /// $inc = __DIR__ . '/held.inc'; file_put_contents($inc, '<?php ');
+    /// include $inc;
+    /// $listed = shell_exec('ls -iLd /dev/fd/* 2>/dev/null');
+    /// $held = fn ($path) => preg_match_all('/^ *' . fileinode($path) . ' /m', $listed);
+    /// var_dump($held(__FILE__), $held($inc));
+    /// unlink($inc);
+    /// ```
+    /// ```expect process
+    /// int(1)
+    /// int(0)
+    /// ```
+    pub(crate) fn open_primary_file(&mut self) {
+        let Some(script) = self.description.script_name.clone() else {
+            return;
+        };
+        if self.description.program_file != ProgramFile::Opened && self.accelerator_holds(&script) {
+            return;
+        }
+        let path = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(&script);
+        if let Ok(file) = std::fs::File::open(path)
+            && php_process::inherit_fd(std::os::fd::AsFd::as_fd(&file)).is_ok()
+        {
+            self.include.primary = Some(file);
+        }
+    }
+
+    /// The host's `zend_destroy_file_handle` once the program has been
+    /// served, before the request shuts down; a file php-fpm leaves
+    /// listed is closed with the request ([`ProgramFile::Listed`]).
+    pub(crate) fn close_primary_file(&mut self) {
+        if self.description.program_file != ProgramFile::Listed {
+            self.include.primary = None;
         }
     }
 

@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use php_sapi::{
-    Aborted, CommandLine, EachLine, Engine, FileHandles, Observables, OutputSink,
+    Aborted, CommandLine, EachLine, Engine, FileHandles, Observables, OutputSink, ProgramFile,
     RequestDescription, ResponseHead,
 };
 
@@ -69,8 +69,9 @@ const STANDARD_INPUT: &[u8] = b"Standard input code";
 /// The request description `do_repeat` builds (`php_cli.c:878-916`):
 /// `argv` with `php_self` first, which is the file's name or `Standard
 /// input code`; the process's environment and its working directory; the
-/// file named on the line, which the engine reads by name, or stdin read
-/// whole and served as `Standard input code` where `stdin` asks it; and
+/// file named on the line, which the engine reads by name and holds open
+/// while it runs, as `cli_seek_file_begin`'s `FILE *` is held
+/// ([`ProgramFile::Opened`]), or stdin read whole and served as `Standard input code` where `stdin` asks it; and
 /// the process's standard handles ([`FileHandles`]), which the engine
 /// registers as `STDIN`, `STDOUT` and `STDERR` over copies of fds 0, 1
 /// and 2. A file that cannot be opened is `cli_seek_file_begin`'s line on
@@ -115,6 +116,7 @@ pub fn describe(
         source,
         file_handles: Some(process_handles()),
         process_title: crate::title_constant(),
+        program_file: ProgramFile::Opened,
         ..RequestDescription::default()
     })
 }
