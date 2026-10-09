@@ -73,13 +73,33 @@ pub(crate) struct ResHeader {
     kind: Cell<i32>,
     /// Which allocator `ptr` came from, in the word php's struct pads.
     home: Home,
-    /// Whether its owners took it off the list ([`Heap::resource_unlist`]),
-    /// in the same word: the last release frees it with no entry to
-    /// delete.
-    unlisted: Cell<bool>,
+    /// Where it stands with the list and its free, in the same word.
+    listing: Cell<Listing>,
     /// `ptr`: the payload allocation, none for a resource of no payload
     /// and none once closed.
     ptr: Cell<Option<NonNull<PayloadBox>>>,
+}
+
+/// Where a resource stands with `EG(regular_list)` and with its free,
+/// which is what the release that reaches zero reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Listing {
+    /// In the list: the free deletes its entry, whose destructor is
+    /// php's only `efree` of a resource.
+    Listed,
+    /// Taken off the list by its owners ([`Heap::resource_unlist`]): its
+    /// thirty-two bytes are counted off `memory_get_usage()` as php's
+    /// `efree` there counts them and kept, retired, for the payload the
+    /// owners still name, and the free gives them back.
+    Unlisted,
+    /// The free is under way: a destructor that takes an owner of its own
+    /// resource and gives it up again reaches the free a second time and
+    /// finds nothing to do.
+    Destroying,
+    /// Destroyed: read only while a pin stood at the free, whose bytes,
+    /// retired, wait for the pin.
+    Destroyed,
 }
 
 /// Where a resource's payload was allocated: the request's heap, which
@@ -171,7 +191,7 @@ impl Res {
                 id,
                 kind: Cell::new(i32::try_from(kind.0).unwrap_or(i32::MAX)),
                 home,
-                unlisted: Cell::new(false),
+                listing: Cell::new(Listing::Listed),
                 ptr: Cell::new(ptr),
             });
         }
@@ -216,6 +236,12 @@ impl Res {
     #[must_use]
     pub fn is_same(&self, other: Res) -> bool {
         self.0 == other.0
+    }
+
+    /// Whether its last owner went while a pin stood, so the bytes the
+    /// pin keeps are retired and go back with it.
+    pub(crate) fn is_destroyed(self) -> bool {
+        self.header().listing.get() == Listing::Destroyed
     }
 
     /// The payload's table and where the payload sits after it, when
@@ -580,10 +606,13 @@ impl Heap {
     /// shutdown walk does not close it, and its id is spent; the release
     /// that reaches zero serves its destructor and frees it as it would a
     /// listed one. php `efree`s the thirty-two bytes there and keeps the
-    /// `php_stream`; here they stay, the payload's home.
+    /// `php_stream`, so `memory_get_usage()` falls by them here; the bytes
+    /// themselves stay, retired, as the payload's home, and go back at
+    /// the last release without being counted off a second time.
     pub fn resource_unlist(&mut self, r: Res) {
-        if self.resources.del(r.id()) {
-            r.header().unlisted.set(true);
+        if r.header().listing.get() == Listing::Listed && self.resources.del(r.id()) {
+            r.header().listing.set(Listing::Unlisted);
+            self.mm.retire(r.address());
         }
     }
 
@@ -682,18 +711,26 @@ impl Heap {
     /// string(6) "stream"
     /// ```
     pub(crate) fn resource_free(hooks: &mut dyn HeapHooks, r: Res) {
-        // An unlisted resource has no entry to delete: its flag is the
-        // entry, cleared as the entry is deleted, so a free reached again
-        // from the destructor finds neither.
-        if r.header().unlisted.replace(false) || hooks.heap().resources.del(r.id()) {
-            Heap::resource_dtor(hooks, r);
-        } else if !hooks.heap().mm.is_retired(r.address()) {
+        match r.header().listing.replace(Listing::Destroying) {
+            Listing::Listed => {
+                hooks.heap().resources.del(r.id());
+                Heap::resource_dtor(hooks, r);
+            }
+            Listing::Unlisted => Heap::resource_dtor(hooks, r),
             // The free under way, reached again from its destructor.
-            return;
+            Listing::Destroying => return,
+            // Destroyed under a pin, and let go again: the retired bytes
+            // go back once no pin stands.
+            Listing::Destroyed => {}
         }
+        let pinned = r.gc().pinned();
+        r.header().listing.set(Listing::Destroyed);
         // SAFETY: the resource came from `resource_alloc`, its entry is
-        // gone and its payload dropped, so only a pin names it.
-        unsafe { hooks.heap().give_back(r.address(), r.gc().pinned()) };
+        // gone and its payload dropped, so only a pin names it; an
+        // unlisted one's bytes were retired at the unlist, and
+        // `give_back` gives retired bytes back without counting them off
+        // again.
+        unsafe { hooks.heap().give_back(r.address(), pinned) };
     }
 
     /// `zend_close_rsrc_list` (`Z/Zend/zend_list.c:217`), the shutdown
@@ -858,8 +895,10 @@ mod tests {
 
     /// A resource its owners took off the list: the list neither finds
     /// nor counts it, the shutdown walk leaves it open, its id stays
-    /// spent, and its last release serves the destructor once and gives
-    /// its bytes back as a listed one's does.
+    /// spent, its thirty-two bytes leave `memory_get_usage()` at the
+    /// unlist, as `mysqlnd_fixup_regular_list`'s `efree` takes them, and
+    /// its last release serves the destructor once and gives back its
+    /// payload's bytes and never the header's a second time.
     #[test]
     fn an_unlisted_resource_is_its_owners_alone_and_freed_at_their_last_release() {
         let _alone = alone();
@@ -875,8 +914,10 @@ mod tests {
         else {
             return;
         };
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 16);
         rec.heap.resource_unlist(kept);
         rec.heap.resource_unlist(kept);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 16);
         assert_eq!(rec.heap.resources(), 0);
         assert!(rec.heap.resource_at(1).is_none());
         Heap::close_resources(&mut rec);
@@ -885,9 +926,16 @@ mod tests {
             return;
         };
         assert_eq!(next.id(), 2, "the unlisted id stays spent");
-        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 32 + 16);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32 + 16);
         let z = Zval::resource(kept);
         rec.heap.addref(z);
+        // A pin over it let go while it lives keeps its bytes.
+        assert!(Heap::pin_block(z));
+        rec.heap.unpin_block(z);
+        assert_eq!(
+            rec.heap.resource_native::<Observed>(kept).map(|_| ()),
+            Some(())
+        );
         Heap::release(&mut rec, z);
         assert!(rec.freed.is_empty(), "an owner still holds it");
         Heap::release(&mut rec, z);
@@ -902,6 +950,21 @@ mod tests {
         Heap::resource_close(&mut rec, closed);
         Heap::release(&mut rec, Zval::resource(closed));
         assert_eq!(rec.freed, vec![(1, 4, true), (3, 5, true)]);
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
+        // Let go under a pin: destroyed at the release, its bytes kept for
+        // the pin and given back with it, counted off once.
+        let Ok(pinned) = rec.heap.resource(ResourceType(6)) else {
+            return;
+        };
+        rec.heap.resource_unlist(pinned);
+        let z = Zval::resource(pinned);
+        assert!(Heap::pin_block(z));
+        Heap::release(&mut rec, z);
+        assert_eq!(rec.freed[2..], [(4, 6, true)]);
+        assert!(rec.heap.mm.is_retired(pinned.address()));
+        assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
+        rec.heap.unpin_block(z);
+        assert!(!rec.heap.mm.is_retired(pinned.address()));
         assert_eq!(rec.heap.memory_usage(false) - start, LIST + 32);
     }
 
