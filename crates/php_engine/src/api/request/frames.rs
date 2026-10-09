@@ -641,13 +641,22 @@ impl Request {
         }
         // `destroy_op_array`, which frees the heap runtime cache, then
         // `efree_size(EX(func))`.
-        if let Some(held) = self.vm.pop().and_then(|state| state.op_array) {
+        let Some(mut popped) = self.vm.pop() else {
+            self.stack.pop_frame(&mut self.heap);
+            return;
+        };
+        if let Some(held) = popped.op_array.take() {
             if let Some(cache) = held.run_time_cache {
                 cache.free(self);
             }
             held.copy.free(self);
         }
         self.stack.pop_frame(&mut self.heap);
+        // An `eval`'s main op array is destroyed when its execution ends,
+        // and the names its compile made with it.
+        if popped.function.is_none() && popped.body == exec::Body::Main && !self.bailout {
+            self.release_unit_names(Some(&popped.unit));
+        }
     }
 
     /// What [`Request::pop_frame`] gives up of `frame`, in its order.
