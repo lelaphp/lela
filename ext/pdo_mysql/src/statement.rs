@@ -3,8 +3,9 @@
 //! rows buffered or read one at a time as `USE_BUFFERED_QUERY` says at
 //! `executer` call; the columns' descriptions and the `getColumnMeta` rows.
 
+use php_ext::raising::Thrown;
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_mysqlnd::client::{
     Fetched, Field, FieldType, ResultSet, Stmt as Ps, StmtFetch, column,
 };
@@ -15,21 +16,24 @@ use php_ext_pdo::connector::{
 
 use crate::driver::{H, error_of, handle};
 
-/// `pdo_mysql_stmt`.
+/// `sizeof(pdo_mysql_stmt)`.
+const PDO_MYSQL_STMT: usize = 88;
+/// `sizeof(zval)`.
+const ZVAL: usize = 16;
+
+/// `pdo_mysql_stmt`, in the allocation php `ecalloc`s for it, which the
+/// statement's `dtor` gives back.
 pub(crate) struct Stmt {
     /// `S->H`, by number.
     h: usize,
-    /// `S->result` of a text query.
+    /// `S->result`: a text query's rows, or the columns
+    /// `mysqlnd_stmt_result_metadata` describes of a server-side
+    /// statement's rows; `S->fields` are its.
     result: Option<ResultSet>,
     /// `S->stmt`.
     pub(crate) ps: Option<Ps>,
-    /// Whether a server-side statement's `mysql_stmt_execute` left rows,
-    /// `S->result` from `mysqlnd_stmt_result_metadata`.
-    has_metadata: bool,
-    /// `S->fields`.
-    fields: Vec<Field>,
-    /// `S->current_row`, one owner of each value.
-    current_row: Vec<Owner<Value>>,
+    /// `S->current_row`.
+    current_row: Option<CurrentRow>,
     /// `S->num_params`.
     pub(crate) num_params: u32,
     /// `S->max_length`.
@@ -39,22 +43,70 @@ pub(crate) struct Stmt {
     /// The parameters `EXEC_PRE` was dispatched for, which PDO's
     /// `bound_params` holds.
     bound: u32,
+    /// The `pdo_mysql_stmt` itself, none once the `dtor` gave it back.
+    held: Option<Emalloc>,
+}
+
+/// `S->current_row`: a text row's values, one owner of each, in the
+/// `ecalloc(column_count, sizeof(zval))` the first fetch makes.
+struct CurrentRow {
+    values: Vec<Owner<Value>>,
+    held: Emalloc,
 }
 
 impl Stmt {
-    pub(crate) fn new(h: usize) -> Stmt {
-        Stmt {
+    /// `ecalloc(1, sizeof(pdo_mysql_stmt))` for the connection `h`; the
+    /// `Err` is the memory limit's fatal. What `memory_get_usage()` sees of
+    /// a statement past its rows is the `pdo_mysql_stmt`, PDO's columns, a
+    /// text row's `current_row` and a server-side statement's
+    /// `mysqlnd_stmt_result_metadata`, the last two given back by
+    /// `closeCursor()`, all of it by the statement's free:
+    ///
+    /// ```php
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// $m = memory_get_usage();
+    /// $st = $p->query("SELECT REPEAT('x', 100000) a");
+    /// echo memory_get_usage() - $m, "\n";
+    /// $st->fetchAll();
+    /// echo memory_get_usage() - $m, "\n";
+    /// unset($st);
+    /// echo memory_get_usage() - $m, "\n";
+    /// $p->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+    /// $st = $p->prepare("SELECT REPEAT('x', 1000000) a, REPEAT('y', 1000000) b");
+    /// echo memory_get_usage() - $m, "\n";
+    /// $st->execute();
+    /// echo memory_get_usage() - $m, "\n";
+    /// $st->closeCursor();
+    /// echo memory_get_usage() - $m, "\n";
+    /// unset($st);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect mysql
+    /// 221544
+    /// 323992
+    /// 32
+    /// 21792
+    /// 4044176
+    /// 21840
+    /// 32
+    /// ```
+    pub(crate) fn new(req: &mut Request, h: usize) -> Result<Stmt, Thrown> {
+        Ok(Stmt {
             h,
             result: None,
             ps: None,
-            has_metadata: false,
-            fields: Vec::new(),
-            current_row: Vec::new(),
+            current_row: None,
             num_params: 0,
             max_length: false,
             done: false,
             bound: 0,
-        }
+            held: Some(Emalloc::new(req, PDO_MYSQL_STMT)?),
+        })
+    }
+
+    /// `S->fields`: the columns of the rows, none where there are none.
+    fn fields(&self) -> &[Field] {
+        self.result.as_ref().map_or(&[], ResultSet::fields)
     }
 
     /// The connection's `pdo_mysql_db_handle`.
@@ -72,15 +124,17 @@ impl Stmt {
 
     /// Whether there are rows to read, `S->result`.
     fn has_result(&self) -> bool {
-        self.result.is_some() || self.has_metadata
+        self.result.is_some()
     }
 
     /// `pdo_mysql_free_result`.
     fn free_rows(&mut self, req: &mut Request) -> Result<(), Failure> {
-        for value in std::mem::take(&mut self.current_row) {
-            value.give_up(req);
+        if let Some(row) = self.current_row.take() {
+            for value in row.values {
+                value.give_up(req);
+            }
+            row.held.free(req);
         }
-        self.has_metadata = false;
         if let Some(result) = self.result.take() {
             result.free(req, false)?;
         }
@@ -107,7 +161,6 @@ impl Stmt {
         };
         let rows = result.num_rows().cast_signed();
         let columns = result.num_fields() as usize;
-        self.fields = result.fields().to_vec();
         self.result = Some(result);
         Ok(Executed {
             columns,
@@ -127,12 +180,9 @@ impl Stmt {
         for i in 0..columns {
             ps.bind_column(req, i)?;
         }
-        if let Some(fields) = ps.fields() {
-            self.fields = fields;
-            self.has_metadata = true;
-            if h.buffered && !ps.store(req)? {
-                return Err(self.error(req));
-            }
+        self.result = ps.described(req)?;
+        if self.result.is_some() && h.buffered && !ps.store(req)? {
+            return Err(self.error(req));
         }
         let affected = self
             .ps
@@ -258,10 +308,28 @@ impl Statement for Stmt {
         let Some(result) = self.result.as_mut() else {
             return Ok(false);
         };
+        let columns = result.num_fields() as usize;
         match result.fetch(req)? {
             Fetched::Row(row) => {
-                for value in std::mem::replace(&mut self.current_row, row) {
-                    value.give_up(req);
+                if self.current_row.is_none() {
+                    let held = match Emalloc::new(req, columns * ZVAL) {
+                        Ok(held) => held,
+                        Err(thrown) => {
+                            for value in row {
+                                value.give_up(req);
+                            }
+                            return Err(thrown.into());
+                        }
+                    };
+                    self.current_row = Some(CurrentRow {
+                        values: Vec::new(),
+                        held,
+                    });
+                }
+                if let Some(current) = self.current_row.as_mut() {
+                    for value in std::mem::replace(&mut current.values, row) {
+                        value.give_up(req);
+                    }
                 }
                 Ok(true)
             }
@@ -277,7 +345,7 @@ impl Statement for Stmt {
             return Err(Failure::silent());
         }
         let h = self.handle(req)?;
-        let Some(field) = self.fields.get(column) else {
+        let Some(field) = self.fields().get(column) else {
             return Err(Failure::silent());
         };
         let name = if h.fetch_table_names {
@@ -303,13 +371,17 @@ impl Statement for Stmt {
         ty: Option<BindKind>,
     ) -> Result<Owner<Value>, Failure> {
         let _ = ty;
-        if !self.has_result() || column >= self.fields.len() {
+        if !self.has_result() || column >= self.fields().len() {
             return Err(Failure::silent());
         }
         if let Some(ps) = &self.ps {
             return Ok(ps.column_value(req, u32::try_from(column).unwrap_or(u32::MAX)));
         }
-        let value = self.current_row.get(column).map_or(Value::null(), |v| **v);
+        let value = self
+            .current_row
+            .as_ref()
+            .and_then(|row| row.values.get(column))
+            .map_or(Value::null(), |v| **v);
         Ok(Owner::take(req, value))
     }
 
@@ -389,7 +461,7 @@ impl Statement for Stmt {
         if !self.has_result() {
             return Err(Failure::silent());
         }
-        let Some(field) = self.fields.get(column).cloned() else {
+        let Some(field) = self.fields().get(column).cloned() else {
             return Err(Failure::silent());
         };
         let mut meta = PhpArray::new(req)?;
@@ -482,6 +554,9 @@ impl Statement for Stmt {
         }
         if !self.done {
             self.drain(req).ok();
+        }
+        if let Some(held) = self.held.take() {
+            held.free(req);
         }
     }
 }

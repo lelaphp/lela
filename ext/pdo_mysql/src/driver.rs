@@ -15,7 +15,7 @@ use php_ext::values::{Owner, PhpString, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
     BindType, Connection, Connector, Failure, OnError, Placeholders, Prepared, Scanner, Source,
-    SqlError, SqlState, bool_attribute, long_attribute, option_long, option_string,
+    SqlError, SqlState, Statement as _, bool_attribute, long_attribute, option_long, option_string,
     parse_data_source, rewrite_named,
 };
 
@@ -249,6 +249,50 @@ impl Connector for Driver {
     }
 }
 
+/// What `mysql_handle_preparer` made of a query: a server-side statement,
+/// with the parameter map where the query's named placeholders were
+/// rewritten, or one PDO emulates.
+enum Native {
+    Prepared(Option<Vec<(i64, Vec<u8>)>>),
+    Emulated,
+}
+
+/// `mysql_handle_preparer` past the emulated case: the query's named
+/// placeholders rewritten and a server-side statement prepared on `stmt`;
+/// emulated after all where the server cannot prepare it (1295).
+fn prepare_native(
+    req: &mut Request,
+    h: H,
+    id: usize,
+    stmt: &mut Stmt,
+    sql: &[u8],
+    options: Option<php_ext::values::PhpArray>,
+) -> Result<Native, Failure> {
+    let rewritten = rewrite_named(sql, Some(crate::scanner::scan as Scanner))?;
+    let (sent, map) = match &rewritten {
+        Some(rewritten) => (
+            rewritten.sql.as_slice(),
+            Some(rewritten.parameter_map.clone()),
+        ),
+        None => (sql, None),
+    };
+    let mut ps = Ps::init(req, h.server)?;
+    if !ps.prepare(req, sent)? {
+        if h.server.status(req).errno == 1295 {
+            ps.close(req, true)?;
+            return Ok(Native::Emulated);
+        }
+        let failure = error_of(req, h.server, None);
+        ps.close(req, true)?;
+        return Err(failure);
+    }
+    stmt.num_params = ps.parameter_count();
+    stmt.ps = Some(ps);
+    update(req, id, |h| h.own_columns = true);
+    stmt.max_length = option_long(req, options, attr::MAX_COLUMN_LEN, 0)? & 1 != 0;
+    Ok(Native::Prepared(map))
+}
+
 /// The `driver_options` half of `pdo_mysql_handle_factory`: the `H`'s
 /// settings and the connection's options read off them, the flags they
 /// add; `false` where `mysql_options` refused one.
@@ -390,7 +434,10 @@ impl Db {
 }
 
 impl Connection for Db {
-    /// `mysql_handle_preparer`.
+    /// `mysql_handle_preparer`: the `pdo_mysql_stmt` made, and a
+    /// server-side statement prepared unless prepares are emulated; a
+    /// failure frees the statement as PDO's free of its object runs the
+    /// `dtor`.
     fn prepare(
         &mut self,
         req: &mut Request,
@@ -399,45 +446,31 @@ impl Connection for Db {
     ) -> Result<Prepared, Failure> {
         let h = self.h(req)?;
         let id = self.id().ok_or_else(Failure::silent)?;
-        let mut stmt = Stmt::new(id);
-        let emulated = |stmt: Stmt| Prepared {
-            statement: Box::new(stmt),
-            placeholders: Placeholders::Emulated,
-            parameter_map: None,
+        let mut stmt = Stmt::new(req, id)?;
+        let native = if h.emulate_prepare || h.server.status(req).server_version < 40100 {
+            Ok(Native::Emulated)
+        } else {
+            prepare_native(req, h, id, &mut stmt, sql, options)
         };
-        if h.emulate_prepare || h.server.status(req).server_version < 40100 {
-            return Ok(emulated(stmt));
-        }
-        let rewritten = rewrite_named(sql, Some(crate::scanner::scan as Scanner))?;
-        let (sent, map) = match &rewritten {
-            Some(rewritten) => (
-                rewritten.sql.as_slice(),
-                Some(rewritten.parameter_map.clone()),
-            ),
-            None => (sql, None),
-        };
-        let mut ps = Ps::init(req, h.server)?;
-        if !ps.prepare(req, sent)? {
-            if h.server.status(req).errno == 1295 {
-                ps.close(req, true)?;
-                return Ok(emulated(stmt));
+        match native {
+            Ok(Native::Prepared(map)) => Ok(Prepared {
+                statement: Box::new(stmt),
+                placeholders: Placeholders::Native {
+                    named: false,
+                    positional: true,
+                },
+                parameter_map: map,
+            }),
+            Ok(Native::Emulated) => Ok(Prepared {
+                statement: Box::new(stmt),
+                placeholders: Placeholders::Emulated,
+                parameter_map: None,
+            }),
+            Err(failure) => {
+                stmt.close(req);
+                Err(failure)
             }
-            let failure = error_of(req, h.server, None);
-            ps.close(req, true)?;
-            return Err(failure);
         }
-        stmt.num_params = ps.parameter_count();
-        stmt.ps = Some(ps);
-        update(req, id, |h| h.own_columns = true);
-        stmt.max_length = option_long(req, options, attr::MAX_COLUMN_LEN, 0)? & 1 != 0;
-        Ok(Prepared {
-            statement: Box::new(stmt),
-            placeholders: Placeholders::Native {
-                named: false,
-                positional: true,
-            },
-            parameter_map: map,
-        })
     }
 
     /// `mysql_handle_doer`: the affected rows, results of further
