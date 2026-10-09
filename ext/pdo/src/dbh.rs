@@ -103,9 +103,6 @@ pub(crate) struct DbhState {
     /// `dbh->error_code`: `None` before anything cleared it, php's
     /// zeroed array, which `errorCode()` answers `null` for.
     pub(crate) error_code: Option<SqlState>,
-    /// The connection's `einfo`, what `fetch_err` appends: the native
-    /// code and text of its last error, `None` for none.
-    pub(crate) native_error: Option<(i64, Vec<u8>)>,
     /// `dbh->desired_case`.
     pub(crate) case: Case,
     /// `dbh->oracle_nulls`.
