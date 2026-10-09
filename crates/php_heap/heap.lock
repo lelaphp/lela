@@ -232,6 +232,7 @@ Obj::pins
 Obj::properties
 Obj::protect
 Obj::refcount
+Obj::set_class
 Obj::set_destructor_called
 Obj::set_laziness
 Obj::set_slot_bit

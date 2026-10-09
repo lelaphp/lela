@@ -1267,6 +1267,7 @@ values::PhpObject::replace_table
 values::PhpObject::row
 values::PhpObject::row_place
 values::PhpObject::row_ref
+values::PhpObject::set_class
 values::PhpObject::set_prop
 values::PhpObject::set_row
 values::PhpObject::set_slot

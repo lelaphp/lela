@@ -86,7 +86,7 @@ pub(crate) struct ObjHeader {
     /// php's `ce`: the class as the engine numbers it, which the heap
     /// reads nothing of, and the slots the class laid down, which php
     /// reads off `ce->default_properties_count`.
-    class: u32,
+    class: Cell<u32>,
     slots: u32,
     /// php's `handlers`: what the heap needs of the table, the payload's
     /// type; none for a class with no native payload.
@@ -206,7 +206,7 @@ impl Obj {
                 gc: Refcounted::new(ZvalType::Object, 0),
                 handle: Cell::new(0),
                 extra_flags: Cell::new(0),
-                class,
+                class: Cell::new(class),
                 slots,
                 payload: Cell::new(payload),
                 properties: Cell::new(None),
@@ -228,7 +228,19 @@ impl Obj {
     /// The class, as the engine numbered it when it built the object.
     #[must_use]
     pub fn class(&self) -> u32 {
-        self.header().class
+        self.header().class.get()
+    }
+
+    /// php's `zobj->ce = ce` where the object keeps its layout: `class`
+    /// taken where it lays down `slots`, the slots the object has, and
+    /// the object has no native payload; `false`, and nothing changed,
+    /// otherwise.
+    pub fn set_class(&self, class: u32, slots: u32) -> bool {
+        if slots != self.slots() || self.has_native() {
+            return false;
+        }
+        self.header().class.set(class);
+        true
     }
 
     /// The declared property slots, `ce->default_properties_count`.
@@ -1219,6 +1231,12 @@ mod tests {
         // the 96-byte bin.
         assert_eq!(r.heap.memory_usage(false) - start, 40 + 96);
         assert_eq!(three.slots(), 3);
+        assert!(
+            !three.set_class(8, 0),
+            "a class of another layout is refused"
+        );
+        assert!(three.set_class(8, 3));
+        assert_eq!((plain.class(), three.class()), (7, 8));
         assert!(three.slot(0).is_undef());
         assert!(
             three.slot(3).is_undef(),

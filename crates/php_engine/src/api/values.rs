@@ -1321,6 +1321,15 @@ impl PhpObject {
         ClassId(self.0.class())
     }
 
+    /// php's `zobj->ce = ce`, which only `to_zval_object_ex` makes, on an
+    /// object that keeps its layout: whether the object took `class`.
+    /// Both classes lay down no property slot and no native payload and
+    /// are served by the standard handlers, the object is not lazy and
+    /// `class` is one `new` could make; otherwise nothing changes.
+    pub fn set_class(&self, req: &Request, class: ClassId) -> bool {
+        req.set_object_class(*self, class)
+    }
+
     /// The object's handler table, php's `Z_OBJ_HT_P`: its class's, or
     /// [`Std`](crate::api::abi::Std) for a class that declares none, as
     /// the kernels reach it. What a native asks of another class's

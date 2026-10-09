@@ -845,6 +845,26 @@ impl Request {
         self.own_handlers(class).unwrap_or(&Std)
     }
 
+    /// [`PhpObject::set_class`]: `object` takes `class` where neither
+    /// lays down a slot or a native payload, both are served by [`Std`],
+    /// the object is not lazy and `class` is one `new` could make.
+    pub(crate) fn set_object_class(&self, object: PhpObject, class: ClassId) -> bool {
+        let plain = |at: ClassId| {
+            self.class_slots(at) == 0
+                && self.own_handlers(at).is_none()
+                && self.native_new_of(at).is_none()
+        };
+        let makeable = self
+            .class_decl(class)
+            .is_some_and(|decl| decl.kind == ClassKind::Class && !decl.flags.is_abstract);
+        let o = object.heap();
+        makeable
+            && o.laziness() == php_heap::Laziness::Eager
+            && plain(object.class())
+            && plain(class)
+            && o.set_class(class.0, 0)
+    }
+
     /// The handler table of `class` where it is not
     /// `std_object_handlers`: its own or the nearest parent's, or an
     /// enum's; `None` where its objects are served by [`Std`].
