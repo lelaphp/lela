@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=7cb8d4e386452301d8e03e6808f93f4c55974d28dc6c3415550de96cb06e1457 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=a58ccc13ca790d2b22a2d93de5a51e92c713dce846c06d4c35b2ce6ff0921eda out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -115,7 +115,7 @@ third-engine-design.md
 - ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 
-<!-- /computed in=be732ccd1dbc5db7915cd76ee094197e6b019cd74819350d09b5e51700caf1d0 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
+<!-- /computed in=eee6aaed6aed5b4236dca6224300a93d161d48f09c9a673365ddbc00b8a11e14 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
