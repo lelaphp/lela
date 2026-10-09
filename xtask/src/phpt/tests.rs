@@ -1969,7 +1969,7 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
     // An engine built after the tree, so the run copies the tree and asks
     // the server; it never runs a test, the refusal comes first.
     let ask = Ask {
-        engine: Some(std::env::current_exe().unwrap()),
+        engine: super::Engine::Named(std::env::current_exe().unwrap()),
         jobs: NonZeroUsize::new(1),
         ..Ask::default()
     };
@@ -2215,11 +2215,8 @@ fn a_test_the_kept_target_has_no_verdict_for_is_predated_and_not_outside() {
         Some(Number::Int(2)),
         "{reading:#?}"
     );
-    let keeps = format!(
-        "1 of 1 target tests met (ext/fixture/tests/met.phpt), 1 outside (missed by the oracle: ext/fixture/tests/oracle-miss.phpt); 2 tests the target predates, kept over another corpus; `xtask phpt --subset ext/fixture --engine {}` keeps it again",
-        manifest().pin.oracle.path.display()
-    );
-    assert!(reading.message.contains(&keeps), "{}", reading.message);
+    let keeps = "1 of 1 target tests met (ext/fixture/tests/met.phpt), 1 outside (missed by the oracle: ext/fixture/tests/oracle-miss.phpt); 2 tests the target predates, kept over another corpus; `xtask phpt --subset ext/fixture --control` keeps it again";
+    assert!(reading.message.contains(keeps), "{}", reading.message);
 
     let current = fixture_target(&[
         ("met.phpt", "pass"),

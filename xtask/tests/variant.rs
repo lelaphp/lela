@@ -548,7 +548,7 @@ fn phpt_run(root: &Path, manifest: &Manifest, engine: &Path) -> Reading {
     let locks = Tree::new("variant-phpt-locks").unwrap();
     let ask = phpt::Ask {
         subset: Some("ext/fixture".to_owned()),
-        engine: Some(engine.to_path_buf()),
+        engine: phpt::Engine::Named(engine.to_path_buf()),
         locks: Some(locks.path().to_path_buf()),
         ..phpt::Ask::default()
     };
@@ -613,7 +613,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
     let run = |engine: &Path| {
         let ask = phpt::Ask {
             subset: Some("ext/fixture".to_owned()),
-            engine: Some(engine.to_path_buf()),
+            engine: phpt::Engine::Named(engine.to_path_buf()),
             locks: Some(locks.path().to_path_buf()),
             unkept: true,
             ..phpt::Ask::default()
@@ -649,6 +649,81 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
     fs::write(&main, "#!/bin/sh\n").unwrap();
     let refused = run(&main).expect_err("no subset's control");
     assert!(format!("{refused:#}").contains("--unkept"), "{refused:#}");
+}
+
+/// The runner's control with no php named (#1970): `--control --unkept`
+/// runs a variant's subset under the variant's own php and keeps its target
+/// under the variant's pin, which then stands; a subset of the main oracle,
+/// whose php is not here, runs nothing and says why.
+#[test]
+fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
+    let Some((root, manifest, _)) = phpt_scratch("phpt-control", None, true) else {
+        return;
+    };
+    let locks = Tree::new("variant-control-locks").unwrap();
+    let ask = phpt::Ask {
+        subset: Some("ext/fixture".to_owned()),
+        engine: phpt::Engine::Control,
+        unkept: true,
+        locks: Some(locks.path().to_path_buf()),
+        ..phpt::Ask::default()
+    };
+    let run = |manifest: &Manifest| phpt::run(&root, manifest, &Registry::default(), &ask);
+    let readings = run(&manifest).unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
+    assert_eq!(count(reading, "passed"), 1, "{reading:#?}");
+    let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
+    let kept = root.join(format!(
+        "target/phpt-runs/pin-{}-{md5}/ext/fixture.json",
+        manifest.pin.source.tag
+    ));
+    assert!(kept.is_file(), "{}", kept.display());
+    let readings = run(&manifest).unwrap();
+    assert!(readings.is_empty(), "the target stands: {readings:#?}");
+
+    let mut main = manifest.clone();
+    main.crates[0].oracle = None;
+    let readings = run(&main).unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(
+        reading.message.contains("no-php-here"),
+        "{}",
+        reading.message
+    );
+}
+
+/// The oracle job runs the control with `--control`, so dashboard.yml
+/// names no php for it and no variant: each subset's own pinned php is the
+/// harness's to find (#1970).
+#[test]
+fn the_oracle_jobs_control_names_no_php_and_no_variant() {
+    let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    let commands: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    assert!(
+        commands.contains(&"set -- --control"),
+        "the control step asks for the control"
+    );
+    for line in commands {
+        assert!(
+            !line.contains("--engine") && !line.contains(".binary.path"),
+            "{line}"
+        );
+    }
+    let pin = Pin::parse(&tracked_text()).unwrap();
+    for name in pin.variant.keys() {
+        assert!(!text.contains(name.as_str()), "dashboard.yml names {name}");
+    }
 }
 
 /// `phpt`'s half of the binary's negative control: the subset of a crate
