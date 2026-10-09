@@ -958,18 +958,15 @@ impl HeapHooks for Hooks<'_> {
     /// `list_dtor_ex`: the type's destructor as registered, handed the
     /// resource with the type it had, as php hands it a copy of the
     /// struct; a type with no destructor closes silently. What it throws
-    /// is pending from here, with what was pending before chained under
-    /// it as its `previous`, as `zend_throw_exception_internal` chains a
-    /// throwable raised while `EG(exception)` stands.
+    /// is raised as `zend_throw_exception_internal` raises it
+    /// ([`Request::throw_internal`]): chained over what was pending, and
+    /// at the request's end, with no frame standing, handed to the
+    /// handler `set_exception_handler()` set.
     fn free_resource(&mut self, res: Res, kind: ResourceType) {
         if let Some(dtor) = self.0.resources.dtor(kind)
             && let Err(thrown) = dtor(self.0, Resource::of(res))
         {
-            let before = self.0.take_raised();
-            self.0.leave_pending(&thrown);
-            if let Some(before) = before {
-                self.0.raise_under(before);
-            }
+            self.0.throw_internal(&thrown);
         }
         // `zend_close_rsrc_list`'s `zend_catch`: what a destructor bailed
         // out of is caught behind it, and the walk goes on.

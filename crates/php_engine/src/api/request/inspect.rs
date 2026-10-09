@@ -448,7 +448,11 @@ impl Request {
     /// (`Z/sapi/phpdbg/phpdbg_prompt.c:688`): its class, `file` and
     /// `line`, and what `__toString` answered, the status 255.
     pub(crate) fn keep_uncaught(&mut self) {
-        self.user_exception_handler();
+        // A handler that threw has rendered its throwable as the fatal
+        // and left, and nothing is kept.
+        if self.user_exception_handler().is_break() {
+            return;
+        }
         let Some(throwable) = self.take_pending_view() else {
             self.raised = None;
             return;
