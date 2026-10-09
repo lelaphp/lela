@@ -9,6 +9,7 @@
 //! ([`php_ext::abi::ExtensionBuilder::upload`]), served while the request
 //! starts, before the session's own `RINIT`.
 
+use php_ext::abi::{Beneath, chain};
 use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, walk};
@@ -54,8 +55,10 @@ struct File {
     bytes_processed: i64,
 }
 
-/// The upload hook: `php_session_rfc1867_callback` over one step, and
-/// `false`, php's `FAILURE`, once the session asked for the upload to be
+/// The upload hook: `php_session_rfc1867_callback` over one step, which
+/// serves the link it saved first and keeps its answer
+/// (`Z/ext/session/session.c:3174-3176`), and `false`, php's `FAILURE`,
+/// where that link failed or once the session asked for the upload to be
 /// cancelled.
 ///
 /// ```php
@@ -65,7 +68,14 @@ struct File {
 /// string(1) "1"
 /// string(27) "PHP_SESSION_UPLOAD_PROGRESS"
 /// ```
-pub(crate) fn hook(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
+pub(crate) fn hook(req: &mut Request, beneath: Beneath<'_, chain::Upload>) -> Result<bool, Thrown> {
+    let went_on = beneath.serve(req)?;
+    Ok(step(req, &beneath.event())? && went_on)
+}
+
+/// The session's own work over one step of the upload; `false` once the
+/// session asked for the upload to be cancelled.
+fn step(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
     if !ini_bool(req, b"session.upload_progress.enabled") {
         return Ok(true);
     }

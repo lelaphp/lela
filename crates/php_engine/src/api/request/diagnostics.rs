@@ -11,9 +11,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use crate::api::abi::{AfterLog, Callable, IniStage};
+use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef, adopted_some};
-use crate::supplied::{Bail, ErrorBeneath};
+use crate::supplied::Bail;
+use crate::supplied::chain::ErrorArgs;
 
 use super::{Phase, Raised, Request, ini_atol, ini_truth, zone};
 
@@ -622,8 +624,7 @@ impl Request {
         line: u32,
     ) {
         let shared = Arc::clone(&self.shared);
-        let top = ErrorBeneath {
-            links: shared.supplied.error.links(),
+        let args = ErrorArgs {
             level,
             bail,
             string,
@@ -631,7 +632,7 @@ impl Request {
             file,
             line,
         };
-        top.serve(self);
+        Beneath::<chain::Error>::top(shared.supplied.error.links(), args).serve(self);
     }
 
     /// `php_error_cb` (`Z/main/main.c:1370-1500`): the diagnostic stored,
@@ -669,8 +670,8 @@ impl Request {
     /// the store marked destructed are `php_error_cb`'s, so a link of
     /// `zend_error_cb` that does not serve it, as soap's serves a
     /// throwing client's fatal, leaves by `zend_bailout` alone.
-    pub(crate) fn php_error_cb(&mut self, error: ErrorBeneath<'_>) {
-        let ErrorBeneath {
+    pub(crate) fn php_error_cb(&mut self, error: ErrorArgs<'_>) {
+        let ErrorArgs {
             level,
             string,
             message,

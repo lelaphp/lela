@@ -5,7 +5,7 @@
 //! verbosity, and a started cache with `opcache.preload` set names the
 //! file the unit cache preloads.
 
-use php_ext::abi::PostStartup;
+use php_ext::abi::{Beneath, PostStartup, chain};
 use php_ext::process;
 use php_ext::request::{CacheBudget, Request};
 
@@ -17,8 +17,18 @@ use crate::{Startup, cli, consumption, max_cached_keys, verdict};
 /// strings buffer.
 const SHARED_GLOBALS: i64 = 216;
 
-/// The engine finishing its startup, once, on the first request's host.
-pub(crate) fn post_startup(req: &mut Request) -> PostStartup {
+/// The engine finishing its startup, once, on the first request's host:
+/// `accel_post_startup`, which serves the link it saved first and fails
+/// where it failed (`Z/ext/opcache/ZendAccelerator.c:3234-3241`), then
+/// does its own work.
+pub(crate) fn post_startup(
+    req: &mut Request,
+    beneath: Beneath<'_, chain::PostStartup>,
+) -> PostStartup {
+    match beneath.serve(req) {
+        PostStartup::Serve => {}
+        answered @ (PostStartup::Preload(_) | PostStartup::Refuse { .. }) => return answered,
+    }
     if verdict(req) != Startup::Ok {
         return PostStartup::Serve;
     }

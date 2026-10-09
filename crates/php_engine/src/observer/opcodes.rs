@@ -37,9 +37,10 @@
 use php_heap::FrameRef;
 use php_unit::Opcode;
 
-use crate::api::abi::Start;
+use crate::api::abi::{Beneath, Start, chain};
 use crate::api::request::Request;
 use crate::supplied::Chain;
+use crate::supplied::chain::{OpcodeArgs, OpcodeLink};
 
 use super::{Observable, Observed};
 
@@ -109,10 +110,12 @@ impl Opcodes {
 
 /// What an extension observing opcodes is told of an opline, before
 /// the opcode's handler runs: the frame standing at it, as
-/// [`Observed::frame`] reads it, and the opcode's name as php names
-/// it, `zend_get_opcode_name(EX(opline)->opcode)`. Nothing it does
-/// replaces the handler, which runs after it whatever it did.
-pub type OpcodeHandler = fn(&mut Observed<'_>, &'static str);
+/// [`Observed::frame`] reads it, and the one beneath, which names the
+/// opcode as php names it, `zend_get_opcode_name(EX(opline)->opcode)`
+/// ([`Beneath::opcode`]), and which the handler serves where it will.
+/// Nothing it does replaces the opcode's handler, which runs after it
+/// whatever it did.
+pub type OpcodeHandler = for<'a, 'b> fn(&mut Observed<'a>, Beneath<'b, chain::Opcode>);
 
 /// What an extension's engine start answers of the opcodes it observes,
 /// handed what its `MINIT` is ([`Start`]).
@@ -126,35 +129,34 @@ pub(crate) struct OpcodeObserver {
     pub(crate) handler: OpcodeHandler,
 }
 
-/// The engine's opcode observers, fixed as it starts: each declaring
-/// extension's set beside its handler, the later supplier's first, and
-/// every opcode any of them declared.
+/// The engine's opcode observers, fixed as it starts: the links of the
+/// chain, each declaring extension's set beside its handler, the first
+/// supplier's first, and every opcode any of them declared.
 #[derive(Debug, Default)]
 pub(crate) struct ObservedOpcodes {
     any: Opcodes,
-    observers: Box<[(Opcodes, OpcodeHandler)]>,
+    links: Box<[OpcodeLink]>,
 }
 
 impl ObservedOpcodes {
     /// Every observer's declaration asked of `start`, as php's
-    /// `MINIT`s call `zend_set_user_opcode_handler`. Each is told from
-    /// the top of `chain` down: php keeps one handler per opcode, and an
-    /// extension that sets one over another's saves it and calls it after
-    /// its own work, as xdebug's `xdebug_set_opcode_handler` does, so the
-    /// later supplier is told first. One that declares nothing is not
-    /// kept.
+    /// `MINIT`s call `zend_set_user_opcode_handler`, each the chain's
+    /// link in the order they were installed. One that declares nothing
+    /// is not kept.
     pub(crate) fn start(chain: &Chain<OpcodeObserver>, start: &Start) -> ObservedOpcodes {
-        let observers: Box<[_]> = chain
-            .top_down()
-            .map(|observer| ((observer.declared)(start), observer.handler))
-            .filter(|(declared, _)| !declared.is_empty())
-            .collect();
-        let any = observers
+        let links: Box<[_]> = chain
+            .links()
             .iter()
-            .fold(Opcodes::default(), |any, (declared, _)| {
-                any.union(*declared)
-            });
-        ObservedOpcodes { any, observers }
+            .map(|observer| OpcodeLink {
+                declared: (observer.declared)(start),
+                handler: observer.handler,
+            })
+            .filter(|link| !link.declared.is_empty())
+            .collect();
+        let any = links
+            .iter()
+            .fold(Opcodes::default(), |any, link| any.union(link.declared));
+        ObservedOpcodes { any, links }
     }
 
     /// Whether any extension declared an opcode, which chooses the loop
@@ -231,16 +233,19 @@ pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {
     Declared::of(req).before(req, frame, opcode);
 }
 
-/// php's `ZEND_USER_OPCODE` handler up to its dispatch: every observer
-/// that declared `opcode` told of the opline, the later supplier's first.
+/// php's `ZEND_USER_OPCODE` handler up to its dispatch: the chain of
+/// the observers that declared `opcode` entered from the top, the later
+/// supplier's first ([`chain::Opcode`]).
 #[cold]
 #[inline(never)]
 fn tell(req: &mut Request, frame: FrameRef, opcode: Opcode) {
     let shared = std::sync::Arc::clone(&req.shared);
-    let at = Observable::Code(frame);
-    for (declared, handler) in &shared.opcodes.observers {
-        if declared.contains(opcode) {
-            handler(&mut Observed { req, at }, opcode.name());
-        }
-    }
+    Beneath::<chain::Opcode>::top(&shared.opcodes.links, OpcodeArgs { frame, opcode }).serve(req);
+}
+
+/// One link that declared the opcode told of the opline: `handler`
+/// handed the frame standing at it and the ones beneath.
+pub(crate) fn told(handler: OpcodeHandler, req: &mut Request, beneath: Beneath<'_, chain::Opcode>) {
+    let at = Observable::Code(beneath.frame());
+    handler(&mut Observed { req, at }, beneath);
 }

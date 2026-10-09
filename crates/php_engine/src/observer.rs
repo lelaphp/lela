@@ -124,7 +124,9 @@ use crate::api::raising::{Level, Thrown};
 use crate::api::request::{ChainFrame, FrameView, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, Owner, PhpObject, Value};
 
-pub(crate) use opcodes::{Declared, ObservedOpcodes, OpcodeObserver, Telling, Untold, tell_before};
+pub(crate) use opcodes::{
+    Declared, ObservedOpcodes, OpcodeObserver, Telling, Untold, tell_before, told,
+};
 pub use opcodes::{OpcodeHandler, Opcodes, OpcodesDeclared};
 
 /// What an observer observes, php's `zend_execute_data` of a call: a
@@ -820,7 +822,7 @@ pub(crate) type ClassLinked = fn(&mut Request, ClassId, &[u8]);
 /// reports, beside and before `zend_error_cb` (`Z/Zend/zend.c:1528`),
 /// and in `zend_exception_error` before an uncaught throwable reaches
 /// `zend_error_cb` (`Z/Zend/zend_exceptions.c:926`, `:953`). It is not
-/// `zend_error_cb`'s chain ([`crate::supplied::ErrorBeneath`]): an error
+/// `zend_error_cb`'s chain ([`crate::api::abi::chain::Error`]): an error
 /// observer is a list told of every diagnostic, whether the user's
 /// handler takes it or `error_reporting` hides it, and it changes
 /// nothing of how the diagnostic is served; a link of `zend_error_cb`

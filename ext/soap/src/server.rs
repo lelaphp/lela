@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use php_ext::abi::ErrorBeneath;
+use php_ext::abi::{Beneath, chain};
 use php_ext::abi::{Instance, ObjectHandlers, Refusals, Std, This, Untyped, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
@@ -333,7 +333,7 @@ fn fatal_fault(
 /// <?xml version="1.0" encoding="UTF-8"?>
 /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>fatal</faultstring><detail>buffered</detail></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
 /// ```
-pub(crate) fn soap_error_handler(req: &mut Request, beneath: ErrorBeneath<'_>) {
+pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::Error>) {
     let state = req.state::<State>();
     if !state.use_soap_error_handler {
         beneath.serve(req);

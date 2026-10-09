@@ -4,11 +4,11 @@
 //! stands in once `Phar::interceptFileFuncs()` asked for it, and
 //! otherwise serving the native it replaced.
 
-use php_ext::abi::ExtensionBuilder;
+use php_ext::abi::{Beneath, ExtensionBuilder, chain};
 use php_ext::call::passthrough;
 use php_ext::process;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{Request, Streams as _, Unresolved};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::archive::{self, ENT_PERM_MASK, archives, lossy};
@@ -172,8 +172,20 @@ fn relative_name(
 /// `phar_resolve_path`, phar's `zend_resolve_path`: what
 /// `phar_find_in_include_path` finds for a path named from inside the
 /// archive being served, where it knows the directory it is served from;
-/// `None` leaves the path to the engine.
-pub(crate) fn resolve_path(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
+/// any other path left to the one it saved, `phar_save_resolve_path`.
+pub(crate) fn resolve_path(
+    req: &mut Request,
+    beneath: Beneath<'_, chain::ResolvePath>,
+) -> Result<Vec<u8>, Unresolved> {
+    match found_in_archive(req, beneath.path()).map_err(Unresolved::Threw)? {
+        Some(path) => Ok(path),
+        None => beneath.serve(req),
+    }
+}
+
+/// What [`find_in_include_path`] finds for `filename` in the archive
+/// being served, where one is.
+fn found_in_archive(req: &mut Request, filename: &[u8]) -> Result<Option<Vec<u8>>, Thrown> {
     if req.state::<crate::State>().cwd.is_none() {
         return Ok(None);
     }

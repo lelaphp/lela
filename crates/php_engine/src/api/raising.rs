@@ -9,6 +9,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::abi::{Beneath, chain};
 use crate::api::call::write_prop;
 use crate::api::request::Request;
 use crate::api::values::{Owner, PhpObject, PhpString, Value, adopted};
@@ -961,11 +962,8 @@ pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
         return thrown;
     }
     let shared = std::sync::Arc::clone(&req.shared);
-    req.while_pending(&thrown, |req| {
-        for hook in shared.supplied.thrown.top_down() {
-            hook(req, object);
-        }
-    });
+    let top = Beneath::<chain::Throw>::top(shared.supplied.thrown.links(), object);
+    req.while_pending(&thrown, |req| top.serve(req));
     thrown
 }
 

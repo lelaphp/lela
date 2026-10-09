@@ -5,7 +5,7 @@
 //! `zend_ffi_create_callback` makes of a PHP callable a C function is
 //! handed, which C calls back through `zend_ffi_callback_trampoline`.
 
-use php_ext::abi::Callable;
+use php_ext::abi::{Beneath, Callable, chain};
 use php_ext::coerce::{callable_checked, to_double, to_long, truthy, value_name, with_string};
 use php_ext::raising::{Thrown, fatal, while_pending};
 use php_ext::request::Request;
@@ -595,7 +595,8 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
 
 /// The calls C made of this request's callbacks while it ran PHP code,
 /// served at the request's interrupt check as pcntl's dispatch serves
-/// the signals delivered. A call from a signal handler the kernel
+/// the signals delivered, before the link of `zend_interrupt_function`
+/// beneath this one. A call from a signal handler the kernel
 /// entered in another extension's native here: php's handler called
 /// PHP code inside `posix_kill()`, and this one when it returns, which
 /// is the same place in the program; C read a zeroed return and the
@@ -638,13 +639,12 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
 /// loop 4499998500000
 /// done
 /// ```
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "the interrupt hook's signature; a throwable a callback leaves is php's fatal, not thrown"
-)]
-pub(crate) fn serve_deferred(req: &mut Request) -> Result<(), Thrown> {
+pub(crate) fn serve_deferred(
+    req: &mut Request,
+    beneath: Beneath<'_, chain::Interrupt>,
+) -> Result<(), Thrown> {
     if req.state::<State>().callbacks.is_empty() {
-        return Ok(());
+        return beneath.serve(req);
     }
     let reentry = req.reentry();
     reentry.serve_waiting(|call| ffi::serve_waiting(req, call));
@@ -659,7 +659,7 @@ pub(crate) fn serve_deferred(req: &mut Request) -> Result<(), Thrown> {
         };
         callback(req, deferred.callback, 0, &addrs);
     }
-    Ok(())
+    beneath.serve(req)
 }
 
 /// `ZEND_RSHUTDOWN_FUNCTION(ffi)`: the callbacks given up

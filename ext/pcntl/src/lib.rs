@@ -133,7 +133,7 @@ pub fn extension() -> Extension {
         ])
         .request_state::<State>()
         .rshutdown(signals::rshutdown)
-        .interrupt(signals::dispatch)
+        .interrupt(signals::interrupt)
         .ticks(signals::dispatch)
         .info(pcntl_info)
         .build("pcntl")

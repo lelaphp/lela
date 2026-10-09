@@ -37,7 +37,17 @@ pub use crate::observer::{
 };
 use crate::observer::{ClassLinked, ErrorObserver, FunctionDeclared};
 pub use crate::statement::{Statement, StatementHandler};
-pub use crate::supplied::{Compiled, ErrorBeneath, GcBeneath, StringBeneath};
+pub use crate::supplied::{Beneath, ChainKind, Compiled};
+
+/// The chained kinds (#1945), each a marker [`Beneath`] is generic
+/// over: php's saved pointer of the name, entered from the top with each
+/// link handed the ones beneath.
+pub mod chain {
+    pub use crate::supplied::chain::{
+        CompileFile, CompileString, Error, GcCollect, Interrupt, Opcode, PostStartup, ResolvePath,
+        Throw, Upload,
+    };
+}
 pub use class::{
     Cases, Class, ClassRef, ConstArray, ConstValue, Header, IntoConst, Members, PropertyValue,
     Typed,
@@ -506,32 +516,36 @@ pub(crate) type Rinit = fn(&mut Request) -> Result<(), Thrown>;
 /// `post_deactivate` or the engine end: served in reverse bundle order,
 /// each in a `zend_try` of its own (ADR-0010).
 pub(crate) type EndFunction = fn(&mut Request);
-/// The interrupt hook, php's `zend_interrupt_function`.
-pub(crate) type InterruptHook = fn(&mut Request) -> Result<(), Thrown>;
+/// The interrupt hook, php's `zend_interrupt_function`:
+/// [`ExtensionBuilder::interrupt`].
+pub(crate) type InterruptHook =
+    fn(&mut Request, Beneath<'_, chain::Interrupt>) -> Result<(), Thrown>;
 /// The hook `ZEND_TICKS` serves, a function php's `php_add_tick_function`
 /// adds.
 pub(crate) type TicksHook = fn(&mut Request) -> Result<(), Thrown>;
 /// The compile hook, php's `zend_compile_file` as an extension overrides
 /// it: the source a file compiles from, where the extension replaces it.
-pub(crate) type CompileFileHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+pub(crate) type CompileFileHook =
+    fn(&mut Request, Beneath<'_, chain::CompileFile>) -> Result<Option<Vec<u8>>, Thrown>;
 /// The string compile hook, php's `zend_compile_string` as an extension
 /// overrides it: [`ExtensionBuilder::compile_string`].
-pub(crate) type CompileStringHook = fn(&mut Request, StringBeneath<'_>) -> Result<Compiled, Thrown>;
+pub(crate) type CompileStringHook =
+    fn(&mut Request, Beneath<'_, chain::CompileString>) -> Result<Compiled, Thrown>;
 /// The error hook, php's `zend_error_cb` as an extension overrides it:
 /// [`ExtensionBuilder::error`].
-pub(crate) type ErrorHook = fn(&mut Request, ErrorBeneath<'_>);
+pub(crate) type ErrorHook = fn(&mut Request, Beneath<'_, chain::Error>);
 /// The throw hook, php's `zend_throw_exception_hook`:
 /// [`ExtensionBuilder::thrown`].
-pub(crate) type ThrownHook = fn(&mut Request, PhpObject);
+pub(crate) type ThrownHook = fn(&mut Request, Beneath<'_, chain::Throw>);
 /// The cycle collection hook, php's `gc_collect_cycles` pointer as an
 /// extension overrides it: [`ExtensionBuilder::gc_collect`].
-pub(crate) type GcCollectHook = fn(&mut Request, GcBeneath<'_>) -> i64;
+pub(crate) type GcCollectHook = fn(&mut Request, Beneath<'_, chain::GcCollect>) -> i64;
 /// The one question the unit cache asks an extension about a file
 /// (design §6.3): [`ExtensionBuilder::admission`].
 pub(crate) type AdmissionHook = fn(&mut Request, &[u8]) -> Admission;
 /// What the engine asks each extension as it finishes starting up:
 /// [`ExtensionBuilder::post_startup`].
-pub(crate) type PostStartupHook = fn(&mut Request) -> PostStartup;
+pub(crate) type PostStartupHook = fn(&mut Request, Beneath<'_, chain::PostStartup>) -> PostStartup;
 /// What the unit cache tells each extension of a file it holds:
 /// [`ExtensionBuilder::cached`].
 pub(crate) type CachedHook = fn(&mut Request, &[u8]);
@@ -577,9 +591,9 @@ pub struct Shell {
 /// serves its first request (design §6.3): php's `zend_post_startup_cb`,
 /// which opcache's `accel_post_startup` is. The engine is built before
 /// any host names itself, so it asks once, on the first request's
-/// host, and the first link from the bottom of the chain that does not
-/// answer [`PostStartup::Serve`] decides, as each of php's links calls
-/// the one it saved before its own work and fails where it failed.
+/// host, from the top of the chain ([`ExtensionBuilder::post_startup`]):
+/// what the top link answers decides, and beneath every link the chain
+/// answers [`PostStartup::Serve`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostStartup {
     /// Serve as built.
@@ -596,15 +610,17 @@ pub enum PostStartup {
 }
 /// The path resolver, php's `zend_resolve_path` as an extension overrides
 /// it: [`ExtensionBuilder::resolve_path`].
-pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
+pub(crate) type ResolvePathHook = fn(
+    &mut Request,
+    Beneath<'_, chain::ResolvePath>,
+) -> Result<Vec<u8>, crate::api::request::Unresolved>;
 
 /// What [`ExtensionBuilder::encodings`] takes: the encoding functions
 /// bound to one request.
 pub(crate) type EncodingsHook = fn(&mut Request) -> Box<dyn Multibyte>;
 /// The upload hook, php's `php_rfc1867_callback`:
 /// [`ExtensionBuilder::upload`].
-pub(crate) type UploadHook =
-    fn(&mut Request, &crate::api::request::Upload<'_>) -> Result<bool, Thrown>;
+pub(crate) type UploadHook = fn(&mut Request, Beneath<'_, chain::Upload>) -> Result<bool, Thrown>;
 /// The data treater, php's `sapi_module.treat_data`:
 /// [`ExtensionBuilder::treat_data`].
 pub(crate) type TreatDataHook = fn(
@@ -1251,10 +1267,12 @@ impl ExtensionBuilder {
     /// delivery, or a periodic interrupt an extension started with
     /// [`Request::start_periodic`], whose periods the hook reads with
     /// [`Request::periods_elapsed`]. What
-    /// it throws is left pending where the loop stands, as
+    /// it answers is left pending where the loop stands, as
     /// `zend_interrupt_helper` leaves `EG(exception)`. Two extensions'
     /// hooks chain as php's saved pointer does: the later is served
-    /// first, then the earlier.
+    /// first, handed the earlier ([`Beneath`]) to serve where its work
+    /// is to stand, as pcntl's serves it after its own, and nothing of
+    /// php's stands beneath them.
     #[must_use]
     pub fn interrupt(mut self, hook: InterruptHook) -> ExtensionBuilder {
         self.supplies.interrupt = Some(hook);
@@ -1277,12 +1295,14 @@ impl ExtensionBuilder {
     /// `zend_compile_file` overridden, as phar's `MINIT` overrides it
     /// with `phar_compile_file`: before a file is compiled, by an
     /// include, `spl_autoload` or as the primary file, `hook` is handed
-    /// its path and may answer the source to compile under that path in
-    /// place of the file's own, which the engine compiles as the
-    /// request's own unit and publishes nowhere; `None` leaves the file
-    /// to the unit cache. Two extensions' hooks chain as php's saved
-    /// pointer does: the later is asked first, and what it leaves goes
-    /// to the earlier.
+    /// its path with the one beneath ([`Beneath`]) and may answer the
+    /// source to compile under that path in place of the file's own,
+    /// which the engine compiles as the request's own unit and publishes
+    /// nowhere; `None` leaves the file to the unit cache, which is what
+    /// the chain answers beneath every link. Two extensions' hooks chain
+    /// as php's saved pointer does: the later is served first, and the
+    /// earlier where the later serves the one beneath, as phar's does for
+    /// a file it does not serve.
     #[must_use]
     pub fn compile_file(mut self, hook: CompileFileHook) -> ExtensionBuilder {
         self.supplies.compile_file = Some(hook);
@@ -1294,8 +1314,9 @@ impl ExtensionBuilder {
     /// declared: every string compiled as an `eval` compiles it, by
     /// `eval`, the CLI's `-r`, `-B`, `-R` and `-E`, the shell or the
     /// debugger, is served by `hook`, handed the one beneath
-    /// ([`StringBeneath`]) to serve where its work is to stand, with
-    /// the source it compiles, the string's or one of its own. What it
+    /// ([`Beneath`]) to serve where its work is to stand, over the
+    /// string's source or one of its own ([`Beneath::with_source`]),
+    /// with php's own `compile_string` beneath every link. What it
     /// throws is raised where the string was to compile, as php raises
     /// `EG(exception)` where the pointer answers `NULL`. Two extensions'
     /// hooks chain as php's saved pointer does: the later is served
@@ -1309,7 +1330,7 @@ impl ExtensionBuilder {
     /// `zend_error_cb` overridden, as soap's `MINIT` overrides it with
     /// `soap_error_handler`: every diagnostic the user's error handler
     /// does not take, and every uncaught throwable rendered, is served
-    /// by `hook`, handed the one beneath ([`ErrorBeneath`]), which ends
+    /// by `hook`, handed the one beneath ([`Beneath`]), which ends
     /// in php's own `php_error_cb` that stores, logs and displays it.
     /// A hook that does not serve the one beneath has served the
     /// diagnostic itself; a fatal ends the request all the same. Two
@@ -1331,8 +1352,10 @@ impl ExtensionBuilder {
     /// (`zend_fiber_delegate_transfer_result`). As php's, it is told
     /// nothing of a throwable raised while another is pending, which is
     /// chained under it, nor of one raised where nothing executes. Two
-    /// extensions' hooks are each told, the later first, as each of
-    /// php's links serves before the one it saved.
+    /// extensions' hooks chain as php's saved pointer does: the later is
+    /// told first, handed the earlier ([`Beneath`]) to tell where it
+    /// will, as each of php's links serves before the one it saved, and
+    /// nothing of php's stands beneath them.
     #[must_use]
     pub fn thrown(mut self, hook: ThrownHook) -> ExtensionBuilder {
         self.supplies.thrown = Some(hook);
@@ -1416,15 +1439,16 @@ impl ExtensionBuilder {
     /// the engine starts, which opcodes the extension observes, handed
     /// what its `MINIT` is; `handler` is told of each opline of one of
     /// them the loop dispatches, before the opcode's handler runs, handed
-    /// the frame standing at it and the opcode's name. The opcode's
-    /// handler always runs after it: no extension replaces one. Two
-    /// extensions that declare one opcode are each told, the later
-    /// first: php keeps one handler per opcode, the later set over the
-    /// earlier, and tells the earlier only where the later saved it and
-    /// calls it after its own work, as xdebug's does; here every
-    /// declaration is told, as if each saved the one beneath. A second
-    /// declaration of one extension stands over its first. With none declared, a serving reads one word as
-    /// its loop is entered and each opline pays a test of it.
+    /// the frame standing at it and the one beneath ([`Beneath`]), which
+    /// names the opcode as php names it. The opcode's handler always runs
+    /// after it: no extension replaces one. Two extensions that declare
+    /// one opcode chain as php's handler for it does: the later is told
+    /// first, and the earlier where the later serves the one beneath, as
+    /// xdebug's saves the handler it set over and calls it after its own
+    /// work; nothing of php's stands beneath them. A second declaration
+    /// of one extension stands over its first. With none declared, a
+    /// serving reads one word as its loop is entered and each opline
+    /// pays a test of it.
     #[must_use]
     pub fn opcodes(
         mut self,
@@ -1471,7 +1495,7 @@ impl ExtensionBuilder {
     /// The `gc_collect_cycles` pointer overridden, as xdebug's and the
     /// profilers' `MINIT` override it to measure each collection: every cycle
     /// collection, by `gc_collect_cycles()` or by a full root buffer, is
-    /// served by `hook`, handed the one beneath ([`GcBeneath`]) to
+    /// served by `hook`, handed the one beneath ([`Beneath`]) to
     /// serve where its work is to stand; what it answers is the collection's
     /// count. Two extensions' hooks chain as php's saved pointer does:
     /// the later is served first and the earlier when the later serves
@@ -1502,9 +1526,13 @@ impl ExtensionBuilder {
     /// `zend_post_startup_cb`, where opcache refuses a configuration it
     /// cannot start under and names the file `opcache.preload` serves.
     /// What the hook writes to the error stream is written before
-    /// anything the engine serves.
+    /// anything the engine serves. Two extensions' hooks chain as php's
+    /// saved pointer does: the later is asked first, handed the earlier
+    /// ([`Beneath`]) to ask where it will, as opcache's asks the one it
+    /// saved before its own work and answers what it answered where that
+    /// did not serve; beneath every link the chain serves.
     #[must_use]
-    pub fn post_startup(mut self, hook: fn(&mut Request) -> PostStartup) -> ExtensionBuilder {
+    pub fn post_startup(mut self, hook: PostStartupHook) -> ExtensionBuilder {
         self.supplies.post_startup = Some(hook);
         self
     }
@@ -1595,10 +1623,11 @@ impl ExtensionBuilder {
     /// `zend_resolve_path` overridden, as phar's `MINIT` overrides it with
     /// `phar_resolve_path`: a path an include or an open along the
     /// `include_path` names is handed to `hook` first, which may answer
-    /// where it stands, a `phar://` URL inside the archive being served;
-    /// `None` leaves it to the engine's own resolution. Two extensions'
-    /// hooks chain as php's saved pointer does: the later is asked first,
-    /// and what it leaves goes to the earlier.
+    /// where it stands, a `phar://` URL inside the archive being served,
+    /// or serve the one beneath ([`Beneath`]), which ends in the engine's
+    /// own resolution. Two extensions' hooks chain as php's saved pointer
+    /// does: the later is asked first, and the earlier where the later
+    /// serves the one beneath.
     #[must_use]
     pub fn resolve_path(mut self, hook: ResolvePathHook) -> ExtensionBuilder {
         self.supplies.resolve_path = Some(hook);
@@ -1637,8 +1666,11 @@ impl ExtensionBuilder {
     /// ([`crate::api::request::Upload`]), and `false` answers php's
     /// `FAILURE`: the body's reading stops at its start, a field is not
     /// registered, a file is passed over at its start and cancelled with
-    /// `UPLOAD_ERR_EXTENSION` after it. Every extension's hook is asked,
-    /// in bundle order.
+    /// `UPLOAD_ERR_EXTENSION` after it. Two extensions' hooks chain as
+    /// php's saved pointer does: the later is asked first, handed the
+    /// earlier ([`Beneath`]) to ask where it will, as session's asks the
+    /// one it saved before its own work and keeps its answer; beneath
+    /// every link the chain answers `true`, php's `SUCCESS`.
     #[must_use]
     pub fn upload(mut self, hook: UploadHook) -> ExtensionBuilder {
         self.supplies.upload = Some(hook);

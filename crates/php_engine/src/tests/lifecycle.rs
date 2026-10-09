@@ -4,7 +4,9 @@
 //! request a request state is built for and at engine drop.
 
 use super::test_ext::{Event, Events, Phase, Recording, TestExt, record};
-use crate::api::abi::{Extension, ExtensionBuilder, PostStartup as Answer, Refusal, Start};
+use crate::api::abi::{
+    Beneath, Extension, ExtensionBuilder, PostStartup as Answer, Refusal, Start, chain,
+};
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::engine::{
@@ -218,7 +220,7 @@ fn two_engines_in_one_process_each_build_reach_and_drop_their_own_engine_state()
 /// (`Z/sapi/cli/php_cli.c:1341-1350`); its engine states only drop.
 #[test]
 fn a_refused_request_drops_its_request_state_in_reverse() {
-    fn refuse<const N: u8>(_: &mut Request) -> Answer {
+    fn refuse<const N: u8>(_: &mut Request, _: Beneath<'_, chain::PostStartup>) -> Answer {
         record(N, PostStartup);
         Answer::Refuse { status: 3 }
     }
@@ -395,7 +397,7 @@ fn each_deactivate_function_is_guarded_on_its_own() {
 /// that calls `exit`, and one that ends in a fatal.
 #[test]
 fn a_request_drops_its_request_state_in_reverse_however_it_ends() {
-    fn serve_on<const N: u8>(_: &mut Request) -> Answer {
+    fn serve_on<const N: u8>(_: &mut Request, _: Beneath<'_, chain::PostStartup>) -> Answer {
         record(N, PostStartup);
         Answer::Serve
     }

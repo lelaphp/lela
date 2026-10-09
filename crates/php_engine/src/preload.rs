@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::api::abi::PostStartup;
+use crate::api::abi::{Beneath, PostStartup, chain};
 use crate::api::request::{Phase, Request, Sink};
 use crate::engine::{Engine, OutputSink, RequestDescription, refused_program, serve_unit};
 use crate::unit_cache::PRELOAD_SCRIPT;
@@ -68,10 +68,10 @@ impl Engine {
     }
 
     /// How the engine's startup finished, which the first request's host
-    /// finishes: each link of `zend_post_startup_cb` (`php_module_startup`)
-    /// asked from the bottom of the chain, as opcache's calls the one it
-    /// saved before its own work, until one refuses or names a file to
-    /// preload. What the extensions wrote goes to
+    /// finishes: the `zend_post_startup_cb` chain (`php_module_startup`)
+    /// entered from the top ([`crate::api::abi::chain::PostStartup`]),
+    /// whose answer serves, refuses or names a file to preload. What the
+    /// extensions wrote goes to
     /// `sink` before anything the first request writes.
     pub(crate) fn started(&self, first: &RequestDescription, sink: &mut dyn OutputSink) -> Started {
         *self
@@ -81,8 +81,8 @@ impl Engine {
     }
 
     fn finish_startup(&self, first: &RequestDescription, sink: &mut dyn OutputSink) -> Started {
-        let hooks: Vec<_> = self.shared.supplied.post_startup.bottom_up().collect();
-        if hooks.is_empty() {
+        let links = self.shared.supplied.post_startup.links();
+        if links.is_empty() {
             return Started::Serving;
         }
         // `accel_finish_startup_preload`'s request: the host's, with no
@@ -98,11 +98,7 @@ impl Engine {
         if let Some(held) = sink.held() {
             req.hold(held);
         }
-        let answer = hooks
-            .into_iter()
-            .map(|hook| hook(&mut req))
-            .find(|answer| *answer != PostStartup::Serve)
-            .unwrap_or(PostStartup::Serve);
+        let answer = Beneath::<chain::PostStartup>::top(links, ()).serve(&mut req);
         match answer {
             PostStartup::Serve => {
                 hand_over(&mut req, sink);

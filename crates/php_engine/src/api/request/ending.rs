@@ -12,7 +12,8 @@ use php_heap::Fatal;
 use crate::api::abi::AfterLog;
 use crate::api::raising::Level;
 use crate::api::values::Value;
-use crate::supplied::{Bail, ErrorBeneath};
+use crate::supplied::Bail;
+use crate::supplied::chain::ErrorArgs;
 
 use diagnostics::Display;
 
@@ -261,8 +262,8 @@ impl Request {
     /// Fatal error: Cannot redeclare function f() (previously declared in %s:2) in %s on line 3
     /// sd
     /// ```
-    pub(super) fn cannot_recover(&mut self, error: ErrorBeneath<'_>) {
-        let ErrorBeneath {
+    pub(super) fn cannot_recover(&mut self, error: ErrorArgs<'_>) {
+        let ErrorArgs {
             level,
             bail,
             message,

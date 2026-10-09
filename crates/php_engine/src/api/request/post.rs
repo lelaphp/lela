@@ -14,6 +14,7 @@ use std::path::PathBuf;
 
 use super::Request;
 use super::variables::BodyLimits;
+use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::values::{Owner, PhpArray, adopted};
@@ -420,17 +421,12 @@ impl Request {
         self.post.uploaded.push(path);
     }
 
-    /// `php_rfc1867_callback` over one step: every link of the chain from
-    /// the bottom, as session's calls the one it saved before its own
-    /// work (`Z/ext/session/session.c:3174-3176`); `false` where one
-    /// answered php's `FAILURE`.
+    /// `php_rfc1867_callback` over one step: the chain entered from the
+    /// top ([`chain::Upload`]); `false` where it answered
+    /// php's `FAILURE`.
     pub(crate) fn upload_event(&mut self, event: &Upload<'_>) -> Result<bool, Thrown> {
         let shared = std::sync::Arc::clone(&self.shared);
-        let mut went_on = true;
-        for hook in shared.supplied.upload.bottom_up() {
-            went_on &= hook(self, event)?;
-        }
-        Ok(went_on)
+        Beneath::<chain::Upload>::top(shared.supplied.upload.links(), *event).serve(self)
     }
 
     /// How much of the body the host has handed out,

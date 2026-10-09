@@ -8,12 +8,12 @@
 use std::collections::BTreeMap;
 
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
-use php_ext::abi::{Passed, Ref, Untyped};
+use php_ext::abi::{Beneath, Passed, Ref, Untyped, chain};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{is_callable, to_callable, value_name};
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal, leave_pending,
 };
 use php_ext::request::{Receiving, Request, Siginfo, take_signals};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
@@ -223,7 +223,7 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 /// holds `SIG_DFL` or `SIG_IGN` for is dropped. Every signal is blocked
 /// while the queue plays, as php blocks them, and a handler that throws
 /// ends the dispatch with what is left dropped. The engine's interrupt
-/// check serves it as php's `pcntl_interrupt_function`. No fiber may
+/// check serves it through [`interrupt`]. No fiber may
 /// switch while the handlers play, `zend_fiber_switch_block`, so a
 /// handler served inside a fiber cannot suspend it:
 ///
@@ -240,6 +240,20 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 /// Cannot switch fibers in current execution context
 /// end
 /// ```
+/// `pcntl_interrupt_function` (`pcntl.c:1922-1927`), pcntl's link of
+/// `zend_interrupt_function`: the signals taken dispatched
+/// ([`dispatch`]), what a handler threw left pending, and then the one it
+/// saved served.
+pub(crate) fn interrupt(
+    req: &mut Request,
+    beneath: Beneath<'_, chain::Interrupt>,
+) -> Result<(), Thrown> {
+    if let Err(thrown) = dispatch(req) {
+        leave_pending(req, thrown);
+    }
+    beneath.serve(req)
+}
+
 pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     let table = &req.state::<State>().signals;
     if table.dispatching || table.handlers.is_empty() {

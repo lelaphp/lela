@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use php_compile::StackLimit;
 
 use super::{Forked, Periodic, Receiving, Reentry, Request};
+use crate::api::abi::{Beneath, chain};
 
 /// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
@@ -449,18 +450,17 @@ impl Request {
         waited
     }
 
-    /// Each extension's interrupt hook, from the top of the chain: php's
+    /// The interrupt hooks' chain entered from the top: php's
     /// `zend_interrupt_function`, which the last `MINIT` to set it
-    /// holds, each link serving its own work and then the one it saved
-    /// beneath it, as pcntl's does (`Z/ext/pcntl/pcntl.c:1922-1927`);
-    /// what the interrupt check serves when the execution timer was not
-    /// what raised it.
+    /// holds, each link handed the one it saved
+    /// ([`crate::api::abi::chain::Interrupt`]); what the interrupt check
+    /// serves when the execution timer was not what raised it. What the
+    /// chain answers is left pending where the loop stands.
     pub(crate) fn serve_interrupt_hooks(&mut self) {
         let shared = Arc::clone(&self.shared);
-        for hook in shared.supplied.interrupt.top_down() {
-            if let Err(thrown) = hook(self) {
-                self.leave_pending(&thrown);
-            }
+        let top = Beneath::<chain::Interrupt>::top(shared.supplied.interrupt.links(), ());
+        if let Err(thrown) = top.serve(self) {
+            self.leave_pending(&thrown);
         }
     }
 
