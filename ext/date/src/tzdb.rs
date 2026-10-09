@@ -247,8 +247,7 @@ pub(super) fn abbreviations(req: &mut Request) -> Result<Owner<PhpArray>, Thrown
             set_str(req, &mut element, b"timezone_id", id)?;
             list.append(req, element.into_value())?;
         }
-        let key = PhpString::new(req, name)?.into_key();
-        array.set(req, key, list.into_value())?;
+        array.set_str(req, name, list.into_value())?;
     }
     Ok(array)
 }

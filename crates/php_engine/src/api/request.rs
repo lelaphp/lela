@@ -136,6 +136,7 @@ pub(crate) mod temporary;
 mod ticks;
 mod traces;
 mod unit_cache;
+mod unit_names;
 pub(crate) use unit_cache::HandlePath;
 mod variables;
 mod zone;
@@ -439,6 +440,9 @@ pub struct Request {
     /// arrays is the body: a `Function` of the request's own counts into
     /// this list (design §5.6, §5.14).
     user_functions: Vec<UserFunction>,
+    /// The names the request-only units it compiled carry, held while
+    /// each unit lives ([`unit_names::UnitNames`]).
+    unit_names: unit_names::UnitNames,
     /// php's `EG(function_table)` past the natives as the preload left
     /// it: its functions, published, in the order its table holds them,
     /// which the request's own top-level functions follow.
@@ -764,6 +768,7 @@ impl Request {
             buckets,
             aliases: tables.aliases,
             user_functions: Vec::new(),
+            unit_names: unit_names::UnitNames::default(),
             preloaded_functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,

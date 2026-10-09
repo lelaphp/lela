@@ -6,6 +6,7 @@
 //! ([`crate::ffi`]) and answering as php answers, a throwable handed
 //! back for the call to carry out.
 
+use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::{value_name, with_string};
 use php_ext::raising::{Thrown, throw_error};
@@ -13,7 +14,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
 
 use crate::ffi::{
-    Aggregate, Argument, Callbacks, Handler, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
+    Aggregate, Argument, Callbacks, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
     SQLITE_OK,
 };
 
@@ -26,7 +27,7 @@ impl Callbacks for PdoSqlite {
     fn scalar(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         call: &mut Invocation<'_>,
     ) -> Result<(), Thrown> {
         scalar(req, handler, call)
@@ -35,7 +36,7 @@ impl Callbacks for PdoSqlite {
     fn step(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         state: &mut Option<Box<Aggregate>>,
         args: Vec<Argument>,
     ) -> Result<(), Thrown> {
@@ -45,7 +46,7 @@ impl Callbacks for PdoSqlite {
     fn finalize(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         state: Option<Box<Aggregate>>,
         call: &mut Invocation<'_>,
     ) -> Result<(), Thrown> {
@@ -55,7 +56,7 @@ impl Callbacks for PdoSqlite {
     fn collate(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         left: &[u8],
         right: &[u8],
     ) -> (i32, Option<Thrown>) {
@@ -65,7 +66,7 @@ impl Callbacks for PdoSqlite {
     fn authorize(
         &self,
         req: &mut Request,
-        handler: Option<&Handler>,
+        handler: Option<&Callable>,
         action: i32,
         names: [Option<Vec<u8>>; 4],
         pending: bool,
@@ -137,11 +138,11 @@ fn result(
 /// `do_callback` for a scalar function.
 fn scalar(
     req: &mut Request,
-    handler: &Handler,
+    handler: &Callable,
     invocation: &mut Invocation<'_>,
 ) -> Result<(), Thrown> {
     let values = arguments(req, invocation.arguments())?;
-    let returned = call(req, &handler.callable, &views(&values));
+    let returned = call(req, handler, &views(&values));
     release_all(req, values);
     match returned {
         Ok(returned) => result(req, returned, invocation),
@@ -183,7 +184,7 @@ fn state_of(
 /// reference.
 fn step(
     req: &mut Request,
-    handler: &Handler,
+    handler: &Callable,
     state: &mut Option<Box<Aggregate>>,
     given: Vec<Argument>,
 ) -> Result<(), Thrown> {
@@ -191,7 +192,7 @@ fn step(
     let mut values = vec![context.as_value(), Value::int(row)];
     let extra = arguments(req, given)?;
     values.extend(views(&extra));
-    let returned = call(req, &handler.callable, &values);
+    let returned = call(req, handler, &values);
     release_all(req, extra);
     let returned = returned?;
     context.set(req, returned)
@@ -202,18 +203,13 @@ fn step(
 /// answer; the reference given up.
 fn finalize(
     req: &mut Request,
-    handler: &Handler,
+    handler: &Callable,
     mut state: Option<Box<Aggregate>>,
     invocation: &mut Invocation<'_>,
 ) -> Result<(), Thrown> {
     let held = state_of(req, &mut state);
-    let returned = held.and_then(|(context, row)| {
-        call(
-            req,
-            &handler.callable,
-            &[context.as_value(), Value::int(row)],
-        )
-    });
+    let returned =
+        held.and_then(|(context, row)| call(req, handler, &[context.as_value(), Value::int(row)]));
     crate::ffi::drop_aggregate(req, state);
     match returned {
         Ok(returned) => result(req, returned, invocation),
@@ -229,7 +225,7 @@ fn finalize(
 /// `FAILURE` beside the `TypeError` for an answer of another type.
 fn collate(
     req: &mut Request,
-    handler: &Handler,
+    handler: &Callable,
     left: &[u8],
     right: &[u8],
 ) -> (i32, Option<Thrown>) {
@@ -237,7 +233,7 @@ fn collate(
         (Ok(left), Ok(right)) => vec![left.into_value(), right.into_value()],
         (Err(thrown), _) | (_, Err(thrown)) => return (0, Some(thrown)),
     };
-    let returned = call(req, &handler.callable, &views(&values));
+    let returned = call(req, handler, &views(&values));
     release_all(req, values);
     let returned = match returned {
         Ok(returned) => returned,
@@ -270,7 +266,7 @@ fn collate(
 /// takes.
 fn authorize(
     req: &mut Request,
-    handler: Option<&Handler>,
+    handler: Option<&Callable>,
     action: i32,
     names: [Option<Vec<u8>>; 4],
     pending: bool,
@@ -294,7 +290,7 @@ fn authorize(
             None => Owner::take(req, Value::null()),
         });
     }
-    let returned = call(req, &handler.callable, &views(&values));
+    let returned = call(req, handler, &views(&values));
     release_all(req, values);
     let returned = returned?;
     let name = req.active_function_name();

@@ -1729,6 +1729,34 @@ impl crate::Heap {
         Ok(())
     }
 
+    /// `zend_hash_str_update` over `a`: `z` at the string key of these
+    /// bytes, as written, no integer read out of them. A key the table
+    /// holds keeps its bucket and its string, and what it held is
+    /// released last, through `hooks`, as [`Heap::array_update`] does.
+    /// A key it does not hold is made only after the table has room, as
+    /// `_zend_hash_str_add_or_update_i` makes its `zend_string_init` past
+    /// `ZEND_HASH_IF_FULL_DO_RESIZE`: so no string stands beside the old
+    /// data and the new while the table doubles, which
+    /// `memory_get_peak_usage()` reads. The array has one owner, which
+    /// the engine's `SEPARATE_ARRAY` made sure of.
+    pub fn array_str_update(
+        hooks: &mut dyn HeapHooks,
+        a: Arr,
+        bytes: &[u8],
+        z: Zval,
+    ) -> Result<(), Fatal> {
+        let heap = hooks.heap();
+        if let Some(idx) = a.find_bucket_bytes(crate::string::hash_func(bytes), bytes) {
+            let old = a.replace_at(idx, z);
+            Heap::release(hooks, old);
+            return Ok(());
+        }
+        a.make_room_for_str(&mut heap.tables())?;
+        let key = heap.string(bytes)?;
+        a.place_str(key, z);
+        Ok(())
+    }
+
     /// `zend_hash_next_index_insert`, `$a[] = z`: `false`, and `z` still
     /// the caller's, when `nNextFreeElement` is `ZEND_LONG_MAX` and taken.
     /// Nothing is replaced, so nothing here can reach user code.
@@ -2844,6 +2872,35 @@ mod tests {
         assert_eq!(a.get(Key::Str(key)).and_then(Zval::as_long), Some(10));
         assert_eq!(a.get(Key::Long(3)).and_then(Zval::as_long), Some(4));
         nothing.heap.release_string(key);
+        Heap::release(&mut nothing, Zval::array(a));
+        assert_eq!(nothing.heap.memory_usage(false), start);
+    }
+
+    /// `zend_hash_str_update` makes the key after the table has room:
+    /// at the ninth key the old data and the new stand together, 56 +
+    /// 320 + 640 and eight 32-byte keys, and the ninth key comes after
+    /// the old data is freed, so the peak never holds all three. A key
+    /// written again keeps its bucket and its string and makes none.
+    #[test]
+    fn a_byte_key_is_made_after_the_table_has_room() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let Ok(a) = nothing.heap.array() else { return };
+        let names: Vec<Vec<u8>> = (0..9).map(|i| format!("k{i}").into_bytes()).collect();
+        for (i, name) in (0..8).zip(&names) {
+            assert!(Heap::array_str_update(&mut nothing, a, name, Zval::long(i)).is_ok());
+        }
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 320 + 8 * 32);
+        nothing.heap.reset_peak();
+        assert!(Heap::array_str_update(&mut nothing, a, &names[8], Zval::long(8)).is_ok());
+        assert_eq!(nothing.heap.memory_peak(), start + 56 + 320 + 640 + 8 * 32);
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 640 + 9 * 32);
+        assert!(Heap::array_str_update(&mut nothing, a, b"k3", Zval::long(30)).is_ok());
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 640 + 9 * 32);
+        assert_eq!(a.len(), 9);
+        assert_eq!(a.str_find(b"k3").and_then(Zval::as_long), Some(30));
+        assert_eq!(a.str_find(b"k8").and_then(Zval::as_long), Some(8));
         Heap::release(&mut nothing, Zval::array(a));
         assert_eq!(nothing.heap.memory_usage(false), start);
     }

@@ -15,6 +15,33 @@ use crate::api::values::{Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, a
 
 use super::{Hooks, Request};
 
+/// The home a unit this request alone serves interns its strings into,
+/// php's `zend_new_interned_string_request` (`Z/Zend/zend_string.c:227`):
+/// the engine's table first, `interned_strings_permanent` and what
+/// publication interned, so an `eval`'s constant string that names a
+/// function, a class or a key php interned at startup costs nothing, then the
+/// request's own table ([`Heap`]'s [`Intern`]).
+pub(super) struct RequestStrings<'a> {
+    pub(super) shared: &'a crate::engine::Shared,
+    pub(super) heap: &'a mut Heap,
+}
+
+impl Intern for RequestStrings<'_> {
+    fn intern(&mut self, bytes: &[u8]) -> Result<php_heap::Str, Fatal> {
+        match self.shared.existing_interned(bytes) {
+            Some(held) => Ok(held),
+            None => self.heap.intern(bytes),
+        }
+    }
+
+    fn constant_array(
+        &mut self,
+        entries: &[(php_heap::Key, php_heap::Zval)],
+    ) -> Result<Arr, Fatal> {
+        self.heap.constant_array(entries)
+    }
+}
+
 impl Request {
     /// The request's own memory, for the compilation whose unit is this
     /// request's alone (design §5.2): what a host handed the source for,
@@ -228,6 +255,20 @@ impl Request {
     ) -> Result<(), Thrown> {
         let z = value.into_zval();
         let written = Heap::array_update(&mut Hooks(self), a, key, z);
+        self.fatal_of(written)
+    }
+
+    /// `zend_hash_str_update` over `a`, which has one owner: `value` is
+    /// the array's from here, what the key held is released, and a key
+    /// the array lacks is made after the table has room.
+    pub(crate) fn array_str_update(
+        &mut self,
+        a: Arr,
+        name: &[u8],
+        value: Value,
+    ) -> Result<(), Thrown> {
+        let z = value.into_zval();
+        let written = Heap::array_str_update(&mut Hooks(self), a, name, z);
         self.fatal_of(written)
     }
 

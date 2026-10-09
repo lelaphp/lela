@@ -4917,6 +4917,7 @@ impl Engine {
         req.destroy_symbol_table();
         req.destroy_static_vars();
         req.free_default_arguments();
+        req.release_all_unit_names();
         #[cfg(debug_assertions)]
         if self.shared.sense_leaks.armed() {
             req.free_executor_values();
@@ -5191,6 +5192,11 @@ fn compile(
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
 pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKind) -> bool {
+    // A request-only unit's names, which php's compile made as strings
+    // of the request; the memory limit refusing them ends the request.
+    if matches!(kind, SourceKind::Eval(_)) && req.hold_unit_names(unit).is_err() {
+        return false;
+    }
     // `zend_compile_halt_compiler`'s constant, and opcache's again on a
     // hit, under the file's mangled name, where the file has not
     // registered it already.

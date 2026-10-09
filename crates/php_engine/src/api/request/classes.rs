@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use php_heap::{FrameRef, Heap};
+use php_heap::{FrameRef, Intern};
 use php_link::LinkedClass;
 use php_unit::decl::{ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
 use php_unit::{FramelessEntry, Opcode, Unit};
@@ -1618,17 +1618,22 @@ impl Request {
         class_in(&self.shared, &self.declared, &self.aliases, name)
     }
 
-    /// The request's heap, which the units it compiles for itself intern
-    /// into, beside its classes as the compiler asks after one
+    /// The request's strings, which the units it compiles for itself
+    /// intern into ([`super::memory::RequestStrings`]), beside its
+    /// classes as the compiler asks after one
     /// ([`php_compile::RequestClasses`]), borrowed apart so both are
     /// handed to one compile.
     pub(crate) fn compiling<R>(
         &mut self,
-        compile: impl FnOnce(&mut Heap, php_compile::RequestClasses<'_>) -> R,
+        compile: impl FnOnce(&mut dyn Intern, php_compile::RequestClasses<'_>) -> R,
     ) -> R {
         let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
-        compile(&mut self.heap, php_compile::RequestClasses::new(&holds))
+        let mut strings = super::memory::RequestStrings {
+            shared,
+            heap: &mut self.heap,
+        };
+        compile(&mut strings, php_compile::RequestClasses::new(&holds))
     }
 
     /// `zend_get_callable_name_ex` (`Z/Zend/zend_API.c:4075`): a string

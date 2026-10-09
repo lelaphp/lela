@@ -268,6 +268,27 @@ fn xml_set_object(
 /// Deprecated: xml_set_element_handler(): Passing non-callable strings is deprecated since 8.4 in %s on line 6
 /// xml_set_element_handler(): Argument #2 ($start_handler) an object must be set via xml_set_object() to be able to lookup method
 /// ```
+///
+/// A handler is kept as `zend_fcc_dup` keeps it, so a `Class::method`
+/// string set with `$this` in scope keeps that object until the parser
+/// gives the handler up:
+///
+/// ```php
+/// class A { public $n = 'kept'; function __destruct(){ echo "dtor\n"; } function s($p, $name, $a){ echo $this->n, " $name\n"; }
+///   function set($p){ xml_set_element_handler($p, 'A::s', null); } }
+/// $p = xml_parser_create();
+/// (new A)->set($p);
+/// echo "set\n";
+/// xml_parse($p, '<r/>', true);
+/// unset($p);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// set
+/// kept R
+/// dtor
+/// end
+/// ```
 #[php_function]
 fn xml_set_element_handler(
     req: &mut Request,

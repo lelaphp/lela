@@ -5,15 +5,17 @@ use std::cmp::Ordering;
 
 use php_unit::decl::Type;
 
-use crate::api::abi::{Class, FromArgument, Instance, IntoReturn, Raw, Static};
+use crate::api::abi::{Callable, Class, FromArgument, Instance, IntoReturn, Raw, Static};
+use crate::api::call::Target;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value};
 
 /// A view an [`Owner`] can own: [`Value`], the five refcounted kinds, a
 /// [`Key`], the two object returns, [`Instance`] and [`Static`], a
-/// [`Raw`] return, and a typed view of one resource ([`ResourceView`]).
-/// Sealed but for that last door: the face lists them.
+/// [`Raw`] return, a [`Callable`], and a typed view of one resource
+/// ([`ResourceView`]). Sealed but for that last door: the face lists
+/// them.
 pub trait View: sealed::Counted + Clone {}
 
 /// A typed view of one [`Resource`]: the streams facet's `Stream` and
@@ -35,30 +37,63 @@ impl ResourceView for Resource {
 }
 
 impl<T: ResourceView> sealed::Counted for T {
-    fn counted(&self) -> Value {
-        Value::resource(self.resource())
+    type Kept = Resource;
+    fn kept(&self) -> Resource {
+        self.resource()
+    }
+    fn counted_on(&self, kept: Resource) -> Value {
+        Value::resource(kept)
     }
 }
 impl<T: ResourceView> View for T {}
+impl<T: ResourceView> sealed::One for T {}
 
 mod sealed {
-    use crate::api::values::Value;
+    use crate::api::values::{PhpObject, Value};
 
     /// What the owner's count is taken on and given up from.
     pub trait Counted {
+        /// What an owner keeps beside its view to name the value its
+        /// count stands on: nothing for a sealed view, which is that
+        /// value, and the resource for a typed view of one, the open door,
+        /// which could answer another resource later (#2209).
+        type Kept: Copy + std::fmt::Debug;
+        /// What an owner made of the view keeps.
+        fn kept(&self) -> Self::Kept;
+        /// The value an owner's count stands on, read from the view and
+        /// what the owner kept.
+        fn counted_on(&self, kept: Self::Kept) -> Value;
         /// The value the view names, no owner taken.
-        fn counted(&self) -> Value;
+        fn counted(&self) -> Value {
+            self.counted_on(self.kept())
+        }
+
+        /// The object a callable resolved to where its value does not
+        /// name it, which an owner of the callable counts beside the
+        /// value ([`super::Callable`]), read from the view; no other view
+        /// has one.
+        fn receiver(&self) -> Option<PhpObject> {
+            None
+        }
     }
+
+    /// A view whose owner is the one count on [`Counted::counted`], so
+    /// it is recast to an owner of another view of that value. Every
+    /// view but [`super::Callable`].
+    pub trait One: Counted {}
 }
 
 macro_rules! view {
     ($t:ty, $make:expr) => {
         impl sealed::Counted for $t {
-            fn counted(&self) -> Value {
+            type Kept = ();
+            fn kept(&self) {}
+            fn counted_on(&self, (): ()) -> Value {
                 ($make)(self.clone())
             }
         }
         impl View for $t {}
+        impl sealed::One for $t {}
     };
 }
 view!(Value, |v: Value| v);
@@ -74,18 +109,52 @@ view!(Key, |k: Key| match k {
 view!(Static, |s: Static| Value::object(s.0));
 
 impl<C: Class> sealed::Counted for Instance<C> {
-    fn counted(&self) -> Value {
+    type Kept = ();
+    fn kept(&self) {}
+    fn counted_on(&self, (): ()) -> Value {
         Value::object(self.object())
     }
 }
 impl<C: Class> View for Instance<C> {}
+impl<C: Class> sealed::One for Instance<C> {}
 
 impl<T: FromArgument> sealed::Counted for Raw<T> {
-    fn counted(&self) -> Value {
+    type Kept = ();
+    fn kept(&self) {}
+    fn counted_on(&self, (): ()) -> Value {
         self.value()
     }
 }
 impl<T: FromArgument> View for Raw<T> {}
+impl<T: FromArgument> sealed::One for Raw<T> {}
+
+/// A callable kept past the frame it was read off, `zend_fcc_dup`: an
+/// owner of it is the claim `zend_fcc_addref` (`Z/Zend/zend_API.h:773`)
+/// makes, counted on its value and, `GC_ADDREF(fcc->object)`, on the
+/// receiver it resolved to where that is not the value. A
+/// `Class::method` string taken with `$this` in scope names an object
+/// the string does not own, so the owner owns it; a closure's count is
+/// its value's, since `fcc->closure` is the value. [`Owner::give_up`]
+/// is `zend_fcc_dtor`, the receiver given up first. The owner keeps
+/// nothing beside the view: the receiver is read from it. The owner is
+/// never recast to an owner of one value: it is two counts.
+impl sealed::Counted for Callable {
+    type Kept = ();
+    fn kept(&self) {}
+    fn counted_on(&self, (): ()) -> Value {
+        self.value()
+    }
+
+    fn receiver(&self) -> Option<PhpObject> {
+        match self.target() {
+            Target::Method {
+                this: Some(this), ..
+            } => Some(this),
+            Target::Function(_) | Target::Method { this: None, .. } | Target::Closure(_) => None,
+        }
+    }
+}
+impl View for Callable {}
 
 /// One owner of the value a view names: one counted claim on it, the
 /// glossary's **Owner**, where the view itself carries none. Neither
@@ -170,8 +239,10 @@ impl<T: FromArgument> View for Raw<T> {}
 #[derive(Debug)]
 pub struct Owner<T: View> {
     view: T,
-    /// The value the count stands on, read where the owner was made.
-    counted: Value,
+    /// What names the value the count stands on beside the view, read
+    /// where the owner was made: nothing for a sealed view, so an owner of
+    /// one is the view alone in a release build.
+    kept: T::Kept,
     /// A debug build's record of where the owner was made, until it is
     /// consumed.
     #[cfg(debug_assertions)]
@@ -196,27 +267,30 @@ impl<T: View> Owner<T> {
     /// takes its own owner of it, `RETURN_COPY` ([`IntoReturn`]).
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn take(req: &Request, view: T) -> Owner<T> {
-        let counted = view.counted();
-        req.addref(&counted);
-        Owner::of(req, view, counted)
+        let kept = view.kept();
+        req.addref(&view.counted_on(kept));
+        if let Some(receiver) = view.receiver() {
+            req.addref(&receiver.as_value());
+        }
+        Owner::of(req, view, kept)
     }
 
     /// The owner `view` already is: the count a value is made with,
     /// which only the engine hands out.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn adopt(req: &Request, view: T) -> Owner<T> {
-        let counted = view.counted();
-        Owner::of(req, view, counted)
+        let kept = view.kept();
+        Owner::of(req, view, kept)
     }
 
-    /// The owner of `counted`, presented as `view`.
+    /// The owner of what `view` and `kept` name.
     #[cfg_attr(debug_assertions, track_caller)]
-    fn of(req: &Request, view: T, counted: Value) -> Owner<T> {
+    fn of(req: &Request, view: T, kept: T::Kept) -> Owner<T> {
         #[cfg(not(debug_assertions))]
         let _ = req;
         Owner {
             view,
-            counted,
+            kept,
             #[cfg(debug_assertions)]
             made: Some(Made {
                 site: std::panic::Location::caller(),
@@ -236,7 +310,10 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn give_up(mut self, req: &mut Request) {
         self.consume();
-        req.release(self.counted);
+        if let Some(receiver) = self.view.receiver() {
+            req.release(receiver.as_value());
+        }
+        req.release(self.stands_on());
     }
 
     /// The owner given up as `zval_ptr_dtor_nogc` gives one up: the value
@@ -250,27 +327,10 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn give_up_nogc(mut self, req: &mut Request) {
         self.consume();
-        req.release_nogc(self.counted);
-    }
-
-    /// The owner given up as `GC_DELREF` gives one up, and what is left
-    /// of the value: at the last owner the value is destroyed,
-    /// `zend_array_destroy`, `zend_string_efree` or
-    /// `zend_objects_store_del` with its destructor served, and where
-    /// owners are left nothing else happens, no possible root of the
-    /// cycle collector (design §5.12). What php's handlers do after a
-    /// diagnostic, and the test they make after it: whether the call the
-    /// owner was held across freed the value or took an owner of its own.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn let_go(mut self, req: &mut Request) -> Left {
-        self.consume();
-        let value = self.counted;
-        if !value.is_refcounted() {
-            return Left::Uncounted;
+        if let Some(receiver) = self.view.receiver() {
+            req.release_nogc(receiver.as_value());
         }
-        let owners = value.refcount().saturating_sub(1);
-        req.release_nogc(value);
-        Left::Owners(owners)
+        req.release_nogc(self.stands_on());
     }
 
     /// The owner left to the request's end, as php's fatal leaves every
@@ -291,30 +351,9 @@ impl<T: View> Owner<T> {
         self.view.clone()
     }
 
-    /// The owner of the value as a [`Value`], the same count: what a
-    /// native returns as `mixed` or hands to a sink that takes a value.
-    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
-    pub fn into_value(self) -> Owner<Value> {
-        let value = self.counted;
-        self.recast(value)
-    }
-
-    /// The same owner over another view of its value; a debug build's
-    /// record of where it was made moves to it, and this one is
-    /// consumed.
-    fn recast<U: View>(self, view: U) -> Owner<U> {
-        let counted = self.counted;
-        #[cfg(debug_assertions)]
-        let made = {
-            let mut recast = self;
-            recast.made.take()
-        };
-        Owner {
-            view,
-            counted,
-            #[cfg(debug_assertions)]
-            made,
-        }
+    /// The value the count stands on.
+    fn stands_on(&self) -> Value {
+        self.view.counted_on(self.kept)
     }
 
     /// The owner consumed, so a debug build's `Drop` records nothing.
@@ -328,13 +367,64 @@ impl<T: View> Owner<T> {
     }
 }
 
+/// What an owner of one count does with it: the count let go as a
+/// handler lets one go, and the owner recast to another view of the
+/// value. An owner of a [`Callable`] is two counts and does neither.
+impl<T: View + sealed::One> Owner<T> {
+    /// The owner given up as `GC_DELREF` gives one up, and what is left
+    /// of the value: at the last owner the value is destroyed,
+    /// `zend_array_destroy`, `zend_string_efree` or
+    /// `zend_objects_store_del` with its destructor served, and where
+    /// owners are left nothing else happens, no possible root of the
+    /// cycle collector (design §5.12). What php's handlers do after a
+    /// diagnostic, and the test they make after it: whether the call the
+    /// owner was held across freed the value or took an owner of its own.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn let_go(mut self, req: &mut Request) -> Left {
+        self.consume();
+        let value = self.stands_on();
+        if !value.is_refcounted() {
+            return Left::Uncounted;
+        }
+        let owners = value.refcount().saturating_sub(1);
+        req.release_nogc(value);
+        Left::Owners(owners)
+    }
+
+    /// The owner of the value as a [`Value`], the same count: what a
+    /// native returns as `mixed` or hands to a sink that takes a value.
+    #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
+    pub fn into_value(self) -> Owner<Value> {
+        let value = self.stands_on();
+        self.recast(value, ())
+    }
+
+    /// The same owner over another view of its value, `kept` naming the
+    /// same value; a debug build's record of where it was made moves to
+    /// it, and this one is consumed.
+    fn recast<U: View + sealed::One>(self, view: U, kept: U::Kept) -> Owner<U> {
+        #[cfg(debug_assertions)]
+        let made = {
+            let mut recast = self;
+            recast.made.take()
+        };
+        Owner {
+            view,
+            kept,
+            #[cfg(debug_assertions)]
+            made,
+        }
+    }
+}
+
 impl<T: ResourceView> Owner<T> {
     /// The owner of the typed view as the [`Resource`] it is, the same
     /// count: what a native returns a stream it made as.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_resource(self) -> Owner<Resource> {
         let resource = self.view.resource();
-        self.recast(resource)
+        let kept = self.kept;
+        self.recast(resource, kept)
     }
 }
 
@@ -345,7 +435,7 @@ impl Owner<PhpString> {
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_key(self) -> Owner<Key> {
         let key = Key::Str(self.view);
-        self.recast(key)
+        self.recast(key, ())
     }
 }
 
@@ -363,7 +453,8 @@ impl Owner<Resource> {
             view.resource() == self.view,
             "a typed view of another resource"
         );
-        self.recast(view)
+        let kept = self.kept;
+        self.recast(view, kept)
     }
 }
 
@@ -373,7 +464,7 @@ impl Owner<Value> {
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_raw<T: FromArgument>(self) -> Owner<Raw<T>> {
         let raw = Raw::returned(self.view);
-        self.recast(raw)
+        self.recast(raw, ())
     }
 
     /// `ZVAL_DEREF` and then `convert_to_*` (`Z/Zend/zend_operators.c`):
@@ -418,20 +509,33 @@ impl Owner<Value> {
     }
 }
 
+impl Owner<Callable> {
+    /// `zend_get_gc_buffer_add_fcc`: each value the owner counts, the
+    /// callable's value and the receiver it resolved to, handed to a
+    /// `get_gc`'s `visit`, so the cycle collector reads the owner's
+    /// counts as the edges they are.
+    pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
+        visit(self.stands_on());
+        if let Some(receiver) = sealed::Counted::receiver(&self.view) {
+            visit(receiver.as_value());
+        }
+    }
+}
+
 impl Owner<PhpObject> {
     /// The owner of the object as the `C` the body vouches it is, the
     /// same count, to return ([`Instance::of`]).
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_instance<C: Class>(self) -> Owner<Instance<C>> {
         let instance = Instance::of(self.view);
-        self.recast(instance)
+        self.recast(instance, ())
     }
 
     /// The owner of the object as `static`, the same count, to return.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_static(self) -> Owner<Static> {
         let object = Static(self.view);
-        self.recast(object)
+        self.recast(object, ())
     }
 }
 
@@ -440,12 +544,11 @@ impl Owner<PhpObject> {
 /// name, and the owner lends no `&mut PhpArray`, through which a view
 /// could be put where the owner stands.
 impl Owner<PhpArray> {
-    /// A write through the owner's array, its count moved with the name
-    /// where the write separated the array.
+    /// A write through the owner's array. The count stands on the array
+    /// the owner names, so where the write separated it the count moved
+    /// with the name.
     pub(super) fn written<R>(&mut self, write: impl FnOnce(&mut PhpArray) -> R) -> R {
-        let answer = write(&mut self.view);
-        self.counted = Value::array(self.view);
-        answer
+        write(&mut self.view)
     }
 
     /// Remove `key` from this very table, whatever its other owners,
@@ -470,6 +573,17 @@ impl Owner<PhpArray> {
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         self.written(|view| view.set(req, key, value))
+    }
+
+    /// [`PhpArray::set_str`].
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_str(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        self.written(|view| view.set_str(req, name, value))
     }
 
     /// [`PhpArray::add_new`].
@@ -604,6 +718,16 @@ impl Left {
     }
 }
 
+// An owner of a value is the value (#2209): what it keeps beside a sealed
+// view is nothing, and only a debug build's record of where it was made
+// adds to it. Held at every build, so no lane can skip it.
+const _: () = {
+    #[cfg(not(debug_assertions))]
+    assert!(size_of::<Owner<Value>>() == size_of::<Value>());
+    #[cfg(debug_assertions)]
+    assert!(size_of::<Owner<Value>>() == size_of::<Value>() + size_of::<Option<Made>>());
+};
+
 impl<T: View> std::ops::Deref for Owner<T> {
     type Target = T;
 
@@ -627,7 +751,7 @@ impl<T: View> Drop for Owner<T> {
 /// temporary holds it, and nothing more is taken. The value is the one
 /// the count stands on, and not `T::into_return`'s, which is a view's
 /// return.
-impl<T: View + IntoReturn> IntoReturn for Owner<T> {
+impl<T: View + sealed::One + IntoReturn> IntoReturn for Owner<T> {
     const UNDECLARED: bool = T::UNDECLARED;
     const MASK: u32 = T::MASK;
     fn declared() -> Option<Type> {

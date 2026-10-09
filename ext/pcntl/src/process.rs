@@ -707,6 +707,158 @@ pub(crate) fn pcntl_strerror(
     PhpString::new(req, sentence.as_bytes())
 }
 
+/// `pcntl_unshare(int $flags): bool`: `unshare(2)`, with php's
+/// `ValueError` for flags the kernel refuses and its warning for any
+/// other failure.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_unshare(req: &mut Request, flags: i64) -> Result<bool, Thrown> {
+    let Err(errno) = ffi::unshare(flags) else {
+        return Ok(true);
+    };
+    failed(req, errno);
+    let n = errno as i32;
+    let text = match errno {
+        Errno::EINVAL => {
+            let tail = "be a combination of CLONE_* flags, or at least one flag is unsupported by the kernel";
+            return Err(arg_value_error(req, 1, tail));
+        }
+        Errno::ENOMEM => format!("Error {n}: Insufficient memory for unshare"),
+        Errno::EPERM => format!("Error {n}: No privilege to use these flags"),
+        Errno::ENOSPC => format!(
+            "Error {n}: Reached the maximum nesting limit for one of the specified namespaces"
+        ),
+        Errno::EUSERS => {
+            format!("Error {n}: Reached the maximum nesting limit for the user namespace")
+        }
+        _ => format!("Unknown error {n} has occurred"),
+    };
+    docref(req, Level::Warning, &text);
+    Ok(false)
+}
+
+/// `pcntl_getcpuaffinity(?int $process_id = null): array|false`: the
+/// CPUs the process may be scheduled on, the calling one for `null`.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_getcpuaffinity(
+    req: &mut Request,
+    #[php(default = null)] process_id: Option<i64>,
+) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
+    let pid = process_id.unwrap_or(0);
+    let cpus = match ffi::cpu_affinity(pid, ffi::cpus_configured()) {
+        Ok(cpus) => cpus,
+        Err(errno) => {
+            affinity_refused(req, errno, pid, None)?;
+            return Ok(OrFalse::False);
+        }
+    };
+    let mut out = PhpArray::new(req)?;
+    for cpu in cpus {
+        let cpu = i64::try_from(cpu).unwrap_or(i64::MAX);
+        out.append(req, Owner::take(req, Value::int(cpu)))?;
+    }
+    Ok(OrFalse::Value(out))
+}
+
+/// `pcntl_setcpuaffinity(?int $process_id = null, array $cpu_ids = []):
+/// bool`: the process held to the CPUs given, each an int or a string
+/// holding one, below the CPUs the system has configured.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_setcpuaffinity(
+    req: &mut Request,
+    #[php(default = null)] process_id: Option<i64>,
+    #[php(default = [])] cpu_ids: PhpArray,
+) -> Result<bool, Thrown> {
+    if cpu_ids.is_empty() {
+        return Err(arg_value_error(req, 2, "not be empty"));
+    }
+    let pid = process_id.unwrap_or(0);
+    let configured = ffi::cpus_configured();
+    let values: Vec<Value> = php_ext::values::walk::rows(req, cpu_ids)
+        .map(|(_, value)| value.deref())
+        .collect();
+    let mut cpus = Vec::new();
+    for value in values {
+        let cpu = match value.as_ref() {
+            php_ext::values::ValueRef::Int(n) => n,
+            php_ext::values::ValueRef::Str(s) => match Key::lookup(*s) {
+                Key::Int(n) => n,
+                Key::Str(_) => {
+                    let shown = String::from_utf8_lossy(s.as_bytes()).into_owned();
+                    let tail = format!("cpu id invalid value ({shown})");
+                    return Err(argument_error(req, "ValueError", 2, &tail));
+                }
+            },
+            _ => {
+                let given = php_ext::coerce::value_name(req, &value);
+                let tail = format!("value must be of type int|string, {given} given");
+                return Err(argument_error(req, "TypeError", 2, &tail));
+            }
+        };
+        if !(0..configured).contains(&cpu) {
+            let tail = format!("cpu id must be between 0 and {configured} ({cpu})");
+            return Err(argument_error(req, "ValueError", 2, &tail));
+        }
+        cpus.push(usize::try_from(cpu).unwrap_or(0));
+    }
+    match ffi::set_cpu_affinity(pid, &cpus) {
+        Ok(()) => Ok(true),
+        Err(errno) => {
+            affinity_refused(req, errno, pid, Some(2))?;
+            Ok(false)
+        }
+    }
+}
+
+/// What `sched_getaffinity` and `sched_setaffinity` refused, as php says
+/// it: a `ValueError` for a process that is not there and for a mask the
+/// kernel will not take, at the CPU ids where the call was a set, and a
+/// warning otherwise.
+#[cfg(target_os = "linux")]
+fn affinity_refused(
+    req: &mut Request,
+    errno: Errno,
+    pid: i64,
+    cpu_ids_at: Option<u32>,
+) -> Result<(), Thrown> {
+    failed(req, errno);
+    match errno {
+        Errno::ESRCH => {
+            let tail = format!("invalid process ({pid})");
+            Err(argument_error(req, "ValueError", 1, &tail))
+        }
+        Errno::EINVAL => Err(match cpu_ids_at {
+            Some(at) => argument_error(
+                req,
+                "ValueError",
+                at,
+                "invalid cpu affinity mask size or unmapped cpu id(s)",
+            ),
+            None => {
+                php_ext::raising::throw_error(req, "ValueError", "invalid cpu affinity mask size")
+            }
+        }),
+        Errno::EPERM => {
+            let text = "Calling process not having the proper privileges";
+            docref(req, Level::Warning, text);
+            Ok(())
+        }
+        _ => {
+            docref(req, Level::Warning, &format!("Error {}", errno as i32));
+            Ok(())
+        }
+    }
+}
+
+/// `pcntl_getcpu(): int`: the CPU the calling thread runs on.
+#[cfg(target_os = "linux")]
+#[php_function]
+pub(crate) fn pcntl_getcpu() -> i64 {
+    ffi::current_cpu().into()
+}
+
 /// `strerror(3)`, as the standard library reads it through
 /// `strerror_r(3)`, less the `" (os error N)"` it appends.
 fn strerror(errno: i32) -> String {

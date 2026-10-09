@@ -310,6 +310,11 @@ unsafe extern "C" {
     /// copied, `timelib_free(dummy_t.tz_abbr)`.
     #[link_name = "efree"]
     pub fn timelib_free(ptr: *mut c_void);
+    /// `timelib_malloc`, which `include/timelib_config.h` points at
+    /// `emalloc`, as php's does: what stands for a block php's code makes
+    /// on the request's heap beside timelib's, `DATEG(tzcache)`'s table.
+    #[link_name = "emalloc"]
+    pub fn timelib_malloc(size: usize) -> *mut c_void;
     pub fn timelib_unixtime2local(tm: *mut TimeFields, ts: i64);
     pub fn timelib_update_from_sse(tm: *mut TimeFields);
     pub fn timelib_set_timezone_from_offset(t: *mut TimeFields, utc_offset: i64);

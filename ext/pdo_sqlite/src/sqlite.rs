@@ -3,6 +3,7 @@
 //! SQLSTATE mapping of `pdo_sqlite_error` and the column types of
 //! `pdo_sqlite_stmt_get_col`.
 
+use php_ext::abi::Callable;
 use php_ext::coerce::{to_long, to_string, value_name};
 use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
@@ -14,7 +15,7 @@ use php_ext_pdo::connector::{
 };
 
 use crate::Sqlite;
-use crate::ffi::{self, Db, Function, Handler, Registration};
+use crate::ffi::{self, Db, Function, Registration};
 
 /// `PDO_ATTR_TIMEOUT` and `PDO_ATTR_CURSOR`, which the connector reads.
 const ATTR_TIMEOUT: i64 = 2;
@@ -431,24 +432,20 @@ impl Connection for Handle {
     /// callables given up, so none lingers for the next request.
     fn persistent_shutdown(&mut self, req: &mut Request) {
         if let Some(handler) = self.db.set_authorizer(None) {
-            handler.release(req);
+            handler.give_up(req);
         }
         for registration in std::mem::take(&mut self.registrations) {
             for handler in registration.unregister() {
-                handler.release(req);
+                handler.give_up(req);
             }
         }
     }
 
     /// `pdo_sqlite_get_gc`.
     fn gc(&self, visit: &mut dyn FnMut(Value)) {
-        if let Some(handler) = self.db.authorizer() {
-            visit(handler.value);
-        }
+        self.db.visit_authorizer(visit);
         for registration in &self.registrations {
-            for handler in registration.handlers() {
-                visit(handler.value);
-            }
+            registration.visit(visit);
         }
     }
 
@@ -872,13 +869,14 @@ pub(super) fn register(
     name: &[u8],
     argc: i64,
     flags: i64,
-    function: Function,
+    function: impl FnOnce(&Request) -> Function,
 ) -> Result<bool, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
-            function.release(req);
             return Ok(false);
         };
+        // `zend_fcc_dup` once the connection stands.
+        let function = function(req);
         // php hands the library its `zend_long`s as `int`s.
         #[allow(clippy::cast_possible_truncation)]
         match handle
@@ -902,20 +900,21 @@ pub(super) fn register_collation(
     req: &mut Request,
     this: php_ext::values::PhpObject,
     name: &[u8],
-    handler: Handler,
+    callback: Callable,
 ) -> Result<bool, Thrown> {
     php_ext_pdo::connector::with_connection(req, this, |req, conn| {
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
-            handler.release(req);
             return Ok(false);
         };
+        // `zend_fcc_dup` once the connection stands.
+        let handler = Owner::take(req, callback);
         match handle.db.create_collation(name, handler) {
             Ok(registration) => {
                 handle.registrations.push(registration);
                 Ok(true)
             }
             Err((handler, _)) => {
-                handler.release(req);
+                handler.give_up(req);
                 Ok(false)
             }
         }

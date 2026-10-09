@@ -241,7 +241,7 @@ pub(super) struct Response {
     /// The `php_output` layer, `main/output.c`'s `OG` and the header state
     /// `sapi_send_headers` keeps beside it (`crate::output`).
     output: Output,
-    header_callback: Option<Callable>,
+    header_callback: Option<Owner<Callable>>,
     /// php's `PG(connection_status)`: whether the host's sink refused a
     /// write, `PHP_CONNECTION_ABORTED`, which `connection_aborted()`
     /// answers ([`Request::handle_aborted_connection`]).
@@ -496,7 +496,7 @@ impl Request {
     /// `header_register_callback`'s callable, taken to be served once by
     /// `sapi_send_headers`, which unsets `SG(callback_func)` before the
     /// call so a second send finds none.
-    pub(crate) fn take_header_callback(&mut self) -> Option<Callable> {
+    pub(crate) fn take_header_callback(&mut self) -> Option<Owner<Callable>> {
         self.response.header_callback.take()
     }
 
@@ -683,9 +683,9 @@ impl Request {
     /// held, with the owners `zend_fcc_addref` takes, for
     /// `sapi_send_headers` to serve once; one held before is given up.
     pub fn set_header_callback(&mut self, callback: Callable) {
-        callback.addref(self);
-        if let Some(previous) = self.response.header_callback.replace(callback) {
-            previous.release(self);
+        let held = Owner::take(self, callback);
+        if let Some(previous) = self.response.header_callback.replace(held) {
+            previous.give_up(self);
         }
     }
 

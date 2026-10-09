@@ -5,13 +5,14 @@
 //! call left reachable (`ffi`). The two values differ in what the
 //! authorizer's errors raise, which `enableExceptions` chooses.
 
+use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString, Value, ValueRef};
 use php_ext_pdo_sqlite::ffi::{
-    Aggregate, Argument, Callbacks, Handler, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
+    Aggregate, Argument, Callbacks, Invocation, SQLITE_ATTACH, SQLITE_DENY, SQLITE_IGNORE,
     SQLITE_OK, drop_aggregate,
 };
 
@@ -94,11 +95,11 @@ impl Callbacks for Sqlite3 {
     fn scalar(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         invocation: &mut Invocation<'_>,
     ) -> Result<(), Thrown> {
         let values = arguments(req, invocation.arguments())?;
-        let returned = call(req, &handler.callable, &views(&values));
+        let returned = call(req, handler, &views(&values));
         release_all(req, values);
         match returned {
             Ok(returned) => answer(req, returned, invocation),
@@ -115,7 +116,7 @@ impl Callbacks for Sqlite3 {
     fn step(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         state: &mut Option<Box<Aggregate>>,
         args: Vec<Argument>,
     ) -> Result<(), Thrown> {
@@ -130,7 +131,7 @@ impl Callbacks for Sqlite3 {
         let extra = arguments(req, args)?;
         let mut values = vec![*held.value, Value::int(held.row)];
         values.extend(views(&extra));
-        let returned = call(req, &handler.callable, &values);
+        let returned = call(req, handler, &values);
         release_all(req, extra);
         let (kept, thrown) = match returned {
             Ok(value) => (value, None),
@@ -145,12 +146,12 @@ impl Callbacks for Sqlite3 {
     fn finalize(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         state: Option<Box<Aggregate>>,
         invocation: &mut Invocation<'_>,
     ) -> Result<(), Thrown> {
         let value = state.as_ref().map_or(Value::null(), |held| *held.value);
-        let returned = call(req, &handler.callable, &[value, Value::int(0)]);
+        let returned = call(req, handler, &[value, Value::int(0)]);
         let answered = match returned {
             Ok(returned) => answer(req, returned, invocation),
             Err(thrown) => {
@@ -168,7 +169,7 @@ impl Callbacks for Sqlite3 {
     fn collate(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         left: &[u8],
         right: &[u8],
     ) -> (i32, Option<Thrown>) {
@@ -176,7 +177,7 @@ impl Callbacks for Sqlite3 {
             (Ok(left), Ok(right)) => vec![left.into_value(), right.into_value()],
             (Err(thrown), _) | (_, Err(thrown)) => return (0, Some(thrown)),
         };
-        let returned = call(req, &handler.callable, &views(&values));
+        let returned = call(req, handler, &views(&values));
         release_all(req, values);
         let returned = match returned {
             Ok(returned) => returned,
@@ -203,7 +204,7 @@ impl Callbacks for Sqlite3 {
     fn authorize(
         &self,
         req: &mut Request,
-        handler: Option<&Handler>,
+        handler: Option<&Callable>,
         action: i32,
         names: [Option<Vec<u8>>; 4],
         pending: bool,
@@ -237,7 +238,7 @@ impl Callbacks for Sqlite3 {
                 None => Owner::take(req, Value::null()),
             });
         }
-        let returned = call(req, &handler.callable, &views(&values));
+        let returned = call(req, handler, &views(&values));
         release_all(req, values);
         let exceptions = self.exceptions;
         let returned = match returned {
