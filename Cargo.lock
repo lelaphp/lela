@@ -788,7 +788,9 @@ version = "0.0.0"
 dependencies = [
  "libbz2-rs-sys",
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
