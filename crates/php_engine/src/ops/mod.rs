@@ -2855,12 +2855,22 @@ pub(crate) fn concat_assign(
 ///   thrown in %s on line 4
 /// ```
 pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
-    let (left, right) = (&left.deref(), &right.deref());
+    let (left, right) = (left.deref(), right.deref());
+    if let (Some(a), Some(b)) = (left.as_array(), right.as_array()) {
+        return compare_arrays(req, *a, *b);
+    }
+    compare_values(req, &left, &right)
+}
+
+/// [`compare`] past `TYPE_PAIR(IS_ARRAY, IS_ARRAY)`, which it never
+/// sees: a call of its own, so that what the other pairs take is off
+/// the stack while two nested arrays are compared level by level (#2221).
+#[inline(never)]
+fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
         return Ok(php_heap::compare(a, b, req.precision()));
     }
     Ok(match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, *a, *b)?,
         (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
         // `TYPE_PAIR(IS_OBJECT, IS_NULL)` and its mirror: an object is
         // greater than a null whatever its truth.
@@ -3082,16 +3092,26 @@ pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Resul
 /// bool(false)
 /// ```
 pub(crate) fn identical(req: &mut Request, left: &Value, right: &Value) -> Result<bool, Thrown> {
-    let (left, right) = (&left.deref(), &right.deref());
-    if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
-        return Ok(php_heap::identical(a, b));
+    let (left, right) = (left.deref(), right.deref());
+    if let (Some(a), Some(b)) = (left.as_array(), right.as_array()) {
+        return identical_arrays(req, *a, *b);
     }
-    Ok(match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Array(a), ValueRef::Array(b)) => identical_arrays(req, *a, *b)?,
+    Ok(identical_values(&left, &right))
+}
+
+/// [`identical`] past two arrays, which it never sees: a call of its
+/// own, as [`compare_values`] is, so that what the other pairs take is
+/// off the stack while two nested arrays are walked level by level.
+#[inline(never)]
+fn identical_values(left: &Value, right: &Value) -> bool {
+    if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
+        return php_heap::identical(a, b);
+    }
+    match (left.as_ref(), right.as_ref()) {
         (ValueRef::Object(a), ValueRef::Object(b)) => a == b,
         (ValueRef::Resource(a), ValueRef::Resource(b)) => a == b,
         _ => false,
-    })
+    }
 }
 
 /// `zend_hash_compare` with `hash_zval_identical_function` and

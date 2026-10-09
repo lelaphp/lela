@@ -773,11 +773,11 @@ fn foreach_steps<B>(
         // takes is off the stack while the body runs: a walk the body
         // re-enters, a nested array compared or dumped, costs a level
         // only what this loop keeps.
-        let Some((found, mut row)) = next_lent(req, table, (pos, end), watch, unwritten) else {
+        let mut lent = next_lent(req, table, (&mut pos, end), watch, unwritten);
+        let Some(row) = lent.as_mut() else {
             break;
         };
-        pos = found.saturating_add(1);
-        let step = body(req, &mut row);
+        let step = body(req, row);
         row.let_go(req);
         if let ControlFlow::Break(broke) = step? {
             return Ok(Some(broke));
@@ -787,32 +787,32 @@ fn foreach_steps<B>(
 }
 
 /// The row a [`foreach`] walk lends next, at or after `pos` below `end`,
-/// with its position, its key and value kept for the step as [`Lent::of`]
-/// says; `None` past the last.
+/// its key and value kept for the step as [`Lent::of`] says, and `pos`
+/// left one past it; `None` past the last.
 #[inline(never)]
 fn next_lent(
     req: &mut Request,
     table: &Table,
-    (pos, end): (u32, u32),
+    (pos, end): (&mut u32, u32),
     watch: Watch,
     unwritten: Unwritten,
-) -> Option<(u32, Row)> {
+) -> Option<Row> {
     let found = match (table, unwritten) {
-        (Table::Object(object), Unwritten::Shown) => object.shown_from(req, pos, end),
+        (Table::Object(object), Unwritten::Shown) => object.shown_from(req, *pos, end),
         _ => table
-            .held_from(pos, end)
+            .held_from(*pos, end)
             .map(|(found, key, value, at)| (found, key, value, at, None)),
     };
     let (found, key, value, at, uninitialized) = found?;
+    *pos = found.saturating_add(1);
     let lent = Lent::of(watch, at);
-    let row = Row {
+    Some(Row {
         key: Keep::lent(req, key, lent),
         value: Keep::lent(req, Value::of_zval(value), lent),
         at,
         watch,
         uninitialized,
-    };
-    Some((found, row))
+    })
 }
 
 /// How a callback walk keeps the rows it lends for their step: php's
@@ -919,9 +919,12 @@ impl<T: View> Keep<T> {
     /// What the walk took for the step given back: an owner as
     /// `zval_ptr_dtor_nogc` gives one up, since php's walk holds none
     /// and so leaves no possible root of the cycle collector; a pin let
-    /// go.
-    fn let_go(self, req: &mut Request) {
-        match self {
+    /// go. The view is left, which nothing keeps from here. In place, so
+    /// a walk keeps its row in one place across the body's call, which a
+    /// recursion through the walk pays for at every level.
+    fn let_go(&mut self, req: &mut Request) {
+        let view = self.get().clone();
+        match std::mem::replace(self, Keep::Viewed(view)) {
             Keep::Owned(owner) => owner.give_up_nogc(req),
             Keep::Pinned(pin) => pin.let_go(req),
             Keep::Viewed(_) => {}
@@ -1103,16 +1106,14 @@ impl Row {
     /// holds.
     fn lend(&mut self, req: &mut Request, cell: PhpRef) -> PhpRef {
         let kept = Keep::lent(req, cell.as_value(), self.value.lent_as());
-        let value = std::mem::replace(&mut self.value, kept);
+        let mut value = std::mem::replace(&mut self.value, kept);
         value.let_go(req);
         cell
     }
 
     /// What the walk kept of the row given back as the step ends
-    /// ([`Keep::let_go`]): the value first and then the key, so a key
-    /// and a value that are one string are kept by the pin that set it
-    /// until both are let go.
-    fn let_go(self, req: &mut Request) {
+    /// ([`Keep::let_go`]), the value and then the key, each left a view.
+    fn let_go(&mut self, req: &mut Request) {
         self.value.let_go(req);
         self.key.let_go(req);
     }
@@ -1205,10 +1206,11 @@ fn steps<B>(
     body: &mut impl FnMut(&mut Request, &mut Row) -> Step<B>,
 ) -> Result<Option<B>, Thrown> {
     loop {
-        let Some(mut row) = next_row(req, holder, at)? else {
+        let mut lent = next_row(req, holder, at)?;
+        let Some(row) = lent.as_mut() else {
             return Ok(None);
         };
-        let step = body(req, &mut row);
+        let step = body(req, row);
         row.let_go(req);
         let thrown = match step {
             Ok(ControlFlow::Break(broke)) => return Ok(Some(broke)),
