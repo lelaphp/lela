@@ -4,7 +4,7 @@
 
 use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, walk};
 
 use crate::alloc::{
     Alloc, CONN_DATA, MYSQLND, PAYLOAD_DECODER_FACTORY, PFC, PLUGIN_ROOM, Pstr, STATS, VIO,
@@ -168,7 +168,7 @@ impl ConnectAttr {
     fn clean(&mut self, req: &mut Request) -> Result<(), Thrown> {
         match self {
             ConnectAttr::Heap(attrs) => {
-                let keys: Vec<Key> = attrs.iter().map(|(key, _)| key).collect();
+                let keys: Vec<Key> = walk::rows(req, **attrs).map(|(key, _)| key).collect();
                 for key in keys {
                     attrs.unset(req, &key)?;
                 }
@@ -190,10 +190,9 @@ impl ConnectAttr {
     }
 
     /// The attributes in order, as the handshake sends them.
-    pub(crate) fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+    pub(crate) fn pairs(&self, req: &Request) -> Vec<(Vec<u8>, Vec<u8>)> {
         match self {
-            ConnectAttr::Heap(attrs) => attrs
-                .iter()
+            ConnectAttr::Heap(attrs) => walk::rows(req, **attrs)
                 .map(|(key, value)| {
                     let key = match key {
                         Key::Str(s) => s.as_bytes().to_vec(),

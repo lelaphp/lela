@@ -18052,16 +18052,18 @@ pub(crate) fn rope_end<T: Tier>(
         req.release(held);
         return threw(req, frame, &thrown);
     }
-    let len: usize = rope
-        .iter()
+    // `zend_string_alloc` of the pieces' joined length, then each
+    // piece's bytes copied in, as php's `memcpy` loop copies them.
+    let len: usize = walk::rows(req, rope)
         .map(|(_, v)| {
             v.as_php_string()
                 .map_or(0, crate::api::values::PhpString::len)
         })
         .sum();
-    let joined = req.string_with(len, |bytes| {
+    let joined = crate::api::values::FreshString::new(req, len).map(|mut fresh| {
+        let bytes = fresh.bytes_mut();
         let mut at: usize = 0;
-        for (_, v) in &rope {
+        for (_, v) in walk::rows(req, rope) {
             let Some(s) = v.as_php_string() else {
                 continue;
             };
@@ -18071,6 +18073,7 @@ pub(crate) fn rope_end<T: Tier>(
             }
             at = end;
         }
+        fresh.finish(req).hand_on()
     });
     let held = req.take_slot(frame, rope_slot);
     req.release(held);

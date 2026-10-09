@@ -721,12 +721,14 @@ fn array_diff(
             if found {
                 continue;
             }
-            for (_, value) in &other {
-                if with_string(req, &value, |text| text == search.as_slice())? {
-                    found = true;
-                    break;
+            // Holding nothing: a conversion may serve `__toString`.
+            let hit = walk::foreach(req, other, Hold::None, |req, row| -> walk::Step {
+                if with_string(req, row.value(), |text| text == search.as_slice())? {
+                    return Ok(ControlFlow::Break(()));
                 }
-            }
+                Ok(ControlFlow::Continue(()))
+            })?;
+            found = hit.is_some();
         }
         if found {
             return Ok(Owner::take(req, PhpArray::empty()));
@@ -739,9 +741,10 @@ fn array_diff(
     }
     let mut exclude: HashSet<Vec<u8>> = HashSet::new();
     for other in &rest {
-        for (_, value) in other {
-            exclude.insert(with_string(req, &value, <[u8]>::to_vec)?);
-        }
+        walk::foreach(req, *other, Hold::None, |req, row| -> walk::Step {
+            exclude.insert(with_string(req, row.value(), <[u8]>::to_vec)?);
+            Ok(ControlFlow::Continue(()))
+        })?;
     }
     let mut out = PhpArray::new(req)?;
     // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(args[0]), idx, key, value)`

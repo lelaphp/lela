@@ -17,7 +17,7 @@ use php_ext::call::{
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
 use php_ext::raising::{Thrown, deprecated, throw, throw_error};
 use php_ext::request::{MethodRow, Request};
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use super::lazy::{Strategy, new_lazy, object_of, reset_as_lazy};
 use super::{
@@ -342,22 +342,23 @@ impl Unpacked {
             positional: Vec::new(),
             named: Vec::new(),
         };
-        let mut cursor = args.iter();
-        while cursor.advance() {
-            let (Some(key), Some(value)) = (cursor.key(), cursor.value().copied()) else {
-                continue;
-            };
+        let mut misplaced = false;
+        for (key, value) in walk::rows(req, args) {
             match key {
                 Key::Str(name) => unpacked.named.push((name, value)),
                 Key::Int(_) if !unpacked.named.is_empty() => {
-                    return Err(throw_error(
-                        req,
-                        "Error",
-                        "Cannot use positional argument after named argument",
-                    ));
+                    misplaced = true;
+                    break;
                 }
                 Key::Int(_) => unpacked.positional.push(value),
             }
+        }
+        if misplaced {
+            return Err(throw_error(
+                req,
+                "Error",
+                "Cannot use positional argument after named argument",
+            ));
         }
         Ok(unpacked)
     }

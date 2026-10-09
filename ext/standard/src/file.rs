@@ -3087,8 +3087,11 @@ pub fn php_fputcsv(
 ) -> Result<Option<usize>, Thrown> {
     let count = fields.len();
     let mut line = Vec::new();
-    for (i, (_, field)) in fields.iter().enumerate() {
-        with_string(req, &field, |bytes| {
+    let mut i = 0;
+    // `ZEND_HASH_FOREACH_VAL(fields, field_tmp)`, holding nothing: a
+    // conversion may serve `__toString`.
+    walk::foreach(req, fields, Hold::None, |req, row| -> walk::Step {
+        with_string(req, row.value(), |bytes| {
             let special = [delimiter, enclosure, b'\n', b'\r', b'\t', b' ']
                 .iter()
                 .chain(escape.iter())
@@ -3111,10 +3114,12 @@ pub fn php_fputcsv(
                 line.extend_from_slice(bytes);
             }
         })?;
-        if i + 1 != count {
+        i += 1;
+        if i != count {
             line.push(delimiter);
         }
-    }
+        Ok(std::ops::ControlFlow::Continue(()))
+    })?;
     match eol {
         Some(eol) => line.extend_from_slice(eol),
         None => line.push(b'\n'),

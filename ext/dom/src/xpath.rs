@@ -11,6 +11,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_chained, throw_error,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{
@@ -89,9 +90,12 @@ impl Namespace {
             return Ok(());
         };
         if let Some(array) = restrict.as_array().copied() {
-            for (key, value) in &array {
+            // `ZEND_HASH_FOREACH_STR_KEY_VAL`, holding nothing: a
+            // conversion may serve `__toString`.
+            walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
+                let value = *row.value();
                 let (callable, owner) = callable_of(req, &value, 1, true)?;
-                let name = match key {
+                let name = match row.key() {
                     Key::Str(s) => Ok(s.as_bytes().to_vec()),
                     Key::Int(_) => with_string(req, &value, <[u8]>::to_vec),
                 };
@@ -113,7 +117,8 @@ impl Namespace {
                     value: owner,
                 };
                 self.insert(req, function);
-            }
+                Ok(std::ops::ControlFlow::Continue(()))
+            })?;
         } else {
             let name = restrict
                 .as_str_bytes()

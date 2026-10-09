@@ -1125,10 +1125,6 @@ test::Engine::unit
 test::Engine::zend_version_info
 test::Entered
 test::LeakSensor
-values::ArrayIter
-values::ArrayIter::advance
-values::ArrayIter::key
-values::ArrayIter::value
 values::ClassId
 values::ClassId::is_published
 values::ClosureInfo
@@ -1215,7 +1211,6 @@ values::PhpArray::is_list
 values::PhpArray::is_packed
 values::PhpArray::is_recursive
 values::PhpArray::is_same
-values::PhpArray::iter
 values::PhpArray::iterators_advance
 values::PhpArray::iterators_carry
 values::PhpArray::iterators_lower_pos

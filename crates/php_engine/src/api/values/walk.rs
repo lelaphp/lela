@@ -55,7 +55,7 @@ use crate::api::abi::Ref;
 use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
 use crate::api::request::Request;
 use crate::api::values::{
-    ArrayIter, HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
+    HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
 };
 
 /// What a walk's body answers for one row: `Continue` to go on to the
@@ -142,7 +142,7 @@ pub type Step<B = ()> = Result<ControlFlow<B>, Thrown>;
 /// ```
 pub fn rows(_request: &Request, table: impl Into<Table>) -> Rows<'_> {
     let rows = match table.into() {
-        Table::Array(array) => Walked::Array(array.iter()),
+        Table::Array(array) => Walked::Array(array.heap().iter()),
         Table::Object(table) => Walked::Positions {
             end: table.table.used(),
             table,
@@ -169,7 +169,7 @@ pub struct Rows<'r> {
 /// Where a [`Rows`] walk stands.
 #[derive(Debug)]
 enum Walked {
-    Array(ArrayIter),
+    Array(php_heap::ArrIter),
     /// The next position of an object's table to read, and the end.
     Positions {
         table: ObjectTable,
@@ -183,7 +183,7 @@ impl Iterator for Rows<'_> {
 
     fn next(&mut self) -> Option<(Key, Value)> {
         match &mut self.rows {
-            Walked::Array(rows) => rows.next(),
+            Walked::Array(rows) => rows.next().map(super::view),
             Walked::Positions { table, pos, end } => {
                 let (found, key, value, _) = table.held_from(*pos, *end)?;
                 *pos = found.saturating_add(1);

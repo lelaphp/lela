@@ -51,7 +51,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::decl::{ConstDecl, ConstExpr, Name, Radix};
 use php_ext::raising::{Level, Thrown, argument_error, arity, throw};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
 
 /// `ZSTR_MAX_LEN`: `SIZE_MAX` less a `zend_string`'s 24-byte header and
 /// its NUL, the bound `libsodium.c`'s overflow checks are written over.
@@ -502,8 +502,7 @@ fn scrub(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     else {
         return Ok(());
     };
-    let framed: Vec<(Key, PhpArray)> = trace
-        .iter()
+    let framed: Vec<(Key, PhpArray)> = walk::rows(req, trace)
         .filter_map(|(key, frame)| {
             let frame = frame.as_array().copied()?;
             frame.find(b"args").map(|_| (key, frame))

@@ -32,6 +32,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw_error,
 };
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_dom::XPathCallbacks;
 use php_ext_libxml::ffi::{ClassType, Kind, Node, NodeObject, Ns, Raised, Route};
@@ -899,8 +900,10 @@ impl XSLTProcessor {
                 return Ok(true);
             }
         };
-        for (key, entry) in &name {
-            let Key::Str(key) = key else {
+        // `ZEND_HASH_FOREACH_STR_KEY_VAL`, holding nothing: a conversion
+        // may serve `__toString`.
+        walk::foreach(req, name, Hold::None, |req, row| -> walk::Step {
+            let Key::Str(key) = row.key().clone() else {
                 return Err(arg_type_error(req, 2, "contain only string keys"));
             };
             if key.as_bytes().contains(&0) {
@@ -908,13 +911,14 @@ impl XSLTProcessor {
                 return Err(arg_value_error(req, 3, tail));
             }
             let key = parameter_key(req, namespace, key.as_bytes())?;
-            let entry = with_string(req, &entry, <[u8]>::to_vec)?;
+            let entry = with_string(req, row.value(), <[u8]>::to_vec)?;
             if entry.contains(&0) {
                 let tail = "not contain values with any null bytes";
                 return Err(arg_value_error(req, 3, tail));
             }
             set_param(req, this, key, entry);
-        }
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
         Ok(true)
     }
 

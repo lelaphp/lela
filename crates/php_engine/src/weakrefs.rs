@@ -513,8 +513,7 @@ impl ObjectHandlers for WeakMapHandlers {
         index: usize,
     ) -> Result<Option<IteratorElement>, Thrown> {
         let entry = entries_of(req, object).and_then(|entries| {
-            entries
-                .iter()
+            crate::api::values::walk::rows(req, entries)
                 .filter_map(|(key, value)| match key {
                     Key::Int(id) => u32::try_from(id)
                         .ok()

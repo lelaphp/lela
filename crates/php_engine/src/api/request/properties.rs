@@ -3297,8 +3297,7 @@ impl Request {
             // A table the class keeps in place of the object's: each row
             // the value it answered.
             Table::Array(array) => {
-                let row = array
-                    .iter()
+                let row = walk::rows(self, array)
                     .enumerate()
                     .skip(usize::try_from(at).unwrap_or(usize::MAX))
                     .find(|(_, (key, _))| match key {

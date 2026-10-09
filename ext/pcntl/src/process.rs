@@ -8,6 +8,7 @@
 //! succeeds) happens in a forked child whose status the parent reads.
 
 use std::ffi::CString;
+use std::ops::ControlFlow;
 
 use nix::errno::Errno;
 use php_ext::abi::{False, OrFalse, Passed, Path, Ref, Untyped};
@@ -21,6 +22,7 @@ use php_ext::raising::arity;
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
 use php_ext::request::{Forked, Request};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
 use crate::{State, failed, ffi};
@@ -444,8 +446,11 @@ pub(crate) fn pcntl_exec(
 ) -> Result<False, Thrown> {
     let program = CString::new(path.0.as_bytes()).unwrap_or_default();
     let mut arguments = vec![program.clone()];
-    for (_, element) in &args {
-        let Ok(argument) = with_string(req, &element, |bytes| CString::new(bytes))? else {
+    // `ZEND_HASH_FOREACH_VAL(args_hash, element)` and `zval_get_string`,
+    // which may serve `__toString`: a foreach walk holding nothing, the
+    // argument holding the array.
+    walk::foreach(req, args, Hold::None, |req, row| -> walk::Step {
+        let Ok(argument) = with_string(req, row.value(), |bytes| CString::new(bytes))? else {
             return Err(argument_error(
                 req,
                 "ValueError",
@@ -454,12 +459,13 @@ pub(crate) fn pcntl_exec(
             ));
         };
         arguments.push(argument);
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     let executed = match env_vars {
         Passed::Given(env_vars) => {
             let mut envp = Vec::new();
-            for (key, element) in &env_vars {
-                let value = with_string(req, &element, <[u8]>::to_vec)?;
+            walk::foreach(req, env_vars, Hold::None, |req, row| -> walk::Step {
+                let value = with_string(req, row.value(), <[u8]>::to_vec)?;
                 if value.contains(&0) {
                     return Err(argument_error(
                         req,
@@ -468,7 +474,7 @@ pub(crate) fn pcntl_exec(
                         "value for environment variable must not contain null bytes",
                     ));
                 }
-                let mut pair = match key {
+                let mut pair = match row.key() {
                     Key::Int(n) => n.to_string().into_bytes(),
                     Key::Str(name) => name.as_bytes().to_vec(),
                 };
@@ -483,7 +489,8 @@ pub(crate) fn pcntl_exec(
                 pair.push(b'=');
                 pair.extend_from_slice(&value);
                 envp.push(CString::new(pair).unwrap_or_default());
-            }
+                Ok(ControlFlow::Continue(()))
+            })?;
             nix::unistd::execve(&program, &arguments, &envp)
         }
         Passed::Omitted => nix::unistd::execv(&program, &arguments),

@@ -10,6 +10,7 @@
 //! for the call.
 
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 
 use php_ext::abi::{CloneObj, Instance, ObjectHandlers, OrFalse, Raw, This, Union, Untyped};
 use php_ext::attr::{php_class, php_function};
@@ -17,6 +18,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_string};
 use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::common_date::{process_timezone_argument, zval_to_millis};
@@ -635,18 +637,20 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
     }
     let types = arg_types(req, site)?.unwrap_or_default();
     set_timezone(req, site)?;
-    let elements: Vec<(Key, Value)> = values.iter().collect();
-    let mut args = Vec::with_capacity(elements.len());
-    for (key, value) in elements {
+    let mut args = Vec::with_capacity(values.len());
+    // `ZEND_HASH_FOREACH_KEY_VAL(args, num_index, str_index, elem)` over
+    // the argument, which holds the array while a conversion serves
+    // `__toString` or a date argument's methods.
+    walk::foreach(req, values, Hold::None, |req, row| -> walk::Step {
         if site.code(req).is_failure() {
-            break;
+            return Ok(ControlFlow::Break(()));
         }
-        let value = value.deref();
-        let (name, stored) = match &key {
+        let value = row.value().deref();
+        let (name, stored) = match row.key() {
             Key::Int(n) if !(0..=i64::from(i32::MAX)).contains(n) => {
                 let message = "Found negative or too large array key";
                 site.set(req, Code::ILLEGAL_ARGUMENT, message)?;
-                continue;
+                return Ok(ControlFlow::Continue(()));
             }
             Key::Int(n) => (
                 n.to_string().encode_utf16().collect(),
@@ -660,7 +664,7 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
                 Err(code) => {
                     let message = quoted("Invalid UTF-8 data in argument key: ", s.as_bytes(), "");
                     site.set(req, code, message)?;
-                    continue;
+                    return Ok(ControlFlow::Continue(()));
                 }
             },
         };
@@ -683,7 +687,8 @@ fn format_helper(req: &mut Request, site: &mut Site, values: PhpArray) -> Answer
         if let Some(arg) = arg {
             args.push((name, arg));
         }
-    }
+        Ok(ControlFlow::Continue(()))
+    })?;
     if site.code(req).is_failure() {
         return Ok(None);
     }
