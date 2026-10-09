@@ -23,6 +23,17 @@
 //! signal says what was running, which with memory already damaged is not
 //! always what damaged it, so the reading names what was in flight and
 //! claims no more.
+//!
+//! The journal is the run's claim on System V IPC ([`sysv::Claim`],
+//! #2115): a fence that makes a segment, a semaphore set or a queue and
+//! is cut off before it removes it, and php's own `msg_get_queue(0)`,
+//! which leaves one nobody can use, leave objects the kernel's small
+//! tables keep after every process is gone. When the served process ends,
+//! however it ends, what was made while it ran and nothing holds is
+//! removed, the run's or another of the runner's that left it so; a run
+//! whose watching process was killed too leaves its claim, and the next
+//! run removes what it left before it starts. Each reading of the run
+//! counts what was removed as `sysv_removed` and its message names it.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -30,6 +41,7 @@ use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -38,7 +50,7 @@ use super::{Ask, INSTRUMENT, coverage_rule, fence::Witness, under_rule};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::reading::{Reading, Status, Store};
-use crate::scratch::Tree;
+use crate::sysv;
 
 /// One line of the journal.
 #[derive(Debug, Serialize, Deserialize)]
@@ -262,8 +274,13 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     // The tree before the served run starts: what a crate it died before
     // sending a reading for is stamped with.
     let snapshot = Snapshot::disk(root)?;
-    let tree = Tree::new("witness-journal")?;
-    let journal: PathBuf = tree.join("journal.jsonl");
+    let grace = Duration::from_secs(manifest.pin.recipe.limits.timeout_s);
+    let reclaimed = said(
+        "before the run, of what runs cut off left",
+        sysv::reclaim(grace),
+    );
+    let claim = sysv::Claim::new(INSTRUMENT)?;
+    let journal: PathBuf = claim.path().to_path_buf();
     let exe = std::env::current_exe().context("locating this binary")?;
     let mut served = Command::new(&exe);
     served.arg("--root").arg(root).arg(INSTRUMENT);
@@ -277,20 +294,53 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
         .status()
         .with_context(|| format!("starting {} witness", exe.display()))?;
     let kept = Kept::read(&journal)?;
-    match Ended::of(status) {
-        Ended::Exited(0) => ask.scope.record(store, &kept.readings),
-        Ended::Exited(code) => {
-            ask.scope.record(store, &kept.readings)?;
+    let mut readings = kept.readings.clone();
+    let ended = Ended::of(status);
+    if let Ended::Signalled(signal) = ended {
+        readings.extend(died(&snapshot, manifest, &crates, &kept, signal)?);
+        eprintln!(
+            "witness: the served run died on {signal}; {}",
+            in_flight(&kept)
+        );
+    }
+    let settled = said("of what was left while it ran", claim.settle());
+    let swept: Vec<(u64, String)> = [reclaimed, settled].into_iter().flatten().collect();
+    if !swept.is_empty() {
+        let removed = swept.iter().map(|(n, _)| n).sum();
+        let words: Vec<String> = swept.into_iter().map(|(_, words)| words).collect();
+        for reading in &mut readings {
+            reading.count(SYSV_REMOVED, removed)?;
+            reading.message = format!("{}; {}", reading.message, words.join("; "));
+        }
+    }
+    ask.scope.record(store, &readings)?;
+    match ended {
+        Ended::Exited(code) if code != 0 => {
             bail!("witness: the served run ended with exit {code}; the line above it says why")
         }
-        Ended::Signalled(signal) => {
-            let mut readings = kept.readings.clone();
-            readings.extend(died(&snapshot, manifest, &crates, &kept, signal)?);
-            eprintln!(
-                "witness: the served run died on {signal}; {}",
-                in_flight(&kept)
-            );
-            ask.scope.record(store, &readings)
+        _ => Ok(()),
+    }
+}
+
+/// What the readings of a run count the System V objects removed around
+/// it as.
+const SYSV_REMOVED: &str = "sysv_removed";
+
+/// What a sweep of System V IPC `when` removed, said in a line now and
+/// returned with the words for every reading of the run; nothing where it
+/// removed nothing, and a line saying so where it could not read the
+/// machine.
+fn said(when: &str, swept: Result<sysv::Swept>) -> Option<(u64, String)> {
+    match swept {
+        Ok(swept) if swept.removed() > 0 => {
+            let words = format!("{when}, {swept}");
+            println!("witness: {words}");
+            Some((swept.removed() as u64, words))
+        }
+        Ok(_) => None,
+        Err(why) => {
+            println!("witness: System V IPC not swept {when}: {why:#}");
+            None
         }
     }
 }
@@ -354,6 +404,7 @@ fn died(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Tree;
 
     #[test]
     fn a_signal_is_named_where_both_platforms_agree_and_numbered_where_not() {

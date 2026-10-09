@@ -1,6 +1,7 @@
 //! The environment a test's programs get, built in this one place as
 //! run-tests.php builds it at the pinned tag (#1186): what the runner adds
-//! to its own environment once for every test (run-tests.php:645-677),
+//! to its own environment once for every test (run-tests.php:215-216,
+//! 645-677),
 //! then, for each test, a redirect's environment (run-tests.php:2228), the
 //! CGI variables emptied (run-tests.php:2000-2008), the test's `--ENV--`
 //! (run-tests.php:2009-2018) and `TEST_PHP_EXTRA_ARGS`
@@ -15,6 +16,7 @@
 //! `[recipe.env]`), so what differs from upstream's CI is the pin's to say
 //! and not this module's.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -43,7 +45,9 @@ pub(crate) struct Environment(Vec<(String, OsString)>);
 
 impl Environment {
     /// What run-tests.php adds to its own environment for every test of a
-    /// run: `SKIP_ONLINE_TESTS`, set as upstream sets it unless `--online`
+    /// run, `recipe` being the environment it runs in: `TEMP`, where
+    /// `recipe` gives none, as its own `sys_get_temp_dir()` answers
+    /// (run-tests.php:215-216, [`temp_dir`]); `SKIP_ONLINE_TESTS`, set as upstream sets it unless `--online`
     /// is asked for, which this runner never is (run-tests.php:645-650);
     /// `SKIP_IO_CAPTURE_TESTS`, set as upstream sets it when its own streams
     /// are not all a terminal (run-tests.php:652-656), since this runner
@@ -57,8 +61,12 @@ impl Environment {
         binary: &Path,
         (cgi, phpdbg): (Option<&Path>, Option<&Path>),
         root: &Path,
+        recipe: &BTreeMap<String, String>,
     ) -> Environment {
         let mut env = Environment::default();
+        if recipe.get("TEMP").is_none_or(php_empty) {
+            env.set("TEMP", temp_dir(recipe));
+        }
         env.set("SKIP_ONLINE_TESTS", "1");
         env.set("SKIP_IO_CAPTURE_TESTS", "1");
         let named = |path: Option<&Path>| {
@@ -108,15 +116,15 @@ impl Environment {
         self.0.push((name.to_owned(), value.into()));
     }
 
-    /// Whether `name` is set to something php's `!empty()` holds true: not
-    /// empty and not `"0"`, what run-tests.php asks before it lays a
-    /// request variable over a test's own.
+    /// Whether `name` is set to something php's `!empty()` holds true,
+    /// what run-tests.php asks before it lays a request variable over a
+    /// test's own.
     pub(crate) fn given(&self, name: &str) -> bool {
         self.0
             .iter()
             .rev()
             .find(|(had, _)| had == name)
-            .is_some_and(|(_, value)| !value.is_empty() && value != "0")
+            .is_some_and(|(_, value)| !php_empty(value))
     }
 
     /// The entries in the order they were set, what an invocation hands a
@@ -135,6 +143,25 @@ impl Extend<(String, OsString)> for Environment {
 impl From<Vec<(String, OsString)>> for Environment {
     fn from(entries: Vec<(String, OsString)>) -> Environment {
         Environment(entries)
+    }
+}
+
+/// Whether php's `empty()` holds a string true: empty, or `"0"`.
+fn php_empty(value: impl AsRef<std::ffi::OsStr>) -> bool {
+    let value = value.as_ref();
+    value.is_empty() || value == "0"
+}
+
+/// What php's `sys_get_temp_dir()` answers in `env` with no
+/// `sys_temp_dir`, as `php_get_temporary_directory` finds it
+/// (`main/php_open_temporary_file.c` at the tag): `TMPDIR` less one
+/// trailing slash where it names one, and the C library's `P_tmpdir`
+/// otherwise, `/var/tmp/` on macOS and `/tmp` under glibc and musl.
+fn temp_dir(env: &BTreeMap<String, String>) -> String {
+    match env.get("TMPDIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => dir.strip_suffix('/').unwrap_or(dir).to_owned(),
+        None if cfg!(target_vendor = "apple") => "/var/tmp/".to_owned(),
+        None => "/tmp".to_owned(),
     }
 }
 
@@ -198,7 +225,9 @@ mod tests {
 
     #[test]
     fn the_runner_skips_the_online_and_the_capture_tests_as_upstream_does_off_a_terminal() {
-        let env = Environment::of_runner(Path::new("/b/php"), (None, None), Path::new("/tree"));
+        let none = BTreeMap::new();
+        let env =
+            Environment::of_runner(Path::new("/b/php"), (None, None), Path::new("/tree"), &none);
         assert_eq!(value(&env, "SKIP_ONLINE_TESTS"), Some("1".as_ref()));
         assert_eq!(value(&env, "SKIP_IO_CAPTURE_TESTS"), Some("1".as_ref()));
         assert_eq!(value(&env, "TEST_PHP_EXECUTABLE"), Some("/b/php".as_ref()));
@@ -212,7 +241,12 @@ mod tests {
 
     #[test]
     fn a_test_empties_the_cgi_variables_and_its_own_env_stands_over_them() {
-        let runner = Environment::of_runner(Path::new("/b/php"), (None, None), Path::new("/tree"));
+        let runner = Environment::of_runner(
+            Path::new("/b/php"),
+            (None, None),
+            Path::new("/tree"),
+            &BTreeMap::new(),
+        );
         let text = "--TEST--\nn\n--ENV--\nTZ=GMT\nemptyval=\n--FILE--\nx\n--EXPECT--\n1\n";
         let phpt = Phpt::parse(Path::new("/t/x.phpt"), text.as_bytes()).unwrap();
         let redirected = [("REQUEST_METHOD".to_owned(), OsString::from("GET"))];
@@ -227,5 +261,37 @@ mod tests {
         assert!(!env.given("emptyval") && !env.given("QUERY_STRING"));
         assert_eq!(value(&env, "TEST_PHP_EXTRA_ARGS"), Some(" -n".as_ref()));
         assert_eq!(escaped("/a/it's/php"), r"'/a/it'\''s/php'");
+    }
+
+    /// run-tests.php sets `TEMP` in its own environment, which every test
+    /// inherits, to what its `sys_get_temp_dir()` answers where its
+    /// environment gives none (run-tests.php:215-216): the recipe's
+    /// `TMPDIR` less a trailing slash, the C library's `P_tmpdir` where
+    /// the recipe names none, and the recipe's own `TEMP` where it names
+    /// one (#1730).
+    #[test]
+    fn the_runner_gives_temp_as_its_own_sys_get_temp_dir_answers() {
+        let temp = |recipe: &[(&str, &str)]| {
+            let recipe = recipe
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), (*v).to_owned()))
+                .collect();
+            let env =
+                Environment::of_runner(Path::new("/b/php"), (None, None), Path::new("/t"), &recipe);
+            value(&env, "TEMP").map(|v| v.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            temp(&[("TMPDIR", "/run/tmp/")]).as_deref(),
+            Some("/run/tmp")
+        );
+        let p_tmpdir = if cfg!(target_vendor = "apple") {
+            "/var/tmp/"
+        } else {
+            "/tmp"
+        };
+        assert_eq!(temp(&[]).as_deref(), Some(p_tmpdir));
+        assert_eq!(temp(&[("TMPDIR", "")]).as_deref(), Some(p_tmpdir));
+        assert_eq!(temp(&[("TEMP", "/mine"), ("TMPDIR", "/run/tmp")]), None);
+        assert_eq!(temp(&[("TEMP", "0")]).as_deref(), Some(p_tmpdir));
     }
 }

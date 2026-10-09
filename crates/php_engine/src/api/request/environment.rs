@@ -206,16 +206,17 @@ impl Request {
     /// one trailing slash taken off either; else the C library's
     /// `P_tmpdir` as it stands ([`P_TMPDIR`]), trailing slash and all.
     ///
-    /// The recipe clears the environment, so no `TMPDIR` reaches php
-    /// and the directory is the platform's own:
+    /// The recipe names a `TMPDIR` of the harness's own (#1730); emptied
+    /// before the first answer, the directory is the platform's own:
     ///
     /// ```php
+    /// putenv('TMPDIR=');
     /// $t = sys_get_temp_dir();
     /// var_dump($t === (PHP_OS_FAMILY === 'Darwin' ? '/var/tmp/' : '/tmp'), getenv('TMPDIR'), is_dir($t));
     /// ```
     /// ```expect
     /// bool(true)
-    /// bool(false)
+    /// string(0) ""
     /// bool(true)
     /// ```
     #[must_use]

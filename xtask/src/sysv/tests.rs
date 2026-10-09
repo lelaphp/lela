@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{
-    Clock, Ctime, Kind, Namespace, Object, Runner, Standing, Swept, left, offset, second_of_day,
-    unnamed_left,
+    Claim, Clock, Ctime, Kind, Namespace, Object, Runner, Standing, Swept, abandoned, claimed,
+    left, offset, reclaim, second_of_day, unnamed_left,
 };
 use crate::oracle::Ran;
 
@@ -20,7 +20,7 @@ q 1441795 0x00000001 --rw-rw-rw- mitchell    staff mitchell    staff      0     
 T     ID     KEY        MODE       OWNER    GROUP  CREATOR   CGROUP NATTCH  SEGSZ  CPID  LPID   ATIME    DTIME    CTIME
 Shared Memory:
 m  65536 0x042e2346 --rw------- mitchell    staff mitchell    staff      6     56    824    824 20:45:10 21:56:32 20:45:10
-m 6750211 0x00000000 --rw-rw-rw- mitchell    staff mitchell    staff      0   1024  77085  77085 23:48:08 23:48:08 23:48:08
+m 6750211 0x00000000 --rw-rw-rw- mitchell    staff mitchell    staff      0   1024  77085  77090 23:48:08 23:48:08 23:48:08
 
 T     ID     KEY        MODE       OWNER    GROUP  CREATOR   CGROUP NSEMS   OTIME    CTIME
 Semaphores:
@@ -70,7 +70,7 @@ fn ipcs_is_read_by_each_sections_header() {
                 attached: 6,
                 ..m(65_536, &[824], 0x042e_2346, "20:45:10")
             },
-            m(6_750_211, &[77_085], 0, "23:48:08"),
+            m(6_750_211, &[77_085, 77_090], 0, "23:48:08"),
             made(
                 Kind::Semaphores,
                 65_539,
@@ -96,7 +96,7 @@ const PROC_MSG: &str = "\
 const PROC_SHM: &str = "\
        key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap
   70132550          0   600                    56   824   824      6  1000  1000  1000  1000 1759344310 1759348592 1759344310                  4096                     0
-         0      32769   666                  1024 77085 77085      0  1000  1000  1000  1000 1759355288 1759355288 1759355288                     0                     0
+         0      32769   666                  1024 77085 77090      0  1000  1000  1000  1000 1759355288 1759355288 1759355288                     0                     0
 ";
 const PROC_SEM: &str = "\
        key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime
@@ -127,7 +127,14 @@ fn proc_sysvipc_is_read_by_each_files_header() {
                 attached: 6,
                 ..at(Kind::Memory, 0, &[824], 0x042e_2346, "1000", 1_759_344_310)
             },
-            at(Kind::Memory, 32_769, &[77_085], 0, "1000", 1_759_355_288),
+            at(
+                Kind::Memory,
+                32_769,
+                &[77_085, 77_090],
+                0,
+                "1000",
+                1_759_355_288
+            ),
             at(Kind::Semaphores, 0, &[], 0xcafe_babe, "999", 1_759_344_310),
             at(Kind::Semaphores, 32_769, &[], 0, "1000", 1_759_282_783),
         ]
@@ -205,18 +212,15 @@ fn only_what_the_runs_own_processes_left_is_removed() {
 #[test]
 fn the_sweep_says_how_many_it_removed_of_each_kind_and_what_it_kept() {
     let swept = Swept {
-        removed: BTreeMap::from([(Kind::Memory, 2), (Kind::Queue, 1)]),
+        removed: BTreeMap::from([(Kind::Memory, vec![7, 9]), (Kind::Queue, vec![8])]),
         unnamed_removed: 1,
         unnamed: 1,
     };
     assert_eq!(
         swept.to_string(),
-        "removed 3 System V objects its tests left (2 shared memory segments, 1 message queue), 1 of them naming no process, the runner's, private and made while one of the subset's programs ran; 1 new one names no process and stands, since nothing tells the run's from another program's"
+        "removed 3 System V objects (shared memory segments 7 9, message queue 8), 1 of them naming no process, the runner's, private and made while one of the run's programs ran; 1 new one names no process and stands, since nothing tells the run's from another program's"
     );
-    assert_eq!(
-        Swept::default().to_string(),
-        "removed 0 System V objects its tests left"
-    );
+    assert_eq!(Swept::default().to_string(), "removed 0 System V objects");
 }
 
 /// 2026-10-01 23:00:00 in a zone two hours east of UTC, as seconds since
@@ -417,4 +421,113 @@ fn a_queue_made_in_the_namespace_does_not_outlive_its_program() {
         "the queue {} outlived its namespace: {outside:?}",
         made[0]
     );
+}
+
+/// A witness run's claim, one counterexample per clause (#2115): an
+/// object is the run's when it is private, the runner's, attached to
+/// nothing, names no living process, and was made inside the claim's
+/// window, whether it names a process or none.
+#[test]
+fn a_claim_takes_what_is_forsaken_inside_its_window_and_nothing_else() {
+    let standing = Standing(vec![
+        // A segment the served process made and left, its creator gone.
+        made(Kind::Memory, 1, &[100], 0, "mitchell", "23:00:05"),
+        // php's msg_get_queue(0)'s probe, mode 0, naming nobody.
+        made(Kind::Queue, 2, &[], 0, "mitchell", "23:00:06"),
+        // The same a second before the run began.
+        made(Kind::Queue, 3, &[], 0, "mitchell", "23:00:03"),
+        // One a living process still names.
+        made(Kind::Memory, 4, &[500], 0, "mitchell", "23:00:05"),
+        // One something still holds.
+        Object {
+            attached: 1,
+            ..made(Kind::Memory, 5, &[100], 0, "mitchell", "23:00:05")
+        },
+        // A keyed one, and another user's.
+        made(
+            Kind::Semaphores,
+            6,
+            &[],
+            0x5a00_0001,
+            "mitchell",
+            "23:00:05",
+        ),
+        made(Kind::Queue, 7, &[], 0, "postgres", "23:00:05"),
+    ]);
+    let alive = |pid| pid == 500;
+    let window = [(AT_2300 + 4, AT_2300 + 10)];
+    let gone: Vec<u64> = claimed(&standing, &window, (&runner(), &clock()), alive)
+        .into_iter()
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(gone, [1, 2]);
+    // The control: no window, nothing taken.
+    assert!(claimed(&standing, &[], (&runner(), &clock()), alive).is_empty());
+}
+
+/// A private segment of the runner's that nothing attaches and whose
+/// every named process is dead is taken whatever run made it, as the
+/// segments that filled the table on 2026-10-06 were by hand (#2115); one
+/// a living process last attached, a queue, and a segment naming nobody
+/// are not.
+#[test]
+fn a_dead_creators_private_segment_is_abandoned_whatever_run_made_it() {
+    let standing = Standing(vec![
+        made(Kind::Memory, 1, &[100], 0, "mitchell", "6:28:37"),
+        made(Kind::Memory, 2, &[100, 500], 0, "mitchell", "6:28:37"),
+        made(Kind::Memory, 3, &[], 0, "mitchell", "6:28:37"),
+        made(Kind::Queue, 4, &[100], 0, "mitchell", "6:28:37"),
+        made(Kind::Memory, 5, &[100], 0x042e_2346, "mitchell", "6:28:37"),
+    ]);
+    let gone: Vec<u64> = abandoned(&standing, &runner(), |pid| pid == 500)
+        .into_iter()
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(gone, [1]);
+}
+
+/// A claim its run never settled, as a run killed whole leaves one, is
+/// taken by the next run's reclaim with what was made under it: here a
+/// private queue of mode 0 nobody sent to, as php's `msg_get_queue(0)`
+/// leaves one, made by a process gone since. Another run's reclaim on the
+/// machine may take it first, so what is held is that neither stands.
+#[test]
+fn a_claim_left_unsettled_is_reclaimed_with_what_was_made_under_it() {
+    let claim = Claim::new("sysv-test").unwrap();
+    let path = claim.path().to_path_buf();
+    let made = std::process::Command::new("perl")
+        .args([
+            "-MIPC::SysV=IPC_PRIVATE",
+            "-e",
+            "print msgget(IPC_PRIVATE, 0) // die $!",
+        ])
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let id: u64 = String::from_utf8_lossy(&made.stdout).parse().unwrap();
+    std::fs::write(&path, "{}\n").unwrap();
+    drop(claim);
+    assert!(
+        path.exists(),
+        "the claim outlives a run that did not settle it"
+    );
+    // A reclaim that meets the claim's lock held passes it over, and a
+    // process forked in the moment between holds the descriptors of the
+    // one it came from until it execs: the next reclaim takes it.
+    for _ in 0..20 {
+        reclaim(Duration::from_secs(1)).unwrap();
+        if !path.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let standing = Standing::now().unwrap();
+    assert!(
+        !standing
+            .0
+            .iter()
+            .any(|o| o.kind == Kind::Queue && o.id == id),
+        "queue {id} stands after the reclaim"
+    );
+    assert!(!path.exists(), "the claim is taken with what it claimed");
 }

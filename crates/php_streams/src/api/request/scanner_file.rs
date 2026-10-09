@@ -32,9 +32,9 @@ const ZEND_MMAP_AHEAD: usize = 32;
 /// unlink($p); rmdir($d);
 /// ```
 /// ```expect
-/// int(1080)
+/// int(1112)
 /// int(56)
-/// int(1240)
+/// int(1272)
 /// ```
 pub struct ScannerFile {
     stream: Owner<Stream>,

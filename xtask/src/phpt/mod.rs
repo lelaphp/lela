@@ -153,7 +153,6 @@ pub(crate) mod miss;
 mod redirect;
 pub(crate) mod row;
 pub(crate) mod server;
-mod sysv;
 pub(crate) mod target;
 pub(crate) mod upstream;
 
@@ -178,6 +177,7 @@ use crate::oracle::{ENGINE, Oracle, Oracles, Pin, Runner, Source, profile};
 use crate::reading::{Reading, listed, plural};
 use crate::scratch::{self, Full, Tree};
 use crate::sources;
+use crate::sysv;
 use crate::tally::{self, Outcome};
 use adapter::Adapter;
 use target::{Measure, Target};
@@ -1509,7 +1509,7 @@ fn swept_around<T>(
     let removed = match swept {
         Ok(swept) => {
             if swept.removed() > 0 || swept.unnamed > 0 {
-                println!("phpt: {scope}: {swept}");
+                println!("phpt: {scope}: of what its tests left, {swept}");
             }
             Some(swept.removed() as u64).filter(|n| *n > 0)
         }

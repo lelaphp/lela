@@ -481,15 +481,80 @@ pub struct Recipe {
 
 impl Recipe {
     /// `program`'s environment as the recipe has it: cleared where
-    /// `env_clear` says, then `[recipe.env]`, so nothing of the shell's
-    /// reaches what it runs. Every process the harness runs under the
-    /// recipe starts this way, the oracle and the linked engine alike.
-    pub(crate) fn environ<'c>(&self, program: &'c mut Command) -> &'c mut Command {
+    /// `env_clear` says, then `[recipe.env]` as this run gives it
+    /// ([`Recipe::environment`]), so nothing of the shell's reaches what it
+    /// runs. Every process the harness runs under the recipe starts this
+    /// way, the oracle and the linked engine alike.
+    pub(crate) fn environ<'c>(&self, program: &'c mut Command) -> Result<&'c mut Command> {
         if self.env_clear {
             program.env_clear();
         }
-        program.envs(&self.env)
+        Ok(program.envs(self.environment()?))
     }
+
+    /// `[recipe.env]` as this run's programs get it: [`RUN`] in a value is
+    /// the run's own directory ([`run_dir`]), and the directory such a
+    /// value names is laid down the first time it is named, with an empty
+    /// `.php_history` in the one `HOME` names, so no program reaches the
+    /// user's own home or temporary directory (#1705, #1730).
+    pub(crate) fn environment(&self) -> Result<BTreeMap<String, String>> {
+        let mut env = self.env.clone();
+        for (name, value) in &mut env {
+            if !value.contains(RUN) {
+                continue;
+            }
+            *value = value.replace(RUN, &run_dir()?.display().to_string());
+            match fs::create_dir(&*value) {
+                Ok(()) if name == "HOME" => {
+                    let history = Path::new(&*value).join(".php_history");
+                    fs::write(&history, "")
+                        .map_err(|err| scratch::made(err, &history, "laying down"))?;
+                }
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => return Err(scratch::made(err, Path::new(&*value), "laying down")),
+            }
+        }
+        Ok(env)
+    }
+}
+
+/// What a value of `[recipe.env]` names the run's own directory by, as a
+/// test's `--ENV--` names the scratch one `{TMP}` (#1730).
+pub(crate) const RUN: &str = "{RUN}";
+
+/// The run's own directory, one per harness process: a scratch tree made
+/// the first time a program names it ([`Recipe::environment`]) and
+/// removed when the run ends ([`run_ended`]), or, where the process is
+/// killed first, by the next run's sweep. It stands under `/tmp` and not
+/// the temporary directory: a test binds a unix socket to a name
+/// `tempnam(sys_get_temp_dir(), ...)` makes, and macOS's per-user
+/// temporary directory, 57 bytes resolved, leaves too few of a socket
+/// path's 104 for the run's directory and the name (`sapi/cli`'s
+/// 022.phpt).
+static RUN_DIR: Mutex<Option<Tree>> = Mutex::new(None);
+
+/// Where the run's own directory stands, made now if no program has
+/// named it yet.
+pub(crate) fn run_dir() -> Result<PathBuf> {
+    let mut held = RUN_DIR.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(tree) = &*held {
+        return Ok(tree.path().to_path_buf());
+    }
+    // The process id at the widest any platform numbers one, so the path
+    // is of one length whatever process runs.
+    let tree = Tree::under(Path::new("/tmp"), &format!("run-{:07}", std::process::id()))?;
+    let path = tree.path().to_path_buf();
+    *held = Some(tree);
+    Ok(path)
+}
+
+/// The run's own directory removed, as the run ends.
+pub(crate) fn run_ended() {
+    RUN_DIR
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1327,7 +1392,7 @@ impl<'a> Oracle<'a> {
             .args(call.args)
             .current_dir(call.cwd.unwrap_or(&scratch.dir))
             .process_group(0);
-        recipe.environ(&mut cmd);
+        recipe.environ(&mut cmd)?;
         for (name, value) in call.env {
             if value.is_empty() {
                 cmd.env_remove(name);

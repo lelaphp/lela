@@ -40,8 +40,8 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result};
 
@@ -106,17 +106,33 @@ impl Tree {
     /// compares paths would compare two spellings of one directory.
     pub fn new(name: &str) -> Result<Tree> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        static SWEPT: Once = Once::new();
-
-        // Before this process's first tree, and so before there is one of
-        // ours to mistake for a dead run's.
-        SWEPT.call_once(|| reap(&std::env::temp_dir()));
-
-        let named = std::env::temp_dir().join(format!(
-            "{PREFIX}{name}-{}-{}",
+        let unique = format!(
+            "{name}-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        );
+        Tree::under(&std::env::temp_dir(), &unique)
+    }
+
+    /// The tree `xtask-<name>` under `base` and not the temporary
+    /// directory, `name` the caller's to make unique: where a path a
+    /// program is handed must stay short and of one length, as a unix
+    /// socket's must and as a witness's memory count reads it (`run_dir`,
+    /// #1730). `base` is swept as the temporary directory is.
+    pub(crate) fn under(base: &Path, name: &str) -> Result<Tree> {
+        static SWEPT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+        // Before this process's first tree under `base`, and so before
+        // there is one of ours there to mistake for a dead run's.
+        {
+            let mut swept = SWEPT.lock().unwrap_or_else(PoisonError::into_inner);
+            if !swept.iter().any(|done| done == base) {
+                reap(base);
+                swept.push(base.to_path_buf());
+            }
+        }
+
+        let named = base.join(format!("{PREFIX}{name}"));
         let keep = std::env::var_os(KEEP).is_some_and(|v| !v.is_empty());
 
         // The lock is taken before the directory exists, so a sweep in

@@ -61,6 +61,7 @@ pub mod scratch;
 mod sources;
 pub mod status;
 pub mod steer;
+mod sysv;
 mod tally;
 pub mod test;
 pub mod ticket;
@@ -99,7 +100,9 @@ pub(crate) fn built_root() -> PathBuf {
 /// neither done nor undone: 3, so a caller can tell it from a refusal
 /// that changed nothing, which is 1.
 pub fn run() -> ExitCode {
-    match command_line() {
+    let ran = command_line();
+    oracle::run_ended();
+    match ran {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("xtask: {err:#}");

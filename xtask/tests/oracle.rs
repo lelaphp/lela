@@ -111,7 +111,7 @@ fn the_load_number_after_extension_is_the_pins_token_in_both_streams() {
 #[test]
 fn a_snippet_gives_the_bytes_php_gives_by_hand_under_the_recipe() {
     let Some(pin) = pin() else { return };
-    let snippet = r#"var_dump(ini_get("precision"), ini_get("date.timezone"), getenv("LANG"), getenv("HOME"), error_reporting());"#;
+    let snippet = r#"var_dump(ini_get("precision"), ini_get("date.timezone"), getenv("LANG"), getenv("PATH"), error_reporting());"#;
     let out = pin.oracle().run(Program::Snippet(snippet), None).unwrap();
 
     // By hand: the recipe's arguments and ini as `-d`, the environment

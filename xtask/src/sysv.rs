@@ -1,18 +1,20 @@
-//! What a subset's tests leave of System V IPC, removed after the subset
-//! (#1412). A test that creates a shared memory segment, a semaphore set or
-//! a message queue and ends before it removes it, as `shmop`'s private
+//! What a lane's programs leave of System V IPC, removed after them: a
+//! phpt subset's tests (#1412) and a witness run's fences (#2115). A test
+//! that creates a shared memory segment, a semaphore set or a message
+//! queue and ends before it removes it, as `shmop`'s private
 //! segments do under php itself, leaves the object standing after its
 //! process is gone, and the kernel's tables are small: macOS allows 32
 //! segments (`kern.sysv.shmmni`) and about 40 queues, so a day of runs
 //! fills them and every later `shmop_open`, `shm_attach` or
 //! `msg_get_queue` fails with "No space left on device".
 //!
-//! **Whose an object is.** An object is the run's when the kernel names a
+//! **Whose an object is.** An object is a subset's when the kernel names a
 //! process the run spawned on it, and never by its key, so a database or
 //! any other program on the machine is never touched: a segment by its
-//! creator, a queue by its last sender or receiver, and a semaphore set by
-//! the last process to operate on any of its semaphores, the kernel keeping
-//! no creator for those two. Beside that it is new since the subset began,
+//! creator and the last process to attach or detach it, a queue by its
+//! last sender or receiver, and a semaphore set by the last process to
+//! operate on any of its semaphores, the kernel keeping no creator for
+//! those two. Beside that it is new since the subset began,
 //! so an object a recycled process id created before the run is not the
 //! run's; nothing is attached to it; and no process the kernel names on it
 //! is alive, so one another program still holds is left to it. The
@@ -34,6 +36,24 @@
 //! as one of the subset's programs ran, which nothing but its maker could
 //! ever address. Any other new object that names no process stands, and
 //! the run counts it apart from those it removed.
+//!
+//! **A witness run's.** The witness lane serves most fences in the
+//! harness's own process, through the linked engine, and the oracle's
+//! beside it, so the processes a fence's objects name are not the lane's
+//! to list ahead. A witness run instead holds a [`Claim`]: a file in the
+//! user's claims directory, locked for as long as the run lives and
+//! written to as each fence starts and ends. An object is the run's when
+//! it is private, the runner's, attached to nothing, names no process
+//! still alive ([`forsaken`]), and was made inside the claim's window,
+//! from the claim's making to its settling. A run killed before it
+//! settles leaves its claim with the lock released, however it ended, as
+//! a scratch tree's lock is ([`crate::scratch`]); the next witness run
+//! takes it before it starts ([`reclaim`]), its window ending a recipe's
+//! timeout past the claim's last write, since a fence in flight may run
+//! that long after it. The same sweep takes every private segment of the
+//! runner's that is forsaken and names a process, a dead creator's that
+//! nothing attaches, which a phpt run killed before its sweep leaves too:
+//! the segments are the table that fills first (#2115).
 //!
 //! **On Linux.** The System V subsets run in a private IPC namespace where
 //! `unshare` permits, so nothing they make outlives its program, and the
@@ -59,11 +79,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::oracle::{Programs, Ran};
 
@@ -114,8 +136,9 @@ pub(crate) struct Object {
     pub kind: Kind,
     pub id: u64,
     /// The processes the kernel names on it, none of them zero: a
-    /// segment's creator, a queue's last sender and receiver, the last
-    /// process to operate on each semaphore of a set.
+    /// segment's creator and the last to attach or detach it, a queue's
+    /// last sender and receiver, the last process to operate on each
+    /// semaphore of a set.
     pub named: BTreeSet<u32>,
     /// The processes attached to a segment; none for the other kinds.
     pub attached: u64,
@@ -185,8 +208,8 @@ impl Standing {
     }
 
     /// What `ipcs -a` printed, read by each section's header line: an
-    /// object's processes are a segment's `CPID` and a queue's `LSPID` and
-    /// `LRPID`, its attached count a segment's `NATTCH`; a semaphore set
+    /// object's processes are a segment's `CPID` and `LPID` and a queue's
+    /// `LSPID` and `LRPID`, its attached count a segment's `NATTCH`; a semaphore set
     /// names none here, `ipcs` printing none, until [`Standing::now`]
     /// reads them. Every kind's `KEY`, `CREATOR` and `CTIME` are read
     /// alike. A line of no section is not an object.
@@ -227,7 +250,7 @@ impl Standing {
                     // line's last.
                     let ctime = fields.last().and_then(|t| second_of_day(t)).map(Ctime::Day);
                     let (named, attached): (&[&str], _) = match kind {
-                        Kind::Memory => (&["CPID"], column("NATTCH").unwrap_or(0)),
+                        Kind::Memory => (&["CPID", "LPID"], column("NATTCH").unwrap_or(0)),
                         Kind::Queue => (&["LSPID", "LRPID"], 0),
                         Kind::Semaphores => (&[], 0),
                     };
@@ -272,15 +295,15 @@ impl Standing {
 
     /// What `/proc/sysvipc/shm`, `msg` and `sem` print, each read by its
     /// header line as [`Standing::parse`] reads `ipcs`: a segment's `cpid`
-    /// and a queue's `lspid` and `lrpid` are its processes, a segment's
-    /// `nattch` its attached count; the key is the signed decimal the
-    /// kernel prints, the creator the `cuid`, and `ctime` seconds since the
-    /// epoch. A semaphore set names no process here either.
+    /// and `lpid` and a queue's `lspid` and `lrpid` are its processes, a
+    /// segment's `nattch` its attached count; the key is the signed
+    /// decimal the kernel prints, the creator the `cuid`, and `ctime`
+    /// seconds since the epoch. A semaphore set names no process here either.
     pub(crate) fn of_proc(shm: &str, msg: &str, sem: &str) -> Standing {
         let mut objects = Vec::new();
         for (kind, listed, id, named) in [
             (Kind::Queue, msg, "msqid", &["lspid", "lrpid"][..]),
-            (Kind::Memory, shm, "shmid", &["cpid"][..]),
+            (Kind::Memory, shm, "shmid", &["cpid", "lpid"][..]),
             (Kind::Semaphores, sem, "semid", &[][..]),
         ] {
             let mut lines = listed.lines();
@@ -494,11 +517,40 @@ fn seconds(time: SystemTime, up: bool) -> i64 {
     }
 }
 
+/// Whether `object` is `runner`'s, made under `IPC_PRIVATE`, attached to
+/// nothing, and names no process `alive` says still runs: one nothing but
+/// its id reaches, and that no living process the kernel names holds.
+pub(crate) fn forsaken(object: &Object, runner: &Runner, alive: impl Fn(u32) -> bool) -> bool {
+    object.key == 0
+        && object.attached == 0
+        && runner.made(&object.creator)
+        && !object.named.iter().any(|pid| alive(*pid))
+}
+
+/// Whether `clock` reads `object`'s `CTIME` as a second inside one of
+/// `windows`, each from and to in whole seconds since the epoch.
+fn made_within(object: &Object, windows: &[(i64, i64)], clock: &Clock) -> bool {
+    object.ctime.is_some_and(|ctime| {
+        let made = clock.at(ctime);
+        windows
+            .iter()
+            .any(|(from, to)| *from <= made && made <= *to)
+    })
+}
+
+/// `from` to `to` rounded out to whole seconds since the epoch, a `to` of
+/// none lasting until `clock`'s now.
+fn window(from: SystemTime, to: Option<SystemTime>, clock: &Clock) -> (i64, i64) {
+    (
+        seconds(from, false),
+        to.map_or(clock.now, |to| seconds(to, true)),
+    )
+}
+
 /// The objects of `after` that name no process and are the run's by the
-/// rule Mitchell ruled on #1469 (#1482): new since `before`, nothing
-/// attached, made by `runner` under `IPC_PRIVATE`, at a second inside one
-/// of `runs`, each rounded out to whole seconds, a run not seen to end
-/// lasting until `clock`'s now.
+/// rule Mitchell ruled on #1469 (#1482): new since `before`, forsaken by
+/// `runner`, at a second inside one of `runs`, each rounded out to whole
+/// seconds, a run not seen to end lasting until `clock`'s now.
 pub(crate) fn unnamed_left<'a>(
     before: &Standing,
     after: &'a Standing,
@@ -508,41 +560,62 @@ pub(crate) fn unnamed_left<'a>(
     let stood: BTreeSet<(Kind, u64)> = before.0.iter().map(|o| (o.kind, o.id)).collect();
     let windows: Vec<(i64, i64)> = runs
         .iter()
-        .map(|ran| {
-            let to = ran.to.map_or(clock.now, |to| seconds(to, true));
-            (seconds(ran.from, false), to)
-        })
+        .map(|ran| window(ran.from, ran.to, clock))
         .collect();
     after
         .0
         .iter()
         .filter(|o| !stood.contains(&(o.kind, o.id)))
-        .filter(|o| o.named.is_empty() && o.attached == 0)
-        .filter(|o| o.key == 0 && runner.made(&o.creator))
-        .filter(|o| {
-            o.ctime.is_some_and(|ctime| {
-                let made = clock.at(ctime);
-                windows
-                    .iter()
-                    .any(|(from, to)| *from <= made && made <= *to)
-            })
-        })
+        .filter(|o| o.named.is_empty() && forsaken(o, runner, |_| false))
+        .filter(|o| made_within(o, &windows, clock))
         .collect()
 }
 
-/// What one sweep did: the objects it removed by kind, how many of those
-/// named no process, and the new ones it left because the kernel names no
-/// process on them and the rule for those does not take them.
+/// The objects of `standing` a witness run's claims over `windows` take
+/// (#2115): each forsaken by `runner`, as `alive` reads the processes it
+/// names, and made inside one of the windows.
+pub(crate) fn claimed<'a>(
+    standing: &'a Standing,
+    windows: &[(i64, i64)],
+    (runner, clock): (&Runner, &Clock),
+    alive: impl Fn(u32) -> bool,
+) -> Vec<&'a Object> {
+    standing
+        .0
+        .iter()
+        .filter(|o| forsaken(o, runner, &alive) && made_within(o, windows, clock))
+        .collect()
+}
+
+/// The segments of `standing` forsaken by `runner` that name a process:
+/// private ones nothing attaches whose creator and last user are dead,
+/// whatever run made them (#2115).
+pub(crate) fn abandoned<'a>(
+    standing: &'a Standing,
+    runner: &Runner,
+    alive: impl Fn(u32) -> bool,
+) -> Vec<&'a Object> {
+    standing
+        .0
+        .iter()
+        .filter(|o| o.kind == Kind::Memory && !o.named.is_empty() && forsaken(o, runner, &alive))
+        .collect()
+}
+
+/// What one sweep did: the objects it removed, each kind's ids in the
+/// order removed, how many of those named no process, and the new ones it
+/// left because the kernel names no process on them and the rule for
+/// those does not take them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Swept {
-    pub removed: BTreeMap<Kind, usize>,
+    pub removed: BTreeMap<Kind, Vec<u64>>,
     pub unnamed_removed: usize,
     pub unnamed: usize,
 }
 
 impl Swept {
     pub(crate) fn removed(&self) -> usize {
-        self.removed.values().sum()
+        self.removed.values().map(Vec::len).sum()
     }
 }
 
@@ -551,13 +624,14 @@ impl fmt::Display for Swept {
         let kinds: Vec<String> = Kind::ALL
             .iter()
             .filter_map(|kind| {
-                let n = *self.removed.get(kind)?;
-                Some(format!("{n} {}", kind.noun(n)))
+                let ids = self.removed.get(kind)?;
+                let ids: Vec<String> = ids.iter().map(u64::to_string).collect();
+                Some(format!("{} {}", kind.noun(ids.len()), ids.join(" ")))
             })
             .collect();
         write!(
             f,
-            "removed {} System V object{} its tests left",
+            "removed {} System V object{}",
             self.removed(),
             crate::reading::plural(self.removed())
         )?;
@@ -567,7 +641,7 @@ impl fmt::Display for Swept {
         if self.unnamed_removed > 0 {
             write!(
                 f,
-                ", {} of them naming no process, the runner's, private and made while one of the subset's programs ran",
+                ", {} of them naming no process, the runner's, private and made while one of the run's programs ran",
                 self.unnamed_removed
             )?;
         }
@@ -586,9 +660,7 @@ impl fmt::Display for Swept {
 }
 
 /// Remove what the programs of `spawned` left since `before`, read again
-/// now, and say what was done: each object by an `ipcrm` of its own, so
-/// one that another run's sweep took in the moment between is passed over
-/// and not the whole sweep refused (#1582).
+/// now, and say what was done.
 pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
     let clock = Clock::now()?;
     let after = Standing::now()?;
@@ -601,26 +673,38 @@ pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
         .filter(|o| o.named.is_empty() && !stood.contains(&(o.kind, o.id)))
         .count();
     let mut swept = Swept {
-        unnamed_removed: unnamed_gone.len(),
         unnamed: unnamed - unnamed_gone.len(),
         ..Swept::default()
     };
     gone.extend(unnamed_gone);
+    remove(gone, &mut swept)?;
+    Ok(swept)
+}
+
+/// Each of `objects` removed by an `ipcrm` of its own and counted into
+/// `swept`, so one that another run's sweep took in the moment between is
+/// passed over and not the whole sweep refused (#1582).
+fn remove(objects: Vec<&Object>, swept: &mut Swept) -> Result<()> {
     let mut refused = Vec::new();
-    for object in gone {
+    for object in objects {
         let removed = Command::new("ipcrm")
             .arg(object.kind.flag())
             .arg(object.id.to_string())
             .output()
             .context("running ipcrm")?;
         if removed.status.success() {
-            *swept.removed.entry(object.kind).or_default() += 1;
+            swept
+                .removed
+                .entry(object.kind)
+                .or_default()
+                .push(object.id);
+            swept.unnamed_removed += usize::from(object.named.is_empty());
         } else {
             refused.push((object, removed));
         }
     }
     if refused.is_empty() {
-        return Ok(swept);
+        return Ok(());
     }
     // An object `ipcrm` refused that is no longer standing was removed in
     // the moment between: by another run's sweep on the machine, which the
@@ -642,9 +726,121 @@ pub(crate) fn sweep(before: &Standing, spawned: &Programs) -> Result<Swept> {
                 String::from_utf8_lossy(&removed.stderr).trim()
             );
         }
-        if object.named.is_empty() {
-            swept.unnamed_removed = swept.unnamed_removed.saturating_sub(1);
+    }
+    Ok(())
+}
+
+/// Where the user's claims stand: one directory under the temporary one,
+/// read by every run that shares it.
+fn claims() -> PathBuf {
+    std::env::temp_dir().join("xtask-sysv-claims")
+}
+
+/// What a claim is named while its lock is being taken, a name
+/// [`reclaim`] passes over, as a scratch tree's is ([`crate::scratch`]).
+const TAKING: &str = "taking";
+
+/// A witness run's claim on the System V objects made while it runs
+/// (#2115): a file of the claims directory, locked for as long as this
+/// value lives, which the run writes to as it goes. Settled, what the run
+/// left is removed and the file goes; a run that ends without settling
+/// leaves the file with its lock released, for the next run's
+/// [`reclaim`].
+#[derive(Debug)]
+pub(crate) struct Claim {
+    path: PathBuf,
+    _lock: File,
+    from: SystemTime,
+}
+
+impl Claim {
+    /// A claim of `lane`'s, from now.
+    pub(crate) fn new(lane: &str) -> Result<Claim> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = claims();
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join(format!(
+            "{lane}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let taking = path.with_extension(TAKING);
+        let from = SystemTime::now();
+        let lock = File::create(&taking)
+            .with_context(|| format!("creating the claim {}", taking.display()))?;
+        lock.try_lock()
+            .map_err(|_| anyhow!("the claim {} is held by another run", taking.display()))?;
+        fs::rename(&taking, &path)
+            .with_context(|| format!("naming the claim {}", path.display()))?;
+        Ok(Claim {
+            path,
+            _lock: lock,
+            from,
+        })
+    }
+
+    /// The claim's file, which the run writes to as it goes.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// What the run left removed: every object forsaken by the runner and
+    /// made from the claim's making until now. The claim goes with it.
+    pub(crate) fn settle(self) -> Result<Swept> {
+        let clock = Clock::now()?;
+        let standing = Standing::now()?;
+        let windows = [window(self.from, None, &clock)];
+        let mut swept = Swept::default();
+        remove(
+            claimed(&standing, &windows, (&Runner::now(), &clock), alive),
+            &mut swept,
+        )?;
+        fs::remove_file(&self.path).ok();
+        Ok(swept)
+    }
+}
+
+/// What runs that ended without settling their claims left, removed
+/// before a run starts (#2115): each such claim's window from its making
+/// to `grace` past its last write, and every segment [`abandoned`]. The
+/// claims go with it; a claim whose lock will not come is a run still
+/// going, and is passed over.
+pub(crate) fn reclaim(grace: Duration) -> Result<Swept> {
+    let mut ended = Vec::new();
+    for entry in fs::read_dir(claims()).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == TAKING) {
+            continue;
         }
+        let Ok(file) = File::options().write(true).open(&path) else {
+            continue;
+        };
+        let Ok(meta) = file.metadata() else {
+            continue;
+        };
+        if file.try_lock().is_err() {
+            continue;
+        }
+        let Ok(last) = meta.modified() else {
+            continue;
+        };
+        ended.push((path, meta.created().unwrap_or(last), last + grace, file));
+    }
+    let clock = Clock::now()?;
+    let standing = Standing::now()?;
+    let runner = Runner::now();
+    let windows: Vec<(i64, i64)> = ended
+        .iter()
+        .map(|(_, from, to, _)| window(*from, Some(*to), &clock))
+        .collect();
+    let mut gone = claimed(&standing, &windows, (&runner, &clock), alive);
+    gone.extend(abandoned(&standing, &runner, alive));
+    let mut seen = BTreeSet::new();
+    gone.retain(|o| seen.insert((o.kind, o.id)));
+    let mut swept = Swept::default();
+    remove(gone, &mut swept)?;
+    for (path, ..) in ended {
+        fs::remove_file(path).ok();
     }
     Ok(swept)
 }

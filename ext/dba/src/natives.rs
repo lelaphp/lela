@@ -100,12 +100,13 @@ pub(crate) fn dba_popen(
 /// dba_open(): Argument #5 ($map_size) must be greater than or equal to 0
 /// dba_open(): Argument #6 ($flags) must be greater than or equal to 0
 ///
-/// Warning: dba_open(): Driver initialization failed for handler: flatfile: Unable to establish lock in %s on line 12
+/// Warning: dba_open(): Driver initialization failed for handler: flatfile: Unable to establish lock (database file already open) in %s on line 12
+///
+/// Warning: dba_open(): Driver initialization failed for handler: flatfile: Unable to establish lock (database file already open) in %s on line 12
 ///
 /// Warning: dba_open(): Handler flatfile doesn't uses locking for this mode which makes modifier t (test lock) obsolete in %s on line 12
 /// bool(false)
-/// object(Dba\Connection)#3 (0) {
-/// }
+/// bool(false)
 /// bool(false)
 ///
 /// Warning: dba_open(): Driver initialization failed for handler: cdb: Update operations are not supported in %s on line 14
