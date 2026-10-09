@@ -14,39 +14,14 @@ use php_ext::values::{Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::State;
 use crate::ffi::{Easy, Hook};
 
-/// A callable kept past the call it was given to, `zend_fcc_dup`: the
-/// resolved callee and the value it came from, one owner of the value.
-pub(crate) struct Handler {
-    pub(crate) callable: Callable,
-    value: Value,
-}
+/// A callable kept past the call it was given to, `zend_fcc_dup`
+/// (`Z/ext/curl/interface.c:1224`, `multi.c:493`): its value's owner and
+/// the receiver's it resolved to; given up as `zend_fcc_dtor` gives it.
+pub(crate) type Handler = Owner<Callable>;
 
-impl Handler {
-    /// The callable and one more owner of `value`.
-    pub(crate) fn keep(req: &Request, callable: Callable, value: &Value) -> Handler {
-        let value = value.deref();
-        req.addref(&value);
-        Handler { callable, value }
-    }
-
-    /// `zend_fcc_dup`.
-    pub(crate) fn dup(&self, req: &Request) -> Handler {
-        req.addref(&self.value);
-        Handler {
-            callable: self.callable.clone(),
-            value: self.value,
-        }
-    }
-
-    /// The value the callable came from.
-    pub(crate) fn value(&self) -> Value {
-        self.value
-    }
-
-    /// `zend_fcc_dtor`.
-    pub(crate) fn release(self, req: &mut Request) {
-        req.release(self.value);
-    }
+/// Another owner of what `handler` keeps, `zend_fcc_dup` of a copy.
+pub(crate) fn dup(req: &Request, handler: &Handler) -> Handler {
+    Owner::take(req, Callable::clone(handler))
 }
 
 /// `ch->handlers.write->method`: where the body goes.
@@ -101,14 +76,14 @@ impl<M: Copy> Channel<M> {
         }
         Channel {
             to: self.to,
-            handler: self.handler.as_ref().map(|handler| handler.dup(req)),
+            handler: self.handler.as_ref().map(|handler| dup(req, handler)),
             stream: self.stream,
         }
     }
 
     fn release(self, req: &mut Request) {
         if let Some(handler) = self.handler {
-            handler.release(req);
+            handler.give_up(req);
         }
         if let Some(stream) = self.stream {
             req.release(stream);
@@ -171,7 +146,7 @@ impl Curl {
         self.header.release(req);
         self.read.release(req);
         for handler in self.hooks.into_iter().flatten() {
-            handler.release(req);
+            handler.give_up(req);
         }
         for value in [self.stderr, self.postfields, self.private]
             .into_iter()
@@ -265,14 +240,14 @@ impl ObjectHandlers for Handlers {
         ];
         for (handler, stream) in channels {
             if let Some(handler) = handler {
-                visit(handler.value);
+                handler.visit(visit);
             }
             if let Some(stream) = stream {
                 visit(*stream);
             }
         }
         for handler in curl.hooks.iter().flatten() {
-            visit(handler.value);
+            handler.visit(visit);
         }
         for value in [curl.postfields, curl.stderr, curl.private]
             .into_iter()
@@ -395,7 +370,7 @@ pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl
         Some(from) => from
             .hooks
             .iter()
-            .map(|hook| hook.as_ref().map(|handler| handler.dup(req)))
+            .map(|hook| hook.as_ref().map(|handler| dup(req, handler)))
             .collect(),
         None => Vec::new(),
     };
@@ -660,7 +635,7 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
     curl.write.to = WriteTo::Stdout;
     curl.header.to = HeaderTo::Ignore;
     curl.read.to = ReadFrom::Direct;
-    let mut released: Vec<Value> = [
+    let released: Vec<Value> = [
         curl.write.stream.take(),
         curl.header.stream.take(),
         curl.read.stream.take(),
@@ -670,11 +645,11 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
     .flatten()
     .collect();
     let hooks: Vec<Handler> = curl.hooks.iter_mut().filter_map(Option::take).collect();
-    for handler in hooks {
-        released.push(handler.value);
-    }
     for value in released {
         req.release(value);
+    }
+    for handler in hooks {
+        handler.give_up(req);
     }
 }
 

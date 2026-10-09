@@ -46,9 +46,9 @@ enum Mode {
 struct Function {
     /// The name an expression calls it by.
     name: Vec<u8>,
-    callable: Callable,
-    /// The value `callable` was read off, the namespace's owner of it.
-    value: Owner<Value>,
+    /// The callable, kept as php keeps the entry's
+    /// `zend_fcall_info_cache` (`Z/ext/dom/xpath_callbacks.c:32-34`).
+    callable: Owner<Callable>,
 }
 
 /// `php_dom_xpath_callback_ns`: one namespace's `functions` table,
@@ -66,7 +66,7 @@ impl Namespace {
     /// in the place it already held, the owner it replaces let go of.
     fn insert(&mut self, req: &mut Request, function: Function) {
         if let Some(slot) = self.functions.iter_mut().find(|f| f.name == function.name) {
-            std::mem::replace(slot, function).value.give_up(req);
+            std::mem::replace(slot, function).callable.give_up(req);
         } else {
             self.functions.push(function);
         }
@@ -77,7 +77,7 @@ impl Namespace {
         self.functions
             .iter()
             .find(|f| f.name == name)
-            .map(|f| &f.callable)
+            .map(|f| &*f.callable)
     }
 
     /// `php_dom_xpath_callback_ns_update_method_handler`: each entry of
@@ -94,7 +94,7 @@ impl Namespace {
             // conversion may serve `__toString`.
             walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
                 let value = *row.value();
-                let (callable, owner) = callable_of(req, &value, 1, true)?;
+                let callable = callable_of(req, &value, 1, true)?;
                 let name = match row.key() {
                     Key::Str(s) => Ok(s.as_bytes().to_vec()),
                     Key::Int(_) => with_string(req, &value, <[u8]>::to_vec),
@@ -102,21 +102,16 @@ impl Namespace {
                 let name = match name {
                     Ok(name) if Validation::Nulls.holds(&name) => name,
                     Ok(_) => {
-                        owner.give_up(req);
+                        callable.give_up(req);
                         let tail = "be an array containing valid callback names";
                         return Err(arg_value_error(req, 1, tail));
                     }
                     Err(thrown) => {
-                        owner.give_up(req);
+                        callable.give_up(req);
                         return Err(thrown);
                     }
                 };
-                let function = Function {
-                    name,
-                    callable,
-                    value: owner,
-                };
-                self.insert(req, function);
+                self.insert(req, Function { name, callable });
                 Ok(std::ops::ControlFlow::Continue(()))
             })?;
         } else {
@@ -127,15 +122,8 @@ impl Namespace {
             if !Validation::Nulls.holds(&name) {
                 return Err(arg_value_error(req, 1, "be a valid callback name"));
             }
-            let (callable, value) = callable_of(req, &restrict, 1, false)?;
-            self.insert(
-                req,
-                Function {
-                    name,
-                    callable,
-                    value,
-                },
-            );
+            let callable = callable_of(req, &restrict, 1, false)?;
+            self.insert(req, Function { name, callable });
         }
         self.mode = Mode::Set;
         Ok(())
@@ -200,7 +188,7 @@ impl XPathCallbacks {
             .chain(self.namespaces.into_iter().map(|(_, n)| n));
         for namespace in namespaces {
             for function in namespace.functions {
-                function.value.give_up(req);
+                function.callable.give_up(req);
             }
         }
         for value in self.node_list {
@@ -213,7 +201,7 @@ impl XPathCallbacks {
         let namespaces = self.php_ns.as_deref().into_iter();
         for namespace in namespaces.chain(self.namespaces.iter().map(|(_, n)| n)) {
             for function in &namespace.functions {
-                visit(*function.value);
+                function.callable.visit(visit);
             }
         }
         for value in &self.node_list {
@@ -257,7 +245,7 @@ impl XPathCallbacks {
         if !Validation::NcName.holds(name) {
             return Err(arg_value_error(req, 2, "be a valid callback name"));
         }
-        let (callable, value) = callable_of(req, callable, 3, false)?;
+        let callable = callable_of(req, callable, 3, false)?;
         let at = if let Some(at) = self.namespaces.iter().position(|(n, _)| n == ns) {
             at
         } else {
@@ -266,14 +254,7 @@ impl XPathCallbacks {
         };
         let namespace = &mut self.namespaces[at].1;
         let name = name.to_vec();
-        namespace.insert(
-            req,
-            Function {
-                name,
-                callable,
-                value,
-            },
-        );
+        namespace.insert(req, Function { name, callable });
         namespace.mode = Mode::Set;
         Ok(())
     }
@@ -747,16 +728,16 @@ fn node_list(
     crate::node_set(req, class, array)
 }
 
-/// One callable the registration read, with the value it came from, one
-/// owner taken.
+/// One callable the registration read, kept: `zend_fcc_dup`'s owners
+/// of its value and of the receiver it resolved to.
 fn callable_of(
     req: &mut Request,
     value: &Value,
     position: u32,
     is_array: bool,
-) -> Result<(Callable, Owner<Value>), Thrown> {
+) -> Result<Owner<Callable>, Thrown> {
     match callable_checked(req, value) {
-        Ok(c) => Ok((c, Owner::take(req, *value))),
+        Ok(c) => Ok(Owner::take(req, c)),
         Err(why) => {
             let tail = if is_array {
                 format!("be an array with valid callbacks as values, {why}")
@@ -1049,6 +1030,33 @@ impl DOMXPath {
     /// ```expect
     /// string(2) "xx"
     /// DOMXPath::registerPhpFunctionNS(): Argument #1 ($namespaceURI) must not be "http://php.net/xpath" because it is reserved by PHP
+    /// ```
+    ///
+    /// A function registered here or through `registerPhpFunctions` is
+    /// kept as php keeps its `zend_fcall_info_cache`: a `'Class::method'`
+    /// string registered with `$this` in scope keeps the object it
+    /// resolved to until the evaluator lets it go.
+    ///
+    /// ```php
+    /// class A {
+    ///     function f() { return 'x'; }
+    ///     function go() {
+    ///         $x = new DOMXPath(new DOMDocument);
+    ///         $x->registerPhpFunctionNS('urn:a', 'f', 'A::f');
+    ///         $x->registerPhpFunctions(['g' => 'A::f']);
+    ///         return $x;
+    ///     }
+    ///     function __destruct() { echo "dtor\n"; }
+    /// }
+    /// $x = (new A)->go();
+    /// echo "kept\n";
+    /// unset($x);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// kept
+    /// dtor
+    /// end
     /// ```
     fn registerPhpFunctionNS(
         req: &mut Request,

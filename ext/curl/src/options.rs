@@ -10,7 +10,7 @@ use php_ext::coerce::{callable_checked, to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::{Cast, Request, Stream};
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::constants as c;
 use crate::ffi::{CFile, Easy, Hook, Slist};
@@ -436,7 +436,7 @@ fn callable(
         return Ok(None);
     }
     match callable_checked(req, &value) {
-        Ok(callable) => Ok(Some(Handler::keep(req, callable, &value))),
+        Ok(callable) => Ok(Some(Owner::take(req, callable))),
         Err(refusal) => {
             php_ext::raising::pending(req)?;
             let position = if in_array { 2 } else { 3 };
@@ -468,7 +468,7 @@ fn set_channel(
         }
     };
     if let Some(old) = old {
-        old.release(req);
+        old.give_up(req);
     }
     let handler = callable(req, value, option, in_array);
     let curl = payload(req, object)?;
@@ -513,7 +513,7 @@ fn set_hook(
     in_array: bool,
 ) -> Set {
     if let Some(old) = payload(req, object)?.hook_mut(hook).take() {
-        old.release(req);
+        old.give_up(req);
     }
     let handler = callable(req, value, option, in_array)?;
     *payload(req, object)?.hook_mut(hook) = handler;
@@ -847,6 +847,31 @@ pub(crate) fn setopt(
 ///
 /// Notice: curl_setopt(): CURLOPT_SSL_VERIFYHOST no longer accepts the value 1, value 2 will be used instead in %s on line 8
 /// bool(true)
+/// ```
+///
+/// A callable option keeps what php's `zend_fcc_dup` keeps: a
+/// `'Class::method'` string set with `$this` in scope keeps the object
+/// it resolved to for as long as the option keeps the callable.
+///
+/// ```php
+/// class A {
+///     function w($ch, $data) { return strlen($data); }
+///     function go() {
+///         $ch = curl_init();
+///         curl_setopt($ch, CURLOPT_WRITEFUNCTION, 'A::w');
+///         return $ch;
+///     }
+///     function __destruct() { echo "dtor\n"; }
+/// }
+/// $ch = (new A)->go();
+/// echo "kept\n";
+/// unset($ch);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// kept
+/// dtor
+/// end
 /// ```
 #[php_function]
 fn curl_setopt(
