@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use php_compile::StackLimit;
 
-use super::{Forked, Periodic, Receiving, Request};
+use super::{Forked, Periodic, Receiving, Reentry, Request};
 
 /// One request's interrupt (design §5.8; `CONTEXT.md`, Interrupt), as
 /// the thread that raises it sees it: `Send` and `Sync`, and cloned so
@@ -25,10 +25,11 @@ use super::{Forked, Periodic, Receiving, Request};
 pub struct Interrupt(Arc<State>);
 
 impl Interrupt {
-    /// What signal delivery and a periodic interrupt raise it with: the
-    /// loop serves each extension's interrupt hook at its next check,
-    /// which is php's `zend_interrupt_function`, and pcntl's dispatches
-    /// what was delivered to its PHP handlers.
+    /// What signal delivery, a periodic interrupt and a deferred FFI
+    /// callback ([`Reentry`]) raise it with: the loop serves each
+    /// extension's interrupt hook at its next check, which is php's
+    /// `zend_interrupt_function`; pcntl's dispatches what was delivered
+    /// to its PHP handlers, and ffi's serves the callbacks deferred.
     pub fn raise(&self) {
         self.0.raised.store(true, Ordering::Release);
     }
@@ -183,6 +184,20 @@ pub(super) struct Limits {
     /// (`zend_call_stack_init`) from the two `zend.*_stack_size`
     /// entries; what the compiler is held to (design §5.6).
     stack_limit: StackLimit,
+    /// How a function C calls back reaches the request
+    /// ([`Request::reentry`]), made at the first ask and closed as the
+    /// request is dropped.
+    reentry: Option<Arc<Reentry>>,
+}
+
+impl Drop for Limits {
+    /// The request's end, for a thread waiting on it: what is still
+    /// posted is abandoned and returns zero to C (#1640).
+    fn drop(&mut self) {
+        if let Some(reentry) = &self.reentry {
+            reentry.close();
+        }
+    }
 }
 
 impl Limits {
@@ -195,6 +210,7 @@ impl Limits {
             deadlines: crate::interrupt::Deadlines::new(timer, &interrupt),
             interrupt,
             stack_limit: StackLimit::UNCHECKED,
+            reentry: None,
         }
     }
 }
@@ -387,13 +403,50 @@ impl Request {
 
     /// This request's interrupt (design §5.8): what the loop tests at a
     /// back-edge, at a frame's activation, after every `Flow::Resume` and
-    /// after an internal call returns, and what the engine's execution timer and signal
-    /// delivery raise. A `tier.lock` item, because compiled code tests
+    /// after an internal call returns, and what the engine's execution
+    /// timer, signal delivery, a periodic interrupt and a deferred FFI
+    /// callback raise. A `tier.lock` item, because compiled code tests
     /// the same atomic once per loop iteration through the tier's
     /// `ExitCtx` (`jit-design.md` §4.3).
     #[must_use]
     pub fn interrupt(&self) -> &Interrupt {
         &self.limits.interrupt
+    }
+
+    /// How a function C calls back reaches this request (#1638, #1640):
+    /// one per request, made at the first ask, which ext/ffi makes at
+    /// its first call into C or callback, and closed when the request
+    /// ends.
+    pub fn reentry(&mut self) -> Arc<Reentry> {
+        let interrupt = &self.limits.interrupt;
+        Arc::clone(
+            self.limits
+                .reentry
+                .get_or_insert_with(|| Arc::new(Reentry::new(interrupt))),
+        )
+    }
+
+    /// `wait` called with the request lent to a callback C makes from
+    /// another thread meanwhile, which takes it, served on that thread,
+    /// and gives it back before this returns (#1640): what a call into C
+    /// and an engine native that blocks (`sleep`, `usleep`,
+    /// `stream_select`, a blocking read) wait through, so the request
+    /// never waits on C while C waits on the request. `wait` reaches
+    /// nothing of the request, which is borrowed for its length; where
+    /// no [`Reentry`] was made, nothing can call back and nothing is
+    /// lent.
+    pub fn blocking<T>(&mut self, wait: impl FnOnce() -> T) -> T {
+        let Some(reentry) = self.limits.reentry.clone() else {
+            return wait();
+        };
+        let Some(at) = std::num::NonZeroUsize::new(std::ptr::from_mut(self).expose_provenance())
+        else {
+            return wait();
+        };
+        let lending = reentry.lend(at);
+        let waited = wait();
+        reentry.reclaim(lending);
+        waited
     }
 
     /// Each extension's interrupt hook, from the top of the chain: php's

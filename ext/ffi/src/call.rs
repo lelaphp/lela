@@ -15,7 +15,7 @@ use crate::cdata::{Fetch, as_cdata, func_pointee, to_value, type_name, view, wri
 use crate::decls::function_symbol;
 use crate::ffi::{self, ARG_SIZE, Closure, ClosureError, Layout, Signature};
 use crate::types::{Int, Kind, Scalar, TypeId, attr};
-use crate::{State, ffi_error, reentry, types};
+use crate::{State, ffi_error, types};
 
 /// A callback C may call: libffi's closure over the PHP callable, kept
 /// until the request ends as php keeps `FFI_G(callbacks)`.
@@ -174,8 +174,7 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Owne
     };
     let ret_size = types(req).get(shape.ret).size;
     let mut buffer = vec![0u64; ret_size.max(8).div_ceil(8)];
-    let reentry = reentry(req);
-    ffi::call(req, &reentry, &mut sig, addr, &frame.addrs, &mut buffer);
+    ffi::call(req, &mut sig, addr, &frame.addrs, &mut buffer);
     drop(frame.strings);
     if let Some(thrown) = frame.pending {
         return Err(thrown);
@@ -475,7 +474,7 @@ pub(crate) fn create_callback(
     let Some(sig) = Signature::prepare(shape.abi, &ret, &layouts, None) else {
         return Err(ffi_error(req, "Cannot prepare callback CIF"));
     };
-    let reentry = reentry(req);
+    let reentry = req.reentry();
     let index = req.state::<State>().callbacks.len();
     let closure = match Closure::new(sig, reentry, callback, index) {
         Ok(closure) => closure,
@@ -595,11 +594,11 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
 }
 
 /// The calls C made of this request's callbacks while it ran PHP code,
-/// from a signal handler the kernel entered in another extension's
-/// native here, served at the request's interrupt check as pcntl's
-/// dispatch serves the signals delivered: php's handler called PHP
-/// code inside `posix_kill()`, and this one when it returns, which is
-/// the same place in the program. C read a zeroed return and the
+/// served at the request's interrupt check as pcntl's dispatch serves
+/// the signals delivered. A call from a signal handler the kernel
+/// entered in another extension's native here: php's handler called
+/// PHP code inside `posix_kill()`, and this one when it returns, which
+/// is the same place in the program; C read a zeroed return and the
 /// return PHP code makes is dropped, which a signal handler's caller
 /// never reads either.
 ///
@@ -615,14 +614,40 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
 /// caught 30
 /// done
 /// ```
+///
+/// A call from another thread, after the call into C that made it
+/// returned (#1640, #1614): php calls the callable on that thread at
+/// once, concurrently with the request; here the thread waits, the
+/// request serves the call at its next check and hands back the return,
+/// which is one interleaving of php's race. A thread still waiting when
+/// the request blocks in a call into C, `pthread_join` here, or in a
+/// native such as `usleep`, takes the lent request and is served on its
+/// own thread.
+///
+/// ```php
+/// $ffi = FFI::cdef("typedef void *(*start)(void *); int pthread_create(void **t, void *attr, start s, void *a); int pthread_join(void *t, void **r);");
+/// $t = $ffi->new("void *");
+/// $ffi->pthread_create(FFI::addr($t), null, function ($a) { echo "thread\n"; return null; }, null);
+/// $x = 0; for ($i = 0; $i < 3000000; $i++) { $x += $i; }
+/// echo "loop $x\n";
+/// $ffi->pthread_join($t, null);
+/// echo "done\n";
+/// ```
+/// ```expect
+/// thread
+/// loop 4499998500000
+/// done
+/// ```
 #[allow(
     clippy::unnecessary_wraps,
     reason = "the interrupt hook's signature; a throwable a callback leaves is php's fatal, not thrown"
 )]
 pub(crate) fn serve_deferred(req: &mut Request) -> Result<(), Thrown> {
-    let Some(reentry) = req.state::<State>().reentry.clone() else {
+    if req.state::<State>().callbacks.is_empty() {
         return Ok(());
-    };
+    }
+    let reentry = req.reentry();
+    reentry.serve_waiting(|call| ffi::serve_waiting(req, call));
     for mut deferred in reentry.take_deferred() {
         let Some(addrs) = req
             .state::<State>()

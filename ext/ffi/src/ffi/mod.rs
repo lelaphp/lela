@@ -17,7 +17,7 @@ use std::ffi::{CStr, c_char, c_uint, c_ushort, c_void};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use php_ext::request::{DEFERRED_WORDS, Deferred, Reentry, Request};
+use php_ext::request::{DEFERRED_WORDS, Deferred, Lent, Reentry, Request};
 
 mod sys {
     use std::ffi::{c_int, c_uint, c_ushort, c_void};
@@ -478,11 +478,10 @@ fn place(
 
 /// `ffi_call(&cif, target, ret, args)`: the C function at `target`
 /// called with the argument values at `args`, the return written into
-/// `ret`. The request is lent to `reentry` while C runs, for a callback
-/// C makes back into PHP code, and taken back once C returns.
+/// `ret`. The request is lent while C runs ([`Request::blocking`]), for
+/// a callback C makes back into PHP code, and taken back once C returns.
 pub(crate) fn call(
     req: &mut Request,
-    reentry: &Reentry,
     sig: &mut Signature,
     target: usize,
     args: &[usize],
@@ -494,23 +493,15 @@ pub(crate) fn call(
     } else {
         values.as_mut_ptr()
     };
-    let lent = NonZeroUsize::new(std::ptr::from_mut(req).expose_provenance())
-        .map(|at| (at, reentry.lend(at)));
-    // SAFETY: the cif was prepared for exactly these argument values,
-    // each standing across the call, and `ret` holds at least
-    // `sizeof(ffi_arg)` and the return type's size; `target` is the
-    // function the declaration names, as php calls it.
-    unsafe {
-        sys::ffi_call(
-            &raw mut *sig.cif,
-            target as *const c_void,
-            ret.as_mut_ptr().cast(),
-            values,
-        );
-    }
-    if let Some((at, before)) = lent {
-        reentry.reclaim(at, before);
-    }
+    let cif = &raw mut *sig.cif;
+    let ret = ret.as_mut_ptr().cast();
+    req.blocking(|| {
+        // SAFETY: the cif was prepared for exactly these argument values,
+        // each standing across the call, and `ret` holds at least
+        // `sizeof(ffi_arg)` and the return type's size; `target` is the
+        // function the declaration names, as php calls it.
+        unsafe { sys::ffi_call(cif, target as *const c_void, ret, values) };
+    });
     let _ = (&sig.args, &sig.nodes, &sig.lists);
 }
 
@@ -646,15 +637,19 @@ impl Drop for Closure {
 }
 
 /// `zend_ffi_callback_trampoline`'s entry from C: the thunk and the
-/// argument addresses. Where the request is lent, during a call into C,
-/// the callback takes it and calls PHP code at once, as php does. At any
-/// other time C called it from a signal handler that interrupted the
-/// request, or from another thread while the request runs: the first is
-/// deferred, its arguments copied and the return zeroed for C, and
-/// served at the request's interrupt check; the second returns without
-/// calling PHP code, since php would serve the request on two threads at
-/// once. Nothing here allocates outside the lent case, so a signal
-/// handler may enter it.
+/// argument addresses. Where the request is lent, during a call into C
+/// or a native that blocks, the callback takes it and calls PHP code at
+/// once, as php does. At any other time the request runs PHP code, and
+/// C called it from a signal handler that interrupted the request's own
+/// thread, or from another thread. The first is deferred, its arguments
+/// copied and the return zeroed for C, and served at the request's
+/// interrupt check; nothing in it allocates, so a signal handler may
+/// enter it. The second is posted with its arguments where C passed
+/// them and the thread held until the request serves it at its check,
+/// or lends itself, or ends, when C reads zero (#1640): php calls the
+/// callable on that thread at once, concurrently with the request, and
+/// a call served at the request's next check is one interleaving that
+/// race allows.
 extern "C" fn enter(
     _cif: *mut sys::Cif,
     ret: *mut c_void,
@@ -671,16 +666,9 @@ extern "C" fn enter(
         // cif the closure was prepared with.
         unsafe { std::slice::from_raw_parts(args, thunk.arity) }
     };
-    if let Some(at) = thunk.reentry.take_lent() {
-        let addrs: Vec<usize> = addrs.iter().map(|addr| *addr as usize).collect();
-        // SAFETY: `call` lent the request's address, exposed from the
-        // `&mut Request` it holds and uses no further until C returns and
-        // it takes the address back, which waits for `give_back`. The swap
-        // in `take_lent` hands it to this callback alone, so this is the
-        // one reference to the request until then.
-        let req = unsafe { &mut *std::ptr::with_exposed_provenance_mut::<Request>(at.get()) };
-        (thunk.callback)(req, thunk.data, ret as usize, &addrs);
-        thunk.reentry.give_back(at);
+    if let Some(lent) = thunk.reentry.take_lent() {
+        serve_lent(&lent, thunk.callback, thunk.data, ret, addrs);
+        thunk.reentry.give_back(lent);
         return;
     }
     if thunk.returns != 0 {
@@ -688,7 +676,24 @@ extern "C" fn enter(
         // scalar widened to `ffi_arg`, which `returns` is.
         unsafe { std::ptr::write_bytes(ret.cast::<u8>(), 0, thunk.returns) };
     }
-    if thread() != thunk.thread || thunk.words > DEFERRED_WORDS {
+    if thread() != thunk.thread {
+        // The thunk may be freed with the request while this thread
+        // waits, so nothing past here reads it.
+        let reentry = Arc::clone(&thunk.reentry);
+        let waiting = Waiting {
+            callback: thunk.callback,
+            data: thunk.data,
+            ret: ret as usize,
+            args: addrs.iter().map(|addr| *addr as usize).collect(),
+        };
+        if let Some(call) = NonZeroUsize::new(std::ptr::from_ref(&waiting).expose_provenance()) {
+            reentry.wait(call, |lent| {
+                serve_lent(lent, waiting.callback, waiting.data, ret, addrs);
+            });
+        }
+        return;
+    }
+    if thunk.words > DEFERRED_WORDS {
         return;
     }
     thunk.reentry.defer(|deferred| {
@@ -707,6 +712,46 @@ extern "C" fn enter(
             }
         }
     });
+}
+
+/// The callback called with the request a lend exposed, on the thread
+/// C called it on.
+fn serve_lent(
+    lent: &Lent,
+    callback: Callback,
+    data: usize,
+    ret: *mut c_void,
+    addrs: &[*mut c_void],
+) {
+    let addrs: Vec<usize> = addrs.iter().map(|addr| *addr as usize).collect();
+    // SAFETY: the lend exposed the request's address from the `&mut
+    // Request` its waiter holds and uses no further until it takes the
+    // request back, which waits for `give_back`. Taking it handed it to
+    // this callback alone, so this is the one reference to the request
+    // until then.
+    let req = unsafe { &mut *std::ptr::with_exposed_provenance_mut::<Request>(lent.at().get()) };
+    callback(req, data, ret as usize, &addrs);
+}
+
+/// A call C made from another thread while the request ran PHP code,
+/// on that thread's stack while it waits in [`Reentry::wait`]: the
+/// callback, where C reads its return, and each argument's address,
+/// all C's own until the thread returns to it.
+struct Waiting {
+    callback: Callback,
+    data: usize,
+    ret: usize,
+    args: Vec<usize>,
+}
+
+/// The call another thread waits on at `call`, served on the request's
+/// thread at its interrupt check ([`Reentry::serve_waiting`]).
+pub(crate) fn serve_waiting(req: &mut Request, call: NonZeroUsize) {
+    // SAFETY: `call` is the address of a `Waiting` its thread exposed
+    // and keeps standing, unchanged, until `Reentry::wait` returns,
+    // which is not before this call is answered.
+    let waiting = unsafe { &*std::ptr::with_exposed_provenance::<Waiting>(call.get()) };
+    (waiting.callback)(req, waiting.data, waiting.ret, &waiting.args);
 }
 
 /// `ZEND_FFI_SIZEOF_ARG`: the room each argument value takes.
