@@ -572,6 +572,12 @@ pub struct Predicates {
     /// `disallowed-macros` beside `deny_types`' `disallowed-types`, and
     /// `permit` reads an invocation of one as it reads a mention of a type.
     pub deny_macros: Option<Vec<String>>,
+    /// The functions and methods denied, each by its full path
+    /// (`std::thread::Builder::spawn`), a wildcard refused: clippy's
+    /// `disallowed-methods`, which resolves a call however it was imported
+    /// (#1950). It renders into the `clippy.toml` its scope reaches, and a
+    /// site the rule allows carries `#[expect(clippy::disallowed_methods)]`.
+    pub deny_methods: Option<Vec<String>>,
     pub allow: Option<Vec<String>>,
     pub deny_pattern: Option<String>,
     pub unless: Option<String>,
@@ -626,8 +632,9 @@ impl AvoidFrom {
 impl Predicates {
     /// The predicate names, in the design's order, `require_argv` after
     /// the `deny_argv` it stands beside.
-    pub const NAMES: [&'static str; 11] = [
+    pub const NAMES: [&'static str; 12] = [
         "deny_types",
+        "deny_methods",
         "allow",
         "deny_pattern",
         "deny_argv",
@@ -644,6 +651,7 @@ impl Predicates {
     pub fn named(&self) -> Vec<&'static str> {
         let set = [
             self.deny_types.is_some(),
+            self.deny_methods.is_some(),
             self.allow.is_some(),
             self.deny_pattern.is_some(),
             self.deny_argv.is_some(),
@@ -665,7 +673,7 @@ impl Predicates {
 
     /// Whether the predicate describes one write or one command, so `permit`
     /// can judge it before the call runs: `deny`, `deny_argv`, `require_argv`,
-    /// `deny_pattern`, `deny_types`, `allow`, `on`. The other four read the
+    /// `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
     /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
         self.deny.is_some()
@@ -1010,17 +1018,16 @@ impl Manifest {
                     named[0]
                 );
             }
-            if let Some(wildcard) = rule
-                .predicate
-                .deny_macros
-                .iter()
-                .flatten()
-                .find(|m| m.ends_with("::*"))
-            {
-                bail!(
-                    "rule \"{}\" denies the macros {wildcard}; a macro is denied by its full path, since clippy matches paths and no table of a module's macros expands a wildcard",
-                    rule.id
-                );
+            for (kind, paths) in [
+                ("macros", &rule.predicate.deny_macros),
+                ("methods", &rule.predicate.deny_methods),
+            ] {
+                if let Some(wildcard) = paths.iter().flatten().find(|m| m.ends_with("::*")) {
+                    bail!(
+                        "rule \"{}\" denies the {kind} {wildcard}; each is denied by its full path, since clippy matches paths and no table of a module's {kind} expands a wildcard",
+                        rule.id
+                    );
+                }
             }
             if let Some(qualifier) = rule.predicate.orphaned_qualifier() {
                 bail!(
