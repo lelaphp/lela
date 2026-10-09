@@ -11,31 +11,72 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{FieldType, Mysqlnd, Stmt, StmtAttr, StmtFetch, StmtStatus};
 
 use crate::link::{self, Need, mysqli};
 use crate::props::{self, Props};
 use crate::result::{AsIs, mysqli_result};
 use crate::{
-    On, affected, closed, long_or_string, not_initialized, report, report_conn, report_error,
-    report_index, report_mode, string,
+    On, Resource, affected, closed, long_or_string, not_initialized, report, report_conn,
+    report_error, report_index, report_mode, string,
 };
 
+/// `sizeof(MY_STMT)`.
+const MY_STMT: usize = 80;
+
 /// The statement: closed (php's null `ptr`), made by `stmt_init`
-/// (`MYSQLI_STATUS_INITIALIZED`), or prepared (`MYSQLI_STATUS_VALID`).
+/// (`MYSQLI_STATUS_INITIALIZED`), or prepared (`MYSQLI_STATUS_VALID`),
+/// behind its `MYSQLI_RESOURCE`.
 #[derive(Default)]
 pub(crate) enum StmtObj {
     #[default]
     Closed,
-    Made(MyStmt),
-    Prepared(MyStmt),
+    Made(Resource<MyStmt>),
+    Prepared(Resource<MyStmt>),
 }
 
-/// `MY_STMT`: the statement and, under `MYSQLI_REPORT_INDEX`, its query.
+/// `MY_STMT`, in the allocation php `ecalloc`s for it: the statement and,
+/// under `MYSQLI_REPORT_INDEX`, its query, `estrdup`'d with its NUL.
 pub(crate) struct MyStmt {
     stmt: Stmt,
-    query: Option<Vec<u8>>,
+    query: Option<Emalloc>,
+    held: Emalloc,
+}
+
+impl MyStmt {
+    /// `ecalloc(1, sizeof(MY_STMT))` and `mysql_stmt_init` of `conn`; the
+    /// `Err` is the memory limit's fatal.
+    fn init(req: &mut Request, conn: Mysqlnd) -> Result<MyStmt, Thrown> {
+        let held = Emalloc::new(req, MY_STMT)?;
+        Ok(MyStmt {
+            stmt: Stmt::init(req, conn),
+            query: None,
+            held,
+        })
+    }
+
+    /// The query kept for `MYSQLI_REPORT_INDEX`, without its NUL.
+    fn query(&self) -> &[u8] {
+        self.query
+            .as_ref()
+            .and_then(|q| q.bytes().split_last())
+            .map_or(&[], |(_, query)| query)
+    }
+
+    /// `mysqli_stmt_close(stmt->stmt, implicit)`, then
+    /// `php_clear_stmt_bind`'s `efree(stmt->query)` and `efree(stmt)`, which
+    /// an implicit close that failed skips as php returns before them.
+    fn close(self, req: &mut Request, implicit: bool) -> Result<bool, Thrown> {
+        let closed = self.stmt.close(req, implicit);
+        if !implicit || matches!(closed, Ok(true)) {
+            if let Some(query) = self.query {
+                query.free(req);
+            }
+            self.held.free(req);
+        }
+        closed
+    }
 }
 
 /// `mysqli_stmt_class_entry`.
@@ -87,17 +128,22 @@ fn facts(req: &mut Request, on: On, need: Need) -> Result<StmtStatus, Thrown> {
     with_stmt(req, on.object, need, |req, s| Ok(s.stmt.status(req)))
 }
 
-/// The query kept for `MYSQLI_REPORT_INDEX`.
-fn kept_query(req: &mut Request, query: &[u8]) -> Option<Vec<u8>> {
-    (!query.is_empty() && report_mode(req) & report::INDEX != 0).then(|| query.to_vec())
+/// Whether `query` is kept for `MYSQLI_REPORT_INDEX`.
+fn keeps_query(req: &mut Request, query: &[u8]) -> bool {
+    !query.is_empty() && report_mode(req) & report::INDEX != 0
 }
 
-/// A statement on a new `mysqli_stmt` in `state`.
-fn wrap(req: &mut Request, state: StmtObj) -> Result<Owner<Instance<mysqli_stmt>>, Thrown> {
+/// A statement on a new `mysqli_stmt` in `state`, made of its resource.
+fn wrap(
+    req: &mut Request,
+    state: fn(Resource<MyStmt>) -> StmtObj,
+    stmt: MyStmt,
+) -> Result<Owner<Instance<mysqli_stmt>>, Thrown> {
+    let resource = Resource::new(req, stmt)?;
     let class = stmt_class(req)?;
     let object = new_object(req, class)?;
     if let Some(slot) = crate::payload::<StmtObj>(req, *object) {
-        *slot = state;
+        *slot = state(resource);
     }
     Ok(object.into_instance())
 }
@@ -108,8 +154,8 @@ pub(crate) fn stmt_init(
     on: On,
 ) -> Result<OrFalse<Owner<Instance<mysqli_stmt>>>, Thrown> {
     let conn = link::conn(req, on.object, Need::Open)?;
-    let stmt = Stmt::init(req, conn);
-    wrap(req, StmtObj::Made(MyStmt { stmt, query: None })).map(OrFalse::Value)
+    let stmt = MyStmt::init(req, conn)?;
+    wrap(req, StmtObj::Made, stmt).map(OrFalse::Value)
 }
 
 /// `mysqli_prepare`: a failed prepare's statement closed with the
@@ -120,14 +166,21 @@ pub(crate) fn prepare(
     query: PhpString,
 ) -> Result<OrFalse<Owner<Instance<mysqli_stmt>>>, Thrown> {
     let conn = link::conn(req, on.object, Need::Open)?;
-    let mut stmt = Stmt::init(req, conn);
-    if !stmt.prepare(req, query.as_bytes())? {
+    let mut stmt = MyStmt::init(req, conn)?;
+    if !stmt.stmt.prepare(req, query.as_bytes())? {
         conn.keeping_error(req, |req| stmt.close(req, false))?;
         report_conn(req, conn)?;
         return Ok(OrFalse::False);
     }
-    let query = kept_query(req, query.as_bytes());
-    wrap(req, StmtObj::Prepared(MyStmt { stmt, query })).map(OrFalse::Value)
+    if keeps_query(req, query.as_bytes()) {
+        // `estrdup(query)`.
+        let mut kept = Emalloc::new(req, query.len() + 1)?;
+        if let Some(bytes) = kept.bytes_mut().get_mut(..query.len()) {
+            bytes.copy_from_slice(query.as_bytes());
+        }
+        stmt.query = Some(kept);
+    }
+    wrap(req, StmtObj::Prepared, stmt).map(OrFalse::Value)
 }
 
 /// `mysqli_stmt_prepare`.
@@ -276,7 +329,7 @@ pub(crate) fn execute(req: &mut Request, on: On, params: Option<PhpArray>) -> Re
         }
         if report_mode(req) & report::INDEX != 0 {
             let status = s.stmt.status(req).server_status;
-            report_index(req, s.query.as_deref().unwrap_or_default(), status)?;
+            report_index(req, s.query(), status)?;
         }
         Ok(answer)
     })
@@ -298,7 +351,7 @@ pub(crate) fn execute_query(
         reported?;
         return Ok(Union::B(false));
     }
-    let kept = kept_query(req, query.as_bytes());
+    let kept = keeps_query(req, query.as_bytes()).then_some(query);
     if let Some(params) = params {
         match bind_list(req, &mut stmt, params, on.at(3)) {
             Err(thrown) => {
@@ -317,7 +370,7 @@ pub(crate) fn execute_query(
             return Ok(());
         }
         let status = stmt.status(req).server_status;
-        report_index(req, kept.as_deref().unwrap_or_default(), status)
+        report_index(req, kept.as_ref().map_or(&[], PhpString::as_bytes), status)
     };
     if !stmt.execute(req)? {
         let reported = report_stmt(req, &stmt).and_then(|()| index(req, &stmt));
@@ -448,7 +501,11 @@ pub(crate) fn close(req: &mut Request, on: On) -> Result<True, Thrown> {
         .map(std::mem::take)
         .unwrap_or_default();
     if let StmtObj::Made(s) | StmtObj::Prepared(s) = held {
-        s.stmt.close(req, false)?;
+        // `MYSQLI_CLEAR_RESOURCE` after `php_clear_stmt_bind`.
+        let (resource, stmt) = s.repoint(());
+        let closed = stmt.close(req, false);
+        resource.free(req);
+        closed?;
     }
     Ok(True)
 }
@@ -706,10 +763,11 @@ impl mysqli_stmt {
         #[php(default = null)] query: Option<PhpString>,
     ) -> Answer<()> {
         let conn = link::conn(req, mysql.object(), Need::Open)?;
-        let stmt = Stmt::init(req, conn);
+        let stmt = MyStmt::init(req, conn)?;
+        let resource = Resource::new(req, stmt)?;
         let object = this.object();
         if let Some(slot) = crate::payload::<StmtObj>(req, object) {
-            *slot = StmtObj::Made(MyStmt { stmt, query: None });
+            *slot = StmtObj::Made(resource);
         }
         if let Some(query) = query {
             stmt_prepare(req, On::method(object), query)?;
@@ -906,14 +964,16 @@ impl Props for StmtProps {
         let held = crate::payload::<StmtObj>(req, object)
             .map(std::mem::take)
             .unwrap_or_default();
-        if let StmtObj::Made(s) | StmtObj::Prepared(s) = held
-            && !s.stmt.close(req, true).unwrap_or(false)
-        {
-            docref(
-                req,
-                Level::Warning,
-                "Error occurred while closing statement",
-            );
+        if let StmtObj::Made(s) | StmtObj::Prepared(s) = held {
+            let (resource, stmt) = s.repoint(());
+            if !stmt.close(req, true).unwrap_or(false) {
+                docref(
+                    req,
+                    Level::Warning,
+                    "Error occurred while closing statement",
+                );
+            }
+            resource.free(req);
         }
     }
 }

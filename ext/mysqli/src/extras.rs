@@ -14,12 +14,12 @@ use php_ext::coerce::{to_string, with_string};
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
-use php_ext_mysqlnd::client::{CLIENT_INFO, CLIENT_VERSION, Mysqlnd};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext_mysqlnd::client::{CLIENT_INFO, CLIENT_VERSION, Mysqlnd, ResultSet};
 
 use crate::link::{self, Link, Need};
 use crate::props::{self, Props};
-use crate::{On, State, VERSION_ID, string};
+use crate::{On, Resource, State, VERSION_ID, string};
 
 // ---- mysqli_driver
 
@@ -122,18 +122,43 @@ impl Props for DriverProps {
 
 // ---- mysqli_warning
 
-/// One row of `SHOW WARNINGS`: `MYSQLI_WARNING` without its link.
+/// `sizeof(MYSQLI_WARNING)`.
+const MYSQLI_WARNING: usize = 48;
+
+/// One row of `SHOW WARNINGS`, `MYSQLI_WARNING` in the allocation php
+/// `ecalloc`s for it: the row's reason, one more owner of its string
+/// (`ZVAL_COPY` and `convert_to_string`), the `"HY000"` php makes for each
+/// and the code.
 pub(crate) struct Warning {
-    message: Vec<u8>,
+    reason: Owner<Value>,
+    sqlstate: Owner<Value>,
     errno: i64,
+    held: Emalloc,
 }
 
-/// The warnings an object walks, `None` once php's `ptr` is gone.
-#[derive(Default)]
-pub(crate) struct Warnings {
+impl Warning {
+    /// `php_new_warning`; the `Err` is the memory limit's fatal.
+    fn new(req: &mut Request, reason: Owner<Value>, errno: i64) -> Result<Warning, Thrown> {
+        let held = Emalloc::new(req, MYSQLI_WARNING)?;
+        Ok(Warning {
+            reason,
+            sqlstate: PhpString::new(req, b"HY000")?.into_value(),
+            errno,
+            held,
+        })
+    }
+}
+
+/// The warnings, `info`, and the one `ptr` stands at.
+pub(crate) struct List {
     list: Vec<Warning>,
     at: usize,
 }
+
+/// A `mysqli_warning`'s payload: the warnings behind their
+/// `MYSQLI_RESOURCE`, none once php's `ptr` is gone.
+#[derive(Default)]
+pub(crate) struct Warnings(Option<Resource<List>>);
 
 /// `final class mysqli_warning`, made only by `get_warnings`.
 ///
@@ -191,7 +216,7 @@ impl mysqli_warning {
     }
 
     fn next(req: &mut Request, this: This<Self>) -> bool {
-        let Some(w) = crate::payload::<Warnings>(req, this.object()) else {
+        let Some(Warnings(Some(w))) = crate::payload::<Warnings>(req, this.object()) else {
             return false;
         };
         if w.at + 1 < w.list.len() {
@@ -214,20 +239,41 @@ impl Props for WarningProps {
         name: &str,
         quiet: bool,
     ) -> Result<Option<Owner<Value>>, Thrown> {
-        let at = crate::payload_ref::<Warnings>(req, object)
-            .and_then(|w| w.list.get(w.at))
-            .map(|w| (w.message.clone(), w.errno));
-        let Some((message, errno)) = at else {
+        let at = match crate::payload_ref::<Warnings>(req, object) {
+            Some(Warnings(Some(w))) => w.list.get(w.at),
+            _ => None,
+        };
+        let Some(w) = at else {
             return props::gone(req, object, quiet);
         };
-        Ok(Some(match name {
-            "message" => string(req, &message)?,
-            "sqlstate" => string(req, b"HY000")?,
-            _ => Owner::take(req, Value::int(errno)),
-        }))
+        // `ZVAL_COPY(retval, &w->reason)` and the like: one more owner.
+        let value = match name {
+            "message" => *w.reason,
+            "sqlstate" => *w.sqlstate,
+            _ => Value::int(w.errno),
+        };
+        Ok(Some(Owner::take(req, value)))
     }
 
-    fn free(_: &mut Request, _: PhpObject) {}
+    /// `mysqli_warning_free_storage`: `php_clear_warnings`, each
+    /// warning's strings released and the warning freed, then the
+    /// resource.
+    fn free(req: &mut Request, object: PhpObject) {
+        let held = crate::payload::<Warnings>(req, object).and_then(|w| w.0.take());
+        if let Some(resource) = held {
+            let list = resource.free(req).list;
+            clear(req, list);
+        }
+    }
+}
+
+/// `php_clear_warnings`.
+fn clear(req: &mut Request, list: Vec<Warning>) {
+    for w in list {
+        w.reason.give_up(req);
+        w.sqlstate.give_up(req);
+        w.held.free(req);
+    }
 }
 
 /// `php_get_warnings`: `SHOW WARNINGS` read off the connection, each row's
@@ -241,40 +287,80 @@ fn read_warnings(req: &mut Request, conn: Mysqlnd) -> Result<Vec<Warning>, Throw
     };
     let mut list = Vec::new();
     loop {
-        let row = set.fetch_into(req, 2)?;
-        let Some(array) = row.as_array().copied() else {
-            row.give_up(req);
-            break;
-        };
-        // `zend_hash_internal_pointer_reset`, `zend_hash_move_forward`
-        // and `zend_hash_get_current_data` (`Z/ext/mysqli/mysqli_warning.c:83`)
-        // over the row this native owns, a list: its second and third
-        // cells, looked up when each is read.
-        let cell = |at: i64| array.get(&Key::Int(at)).map(|v| v.deref());
-        let errno = match cell(1).map(|v| php_ext::coerce::to_long(req, &v)) {
-            Some(Ok(n)) => n,
-            Some(Err(thrown)) => {
-                row.give_up(req);
+        match read_warning(req, &mut set) {
+            Ok(Some(warning)) => list.push(warning),
+            Ok(None) => break,
+            Err(thrown) => {
+                clear(req, list);
                 return Err(thrown);
             }
-            None => 0,
-        };
-        let message = match cell(2).map(|v| with_string(req, &v, <[u8]>::to_vec)) {
-            Some(Ok(bytes)) => bytes,
-            Some(Err(thrown)) => {
-                row.give_up(req);
-                return Err(thrown);
-            }
-            None => Vec::new(),
-        };
-        list.push(Warning { message, errno });
-        row.give_up(req);
+        }
     }
-    set.free(req, false)?;
+    if let Err(thrown) = set.free(req, false) {
+        clear(req, list);
+        return Err(thrown);
+    }
     Ok(list)
 }
 
-/// The warnings on a new `mysqli_warning`, `false` where there are none.
+/// One row of `SHOW WARNINGS` made a warning, `None` past the last.
+fn read_warning(req: &mut Request, set: &mut ResultSet) -> Result<Option<Warning>, Thrown> {
+    let row = set.fetch_into(req, 2)?;
+    let Some(array) = row.as_array().copied() else {
+        row.give_up(req);
+        return Ok(None);
+    };
+    // `zend_hash_internal_pointer_reset`, `zend_hash_move_forward`
+    // and `zend_hash_get_current_data` (`Z/ext/mysqli/mysqli_warning.c:83`)
+    // over the row this native owns, a list: its second and third
+    // cells, looked up when each is read.
+    let cell = |at: i64| array.get(&Key::Int(at)).map(|v| v.deref());
+    let warning = cell(1)
+        .map_or(Ok(0), |v| php_ext::coerce::to_long(req, &v))
+        .and_then(|errno| {
+            // `ZVAL_COPY(&w->reason, reason)` and `convert_to_string`.
+            let reason = match cell(2) {
+                Some(v) if v.as_str_bytes().is_some() => Owner::take(req, v),
+                Some(v) => {
+                    let bytes = with_string(req, &v, <[u8]>::to_vec)?;
+                    PhpString::new(req, &bytes)?.into_value()
+                }
+                None => PhpString::new(req, b"")?.into_value(),
+            };
+            Warning::new(req, reason, errno)
+        });
+    row.give_up(req);
+    warning.map(Some)
+}
+
+/// The warnings on a new `mysqli_warning`, `false` where there are none:
+/// each `MYSQLI_WARNING` with its reason and its `"HY000"`, behind the
+/// object's resource, given back with the object, the reason read off it
+/// kept by its reader:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $l->query('SELECT 1/0, CAST("x" AS SIGNED)');
+/// $l->get_warnings();
+/// $l->query('SELECT 1/0, CAST("x" AS SIGNED)');
+/// $m = memory_get_usage();
+/// $w = $l->get_warnings();
+/// echo memory_get_usage() - $m, "\n";
+/// $message = $w->message;
+/// $w->next();
+/// echo memory_get_usage() - $m, "\n";
+/// unset($w);
+/// echo memory_get_usage() - $m, "\n";
+/// unset($message);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 400
+/// 432
+/// 72
+/// 32
+/// ```
 fn warnings(
     req: &mut Request,
     conn: Mysqlnd,
@@ -289,9 +375,10 @@ fn warnings(
     }
     let class = lookup_class(req, b"mysqli_warning")?
         .ok_or_else(|| fatal(req, "InternalError: mysqli_warning is not linked"))?;
+    let resource = Resource::new(req, List { list, at: 0 })?;
     let object = new_object(req, class)?;
     if let Some(w) = crate::payload::<Warnings>(req, *object) {
-        *w = Warnings { list, at: 0 };
+        *w = Warnings(Some(resource));
     }
     Ok(OrFalse::Value(object.into_instance()))
 }
