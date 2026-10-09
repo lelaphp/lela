@@ -258,41 +258,10 @@ fn show_opcode(observed: &mut Observed<'_>) {
 }
 
 /// The observer's request state: `ZT_G(observer_nesting_depth)`, which
-/// `RINIT` zeroes, and the chain of fibers each resumed by the one
-/// below it, php's `fiber->caller` links, which a switch handler reads to
-/// tell a resumption from a suspension.
+/// `RINIT` zeroes.
 #[derive(Debug, Default)]
 pub(crate) struct Observing {
     depth: usize,
-    /// The fibers standing above the request's own stack, the running
-    /// one last, each by its object's number.
-    resumed: Vec<u32>,
-}
-
-impl Observing {
-    /// The switch from `from` to `to` taken into the chain: a return to
-    /// the fiber or stack that resumed `from`, which takes `from` off,
-    /// or a start or resumption of `to` by `from`, which puts `to` on;
-    /// whether it is the latter, php's `fiber->caller == from` of `to`.
-    fn switched(&mut self, from: Option<u32>, to: Option<u32>) -> bool {
-        let resumer = match self.resumed.len() {
-            0 => return self.resume(to),
-            1 => None,
-            n => self.resumed.get(n - 2).copied(),
-        };
-        if self.resumed.last().copied() == from && resumer == to {
-            self.resumed.pop();
-            return false;
-        }
-        self.resume(to)
-    }
-
-    fn resume(&mut self, to: Option<u32>) -> bool {
-        if let Some(fiber) = to {
-            self.resumed.push(fiber);
-        }
-        true
-    }
 }
 
 /// The names `observe_function_names` holds, split at each comma as the
@@ -691,20 +660,12 @@ fn fiber_destroy(req: &mut Request, fiber: ObservedFiber) {
 /// suspended.
 fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
     let switches = Switches::of(req);
-    if !switches.enabled {
-        return;
-    }
-    let key = |fiber: ObservedFiber| fiber.fiber().map(|object| object.index());
-    let resumes = req
-        .state::<crate::State>()
-        .observer
-        .switched(key(from), key(to));
-    if !switches.fiber_switch {
+    if !(switches.enabled && switches.fiber_switch) {
         return;
     }
     let entered = if to.status() == FiberStatus::Init {
         Some("init")
-    } else if to.fiber().is_none() || !resumes {
+    } else if !to.resumed_by(&from) {
         None
     } else if to.destroyed() {
         Some("destroying")
@@ -712,13 +673,15 @@ fn fiber_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
         (to.status() != FiberStatus::Dead).then_some("resume")
     };
     let left = if from.status() == FiberStatus::Dead {
-        Some(match (from.fiber(), from.threw(), from.destroyed()) {
-            (Some(_), true, _) => "threw",
-            (Some(_), false, true) => "destroyed",
-            _ => "returned",
+        Some(if from.threw() {
+            "threw"
+        } else if from.destroyed() {
+            "destroyed"
+        } else {
+            "returned"
         })
     } else {
-        (from.fiber().is_some() && !resumes).then_some("suspend")
+        (from.is_fiber() && !from.has_caller()).then_some("suspend")
     };
     let mut out = format!(
         "<!-- switching from fiber {} to {} -->\n",

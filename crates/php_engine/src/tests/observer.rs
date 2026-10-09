@@ -10,9 +10,12 @@ use std::path::{Path, PathBuf};
 use php_macros::php_function;
 
 use super::test_ext::{
-    Event, Events, Phase, Recording, TestExt, observed_name, record, returned_name,
+    Event, Events, Phase, Recording, TestExt, fiber_name, observed_name, record, returned_name,
 };
-use crate::api::abi::{Extension, ExtensionBuilder, Observed, ObserverHandlers};
+use crate::api::abi::{Extension, ExtensionBuilder, Observed, ObservedFiber, ObserverHandlers};
+use crate::api::call::call;
+use crate::api::coerce::callable_checked;
+use crate::api::request::Request;
 use crate::api::values::{PhpString, Value};
 use crate::engine::Engine;
 use crate::test::{Capture, Served};
@@ -1152,6 +1155,77 @@ fn a_fiber_inside_a_fiber_switches_with_its_resumer() {
             end(0, "Fiber::getReturn", Some("1")),
             end(0, file, Some("1")),
         ]
+    );
+}
+
+/// `Fiber::getCurrent()` served from a fiber switch handler reads
+/// php's `EG(active_fiber)` as the switch's notice finds it, which
+/// `zend_fiber_resume_internal` sets to the fiber before the switch into
+/// it and restores only once the switch back has returned
+/// (`Z/Zend/zend_fibers.c:680-696`): the fiber, on each switch into it
+/// and each switch out of it, its last among them (#2014).
+#[test]
+fn a_switch_handler_reads_the_fiber_switched_into_and_out_of_as_the_current_one() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::builder()
+            .fiber_switch(current_at_switch)
+            .build("test_ext_0")])
+        .build();
+    let dir = scratch("fiber_current");
+    rec.mark("built");
+    let served = serve_main(
+        &engine,
+        &dir,
+        "<?php\n$fiber = new Fiber(function () { Fiber::suspend(); });\n\
+         $fiber->start();\n$fiber->resume();\necho 'done';\n",
+    );
+    rec.mark("served");
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "done");
+    let events = observed(&rec.events().between("built", "served"));
+    // The fiber as the first switch, the one into it, names it.
+    let fiber = match events.first() {
+        Some(Ext(_, FiberSwitch(_, to))) => to.split(' ').next().unwrap_or_default().to_owned(),
+        _ => String::new(),
+    };
+    let current = |to: &str| format!("{to}; current {fiber}");
+    assert_eq!(
+        events,
+        [
+            switch(0, "main running", &current(&format!("{fiber} init"))),
+            switch(0, &format!("{fiber} running"), &current("main suspended")),
+            switch(0, "main running", &current(&format!("{fiber} suspended"))),
+            switch(0, &format!("{fiber} dead"), &current("main suspended")),
+        ]
+    );
+}
+
+/// A switch handler that records the switch with what
+/// `Fiber::getCurrent()` answers there: `#n` for a fiber, `null` for
+/// none.
+fn current_at_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) {
+    let current = match PhpString::interned(req, b"Fiber::getCurrent")
+        .ok()
+        .and_then(|name| callable_checked(req, &Value::string(name)).ok())
+        .map(|callable| call(req, &callable, &[]))
+    {
+        Some(Ok(answer)) => {
+            let named = answer.as_object().map_or_else(
+                || String::from("null"),
+                |fiber| format!("#{}", fiber.index()),
+            );
+            answer.give_up(req);
+            named
+        }
+        Some(Err(_)) => String::from("thrown"),
+        None => String::from("uncallable"),
+    };
+    record(
+        0,
+        FiberSwitch(
+            fiber_name(from),
+            format!("{}; current {current}", fiber_name(to)),
+        ),
     );
 }
 

@@ -28,14 +28,18 @@ use corosensei::{Coroutine, CoroutineResult, Yielder};
 
 use crate::hooks::Fatal;
 
-/// What a fiber's body is handed each time it runs: the request that
-/// resumed it, as the pointer the switch carries, and what the resumer
-/// sent. Private, because turning the pointer back into the request is
+/// What crosses a switch each way: the request, as the pointer the
+/// switch carries, and the transfer. A resume hands a fiber's body the
+/// request that resumed it; a suspend hands its own back, so the
+/// pointer escapes into the jump as the resume's does, and nothing the
+/// suspend read of the request before the jump is taken as still
+/// standing after it, when every fiber that ran meanwhile has written
+/// it. Private, because turning the pointer back into the request is
 /// this file's one reason to be an `unsafe` home.
 struct Resume<R: Host>(*mut R, R::Transfer);
 
 /// The one [`Yielder`] shape a fiber of `R` suspends through.
-type Suspender<R> = Yielder<Resume<R>, <R as Host>::Transfer>;
+type Suspender<R> = Yielder<Resume<R>, Resume<R>>;
 
 /// The request a fiber runs on, as this crate sees it: what a switch
 /// carries each way, and where the running fibers' suspend points are
@@ -103,7 +107,7 @@ pub enum Switched<T> {
 /// the fiber is built from (`zend_fiber_stack_base`,
 /// `zend_fiber_stack_limit`).
 pub struct FiberStack<R: Host> {
-    coroutine: Coroutine<Resume<R>, R::Transfer, R::Transfer, DefaultStack>,
+    coroutine: Coroutine<Resume<R>, Resume<R>, R::Transfer, DefaultStack>,
     base: usize,
     end: usize,
 }
@@ -217,7 +221,7 @@ impl<R: Host> FiberStack<R> {
         // this resume found it.
         host.suspensions().running.truncate(depth);
         Ok(match switched {
-            CoroutineResult::Yield(back) => Switched::Suspended(back),
+            CoroutineResult::Yield(Resume(_, back)) => Switched::Suspended(back),
             CoroutineResult::Return(back) => Switched::Returned(back),
         })
     }
@@ -240,7 +244,7 @@ pub fn suspend<R: Host>(host: &mut R, transfer: R::Transfer) -> Result<R::Transf
     // lives on that stack for as long as the body runs; it is taken off
     // before the body returns, so a point on the list names a live one.
     let suspender = unsafe { point.as_ref() };
-    let Resume(resumer, back) = suspender.suspend(transfer);
+    let Resume(resumer, back) = suspender.suspend(Resume(expected, transfer));
     host.suspensions().running.push(point);
     if resumer != expected {
         return Err(Fatal::Error(String::from(
