@@ -591,6 +591,24 @@ pub struct Regime {
     pub args: Vec<String>,
 }
 
+/// What a regime's line names the workspace root by (#1634): a file of
+/// the workspace a regime hands a host, as `[regime.ffi-preload]` hands
+/// `opcache.preload` one, stands in the pin as `{workspace}/<path>`, and
+/// [`Pin::load`] writes the root in, so the oracle's run and the engine's
+/// are handed the one path.
+pub(crate) const WORKSPACE: &str = "{workspace}";
+
+impl Regime {
+    /// [`WORKSPACE`] in each of the regime's lines, its ini and its
+    /// arguments, the workspace at `root`.
+    fn placed(&mut self, root: &Path) {
+        let root = root.display().to_string();
+        for line in self.ini.iter_mut().chain(&mut self.args) {
+            *line = line.replace(WORKSPACE, &root);
+        }
+    }
+}
+
 /// The one argument of php's command line an engine linked into the
 /// harness takes, as every host reads it: `-e`, which a host hands its
 /// engine's builder as extended info (#1780, #1822).
@@ -635,8 +653,10 @@ impl Linked {
 }
 
 impl Pin {
-    /// Load the pin at `path` as this machine has it: the file's facts,
-    /// and the tree [`TREE_VARIABLE`] names in the process's environment.
+    /// Load the pin at `path` as this machine has it: the file's facts
+    /// placed in the directory it stands in, the workspace root, where a
+    /// variant's relative path and a regime's [`WORKSPACE`] are read; and
+    /// the tree [`TREE_VARIABLE`] names in the process's environment.
     pub fn load(path: &Path) -> Result<Pin> {
         let text = fs::read_to_string(path)
             .with_context(|| format!("reading the oracle pin {}", path.display()))?;
@@ -644,6 +664,9 @@ impl Pin {
         if let Some(dir) = path.parent() {
             for variant in pin.variant.values_mut() {
                 variant.placed(dir);
+            }
+            for regime in pin.regime.values_mut() {
+                regime.placed(dir);
             }
         }
         // An empty value is unset, as `getenv` reads it in run-tests.php.

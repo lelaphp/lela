@@ -200,6 +200,10 @@ ini = ["opcache.enable_cli=1"]
 # php's -e (ZEND_COMPILE_EXTENDED_INFO), which no ini setting reaches (#1780)
 args = ["-e"]
 
+[regime.ffi-preload]
+# opcache.preload is PHP_INI_SYSTEM: a witness of a preloaded caller (#1614) names this regime.
+ini = ["opcache.enable=1", "opcache.preload={workspace}/ext/ffi/tests/preload.php"]
+
 [variant.zend-test]
 # The pinned tag with the main oracle's configure line plus --enable-zend-test (#1782),
 # built by scripts/oracle-build.py (#1889) to the fixed prefix; image is the base
