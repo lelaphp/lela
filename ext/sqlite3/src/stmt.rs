@@ -56,7 +56,7 @@ pub(crate) fn step(req: &mut Request, stmt: Option<&Stmt>) -> (Step, Option<Thro
 /// library answers for a null statement where there is none.
 pub(crate) fn last_error(stmt: Option<&Stmt>) -> (i64, String) {
     match stmt {
-        Some(stmt) => (i64::from(stmt.db().errcode()), text(&stmt.db().errmsg())),
+        Some(stmt) => (i64::from(stmt.errcode()), text(&stmt.errmsg())),
         None => (21, String::from("out of memory")),
     }
 }
@@ -190,7 +190,7 @@ pub(crate) fn prepare_on(
     let stmt = match prepared {
         Ok(stmt) => stmt,
         Err(code) => {
-            let message = format!("Unable to prepare statement: {}", text(&db.errmsg()));
+            let message = format!("Unable to prepare statement: {}", text(&db.errmsg(req)));
             made.give_up(req);
             fail(req, exceptions, thrown, i64::from(code), &message)?;
             return Ok(None);

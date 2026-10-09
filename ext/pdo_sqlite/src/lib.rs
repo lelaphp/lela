@@ -258,7 +258,10 @@ impl Sqlite {
                 return Ok(());
             };
             let path = full.to_string_lossy().into_owned();
-            match handle.db.load_extension(path.as_bytes()) {
+            let Some(db) = handle.db() else {
+                return Ok(());
+            };
+            match db.load_extension(req, path.as_bytes()) {
                 Ok(()) => Ok(()),
                 Err(text) => {
                     let text = String::from_utf8_lossy(&text).into_owned();
@@ -345,7 +348,10 @@ impl Sqlite {
                 return Ok(());
             };
             let handler = callback.map(|callable| Owner::take(req, callable));
-            if let Some(old) = handle.db.set_authorizer(handler) {
+            if let Some(db) = handle.db() {
+                db.set_authorizer(req, handler.as_deref());
+            }
+            if let Some(old) = std::mem::replace(&mut handle.authorizer, handler) {
                 old.give_up(req);
             }
             Ok(())
