@@ -567,6 +567,8 @@ request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
 request::Invalidation
+request::Lent
+request::Lent::at
 request::MethodRow
 request::MethodRow::class
 request::MethodRow::scope
@@ -624,11 +626,10 @@ request::Receiving
 request::Reentry
 request::Reentry::defer
 request::Reentry::give_back
-request::Reentry::lend
-request::Reentry::new
-request::Reentry::reclaim
+request::Reentry::serve_waiting
 request::Reentry::take_deferred
 request::Reentry::take_lent
+request::Reentry::wait
 request::Refused
 request::Request
 request::Request::absolutize
@@ -645,6 +646,7 @@ request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::bailing_out
+request::Request::blocking
 request::Request::buffer_handler
 request::Request::buffer_handler_started
 request::Request::buffer_status
@@ -782,6 +784,7 @@ request::Request::raised
 request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear
+request::Request::reentry
 request::Request::register_constant
 request::Request::register_shutdown_function
 request::Request::register_tick_function
@@ -996,6 +999,7 @@ request::Unresolved
 request::Upload
 request::UrlStat
 request::UrlStat::found
+request::Waited
 request::Whence
 request::Whence::from_int
 request::WrapperOp
