@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::port_map;
-use xtask::reading::{Status, Store};
+use xtask::reading::{Number, Status, Store};
 use xtask::scratch::Tree;
 
 fn workspace() -> &'static Path {
@@ -65,6 +65,23 @@ fn scratch(name: &str) -> Tree {
     dir
 }
 
+/// The committed census's rows of one status, read off its `status`
+/// lines, so a row a commit marks gone moves the counts the tests expect
+/// and not the tests (#2504).
+fn marked(status: &str) -> i64 {
+    let seed = std::fs::read_to_string(workspace().join(port_map::SEED)).unwrap();
+    let line = format!("status = \"{status}\"");
+    let n = seed.lines().filter(|l| l.trim() == line).count();
+    i64::try_from(n).unwrap()
+}
+
+/// Every row of the committed census.
+fn census_rows() -> i64 {
+    let rows = marked("same") + marked("renamed") + marked("gone");
+    assert!(rows > 600, "the census has its rows: {rows}");
+    rows
+}
+
 fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("--root")
@@ -95,7 +112,11 @@ fn the_run_prints_a_line_per_row_with_its_status_and_its_api_item() {
         .lines()
         .filter(|l| l.starts_with("same ") || l.starts_with("renamed ") || l.starts_with("gone "))
         .collect();
-    assert_eq!(rows.len(), 651, "one line per census row");
+    assert_eq!(
+        i64::try_from(rows.len()).unwrap(),
+        census_rows(),
+        "one line per census row"
+    );
     assert!(
         rows.iter().all(|l| l.contains("unresolved")),
         "no extension is ported, so no row is resolved"
@@ -122,12 +143,14 @@ fn the_reading_is_the_unresolved_rows_at_the_crate_the_lock_lives_with() {
     assert_eq!(reading.status, Status::Pass, "{reading:?}");
     assert_eq!(reading.instrument, port_map::INSTRUMENT);
     assert_eq!(reading.scope, "php_ext");
-    assert_eq!(reading.numbers["rows"], 651.into());
-    assert_eq!(reading.numbers["same"], 156.into());
-    assert_eq!(reading.numbers["renamed"], 338.into());
-    assert_eq!(reading.numbers["gone"], 157.into());
+    let n = |status: &str| Number::from(marked(status));
+    let rows = Number::from(census_rows());
+    assert_eq!(reading.numbers["rows"], rows);
+    assert_eq!(reading.numbers["same"], n("same"));
+    assert_eq!(reading.numbers["renamed"], n("renamed"));
+    assert_eq!(reading.numbers["gone"], n("gone"));
     assert_eq!(reading.numbers["unmatched"], 0.into());
-    assert_eq!(reading.numbers["unresolved"], 651.into());
+    assert_eq!(reading.numbers["unresolved"], rows);
     assert!(!reading.commit.is_empty(), "stamped: {reading:?}");
     assert!(
         reading.message.contains(port_map::SEED)
@@ -221,7 +244,7 @@ fn status_renders_the_reading_as_one_row_of_its_own_section() {
     let (ok, md, err) = xtask(&root, ["status", "--section", "port-map"].as_slice());
     assert!(ok, "{err}");
     assert!(
-        md.contains("php_ext") && md.contains("unresolved=651"),
+        md.contains("php_ext") && md.contains(&format!("unresolved={}", census_rows())),
         "{md}"
     );
 }
