@@ -591,7 +591,7 @@ fn date_arg(req: &mut Request, site: &mut Site, value: Value, name: &[u16]) -> A
         Ok(_) => site.set(req, code, message).map(|()| None),
         Err(thrown) => site
             .outside()
-            .set_over(req, thrown, code, message)
+            .set_over(req, Some(thrown), code, message)
             .map(|()| None),
     }
 }

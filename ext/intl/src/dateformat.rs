@@ -612,37 +612,80 @@ const TM_KEYS: [&str; 6] = [
 
 /// `internal_get_arr_ele`: the integer at `key`, zero where it is
 /// absent; a value that is no integer, or one past 32 bits, sets the
-/// object's error, and nothing is read once it is set.
+/// object's error, and nothing is read once it is set. What the error
+/// throws is left in `pending`, as php's C runs on past it.
 fn array_field(
     req: &mut Request,
     object: PhpObject,
     array: PhpArray,
     key: &str,
-) -> Result<i32, Thrown> {
+    pending: &mut Option<Thrown>,
+) -> i32 {
     if error::object_code::<DateFormatObject>(req, object).is_failure() {
-        return Ok(0);
+        return 0;
     }
     let Some(value) = array.find(key.as_bytes()).map(|v| v.deref()) else {
-        return Ok(0);
+        return 0;
     };
     let message = match value.as_ref() {
         ValueRef::Int(n) => match i32::try_from(n) {
-            Ok(n) => return Ok(n),
+            Ok(n) => return n,
             Err(_) => format!("value {n} is out of bounds for a 32-bit integer in key '{key}'"),
         },
         _ => format!("parameter array contains a non-integer element for key '{key}'"),
     };
-    error::errors_set::<DateFormatObject>(req, object, Code::ILLEGAL_ARGUMENT, &message)?;
-    Ok(0)
+    raise_over(req, object, pending, Code::ILLEGAL_ARGUMENT, &message);
+    0
+}
+
+/// `intl_errors_set` on the object over what `pending` holds, its
+/// `IntlException` chained to it, as `zend_throw_exception` chains a
+/// throw to the one pending; what is pending after is left there.
+///
+/// ```php
+/// ini_set('intl.use_exceptions', 1);
+/// $f = new IntlDateFormatter('en_US', IntlDateFormatter::SHORT, IntlDateFormatter::SHORT, 'UTC');
+/// try { $f->format(['tm_year' => 'x', 'tm_mon' => 1.5, 'tm_hour' => PHP_INT_MAX]); } catch (IntlException $e) {
+///     for (; $e; $e = $e->getPrevious()) echo get_class($e), ': ', $e->getMessage(), "\n";
+/// }
+/// ini_set('intl.use_exceptions', 0);
+/// var_dump($f->format(['tm_mday' => 2 ** 40]), intl_get_error_message(), $f->getErrorMessage());
+/// var_dump($f->format(['tm_year' => 100, 'tm_mday' => 2]), intl_get_error_code());
+/// ```
+/// ```expect
+/// IntlException: IntlDateFormatter::format(): date formatting failed
+/// IntlException: IntlDateFormatter::format(): error cloning calendar
+/// IntlException: IntlDateFormatter::format(): parameter array contains a non-integer element for key 'tm_year'
+/// bool(false)
+/// string(77) "IntlDateFormatter::format(): date formatting failed: U_ILLEGAL_ARGUMENT_ERROR"
+/// string(77) "IntlDateFormatter::format(): date formatting failed: U_ILLEGAL_ARGUMENT_ERROR"
+/// string(18) "1/2/00, 12:00 AM"
+/// int(0)
+/// ```
+fn raise_over(
+    req: &mut Request,
+    object: PhpObject,
+    pending: &mut Option<Thrown>,
+    code: Code,
+    message: &str,
+) {
+    let mut outside = Outside::of::<DateFormatObject>(object);
+    *pending = outside.set_over(req, pending.take(), code, message).err();
 }
 
 /// `internal_get_timestamp`: the array's date and time, set on a clone
 /// of the formatter's calendar, as milliseconds; the object's error set
-/// where that fails.
-fn array_millis(req: &mut Request, object: PhpObject, array: PhpArray) -> Result<f64, Thrown> {
+/// where that fails, which a failure of an element's already is, so
+/// `ucal_clone` refuses the code it is handed and php raises again.
+fn array_millis(
+    req: &mut Request,
+    object: PhpObject,
+    array: PhpArray,
+    pending: &mut Option<Thrown>,
+) -> f64 {
     let mut f = [0i32; 6];
     for (slot, key) in f.iter_mut().zip(TM_KEYS) {
-        *slot = array_field(req, object, array, key)?;
+        *slot = array_field(req, object, array, key, pending);
     }
     let fields = [f[0].wrapping_add(1900), f[1], f[5], f[2], f[3], f[4]];
     let mut code = error::object_code::<DateFormatObject>(req, object);
@@ -654,11 +697,11 @@ fn array_millis(req: &mut Request, object: PhpObject, array: PhpArray) -> Result
         millis = held.and_then(|udatf| udatf.timestamp(fields, &mut code));
     }
     let Some(millis) = millis else {
-        error::errors_set::<DateFormatObject>(req, object, code, "error cloning calendar")?;
-        return Ok(0.0);
+        raise_over(req, object, pending, code, "error cloning calendar");
+        return 0.0;
     };
     set_code(req, object, code);
-    Ok(millis)
+    millis
 }
 
 /// `datefmt_format`: an array of `localtime()`'s fields, or any value
@@ -670,10 +713,17 @@ fn format(req: &mut Request, object: PhpObject, datetime: Value) -> Answer<Owner
         if array.is_empty() {
             return Ok(OrFalse::False);
         }
-        let millis = array_millis(req, object, *array)?;
+        let mut pending = None;
+        let millis = array_millis(req, object, *array, &mut pending);
+        // `INTL_METHOD_CHECK_STATUS`, raised over what the array threw.
         let code = error::object_code::<DateFormatObject>(req, object);
-        if let Err(stop) = check(req, object, code, "date formatting failed") {
-            return or_false(Err(stop));
+        error::set_code(req, code);
+        if code.is_failure() {
+            raise_over(req, object, &mut pending, code, "date formatting failed");
+            return pending.map_or(Ok(OrFalse::False), Err);
+        }
+        if let Some(thrown) = pending {
+            return Err(thrown);
         }
         millis
     } else {
