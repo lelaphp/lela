@@ -226,11 +226,8 @@ pub(crate) fn served_as_fpm(
     for ini in &recipe.ini {
         master.arg("-d").arg(ini);
     }
-    if recipe.env_clear {
-        master.env_clear();
-    }
-    master
-        .envs(&recipe.env)
+    recipe
+        .environ(&mut master)
         .envs(env.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())

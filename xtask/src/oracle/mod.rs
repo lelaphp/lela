@@ -479,6 +479,19 @@ pub struct Recipe {
     pub normalise: Normalise,
 }
 
+impl Recipe {
+    /// `program`'s environment as the recipe has it: cleared where
+    /// `env_clear` says, then `[recipe.env]`, so nothing of the shell's
+    /// reaches what it runs. Every process the harness runs under the
+    /// recipe starts this way, the oracle and the linked engine alike.
+    pub(crate) fn environ<'c>(&self, program: &'c mut Command) -> &'c mut Command {
+        if self.env_clear {
+            program.env_clear();
+        }
+        program.envs(&self.env)
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
@@ -1249,10 +1262,7 @@ impl<'a> Oracle<'a> {
             .args(call.args)
             .current_dir(call.cwd.unwrap_or(&scratch.dir))
             .process_group(0);
-        if recipe.env_clear {
-            cmd.env_clear();
-        }
-        cmd.envs(&recipe.env);
+        recipe.environ(&mut cmd);
         for (name, value) in call.env {
             if value.is_empty() {
                 cmd.env_remove(name);

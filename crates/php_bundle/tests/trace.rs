@@ -31,7 +31,13 @@ fn ours(entered: &[Entered]) -> Vec<(Option<&'static str>, &'static str)> {
 #[test]
 fn a_traced_request_records_what_it_entered_and_nothing_it_only_named() {
     let dir = std::env::temp_dir();
-    let served = engine().serve_capture_traced_in(&dir, b"trace.php", SCRIPT, Capture::default());
+    let served = engine().serve_capture_traced_in(
+        &dir,
+        b"trace.php",
+        SCRIPT,
+        Vec::new(),
+        Capture::default(),
+    );
     let entered = ours(&served.entered);
     assert!(
         entered.contains(&(Some("ProtoBox"), "__construct")),
