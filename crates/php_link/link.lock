@@ -8,7 +8,6 @@ Exact
 Folded
 Held
 Indexed
-Indexed::empty
 Indexed::find
 Indexed::new
 Indexed::rows

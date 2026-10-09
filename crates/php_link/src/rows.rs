@@ -329,18 +329,8 @@ impl<R, C> Clone for Indexed<'_, R, C> {
 impl<R, C> Copy for Indexed<'_, R, C> {}
 
 impl<R, C> Default for Indexed<'_, R, C> {
-    fn default() -> Self {
-        Indexed {
-            rows: &[],
-            names: None,
-        }
-    }
-}
-
-impl<R, C> Indexed<'static, R, C> {
     /// No rows.
-    #[must_use]
-    pub const fn empty() -> Indexed<'static, R, C> {
+    fn default() -> Self {
         Indexed {
             rows: &[],
             names: None,
@@ -457,7 +447,7 @@ mod tests {
         assert_eq!(table.find(b"a"), None);
         let folded: Names<Folded> = Names::over(&rows);
         assert_eq!(folded.find(&rows, b"B"), Some(1));
-        assert_eq!(Indexed::<ConstDecl, Exact>::empty().find(b"A"), None);
+        assert_eq!(Indexed::<ConstDecl, Exact>::default().find(b"A"), None);
     }
 
     #[test]
