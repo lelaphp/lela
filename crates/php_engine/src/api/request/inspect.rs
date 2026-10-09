@@ -184,11 +184,31 @@ impl Request {
     /// engine, in `scope`'s frame as a nested code frame is, which
     /// `zend_execute` serves with `EG(current_execute_data)` there: its
     /// variables, `$this` and scope, the frame below the evaluated one.
-    /// With none, on a frame of its own over the global table, as
-    /// `zend_execute` serves an op array with no frame standing. What
-    /// it returned is left in [`Request::returned`] where it was served;
-    /// what the compiler threw is left pending.
+    /// `EG(current_execute_data)` stands at that frame from the compile
+    /// on ([`crate::exec::Switch`]), as the debugger that evaluates there moves
+    /// it, so a trace taken in the compile or the evaluated code starts
+    /// at it and passes the frames above it. With none, on a frame of
+    /// its own over the global table, as `zend_execute` serves an op
+    /// array with no frame standing. What it returned is left in
+    /// [`Request::returned`] where it was served; what the compiler
+    /// threw is left pending.
     pub(super) fn eval_returning(
+        &mut self,
+        scope: Option<FrameRef>,
+        code: &[u8],
+        name: &[u8],
+    ) -> Result<Evaluation, Fatal> {
+        let Some(frame) = scope else {
+            return self.eval_returning_in(None, code, name);
+        };
+        self.vm.push_switch(frame);
+        let evaluated = self.eval_returning_in(scope, code, name);
+        self.vm.pop_switch();
+        evaluated
+    }
+
+    /// [`Request::eval_returning`] under the switch it stands.
+    fn eval_returning_in(
         &mut self,
         scope: Option<FrameRef>,
         code: &[u8],

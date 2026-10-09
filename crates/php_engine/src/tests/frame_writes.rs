@@ -30,6 +30,8 @@ struct Plan {
     write: Option<(&'static str, i64)>,
     /// The code evaluated after the write.
     code: &'static str,
+    /// Whether what the evaluation throws is shown with its trace.
+    traced: bool,
 }
 
 thread_local! {
@@ -48,7 +50,11 @@ fn paused(observed: &Observed<'_>, depth: usize) -> Option<FrameId> {
 
 /// What an evaluation answered, as the debugger reports it: the value's
 /// type and contents, or the class and message of what it threw.
-fn shown(req: &mut Request, answered: Option<Result<Owner<Value>, Thrown>>) -> String {
+fn shown(
+    req: &mut Request,
+    answered: Option<Result<Owner<Value>, Thrown>>,
+    traced: bool,
+) -> String {
     match answered {
         None => String::from("refused"),
         Some(Ok(value)) => {
@@ -70,8 +76,14 @@ fn shown(req: &mut Request, answered: Option<Result<Owner<Value>, Thrown>>) -> S
                     .prop(req, b"message")
                     .and_then(|message| message.as_str_bytes().map(<[u8]>::to_vec))
                     .unwrap_or_default();
+                let trace = throwable
+                    .prop(req, b"trace")
+                    .and_then(|trace| trace.as_array().copied())
+                    .filter(|_| traced)
+                    .map(|trace| format!("\n{}", req.trace_to_string(trace, true)))
+                    .unwrap_or_default();
                 req.release(throwable.as_value());
-                format!("{class}: {}", String::from_utf8_lossy(&message))
+                format!("{class}: {}{trace}", String::from_utf8_lossy(&message))
             }
             Cause::Exit => String::from("exit"),
             Cause::Fatal => String::from("fatal"),
@@ -95,7 +107,7 @@ fn stop(observed: &mut Observed<'_>) {
         observed.write(line.as_bytes());
     }
     let answered = observed.eval_in_frame(frame, plan.code.as_bytes(), b"debugger");
-    let line = format!("[eval {}]", shown(observed, answered));
+    let line = format!("[eval {}]", shown(observed, answered, plan.traced));
     observed.write(line.as_bytes());
 }
 
@@ -129,6 +141,7 @@ fn a_debugger_changes_a_local_and_evaluates_an_expression_in_the_paused_frame() 
             depth: 0,
             write: Some(("x", 42)),
             code: "$x + $y",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nfunction f() {\n    $x = 1;\n    $y = 3;\n    pause();\n    echo $x, \"\\n\";\n}\nf();\n",
     );
@@ -145,6 +158,7 @@ fn an_evaluation_in_a_frame_below_reads_its_this_and_writes_its_variables() {
             depth: 1,
             write: None,
             code: "$local = $this->p . $local",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nclass C {\n    private $p = 'secret';\n    function m() {\n        $local = 2;\n        g();\n        return $local;\n    }\n}\nfunction g() { pause(); }\necho (new C)->m(), \"\\n\";\n",
     );
@@ -161,6 +175,7 @@ fn a_variable_the_frame_does_not_name_is_written_into_its_table() {
             depth: 0,
             write: Some(("fresh", 7)),
             code: "$fresh * 2",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nfunction h() {\n    pause();\n    echo get_defined_vars()['fresh'], \"\\n\";\n}\nh();\n",
     );
@@ -176,6 +191,7 @@ fn what_an_evaluation_throws_is_handed_back_and_the_program_goes_on() {
             depth: 0,
             write: None,
             code: "throw new Exception('no')",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nfunction f() { pause(); echo \"on\\n\"; }\nf();\n",
     );
@@ -185,6 +201,7 @@ fn what_an_evaluation_throws_is_handed_back_and_the_program_goes_on() {
             depth: 0,
             write: None,
             code: "1 +",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nfunction f() { pause(); echo \"on\\n\"; }\nf();\n",
     );
@@ -204,6 +221,7 @@ fn a_frame_below_a_fiber_is_refused() {
             depth: 1,
             write: Some(("v", 9)),
             code: "$v",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nfunction outer() {\n    $v = 1;\n    $f = new Fiber(function () { pause(); });\n    $f->start();\n    echo $v, \"\\n\";\n}\nouter();\n",
     );
@@ -214,9 +232,10 @@ fn a_frame_below_a_fiber_is_refused() {
 /// message as the oracle renders the same `eval`; the handler is handed
 /// it as the `Err`, and the request ends once the handler returns, as
 /// `zend_eval_stringl`'s `zend_bailout` leaves it to the request's own
-/// `zend_try`, so nothing after it runs. The trace is the stack's, the
-/// frame of `pause()` above `f()` in it, where php's starts at the frame
-/// evaluated in (#2036), so it is not pinned here.
+/// `zend_try`, so nothing after it runs. The compile runs with
+/// `EG(current_execute_data)` at `f()`, so the trace starts there and
+/// passes the frame of `pause()` above it, as the oracle's does for the
+/// same `eval` typed into `f()`.
 #[test]
 fn a_fatal_in_an_evaluation_ends_the_request() {
     let out = serve(
@@ -224,17 +243,39 @@ fn a_fatal_in_an_evaluation_ends_the_request() {
             depth: 0,
             write: None,
             code: "new class { const A = 1; const A = 2; }",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nfunction f() { pause(); echo \"on\\n\"; }\nf();\n",
     );
-    assert!(
-        out.starts_with(
-            "\nFatal error: Cannot redefine class constant class@anonymous::A in debugger on line 1\nStack trace:\n"
-        ),
-        "{out}"
+    assert_eq!(
+        out,
+        "\nFatal error: Cannot redefine class constant class@anonymous::A in debugger on line 1\n\
+         Stack trace:\n#0 Standard input code(4): f()\n#1 {main}\n[eval fatal]"
     );
-    assert!(out.ends_with("#2 {main}\n[eval fatal]"), "{out}");
-    assert!(!out.contains("on\n"), "{out}");
+}
+
+/// What code evaluated in a frame below the innermost throws traces
+/// from that frame down, php's `prev_execute_data` chain from the
+/// evaluated code: the frames above it, `pause()` and the `eval` it was
+/// called from, are on no row. `f()` stands at an `eval` of its own, so
+/// the chain is the one the oracle traces for that `eval` throwing:
+/// `#0 Standard input code(4): eval()`, `#1 Standard input code(6): f()`.
+#[test]
+fn what_an_evaluation_below_the_innermost_throws_traces_from_its_frame() {
+    let out = serve(
+        Plan {
+            depth: 1,
+            write: None,
+            code: "throw new Exception('no')",
+            traced: true,
+        },
+        "<?php\nfunction pause() {}\nfunction f() {\n    eval('pause();');\n}\nf();\n",
+    );
+    assert_eq!(
+        out,
+        "[eval Exception: no\n#0 Standard input code(4): eval()\n\
+         #1 Standard input code(6): f()\n#2 {main}]"
+    );
 }
 
 /// An evaluation in a frame below one that has a symbol table of its
@@ -249,6 +290,7 @@ fn a_table_built_below_another_leaves_the_upper_one_freed_at_its_return() {
             depth: 1,
             write: None,
             code: "$x",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nclass D { function __destruct() { echo \"[dtor]\"; } }\n\
          function g() {\n    $n = 'e';\n    $$n = new D;\n    pause();\n    echo \"[g]\";\n}\n\
@@ -266,6 +308,7 @@ fn the_main_frame_is_written_and_evaluated_in_over_the_global_table() {
             depth: 1,
             write: Some(("g", 5)),
             code: "$g + 1",
+            traced: false,
         },
         "<?php\nfunction pause() {}\nfunction f() { pause(); }\n$g = 1;\nf();\necho $g, \"\\n\";\n",
     );

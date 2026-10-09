@@ -193,16 +193,18 @@ impl<'a> FrameView<'a> {
     /// `EX(prev_execute_data)` as far as user code goes: the user frame
     /// below this one, on its stack or, below a fiber's first frame, on
     /// the stack that resumed the fiber; none below the request's first.
-    /// A frame being popped is passed over, as php has moved
-    /// `EG(current_execute_data)` past it. The frames php links between
-    /// two user frames are [`FrameView::walk`]'s.
+    /// Above a switch it is the frame the switch moved
+    /// `EG(current_execute_data)` to ([`exec::Switch`]). A frame being
+    /// popped is passed over, as php has moved `EG(current_execute_data)`
+    /// past it. The frames php links between two user frames are
+    /// [`FrameView::walk`]'s.
     #[must_use]
     pub fn caller(&self) -> Option<FrameView<'a>> {
         let mut stack = self.stack;
         let mut vm = self.vm;
         let mut at = self.at.0 as usize;
         loop {
-            if let Some(lower) = at.checked_sub(1) {
+            if let Some(lower) = vm.below(at) {
                 at = lower;
             } else {
                 stack += 1;
@@ -499,7 +501,9 @@ impl Request {
     /// on a fiber whose callable is a native the resumer's.
     pub(crate) fn innermost_frame_view(&self) -> Option<FrameView<'_>> {
         self.executions().enumerate().find_map(|(stack, (_, vm))| {
-            let at = vm.frames().iter().rposition(|state| !state.leaving)?;
+            let at = vm
+                .chained()
+                .find(|&at| vm.frames().get(at).is_some_and(|state| !state.leaving))?;
             Some(FrameView {
                 req: self,
                 stack,

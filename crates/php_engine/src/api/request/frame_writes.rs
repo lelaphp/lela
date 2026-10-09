@@ -62,8 +62,9 @@ impl Request {
     /// `zend_execute` serves nothing while `EG(exception)` stands; a
     /// debugger that evaluates there sets what is pending aside first
     /// ([`Request::take_pending`]), as xdebug's `xdebug_do_eval` does. A
-    /// backtrace taken in the evaluated code lists the frames above the
-    /// one evaluated in, where php's starts at it (#2036). `None`
+    /// backtrace taken in the compile or the evaluated code starts at the
+    /// frame evaluated in and passes the frames above it, as php's
+    /// `prev_execute_data` chain from the evaluated code does. `None`
     /// where the frame is not one this reaches: popped, suspended, or
     /// below a fiber.
     #[cfg_attr(debug_assertions, track_caller)]
