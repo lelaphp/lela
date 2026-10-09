@@ -71,6 +71,13 @@ impl Tier for Debugger {
         natives: false,
     };
 
+    /// php compiles the execution context and executes it only at `run`
+    /// (`zend_execute(PHPDBG_G(ops))`, `Z/sapi/phpdbg/phpdbg_prompt.c:866`),
+    /// so an observer is handed the main file's begin there, after what
+    /// the prompt served before it, and nothing for a cycle never run
+    /// ([`executed`]).
+    const HOLDS: bool = true;
+
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
         match site {
             Site::Entry => entered(req, frame),
@@ -201,7 +208,13 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
                     announce(s);
                 }
             });
-            drive(req, frame)
+            // A fiber's first frame stands at the bottom of its own
+            // stack too, and was begun where it was called.
+            if tier::below(req, frame).is_none() && read::serves(req, frame) == read::Serves::Code {
+                executed(req, frame)
+            } else {
+                drive(req, frame)
+            }
         }
     }
 }
@@ -349,7 +362,7 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
         // nothing but a throwable nothing catches.
         inline(&mut session, req, frame);
         session::put(session);
-        return drive(req, frame);
+        return executed(req, frame);
     }
     if session.stopped.is_none() && unopened(&mut session, req) {
         idle_prompt(&mut session, req, false);
@@ -378,6 +391,14 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     if read::pending(req).is_some() {
         return Flow::Returned;
     }
+    executed(req, frame)
+}
+
+/// `run`'s `zend_execute` over the execution context held at `frame`, the
+/// request's first: the observer's begin of the main file, which the
+/// engine raises for no frame this tier holds, then the loop.
+fn executed(req: &mut Request, frame: FrameRef) -> Flow {
+    tier::begin(req, frame);
     drive(req, frame)
 }
 

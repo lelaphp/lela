@@ -406,7 +406,9 @@ impl Request {
             {
                 NativeCaller::Code(FrameRef(u32::try_from(place).unwrap_or(u32::MAX)))
             }
-            Some(Link::Frame(..) | Link::Call(_) | Link::Site(_)) | None => NativeCaller::Native,
+            Some(Link::Frame(..) | Link::Call(_) | Link::Site(_) | Link::Fake(_)) | None => {
+                NativeCaller::Native
+            }
         }
     }
 
@@ -501,6 +503,7 @@ impl Request {
             let (function, this, called) = match link {
                 Link::Frame(_, state) => (state.function, state.this(), state.called_scope),
                 Link::Call(call) => (Some(call.function), call.this(), call.called_scope),
+                Link::Fake(_) => continue,
                 Link::Site(_) => return None,
             };
             if let Some(this) = this {
@@ -552,6 +555,7 @@ impl Request {
             let (function, this) = match link {
                 Link::Frame(_, state) => (state.function, state.this()),
                 Link::Call(call) => (Some(call.function), call.this()),
+                Link::Fake(_) => continue,
                 Link::Site(_) => return None,
             };
             if this.is_some() {
@@ -658,7 +662,7 @@ impl Request {
         let function = match chain.next() {
             Some(Link::Frame(_, state)) => state.function,
             Some(Link::Call(call)) => Some(call.function),
-            Some(Link::Site(_)) | None => None,
+            Some(Link::Site(_) | Link::Fake(_)) | None => None,
         };
         function.map_or_else(
             || String::from("main"),

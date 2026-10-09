@@ -315,7 +315,7 @@ fn sscanf(
     format: PhpString,
     vars: Variadic<Ref<Value>>,
 ) -> Option<Union<PhpArray, i64>> {
-    let _ = (string, format, vars);
+    drop((string, format, vars));
     None
 }
 
@@ -325,7 +325,7 @@ fn array_multisort(
     #[php(prefer_ref)] array: Ref<Untyped<Value>>,
     #[php(prefer_ref)] rest: Variadic<Ref<Untyped<Value>>>,
 ) -> True {
-    let _ = (array, rest);
+    drop((array, rest));
     True
 }
 

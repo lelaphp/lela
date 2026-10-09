@@ -281,7 +281,7 @@ impl Request {
         Some(match self.chain().next()? {
             Link::Frame(_, state) => (state.function, state.this()),
             Link::Call(call) => (Some(call.function), call.this()),
-            Link::Site(_) => (None, None),
+            Link::Site(_) | Link::Fake(_) => (None, None),
         })
     }
 

@@ -19,7 +19,10 @@ use super::Request;
 
 /// The links of one stack, innermost first: the frames `frames` numbers
 /// and the calls `calls` numbers that are being served, each frame's
-/// `calls_below` saying where among the calls it was pushed.
+/// `calls_below` saying where among the calls it was pushed. A switch
+/// ([`exec::Switch`]) links what stands above it to the frame it moved
+/// `EG(current_execute_data)` to, so the frames and calls between are on
+/// no chain while it stands, as php's `prev_execute_data` passes them.
 pub(super) fn links_of<'a>(
     stack: &'a VmStack,
     vm: &'a Vm,
@@ -27,58 +30,88 @@ pub(super) fn links_of<'a>(
     calls: std::ops::Range<usize>,
     expand: &dyn Fn(PhpObject) -> Vec<Link<'a>>,
 ) -> Vec<Link<'a>> {
-    /// The calls being served below `below`, from where the walk stands.
-    fn take_below<'a>(
+    /// The walk up the stack, outermost first, reversed at the end.
+    struct Walk<'a, 'e> {
+        vm: &'a Vm,
         served: &'a [exec::CallState],
-        taken: &mut usize,
-        below: usize,
-        links: &mut Vec<Link<'a>>,
-    ) {
-        while *taken < below {
-            if let Some(call) = served.get(*taken)
-                && call.stage == exec::CallStage::Serving
-            {
-                links.push(Link::Call(call));
+        end: usize,
+        expand: &'e dyn Fn(PhpObject) -> Vec<Link<'a>>,
+        links: Vec<Link<'a>>,
+        /// The calls taken so far.
+        taken: usize,
+        /// Each frame walked past, with how many links stood when it was.
+        ends: Vec<(usize, usize)>,
+    }
+    impl Walk<'_, '_> {
+        /// The calls being served below `below`, from where the walk
+        /// stands.
+        fn take_below(&mut self, below: usize) {
+            let below = below.min(self.end);
+            while self.taken < below {
+                if let Some(call) = self.served.get(self.taken)
+                    && call.stage == exec::CallStage::Serving
+                {
+                    self.links.push(Link::Call(call));
+                }
+                self.taken += 1;
             }
-            *taken += 1;
+        }
+
+        /// What stands at `at` below the frame there: a placeholder,
+        /// where a generator's frame stood, and the generators it
+        /// expands into, outermost first here; a site; and a switch,
+        /// which takes back off the walk every link above the frame it
+        /// moved to.
+        fn placed(&mut self, at: usize) {
+            let vm = self.vm;
+            for mark in vm.placeholders().iter().filter(|mark| mark.frame == at) {
+                self.take_below(mark.calls);
+                let expanded = (self.expand)(mark.generator);
+                let generators = expanded.len();
+                self.links.extend(expanded.into_iter().rev());
+                self.links.push(Link::Fake(generators));
+            }
+            for site in vm.sites().iter().filter(|site| site.frame == at) {
+                self.take_below(site.calls);
+                self.links.push(Link::Site(site));
+            }
+            for switch in vm.switches().iter().filter(|switch| switch.frame == at) {
+                self.take_below(switch.calls);
+                let to = switch.to.0 as usize;
+                if let Some(&(_, standing)) = self.ends.iter().rev().find(|(frame, _)| *frame == to)
+                {
+                    self.links.truncate(standing);
+                }
+            }
         }
     }
     let states = vm.frames();
-    let served = vm.calls();
-    let end = calls.end.min(served.len());
-    let mut links: Vec<Link> = Vec::new();
-    let mut taken = calls.start;
-    // A placeholder standing at `at`, where a generator's frame stood,
-    // and the generators it expands into, outermost first here since
-    // the walk goes up the stack and is reversed at the end.
-    let placed = |at: usize, taken: &mut usize, links: &mut Vec<Link<'a>>| {
-        for mark in vm.placeholders().iter().filter(|mark| mark.frame == at) {
-            take_below(served, taken, mark.calls.min(end), links);
-            links.extend(expand(mark.generator).into_iter().rev());
-        }
-        for site in vm.sites().iter().filter(|site| site.frame == at) {
-            take_below(served, taken, site.calls.min(end), links);
-            links.push(Link::Site(site));
-        }
+    let mut walk = Walk {
+        vm,
+        served: vm.calls(),
+        end: calls.end.min(vm.calls().len()),
+        expand,
+        links: Vec::new(),
+        taken: calls.start,
+        ends: Vec::new(),
     };
     for at in frames.clone() {
-        placed(at, &mut taken, &mut links);
+        walk.placed(at);
         let Some(state) = states.get(at) else {
             break;
         };
-        let below = usize::try_from(state.calls_below)
-            .unwrap_or(usize::MAX)
-            .min(end);
-        take_below(served, &mut taken, below, &mut links);
+        walk.take_below(usize::try_from(state.calls_below).unwrap_or(usize::MAX));
         if let Some(generator) = state.generator {
-            links.extend(expand(generator).into_iter().rev());
+            walk.links.extend(expand(generator).into_iter().rev());
         }
         if !state.leaving {
-            links.push(Link::Frame(Slots::Stack(stack, at), state));
+            walk.links.push(Link::Frame(Slots::Stack(stack, at), state));
         }
+        walk.ends.push((at, walk.links.len()));
     }
-    placed(frames.end, &mut taken, &mut links);
-    take_below(served, &mut taken, end, &mut links);
+    walk.placed(frames.end);
+    walk.take_below(walk.end);
+    let mut links = walk.links;
     links.reverse();
     links
 }
@@ -93,6 +126,13 @@ pub(super) enum Link<'a> {
     /// code that serves no function, has no `$this` and no scope, and
     /// makes no trace row of its own.
     Site(&'a exec::Site),
+    /// php's `execute_fake` placeholder where a delegating generator's
+    /// frame stood ([`exec::Placeholder`]), the frame gone while what it
+    /// held is released, so a destructor that release serves is called
+    /// from it: no function and no row of its own, it stands for the
+    /// kept frames of the generators the next links are, this many of
+    /// them, and its `prev_execute_data` is the resumer below those.
+    Fake(usize),
 }
 
 /// Where the slots of a frame on the chain are: on a VM stack at its
@@ -159,14 +199,50 @@ impl Request {
     /// stack its frames stand on, the swap php's observer makes at the
     /// switch's notice (`Z/Zend/zend_observer.c:423-424`).
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
-        // The execution left off the running chain keeps what it was
-        // lent ([`exec::Receiver`]).
+        self.switch_stack(other);
+        self.swap_error_reporting(&mut other.error_reporting);
+        self.swap_stack_limit(&mut other.stack_limit);
+    }
+
+    /// The stack the request runs on and `other`'s change places, the
+    /// frames' engine half and the chain of open observed frames with
+    /// it; the execution left off the running chain keeps what it was
+    /// lent ([`exec::Receiver`]).
+    fn switch_stack(&mut self, other: &mut crate::fiber::Execution) {
         self.own_lent_receivers();
         std::mem::swap(&mut self.stack, &mut other.stack);
         std::mem::swap(&mut self.vm, &mut other.vm);
         self.swap_observing(&mut other.observing);
-        self.swap_error_reporting(&mut other.error_reporting);
-        self.swap_stack_limit(&mut other.stack_limit);
+    }
+
+    /// `f` served with the request running on the `stack`-th stack
+    /// down the chain [`Request::executions`] walks, as a debugger
+    /// serves a frame below a fiber with `EG(current_execute_data)`
+    /// moved there: that stack is the running one for `f`, the fibers
+    /// above it set aside, so the chain runs from it into the stacks
+    /// below, and its frames are the ones a [`FrameRef`] names. The
+    /// error-reporting level and the machine stack's limit stay the
+    /// running fiber's, as php moves neither, and no fiber starts,
+    /// suspends or resumes meanwhile, since `f` is served on the
+    /// running fiber's machine stack. `None` where no stack stands
+    /// there.
+    pub(super) fn on_stack<R>(
+        &mut self,
+        stack: usize,
+        f: impl FnOnce(&mut Request) -> R,
+    ) -> Option<R> {
+        if stack == 0 {
+            return Some(f(self));
+        }
+        let mut other = std::mem::take(self.fibers.set_aside_above(stack)?);
+        self.switch_stack(&mut other);
+        let served = self.with_fiber_switch_blocked(f);
+        self.switch_stack(&mut other);
+        if let Some(slot) = self.fibers.set_aside_execution() {
+            *slot = other;
+        }
+        self.fibers.put_back();
+        Some(served)
     }
 
     /// The stacks php's one `prev_execute_data` chain runs through: the
@@ -196,7 +272,9 @@ impl Request {
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
     /// `FrameRef`. A VM stack whose page the memory limit refuses is
-    /// the fatal php raises there, and nothing is pushed.
+    /// the fatal php raises there, and nothing is pushed. The frame is
+    /// not begun: its observer begin is the caller's, which `execute`
+    /// raises as `zend_execute` does.
     pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
@@ -211,7 +289,6 @@ impl Request {
             state.symbol_table = Some(TableId::GLOBAL);
         }
         self.attach_symbol_table(frame);
-        crate::observer::call(self, frame);
         Ok(frame)
     }
 

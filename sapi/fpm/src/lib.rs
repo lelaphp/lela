@@ -269,8 +269,10 @@ pub fn main() -> ExitCode {
     };
     let engine = |ini: &[Define]| engine(ini, &startup);
     let status = match ask {
+        // `main` starts php before it answers `-h`
+        // (`Z/sapi/fpm/fpm/fpm_main.c:1694-1697`).
         Ask::Usage(code) => {
-            let _ = engine(&ini);
+            drop(engine(&ini));
             print(&usage(&argv0));
             code
         }

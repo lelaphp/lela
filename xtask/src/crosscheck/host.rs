@@ -121,7 +121,7 @@ pub(crate) fn oracle_side(
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
         Host::Cgi => {
             let path = pinned(sapi.cgi.as_ref(), "php-cgi")?;
-            crate::witness::served_as_cgi(oracle, &path, &program, REQUEST, &[])?
+            crate::witness::served_as_cgi(oracle, &path, &program, REQUEST, None, &[])?
         }
         Host::Fpm => {
             let path = pinned(sapi.fpm.as_ref(), "php-fpm")?;
@@ -144,7 +144,7 @@ pub(crate) fn engine_side(
     let program = column.program(module);
     let served = match host {
         Host::Cli => bail!("the CLI renders {module} by its flags, not as a request"),
-        Host::Cgi => binary.serve_cgi(oracle, &program, REQUEST)?.0,
+        Host::Cgi => binary.serve_cgi(oracle, &program, REQUEST, None)?.0,
         Host::Fpm => binary.serve_fpm(oracle, &program, REQUEST)?.0,
         Host::Server => served_by_server(oracle, binary.cli()?, &program)?,
     };

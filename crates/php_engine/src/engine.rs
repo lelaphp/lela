@@ -6696,7 +6696,9 @@ mod tests {
     /// and every request serving it reads the one `zend_string` (design
     /// §5.2, §5.14, §6.3): two requests over one file write the same
     /// bytes out of one allocation the engine owns, and the second
-    /// compiles nothing.
+    /// compiles nothing. Beside the constant the table holds the file's
+    /// name, which the unit's op arrays carry
+    /// ([`php_compile::intern_names`]).
     #[test]
     fn two_requests_serving_one_file_share_the_one_constant_string() {
         let engine = Engine::cli_builder().build();
@@ -6718,8 +6720,8 @@ mod tests {
         }
         assert_eq!(
             interned(&engine),
-            1,
-            "one string for the one constant, however many requests read it"
+            2,
+            "one string for the one constant and one for the file's name, however many requests read them"
         );
         // What the cache holds after both: one unit, and the constant
         // string its `ECHO` names is the one allocation.

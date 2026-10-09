@@ -8,14 +8,14 @@
 //! serves it).
 //!
 //! The frame is named by its [`FrameId`], kept from a [`FrameView`]
-//! (#1827), and checked where it stands each time. A frame that stands
-//! on the running stack is paused: the innermost, whose call or native
-//! the handler stands in, and every one below it. A frame on no stack,
-//! popped or a suspended generator's or fiber's, is refused, as
-//! [`Request::frame_of`] refuses it; so is a frame below a fiber, on the
-//! stack that resumed it, which [`Request::frame_of`] reads but whose
-//! slots and table this request cannot reach while the fiber's stack
-//! runs (#2030).
+//! (#1827), and checked where it stands each time
+//! ([`Request::in_frame`]). A frame that stands on the running stack is
+//! paused: the innermost, whose call or native the handler stands in,
+//! and every one below it. A frame below a fiber, on the stack that
+//! resumed it, is served with the request running on that stack, and a
+//! suspended generator's with its frame stood where a resumption stands
+//! it. A frame popped is refused, and so is a suspended fiber's, which
+//! no stack the request runs on holds.
 //!
 //! Both re-enter the request, so both take it whole, `&mut Request`,
 //! and are called from a handler through the [`Observed`] it is handed,
@@ -40,13 +40,18 @@ impl Request {
     /// what stood there released. A variable that holds a reference is
     /// bound to `value` in its place, as php's `zend_hash_update_ind`
     /// binds it. `false`, and the value given up, where the frame is not
-    /// one this reaches: popped, suspended, or below a fiber.
+    /// one this reaches: popped, or a suspended fiber's.
     pub fn set_frame_var(&mut self, frame: FrameId, name: &[u8], value: Owner<Value>) -> bool {
-        let Some(at) = self.running_frame_of(frame) else {
+        let mut value = Some(value);
+        let set = self.in_frame(frame, |req, at| {
+            value
+                .take()
+                .is_some_and(|value| req.set_local_var_in(at, name, value, true))
+        });
+        if let Some(value) = value {
             value.give_up(self);
-            return false;
-        };
-        self.set_local_var_in(at, name, value, true)
+        }
+        set.unwrap_or(false)
     }
 
     /// `zend_eval_stringl(code, &retval, name)`
@@ -62,10 +67,11 @@ impl Request {
     /// `zend_execute` serves nothing while `EG(exception)` stands; a
     /// debugger that evaluates there sets what is pending aside first
     /// ([`Request::take_pending`]), as xdebug's `xdebug_do_eval` does. A
-    /// backtrace taken in the evaluated code lists the frames above the
-    /// one evaluated in, where php's starts at it (#2036). `None`
-    /// where the frame is not one this reaches: popped, suspended, or
-    /// below a fiber.
+    /// backtrace taken in the compile or the evaluated code starts at the
+    /// frame evaluated in and passes the frames above it, as php's
+    /// `prev_execute_data` chain from the evaluated code does. `None`
+    /// where the frame is not one this reaches: popped, or a suspended
+    /// fiber's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn eval_in_frame(
         &mut self,
@@ -85,22 +91,23 @@ impl Request {
         code: &[u8],
         name: &[u8],
     ) -> Option<Result<Value, Thrown>> {
-        let at = self.running_frame_of(frame)?;
-        if self.is_pending() {
-            return Some(if self.bailing_out() {
-                Err(Thrown::of(None))
-            } else {
-                Ok(Value::null())
-            });
-        }
-        let evaluated = self.eval_returning(Some(at), code, name);
-        let returned = std::mem::replace(&mut self.returned, Value::null());
-        let served = match self.fatal_of(evaluated) {
-            Ok(Evaluation::Served) if !self.is_pending() => return Some(Ok(returned)),
-            Ok(_) => Err(Thrown::of(self.take_pending_view())),
-            Err(thrown) => Err(thrown),
-        };
-        self.release(returned);
-        Some(served)
+        self.in_frame(frame, |req, at| {
+            if req.is_pending() {
+                return if req.bailing_out() {
+                    Err(Thrown::of(None))
+                } else {
+                    Ok(Value::null())
+                };
+            }
+            let evaluated = req.eval_returning(Some(at), code, name);
+            let returned = std::mem::replace(&mut req.returned, Value::null());
+            let served = match req.fatal_of(evaluated) {
+                Ok(Evaluation::Served) if !req.is_pending() => return Ok(returned),
+                Ok(_) => Err(Thrown::of(req.take_pending_view())),
+                Err(thrown) => Err(thrown),
+            };
+            req.release(returned);
+            served
+        })
     }
 }

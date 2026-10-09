@@ -552,7 +552,13 @@ impl Request {
         let standing = self.vm.frames().len();
         let callee = match self.caller_frame() {
             Some(frame) => self.push_code_frame(unit, frame, None),
-            None => self.push_frame(unit),
+            None => match self.push_frame(unit) {
+                Ok(frame) => {
+                    crate::observer::call(self, frame);
+                    Ok(frame)
+                }
+                refused => refused,
+            },
         };
         let callee = self.fatal_of(callee)?;
         let reenter = self.shared.loops.reenter;

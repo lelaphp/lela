@@ -52,8 +52,8 @@ pub use php_engine::{
 pub mod tier {
     pub use php_engine::tier::{
         Argument, Aside, Called, Evaluated, Flow, FrameRef, Hooked, Request, SafepointIdx, Site,
-        Stepped, Tier, Under, below, call, catches, entry, evaluate, evaluate_code, exit, frame,
-        restore, set_argv, set_aside, set_stdin, step, unwind,
+        Stepped, Tier, Under, begin, below, call, catches, entry, evaluate, evaluate_code, exit,
+        frame, restore, set_argv, set_aside, set_stdin, step, unwind,
     };
 }
 
