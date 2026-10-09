@@ -999,7 +999,7 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
         .find(|krate| krate.name == "ext/pcre")
         .unwrap();
     let found = super::extract(&root, krate, rule, Target::built()).unwrap();
-    let binary = Binary::with_fpm(&root, root.join("php-fpm"));
+    let binary = Binary::standing(&root, crate::oracle::hosts::FPM, root.join("php-fpm"));
     let tally = judge(
         &manifest.pin.oracle(),
         &binary,
@@ -1231,4 +1231,52 @@ fn a_crate_outside_ext_with_no_native_counts_its_kernels_alone() {
         subjects("ext/lexbor"),
         ["ext/lexbor/src/lib.rs:5 pub fn parse"]
     );
+}
+
+/// The negative control of a host's own lines (#1975, as #2468 ruled):
+/// the fixture's `sapi/cgi` carries one line and no fence. Run under the
+/// pinned php-cgi and a host standing in for the engine's that answers it
+/// otherwise, the crate's reading fails on that line; under a pin whose
+/// php-cgi is not at its path it fails too, and is never a skip.
+#[test]
+fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use crate::reading::Status;
+    let root = workspace().join("xtask/fixtures/witness/host-line-unmet");
+    let mut fixture = Manifest::load(&root).unwrap();
+    let hosts = Tree::new("host-line-unmet").unwrap();
+    let engine = hosts.write("php-cgi", "#!/bin/sh\necho 2\n").unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let binary = Binary::standing(&root, crate::oracle::hosts::CGI, engine);
+    let ask = Ask {
+        crates: vec!["sapi/cgi".to_owned()],
+        staged: false,
+        ..Ask::default()
+    };
+    let read = |fixture: &Manifest| {
+        let readings = super::run_in(&root, fixture, &registry(""), &ask, None, &binary).unwrap();
+        let [reading] = &readings[..] else {
+            panic!("{readings:#?}")
+        };
+        assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+        assert!(
+            reading.message.contains("lines.toml#echoes-one"),
+            "{}",
+            reading.message
+        );
+    };
+    if fixture
+        .pin
+        .sapi
+        .cgi
+        .as_ref()
+        .is_some_and(|cgi| cgi.path.is_file())
+    {
+        read(&fixture);
+    }
+    if let Some(cgi) = fixture.pin.sapi.cgi.as_mut() {
+        cgi.path = hosts.join("absent");
+    }
+    read(&fixture);
 }

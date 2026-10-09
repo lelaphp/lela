@@ -934,6 +934,38 @@ impl fmt::Display for PastLimit {
 
 impl std::error::Error for PastLimit {}
 
+/// What one program run by [`Oracle::to_end`] came to: its two streams,
+/// how it ended, none where it ran past the limit and was killed, its wall
+/// time, and what the caller did while it ran.
+#[derive(Debug)]
+pub(crate) struct ToEnd<T> {
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) exit: Option<Ended>,
+    pub(crate) wall: Duration,
+    pub(crate) during: T,
+}
+
+/// A program [`Oracle::to_end`] has started and not yet waited for: its
+/// process id, and how much it has written to stdout so far.
+pub(crate) struct Running<'a> {
+    pub(crate) pid: u32,
+    taken: &'a Taken,
+}
+
+impl Running<'_> {
+    /// The bytes on stdout so far, stderr's among them where it is merged.
+    pub(crate) fn written(&self) -> u64 {
+        match self.taken {
+            Taken::Files { out, .. } => fs::metadata(out).map_or(0, |m| m.len()),
+            Taken::Pipes { out, .. } => out
+                .bytes
+                .lock()
+                .map_or(0, |held| u64::try_from(held.len()).unwrap_or(u64::MAX)),
+        }
+    }
+}
+
 /// One invocation under the pin's recipe: which binary runs and which
 /// program, and what the run carries over the recipe. Each field past the
 /// program ends its rustdoc in one of harness-design.md §4.3's two groups,
@@ -1413,8 +1445,7 @@ impl<'a> Oracle<'a> {
         cmd.args(call.flags)
             .arg(&scratch.script)
             .args(call.args)
-            .current_dir(call.cwd.unwrap_or(&scratch.dir))
-            .process_group(0);
+            .current_dir(call.cwd.unwrap_or(&scratch.dir));
         recipe.environ(&mut cmd)?;
         for (name, value) in call.env {
             if value.is_empty() {
@@ -1423,6 +1454,47 @@ impl<'a> Oracle<'a> {
                 cmd.env(name, value);
             }
         }
+        let limit = Duration::from_secs(recipe.limits.timeout_s);
+        let ended = self.to_end(cmd, call.streams, call.stdin, limit, |_| ())?;
+        let Some(exit) = ended.exit else {
+            return Err(PastLimit {
+                binary: call.binary.to_path_buf(),
+                script: scratch.script.clone(),
+                limit_s: recipe.limits.timeout_s,
+            }
+            .into());
+        };
+        let (stdout, stderr) = if call.raw {
+            (ended.stdout, ended.stderr)
+        } else {
+            (
+                scratch.normalise(&recipe.normalise, ended.stdout),
+                scratch.normalise(&recipe.normalise, ended.stderr),
+            )
+        };
+        Ok(Observation {
+            stdout,
+            stderr,
+            exit,
+            wall: ended.wall,
+        })
+    }
+
+    /// `cmd` run to its end in a process group of its own, its streams
+    /// taken as `how` says and `stdin` on its stdin, and `during` called
+    /// with the program [`Running`] once it has started, before the wait:
+    /// what every program of the run goes through, [`Oracle::run_under`]'s
+    /// and a host's own line's (`witness`'s host lines, #1975). A program
+    /// still running at `limit` is killed with its group and reaped, and
+    /// comes back with no exit and nothing read.
+    pub(crate) fn to_end<T>(
+        &self,
+        mut cmd: Command,
+        how: Streams,
+        stdin: Stdin<'_>,
+        limit: Duration,
+        during: impl FnOnce(&Running<'_>) -> T,
+    ) -> Result<ToEnd<T>> {
         // The streams, and the program's stdin, stand in a tree apart from
         // the program's directory, so a snippet that lists or reads its
         // own directory finds its own file there and never these; a tree
@@ -1430,8 +1502,9 @@ impl<'a> Oracle<'a> {
         // `memory_get_usage()` counts the path in `$_SERVER` and a witness
         // pins that number.
         let streams = Tree::new("streams")?;
-        let taken = Taken::set(&mut cmd, &streams, call.streams)?;
-        cmd.stdin(stdin_of(&streams, call.stdin)?);
+        let taken = Taken::set(&mut cmd, &streams, how)?;
+        cmd.stdin(stdin_of(&streams, stdin)?).process_group(0);
+        let program = PathBuf::from(cmd.get_program());
 
         let started = Instant::now();
         let from = SystemTime::now();
@@ -1439,11 +1512,14 @@ impl<'a> Oracle<'a> {
         // The command holds the pipes' writing ends until it drops, and a
         // pipe ends only when its last writer closes it.
         drop(cmd);
-        let mut child = spawned.with_context(|| format!("running {}", call.binary.display()))?;
+        let mut child = spawned.with_context(|| format!("running {}", program.display()))?;
         let run = self.spawned.add(child.id(), from);
         let group = Group::of(&child)?;
-        let feeding = fed(call.stdin, &mut child);
-        let limit = Duration::from_secs(recipe.limits.timeout_s);
+        let feeding = fed(stdin, &mut child);
+        let during = during(&Running {
+            pid: child.id(),
+            taken: &taken,
+        });
         let status = loop {
             if let Some(status) = child.try_wait().context("waiting for php")? {
                 self.spawned.ended(run);
@@ -1456,12 +1532,13 @@ impl<'a> Oracle<'a> {
                 drop(group);
                 child.wait().context("reaping php past the limit")?;
                 self.spawned.ended(run);
-                return Err(PastLimit {
-                    binary: call.binary.to_path_buf(),
-                    script: scratch.script.clone(),
-                    limit_s: recipe.limits.timeout_s,
-                }
-                .into());
+                return Ok(ToEnd {
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    exit: None,
+                    wall: started.elapsed(),
+                    during,
+                });
             }
             thread::sleep(Duration::from_millis(5));
         };
@@ -1478,20 +1555,12 @@ impl<'a> Oracle<'a> {
         if let Some(feeding) = feeding {
             feeding.join().ok();
         }
-
-        let (stdout, stderr) = if call.raw {
-            (stdout, stderr)
-        } else {
-            (
-                scratch.normalise(&recipe.normalise, stdout),
-                scratch.normalise(&recipe.normalise, stderr),
-            )
-        };
-        Ok(Observation {
+        Ok(ToEnd {
             stdout,
             stderr,
-            exit: Ended::of(status),
+            exit: Some(Ended::of(status)),
             wall,
+            during,
         })
     }
 

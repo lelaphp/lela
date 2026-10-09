@@ -1,0 +1,317 @@
+# php's own lines, each run by `xtask witness` under the pinned php
+# (oracle.toml's [oracle]) and then under this crate's, in one directory laid
+# afresh, and held equal: what a fence cannot carry, the process boundary, an
+# ini of the line's own (#1634), files laid before the run, a server's
+# requests (#1975, as #2468 ruled). No byte here is the oracle's; the
+# oracle's run is the expectation. The grammar is
+# xtask/src/witness/host.rs's.
+
+# `sapi_cli_ub_write` writes each chunk to fd 1 as it comes and the error
+# stream reaches fd 2 as it is written, so a child process writing to the
+# stdout it inherits stands between the request's own writes; what a handler
+# holds has not left the `php_output` layer, so the child's write stands
+# before it; and one pipe under both streams carries them in the order
+# written (#741).
+[[line]]
+name = "a-popen-child-writes-between-the-echoes"
+args = ["-n", "-r", '''echo "a\n"; $p = popen('cat', 'w'); fwrite($p, "b\n"); pclose($p); echo "c\n";''']
+[[line.then]]
+args = ["-n", "-r", '''echo "a\n"; $p = proc_open('echo child', [], $pipes); proc_close($p); echo "c\n";''']
+[[line.then]]
+args = ["-n", "-r", '''ob_start(); echo "a\n"; $p = popen('cat', 'w'); fwrite($p, "b\n"); pclose($p); ob_end_flush(); echo "c\n";''']
+
+[[line]]
+name = "the-error-stream-and-the-body-interleave-on-one-pipe"
+args = ["-n", "-r", '''echo "a\n"; fwrite(STDERR, "b\n"); echo "c\n"; ini_set('display_errors', 'stderr'); echo $u; echo "d\n";''']
+streams = "merged"
+
+# A process ends its engine, and a `pcntl_fork` child that returns ends the
+# copy the fork made, as php's child calls `php_module_shutdown` over the
+# persistent list it inherited: a `dba_popen` `cdb_make` file is finished
+# there, and again by the parent where the parent ends too; the reader is
+# the next process (#1804).
+[[line]]
+name = "a-forked-child-s-end-finishes-a-persistent-cdb-make-file"
+args = ["-n", "writer.php", "{dir}/child.cdb", "return", "kill"]
+files = { "writer.php" = '''
+<?php
+[, $f, $child, $parent] = $argv;
+$d = dba_popen($f, 'n', 'cdb_make');
+dba_insert('key0', 'value0', $d);
+$pid = pcntl_fork();
+if ($pid === 0) {
+    if ($child === 'kill') posix_kill(getmypid(), SIGKILL);
+    if ($child === 'exit') exit(0);
+    echo "child end\n";
+    return;
+}
+pcntl_waitpid($pid, $status);
+clearstatcache();
+echo "after the child: ", filesize($f), "\n";
+if ($parent === 'kill') posix_kill(getmypid(), SIGKILL);
+''', "reader.php" = '''
+<?php
+clearstatcache();
+echo filesize($argv[1]), "\n";
+var_dump(dba_fetch('key0', dba_open($argv[1], 'r', 'cdb')));
+''' }
+[[line.then]]
+args = ["-n", "reader.php", "{dir}/child.cdb"]
+[[line.then]]
+args = ["-n", "writer.php", "{dir}/child-exit.cdb", "exit", "kill"]
+[[line.then]]
+args = ["-n", "reader.php", "{dir}/child-exit.cdb"]
+[[line.then]]
+args = ["-n", "writer.php", "{dir}/both.cdb", "return", "end"]
+[[line.then]]
+args = ["-n", "reader.php", "{dir}/both.cdb"]
+[[line.then]]
+args = ["-n", "writer.php", "{dir}/killed.cdb", "kill", "end"]
+[[line.then]]
+args = ["-n", "reader.php", "{dir}/killed.cdb"]
+
+# `-s` and `-w`, `PHP_CLI_MODE_HIGHLIGHT` and `PHP_CLI_MODE_STRIP`, over a
+# file with every colour `zend_highlight` has and the heredoc close
+# `zend_strip` writes with the character after it; the later switch wins;
+# `-s` and `-w` after `-r` are php's two sentences, and `-r` after them the
+# conflict.
+[[line]]
+name = "highlight-and-strip"
+args = ["-n", "-s", "hl.php"]
+files = { "hl.php" = "<html>\n<?php\n/** doc */\n$name = \"world\"; // greet\necho \"Hello {$name}\\t!\\n\";\n$t = <<<EOT\n  Dear $name,\n  EOT;\n\techo $t;\n?>\n</html>\n" }
+[[line.then]]
+args = ["-n", "-w", "hl.php"]
+[[line.then]]
+args = ["-n", "-s", "-w", "hl.php"]
+[[line.then]]
+args = ["-n", "-r", "echo 1;", "-s"]
+[[line.then]]
+args = ["-n", "-r", "echo 1;", "-w"]
+[[line.then]]
+args = ["-n", "-s", "-r", "echo 1;"]
+[[line.then]]
+args = ["-n", "-w", "-r", "echo 1;"]
+
+# `-l` over a file that parses, one that does not, one the compiler warns of,
+# one that is not there, and the loop over several, whose status is the last
+# failure's; and under the `dump` regime's ini with `-l` beside it, what
+# `xtask compile-identity` runs both binaries under, php's op arrays before
+# the optimizer on the second stream (design §6.1), and nothing dumped where
+# the ini does not ask. `opcache.file_update_protection=0` is the recipe's:
+# php caches, and so optimizes and dumps, no file younger than it.
+[[line]]
+name = "lint"
+args = ["-n", "-l", "{dir}/ok.php"]
+files = { "ok.php" = "<?php\necho 1;\n", "bad.php" = "<?php\necho 1 +;\n", "dep.php" = "<?php\n(integer)1;\n" }
+[[line.then]]
+args = ["-n", "-l", "{dir}/bad.php"]
+[[line.then]]
+args = ["-n", "-l", "{dir}/dep.php"]
+[[line.then]]
+args = ["-n", "-l", "{dir}/bad.php", "{dir}/ok.php"]
+[[line.then]]
+args = ["-n", "-l", "{dir}/ok.php", "nope.php", "{dir}/ok.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.opt_debug_level=0x10000", "-l", "{dir}/ok.php"]
+
+# A refusal answered after every extension started, at `zend_post_startup`
+# inside `php_module_startup`: opcache's `ACCEL_LOG_FATAL` in
+# `accel_post_startup` for `opcache.file_cache_only` with no
+# `opcache.file_cache`, and a preload that throws. php ends the process
+# there, before `main` reads its line further, so the file named on the line
+# is never opened and `-i`, `-v` and `-m` never answered (#1943).
+# `zend_accel_error` writes the time `asctime` prints and the process's id
+# before its message.
+[[line]]
+name = "post-startup-refused"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "/nonexistent/t.php"]
+mask = [['(?m)^.{24} \(\d+\): ', '<asctime> (<pid>): ']]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "-i"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "-v"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "-m"]
+
+[[line]]
+name = "a-failed-preload-ends-the-process-before-the-host-acts"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.preload={dir}/p.php", "-i"]
+files = { "p.php" = "<?php throw new Exception(\"refused\");\n" }
+
+# `-B`, `-R`, `-F` and `-E` over stdin's lines: each code string is
+# `zend_eval_string_ex` under its own name, so an `exit` with status 0 goes on
+# to the next line, one that sets a status ends the lines, what a line leaves
+# uncaught is rendered and ends them with `-E` still served, and a fatal ends
+# everything; the file `-F` names reads from the same `STDIN` the lines are
+# read from (`sapi/cli/tests/010.phpt`'s shape).
+[[line]]
+name = "process-stdin-uncaught"
+args = ["-n", "-B", "echo \"begin\\n\"; exit(0);", "-R", "var_dump($argn, $argi); if ($argi == 2) throw new Exception(\"x\");", "-E", "echo \"end\\n\";"]
+stdin = "a\n\nb"
+
+[[line]]
+name = "process-stdin-exit-status"
+args = ["-n", "-R", "echo $argn, \"\\n\"; exit(3);", "-E", "echo \"end\\n\";"]
+stdin = "a\nb\n"
+
+[[line]]
+name = "process-stdin-fatal"
+args = ["-n", "-R", "echo $argn; str_repeat(\"x\", PHP_INT_MAX);", "-E", "echo \"end\\n\";"]
+stdin = "a\nb\n"
+
+[[line]]
+name = "process-stdin-file-for-each-line"
+args = ["-n", "-F", "{dir}/f.php"]
+stdin = "a\nb\nc\n"
+files = { "f.php" = "<?php var_dump($argn, fread(STDIN, 10));" }
+[[line.then]]
+args = ["-n", "-F", "nope.php"]
+
+# `-a`, the interactive shell the readline extension provides, fed through a
+# pipe: libedit reads the lines and writes no prompt where stdin is no
+# terminal, each block of code is served as `zend_eval_stringl` serves it, a
+# fatal is rendered and the shell goes on, what a block leaves uncaught is a
+# warning, `#name=value` sets an entry, the code of a prompt's backticks is
+# served for its output, and the status is what the request left; php starts
+# its modules once and asks that one startup whether it has a shell, so the
+# line `ini_error` writes for a `-d` that does not read is written once
+# (#1947).
+[[line]]
+name = "shell-a-fatal-and-an-uncaught-throwable"
+args = ["-n", "-a"]
+env = { PHP_HISTFILE = "{dir}/history" }
+stdin = "echo 1;\nfunction f() {}\nfunction f() {}\necho 2;\nthrow new Exception(\"x\");\nexit(3);\necho \"a\";\n"
+
+[[line]]
+name = "shell-blocks-gather-and-quit-leaves"
+args = ["-n", "-a"]
+env = { PHP_HISTFILE = "{dir}/history" }
+stdin = "$s = <<<EOT\n  one\n  EOT;\necho $s;\n#precision=3\necho 1/3;\nif (true) {\n  echo 'b';\n}\n'q\n';\nquit\necho 'never';\n"
+
+[[line]]
+name = "shell-the-prompt-s-code"
+args = ["-n", "-d", "cli.prompt=`echo 'x';`> ", "-a"]
+env = { PHP_HISTFILE = "{dir}/history" }
+stdin = "echo 'p';\n"
+
+[[line]]
+name = "shell-the-one-engine"
+args = ["-n", "-d", "x=\"abc", "-a"]
+env = { PHP_HISTFILE = "{dir}/history" }
+stdin = "echo 1;\n"
+
+# A request whose start fails under the built-in server: session's `rinit`
+# raises under `session.auto_start` over a session file whose `DateTime` does
+# not unserialize (#1775). `php_cli_server_dispatch` is the one host that
+# shuts the request down after the failure and closes the connection
+# (`Z/sapi/cli/php_cli_server.c:2307-2310`): the client is sent the head and
+# what the failure displayed, the program never runs, no response line is
+# logged for it, and the server goes on to serve the next request (#1879).
+# The log's times, the clients' ports and the response's date are masked.
+[[line]]
+name = "the-built-in-server-shuts-a-failed-request-down"
+args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "index.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>'], ['PHPSESSID=\w+', 'PHPSESSID=<id>'], ['sess_[a-z0-9]{26,}', 'sess_<id>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /index.php HTTP/1.1\r\nHost: x\r\nCookie: PHPSESSID=t1879\r\n\r\n"
+[[line.serve.request]]
+http = "GET /index.php HTTP/1.1\r\nHost: x\r\n\r\n"
+
+# `PHP_CLI_SERVER_WORKERS` that is not above 1 forks nothing: php's line, then
+# the server alone, its log carrying no process id.
+[[line]]
+name = "one-worker-is-refused-and-the-server-serves-alone"
+args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+env = { PHP_CLI_SERVER_WORKERS = "1" }
+files = { "index.php" = "<?php echo 'served';" }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /index.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# A child `pcntl_fork` makes from a request serves on in the loop it was
+# forked from, as php's child does, and ends its engine once that loop stops:
+# a `dba_popen` `cdb_make` file the child opened is finished at its engine
+# end before the parent's `pcntl_waitpid` returns (#1952).
+[[line]]
+name = "a-child-forked-from-a-request-ends-its-engine"
+args = ["-n", "-S", "127.0.0.1:{port}", "-t", "{dir}"]
+files = { "fast.php" = "<?php echo 'fast';", "fork.php" = '''
+<?php
+$f = __DIR__ . '/end.cdb';
+$pid = pcntl_fork();
+if ($pid === 0) {
+    $d = dba_popen($f, 'n', 'cdb_make');
+    dba_insert('key0', 'value0', $d);
+    posix_kill(getmypid(), SIGINT);
+    echo 'child';
+    return;
+}
+pcntl_waitpid($pid, $status);
+clearstatcache();
+file_put_contents(__DIR__ . '/end.log', 'after the child: ' . filesize($f) . ' ' . pcntl_wexitstatus($status));
+''' }
+mask = [['\[\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4}\]', '[<time>]'], ['127\.0\.0\.1:\d+ (Accepted|Closing|\[)', '127.0.0.1:<port> $1'], ['Date: [^\r]*', 'Date: <date>']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+stop = "SIGINT"
+[[line.serve.request]]
+http = "GET /fork.php HTTP/1.0\r\nHost: x\r\n\r\n"
+[[line.serve.request]]
+http = "GET /fast.php HTTP/1.0\r\nHost: x\r\n\r\n"
+
+# What extensions supply is installed in the order php installs it: every
+# module's at its `MINIT`, then opcache's, a Zend extension's, after them
+# (`Z/main/main.c:2353-2356`). A failing `ffi.preload` is ffi's engine start
+# refusing, so startup ends there and opcache's `zend_post_startup_cb` link
+# never preloads (#1797, #1802).
+[[line]]
+name = "a-failing-ffi-preload-refuses-startup-before-opcache-preloads"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.preload={dir}/preload.php", "-d", "ffi.enable=preload", "-d", "ffi.preload={dir}/missing.h", "{dir}/served.php"]
+files = { "preload.php" = "<?php echo \"preloaded\\n\";", "served.php" = "<?php echo \"served\\n\";" }
+
+# An extension whose engine start refuses, php's `MINIT` returning `FAILURE`
+# (ADR-0010): `ffi.preload` naming a header that is not there. php ends the
+# process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
+# `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
+# own (#1802). What php raised before the failed start shows ahead of it,
+# date's warning over the host's `date.timezone`; what it raises only after
+# every extension started, `disable_functions` naming a construct, does not
+# show at all.
+[[line]]
+name = "startup-refused"
+args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "/nonexistent/t.php"]
+[[line.then]]
+args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "-d", "fatal_error_backtraces=0", "-d", "disable_functions=exit", "-d", "date.timezone=Nowhere", "/nonexistent/t.php"]
+
+# `do_cli` registers `STDIN`, `STDOUT` and `STDERR` over the process's fds 0,
+# 1 and 2 as resources 1 to 3 for a file and for `-r`'s code, so a request's
+# first open is resource 5 after `FG(default_context)`; `fstat` and
+# `ftruncate` on the three ask the fds themselves, a pipe's where the
+# streams are pipes; `-l` registers no stream.
+[[line]]
+name = "std-streams"
+args = ["-n", "{dir}/ids.php"]
+files = { "ids.php" = "<?php\nvar_dump(STDIN, STDOUT, STDERR, fopen('php://memory', 'r'));\n", "lint.php" = "<?php\nvar_dump(STDIN);\n" }
+[[line.then]]
+args = ["-n", "-r", "var_dump(STDIN, STDOUT, STDERR, fopen('php://memory', 'r'));"]
+[[line.then]]
+args = ["-n", "-r", "var_dump(fwrite(STDERR, 'x'));"]
+[[line.then]]
+args = ["-n", "-r", "var_dump(count(fstat(fopen('php://stdout', 'w'))), count(fstat(STDERR)), fstat(STDIN)['mode'] === fstat(fopen('php://stdin', 'r'))['mode'], ftruncate(STDOUT, 0));"]
+[[line.then]]
+args = ["-n", "-l", "{dir}/lint.php"]
+
+# `ftruncate(2)` on a file fd 1 is redirected to cuts the file, as php's
+# does: what the request wrote before it is the sink's, and what stands in
+# the file once the process ends is what came after the cut.
+[[line]]
+name = "ftruncate-on-stdout-cuts-the-file-it-is-redirected-to"
+args = ["-n", "-r", "var_dump(ftruncate(STDOUT, 0), fstat(STDOUT)['size']);"]
+streams = "files"

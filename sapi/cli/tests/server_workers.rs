@@ -2,8 +2,11 @@
 //! (`php_cli_server_startup_workers`, `Z/sapi/cli/php_cli_server.c:2503`),
 //! each through the engine's one home for fork (#1885), and every one of
 //! the N + 1 processes serves the same socket in its own event loop and
-//! writes its log lines after its process id. Each test is held to what
-//! the oracle at 8.5.9 does under `php -n -S` with the same environment.
+//! writes its log lines after its process id. Which process serves a
+//! request is the kernel's to say, so this is held by what the processes
+//! do and not by bytes; a number that is not above 1, which forks
+//! nothing, is held to the oracle by `xtask witness`, from
+//! `tests/lines.toml` (#1975).
 
 mod server;
 
@@ -57,23 +60,4 @@ fn two_workers_and_their_parent_serve_and_stop() {
             .is_ok_and(|status| status.success());
         assert!(!alive, "worker {pid} outlived the server");
     }
-}
-
-/// A number that is not above 1 forks nothing: php's line, then the
-/// server alone, its log carrying no process id.
-#[test]
-fn one_worker_is_refused_and_the_server_serves_alone() {
-    let server = Server::start(
-        "one-worker",
-        &[("index.php", "<?php echo 'served';")],
-        &[("PHP_CLI_SERVER_WORKERS", "1")],
-    );
-    assert_eq!(server.get("/index.php"), "served");
-    let log = server.log();
-    assert_eq!(
-        log.first().map(String::as_str),
-        Some("number of workers must be larger than 1")
-    );
-    assert!(started_pids(&log).is_empty());
-    assert_eq!(server.stop(), Some(0));
 }

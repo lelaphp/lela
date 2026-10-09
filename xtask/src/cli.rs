@@ -444,7 +444,8 @@ pub(crate) struct Witness {
     pub unmeasured: bool,
     #[command(flatten)]
     pub accepting: Accepting,
-    /// Only the fences in rustdoc under this source file, from the
+    /// Only the fences in rustdoc under this source file, or the lines
+    /// of a host crate's `tests/lines.toml` named here, from the
     /// workspace root or any tail of it; prints and writes no reading.
     #[arg(
         long,
@@ -454,7 +455,8 @@ pub(crate) struct Witness {
     )]
     pub file: Option<PathBuf>,
     /// Only the fences on this item, by the name its declaration
-    /// writes (`preg_quote`, a method's `add`); prints and writes no reading.
+    /// writes (`preg_quote`, a method's `add`), or a host's line by its
+    /// `name`; prints and writes no reading.
     #[arg(long, value_name = "NAME", requires = "crates")]
     pub item: Option<String>,
     /// Serve the run in this process and append what it judged to

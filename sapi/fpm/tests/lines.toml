@@ -1,0 +1,238 @@
+# php-fpm's own lines, each run by `xtask witness` under the pinned php-fpm
+# (oracle.toml's [sapi]) and then under this crate's, in one directory laid
+# afresh, and held equal: a master over a pool of one static child, the
+# requests handed to it as FastCGI records, and its log; a startup that ends
+# the process (#1975, as #2468 ruled). No byte here is the oracle's; the
+# oracle's run is the expectation. The grammar is
+# xtask/src/witness/host.rs's. `-R` lets the master run as root, as a
+# container's tests do; the log's times, its pids and a child's lifetime are
+# masked.
+
+# A child that has served `pm.max_requests` ends its engine on the way out,
+# as php's child calls `php_module_shutdown`: a `dba_popen` `cdb_make` file
+# the request left open is finished there, so the next child's request reads
+# the value (#1804).
+[[line]]
+name = "a-child-past-its-max-requests-finishes-a-persistent-cdb-make-file"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\npm.max_requests = 1\n", "writer.php" = "<?php $f = '{dir}/t1804.cdb'; $d = dba_popen($f, 'n', 'cdb_make'); dba_insert('key0', 'value0', $d); clearstatcache(); echo filesize($f);", "reader.php" = "<?php $f = '{dir}/t1804.cdb'; clearstatcache(); echo filesize($f), ' '; var_dump(dba_fetch('key0', dba_open($f, 'r', 'cdb')));" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/writer.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/reader.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+
+# A request whose start fails, session's `rinit` raising under
+# `session.auto_start` over a session file whose `DateTime` does not
+# unserialize (#1775): the child renders the uncaught fatal and session's
+# warning, finishes the FastCGI request with what they wrote and closes the
+# connection (`fcgi_finish_request(request, 1)`), and ends with
+# `FPM_EXIT_SOFTWARE` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`), which the
+# master logs before it starts the next child, whose request is served
+# (#1879).
+[[line]]
+name = "a-child-whose-request-start-fails-finishes-the-request-and-ends"
+args = ["-R", "-n", "-F", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "index.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N'], ['PHPSESSID=\w+', 'PHPSESSID=<id>'], ['sess_[a-z0-9]{26,}', 'sess_<id>']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["HTTP_COOKIE", "PHPSESSID=t1879"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"]]
+
+# php-fpm's loop answers its ping and status pages after
+# `php_request_startup` (`Z/sapi/fpm/fpm/fpm_main.c:1838-1852`), so session's
+# `RINIT` under `session.auto_start` has sent its cookie and its cache
+# headers before the page's lines, which replace those of their names
+# (#1968). The status page past its pool's name counts the pool's life.
+[[line]]
+name = "a-ping-and-a-status-page-are-answered-once-the-request-started"
+args = ["-R", "-n", "-F", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nping.path = /ping\nping.response = pong\npm.status_path = /status\n" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N'], ['PHPSESSID=\w+', 'PHPSESSID=<id>'], ['sess_[a-z0-9]{26,}', 'sess_<id>'], ['(?s)(pool:\s+www\n).*?(\n-- stderr)', '$1(the pool counted)$2']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/ping"], ["SCRIPT_FILENAME", "{dir}/nope.php"]]
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/status"], ["SCRIPT_FILENAME", "{dir}/nope.php"]]
+
+# A request whose start fails ends the child before php-fpm's loop looks at
+# its script (`Z/sapi/fpm/fpm/fpm_main.c:1838-1843`), so neither `Primary
+# script unknown` nor `Unable to open primary script` reaches the request's
+# `FCGI_STDERR`, where the same request with a session that reads writes
+# each (#1968). Each failing start destroys the session it read, so each
+# script is a line of its own. A third request, served by the child started
+# after the failed one ended, settles the log before the stop: without it the
+# master may take the stop before it reaps the child, and the log's lines
+# race the signal on either host.
+[[line]]
+name = "a-request-whose-start-fails-logs-no-line-of-an-unknown-script"
+args = ["-R", "-n", "-F", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nping.path = /ping\nping.response = pong\npm.status_path = /status\n", "sess_t1968" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N'], ['PHPSESSID=\w+', 'PHPSESSID=<id>'], ['sess_[a-z0-9]{26,}', 'sess_<id>']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/t.php"], ["SCRIPT_FILENAME", "{dir}/nope.php"]]
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/t.php"], ["SCRIPT_FILENAME", "{dir}/nope.php"], ["HTTP_COOKIE", "PHPSESSID=t1968"]]
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/t.php"], ["SCRIPT_FILENAME", "{dir}/nope.php"]]
+
+[[line]]
+name = "a-request-whose-start-fails-logs-no-line-of-a-script-that-does-not-open"
+args = ["-R", "-n", "-F", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nping.path = /ping\nping.response = pong\npm.status_path = /status\n", "sess_t1968" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}", "shut.php" = "<?php echo 'ran';" }
+modes = { "shut.php" = 0o000 }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N'], ['PHPSESSID=\w+', 'PHPSESSID=<id>'], ['sess_[a-z0-9]{26,}', 'sess_<id>']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/t.php"], ["SCRIPT_FILENAME", "{dir}/shut.php"]]
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/t.php"], ["SCRIPT_FILENAME", "{dir}/shut.php"], ["HTTP_COOKIE", "PHPSESSID=t1968"]]
+[[line.serve.request]]
+params = [["REQUEST_METHOD", "GET"], ["SCRIPT_NAME", "/t.php"], ["SCRIPT_FILENAME", "{dir}/shut.php"]]
+
+# A pool's `php_admin_value[ffi.preload]` naming a header that is not there:
+# php reads `ffi.preload` in `MINIT` alone, which ran once in the master
+# under the master's ini, and its child lays the pool's value over the
+# running engine as the master value, so the child serves its requests and
+# `ini_get()` answers the pool's value (#1944).
+[[line]]
+name = "a-pool-s-failing-ffi-preload-is-not-an-engine-start-of-the-child"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nphp_admin_value[ffi.preload] = /nonexistent/pool-preload.h\n", "index.php" = "<?php var_dump(ini_get('ffi.preload'), extension_loaded('ffi'));" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+
+# The lines a static pool of one child writes at `log_level = debug`,
+# started on a loopback port and sent `SIGQUIT` once ready (#1382, #1502).
+# The master sends its child `SIGQUIT` and, milliseconds later on its next
+# event, `SIGTERM` (`fpm_pctl_kill_all`); whether the idle child's soft quit
+# ends it with code 0 before the second signal kills it is the scheduler's
+# on either host, and the cause the master buries it with is masked.
+[[line]]
+name = "a-static-pool-at-debug-sent-sigquit"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\nlog_level = debug\n[www]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = 1\n" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N'], ['exited (with code 0|on signal 15 \(SIGTERM\)) after', 'exited <on the soft quit or the SIGTERM after it> after']]
+[line.serve]
+listen = "127.0.0.1:{port}"
+ready = ["fpm.log", "ready to handle connections"]
+stop = "SIGQUIT"
+
+# A php.ini's `[HOST=]` table of the request's `SERVER_NAME`, lowered, and
+# its `[PATH=]` tables along the script's directory, set for that request
+# alone as `PHP_INI_SYSTEM`, served on the pool's one child (#1692).
+[[line]]
+name = "a-request-s-host-and-directory-tables-are-set-for-it-alone"
+args = ["-R", "-c", "{dir}/php.ini", "-F", "-y", "{dir}/php-fpm.conf"]
+env = { PHP_INI_SCAN_DIR = "{dir}/scan" }
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\n", "scan/" = "", "php.ini" = "precision=10\n[PATH={dir}/www]\nprecision=5\n[PATH={dir}/www/sub/]\nprecision=3\n[HOST=Example.COM]\nserialize_precision=7\n", "www/sub/t.php" = "<?php var_dump(ini_get('precision'), ini_get('serialize_precision'), ini_set('precision', '9'));\n", "www/t.php" = "<?php var_dump(ini_get('precision'), ini_get('serialize_precision'), ini_set('precision', '9'));\n" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/www/sub/t.php"], ["REQUEST_METHOD", "GET"], ["SERVER_NAME", "Example.com"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/www/t.php"], ["REQUEST_METHOD", "GET"], ["SERVER_NAME", "other"]]
+
+# A refusal answered after every extension started, at `zend_post_startup`
+# inside `php_module_startup`: opcache's `ACCEL_LOG_FATAL` in
+# `accel_post_startup` for `opcache.file_cache_only` with no
+# `opcache.file_cache`. php-fpm's master ends there, before it reads its
+# configuration or binds a socket, under `-t` with no configuration there and
+# in the foreground over a pool that listens, which never says it is running
+# (#1943). `zend_accel_error` writes the time `asctime` prints and the
+# process's id before its message.
+[[line]]
+name = "post-startup-refused"
+args = ["-n", "-d", "opcache.file_cache_only=1", "-t", "-y", "/nonexistent/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = /dev/stderr\n[www]\nlisten = 127.0.0.1:{port}\npm = static\npm.max_children = 1\n" }
+mask = [['(?m)^.{24} \(\d+\): ', '<asctime> (<pid>): ']]
+[[line.then]]
+args = ["-n", "-d", "opcache.file_cache_only=1", "-F", "-y", "{dir}/php-fpm.conf"]
+
+# An extension whose engine start refuses, php's `MINIT` returning `FAILURE`
+# (ADR-0010): `ffi.preload` naming a header that is not there. php ends the
+# process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
+# `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
+# own: the diagnostics on stdout in php-fpm's `html_errors`, the
+# configuration `-t` asks to test never read (#1802).
+[[line]]
+name = "startup-refused"
+args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "-t", "-y", "/nonexistent/php-fpm.conf"]
+
+# `opcache.preload` named on the master's line: php runs it once, in the
+# master, inside `php_module_startup` before it reads its configuration, so
+# what it echoes goes to the master's stdout and it logs one pid; each of the
+# two children keeps what it declared and runs it no more (#2273).
+[[line]]
+name = "a-preload-named-on-the-line-runs-once-in-the-master"
+args = ["-R", "-n", "-d", "opcache.preload={dir}/preload.php", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 2\n", "preload.php" = "<?php\nfile_put_contents('{dir}/preload.log', 'preload pid=' . getmypid() . \"\\n\", FILE_APPEND);\necho \"preload-echo\\n\";\nfunction preloaded_fn() { return 'yes'; }\n", "index.php" = "<?php echo function_exists('preloaded_fn') ? 'fn' : 'nofn', ' [', ini_get('opcache.preload'), \"]\\n\";" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid[ =]|child |after )[\d.]+', '${1}N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+
+# `opcache.preload` in a pool's `php_admin_value`: php reads it at startup
+# alone, in the master, before the child lays its pool's values over the
+# started engine, so nothing is preloaded and `ini_get()` answers the pool's
+# value (#2273).
+[[line]]
+name = "a-pool-s-preload-is-not-run"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 2\nphp_admin_value[opcache.preload] = {dir}/preload.php\n", "preload.php" = "<?php\nfile_put_contents('{dir}/preload.log', 'preload pid=' . getmypid() . \"\\n\", FILE_APPEND);\necho \"preload-echo\\n\";\nfunction preloaded_fn() { return 'yes'; }\n", "index.php" = "<?php echo function_exists('preloaded_fn') ? 'fn' : 'nofn', ' [', ini_get('opcache.preload'), \"]\\n\";" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid[ =]|child |after )[\d.]+', '${1}N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
+
+# A pool's `php_value[date.timezone]` naming no zone: php's child hands it to
+# date's `on_modify` as it lays the pool's values over the started engine,
+# which refuses it with a warning that reaches neither a request nor the log,
+# so the first request shows nothing of it and `ini_get()` answers the
+# default (#2273).
+[[line]]
+name = "a-pool-value-s-refusal-reaches-no-request"
+args = ["-R", "-n", "-F", "-y", "{dir}/php-fpm.conf"]
+files = { "php-fpm.conf" = "[global]\nerror_log = {dir}/fpm.log\n[www]\nlisten = {dir}/fpm.sock\npm = static\npm.max_children = 1\nphp_value[date.timezone] = Bogus/Zone\n", "index.php" = "<?php echo 'ok ', ini_get('date.timezone'), \"\\n\";" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] '], ['(pid|child|after) [\d.]+', '$1 N']]
+[line.serve]
+listen = "{dir}/fpm.sock"
+stop = "SIGTERM"
+[[line.serve.request]]
+params = [["SCRIPT_FILENAME", "{dir}/index.php"], ["REQUEST_METHOD", "GET"], ["QUERY_STRING", "q=1"]]
