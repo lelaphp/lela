@@ -12,6 +12,7 @@ use crate::constants::{
     SUNFUNCS_RET_TIMESTAMP as RET_TIMESTAMP,
 };
 use crate::ffi::Time;
+use crate::lent::lent;
 use crate::obj::set_str;
 use crate::zone::default_zone;
 
@@ -87,13 +88,18 @@ fn sunrise_sunset(req: &mut Request, sunset: bool, given: SunArguments) -> Resul
         return Ok(Union::B(Union::B(OrFalse::False)));
     }
     let zone = default_zone(req)?;
-    let mut t = Time::new();
-    t.set_zone_id(zone);
-    // php reads the offset before the time is set, so at the epoch.
-    #[allow(clippy::cast_precision_loss)]
-    let gmt_offset = gmt_offset.unwrap_or_else(|| t.current_offset() as f64 / 3600.0);
-    t.unixtime2local(time);
-    let (rs, h_rise, h_set, rise, set, _) = t.rise_set(longitude, latitude, altitude, true);
+    let (gmt_offset, (rs, h_rise, h_set, rise, set, _)) = lent(req, |l| {
+        let mut t = Time::new(l);
+        t.set_zone_id(zone);
+        // php reads the offset before the time is set, so at the epoch.
+        #[allow(clippy::cast_precision_loss)]
+        let gmt_offset = gmt_offset.unwrap_or_else(|| t.current_offset(l) as f64 / 3600.0);
+        t.unixtime2local(l, time);
+        (
+            gmt_offset,
+            t.rise_set(l, longitude, latitude, altitude, true),
+        )
+    })?;
     if rs != 0 {
         return Ok(Union::B(Union::B(OrFalse::False)));
     }
@@ -278,11 +284,20 @@ fn date_sun_info(
         return Err(arg_value_error(req, 3, "be finite"));
     }
     let zone = default_zone(req)?;
-    let mut t = Time::new();
-    t.set_zone_id(zone);
-    t.unixtime2local(time);
+    let [first, civil, nautical, astronomical] = lent(req, |l| {
+        let mut t = Time::new(l);
+        t.set_zone_id(zone);
+        t.unixtime2local(l, time);
+        [
+            (-35.0 / 60.0, true),
+            (-6.0, false),
+            (-12.0, false),
+            (-18.0, false),
+        ]
+        .map(|(altitude, upper)| t.rise_set(l, longitude, latitude, altitude, upper))
+    })?;
     let mut array = PhpArray::new(req)?;
-    let (rs, _, _, rise, set, transit) = t.rise_set(longitude, latitude, -35.0 / 60.0, true);
+    let (rs, _, _, rise, set, transit) = first;
     add_pair(req, &mut array, rs, (b"sunrise", b"sunset"), (rise, set))?;
     set_str(
         req,
@@ -290,20 +305,23 @@ fn date_sun_info(
         b"transit",
         Owner::take(req, Value::int(transit)),
     )?;
-    for (altitude, begin, end) in [
+    for ((rs, _, _, rise, set, _), begin, end) in [
         (
-            -6.0,
+            civil,
             &b"civil_twilight_begin"[..],
             &b"civil_twilight_end"[..],
         ),
-        (-12.0, b"nautical_twilight_begin", b"nautical_twilight_end"),
         (
-            -18.0,
+            nautical,
+            b"nautical_twilight_begin",
+            b"nautical_twilight_end",
+        ),
+        (
+            astronomical,
             b"astronomical_twilight_begin",
             b"astronomical_twilight_end",
         ),
     ] {
-        let (rs, _, _, rise, set, _) = t.rise_set(longitude, latitude, altitude, false);
         add_pair(req, &mut array, rs, (begin, end), (rise, set))?;
     }
     Ok(array)

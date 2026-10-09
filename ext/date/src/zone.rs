@@ -10,19 +10,15 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString};
 
 use crate::State;
-use crate::ffi::{Tzdb, Zone, Zones};
-
-/// `DATEG(tzcache)`, the request's zones, which every parse hands timelib
-/// as `php_date_parse_tzfile_wrapper` reads them.
-pub(super) fn zones(req: &mut Request) -> &mut Zones {
-    &mut req.state::<State>().zones
-}
+use crate::ffi::{Tzdb, Zone};
+use crate::lent::lent;
 
 /// `php_date_parse_tzfile(name, tzdb)`: the zone out of the request's
-/// cache, parsed from the bundled database the first time it is asked
-/// for; none for a name the database has not.
-pub(super) fn parse_tzfile(req: &mut Request, name: &[u8]) -> Option<Arc<Zone>> {
-    zones(req).parse(name)
+/// cache, parsed from the bundled database onto the request's heap the
+/// first time it is asked for; none for a name the database has not.
+/// The `Err` is the memory limit.
+pub(super) fn parse_tzfile(req: &mut Request, name: &[u8]) -> Result<Option<Arc<Zone>>, Thrown> {
+    lent(req, |l| l.zone(name))
 }
 
 /// `guess_timezone(tzdb)`: what `date_default_timezone_set` set, else
@@ -80,14 +76,20 @@ pub(super) fn on_update_timezone(req: &mut Request, value: Option<&[u8]>) -> Res
 /// throws when the database cannot give it.
 pub(super) fn default_zone(req: &mut Request) -> Result<Arc<Zone>, Thrown> {
     let name = guess_timezone(req);
-    match parse_tzfile(req, &name) {
+    match parse_tzfile(req, &name)? {
         Some(zone) => Ok(zone),
-        None => Err(throw_error(
-            req,
-            "DateError",
-            "Timezone database is corrupt. Please file a bug report as this should never happen",
-        )),
+        None => Err(corrupt(req)),
     }
+}
+
+/// The `DateError` `get_timezone_info()` throws where the database
+/// cannot give the default zone.
+pub(super) fn corrupt(req: &mut Request) -> Thrown {
+    throw_error(
+        req,
+        "DateError",
+        "Timezone database is corrupt. Please file a bug report as this should never happen",
+    )
 }
 
 /// `date_default_timezone_set(string $timezoneId): bool`: the notice and

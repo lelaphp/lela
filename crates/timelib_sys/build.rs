@@ -3,10 +3,12 @@
 //! `oracle.toml` pins, byte for byte, with its bundled timezone database
 //! (`timezonedb.h`). The file list and the flags are `config0.m4`'s
 //! `timelib_sources` and `PHP_TIMELIB_CFLAGS`; nothing is discovered on
-//! the system. `HAVE_TIMELIB_CONFIG_H` is left undefined, so timelib
-//! allocates with the C library's `malloc` and `free` where php's build
-//! points it at `emalloc` and `efree`. It is optimised as php is, and
-//! floating-point expressions are not contracted into fused
+//! the system. `HAVE_TIMELIB_CONFIG_H` is defined, and `include/` holds
+//! the `timelib_config.h` php's `config0.m4` writes, so timelib allocates
+//! with `emalloc`, `ecalloc`, `erealloc`, `estrdup`, `estrndup` and
+//! `efree` as php's build does; `php_heap` defines them, and they reach
+//! the request's heap under its lend (ADR-0014). It is optimised as php
+//! is, and floating-point expressions are not contracted into fused
 //! multiply-adds, so `astro.c`'s sunrise hours round as the oracle's
 //! build rounds them, to the last bit.
 
@@ -33,7 +35,9 @@ fn main() {
         build.define("NDEBUG", None);
     }
     build
+        .include("include")
         .include("lib")
+        .define("HAVE_TIMELIB_CONFIG_H", "1")
         .define("HAVE_STDINT_H", "1")
         .define("HAVE_SYS_TYPES_H", "1")
         .define("HAVE_UNISTD_H", "1")
@@ -50,5 +54,6 @@ fn main() {
     }
     build.compile("timelib");
     println!("cargo:rerun-if-changed=lib");
+    println!("cargo:rerun-if-changed=include");
     println!("cargo:rerun-if-changed=build.rs");
 }

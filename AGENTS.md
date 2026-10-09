@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=1ae30344b170143b89e4b9d8bd2bb04d5251d26ad3b1a84cb8f1373e10945f9b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=b0e64830416c9ed800256586aedd382238b43e1595c59fda93b2b393eef704c3 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -114,24 +114,25 @@ third-engine-design.md
 - ADR-0011 (accepted, 2026-10-06): A reading's key covers its crate's whole dependency closure, not the locks of the crates it depends on
 - ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
+- ADR-0014 (accepted, 2026-10-09): A request's heap is lent to C for the length of one call
 
-<!-- /computed in=eee6aaed6aed5b4236dca6224300a93d161d48f09c9a673365ddbc00b8a11e14 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
+<!-- /computed in=d51cd519db259fef0939fac2e2c38364dc2d3204cfdc38f3e7f9394dad4d53eb out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
 |---|---|---|---|---|
-| heap | heap.lock | 378 |  | no reading |
+| heap | heap.lock | 379 |  | no reading |
 | process | process.lock | 37 |  | no reading |
 | unit | unit.lock | 95 |  | no reading |
 | link | link.lock | 47 |  | no reading |
 | ops | ops.lock | 209 |  | no reading |
-| api | api.lock | 1355 | 1500 | no reading |
+| api | api.lock | 1356 | 1500 | no reading |
 | sapi | sapi.lock | 43 |  | no reading |
 | tier | tier.lock | 31 |  | no reading |
 | layer | layer.lock | 36 |  | no reading |
 | harness | xtask.lock | 388 |  | no reading |
 
-<!-- /computed in=49d7ec0f60e32e8b5e38a21d5135f1f745e7bbf565a0fd37ab63d5f95e123795 out=6d8a07b2dc87d8b526e065ca302aea5953fbf3042f811d518533302947dfbc21 -->
+<!-- /computed in=a55d972a05cfd6e1afc64b4e37e8dca8625a870d59c6e7ebe806dfba9a1ee2d9 out=92e6c29902b12e2f68b2f0c4e58696362b59b9fb1157e298803ee774bafced40 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |

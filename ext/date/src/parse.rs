@@ -8,22 +8,33 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
-use crate::State;
-use crate::ffi::{Errors, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
+use crate::ffi::{
+    ErrorContainer, Errors, Parsed, RelTime, Time, UNSET, ZONETYPE_ABBR, ZONETYPE_ID,
+    ZONETYPE_OFFSET,
+};
 use crate::format::now;
+use crate::lent::{Lent, kept, lent, release};
 use crate::obj::{set_str, set_string};
-use crate::zone::{default_zone, zones};
+use crate::zone::default_zone;
 
 /// `TIMELIB_SPECIAL_WEEKDAY` and `TIMELIB_SPECIAL_FIRST_DAY_OF_MONTH`.
 const SPECIAL_WEEKDAY: u32 = 0x01;
 const FIRST_DAY_OF_MONTH: i32 = 0x01;
 
-/// `update_errors_warnings(&err)`: the messages kept as the request's
-/// last where there are any, and none kept where there are none.
-pub(super) fn keep_errors(req: &mut Request, errors: &Errors) {
-    let state = req.state::<State>();
-    state.last_errors =
-        (!errors.warnings.is_empty() || !errors.errors.is_empty()).then(|| errors.clone());
+/// `update_errors_warnings(&err)`: the last parse's container freed,
+/// this one's kept as `DATEG(last_errors)` where it has messages and
+/// freed where it has none; its messages answered, copied.
+pub(super) fn keep_errors(lent: &mut Lent<'_>, container: Option<ErrorContainer>) -> Errors {
+    let errors = container
+        .as_ref()
+        .map(ErrorContainer::messages)
+        .unwrap_or_default();
+    let state = lent.state();
+    state.last_errors = None;
+    if errors.any() {
+        state.last_errors = container;
+    }
+    errors
 }
 
 /// `zval_from_error_container`: the counts and the messages by position.
@@ -99,20 +110,30 @@ fn strtotime(
         return Ok(OrFalse::False);
     }
     let zone = default_zone(req)?;
-    let mut base_time = Time::new();
-    base_time.set_zone_id(zone.clone());
-    base_time.unixtime2local(base.unwrap_or_else(now));
-    let (mut t, errors) = Time::strtotime(zones(req), &text);
-    if !errors.errors.is_empty() {
-        return Ok(OrFalse::False);
+    let ts = lent(req, |l| {
+        let mut base_time = Time::new(l);
+        base_time.set_zone_id(zone.clone());
+        base_time.unixtime2local(l, base.unwrap_or_else(now));
+        let Parsed {
+            time: mut t,
+            errors,
+        } = Time::strtotime(l, &text);
+        let failed = errors.is_some_and(|e| !e.messages().errors.is_empty());
+        if failed {
+            return None;
+        }
+        t.fill_holes(l, &mut base_time, crate::ffi::NO_CLONE);
+        t.update_ts(l, Some(&zone));
+        Some(t.date_to_int())
+    })?;
+    match ts {
+        None => Ok(OrFalse::False),
+        Some(None) => {
+            docref(req, Level::Warning, "Epoch doesn't fit in a PHP integer");
+            Ok(OrFalse::False)
+        }
+        Some(Some(ts)) => Ok(OrFalse::Value(ts)),
     }
-    t.fill_holes(&mut base_time, crate::ffi::NO_CLONE);
-    t.update_ts(Some(&zone));
-    let Some(ts) = t.date_to_int() else {
-        docref(req, Level::Warning, "Epoch doesn't fit in a PHP integer");
-        return Ok(OrFalse::False);
-    };
-    Ok(OrFalse::Value(ts))
 }
 
 /// `PHP_DATE_PARSE_DATE_SET_TIME_ELEMENT`: `false` for a field the parse
@@ -132,7 +153,11 @@ fn element(
 }
 
 /// `php_date_do_return_parsed_time`.
-fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<PhpArray>, Thrown> {
+fn parsed_time(
+    req: &mut Request,
+    t: &Time,
+    container: Option<ErrorContainer>,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
     for (name, n) in [
         (&b"year"[..], t.y),
@@ -151,7 +176,13 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
         Value::float(t.us as f64 / 1_000_000.0)
     };
     set_str(req, &mut array, b"fraction", Owner::take(req, fraction))?;
-    add_errors(req, &mut array, errors)?;
+    let errors = container
+        .as_ref()
+        .map(ErrorContainer::messages)
+        .unwrap_or_default();
+    add_errors(req, &mut array, &errors)?;
+    // `timelib_error_container_dtor(error)` once its messages are read.
+    release(req, container)?;
     set_str(
         req,
         &mut array,
@@ -192,42 +223,7 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
         }
     }
     if t.have_relative != 0 {
-        let r = &t.relative;
-        let mut rel = PhpArray::new(req)?;
-        for (name, n) in [
-            (&b"year"[..], r.y),
-            (b"month", r.m),
-            (b"day", r.d),
-            (b"hour", r.h),
-            (b"minute", r.i),
-            (b"second", r.s),
-        ] {
-            set_str(req, &mut rel, name, Owner::take(req, Value::int(n)))?;
-        }
-        if r.have_weekday_relative != 0 {
-            set_str(
-                req,
-                &mut rel,
-                b"weekday",
-                Owner::take(req, Value::int(i64::from(r.weekday))),
-            )?;
-        }
-        if r.have_special_relative != 0 && r.special_type == SPECIAL_WEEKDAY {
-            set_str(
-                req,
-                &mut rel,
-                b"weekdays",
-                Owner::take(req, Value::int(r.special_amount)),
-            )?;
-        }
-        if r.first_last_day_of != 0 {
-            let name: &[u8] = if r.first_last_day_of == FIRST_DAY_OF_MONTH {
-                b"first_day_of_month"
-            } else {
-                b"last_day_of_month"
-            };
-            set_str(req, &mut rel, name, Owner::take(req, Value::bool(true)))?;
-        }
+        let rel = relative_row(req, &t.relative)?;
         set_str(req, &mut array, b"relative", rel.into_value())?;
     }
     Ok(array)
@@ -429,8 +425,8 @@ fn parsed_time(req: &mut Request, t: &Time, errors: &Errors) -> Result<Owner<Php
 /// ```
 #[php_function]
 fn date_parse(req: &mut Request, datetime: PhpString) -> Result<Owner<PhpArray>, Thrown> {
-    let (t, errors) = Time::strtotime(zones(req), datetime.as_bytes());
-    parsed_time(req, &t, &errors)
+    let parsed = lent(req, |l| Time::strtotime(l, datetime.as_bytes()))?;
+    parsed_kept(req, parsed)
 }
 
 /// `date_parse_from_format(string $format, string $datetime): array`.
@@ -515,6 +511,58 @@ fn date_parse_from_format(
     format: PhpString,
     datetime: Path,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let (t, errors) = Time::parse_from_format(zones(req), format.as_bytes(), datetime.0.as_bytes());
-    parsed_time(req, &t, &errors)
+    let parsed = lent(req, |l| {
+        Time::parse_from_format(l, format.as_bytes(), datetime.0.as_bytes())
+    })?;
+    parsed_kept(req, parsed)
+}
+
+/// `php_date_do_return_parsed_time(..., parsed_time, error)`: the array
+/// built while the parse's time stands, the container freed once its
+/// messages are read and the time after the array, as php frees them.
+fn parsed_kept(req: &mut Request, parsed: Parsed) -> Result<Owner<PhpArray>, Thrown> {
+    let Parsed { time, errors } = parsed;
+    kept(req, time, |req, time| parsed_time(req, time, errors))
+}
+
+/// The `relative` row of a parse's answer: each field of its relative
+/// part, and the weekday, weekdays and first or last day of the month
+/// where it has them.
+fn relative_row(req: &mut Request, r: &RelTime) -> Result<Owner<PhpArray>, Thrown> {
+    let mut rel = PhpArray::new(req)?;
+    for (name, n) in [
+        (&b"year"[..], r.y),
+        (b"month", r.m),
+        (b"day", r.d),
+        (b"hour", r.h),
+        (b"minute", r.i),
+        (b"second", r.s),
+    ] {
+        set_str(req, &mut rel, name, Owner::take(req, Value::int(n)))?;
+    }
+    if r.have_weekday_relative != 0 {
+        set_str(
+            req,
+            &mut rel,
+            b"weekday",
+            Owner::take(req, Value::int(i64::from(r.weekday))),
+        )?;
+    }
+    if r.have_special_relative != 0 && r.special_type == SPECIAL_WEEKDAY {
+        set_str(
+            req,
+            &mut rel,
+            b"weekdays",
+            Owner::take(req, Value::int(r.special_amount)),
+        )?;
+    }
+    if r.first_last_day_of != 0 {
+        let name: &[u8] = if r.first_last_day_of == FIRST_DAY_OF_MONTH {
+            b"first_day_of_month"
+        } else {
+            b"last_day_of_month"
+        };
+        set_str(req, &mut rel, name, Owner::take(req, Value::bool(true)))?;
+    }
+    Ok(rel)
 }

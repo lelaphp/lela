@@ -185,7 +185,7 @@ fn gettimeofday(
         return Ok(Union::B(self::as_float(sec, usec)));
     }
     let sec = i64::try_from(sec).unwrap_or(i64::MAX);
-    let offset = php_ext_date::get_timezone_info(req)?.offset_at(sec);
+    let offset = php_ext_date::get_timezone_info(req)?.offset_at(req, sec)?;
     let mut array = PhpArray::new(req)?;
     let rows: [(&[u8], i64); 4] = [
         (b"sec", sec),

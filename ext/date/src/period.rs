@@ -13,9 +13,11 @@ use crate::classes::{DateTimeInterface, Iterator, IteratorAggregate};
 use crate::datetime::restore_properties;
 use crate::ffi::{self, RelTime, Time};
 use crate::interval::DateInterval;
+use crate::lent::{Lent, lent, release};
 use crate::obj::{
-    DateObj, IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, class_id, hold_period, new_date,
-    new_interval, parent_of, period_fields, rows_array, std_rows, uninitialized,
+    IntervalObj, PERIOD, PERIOD_FIELDS, PeriodObj, PeriodState, class_id, hold_period, new_date,
+    new_interval, parent_of, period_fields, rows_array, std_rows, uninitialized, with_period,
+    with_time,
 };
 
 /// `INT_MAX - 8`, the most recurrences a period may have.
@@ -33,42 +35,46 @@ struct Iso {
 /// `date_period_init_iso8601_string`: the string read, and php's
 /// `DateMalformedPeriodStringException` for a part it lacks.
 fn from_iso(req: &mut Request, func: &str, text: &[u8]) -> Result<Iso, Thrown> {
-    let parsed = ffi::strtointerval(text);
+    let read = lent(req, |l| {
+        let parsed = ffi::strtointerval(l, text);
+        if !parsed.errors.errors.is_empty() {
+            return Err(None);
+        }
+        let Some(mut start) = parsed.begin else {
+            return Err(Some("a start date"));
+        };
+        if parsed.period.is_none() {
+            return Err(Some("an interval"));
+        }
+        if parsed.end.is_none() && parsed.recurrences == 0 {
+            return Err(Some("an end date or a recurrence count"));
+        }
+        start.update_ts(l, None);
+        let end = parsed.end.map(|mut e| {
+            e.update_ts(l, None);
+            e
+        });
+        Ok(Iso {
+            start: Some(start),
+            end,
+            interval: parsed.period,
+            recurrences: i64::from(parsed.recurrences),
+        })
+    })?;
     let shown = String::from_utf8_lossy(text).into_owned();
-    if !parsed.errors.errors.is_empty() {
-        return Err(throw(
+    match read {
+        Ok(iso) => Ok(iso),
+        Err(None) => Err(throw(
             req,
             "DateMalformedPeriodStringException",
             &format!("Unknown or bad format ({shown})"),
-        ));
-    }
-    let malformed = |req: &mut Request, what: &str| {
-        throw(
+        )),
+        Err(Some(what)) => Err(throw(
             req,
             "DateMalformedPeriodStringException",
             &format!("{func}(): ISO interval must contain {what}, \"{shown}\" given"),
-        )
-    };
-    let Some(mut start) = parsed.begin else {
-        return Err(malformed(req, "a start date"));
-    };
-    if parsed.period.is_none() {
-        return Err(malformed(req, "an interval"));
+        )),
     }
-    if parsed.end.is_none() && parsed.recurrences == 0 {
-        return Err(malformed(req, "an end date or a recurrence count"));
-    }
-    start.update_ts(None);
-    let end = parsed.end.map(|mut e| {
-        e.update_ts(None);
-        e
-    });
-    Ok(Iso {
-        start: Some(start),
-        end,
-        interval: parsed.period,
-        recurrences: i64::from(parsed.recurrences),
-    })
 }
 
 /// `date_period_init_finish`: the options and the recurrence count,
@@ -112,18 +118,37 @@ fn finish(
 /// The period's payload set, with what its structs hold on the
 /// request's heap. The `Err` is the memory limit.
 fn store(req: &mut Request, object: PhpObject, period: PeriodObj) -> Result<(), Thrown> {
-    if let Some(payload) = object.native_mut::<PeriodObj>(req) {
-        payload.replace(period);
-    }
+    let old = match object.native_mut::<PeriodObj>(req) {
+        Some(payload) => payload.replace(period),
+        None => period,
+    };
+    release(req, old)?;
     hold_period(req, object)
 }
 
-/// The period's state as it stands, to be changed and stored back.
-fn copied(req: &Request, object: PhpObject) -> PeriodObj {
-    object
-        .native::<PeriodObj>(req)
-        .map(|period| period.copied())
-        .unwrap_or_default()
+/// `period` stored where `made` built it whole, and released where
+/// `made` threw, as php's partly built period is freed with its object.
+fn store_made(
+    req: &mut Request,
+    object: PhpObject,
+    period: PeriodObj,
+    made: Result<(), Thrown>,
+) -> Result<(), Thrown> {
+    match made {
+        Ok(()) => store(req, object, period),
+        Err(thrown) => {
+            release(req, period)?;
+            Err(thrown)
+        }
+    }
+}
+
+/// The period's state as it stands, each time copied, to be changed and
+/// stored back.
+fn copied(req: &mut Request, object: PhpObject) -> Result<PeriodObj, Thrown> {
+    with_period(req, object, |req, period| lent(req, |l| period.copied(l)))
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 /// Whether `value` is an object of the class named.
@@ -159,38 +184,41 @@ fn from_objects(
     end: Option<PhpObject>,
 ) -> Result<(), Thrown> {
     let interface = class_id(req, "DateTimeInterface")?;
-    let start_time = start.native::<DateObj>(req).and_then(|d| d.time.clone());
-    let Some(start_time) = start_time else {
+    let Some(start_time) = copy_time(req, start)? else {
         return Err(uninitialized(req, interface));
-    };
-    let end_time = match end {
-        Some(end) => match end.native::<DateObj>(req).and_then(|d| d.time.clone()) {
-            Some(t) => Some(t),
-            None => return Err(uninitialized(req, interface)),
-        },
-        None => None,
     };
     period.start = Some(start_time);
     period.start_ce = Some(start.class());
     period.interval = interval.native::<IntervalObj>(req).and_then(|i| i.diff);
-    period.end = end_time;
+    if let Some(end) = end {
+        let Some(end_time) = copy_time(req, end)? else {
+            return Err(uninitialized(req, interface));
+        };
+        period.end = Some(end_time);
+    }
     Ok(())
+}
+
+/// `timelib_time_clone(dateobj->time)`, none where no constructor set
+/// the time.
+fn copy_time(req: &mut Request, object: PhpObject) -> Result<Option<Time>, Thrown> {
+    with_time(req, object, |req, t| lent(req, |l| t.copy(l))).transpose()
 }
 
 /// `date_period_advance`: the interval added to the time as its relative
 /// part, and the time read back from the seconds.
-fn advance(time: &mut Time, interval: &RelTime) {
+fn advance(lent: &Lent<'_>, time: &mut Time, interval: &RelTime) {
     time.have_relative = 1;
     time.relative = *interval;
     time.sse_uptodate = 0;
-    time.update_ts(None);
-    time.update_from_sse();
+    time.update_ts(lent, None);
+    time.update_from_sse(lent);
 }
 
 /// `date_period_it_has_more`: before the end, or at it to the microsecond
 /// under `INCLUDE_END_DATE`; with no end, fewer steps than the
 /// recurrences.
-fn has_more(period: &PeriodObj, index: usize) -> bool {
+fn has_more(period: &PeriodState, index: usize) -> bool {
     let Some(current) = &period.current else {
         return false;
     };
@@ -279,41 +307,28 @@ pub(super) fn iterator_element(
         Some(class) => Some(base_date_class(req, class)?),
         None => None,
     };
-    let Some(period) = object.native_mut::<PeriodObj>(req) else {
+    let Some(period) = object.native::<PeriodObj>(req) else {
         return Ok(None);
     };
-    let Some(start) = period.start.clone() else {
+    if period.start.is_none() {
         let class = class_id(req, "DatePeriod")?;
         return Err(uninitialized(req, class));
-    };
-    let interval = period.interval.unwrap_or_default();
-    let steps = match period.cursor {
-        Some(at) if at <= index && period.current.is_some() => index - at,
-        _ => {
-            let mut current = start;
-            if !period.include_start_date {
-                advance(&mut current, &interval);
-            }
-            period.current = Some(current);
-            index
+    }
+    let walked = with_period(req, object, |req, period| {
+        lent(req, |l| walk(l, period, index))
+    });
+    let current = walked.transpose()?.flatten();
+    let kept = hold_period(req, object).and_then(|()| {
+        if index > 0 {
+            object.rebuild_properties(req)?;
         }
+        Ok(())
+    });
+    let (Ok(()), Some(base)) = (&kept, base) else {
+        release(req, current)?;
+        return kept.map(|()| None);
     };
-    if let Some(current) = period.current.as_mut() {
-        for _ in 0..steps {
-            advance(current, &interval);
-        }
-    }
-    period.cursor = Some(index);
-    let more = has_more(period, index);
-    let current = period.current.clone();
-    hold_period(req, object)?;
-    if index > 0 {
-        object.rebuild_properties(req)?;
-    }
-    if !more {
-        return Ok(None);
-    }
-    let (Some(current), Some(base)) = (current, base) else {
+    let Some(current) = current else {
         return Ok(None);
     };
     let date = new_date(req, base, current)?;
@@ -325,30 +340,55 @@ pub(super) fn iterator_element(
 /// type php holds it to, written into `period` in php's order as each is
 /// read, a `null` date leaving the field as it was, and nothing rolled
 /// back where a later one is refused; `false` for the refusal.
+/// The period's `current` brought to `index` steps past its rewind, as
+/// [`iterator_element`] says, and a copy of it where `has_more` answers
+/// there is one.
+fn walk(l: &Lent<'_>, period: &mut PeriodState, index: usize) -> Option<Time> {
+    let interval = period.interval.unwrap_or_default();
+    let steps = match period.cursor {
+        Some(at) if at <= index && period.current.is_some() => index - at,
+        _ => {
+            let mut current = period.start.as_ref()?.copy(l);
+            if !period.include_start_date {
+                advance(l, &mut current, &interval);
+            }
+            period.current = Some(current);
+            index
+        }
+    };
+    if let Some(current) = period.current.as_mut() {
+        for _ in 0..steps {
+            advance(l, current, &interval);
+        }
+    }
+    period.cursor = Some(index);
+    if !has_more(period, index) {
+        return None;
+    }
+    period.current.as_ref().map(|current| current.copy(l))
+}
+
 fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Result<bool, Thrown> {
     let find = |name: &[u8]| hash.find(name).map(|v| v.deref());
-    // A date field: `Ok(None)` for `null`, `Err(())` for a refusal.
-    let date_of =
-        |req: &mut Request, v: &Value| -> Result<Result<Option<(Time, ClassId)>, ()>, Thrown> {
-            if matches!(v.as_ref(), ValueRef::Null) {
-                return Ok(Ok(None));
-            }
-            match is_a(req, v, "DateTimeInterface")? {
-                Some(object) => Ok(object
-                    .native::<DateObj>(req)
-                    .and_then(|d| d.time.clone())
-                    .map(|t| Some((t, object.class())))
-                    .ok_or(())),
-                None => Ok(Err(())),
-            }
-        };
+    // A date field: the object of a date class, `Ok(None)` for `null`,
+    // `Err(())` for a refusal.
+    let date_of = |req: &mut Request, v: &Value| -> Result<Result<Option<PhpObject>, ()>, Thrown> {
+        if matches!(v.as_ref(), ValueRef::Null) {
+            return Ok(Ok(None));
+        }
+        Ok(is_a(req, v, "DateTimeInterface")?.map(Some).ok_or(()))
+    };
     let Some(start) = find(b"start") else {
         return Ok(false);
     };
     match date_of(req, &start)? {
-        Ok(Some((t, class))) => {
-            period.start = Some(t);
-            period.start_ce = Some(class);
+        Ok(Some(object)) => {
+            let Some(t) = copy_time(req, object)? else {
+                return Ok(false);
+            };
+            let old = period.start.replace(t);
+            release(req, old)?;
+            period.start_ce = Some(object.class());
         }
         Ok(None) => {}
         Err(()) => return Ok(false),
@@ -358,9 +398,24 @@ fn from_hash(req: &mut Request, hash: PhpArray, period: &mut PeriodObj) -> Resul
             return Ok(false);
         };
         match date_of(req, &value)? {
-            Ok(Some(_)) if period.start_ce.is_none() => return Ok(false),
-            Ok(Some((t, _))) if current => period.current = Some(t),
-            Ok(Some((t, _))) => period.end = Some(t),
+            Ok(Some(object)) => {
+                let initialized = object
+                    .native::<crate::obj::DateObj>(req)
+                    .is_some_and(|d| d.time.is_some());
+                if !initialized || period.start_ce.is_none() {
+                    return Ok(false);
+                }
+                let Some(t) = copy_time(req, object)? else {
+                    return Ok(false);
+                };
+                let slot = if current {
+                    &mut period.current
+                } else {
+                    &mut period.end
+                };
+                let old = slot.replace(t);
+                release(req, old)?;
+            }
             Ok(None) => {}
             Err(()) => return Ok(false),
         }
@@ -471,14 +526,15 @@ impl DatePeriod {
         let built = (|| {
             let func = "DatePeriod::createFromISO8601String";
             let iso = from_iso(req, func, specification.as_bytes())?;
-            let base = class_id(req, "DateTimeImmutable")?;
             let mut period = PeriodObj::default();
             period.start = iso.start;
-            period.start_ce = Some(base);
             period.end = iso.end;
             period.interval = iso.interval;
-            finish(req, func, &mut period, options, iso.recurrences)?;
-            store(req, view, period)
+            let made = class_id(req, "DateTimeImmutable").and_then(|base| {
+                period.start_ce = Some(base);
+                finish(req, func, &mut period, options, iso.recurrences)
+            });
+            store_made(req, view, period, made)
         })();
         match built {
             Ok(()) => Ok(object.into_static()),
@@ -538,6 +594,18 @@ impl DatePeriod {
     /// 1504
     /// -1984
     /// ```
+    ///
+    /// The start, end and interval timelib copies, and what the start's
+    /// and the interval's own constructions allocate, are the request's,
+    /// so the peak is php's (ADR-0014):
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+    /// pk(fn () => new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 3));
+    /// ```
+    /// ```expect
+    /// 1184 512
+    /// ```
     #[php(arity = manual)]
     fn __construct(
         req: &mut Request,
@@ -566,52 +634,54 @@ impl DatePeriod {
         let options_ok = count < 4 || is_long(&d);
         let object = this.object();
         let mut period = PeriodObj::default();
-        let (options, recurrences) = if let (Some(start), Some(interval), true, true, true) = (
-            start_object,
-            interval_object,
-            (3..=4).contains(&count),
-            options_ok,
-            end_object.is_none() && is_long(&c),
-        ) {
-            let recurrences = long(req, end)?;
-            let options = long(req, options)?;
-            from_objects(req, &mut period, start, interval, None)?;
-            (options, recurrences)
-        } else if let (Some(start), Some(interval), Some(end), true, true) = (
-            start_object,
-            interval_object,
-            end_object,
-            (3..=4).contains(&count),
-            options_ok,
-        ) {
-            let options = long(req, options)?;
-            from_objects(req, &mut period, start, interval, Some(end))?;
-            (options, 0)
-        } else if (1..=2).contains(&count)
-            && (count < 2 || is_long(&b))
-            && !matches!(a.deref().as_ref(), ValueRef::Object(_) | ValueRef::Array(_))
-        {
-            let text = start.hold(req)?.0;
-            let options = long(req, interval)?;
-            deprecated(
-                req,
-                "Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead",
-            );
-            let iso = from_iso(req, func, text.as_bytes())?;
-            period.start = iso.start;
-            period.end = iso.end;
-            period.interval = iso.interval;
-            period.start_ce = Some(class_id(req, "DateTime")?);
-            (options, iso.recurrences)
-        } else {
-            return Err(throw_error(
-                req,
-                "TypeError",
-                "DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments",
-            ));
-        };
-        finish(req, func, &mut period, options, recurrences)?;
-        store(req, object, period)
+        let made = (|| {
+            let (options, recurrences) = if let (Some(start), Some(interval), true, true, true) = (
+                start_object,
+                interval_object,
+                (3..=4).contains(&count),
+                options_ok,
+                end_object.is_none() && is_long(&c),
+            ) {
+                let recurrences = long(req, end)?;
+                let options = long(req, options)?;
+                from_objects(req, &mut period, start, interval, None)?;
+                (options, recurrences)
+            } else if let (Some(start), Some(interval), Some(end), true, true) = (
+                start_object,
+                interval_object,
+                end_object,
+                (3..=4).contains(&count),
+                options_ok,
+            ) {
+                let options = long(req, options)?;
+                from_objects(req, &mut period, start, interval, Some(end))?;
+                (options, 0)
+            } else if (1..=2).contains(&count)
+                && (count < 2 || is_long(&b))
+                && !matches!(a.deref().as_ref(), ValueRef::Object(_) | ValueRef::Array(_))
+            {
+                let text = start.hold(req)?.0;
+                let options = long(req, interval)?;
+                deprecated(
+                    req,
+                    "Calling DatePeriod::__construct(string $isostr, int $options = 0) is deprecated, use DatePeriod::createFromISO8601String() instead",
+                );
+                let iso = from_iso(req, func, text.as_bytes())?;
+                period.start = iso.start;
+                period.end = iso.end;
+                period.interval = iso.interval;
+                period.start_ce = Some(class_id(req, "DateTime")?);
+                (options, iso.recurrences)
+            } else {
+                return Err(throw_error(
+                    req,
+                    "TypeError",
+                    "DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments",
+                ));
+            };
+            finish(req, func, &mut period, options, recurrences)
+        })();
+        store_made(req, object, period, made)
     }
 
     /// `DatePeriod::getStartDate(): DateTimeInterface`.
@@ -636,9 +706,13 @@ impl DatePeriod {
         this: This<Self>,
     ) -> Result<Owner<Instance<DateTimeInterface>>, Thrown> {
         let object = this.object();
-        let state = object
-            .native::<PeriodObj>(req)
-            .and_then(|p| p.start.clone().zip(p.start_ce));
+        let state = with_period(req, object, |req, p| {
+            let class = p.start_ce?;
+            let start = p.start.as_ref()?;
+            Some(lent(req, |l| (start.copy(l), class)))
+        })
+        .flatten()
+        .transpose()?;
         let Some((start, class)) = state else {
             return Err(uninitialized(req, object.class()));
         };
@@ -660,10 +734,13 @@ impl DatePeriod {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<Instance<DateTimeInterface>>>, Thrown> {
-        let state = this
-            .object()
-            .native::<PeriodObj>(req)
-            .and_then(|p| p.end.clone().zip(p.start_ce));
+        let state = with_period(req, this.object(), |req, p| {
+            let class = p.start_ce?;
+            let end = p.end.as_ref()?;
+            Some(lent(req, |l| (end.copy(l), class)))
+        })
+        .flatten()
+        .transpose()?;
         match state {
             Some((end, class)) => new_date(req, class, end).map(|date| Some(date.into_instance())),
             None => Ok(None),
@@ -813,7 +890,7 @@ impl DatePeriod {
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let object = this.object();
-        let mut period = copied(req, object);
+        let mut period = copied(req, object)?;
         let taken = from_hash(req, data, &mut period);
         store(req, object, period)?;
         if !taken? {
@@ -842,7 +919,13 @@ impl DatePeriod {
         let object = this.object();
         let own = std_rows(req, object)?;
         let hash = rows_array(req, &own, Vec::new(), false)?;
-        let mut period = copied(req, object);
+        let mut period = match copied(req, object) {
+            Ok(period) => period,
+            Err(thrown) => {
+                hash.give_up(req);
+                return Err(thrown);
+            }
+        };
         let taken = from_hash(req, *hash, &mut period);
         hash.give_up(req);
         store(req, object, period)?;
@@ -872,19 +955,20 @@ impl DatePeriod {
         let class = class_id(req, "DatePeriod")?;
         let object = new_object(req, class)?;
         let mut period = PeriodObj::default();
-        match from_hash(req, array, &mut period) {
-            Ok(true) => {
-                store(req, *object, period)?;
-                Ok(object.into_instance())
-            }
-            Ok(false) => {
-                object.give_up(req);
-                Err(invalid(req))
-            }
-            Err(thrown) => {
-                object.give_up(req);
-                Err(thrown)
-            }
+        let made = match from_hash(req, array, &mut period) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(None),
+            Err(thrown) => Err(Some(thrown)),
+        };
+        if made.is_ok() {
+            store(req, *object, period)?;
+            return Ok(object.into_instance());
+        }
+        release(req, period)?;
+        object.give_up(req);
+        match made {
+            Err(Some(thrown)) => Err(thrown),
+            _ => Err(invalid(req)),
         }
     }
 

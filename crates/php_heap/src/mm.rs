@@ -542,6 +542,46 @@ impl Mm {
         }
     }
 
+    /// Whether `at` is a block this heap handed out, what php's
+    /// `zend_mm_free_heap` checks as `chunk->heap == heap`: a chunk-aligned
+    /// address one of its huge blocks, any other one whose chunk is one of
+    /// its chunks. A chunk is the heap's own 2 MiB and a huge block its
+    /// own mapping, so no block of the system allocator lies inside
+    /// either, and the answer reads only the heap's own lists, never the
+    /// memory at `at`. A slot the debug quarantine holds is still in its
+    /// chunk, so it answers yes and its second free is sensed as one.
+    pub(crate) fn owns(&self, at: NonNull<u8>) -> bool {
+        if at.as_ptr().addr() & (CHUNK_SIZE - 1) == 0 {
+            return self.huge.iter().any(|block| block.at == at);
+        }
+        self.chunks.contains(&chunk_of(at))
+    }
+
+    /// The bytes the block at `at` can hold, what `zend_mm_size` answers:
+    /// its bin's size, its pages, or a huge block's rounded size.
+    ///
+    /// # Safety
+    ///
+    /// `at` is live in this heap ([`Mm::owns`]).
+    pub(crate) unsafe fn usable(&self, at: NonNull<u8>) -> usize {
+        let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
+        if offset == 0 {
+            return self
+                .huge
+                .iter()
+                .find(|block| block.at == at)
+                .map_or(0, |block| block.size);
+        }
+        // SAFETY: the caller's contract: `at` is live in this heap, so the
+        // chunk it sits in is one of ours and its header is initialised.
+        let info = unsafe { &*chunk_of(at).as_ptr() }.map[offset / PAGE_SIZE];
+        if info & IS_SRUN != 0 {
+            BIN_DATA_SIZE[(info & SRUN_BIN_NUM_MASK) as usize]
+        } else {
+            (info & LRUN_PAGES_MASK) as usize * PAGE_SIZE
+        }
+    }
+
     /// `zend_mm_gc` as `gc_mem_caches()` calls it: [`Mm::gc_heap`], and
     /// the observers told of the bytes it gave back, where there are
     /// any.

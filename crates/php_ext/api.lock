@@ -769,6 +769,7 @@ request::Request::interfaces
 request::Request::interrupt
 request::Request::is_uploaded_file
 request::Request::last_error
+request::Request::lend_heap
 request::Request::loaded_env
 request::Request::loaded_extensions
 request::Request::locale_name

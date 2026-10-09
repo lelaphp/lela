@@ -448,6 +448,28 @@ impl Request {
         self.heap.reset_peak();
     }
 
+    /// `call` served with the request's heap lent to C for its length
+    /// (ADR-0014, design §5.14): a C library compiled against
+    /// `php_heap`'s `emalloc`, `ecalloc`, `erealloc`, `estrdup`,
+    /// `estrndup` and `efree` (timelib, through its `timelib_config.h`)
+    /// allocates on this request's heap while `call` runs, as php's
+    /// library does, and a block of the heap it frees goes back to it.
+    /// `call` reaches nothing of the request, which is borrowed for its
+    /// length, and the lend ends when it returns. Every free of a block
+    /// a lend made is made under a lend of the same request; outside one
+    /// `efree` frees nothing, and the block is the request's end's. The
+    /// `Err` is the memory limit's fatal, recorded where `zend_mm` leaves
+    /// the request: the library ran to its return on the system
+    /// allocator's memory, and what `call` answered is dropped.
+    ///
+    /// # Errors
+    ///
+    /// The thrown that carries the limit's fatal.
+    pub fn lend_heap<R>(&mut self, call: impl FnOnce() -> R) -> Result<R, Thrown> {
+        let lent = self.heap.lend(call);
+        self.fatal_of(lent)
+    }
+
     /// `observer` told of every allocation, reallocation and free the
     /// request's heap serves from here on, and of what
     /// `gc_mem_caches()` gives back (design §7.1): what stands in the

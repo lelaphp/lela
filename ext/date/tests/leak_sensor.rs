@@ -27,3 +27,40 @@ $i = new DateInterval('P1D'); $i->__unserialize(['days' => 10]); echo $i->days, 
     );
     assert_eq!(stdout, "10\n");
 }
+
+/// timelib allocates on the request's heap under its lend (ADR-0014), and
+/// every time, zone and error container it made is freed under one: by
+/// the object that holds it, by the native that made it for a moment,
+/// or by `rshutdown`, which frees the zone cache and the last parse's
+/// messages. An armed engine ends each request below with no block of
+/// its heap held, a missed free being the `InternalError` naming one.
+#[test]
+fn what_timelib_made_on_the_request_s_heap_is_freed_by_the_request_s_end() {
+    let stdout = armed(
+        r#"<?php
+date_default_timezone_set('Europe/Amsterdam');
+$d = new DateTime('2020-01-01 10:00 America/New_York');
+$d->modify('+1 day'); $d->setTimezone(new DateTimeZone('Asia/Tokyo'));
+$d->setTime(1, 2)->setDate(2001, 2, 3)->setISODate(2001, 5)->setTimestamp(86400);
+$i = $d->diff(new DateTime('1970-01-03 12:00 UTC'));
+$e = DateTimeImmutable::createFromMutable($d)->add(new DateInterval('P1M'))->sub(new DateInterval('PT1H'));
+$z = [new DateTimeZone('EST'), new DateTimeZone('+01:00'), clone $e->getTimezone()];
+$p = new DatePeriod(new DateTime('2020-01-01'), new DateInterval('P1D'), 3);
+foreach ($p as $x) {} $q = clone $p; $q->__unserialize($p->__serialize());
+$s = DatePeriod::createFromISO8601String('R2/2012-07-01T00:00:00Z/P7D');
+var_dump(date_parse('+1 day')['relative']['day'], date_parse('foo')['error_count']);
+var_dump(DateTime::createFromFormat('Y-m-d', 'bad'), DateTime::getLastErrors()['error_count']);
+var_dump(strtotime('next monday', 0) > 0, date('Y', 0), idate('Y', 0), mktime(0, 0, 0, 1, 1, 2000) > 0);
+var_dump(localtime(0)[5], getdate(0)['year'], date_sun_info(0, 52.3, 4.9)['transit'] > 0, @strftime('%Y', 0));
+var_dump($d->format('c T'), $d->getOffset(), $z[0]->getOffset($d), timezone_transitions_get($z[2], 0, 100000)[0]['ts']);
+try { new DateTime('foo'); } catch (Exception $ex) { echo get_class($ex), "\n"; }
+try { new DatePeriod('R2/P7D'); } catch (Exception $ex) { echo get_class($ex), "\n"; }
+var_dump(DateInterval::createFromDateString('3 days')->d, (array) $d === (array) $d, $d == clone $d);
+"#,
+    );
+    assert!(stdout.contains("int(1)\nint(1)\n"), "{stdout}");
+    assert!(
+        stdout.ends_with("int(3)\nbool(true)\nbool(true)\n"),
+        "{stdout}"
+    );
+}

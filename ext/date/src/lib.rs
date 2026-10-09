@@ -11,8 +11,11 @@
 //!
 //! What php keeps in `DATEG` is the request state: the zone
 //! `date_default_timezone_set` chose, the zones parsed so far
-//! (`DATEG(tzcache)`), and the messages of the last parse
-//! (`DATEG(last_errors)`). The database itself is data compiled into the
+//! (`DATEG(tzcache)`), and the container of the last parse that had
+//! messages (`DATEG(last_errors)`). timelib allocates on the request's
+//! heap as php's build has it, under [`lent`]'s lend (ADR-0014), and
+//! `rshutdown` frees the cache and the container under one, as php's
+//! `RSHUTDOWN` frees them. The database itself is data compiled into the
 //! binary, shared by every request and written by none.
 #![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
@@ -33,6 +36,7 @@ mod ffi;
 mod format;
 mod held;
 mod interval;
+mod lent;
 mod obj;
 mod parse;
 mod period;
@@ -56,7 +60,7 @@ use crate::classes::{
     DateMalformedStringException, DateObjectError, DateRangeError, DateTimeInterface,
 };
 use crate::datetime::{DateTime, DateTimeImmutable};
-use crate::ffi::{Errors, Tzdb, Zones};
+use crate::ffi::{ErrorContainer, Tzdb, Zones};
 pub use crate::ffi::{Offset, Zone};
 use crate::interval::DateInterval;
 pub use crate::obj::TzKind;
@@ -73,8 +77,9 @@ struct State {
     /// `DATEG(tzcache)`: every zone the request parsed, by the name it
     /// was asked for, the parsers' wrapper's among them.
     zones: Zones,
-    /// `DATEG(last_errors)`: the messages of the last parse that had any.
-    last_errors: Option<Errors>,
+    /// `DATEG(last_errors)`: the container of the last parse that had
+    /// messages, on the request's heap as php keeps it.
+    last_errors: Option<ErrorContainer>,
 }
 
 /// `get_timezone_info()`, what `php_date.h` declares `PHPAPI` (design
@@ -232,8 +237,22 @@ pub fn extension() -> Extension {
         ])
         .on_modify(b"date.timezone", zone::on_update_timezone)
         .request_state::<State>()
+        .rshutdown(rshutdown)
         .info(date_info)
         .build("date")
+}
+
+/// `PHP_RSHUTDOWN_FUNCTION(date)`: `DATEG(tzcache)` destroyed and
+/// `DATEG(last_errors)` freed, under a lend, so their blocks go back to
+/// the request's heap where php's go back to it. A zone a date or a
+/// `DateTimeZone` still holds goes back with the last of them.
+fn rshutdown(req: &mut Request) {
+    // Freeing allocates nothing, so the limit refuses nothing.
+    let _freed = lent::lent(req, |l| {
+        let state = l.state();
+        state.zones = Zones::default();
+        state.last_errors = None;
+    });
 }
 
 /// `PHP_INI_BEGIN()` of `php_date.c`: each entry and its default.

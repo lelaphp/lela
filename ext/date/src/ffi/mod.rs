@@ -14,7 +14,13 @@
 //! - [`Tzdb`], the bundled database, the data compiled into the binary, never written;
 //! - [`Zones`], `DATEG(tzcache)`: the zones a request parsed, by the name
 //!   asked for, which the parsers' zone wrapper reads as php's
-//!   `php_date_parse_tzfile_wrapper` reads the cache.
+//!   `php_date_parse_tzfile_wrapper` reads the cache;
+//! - [`ErrorContainer`], a parse's `timelib_error_container`.
+//!
+//! timelib allocates on the request's heap, as php's build has it
+//! (ADR-0014): every call that can allocate or free takes a [`Lent`],
+//! the proof the request's heap is lent for it, and each owner's drop
+//! under a lend gives its memory back ([`crate::lent`]).
 //!
 //! Beside timelib is the one call into the platform's C library,
 //! [`strftime`], which reads the calling thread's `LC_TIME`, the
@@ -37,6 +43,11 @@ use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
 use timelib_sys as sys;
+
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+
+use crate::lent::{Lent, lent};
 
 #[cfg(test)]
 mod tests;
@@ -116,6 +127,16 @@ pub(super) fn isoweek_from_date(y: i64, m: i64, d: i64) -> (i64, i64) {
     // SAFETY: both out-pointers are locals the call writes and nothing else.
     unsafe { sys::timelib_isoweek_from_date(y, m, d, &raw mut iw, &raw mut iy) };
     (iw, iy)
+}
+
+/// `timelib_unixtime2date(ts, &y, &m, &d)`: the date of the Unix time
+/// in UTC.
+pub(super) fn unixtime2date(ts: i64) -> (i64, i64, i64) {
+    let (mut y, mut m, mut d) = (0, 0, 0);
+    // SAFETY: the three out-pointers are locals the call writes and
+    // nothing else.
+    unsafe { sys::timelib_unixtime2date(ts, &raw mut y, &raw mut m, &raw mut d) };
+    (y, m, d)
 }
 
 /// The bundled timezone database, `timezonedb_builtin`: data compiled into
@@ -240,7 +261,7 @@ pub struct Offset {
 impl Zone {
     /// `timelib_parse_tzfile(name, builtin)`: none for a name the
     /// database has not.
-    pub(crate) fn parse(name: &[u8]) -> Option<Zone> {
+    fn parse(_: &Lent<'_>, name: &[u8]) -> Option<Zone> {
         let name = c_string(name);
         let mut error: c_int = 0;
         // SAFETY: a NUL-terminated name, the static database and a local
@@ -342,10 +363,21 @@ impl Zone {
             .collect()
     }
 
+    /// `timelib_get_time_zone_info(ts, tz)` with the request's heap lent
+    /// for it, what ext/standard's `gettimeofday` asks of the default
+    /// zone (design §4.10): the zone's offset in force at the Unix time
+    /// `ts`, made and freed on the request's heap as php's is.
+    ///
+    /// # Errors
+    ///
+    /// The memory limit.
+    pub fn offset_at(&self, req: &mut Request, ts: i64) -> Result<Offset, Thrown> {
+        lent(req, |l| self.offset_in(l, ts))
+    }
+
     /// `timelib_get_time_zone_info(ts, tz)`: the zone's offset in force
     /// at the Unix time `ts`.
-    #[must_use]
-    pub fn offset_at(&self, ts: i64) -> Offset {
+    pub(crate) fn offset_in(&self, _: &Lent<'_>, ts: i64) -> Offset {
         // SAFETY: a live zone, read only; the offset answered is ours.
         let raw = unsafe { sys::timelib_get_time_zone_info(ts, self.ptr()) };
         if raw.is_null() {
@@ -413,18 +445,6 @@ impl Zone {
 pub(crate) struct Zones(HashMap<Vec<u8>, Arc<Zone>>);
 
 impl Zones {
-    /// `php_date_parse_tzfile(name, tzdb)`: the cached zone, or the one
-    /// the database parses the first time it is asked for; none for a
-    /// name the database has not, which is not kept.
-    pub(crate) fn parse(&mut self, name: &[u8]) -> Option<Arc<Zone>> {
-        if let Some(zone) = self.0.get(name) {
-            return Some(Arc::clone(zone));
-        }
-        let zone = Arc::new(Zone::parse(name)?);
-        self.0.insert(name.to_vec(), Arc::clone(&zone));
-        Some(zone)
-    }
-
     /// How many names the request has parsed a zone for.
     #[cfg(test)]
     fn len(&self) -> usize {
@@ -432,15 +452,34 @@ impl Zones {
     }
 }
 
-/// What a parse hands timelib in place of the database: the request's
-/// zones, and every zone the wrapper answered, so [`Time::sync`] shares
-/// the `Arc` of the zone a parse pointed the time at.
-struct Lookup<'a> {
-    zones: &'a mut Zones,
+impl Lent<'_> {
+    /// `php_date_parse_tzfile(name, tzdb)`: the cached zone, or the one
+    /// the database parses the first time it is asked for, on the
+    /// request's heap as php's `DATEG(tzcache)` entry is; none for a name
+    /// the database has not, which is not kept.
+    pub(crate) fn zone(&mut self, name: &[u8]) -> Option<Arc<Zone>> {
+        if let Some(zone) = self.state().zones.0.get(name) {
+            return Some(Arc::clone(zone));
+        }
+        let zone = Arc::new(Zone::parse(self, name)?);
+        self.state()
+            .zones
+            .0
+            .insert(name.to_vec(), Arc::clone(&zone));
+        Some(zone)
+    }
+}
+
+/// What a parse hands timelib in place of the database: the lend, whose
+/// state holds the request's zones, and every zone the wrapper answered,
+/// so [`Time::sync`] shares the `Arc` of the zone a parse pointed the
+/// time at.
+struct Lookup<'a, 'b> {
+    lent: &'a mut Lent<'b>,
     answered: Vec<Arc<Zone>>,
 }
 
-impl Lookup<'_> {
+impl Lookup<'_, '_> {
     /// The pointer timelib's parsers take as their `tzdb` and hand,
     /// untouched, to the wrapper: timelib's `parse_date.re` stores it in
     /// its scanner and passes it to `tz_wrapper` and reads it nowhere
@@ -462,8 +501,8 @@ unsafe extern "C" fn cached_zone(
     // SAFETY: `lookup` is the `Lookup::as_tzdb` of a `Lookup` the parse
     // that calls this borrows uniquely for the call and touches nothing
     // else of while timelib runs.
-    let lookup = unsafe { &mut *lookup.cast::<Lookup<'_>>().cast_mut() };
-    let Some(zone) = lookup.zones.parse(bytes_of(name)) else {
+    let lookup = unsafe { &mut *lookup.cast::<Lookup<'_, '_>>().cast_mut() };
+    let Some(zone) = lookup.lent.zone(bytes_of(name)) else {
         return ptr::null_mut();
     };
     let at = zone.ptr();
@@ -487,13 +526,39 @@ pub(crate) struct Errors {
 }
 
 impl Errors {
-    /// The container's messages copied, and the container freed.
-    fn take(raw: *mut sys::ErrorContainer) -> Errors {
-        if raw.is_null() {
-            return Errors::default();
-        }
-        // SAFETY: timelib answered an initialised container it allocated.
-        let c = unsafe { &*raw };
+    /// Whether the parse left any message, what decides whether php's
+    /// `update_errors_warnings` keeps its container.
+    pub(crate) fn any(&self) -> bool {
+        !self.warnings.is_empty() || !self.errors.is_empty()
+    }
+}
+
+/// A parse's `timelib_error_container`, as timelib allocated it on the
+/// request's heap: freed by its drop, which under a lend gives it back.
+/// `DATEG(last_errors)` keeps one for as long as php keeps it.
+pub(crate) struct ErrorContainer(NonNull<sys::ErrorContainer>);
+
+// SAFETY: the container is owned here alone, plain data timelib wrote
+// once and reads nowhere after.
+unsafe impl Send for ErrorContainer {}
+
+impl Drop for ErrorContainer {
+    fn drop(&mut self) {
+        // SAFETY: the container timelib answered, and this its one owner.
+        unsafe { sys::timelib_error_container_dtor(self.0.as_ptr()) };
+    }
+}
+
+impl ErrorContainer {
+    /// The container a parse answered, none for none.
+    fn adopt(raw: *mut sys::ErrorContainer) -> Option<ErrorContainer> {
+        NonNull::new(raw).map(ErrorContainer)
+    }
+
+    /// The messages, copied out.
+    pub(crate) fn messages(&self) -> Errors {
+        // SAFETY: a live container owned by `self`, read only.
+        let c = unsafe { self.0.as_ref() };
         let read = |list: *mut sys::ErrorMessage, count: c_int| {
             let len = usize::try_from(count).unwrap_or(0);
             if list.is_null() || len == 0 {
@@ -510,14 +575,17 @@ impl Errors {
                 })
                 .collect()
         };
-        let out = Errors {
+        Errors {
             warnings: read(c.warning_messages, c.warning_count),
             errors: read(c.error_messages, c.error_count),
-        };
-        // SAFETY: the container is ours and copied above.
-        unsafe { sys::timelib_error_container_dtor(raw) };
-        out
+        }
     }
+}
+
+/// A parse's time, and its container of messages.
+pub(crate) struct Parsed {
+    pub time: Time,
+    pub errors: Option<ErrorContainer>,
 }
 
 /// An owned `timelib_time`, and the zone its `tz_info` points at.
@@ -553,19 +621,18 @@ impl std::ops::DerefMut for Time {
     }
 }
 
-impl Clone for Time {
+impl Time {
     /// `timelib_time_clone`: the abbreviation copied and the zone shared.
-    fn clone(&self) -> Time {
+    pub(crate) fn copy(&self, _: &Lent<'_>) -> Time {
         // SAFETY: a live time; the copy answered is ours.
         let raw = unsafe { sys::timelib_time_clone(self.raw.as_ptr()) };
         Time::adopt(raw, self.zone.clone(), &[])
     }
-}
 
-impl Time {
     /// A time timelib allocated, with the zone its pointer is known to
-    /// name or one of the zones a parse's wrapper `answered`; a null answer is timelib's allocation failing, which its
-    /// `calloc` aborts on before it could return.
+    /// name or one of the zones a parse's wrapper `answered`; a null
+    /// answer is an allocation failing, which the process does not
+    /// outlive.
     fn adopt(raw: *mut TimeFields, zone: Option<Arc<Zone>>, answered: &[Arc<Zone>]) -> Time {
         let raw = NonNull::new(raw).unwrap_or_else(|| std::process::abort());
         let mut time = Time { raw, zone };
@@ -575,7 +642,7 @@ impl Time {
     }
 
     /// `timelib_time_ctor()`: every field zero.
-    pub(crate) fn new() -> Time {
+    pub(crate) fn new(_: &Lent<'_>) -> Time {
         // SAFETY: the call takes nothing; the time answered is ours.
         let raw = unsafe { sys::timelib_time_ctor() };
         Time::adopt(raw, None, &[])
@@ -619,14 +686,14 @@ impl Time {
     }
 
     /// `timelib_unixtime2gmt`.
-    pub(crate) fn unixtime2gmt(&mut self, ts: i64) {
+    pub(crate) fn unixtime2gmt(&mut self, _: &Lent<'_>, ts: i64) {
         // SAFETY: a live time owned by `self`.
         unsafe { sys::timelib_unixtime2gmt(self.ptr(), ts) };
         self.sync(&[]);
     }
 
     /// `timelib_unixtime2local`: under the zone the time carries.
-    pub(crate) fn unixtime2local(&mut self, ts: i64) {
+    pub(crate) fn unixtime2local(&mut self, _: &Lent<'_>, ts: i64) {
         // SAFETY: a live time whose zone, if any, `self.zone` keeps alive.
         unsafe { sys::timelib_unixtime2local(self.ptr(), ts) };
         self.sync(&[]);
@@ -643,21 +710,27 @@ impl Time {
     }
 
     /// `timelib_set_timezone(t, tz)`.
-    pub(crate) fn set_timezone(&mut self, zone: &Arc<Zone>) {
+    pub(crate) fn set_timezone(&mut self, _: &Lent<'_>, zone: &Arc<Zone>) {
         // SAFETY: a live time and a live zone the `Arc` keeps alive.
         unsafe { sys::timelib_set_timezone(self.ptr(), zone.ptr()) };
         self.sync(&[zone]);
     }
 
     /// `timelib_set_timezone_from_offset(t, offset)`.
-    pub(crate) fn set_timezone_from_offset(&mut self, offset: i64) {
+    pub(crate) fn set_timezone_from_offset(&mut self, _: &Lent<'_>, offset: i64) {
         // SAFETY: a live time owned by `self`.
         unsafe { sys::timelib_set_timezone_from_offset(self.ptr(), offset) };
         self.sync(&[]);
     }
 
     /// `timelib_set_timezone_from_abbr(t, info)`: timelib copies `abbr`.
-    pub(crate) fn set_timezone_from_abbr(&mut self, utc_offset: i64, abbr: &[u8], dst: i32) {
+    pub(crate) fn set_timezone_from_abbr(
+        &mut self,
+        _: &Lent<'_>,
+        utc_offset: i64,
+        abbr: &[u8],
+        dst: i32,
+    ) {
         let abbr = c_string(abbr);
         let info = sys::AbbrInfo {
             utc_offset,
@@ -673,11 +746,11 @@ impl Time {
     /// `t->tz_abbr = timelib_strdup(abbr)` through the only door timelib
     /// has for it that keeps the zone: set from the abbreviation and the
     /// fields restored.
-    pub(crate) fn set_abbr(&mut self, abbr: &[u8]) {
+    pub(crate) fn set_abbr(&mut self, lent: &Lent<'_>, abbr: &[u8]) {
         let (z, dst, zone_type, have_zone) = (self.z, self.dst, self.zone_type, self.have_zone);
         let zone = self.zone.clone();
         let info = self.tz_info();
-        self.set_timezone_from_abbr(i64::from(z), abbr, dst);
+        self.set_timezone_from_abbr(lent, i64::from(z), abbr, dst);
         self.z = z;
         self.dst = dst;
         self.zone_type = zone_type;
@@ -690,7 +763,7 @@ impl Time {
 
     /// `timelib_update_ts(t, tzi)`: under `zone`, or the time's own when
     /// none is given, as php passes `NULL`.
-    pub(crate) fn update_ts(&mut self, zone: Option<&Arc<Zone>>) {
+    pub(crate) fn update_ts(&mut self, _: &Lent<'_>, zone: Option<&Arc<Zone>>) {
         let tzi = zone.map_or(ptr::null_mut(), |z| z.ptr());
         // SAFETY: a live time and, where given, a zone the `Arc` keeps alive.
         unsafe { sys::timelib_update_ts(self.ptr(), tzi) };
@@ -699,7 +772,7 @@ impl Time {
     }
 
     /// `timelib_update_from_sse`.
-    pub(crate) fn update_from_sse(&mut self) {
+    pub(crate) fn update_from_sse(&mut self, _: &Lent<'_>) {
         // SAFETY: a live time whose zone `self.zone` keeps alive.
         unsafe { sys::timelib_update_from_sse(self.ptr()) };
         self.sync(&[]);
@@ -707,7 +780,7 @@ impl Time {
 
     /// `timelib_fill_holes(t, now, options)`; `now`'s zone is shared, as
     /// `TIMELIB_NO_CLONE` asks, so the option is always given.
-    pub(crate) fn fill_holes(&mut self, now: &mut Time, options: i32) {
+    pub(crate) fn fill_holes(&mut self, _: &Lent<'_>, now: &mut Time, options: i32) {
         // SAFETY: two live times; with `TIMELIB_NO_CLONE` the call copies
         // `now`'s zone pointer, which `now.zone` keeps alive and `sync`
         // then shares by its `Arc`.
@@ -725,7 +798,7 @@ impl Time {
     }
 
     /// `timelib_get_current_offset`.
-    pub(crate) fn current_offset(&self) -> i64 {
+    pub(crate) fn current_offset(&self, _: &Lent<'_>) -> i64 {
         // SAFETY: a live time whose zone `self.zone` keeps alive; the
         // call reads it.
         unsafe { sys::timelib_get_current_offset(self.ptr()) }
@@ -738,7 +811,7 @@ impl Time {
     }
 
     /// `timelib_diff(one, two)`.
-    pub(crate) fn diff(&self, other: &Time) -> RelTime {
+    pub(crate) fn diff(&self, _: &Lent<'_>, other: &Time) -> RelTime {
         // SAFETY: two live times; the relative time answered is ours.
         let raw = unsafe { sys::timelib_diff(self.ptr(), other.ptr()) };
         take_rel(raw)
@@ -746,6 +819,7 @@ impl Time {
 
     fn arith(
         &self,
+        _: &Lent<'_>,
         rel: &RelTime,
         f: unsafe extern "C" fn(*mut TimeFields, *mut RelTime) -> *mut TimeFields,
     ) -> Time {
@@ -763,29 +837,30 @@ impl Time {
     }
 
     /// `timelib_add`.
-    pub(crate) fn add(&self, rel: &RelTime) -> Time {
-        self.arith(rel, sys::timelib_add)
+    pub(crate) fn add(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+        self.arith(lent, rel, sys::timelib_add)
     }
 
     /// `timelib_add_wall`.
-    pub(crate) fn add_wall(&self, rel: &RelTime) -> Time {
-        self.arith(rel, sys::timelib_add_wall)
+    pub(crate) fn add_wall(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+        self.arith(lent, rel, sys::timelib_add_wall)
     }
 
     /// `timelib_sub`.
-    pub(crate) fn sub(&self, rel: &RelTime) -> Time {
-        self.arith(rel, sys::timelib_sub)
+    pub(crate) fn sub(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+        self.arith(lent, rel, sys::timelib_sub)
     }
 
     /// `timelib_sub_wall`.
-    pub(crate) fn sub_wall(&self, rel: &RelTime) -> Time {
-        self.arith(rel, sys::timelib_sub_wall)
+    pub(crate) fn sub_wall(&self, lent: &Lent<'_>, rel: &RelTime) -> Time {
+        self.arith(lent, rel, sys::timelib_sub_wall)
     }
 
     /// `timelib_astro_rise_set_altitude`: the status, the rise and set
     /// hours and the rise, set and transit timestamps.
     pub(crate) fn rise_set(
         &mut self,
+        _: &Lent<'_>,
         lon: f64,
         lat: f64,
         altitude: f64,
@@ -813,12 +888,12 @@ impl Time {
 
     /// `timelib_strtotime(s, len, &errors, DATE_TIMEZONEDB,
     /// php_date_parse_tzfile_wrapper)`: the parse and its messages, each
-    /// zone it names read out of the request's `zones`.
-    pub(crate) fn strtotime(zones: &mut Zones, s: &[u8]) -> (Time, Errors) {
+    /// zone it names read out of the request's zones.
+    pub(crate) fn strtotime(lent: &mut Lent<'_>, s: &[u8]) -> Parsed {
         let text = terminated(s);
         let mut errors: *mut sys::ErrorContainer = ptr::null_mut();
         let mut lookup = Lookup {
-            zones,
+            lent,
             answered: Vec::new(),
         };
         let tzdb = lookup.as_tzdb();
@@ -834,19 +909,19 @@ impl Time {
                 cached_zone,
             )
         };
-        (
-            Time::adopt(raw, None, &lookup.answered),
-            Errors::take(errors),
-        )
+        Parsed {
+            time: Time::adopt(raw, None, &lookup.answered),
+            errors: ErrorContainer::adopt(errors),
+        }
     }
 
     /// `timelib_parse_from_format(format, s, len, &errors, ...)`.
-    pub(crate) fn parse_from_format(zones: &mut Zones, format: &[u8], s: &[u8]) -> (Time, Errors) {
+    pub(crate) fn parse_from_format(lent: &mut Lent<'_>, format: &[u8], s: &[u8]) -> Parsed {
         let format = c_string(format);
         let text = terminated(s);
         let mut errors: *mut sys::ErrorContainer = ptr::null_mut();
         let mut lookup = Lookup {
-            zones,
+            lent,
             answered: Vec::new(),
         };
         let tzdb = lookup.as_tzdb();
@@ -863,42 +938,76 @@ impl Time {
                 cached_zone,
             )
         };
-        (
-            Time::adopt(raw, None, &lookup.answered),
-            Errors::take(errors),
-        )
+        Parsed {
+            time: Time::adopt(raw, None, &lookup.answered),
+            errors: ErrorContainer::adopt(errors),
+        }
     }
+}
 
-    /// `timelib_parse_zone(&ptr, &dst, t, &not_found, ...)` over `s` into
-    /// this time, what `timezone_initialize` asks of a dummy time: the
-    /// offset, whether no zone was found, and how many bytes were read.
-    pub(crate) fn parse_zone(&mut self, zones: &mut Zones, s: &[u8]) -> (i64, i32, bool, usize) {
-        let text = c_string(s);
-        let start = text.as_ptr();
-        let mut at = start;
-        let (mut dst, mut not_found): (c_int, c_int) = (0, 0);
-        let mut lookup = Lookup {
-            zones,
-            answered: Vec::new(),
-        };
-        let tzdb = lookup.as_tzdb();
-        // SAFETY: a NUL-terminated string whose cursor is a local, two
-        // locals for the flags, a live time, and the lookup with the
-        // wrapper that reads it, borrowed for the call alone.
-        let offset = unsafe {
-            sys::timelib_parse_zone(
-                &raw mut at,
-                &raw mut dst,
-                self.ptr(),
-                &raw mut not_found,
-                tzdb,
-                cached_zone,
-            )
-        };
-        let answered: Vec<&Arc<Zone>> = lookup.answered.iter().collect();
-        self.sync(&answered);
-        let read = (at as usize).saturating_sub(start as usize);
-        (offset, dst, not_found != 0, read)
+/// What `timezone_initialize` reads off the `timelib_time` it hands
+/// `timelib_parse_zone`: the offset, whether no zone was found, how many
+/// bytes were read, and the zone the dummy came to carry.
+pub(crate) struct ZoneRead {
+    pub offset: i64,
+    pub dst: i32,
+    pub not_found: bool,
+    pub read: usize,
+    pub zone_type: u32,
+    pub abbr: Vec<u8>,
+    pub zone: Option<Arc<Zone>>,
+}
+
+/// `timelib_parse_zone(&ptr, &dst, &dummy_t, &not_found, ...)` over
+/// `s`, into a `timelib_time` on the stack as php's `dummy_t = {0}` is,
+/// whose `tz_abbr` copy is freed after, `timelib_free(dummy_t.tz_abbr)`.
+pub(crate) fn parse_zone(lent: &mut Lent<'_>, s: &[u8]) -> ZoneRead {
+    let text = c_string(s);
+    let start = text.as_ptr();
+    let mut at = start;
+    let (mut dst, mut not_found): (c_int, c_int) = (0, 0);
+    // SAFETY: every field of `timelib_time` is a number or a pointer, for
+    // which zero is a value, the `{0}` php initialises its dummy with.
+    let mut dummy: TimeFields = unsafe { std::mem::zeroed() };
+    let mut lookup = Lookup {
+        lent,
+        answered: Vec::new(),
+    };
+    let tzdb = lookup.as_tzdb();
+    // SAFETY: a NUL-terminated string whose cursor is a local, two
+    // locals for the flags, the dummy time on this stack, and the lookup
+    // with the wrapper that reads it, borrowed for the call alone.
+    let offset = unsafe {
+        sys::timelib_parse_zone(
+            &raw mut at,
+            &raw mut dst,
+            &raw mut dummy,
+            &raw mut not_found,
+            tzdb,
+            cached_zone,
+        )
+    };
+    let tz_info = dummy.tz_info();
+    let zone = lookup
+        .answered
+        .iter()
+        .find(|zone| !tz_info.is_null() && zone.ptr() == tz_info)
+        .cloned();
+    let abbr = bytes_of(dummy.tz_abbr()).to_vec();
+    let abbr_copy = dummy.tz_abbr();
+    if !abbr_copy.is_null() {
+        // SAFETY: the copy `timelib_parse_zone` made with `timelib_strdup`
+        // and the dummy's alone, which is dropped with this frame.
+        unsafe { sys::timelib_free(abbr_copy.cast_mut().cast()) };
+    }
+    ZoneRead {
+        offset,
+        dst,
+        not_found: not_found != 0,
+        read: (at as usize).saturating_sub(start as usize),
+        zone_type: dummy.zone_type,
+        abbr,
+        zone,
     }
 }
 
@@ -923,8 +1032,10 @@ pub(crate) struct IsoInterval {
     pub errors: Errors,
 }
 
-/// `timelib_strtointerval(s, len, &b, &e, &p, &r, &errors)`.
-pub(super) fn strtointerval(s: &[u8]) -> IsoInterval {
+/// `timelib_strtointerval(s, len, &b, &e, &p, &r, &errors)`: the
+/// container's messages copied and the container freed, as
+/// `date_interval_initialize` frees it.
+pub(super) fn strtointerval(_: &Lent<'_>, s: &[u8]) -> IsoInterval {
     let text = terminated(s);
     let mut begin: *mut TimeFields = ptr::null_mut();
     let mut end: *mut TimeFields = ptr::null_mut();
@@ -949,7 +1060,9 @@ pub(super) fn strtointerval(s: &[u8]) -> IsoInterval {
         end: (!end.is_null()).then(|| Time::adopt(end, None, &[])),
         period: (!period.is_null()).then(|| take_rel(period)),
         recurrences,
-        errors: Errors::take(errors),
+        errors: ErrorContainer::adopt(errors)
+            .map(|container| container.messages())
+            .unwrap_or_default(),
     }
 }
 

@@ -2,8 +2,6 @@
 //! over `timelib_parse_zone`, the name, offset, transitions and location
 //! of a zone, and its serialised form.
 
-use std::sync::Arc;
-
 use php_ext::abi::{Instance, OrFalse, Path, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
@@ -13,41 +11,38 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::classes::DateTimeInterface;
 use crate::datetime::restore_properties;
-use crate::ffi::{Time, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET, Zones};
+use crate::ffi::{self, ZONETYPE_ABBR, ZONETYPE_ID, ZONETYPE_OFFSET};
 use crate::format::format_timestamp;
+use crate::lent::{Lent, lent, release};
 use crate::obj::{
-    TIMEZONE, TzKind, TzObj, class_id, new_timezone, rows_array, set_str, set_string, set_tz,
-    std_rows, time_of, tz_fields, tz_of,
+    TIMEZONE, TzKind, TzObj, class_id, lent_time, new_timezone, rows_array, set_str, set_string,
+    set_tz, std_rows, tz_fields, tz_of,
 };
-use crate::zone::zones;
 
 /// `timezone_initialize(tzobj, tz, &warning)`: an identifier, an
 /// abbreviation or an offset, as `timelib_parse_zone` reads it, or the
 /// message php gives for one it cannot use.
-pub(super) fn initialize(zones: &mut Zones, text: &[u8]) -> Result<TzKind, String> {
+pub(super) fn initialize(lent: &mut Lent<'_>, text: &[u8]) -> Result<TzKind, String> {
     let shown = String::from_utf8_lossy(text).into_owned();
-    let mut dummy = Time::new();
-    let (offset, dst, not_found, read) = dummy.parse_zone(zones, text);
+    let read = ffi::parse_zone(lent, text);
     #[allow(clippy::cast_possible_truncation)]
-    let z = offset as i32;
-    dummy.z = z;
-    if offset >= 100 * 60 * 60 || offset <= -100 * 60 * 60 {
+    let z = i64::from(read.offset as i32);
+    if read.offset >= 100 * 60 * 60 || read.offset <= -100 * 60 * 60 {
         return Err(format!("Timezone offset is out of range ({shown})"));
     }
-    dummy.dst = dst;
-    if not_found || read < text.len() {
+    if read.not_found || read.read < text.len() {
         return Err(format!("Unknown or bad timezone ({shown})"));
     }
-    match dummy.zone_type {
-        ZONETYPE_ID => dummy
-            .zone()
-            .map(|zone| TzKind::Id(Arc::clone(zone)))
+    match read.zone_type {
+        ZONETYPE_ID => read
+            .zone
+            .map(TzKind::Id)
             .ok_or_else(|| format!("Unknown or bad timezone ({shown})")),
-        ZONETYPE_OFFSET => Ok(TzKind::Offset(i64::from(dummy.z))),
+        ZONETYPE_OFFSET => Ok(TzKind::Offset(z)),
         ZONETYPE_ABBR => Ok(TzKind::Abbr {
-            utc_offset: i64::from(dummy.z),
-            abbr: dummy.tz_abbr().to_vec(),
-            dst: dummy.dst,
+            utc_offset: z,
+            abbr: read.abbr,
+            dst: read.dst,
         }),
         _ => Err(format!("Unknown or bad timezone ({shown})")),
     }
@@ -97,7 +92,7 @@ fn timezone_open(
     req: &mut Request,
     timezone: Path,
 ) -> Result<OrFalse<Owner<Instance<DateTimeZone>>>, Thrown> {
-    match initialize(zones(req), timezone.0.as_bytes()) {
+    match lent(req, |l| initialize(l, timezone.0.as_bytes()))? {
         Ok(kind) => new_timezone(req, kind).map(|tz| OrFalse::Value(tz.into_instance())),
         Err(message) => {
             docref(req, Level::Warning, &message);
@@ -137,14 +132,15 @@ fn timezone_name_get(
 /// offset from UTC at the date's instant.
 fn offset_of(req: &mut Request, object: PhpObject, date: PhpObject) -> Result<i64, Thrown> {
     let kind = tz_of(req, object)?;
-    let time = time_of(req, date)?;
-    Ok(match kind {
-        TzKind::Id(zone) => i64::from(zone.offset_at(time.sse).offset),
-        TzKind::Offset(offset) => offset,
+    let offset = lent_time(req, date, |l, time| match &kind {
+        TzKind::Id(zone) => i64::from(zone.offset_in(l, time.sse).offset),
+        TzKind::Offset(offset) => *offset,
         TzKind::Abbr {
             utc_offset, dst, ..
-        } => utc_offset + i64::from(dst) * 3600,
-    })
+        } => utc_offset + i64::from(*dst) * 3600,
+    });
+    release(req, kind)?;
+    offset
 }
 
 /// `timezone_offset_get(DateTimeZone $object, DateTimeInterface
@@ -267,7 +263,7 @@ fn transitions_of(
     } else if trans.is_empty() {
         nominal(req, &mut out, begin_ts)?;
     } else if posix {
-        let o = zone.offset_at(begin_ts);
+        let o = zone.offset_at(req, begin_ts)?;
         transition(
             req,
             &mut out,
@@ -389,9 +385,7 @@ fn timezone_transitions_get(
 
 /// `timelib_unixtime2date(ts, &y, &m, &d)`.
 fn year_of(ts: i64) -> (i64, i64, i64) {
-    let mut t = Time::new();
-    t.unixtime2gmt(ts);
-    (t.y, t.m, t.d)
+    ffi::unixtime2date(ts)
 }
 
 /// `timezone_location_get` and `DateTimeZone::getLocation`.
@@ -457,7 +451,16 @@ fn timezone_location_get(
 }
 
 /// `php_date_timezone_initialize_from_hash`.
-fn from_hash(zones: &mut Zones, hash: PhpArray) -> Option<TzKind> {
+fn from_hash(req: &mut Request, hash: PhpArray) -> Result<Option<TzKind>, Thrown> {
+    let Some(text) = hash_zone(hash) else {
+        return Ok(None);
+    };
+    lent(req, |l| initialize(l, &text).ok())
+}
+
+/// The `timezone` a serialised zone's `timezone_type` admits, none for
+/// a hash `php_date_timezone_initialize_from_hash` refuses.
+fn hash_zone(hash: PhpArray) -> Option<Vec<u8>> {
     let find = |name: &[u8]| hash.find(name).map(|v| v.deref());
     let zone_type = find(b"timezone_type")?;
     let zone = find(b"timezone")?;
@@ -469,7 +472,7 @@ fn from_hash(zones: &mut Zones, hash: PhpArray) -> Option<TzKind> {
     if text.contains(&0) {
         return None;
     }
-    initialize(zones, text).ok()
+    Some(text.to_vec())
 }
 
 /// `class DateTimeZone`: its fourteen groups, the values of
@@ -578,8 +581,20 @@ impl DateTimeZone {
     /// +01:00 160
     /// 96
     /// ```
+    ///
+    /// `timelib_parse_zone` reads into a time on the stack, as php's
+    /// `dummy_t` is, and the zone out of the request's cache, so a second
+    /// construction peaks where php's does (ADR-0014):
+    ///
+    /// ```php
+    /// function pk($f) { $k = $f(); unset($k); $s = memory_get_usage(); memory_reset_peak_usage(); $k = $f(); echo memory_get_peak_usage() - $s, ' ', memory_get_usage() - $s, "\n"; }
+    /// pk(fn () => new DateTimeZone('Europe/Amsterdam'));
+    /// ```
+    /// ```expect
+    /// 104 112
+    /// ```
     fn __construct(req: &mut Request, this: This<Self>, timezone: Path) -> Result<(), Thrown> {
-        match initialize(zones(req), timezone.0.as_bytes()) {
+        match lent(req, |l| initialize(l, timezone.0.as_bytes()))? {
             Ok(kind) => set_zone(req, this.object(), kind),
             Err(message) => Err(throw(
                 req,
@@ -711,7 +726,7 @@ impl DateTimeZone {
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let (object, hash) = (this.object(), data);
-        let Some(kind) = from_hash(zones(req), hash) else {
+        let Some(kind) = from_hash(req, hash)? else {
             return Err(throw_error(
                 req,
                 "Error",
@@ -745,9 +760,9 @@ impl DateTimeZone {
         for (key, value) in object.props(req)? {
             hash.set(req, Owner::take(req, key), Owner::take(req, value))?;
         }
-        let kind = from_hash(zones(req), *hash);
+        let kind = from_hash(req, *hash);
         hash.give_up(req);
-        match kind {
+        match kind? {
             Some(kind) => set_zone(req, object, kind),
             None => Err(throw_error(
                 req,
@@ -786,7 +801,7 @@ impl DateTimeZone {
         let hash = array;
         let class = class_id(req, "DateTimeZone")?;
         let object = new_object(req, class)?;
-        let Some(kind) = from_hash(zones(req), hash) else {
+        let Some(kind) = from_hash(req, hash)? else {
             object.give_up(req);
             return Err(throw_error(
                 req,
