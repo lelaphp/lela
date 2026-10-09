@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::divergence::{self, Kind, Registry, Status};
+use xtask::divergence::{self, Cause, Kind, Registry, Retires, Status};
 use xtask::manifest::Manifest;
 use xtask::scratch::Tree;
 
@@ -76,17 +76,15 @@ fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
     )
 }
 
-/// The counts table's line for one kind, or `total`, the parity rows'.
+/// The counts table's line for the debt rows of one kind, or `total`,
+/// every debt row's.
 fn counts_line(registry: &Registry, kind: Option<Kind>) -> String {
     let counts = registry.counts();
     let of = |status: Status| match kind {
-        Some(kind) => counts.cell(kind, status),
-        None => counts.parity(status),
+        Some(kind) => counts.debt(kind, status),
+        None => counts.total(status),
     };
-    let rows = kind.map_or_else(
-        || Status::ALL.into_iter().map(of).sum(),
-        |k| counts.by_kind[&k],
-    );
+    let rows: u64 = Status::ALL.into_iter().map(of).sum();
     format!(
         "| {} | {} | {} | {} | {rows} |",
         kind.map_or("total", Kind::as_str),
@@ -116,8 +114,16 @@ fn the_tracked_registry_loads_and_every_row_answers_for_itself() {
     assert!(registry.accepted("trace:no-such").is_none());
     let counts = registry.counts();
     assert_eq!(
-        counts.by_kind.values().sum::<u64>(),
+        counts.by_status.values().sum::<u64>(),
         u64::try_from(registry.rows().len()).unwrap()
+    );
+    assert_eq!(
+        Cause::ALL
+            .into_iter()
+            .map(|c| counts.rows_of(c))
+            .sum::<u64>(),
+        u64::try_from(registry.rows().len()).unwrap(),
+        "every row is of one cause"
     );
 }
 
@@ -323,8 +329,14 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
             "the facts list the open rows alone: {cut}"
         );
     }
-    // The kind of a row the registry holds, whichever rows a person keeps.
-    let kind = registry.rows()[0].kind;
+    // The kind of a debt row the registry holds, whichever rows a person
+    // keeps.
+    let kind = registry
+        .rows()
+        .iter()
+        .find(|r| r.cause == Cause::Debt)
+        .expect("the workspace's registry has a debt row")
+        .kind;
     for text in [&md, &cut] {
         assert!(
             text.contains(&counts_line(&registry, Some(kind))),
@@ -351,11 +363,11 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     assert_eq!(value["rows"][0]["id"], registry.rows()[0].id.as_str());
     assert_eq!(
         value["counts"][kind.as_str()]["accepted"],
-        registry.counts().cell(kind, Status::Accepted)
+        registry.counts().debt(kind, Status::Accepted)
     );
     assert_eq!(
         value["counts"]["total"]["open"],
-        registry.counts().parity(Status::Open)
+        registry.counts().total(Status::Open)
     );
 
     // One more accepted row changes the counts and nothing else of what
@@ -389,7 +401,7 @@ since = \"2026-09-29\"
     assert!(ok, "{err}");
     assert!(
         whole.contains(
-            "| trace:fixture-one-more | trace | accepted | 2026-09-29 | The fixture's one more reason (fixture). |"
+            "| trace:fixture-one-more | trace | debt | accepted | 2026-09-29 | The fixture's one more reason (fixture). |"
         ),
         "{whole}"
     );
@@ -414,7 +426,7 @@ since = "2026-09-18"
     assert_eq!(Kind::Crosscheck.prefix(), "crosscheck:");
     assert_eq!(Kind::Crosscheck.as_str(), "crosscheck");
     assert!(parsed.accepted("crosscheck:ctype").is_some());
-    assert_eq!(Kind::ALL.len(), 7);
+    assert_eq!(Kind::ALL.len(), 6);
     assert_eq!(
         Kind::ALL.iter().position(|k| *k == Kind::Crosscheck),
         Kind::ALL
@@ -439,7 +451,7 @@ since = "2026-09-18"
     let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
     assert!(
-        md.contains("| crosscheck:ctype | crosscheck | accepted |"),
+        md.contains("| crosscheck:ctype | crosscheck | debt | accepted |"),
         "{md}"
     );
     assert!(
@@ -457,22 +469,40 @@ since = "2026-09-18"
     assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
 }
 
-/// The `php-ub` kind (#2220): a row recording php's undefined behaviour
-/// or crash parses under `php-ub:`, its `covers` naming the fixture that
-/// holds the engine's side, and `status --section divergence` counts it on
-/// a line of its own after the total, which is the parity rows' and what
-/// the day-30 target reads; a fixture's covered id names the crate `done`
-/// matches it to.
+/// A row's `cause` (#2460, #2462): `debt` where the file writes none, and
+/// the cause it names otherwise, each of the four by its spelling; a
+/// cause outside them is refused by name.
 #[test]
-fn a_php_ub_row_is_counted_apart_from_the_parity_total() {
-    let text = r#"
-[[divergence]]
-id = "trace:fixture-parity"
-kind = "trace"
-reason = "The fixture's parity reason (fixture)."
-status = "accepted"
-since = "2026-09-29"
+fn a_row_without_a_cause_is_debt_and_a_row_with_one_reads_it() {
+    let row = |cause: &str| {
+        format!(
+            "[[divergence]]\nid = \"trace:fixture\"\nkind = \"trace\"\n{cause}reason = \"r §1\"\nstatus = \"accepted\"\nsince = \"2026-10-09\"\nretires = \"pin\"\n"
+        )
+    };
+    let without = Registry::parse(&row("")).unwrap();
+    assert_eq!(without.rows()[0].cause, Cause::Debt);
+    for cause in Cause::ALL {
+        let parsed = Registry::parse(&row(&format!("cause = \"{}\"\n", cause.as_str()))).unwrap();
+        assert_eq!(parsed.rows()[0].cause, cause);
+    }
+    assert_eq!(
+        Cause::ALL.map(Cause::as_str),
+        ["debt", "php-ub", "by-design", "oracle-build"]
+    );
+    let err = Registry::parse(&row("cause = \"taste\"\n"))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("taste"), "{err}");
+}
 
+/// The kind #2220 gave a row of php's undefined behaviour decodes, during
+/// #2463's move, as a `trace` row of cause `php-ub`, its ids as the file
+/// writes them under `php-ub:`; a `php-ub:` id on another kind, or a
+/// `trace:` id on that kind, is refused as before, and so is a row of that
+/// kind naming another cause.
+#[test]
+fn a_row_of_the_old_php_ub_kind_decodes_as_a_trace_row_of_cause_php_ub() {
+    let text = r#"
 [[divergence]]
 id = "php-ub:fixture-freed-table"
 kind = "php-ub"
@@ -482,64 +512,160 @@ since = "2026-10-07"
 covers = ["php-ub:ext/standard/tests/walks.rs::fixture_walk_ends"]
 "#;
     let registry = Registry::parse(text).unwrap();
-    let row = &registry.rows()[1];
-    assert_eq!(row.kind, Kind::PhpUb);
-    assert_eq!(
-        (Kind::PhpUb.as_str(), Kind::PhpUb.prefix()),
-        ("php-ub", "php-ub:")
-    );
-    assert!(!Kind::PhpUb.is_parity());
-    assert!(
-        Kind::ALL
-            .iter()
-            .filter(|k| **k != Kind::PhpUb)
-            .all(|k| k.is_parity())
-    );
-    assert_eq!(
-        Kind::ALL.last(),
-        Some(&Kind::PhpUb),
-        "after every parity kind"
-    );
+    let row = &registry.rows()[0];
+    assert_eq!((row.kind, row.cause), (Kind::Trace, Cause::PhpUb));
+    assert_eq!(row.id.as_str(), "php-ub:fixture-freed-table");
     assert_eq!(
         registry
             .accepted("php-ub:ext/standard/tests/walks.rs::fixture_walk_ends")
             .map(|r| &r.id),
         Some(&row.id)
     );
-    let counts = registry.counts();
-    assert_eq!(
-        counts.parity(Status::Accepted),
-        1,
-        "the php-ub row is not parity"
-    );
-    assert_eq!(counts.by_status[&Status::Accepted], 2, "but it is a row");
+    let named = Registry::parse(
+        &text.replace("kind = \"php-ub\"", "kind = \"php-ub\"\ncause = \"php-ub\""),
+    )
+    .unwrap();
+    assert_eq!(named.rows()[0].cause, Cause::PhpUb);
+    let err = Registry::parse(&text.replace(
+        "kind = \"php-ub\"",
+        "kind = \"php-ub\"\ncause = \"by-design\"",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("by-design"), "{err}");
     let err = Registry::parse(&text.replace("php-ub:fixture-freed-table", "trace:freed"))
         .unwrap_err()
         .to_string();
     assert!(
         err.contains("php-ub:"),
-        "the id carries the kind's prefix: {err}"
+        "the id keeps the kind's prefix: {err}"
     );
+    let err = Registry::parse(&text.replace("kind = \"php-ub\"", "kind = \"trace\""))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("trace:"), "{err}");
 
-    let root = scratch("php-ub");
-    std::fs::write(root.join(divergence::FILE), text).unwrap();
-    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    // The same row migrated, `trace:` and the cause written, decodes to
+    // the same kind and cause.
+    let migrated = text
+        .replace("php-ub:", "trace:")
+        .replace("kind = \"php-ub\"", "kind = \"trace\"\ncause = \"php-ub\"");
+    let row = Registry::parse(&migrated).unwrap().rows()[0].clone();
+    assert_eq!((row.kind, row.cause), (Kind::Trace, Cause::PhpUb));
+}
+
+/// `retires` (Mitchell, 2026-10-09, on #2462) is one of four values, and
+/// any other spelling is refused when the registry decodes.
+#[test]
+fn retires_decodes_as_one_of_four_values_and_an_unknown_one_is_refused() {
+    let row = |retires: &str| {
+        format!(
+            "[[divergence]]\nid = \"crosscheck:openssl\"\nkind = \"crosscheck\"\ncause = \"oracle-build\"\nretires = \"{retires}\"\nreason = \"r\"\nstatus = \"accepted\"\nsince = \"2026-10-09\"\n"
+        )
+    };
+    for retires in [
+        Retires::OracleRebuild,
+        Retires::Pin,
+        Retires::Fixture,
+        Retires::Platform,
+    ] {
+        let parsed = Registry::parse(&row(retires.as_str())).unwrap();
+        assert_eq!(parsed.rows()[0].retires, Some(retires));
+    }
+    let err = Registry::parse(&row("someday")).unwrap_err().to_string();
+    assert!(err.contains("someday"), "{err}");
+    let none = row("pin").replace("retires = \"pin\"\n", "");
+    assert_eq!(Registry::parse(&none).unwrap().rows()[0].retires, None);
+}
+
+/// One row of each cause, a scratch workspace's registry: `status
+/// --section divergence` counts the debt row above the total, holds the
+/// total to the manifest's `[divergence] target`, and counts each other
+/// cause on a line of its own after it (#2462).
+const ONE_OF_EACH: &str = r#"
+[[divergence]]
+id = "trace:fixture-debt"
+kind = "trace"
+reason = "The fixture's parity reason (fixture)."
+status = "accepted"
+since = "2026-09-29"
+
+[[divergence]]
+id = "trace:fixture-freed-table"
+kind = "trace"
+cause = "php-ub"
+reason = "The fixture's undefined behaviour (fixture)."
+status = "accepted"
+since = "2026-10-07"
+
+[[divergence]]
+id = "phpt:fixture-chosen"
+kind = "phpt"
+cause = "by-design"
+reason = "Chosen by design §5.2 (fixture)."
+status = "accepted"
+since = "2026-10-08"
+
+[[divergence]]
+id = "crosscheck:fixture"
+kind = "crosscheck"
+cause = "oracle-build"
+retires = "oracle-rebuild"
+reason = "The oracle's build (fixture)."
+status = "open"
+since = "2026-10-09"
+"#;
+
+#[test]
+fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_own_line() {
+    let root = scratch("causes");
+    std::fs::write(root.join(divergence::FILE), ONE_OF_EACH).unwrap();
+    let seams = root.join("seams.toml");
+    let tracked = std::fs::read_to_string(&seams).unwrap();
+    let untargeted = tracked.split("\n[divergence]\n").next().unwrap().to_owned();
+    std::fs::write(&seams, format!("{untargeted}\n[divergence]\ntarget = 7\n")).unwrap();
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
     let lines: Vec<&str> = md.lines().collect();
-    let at = |prefix: &str| lines.iter().position(|l| l.starts_with(prefix)).unwrap();
+    let at = |prefix: &str| {
+        lines
+            .iter()
+            .position(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line {prefix}: {md}"))
+    };
+    assert_eq!(lines[at("| trace |")], "| trace | 0 | 1 | 0 | 1 |", "{md}");
     assert_eq!(lines[at("| total |")], "| total | 0 | 1 | 0 | 1 |", "{md}");
     assert_eq!(
         lines[at("| php-ub |")],
         "| php-ub | 0 | 1 | 0 | 1 |",
         "{md}"
     );
-    assert!(
-        at("| trace |") < at("| total |") && at("| total |") < at("| php-ub |"),
+    assert_eq!(
+        lines[at("| by-design |")],
+        "| by-design | 0 | 1 | 0 | 1 |",
+        "{md}"
+    );
+    assert_eq!(
+        lines[at("| oracle-build |")],
+        "| oracle-build | 1 | 0 | 0 | 1 |",
         "{md}"
     );
     assert!(
-        md.contains("counted on its own line"),
-        "the counts say why: {md}"
+        at("| trace |") < at("| total |")
+            && at("| total |") < at("| php-ub |")
+            && at("| php-ub |") < at("| by-design |")
+            && at("| by-design |") < at("| oracle-build |"),
+        "{md}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.starts_with("| phpt |")),
+        "no debt row is a phpt row: {md}"
+    );
+    assert!(md.contains("day-30 target of under 7"), "{md}");
+    assert!(md.contains("counted on its own line"), "{md}");
+    assert!(
+        md.contains("| phpt:fixture-chosen | phpt | by-design | accepted |"),
+        "{md}"
     );
     let (ok, json, _) = xtask(
         &root,
@@ -547,23 +673,111 @@ covers = ["php-ub:ext/standard/tests/walks.rs::fixture_walk_ends"]
     );
     assert!(ok);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["target"], 7);
     assert_eq!(value["counts"]["total"]["accepted"], 1);
     assert_eq!(value["counts"]["php-ub"]["accepted"], 1);
+    assert_eq!(value["counts"]["oracle-build"]["open"], 1);
+    let rows = value["rows"].as_array().unwrap();
+    assert_eq!(rows[3]["cause"], "oracle-build");
+    assert_eq!(rows[3]["retires"], "oracle-rebuild");
 
-    // With no php-ub row, the counts carry no line about one: the tracked
-    // registry with its php-ub rows taken out.
-    let parity_only = scratch("parity-only");
-    let tracked = std::fs::read_to_string(parity_only.join(divergence::FILE)).unwrap();
-    let mut blocks = tracked.split("[[divergence]]");
-    let mut kept = blocks.next().unwrap_or_default().to_owned();
-    for block in blocks.filter(|b| !b.contains("kind = \"php-ub\"")) {
-        kept.push_str("[[divergence]]");
-        kept.push_str(block);
-    }
-    std::fs::write(parity_only.join(divergence::FILE), kept).unwrap();
-    let (ok, md, _) = xtask(&parity_only, &["status", "--section", "divergence"]);
-    assert!(ok);
+    // Without the table the total is held to nothing, and says so; with
+    // debt rows alone no line is about another cause.
+    std::fs::write(&seams, &untargeted).unwrap();
+    let debt_only = ONE_OF_EACH.split("\n[[divergence]]").nth(1).unwrap();
+    std::fs::write(
+        root.join(divergence::FILE),
+        format!("[[divergence]]{debt_only}"),
+    )
+    .unwrap();
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    assert!(ok, "{err}");
+    assert!(md.contains("no `[divergence] target`"), "{md}");
     assert!(!md.contains("counted on its own line"), "{md}");
+    assert!(md.contains("| total | 0 | 1 | 0 | 1 |"), "{md}");
+}
+
+/// The guard's two refusals beyond a missing reason (#2462), each with a
+/// fixture under the rule's own that must fail: an accepted `by-design`
+/// row whose reason cites no design section or ADR, and an accepted
+/// `oracle-build` row with no `retires`. The row beside each, in order,
+/// is not named, and the rule's text is printed.
+#[test]
+fn the_guard_refuses_an_uncited_by_design_row_and_an_unretired_oracle_build_row() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    for (file, number, named, says) in [
+        (
+            "by-design-uncited.toml",
+            "uncited",
+            "phpt:fixture-uncited",
+            "cites no design section",
+        ),
+        (
+            "oracle-build-unretired.toml",
+            "unretired",
+            "crosscheck:fixture-unretired",
+            "carries no `retires`",
+        ),
+    ] {
+        let path = fixture("divergence.reason").with_file_name(file);
+        let registry = Registry::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let reading = divergence::reason(&registry, &manifest, workspace()).unwrap();
+        assert_eq!(reading.status, xtask::reading::Status::Fail, "{file}");
+        assert_eq!(reading.numbers[number], 1.into(), "{file}");
+        assert!(
+            reading.message.contains(named) && reading.message.contains(says),
+            "{file}: {}",
+            reading.message
+        );
+        assert!(
+            !reading.message.contains("fixture-in-order"),
+            "{file}: {}",
+            reading.message
+        );
+        let rule = manifest.rule("divergence.reason").unwrap();
+        assert!(reading.message.contains(&rule.text), "{}", reading.message);
+    }
+
+    // What the guard reads is the field and the citation, never the words
+    // about retiring: an ADR or a section is a citation, and a `retires`
+    // answers it whatever the reason says.
+    let cited = r#"
+[[divergence]]
+id = "trace:fixture-adr"
+kind = "trace"
+cause = "by-design"
+reason = "Per-engine state, as ADR-0005 rules."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "trace:fixture-retired"
+kind = "trace"
+cause = "oracle-build"
+retires = "platform"
+reason = "Says nothing of when."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "trace:fixture-open"
+kind = "trace"
+cause = "by-design"
+reason = ""
+status = "open"
+since = "2026-10-09"
+"#;
+    let reading =
+        divergence::reason(&Registry::parse(cited).unwrap(), &manifest, workspace()).unwrap();
+    assert_eq!(reading.status, xtask::reading::Status::Pass, "{reading:?}");
+    let uncited = cited.replace("as ADR-0005 rules", "as ADR-zero rules");
+    let reading =
+        divergence::reason(&Registry::parse(&uncited).unwrap(), &manifest, workspace()).unwrap();
+    assert!(
+        reading.message.contains("trace:fixture-adr"),
+        "an ADR is its number: {}",
+        reading.message
+    );
 }
 
 #[test]
@@ -576,7 +790,7 @@ fn status_divergence_counts_a_proposed_row_as_open() {
     let (ok, md, _) = xtask(&root, &["status", "--section", "divergence"]);
     assert!(ok);
     assert!(
-        md.contains("| phpt:Zend/tests/x.phpt | runner | open | "),
+        md.contains("| phpt:Zend/tests/x.phpt | runner | debt | open | "),
         "the facts list an open row: {md}"
     );
     assert!(md.contains("| runner | 1 | 0 | 0 | 1 |"), "{md}");
@@ -691,7 +905,11 @@ fn an_id_listed_only_in_covers_is_diverged_and_differs_without_the_row() {
 
     let counts = registry.counts();
     assert_eq!(registry.rows().len(), 1);
-    assert_eq!(counts.by_kind[&Kind::Phpt], 1, "a covering row counts once");
+    assert_eq!(
+        counts.debt(Kind::Phpt, Status::Accepted),
+        1,
+        "a covering row counts once"
+    );
     assert_eq!(counts.ids, 3, "its own id and the two it covers");
 }
 
@@ -785,7 +1003,7 @@ fn status_and_the_reason_instrument_count_a_covering_row_once() {
     let (ok, md, err) = xtask(&root, &["status", "--section", "divergence", "--uncut"]);
     assert!(ok, "{err}");
     assert!(
-        md.contains("| phpt:fixture-optimizer (covers 2) | phpt | accepted | 2026-09-28 |"),
+        md.contains("| phpt:fixture-optimizer (covers 2) | phpt | debt | accepted | 2026-09-28 |"),
         "the row once, with how many ids it covers:\n{md}"
     );
     assert!(

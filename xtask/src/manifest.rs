@@ -59,6 +59,10 @@ pub struct Manifest {
     /// that put it there; empty where the file has no table.
     #[serde(default)]
     pub(crate) parity: Parity,
+    /// `[divergence]`: the day-30 target the registry's debt rows are held
+    /// to; `None` where the file has no table, which `status` says.
+    #[serde(default)]
+    pub divergence: Option<DivergenceTable>,
     /// The pin the `[oracle]` row names, loaded from that file by the
     /// oracle module, whose grammar it is.
     #[serde(skip)]
@@ -78,6 +82,17 @@ pub struct Telemetry {
     /// An instrument with readings and no failure this many days is a
     /// candidate for silent.
     pub silent_days: u64,
+}
+
+/// `[divergence]`: what the divergence registry is held to (harness-design.md
+/// §4.3). `target` is the day-30 target: the registry's `debt` rows, a
+/// covering row once, number under it (Mitchell, under 10, on #2460); no
+/// other cause counts toward it (#2462).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct DivergenceTable {
+    pub target: u64,
 }
 
 /// `[parity]`: the suites php builds that parity does not count (design
@@ -897,6 +912,7 @@ impl Manifest {
             weeks: Vec::new(),
             lock_homes: BTreeMap::new(),
             parity: Parity::default(),
+            divergence: None,
             pin: Pin::default(),
             root: PathBuf::new(),
         }

@@ -23,9 +23,13 @@ crosscheck::Column::flag
 crosscheck::Column::kept
 crosscheck::kept
 crosscheck::run
+divergence::Cause
+divergence::Cause::ALL
+divergence::Cause::as_str
 divergence::Counts
-divergence::Counts::cell
-divergence::Counts::parity
+divergence::Counts::debt
+divergence::Counts::rows_of
+divergence::Counts::total
 divergence::Divergence
 divergence::Divergence::ids
 divergence::FILE
@@ -36,7 +40,6 @@ divergence::Id::of
 divergence::Kind
 divergence::Kind::ALL
 divergence::Kind::as_str
-divergence::Kind::is_parity
 divergence::Kind::prefix
 divergence::Registry
 divergence::Registry::accepted
@@ -46,7 +49,8 @@ divergence::Registry::parse
 divergence::Registry::propose
 divergence::Registry::row
 divergence::Registry::rows
-divergence::Registry::unreasoned
+divergence::Retires
+divergence::Retires::as_str
 divergence::Status
 divergence::Status::ALL
 divergence::Status::as_str
@@ -78,6 +82,7 @@ manifest::Crate::subsets
 manifest::Crate::with_feature
 manifest::Crate::with_oracle
 manifest::Crate::with_phpt
+manifest::DivergenceTable
 manifest::Edge
 manifest::Edge::between
 manifest::FILE

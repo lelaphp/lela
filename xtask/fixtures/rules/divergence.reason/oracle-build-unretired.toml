@@ -1,0 +1,21 @@
+# A negative control for the manifest rule `divergence.reason` (#2462): an
+# accepted oracle-build row that carries no `retires`, beside one that does.
+# The first row's reason says when it retires in words, which the guard
+# does not read.
+
+[[divergence]]
+id = "crosscheck:fixture-unretired"
+kind = "crosscheck"
+cause = "oracle-build"
+reason = "The oracle's build links another library; the two agree again when it is rebuilt."
+status = "accepted"
+since = "2026-10-09"
+
+[[divergence]]
+id = "crosscheck:fixture-in-order"
+kind = "crosscheck"
+cause = "oracle-build"
+retires = "oracle-rebuild"
+reason = "The oracle's build links another library."
+status = "accepted"
+since = "2026-10-09"

@@ -479,7 +479,7 @@ The crates are `seams.toml`'s `[[crate]]` rows, counted below by the directory e
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=6f41319c21f7cfa94df8172fefb82a57a8d9882d7b3ae1f33ee607ad5f274c93 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=8286ebb3357ecaa0ffa44a5dda41522e7228ed2fb03bc5c9acee64d994749ed0 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 | Crate | Role | Interface (what callers learn) | Origin |
 |---|---|---|---|
@@ -531,7 +531,7 @@ The permitted edges are `seams.toml`'s `[[edge]]` rows, rendered here: a crate d
 | php_engine::{executor,kernels} | php_engine::{serve,headers,gpc,output} | denied |  |
 | sapi/* | php_sapi, php_proto, php_bundle, php_ext |  | ADR-0008 |
 
-<!-- /computed in=391f572c8d08b1e1baac170d50342505f010aca5761ebf8c9bc4ffd03af07109 out=5f28278f2b9b7afde8e31c26cde0c1e4273513e0448f142cb62c5a2fb9516f2b -->
+<!-- /computed in=b516afbc5c40fa45a286906cbf26bf64d27f0650c6d8932786411412ca41b105 out=5f28278f2b9b7afde8e31c26cde0c1e4273513e0448f142cb62c5a2fb9516f2b -->
 
 What the rows do not say. `php_heap` depends on nothing in the workspace. `php_unit` depends on `php_heap` for names interned and literals as heap values. `php_engine` depends on `php_macros` because its attributes declare Core's natives; `php_macros` depends on no workspace crate, only on `syn`, `quote` and `proc-macro2`: a macro emits paths and never links what they name (ADR-0007). `php_ext` re-exports `api` (with `api::__private`), `tier::Nop` and the attributes only. An `ext/*` crate depends on `php_ext` and on the `ext/*` crates it declares, never on `php_engine`, `php_compile`, `php_syntax` or `php_bundle`. `php_bundle` reaches `php_jit` under `jit` on the targets `php_jit`'s `[[crate]]` row names, and names `php_jit::Jit` and nothing else; nothing depends on `php_jit` but the bundle, and `php_jit` depends on nothing under `ext/`. `php_sapi` never sees `api`; `php_proto` sees nothing. `xtask` links no workspace crate: it reaches the engine through the binaries it builds and starts, `php-linked` and the hosts' own (harness revision 84). Workspace members are the directories §4.1's count names; an extension's package is `php_ext_<name>` at path `ext/<name>`, a host's `php_sapi_<name>` at `sapi/<name>` (ADR-0008).
 
