@@ -10,11 +10,10 @@ use php_ext_mysqlnd::client::{
     Fetched, Field, FieldType, ResultSet, Stmt as Ps, StmtFetch, column,
 };
 use php_ext_pdo::connector::{
-    BindEvent, BindKind, Binding, Column, Executed, Failure, Orientation, SqlError, SqlState,
-    Statement,
+    BindEvent, BindKind, Binding, Column, Executed, Failure, Orientation, SqlState, Statement,
 };
 
-use crate::driver::{Errmsg, H, error_of, handle, persistent};
+use crate::driver::{Einfo, H, error_of, handle, persistent};
 
 /// `sizeof(pdo_mysql_stmt)`.
 const PDO_MYSQL_STMT: usize = 88;
@@ -45,8 +44,8 @@ pub(crate) struct Stmt {
     bound: u32,
     /// The `pdo_mysql_stmt` itself, none once the `dtor` gave it back.
     held: Option<Emalloc>,
-    /// `S->einfo.errmsg`.
-    errmsg: Errmsg,
+    /// `S->einfo`.
+    pub(crate) einfo: Einfo,
 }
 
 /// `S->current_row`: a text row's values, one owner of each, in the
@@ -103,7 +102,7 @@ impl Stmt {
             done: false,
             bound: 0,
             held: Some(Emalloc::new(req, PDO_MYSQL_STMT)?),
-            errmsg: Errmsg::default(),
+            einfo: Einfo::default(),
         })
     }
 
@@ -117,15 +116,15 @@ impl Stmt {
         handle(req, self.h).ok_or_else(Failure::silent)
     }
 
-    /// `pdo_mysql_error_stmt`: the statement's error, its message kept on
-    /// `S->einfo`.
+    /// `pdo_mysql_error_stmt`: the statement's error, its code and message
+    /// kept on `S->einfo`.
     fn error(&mut self, req: &mut Request) -> Failure {
         let Some(h) = handle(req, self.h) else {
             return Failure::silent();
         };
         let failure = error_of(req, h.server, self.ps.as_ref());
         let persistent = persistent(req, self.h);
-        self.errmsg.keep(req, failure, persistent)
+        self.einfo.keep(req, failure, persistent)
     }
 
     /// Whether there are rows to read, `S->result`.
@@ -266,11 +265,7 @@ impl Statement for Stmt {
         if self.ps.is_some() {
             let bound = std::mem::take(&mut self.bound);
             if bound < self.num_params {
-                return Err(Failure::error(SqlError {
-                    state: SqlState(*b"HY093"),
-                    code: 0,
-                    message: Vec::new(),
-                }));
+                return Err(Failure::error(SqlState(*b"HY093")));
             }
             let ran = match self.ps.as_mut() {
                 Some(ps) => ps.execute(req)?,
@@ -302,13 +297,15 @@ impl Statement for Stmt {
         if let Some(ps) = self.ps.as_mut() {
             return match ps.fetch(req)? {
                 StmtFetch::Row => Ok(true),
-                StmtFetch::NoData | StmtFetch::Failed => match self.error(req) {
-                    failure @ Failure {
-                        cause: php_ext_pdo::connector::Cause::Error(SqlError { code: 1.., .. }),
-                        ..
-                    } => Err(failure),
-                    _ => Ok(false),
-                },
+                StmtFetch::NoData => Ok(false),
+                StmtFetch::Failed => {
+                    let failure = self.error(req);
+                    if self.einfo.code() == 0 {
+                        Ok(false)
+                    } else {
+                        Err(failure)
+                    }
+                }
             };
         }
         let Some(result) = self.result.as_mut() else {
@@ -424,11 +421,7 @@ impl Statement for Stmt {
         match event {
             BindEvent::Alloc => {
                 if *param.position < 0 || *param.position >= i64::from(self.num_params) {
-                    return Err(Failure::error(SqlError {
-                        state: SqlState(*b"HY093"),
-                        code: 0,
-                        message: Vec::new(),
-                    }));
+                    return Err(Failure::error(SqlState(*b"HY093")));
                 }
                 Ok(())
             }
@@ -586,7 +579,7 @@ impl Statement for Stmt {
 
     /// `pdo_mysql_stmt_dtor`.
     fn close(&mut self, req: &mut Request) {
-        self.errmsg.free(req);
+        self.einfo.free(req);
         self.free_rows(req).ok();
         if let Some(ps) = self.ps.take() {
             ps.close(req, false).ok();

@@ -12,13 +12,14 @@
 
 use std::borrow::Cow;
 
+use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
-    BindType, Cause, Connection, Connector, Failure, OnError, ParameterMap, Placeholders, Prepared,
-    Scanner, Source, SqlError, SqlState, Statement as _, bool_attribute, long_attribute,
-    option_long, option_string, parse_data_source, rewrite_named,
+    BindType, Cause, Connection, Connector, Failure, NativeError, OnError, ParameterMap,
+    Placeholders, Prepared, Scanner, Source, SqlError, SqlState, Statement, bool_attribute,
+    long_attribute, option_long, option_string, parse_data_source, rewrite_named,
 };
 
 use crate::Mysql;
@@ -63,7 +64,8 @@ pub(crate) struct Driver;
 
 pub(crate) static MYSQL: Driver = Driver;
 
-/// `pdo_mysql_db_handle`, less the server's error, which PDO keeps.
+/// `pdo_mysql_db_handle`, less its `einfo`, which its row of the request's
+/// table keeps beside it.
 #[derive(Debug, Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)] // php's bit fields, one per name
 pub(crate) struct H {
@@ -95,31 +97,26 @@ pub(crate) struct State {
 struct Row {
     h: H,
     held: Option<Emalloc>,
-    /// `H->einfo.errmsg`.
-    errmsg: Errmsg,
+    /// `H->einfo`.
+    einfo: Einfo,
 }
 
 impl State {
     /// The `pdo_mysql_db_handle` held at a new number.
-    fn hold(&mut self, h: H, held: Option<Emalloc>) -> usize {
-        self.handles.push(Some(Row {
-            h,
-            held,
-            errmsg: Errmsg::default(),
-        }));
+    fn hold(&mut self, h: H, held: Option<Emalloc>, einfo: Einfo) -> usize {
+        self.handles.push(Some(Row { h, held, einfo }));
         self.handles.len() - 1
     }
 }
 
-/// `pdo_mysql_error_info`'s `errmsg`: the message `_pdo_mysql_error`
-/// `pestrdup`s, on the request's heap for a connection that is not
-/// persistent, and `malloc`'s, which no request counts, for one that
-/// is; freed at the next error and by the closer or the statement's
-/// `dtor`. PDO keeps the code and the text it reports
-/// (`Connector::errors_per_statement`); this is what php's heap holds
-/// for them. A failed query keeps mysqlnd's list element and this
-/// message, the next error replaces both, and a query that succeeds
-/// frees them:
+/// `pdo_mysql_error_info`: the code `_pdo_mysql_error` read and the
+/// message it `pestrdup`'d for it, on the request's heap for a connection
+/// that is not persistent and `malloc`'s, which no request counts, for one
+/// that is; freed at the next error, by the closer or by the statement's
+/// `dtor`. It is the one copy of the text: `pdo_mysql_fetch_error_func`
+/// reads it back for `errorInfo()` and for the error PDO raises. A failed
+/// query keeps mysqlnd's list element and this message, the next error
+/// replaces both, and a query that succeeds frees them:
 ///
 /// ```php
 /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
@@ -138,29 +135,43 @@ impl State {
 /// 32
 /// ```
 #[derive(Default)]
-pub(crate) struct Errmsg(Option<Emalloc>);
+pub(crate) struct Einfo {
+    /// `einfo->errcode`, zero for no error.
+    code: i64,
+    /// `einfo->errmsg`, none where the code is zero.
+    message: Option<Errmsg>,
+}
 
-impl Errmsg {
-    /// `_pdo_mysql_error`'s `pefree` of the message kept, then the
-    /// `pestrdup` of the one `failure` reports where it carries an error;
-    /// the memory limit's fatal rides on the failure as its throwable.
-    pub(crate) fn keep(
-        &mut self,
-        req: &mut Request,
-        failure: Failure,
-        persistent: bool,
-    ) -> Failure {
+/// Where `pestrdup` put a message, by `dbh->is_persistent`: the request's
+/// heap, with the NUL php copies, or the process's.
+enum Errmsg {
+    Request(Emalloc),
+    Process(Box<[u8]>),
+}
+
+impl Einfo {
+    /// `_pdo_mysql_error` over this `einfo`: the message kept freed, then
+    /// the code `error` read and the `pestrdup` of its text where the code
+    /// is not zero; the failure answers its SQLSTATE, with the memory
+    /// limit's fatal as its throwable.
+    pub(crate) fn keep(&mut self, req: &mut Request, error: SqlError, persistent: bool) -> Failure {
         self.free(req);
-        let message = match &failure.cause {
-            Cause::Error(e) if e.code != 0 && !persistent => &e.message,
-            _ => return failure,
-        };
-        match Emalloc::new(req, message.len() + 1) {
+        self.code = error.code;
+        let failure = Failure::error(error.state);
+        if error.code == 0 {
+            return failure;
+        }
+        if persistent {
+            self.message = Some(Errmsg::Process(error.message.into_boxed_slice()));
+            return failure;
+        }
+        let len = error.message.len();
+        match Emalloc::new(req, len + 1) {
             Ok(mut held) => {
-                if let Some(at) = held.bytes_mut().get_mut(..message.len()) {
-                    at.copy_from_slice(message);
+                if let Some(at) = held.bytes_mut().get_mut(..len) {
+                    at.copy_from_slice(&error.message);
                 }
-                self.0 = Some(held);
+                self.message = Some(Errmsg::Request(held));
                 failure
             }
             Err(thrown) => Failure {
@@ -170,9 +181,31 @@ impl Errmsg {
         }
     }
 
+    /// `einfo->errcode`, zero for no error.
+    pub(crate) fn code(&self) -> i64 {
+        self.code
+    }
+
+    /// `pdo_mysql_fetch_error_func` over this `einfo`: the code and the
+    /// message where the code is not zero.
+    pub(crate) fn fetch(&self, req: &mut Request) -> Result<Option<NativeError>, Thrown> {
+        if self.code == 0 {
+            return Ok(None);
+        }
+        let message = match &self.message {
+            Some(Errmsg::Request(held)) => held.bytes().split_last().map_or(&[][..], |(_, m)| m),
+            Some(Errmsg::Process(bytes)) => bytes,
+            None => &[],
+        };
+        Ok(Some(NativeError {
+            code: self.code,
+            message: PhpString::new(req, message)?,
+        }))
+    }
+
     /// `pefree(einfo->errmsg, dbh->is_persistent)`.
     pub(crate) fn free(&mut self, req: &mut Request) {
-        if let Some(held) = self.0.take() {
+        if let Some(Errmsg::Request(held)) = self.message.take() {
             held.free(req);
         }
     }
@@ -181,16 +214,16 @@ impl Errmsg {
 /// `_pdo_mysql_error(dbh, NULL)`: the connection's error as [`error_of`]
 /// reads it, its message kept on `H->einfo`.
 pub(crate) fn conn_error(req: &mut Request, id: usize, server: Mysqlnd) -> Failure {
-    let failure = error_of(req, server, None);
-    let (mut errmsg, persistent) = match req.state::<State>().handles.get_mut(id) {
-        Some(Some(row)) => (std::mem::take(&mut row.errmsg), row.held.is_none()),
-        _ => return failure,
+    let error = error_of(req, server, None);
+    let (mut einfo, persistent) = match req.state::<State>().handles.get_mut(id) {
+        Some(Some(row)) => (std::mem::take(&mut row.einfo), row.held.is_none()),
+        _ => return Failure::error(error.state),
     };
-    let failure = errmsg.keep(req, failure, persistent);
+    let failure = einfo.keep(req, error, persistent);
     if let Some(Some(row)) = req.state::<State>().handles.get_mut(id) {
-        row.errmsg = errmsg;
+        row.einfo = einfo;
     } else {
-        errmsg.free(req);
+        einfo.free(req);
     }
     failure
 }
@@ -214,27 +247,29 @@ fn update(req: &mut Request, id: usize, f: impl FnOnce(&mut H)) {
     }
 }
 
-/// The `pdo_mysql_db_handle` numbered `id` out of the request's table, its allocation
-/// freed, `mysql_handle_closer`'s `pefree(H->einfo.errmsg, ...)` and
-/// `pefree(H, dbh->is_persistent)`.
-fn unhold(req: &mut Request, id: usize) {
+/// The `pdo_mysql_db_handle` numbered `id` out of the request's table, its
+/// allocation freed, `pefree(H, dbh->is_persistent)`: its `einfo` handed
+/// back, for the closer to free or a connection given back to keep.
+fn unhold(req: &mut Request, id: usize) -> Einfo {
     let row = req
         .state::<State>()
         .handles
         .get_mut(id)
         .and_then(Option::take);
-    if let Some(mut row) = row {
-        row.errmsg.free(req);
-        if let Some(held) = row.held {
-            held.free(req);
-        }
+    let Some(row) = row else {
+        return Einfo::default();
+    };
+    if let Some(held) = row.held {
+        held.free(req);
     }
+    row.einfo
 }
 
-/// `_pdo_mysql_error`: the error of the statement's `MYSQLND_STMT` where
-/// it has one, else of the connection, as PDO keeps it; error 2014 worded
-/// as php words it by whether results are pending, 2057 as php words it.
-pub(crate) fn error_of(req: &mut Request, server: Mysqlnd, ps: Option<&Ps>) -> Failure {
+/// What `_pdo_mysql_error` reads: the error of the statement's
+/// `MYSQLND_STMT` where it has one, else of the connection; error 2014
+/// worded as php words it by whether results are pending, 2057 as php
+/// words it.
+pub(crate) fn error_of(req: &mut Request, server: Mysqlnd, ps: Option<&Ps>) -> SqlError {
     let status = server.status(req);
     let (errno, sqlstate, error) = match ps {
         Some(ps) => {
@@ -244,11 +279,11 @@ pub(crate) fn error_of(req: &mut Request, server: Mysqlnd, ps: Option<&Ps>) -> F
         None => (status.errno, status.sqlstate, status.error),
     };
     if errno == 0 {
-        return Failure::error(SqlError {
+        return SqlError {
             state: SqlState::NONE,
             code: 0,
             message: Vec::new(),
-        });
+        };
     }
     let message = match errno {
         2014 if status.more_results => b"Cannot execute queries while there are pending result sets. Consider unsetting the previous PDOStatement or calling PDOStatement::closeCursor()".to_vec(),
@@ -256,11 +291,11 @@ pub(crate) fn error_of(req: &mut Request, server: Mysqlnd, ps: Option<&Ps>) -> F
         2057 => b"A stored procedure returning result sets of different size was called. This is not supported by libmysql".to_vec(),
         _ => error,
     };
-    Failure::error(SqlError {
+    SqlError {
         state: SqlState(sqlstate),
         code: i64::from(errno),
         message,
-    })
+    }
 }
 
 /// `mysql_warning_count` of the connection `conn` is.
@@ -282,11 +317,6 @@ impl Connector for Driver {
 
     fn class(&self) -> Option<&'static [u8]> {
         Some(b"Pdo\\Mysql")
-    }
-
-    /// `pdo_mysql_fetch_error_func` reads `S->einfo` for a statement.
-    fn errors_per_statement(&self) -> bool {
-        true
     }
 
     /// `pdo_mysql_handle_factory`. The `pdo_mysql_db_handle` it
@@ -353,7 +383,7 @@ impl Connector for Driver {
         // PDO's free of a handle its factory failed, which runs
         // `mysql_handle_closer`.
         let failed = |req: &mut Request, server: Mysqlnd, held: Option<Emalloc>| {
-            let failure = error_of(req, server, None);
+            let failure = Failure::refused(error_of(req, server, None));
             server
                 .close(req, php_ext_mysqlnd::client::CloseType::Explicit)
                 .ok();
@@ -405,7 +435,7 @@ impl Connector for Driver {
         if !h.auto_commit {
             let _ = server.command(req, Command::Autocommit(false))?;
         }
-        let id = req.state::<State>().hold(h, held);
+        let id = req.state::<State>().hold(h, held, Einfo::default());
         Ok(Box::new(Db {
             place: Place::Held(id),
         }))
@@ -582,8 +612,9 @@ enum Place {
     /// A persistent connection the request gave back to the engine's
     /// pool: out of the request's table, with the connection and its
     /// socket, which wait in PDO's pool with it and in no other list
-    /// until a request takes them up.
-    Idle(H, Idle),
+    /// until a request takes them up, and its `einfo`, whose message a
+    /// persistent connection `malloc`s.
+    Idle(H, Idle, Einfo),
     /// In no request's table: closed, or given back and not kept.
     Gone,
 }
@@ -614,7 +645,7 @@ impl Db {
     fn error(&self, req: &mut Request, server: Mysqlnd) -> Failure {
         match self.id() {
             Some(id) => conn_error(req, id, server),
-            None => error_of(req, server, None),
+            None => Failure::error(error_of(req, server, None).state),
         }
     }
 
@@ -675,7 +706,7 @@ impl Connection for Db {
         if affected == u64::MAX {
             let failure = self.error(req, h.server);
             return match &failure.cause {
-                php_ext_pdo::connector::Cause::Error(e) if e.code != 0 => Err(failure),
+                Cause::Error(state) if *state != SqlState::NONE => Err(failure),
                 _ => Ok(0),
             };
         }
@@ -861,6 +892,63 @@ impl Connection for Db {
         Ok(Some(Owner::take(req, scalar)))
     }
 
+    /// `pdo_mysql_fetch_error_func`: a statement's `S->einfo`, the
+    /// connection's `H->einfo` otherwise, so each keeps its own error and
+    /// a later one on the other leaves it as it was:
+    ///
+    /// ```php
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $p->exec('SELEC 1');
+    /// echo json_encode($p->errorInfo()), "\n";
+    /// $s = $p->prepare('SELECT * FROM no_such_table');
+    /// $s->execute();
+    /// $p->exec('SELEC 2');
+    /// echo json_encode($s->errorInfo()), "\n", json_encode($p->errorInfo()), "\n";
+    /// $p->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+    /// $t = $p->prepare('SELECT ?');
+    /// $t->execute();
+    /// echo json_encode($t->errorInfo()), "\n";
+    /// $p->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    /// try { $s->execute(); } catch (PDOException $e) { echo $e->getMessage(), "\n", json_encode($e->errorInfo), "\n"; }
+    /// ```
+    /// ```expect mysql
+    /// ["42000",1064,"You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'SELEC 1' at line 1"]
+    /// ["42S02",1146,"Table 'test.no_such_table' doesn't exist"]
+    /// ["42000",1064,"You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'SELEC 2' at line 1"]
+    /// ["HY093",null,null]
+    /// SQLSTATE[42S02]: Base table or view not found: 1146 Table 'test.no_such_table' doesn't exist
+    /// ["42S02",1146,"Table 'test.no_such_table' doesn't exist"]
+    /// ```
+    fn fetch_err(
+        &self,
+        req: &mut Request,
+        stmt: Option<&dyn Statement>,
+    ) -> Result<Option<NativeError>, Thrown> {
+        if let Some(stmt) = stmt {
+            let any: &dyn std::any::Any = stmt;
+            return match any.downcast_ref::<Stmt>() {
+                Some(stmt) => stmt.einfo.fetch(req),
+                None => Ok(None),
+            };
+        }
+        let id = match &self.place {
+            Place::Held(id) => *id,
+            Place::Idle(_, _, einfo) => return einfo.fetch(req),
+            Place::Gone => return Ok(None),
+        };
+        let mut einfo = match req.state::<State>().handles.get_mut(id) {
+            Some(Some(row)) => std::mem::take(&mut row.einfo),
+            _ => return Ok(None),
+        };
+        let native = einfo.fetch(req);
+        if let Some(Some(row)) = req.state::<State>().handles.get_mut(id) {
+            row.einfo = einfo;
+        } else {
+            einfo.free(req);
+        }
+        native
+    }
+
     /// `pdo_mysql_last_insert_id`.
     fn last_insert_id(
         &mut self,
@@ -929,10 +1017,12 @@ impl Connection for Db {
             return;
         };
         let kept = h.server.give_back(req);
-        unhold(req, id);
-        self.place = match kept {
-            Some(kept) => Place::Idle(h, kept),
-            None => Place::Gone,
+        let mut einfo = unhold(req, id);
+        self.place = if let Some(kept) = kept {
+            Place::Idle(h, kept, einfo)
+        } else {
+            einfo.free(req);
+            Place::Gone
         };
     }
 
@@ -948,7 +1038,7 @@ impl Connection for Db {
                 .close(req, php_ext_mysqlnd::client::CloseType::Explicit)
                 .ok();
         }
-        unhold(req, id);
+        unhold(req, id).free(req);
         self.place = Place::Gone;
     }
 }
@@ -961,14 +1051,15 @@ impl Db {
         if !matches!(self.place, Place::Idle(..)) {
             return;
         }
-        let Place::Idle(mut h, kept) = std::mem::replace(&mut self.place, Place::Gone) else {
+        let Place::Idle(mut h, kept, einfo) = std::mem::replace(&mut self.place, Place::Gone)
+        else {
             return;
         };
         let Ok(server) = Mysqlnd::take_up(req, kept) else {
             return;
         };
         h.server = server;
-        self.place = Place::Held(req.state::<State>().hold(h, None));
+        self.place = Place::Held(req.state::<State>().hold(h, None, einfo));
     }
 
     /// `mysql_handle_autocommit` after the attribute changed.
