@@ -20,7 +20,7 @@
     clippy::multiple_unsafe_ops_per_block
 )]
 
-use std::ffi::{CStr, c_int, c_uint};
+use std::ffi::{CStr, c_char, c_int, c_uint};
 use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr::NonNull;
 
@@ -32,7 +32,7 @@ use php_ext::values::Emalloc;
 // SAFETY: zlib's own `zError`, which libz-sys does not declare, from the
 // library it links: an `int` in, a pointer into a static table out.
 unsafe extern "C" {
-    fn zError(err: c_int) -> *const std::ffi::c_char;
+    fn zError(err: c_int) -> *const c_char;
 }
 
 /// What a zlib call answers, `Z_OK` through `Z_VERSION_ERROR`, the codes
@@ -239,6 +239,30 @@ fn fresh() -> Box<z::z_stream> {
     })
 }
 
+/// `ZLIB_VERSION` of the header this build compiled against
+/// ([`crate::header`]), NUL-terminated as the macro expands to a C string.
+static HEADER_VERSION: [u8; crate::header::ZLIB_VERSION.len() + 1] =
+    nul_terminated(crate::header::ZLIB_VERSION);
+
+/// `text` and a NUL after it, in `N` bytes.
+const fn nul_terminated<const N: usize>(text: &str) -> [u8; N] {
+    let bytes = text.as_bytes();
+    let mut out = [0; N];
+    let mut at = 0;
+    while at < bytes.len() && at + 1 < N {
+        out[at] = bytes[at];
+        at += 1;
+    }
+    out
+}
+
+/// `ZLIB_VERSION` as `zlib.h`'s `deflateInit2` and `inflateInit2` macros
+/// pass it: the header's, which zlib's compatibility test compares with
+/// its own, not the loaded library's `zlibVersion()` ([`version`]).
+fn header_version() -> *const c_char {
+    HEADER_VERSION.as_ptr().cast()
+}
+
 /// `sizeof(z_stream)`, which the init calls check against the library's.
 fn stream_size() -> c_int {
     c_int::try_from(std::mem::size_of::<z::z_stream>()).unwrap_or(c_int::MAX)
@@ -343,7 +367,10 @@ unsafe impl Send for Deflate {}
 impl Deflate {
     /// `deflateInit2(&Z, level, Z_DEFLATED, window, memory, strategy)`:
     /// the stream, or zlib's refusal; the outer `Err` is the memory
-    /// limit's fatal.
+    /// limit's fatal. zlib is handed the header's `ZLIB_VERSION`
+    /// ([`header_version`]) as the macro hands it `deflateInit2_`, so its
+    /// compatibility test answers `Z_VERSION_ERROR` where the library
+    /// loaded is of another major than the header compiled against.
     pub(crate) fn new(
         req: &mut Request,
         level: i64,
@@ -361,11 +388,10 @@ impl Deflate {
             z: fresh(),
             held: Vec::new(),
         };
-        // SAFETY: zlibVersion answers the library's static version string.
-        let version = unsafe { z::zlibVersion() };
         let code = stream.call(req, |z| {
-            // SAFETY: the stream is fresh with its allocator set, and the
-            // version and size are the library's own and the struct's.
+            // SAFETY: the stream is fresh with its allocator set, the
+            // version is the header's static C string and the size the
+            // struct's.
             unsafe {
                 z::deflateInit2_(
                     z,
@@ -374,7 +400,7 @@ impl Deflate {
                     window,
                     memory,
                     strategy,
-                    version,
+                    header_version(),
                     stream_size(),
                 )
             }
@@ -438,7 +464,10 @@ unsafe impl Send for Inflate {}
 
 impl Inflate {
     /// `inflateInit2(&Z, window)`: the stream, or zlib's refusal; the
-    /// outer `Err` is the memory limit's fatal.
+    /// outer `Err` is the memory limit's fatal. zlib is handed the
+    /// header's `ZLIB_VERSION` ([`header_version`]) as the macro hands it
+    /// `inflateInit2_`, and answers `Z_VERSION_ERROR` where the library
+    /// loaded is of another major.
     pub(crate) fn new(req: &mut Request, window: i64) -> Result<Result<Inflate, Status>, Thrown> {
         let Ok(window) = c_int::try_from(window) else {
             return Ok(Err(Status::StreamError));
@@ -447,12 +476,10 @@ impl Inflate {
             z: fresh(),
             held: Vec::new(),
         };
-        // SAFETY: zlibVersion answers the library's static version string.
-        let version = unsafe { z::zlibVersion() };
-        // SAFETY: the stream is fresh with its allocator set, and the
-        // version and size are the library's own and the struct's.
+        // SAFETY: the stream is fresh with its allocator set, the version
+        // is the header's static C string and the size the struct's.
         let code = stream.call(req, |z| unsafe {
-            z::inflateInit2_(z, window, version, stream_size())
+            z::inflateInit2_(z, window, header_version(), stream_size())
         })?;
         Ok(match Status::of(code) {
             Status::Ok => Ok(Inflate(stream)),
@@ -598,5 +625,21 @@ impl Drop for GzFile {
         // SAFETY: an open gzFile, closed once, here, with the duplicate
         // descriptor it owns.
         unsafe { z::gzclose(self.0.as_ptr()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+
+    /// The version handed to the init calls is the header's, as a C
+    /// string with one NUL, at its end.
+    #[test]
+    fn the_init_calls_are_handed_the_header_s_version() {
+        let handed = CStr::from_bytes_with_nul(&super::HEADER_VERSION);
+        assert_eq!(
+            handed.map(CStr::to_bytes),
+            Ok(crate::header::ZLIB_VERSION.as_bytes())
+        );
     }
 }
