@@ -29,6 +29,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod classes;
+mod fiber;
 mod functions;
 mod iterators;
 mod mm_custom_handlers;
@@ -42,7 +43,7 @@ use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
-use php_ext::values::{Owner, ResourceType, Value};
+use php_ext::values::{Owner, PhpObject, ResourceType, Value};
 
 /// `zend_test.str_test`, `OnUpdateStr`.
 pub(crate) const STR_TEST: &[u8] = b"zend_test.str_test";
@@ -97,6 +98,7 @@ const ENTRIES: [(&[u8], &[u8], bool); 7] = [
 pub fn extension() -> Extension {
     let builder = functions::declared(ExtensionBuilder::default());
     let builder = classes::declared(builder);
+    let builder = fiber::declared(builder);
     let builder = iterators::declared(builder);
     let builder = object_handlers::declared(builder)
         .ini(ini())
@@ -154,7 +156,8 @@ fn on_update_not_empty(_: &mut Request, value: Option<&[u8]>) -> Result<bool, Th
 /// The extension's request state (ADR-0005), the part of php's
 /// `zend_test` request state this crate carries: the observer's, where
 /// the allocation observer stands, the weak table, the resource type
-/// whose destructor throws, and the owners `zend_leak_variable` took.
+/// whose destructor throws, the owners `zend_leak_variable` took, and
+/// `ZT_G(active_fiber)`, the `_ZendTestFiber` a resume runs.
 #[derive(Debug, Default)]
 struct State {
     observer: observer::Observing,
@@ -162,6 +165,7 @@ struct State {
     weakmap: weakmap::Map,
     throwing_resource: Option<ResourceType>,
     leaked: Vec<Owner<Value>>,
+    active_fiber: Option<PhpObject>,
 }
 
 /// `PHP_RINIT_FUNCTION(zend_test)`: the allocator hooks' start; the weak

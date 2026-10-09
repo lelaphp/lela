@@ -1036,8 +1036,9 @@ pub enum FiberStatus {
 
 /// A fiber as a fiber observer is handed it, php's `zend_fiber_context`
 /// (`Z/Zend/zend_fibers.h:76-100`): a `Fiber` object, the collector's
-/// destructor fiber among them, or the request's own stack,
-/// `EG(main_fiber_context)`; and its status at the notice. What an
+/// destructor fiber among them, the object an extension's own coroutine
+/// stands in ([`crate::fiber::Coroutine`]), or the request's own
+/// stack, `EG(main_fiber_context)`; and its status at the notice. What an
 /// extension keeps per fiber, which php keeps in the `reserved` slots,
 /// it keys by the object [`ObservedFiber::fiber`] names, its
 /// `PhpObject::index`, from the creation notice to the destruction
@@ -1046,34 +1047,79 @@ pub enum FiberStatus {
 pub struct ObservedFiber {
     fiber: Option<PhpObject>,
     status: FiberStatus,
-    threw: bool,
-    destroyed: bool,
+    /// What php's observer reads of a `Fiber` through
+    /// `zend_fiber_from_context`, which it reads only where
+    /// `context->kind` is `zend_ce_fiber`: none for an extension's
+    /// coroutine and the request's own stack.
+    as_fiber: Option<AsFiber>,
+}
+
+/// A `Fiber`'s `ZEND_FIBER_FLAG_THREW`, `ZEND_FIBER_FLAG_DESTROYED` and
+/// `caller` at a notice.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AsFiber {
+    pub(crate) threw: bool,
+    pub(crate) destroyed: bool,
+    pub(crate) caller: Option<Caller>,
+}
+
+/// php's `fiber->caller`: the stack a running coroutine was resumed
+/// from, which its suspend goes back to; set by the resume, kept while
+/// a suspend of a coroutine below it passes through it, and cleared by
+/// its own suspend and when its body ends.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Caller {
+    /// `EG(main_fiber_context)`, the request's own stack.
+    Request,
+    /// The coroutine the object holds, a `Fiber`'s or an extension's.
+    Coroutine(PhpObject),
+}
+
+impl Caller {
+    /// The caller a resume from `resumer` sets, none being the request's
+    /// own stack.
+    pub(crate) fn of(resumer: Option<PhpObject>) -> Caller {
+        resumer.map_or(Caller::Request, Caller::Coroutine)
+    }
+
+    /// Whether this is the stack `fiber` names, none being the
+    /// request's own.
+    fn is(self, fiber: Option<PhpObject>) -> bool {
+        match (self, fiber) {
+            (Caller::Request, None) => true,
+            (Caller::Coroutine(caller), Some(fiber)) => caller.index() == fiber.index(),
+            (Caller::Request, Some(_)) | (Caller::Coroutine(_), None) => false,
+        }
+    }
 }
 
 impl ObservedFiber {
-    pub(crate) fn of(fiber: Option<PhpObject>, status: FiberStatus) -> ObservedFiber {
+    pub(crate) fn of(
+        fiber: Option<PhpObject>,
+        status: FiberStatus,
+        as_fiber: Option<AsFiber>,
+    ) -> ObservedFiber {
         ObservedFiber {
             fiber,
             status,
-            threw: false,
-            destroyed: false,
+            as_fiber,
         }
     }
 
-    /// With whether the `Fiber` threw and whether it is being destroyed.
-    pub(crate) fn flagged(self, threw: bool, destroyed: bool) -> ObservedFiber {
-        ObservedFiber {
-            threw,
-            destroyed,
-            ..self
-        }
-    }
-
-    /// The `Fiber` object, `zend_fiber_from_context`; `None` for the
-    /// request's own stack, whose `kind` is not `zend_ce_fiber`.
+    /// The object the coroutine stands in, a `Fiber`'s as
+    /// `zend_fiber_from_context` reads it or an extension's; `None` for
+    /// the request's own stack.
     #[must_use]
     pub fn fiber(&self) -> Option<PhpObject> {
         self.fiber
+    }
+
+    /// `context->kind == zend_ce_fiber`: whether the coroutine is a
+    /// `Fiber`'s, whose flags and `caller` php's observer reads, and not
+    /// an extension's or the request's own stack.
+    #[must_use]
+    pub fn is_fiber(&self) -> bool {
+        self.as_fiber.is_some()
     }
 
     /// `context->status` at the notice.
@@ -1084,19 +1130,39 @@ impl ObservedFiber {
 
     /// `ZEND_FIBER_FLAG_THREW`: the fiber's callable left a throwable,
     /// or the unwind exit, which is how a `Dead` fiber that threw is told
-    /// from one that returned. Never set on the request's own stack.
+    /// from one that returned. Set on a `Fiber` alone, whose flags are
+    /// the ones php keeps on `zend_fiber`.
     #[must_use]
     pub fn threw(&self) -> bool {
-        self.threw
+        self.as_fiber.is_some_and(|fiber| fiber.threw)
     }
 
     /// `ZEND_FIBER_FLAG_DESTROYED`: the fiber is being torn down, resumed
     /// with the graceful exit because nothing holds it any more, which
     /// is how a switch into a fiber to destroy it is told from one that
-    /// resumes it. Never set on the request's own stack.
+    /// resumes it. Set on a `Fiber` alone.
     #[must_use]
     pub fn destroyed(&self) -> bool {
-        self.destroyed
+        self.as_fiber.is_some_and(|fiber| fiber.destroyed)
+    }
+
+    /// `fiber->caller == from`: a `Fiber` this switch enters because
+    /// `from` resumed it, and not one a suspend that passed through it
+    /// left waiting on another stack. `false` for any other coroutine.
+    #[must_use]
+    pub fn resumed_by(&self, from: &ObservedFiber) -> bool {
+        self.as_fiber
+            .and_then(|fiber| fiber.caller)
+            .is_some_and(|caller| caller.is(from.fiber))
+    }
+
+    /// `fiber->caller != NULL`: a `Fiber` that runs, or waits on a
+    /// coroutine it resumed or one a suspend passed through it to, and
+    /// so is not suspended by this switch. `false` for any other
+    /// coroutine.
+    #[must_use]
+    pub fn has_caller(&self) -> bool {
+        self.as_fiber.is_some_and(|fiber| fiber.caller.is_some())
     }
 }
 

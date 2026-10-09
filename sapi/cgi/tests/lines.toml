@@ -1,0 +1,170 @@
+# php-cgi's own lines, each run by `xtask witness` under the pinned php-cgi
+# (oracle.toml's [sapi]) and then under this crate's, in one directory laid
+# afresh, and held equal: what a fence cannot carry, an ini of the line's
+# own (#1634), a file laid before the run, a startup that ends the process
+# (#1975, as #2468 ruled). No byte here is the oracle's; the oracle's run is
+# the expectation. The grammar is xtask/src/witness/host.rs's.
+
+# `-i` is php-cgi's `php_print_info` in a request of its own
+# (`Z/sapi/cgi/cgi_main.c`, `case 'i'`), printed before `main` would open a
+# primary script or read stdin: whether the line names a file that does not
+# exist or none at all, the page is phpinfo's under the head, and the status
+# 0. The page past its doctype names the build, which is not the oracle's.
+[[line]]
+name = "info-opens-no-program"
+args = ["-n", "-i"]
+mask = [['(?s)<!DOCTYPE html.*?(\n== run)', '<!DOCTYPE html (the page)$1']]
+[[line.then]]
+args = ["-n", "-i", "{dir}/missing.php"]
+
+# php-cgi reads its own `cgi.*` entries from the engine's ini, a php.ini's
+# value included, as `INI_BOOL` and `CGIG()` read them in php: a `-c` file's
+# `cgi.check_shebang_line=0` leaves a `#!` line in the output, and its
+# `cgi.redirect_status_env` names the variable the redirect check asks for
+# (#1693).
+[[line]]
+name = "ini-file-entries"
+args = ["-c", "{dir}/php.ini", "sb.php", "a=1"]
+env = { PHP_INI_SCAN_DIR = "{dir}/scan" }
+files = { "scan/" = "", "php.ini" = "cgi.redirect_status_env=MY_STATUS\ncgi.check_shebang_line=0\n", "sb.php" = "#!/usr/bin/php\n<?php var_dump($_GET);\n" }
+[[line.then]]
+args = ["-c", "{dir}/php.ini"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/sb.php" }
+
+# A php.ini's `[HOST=]` table of the request's `SERVER_NAME`, lowered, and its
+# `[PATH=]` tables along the script's directory, set at `sapi_cgi_activate`
+# as `PHP_INI_SYSTEM`, so `ini_set` refuses them after (#1692).
+[[line]]
+name = "ini-sections-host-and-directories"
+args = ["-c", "{dir}/php.ini"]
+env = { PHP_INI_SCAN_DIR = "{dir}/scan", REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/www/sub/t.php", SERVER_NAME = "Example.com" }
+files = { "scan/" = "", "php.ini" = "precision=10\n[PATH={dir}/www]\nprecision=5\n[PATH={dir}/www/sub/]\nprecision=3\n[HOST=Example.COM]\nserialize_precision=7\n", "www/sub/t.php" = "<?php var_dump(ini_get('precision'), ini_get('serialize_precision'), ini_set('precision', '9'));\n", "www/t.php" = "<?php var_dump(ini_get('precision'), ini_get('serialize_precision'), ini_set('precision', '9'));\n" }
+[[line.then]]
+args = ["-c", "{dir}/php.ini"]
+env = { SCRIPT_FILENAME = "{dir}/www/t.php", SERVER_NAME = "other" }
+
+# A refusal answered after every extension started, at `zend_post_startup`
+# inside `php_module_startup`: opcache's `ACCEL_LOG_FATAL` in
+# `accel_post_startup` for `opcache.file_cache_only` with no
+# `opcache.file_cache`. php ends the process there, before `main` reads its
+# line further, so the file named on the line is never opened and no head is
+# written (#1943). `zend_accel_error` writes the time `asctime` prints and the
+# process's id before its message.
+[[line]]
+name = "post-startup-refused"
+args = ["-n", "-d", "opcache.file_cache_only=1", "/nonexistent/t.php"]
+mask = [['(?m)^.{24} \(\d+\): ', '<asctime> (<pid>): ']]
+
+# The request `opcache.preload`'s file is served in sends no head:
+# `accel_finish_startup_preload` sets `SG(headers_sent)` and
+# `SG(request_info).no_headers` once it started, so what the file echoes
+# reaches stdout bare and its `header()` reaches no one (#1633).
+[[line]]
+name = "preload-sends-no-head"
+args = ["-n", "-q", "-d", "opcache.enable=1", "-d", "opcache.preload={dir}/preload.php", "{dir}/main.php"]
+files = { "preload.php" = "<?php header('X-A: 1'); echo \"pre\\n\"; function pf() { return 1; }\n", "main.php" = "<?php echo pf(), \"\\n\";\n" }
+[[line.then]]
+args = ["-n", "-d", "opcache.enable=1", "-d", "opcache.preload={dir}/preload.php", "{dir}/main.php"]
+
+# `cgi.redirect_status_env` set to the empty string, by a php.ini or by `-d`,
+# names a variable no environment has, so a server's request is refused with
+# the Security Alert, as `CGIG(redirect_status_env)` set to `""` refuses it;
+# unset, the entry is `NULL` and `REDIRECT_STATUS` lets the request through
+# (#1698).
+[[line]]
+name = "redirect-status-env-empty-or-unset"
+args = ["-c", "{dir}/php.ini"]
+env = { PHP_INI_SCAN_DIR = "{dir}/scan", REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/t.php" }
+files = { "scan/" = "", "t.php" = "<?php echo \"ok\\n\";\n", "php.ini" = "cgi.redirect_status_env=\n" }
+[[line.then]]
+args = ["-n", "-d", "cgi.redirect_status_env="]
+[[line.then]]
+args = ["-n"]
+
+# A request whose start fails: an extension's `rinit` raises, which is php's
+# fatal inside `RINIT` (#1775). Session's, under `session.auto_start`, over a
+# session file whose `DateTime` does not unserialize: the throwable is
+# rendered as the uncaught fatal with no frame standing, session's warning
+# that the data did not decode follows it, and php-cgi's `main` returns
+# `FAILURE` where `php_request_startup` failed
+# (`Z/sapi/cgi/cgi_main.c:2460-2467`), the program never run and no
+# request-end phase served, so the session's file, destroyed as the data
+# failed, is not written again (#1879).
+[[line]]
+name = "start-failed-ends-before-the-program"
+args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "{dir}/t.php"]
+env = { HTTP_COOKIE = "PHPSESSID=t1879" }
+files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+
+# `-q` and `-l` set `no_headers` only once `php_request_startup` returned
+# (`Z/sapi/cgi/cgi_main.c:2468-2471`), so the failure's output commits the
+# head under them too; `-l` writes no verdict.
+[[line]]
+name = "start-failed-commits-the-head-under-q"
+args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-q", "{dir}/t.php"]
+env = { HTTP_COOKIE = "PHPSESSID=t1879" }
+files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+
+[[line]]
+name = "start-failed-commits-the-head-under-l"
+args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-l", "{dir}/t.php"]
+env = { HTTP_COOKIE = "PHPSESSID=t1879" }
+files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+
+# What a buffer `output_buffering` started still holds is never flushed,
+# since no `php_request_shutdown` ends the buffers: nothing at all is
+# written, not even the head.
+[[line]]
+name = "start-failed-buffered-writes-nothing"
+args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "-d", "output_buffering=4096", "{dir}/t.php"]
+env = { HTTP_COOKIE = "PHPSESSID=t1879" }
+files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+
+# php-cgi opens the primary script only once `php_request_startup` has
+# returned (`Z/sapi/cgi/cgi_main.c:2460-2487`), so a start that fails over a
+# missing script writes what the failure wrote under a head with no
+# `Status:` line, and never `No input file specified.`; a server's request
+# with no path translated carries the 404 `init_request_info` set before the
+# start, and nothing more (#2272).
+[[line]]
+name = "start-failed-over-a-missing-script"
+args = ["-n", "-d", "session.auto_start=1", "-d", "session.save_path={dir}", "{dir}/missing.php"]
+env = { HTTP_COOKIE = "PHPSESSID=t1879" }
+files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+
+[[line]]
+name = "start-failed-over-a-missing-script-served"
+args = ["-n", "-d", "cgi.fix_pathinfo=0", "-d", "session.auto_start=1", "-d", "session.save_path={dir}"]
+env = { HTTP_COOKIE = "PHPSESSID=t1879", GATEWAY_INTERFACE = "CGI/1.1", REDIRECT_STATUS = "200", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/missing.php" }
+files = { "t.php" = "<?php echo \"ran\\n\";", "sess_t1879" = "x|O:8:\"DateTime\":1:{s:4:\"date\";i:5;}" }
+
+# An extension whose engine start refuses, php's `MINIT` returning `FAILURE`
+# (ADR-0010): `ffi.preload` naming a header that is not there. php ends the
+# process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
+# `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
+# own: the diagnostics on stdout in php-cgi's `html_errors`, no head before
+# them, the file named on the line never opened (#1802). `-h` is answered
+# after php has started, so the refusal stands in its place.
+[[line]]
+name = "startup-refused"
+args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "/nonexistent/t.php"]
+[[line.then]]
+args = ["-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "-h"]
+
+# `.user.ini` read in each directory from `DOCUMENT_ROOT` down to the
+# script's, or in the script's alone outside the root, and set after the
+# php.ini's `[PATH=]` tables as `PHP_INI_PERDIR` at the htaccess stage: a
+# deeper file's value wins, a `[PATH=]` entry is not overridden, a
+# `PHP_INI_SYSTEM` entry is refused, and a `PHP_INI_ALL` one still changes at
+# runtime (#1699).
+[[line]]
+name = "user-ini-from-the-root-down"
+args = ["-c", "{dir}/php.ini"]
+env = { PHP_INI_SCAN_DIR = "{dir}/scan", REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", DOCUMENT_ROOT = "{dir}/www/", SCRIPT_FILENAME = "{dir}/www/sub/t.php" }
+files = { "scan/" = "", "php.ini" = "[PATH={dir}/www/sub]\nprecision=3\n", ".user.ini" = "precision=5\nserialize_precision=5\nmax_input_time=11\n", "www/.user.ini" = "serialize_precision=6\ndefault_mimetype=\"text/plain\"\nallow_url_fopen=0\n", "www/sub/.user.ini" = "serialize_precision=7\nmax_input_time=12\nprecision=8\n", "out/.user.ini" = "serialize_precision=4\n", "www/sub/t.php" = "<?php var_dump(ini_get(\"precision\"), ini_get(\"serialize_precision\"), ini_get(\"max_input_time\"), ini_get(\"allow_url_fopen\"), ini_set(\"serialize_precision\", \"9\"), ini_get(\"default_mimetype\"));\n", "www/t.php" = "<?php var_dump(ini_get(\"precision\"), ini_get(\"serialize_precision\"), ini_get(\"max_input_time\"), ini_get(\"allow_url_fopen\"), ini_set(\"serialize_precision\", \"9\"), ini_get(\"default_mimetype\"));\n", "out/t.php" = "<?php var_dump(ini_get(\"precision\"), ini_get(\"serialize_precision\"), ini_get(\"max_input_time\"), ini_get(\"allow_url_fopen\"), ini_set(\"serialize_precision\", \"9\"), ini_get(\"default_mimetype\"));\n" }
+[[line.then]]
+args = ["-c", "{dir}/php.ini"]
+env = { SCRIPT_FILENAME = "{dir}/www/t.php" }
+[[line.then]]
+args = ["-c", "{dir}/php.ini"]
+env = { SCRIPT_FILENAME = "{dir}/out/t.php" }

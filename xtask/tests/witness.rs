@@ -922,6 +922,44 @@ fn a_fence_the_oracle_does_not_meet_fails_the_crate() {
     assert_eq!(count(reading, "passed"), 0, "{reading:#?}");
 }
 
+/// The negative control of a fence a `trace:` row covers (harness §4.1,
+/// §4.3, §8; #1650): the fixture's two fences end the oracle on a signal,
+/// and the crate fails on the one no row covers; the covered one is met
+/// against the engine alone, counted `covered`, and the reading records
+/// the oracle's signal for it.
+#[test]
+fn a_fence_a_trace_row_covers_records_the_oracle_and_the_one_it_does_not_fails_the_crate() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = fixture_at("witness", "oracle-signal");
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &Registry::load(&root).unwrap(),
+        &Ask {
+            crates: vec!["ext/pcre".to_owned()],
+            staged: false,
+            ..Ask::default()
+        },
+    )
+    .unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(reading, "failed"), 1, "{reading:#?}");
+    assert_eq!(count(reading, "covered"), 1, "{reading:#?}");
+    assert!(
+        reading.message.contains("ext/pcre/src/lib.rs:26")
+            && reading.message.contains("1 fence held to the engine alone")
+            && reading.message.contains("not judged: signal 9"),
+        "{}",
+        reading.message
+    );
+}
+
 /// A witness that cannot run for want of the pinned binary is a snippet
 /// that did not run, never a refusal: coverage is complete, and the reading
 /// is a skip that counts what did not run (#65). Green would be a claim.

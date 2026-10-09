@@ -184,9 +184,42 @@ impl Request {
     pub(crate) fn uncaught(&mut self) -> Result<(), Fatal> {
         // `zend_execute_scripts` and `zend_throw_exception_internal` with
         // no frame standing: a user exception handler takes the
-        // throwable first, and what it leaves is rendered.
-        self.user_exception_handler();
+        // throwable first, and what it leaves is rendered. A handler
+        // that threw has rendered its own throwable and left by
+        // `zend_bailout`, past everything after it here; that fatal is
+        // already the request's ending, and nothing is added to it.
+        if self.user_exception_handler().is_break() {
+            return Err(Fatal::Error(String::new()));
+        }
         self.exception_error(Level::Error)
+    }
+
+    /// `zend_throw_exception_internal` (`Z/Zend/zend_exceptions.c:180`)
+    /// over a throwable a native raised where no handler hands it back
+    /// to the loop, a resource's destructor: chained over what is
+    /// pending, as `zend_exception_set_previous` chains it; where nothing
+    /// is pending and no frame stands, as when `zend_close_rsrc_list`
+    /// serves the destructor at the request's end, handed to the handler
+    /// `set_exception_handler()` set, or rendered as the uncaught fatal
+    /// and left by `zend_bailout` ([`Request::thrown_without_frame`]);
+    /// pending for the frame that stands otherwise. A fatal or an exit
+    /// the raiser recorded itself is left as it stands.
+    pub(crate) fn throw_internal(&mut self, thrown: &Thrown) {
+        if thrown.exception().is_none() {
+            return;
+        }
+        match self.take_raised() {
+            Some(before) => {
+                self.leave_pending(thrown);
+                self.raise_under(before);
+            }
+            None if !self.bailout && !self.executing() => {
+                if let Ok(undef) = self.thrown_without_frame(thrown) {
+                    self.release(undef);
+                }
+            }
+            None => self.leave_pending(thrown),
+        }
     }
 
     /// `zend_exception_error` (`Z/Zend/zend_exceptions.c:936`): what is

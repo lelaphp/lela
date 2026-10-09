@@ -930,8 +930,20 @@ impl Vm {
     /// `above`, `frames().len()` asking for the innermost: the frame
     /// under it on the stack, or the one a switch standing there moved
     /// `EG(current_execute_data)` to, which stands below it. None below
-    /// the first.
+    /// the first. A frame being popped is passed over
+    /// ([`FrameState::leaving`]): `zend_leave_helper` has made its
+    /// caller current before it frees the CVs, so what a release there
+    /// raises, or calls, stands on the caller.
     pub(crate) fn below(&self, above: usize) -> Option<usize> {
+        let mut at = self.under(above)?;
+        while self.frames.get(at).is_some_and(|state| state.leaving) {
+            at = self.under(at)?;
+        }
+        Some(at)
+    }
+
+    /// [`Vm::below`] with no frame passed over.
+    fn under(&self, above: usize) -> Option<usize> {
         self.switches
             .iter()
             .rev()
@@ -939,13 +951,6 @@ impl Vm {
             .map(|switch| switch.to.0 as usize)
             .filter(|&to| to < above)
             .or_else(|| above.checked_sub(1))
-    }
-
-    /// The places of the frames on the chain, innermost first, each
-    /// [`Vm::below`] the one before.
-    pub(crate) fn chained(&self) -> impl Iterator<Item = usize> + '_ {
-        std::iter::successors(self.below(self.frames.len()), |&at| self.below(at))
-            .take_while(|&at| at < self.frames.len())
     }
 
     /// The sites standing, the innermost last.
@@ -1103,10 +1108,14 @@ impl Vm {
 
     /// The innermost frame's state, `EG(current_execute_data)`: the one
     /// the loop is executing, or the one a switch standing on top moved
-    /// it to ([`Switch`]).
+    /// it to ([`Switch`]), or the caller of a frame being popped.
     pub(crate) fn innermost(&self) -> Option<&FrameState> {
+        self.innermost_at().and_then(|at| self.frames.get(at))
+    }
+
+    /// The place of [`Vm::innermost`].
+    pub(crate) fn innermost_at(&self) -> Option<usize> {
         self.below(self.frames.len())
-            .and_then(|at| self.frames.get(at))
     }
 
     /// `EX(opline) = EG(exception_op)` on `frame`, or the frame back at

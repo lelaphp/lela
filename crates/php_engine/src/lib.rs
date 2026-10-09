@@ -49,6 +49,7 @@ mod multibyte;
 mod natives;
 mod observer;
 mod open_basedir;
+mod operand;
 mod ops;
 mod output;
 mod preload;

@@ -3,31 +3,53 @@
 
 use std::ops::ControlFlow;
 
-use php_ext::abi::{Instance, Pool, Refusals};
+use php_ext::abi::{Instance, ObjectHandlers, Pool, Refusals};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::write_prop;
-use php_ext::coerce::{numeric_string, to_long, value_name};
+use php_ext::coerce::{to_long, try_long, value_name};
 use php_ext::raising::{Thrown, argument_error, throw};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::State;
 use crate::constants as c;
-use crate::ffi::{Share, share_strerror};
+use crate::ffi::{Persistent, Share, ShareRef, Shared, share_strerror};
 use crate::handle::made;
 
 /// `php_curlsh` less its `zend_object`, which both share classes lay.
 #[derive(Default)]
 pub(crate) struct Sh {
-    share: Option<Share>,
+    /// `share`: the request keeps a `CurlShareHandle`'s, and this is its
+    /// one owner; a persistent one is one owner of the pool's share.
+    share: Option<Shared>,
     /// `err.no`.
     err: i64,
 }
 
 /// The share of an object of either share class, `None` for any other.
-pub(crate) fn share_of(req: &Request, object: PhpObject) -> Option<Share> {
-    object.native::<Sh>(req).and_then(|sh| sh.share.clone())
+pub(crate) fn share_of(req: &Request, object: PhpObject) -> Option<ShareRef> {
+    object
+        .native::<Sh>(req)
+        .and_then(|sh| sh.share.as_ref().map(Shared::as_ref))
+}
+
+/// `curl_share_handlers` and `curl_share_persistent_handlers`: what each
+/// refuses, and `curl_share_free_obj`, which cleans a request's share up
+/// and leaves a persistent one to the pool.
+pub(crate) struct Handlers(Refusals);
+
+impl ObjectHandlers for Handlers {
+    fn refusals(&self) -> Refusals {
+        self.0
+    }
+
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        let share = object.native_mut::<Sh>(req).and_then(|sh| sh.share.take());
+        if let Some(share) = share {
+            share.close(req);
+        }
+    }
 }
 
 /// `final class CurlShareHandle`, `@strict-properties`,
@@ -50,7 +72,7 @@ pub(crate) fn share_of(req: &Request, object: PhpObject) -> Option<Share> {
     final,
     not_serializable,
     payload = Sh,
-    handlers = SHARE,
+    handlers = SHARE_HANDLERS,
     dynamic_properties = forbidden
 )]
 pub(crate) struct CurlShareHandle;
@@ -84,7 +106,7 @@ impl CurlShareHandle {}
     final,
     not_serializable,
     payload = Sh,
-    handlers = PERSISTENT,
+    handlers = PERSISTENT_HANDLERS,
     dynamic_properties = forbidden
 )]
 pub(crate) struct CurlSharePersistentHandle;
@@ -105,6 +127,9 @@ const SHARE: Refusals = Refusals::NONE
 /// `curl_share_handlers` in the constructor's words.
 const PERSISTENT: Refusals = SHARE.construction(Some("curl_share_init_persistent()"));
 
+pub(crate) static SHARE_HANDLERS: Handlers = Handlers(SHARE);
+pub(crate) static PERSISTENT_HANDLERS: Handlers = Handlers(PERSISTENT);
+
 /// `curl_share_init(): CurlShareHandle`.
 ///
 /// ```php
@@ -116,8 +141,10 @@ const PERSISTENT: Refusals = SHARE.construction(Some("curl_share_init_persistent
 #[php_function]
 fn curl_share_init(req: &mut Request) -> Result<Owner<Instance<CurlShareHandle>>, Thrown> {
     let object = made(req, b"CurlShareHandle")?;
-    if let Some(sh) = object.native_mut::<Sh>(req) {
-        sh.share = Share::init();
+    let share = Share::init(req);
+    match object.native_mut::<Sh>(req) {
+        Some(sh) => sh.share = share.map(Shared::Request),
+        None => share.into_iter().for_each(|share| share.close(req)),
     }
     Ok(object.into_instance())
 }
@@ -162,7 +189,7 @@ fn curl_share_setopt(
     let (code, thrown) = match option {
         c::CURLSHOPT_SHARE | c::CURLSHOPT_UNSHARE => {
             let n = to_long(req, &value.deref())?;
-            let code = share_of(req, object).map_or(1, |share| share.set_long(option, n));
+            let code = share_of(req, object).map_or(1, |share| share.set_long(req, option, n));
             (code, None)
         }
         _ => (
@@ -221,23 +248,10 @@ fn curl_share_strerror(
     }
 }
 
-/// `zval_try_get_long`: the integer a value is, `None` where it is none.
-fn try_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
-    Ok(match value.as_ref() {
-        ValueRef::Int(n) => Some(n),
-        ValueRef::Null | ValueRef::Bool(_) | ValueRef::Float(_) => Some(to_long(req, value)?),
-        ValueRef::Str(text) => match numeric_string(text.as_bytes()) {
-            Some(number) => Some(to_long(req, &number)?),
-            None => None,
-        },
-        _ => None,
-    })
-}
-
 /// `CURL_G(persistent_curlsh)` as the engine keeps it (design §4.10,
 /// #1172): the persistent shares no request holds, each under the bits
 /// of the options it was made with, lent to one request at a time.
-pub(crate) struct Pooled(pub(crate) Pool<u8, Share>);
+pub(crate) struct Pooled(pub(crate) Pool<u8, Persistent>);
 
 /// The idle shares the pool keeps. php keeps one per set of options in
 /// each php-fpm worker and bounds them by nothing else; this is the
@@ -247,7 +261,7 @@ pub(crate) const POOLED: usize = 1024;
 /// The persistent share made with the options `id` names that the
 /// request holds already, or one the engine's pool kept from an earlier
 /// request, held by this one from here to its end.
-fn lend(req: &mut Request, id: u8) -> Option<Share> {
+fn lend(req: &mut Request, id: u8) -> Option<Persistent> {
     let held = &mut req.state::<State>().persistent;
     if let Some(at) = held.find(&id) {
         return held.get_mut(at).map(|share| share.clone());
@@ -305,6 +319,35 @@ const LOCKS: [(i64, u8); 4] = [
 /// ValueError: curl_share_init_persistent(): Argument #1 ($share_options) must contain only CURL_LOCK_DATA_* constants
 /// TypeError: curl_share_init_persistent(): Argument #1 ($share_options) must contain only int values, string given
 /// ```
+///
+/// Each option is read as `zval_try_get_long` reads it
+/// ([`try_long`]): a leading-numeric string with php's warning, a
+/// fractional float with its deprecation, where `curl_share_setopt`
+/// reads its value silently, as `zval_get_long`.
+///
+/// ```php
+/// $s = curl_share_init();
+/// var_dump(curl_share_setopt($s, CURLSHOPT_SHARE, "3abc"));
+/// var_dump(curl_share_init_persistent(["3abc", 3.0])->options);
+/// try { curl_share_init_persistent(["2abc"]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { curl_share_init_persistent([3.5]); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { curl_share_init_persistent(["x"]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// bool(true)
+///
+/// Warning: A non-numeric value encountered in %s on line 4
+/// array(1) {
+///   [0]=>
+///   int(3)
+/// }
+///
+/// Warning: A non-numeric value encountered in %s on line 5
+/// curl_share_init_persistent(): Argument #1 ($share_options) must not contain CURL_LOCK_DATA_COOKIE because sharing cookies across PHP requests is unsafe
+///
+/// Deprecated: Implicit conversion from float 3.5 to int loses precision in %s on line 6
+/// curl_share_init_persistent(): Argument #1 ($share_options) must contain only int values, string given
+/// ```
 #[php_function]
 fn curl_share_init_persistent(
     req: &mut Request,
@@ -359,7 +402,7 @@ fn curl_share_init_persistent(
     let share = if let Some(share) = lend(req, id) {
         share
     } else {
-        let Some(share) = Share::init() else {
+        let Some(share) = Persistent::init() else {
             object.give_up(req);
             return Err(throw(
                 req,
@@ -386,7 +429,7 @@ fn curl_share_init_persistent(
         share
     };
     if let Some(sh) = object.native_mut::<Sh>(req) {
-        sh.share = Some(share);
+        sh.share = Some(Shared::Persistent(share));
     }
     Ok(object.into_instance())
 }

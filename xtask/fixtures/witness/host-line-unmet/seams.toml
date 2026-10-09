@@ -1,0 +1,20 @@
+# A negative control (harness-design.md §4.1, §8): a workspace that must
+# fail the instrument named by the directory above it. A host crate's one
+# line (#1975), run under the pinned php-cgi and under a host that answers
+# it otherwise, or under a pin whose php-cgi is not there; either fails the
+# crate, and neither is a skip. The pin is the real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "sapi/cgi"
+budget = 1000

@@ -7,6 +7,7 @@
 //! XML-RPC fault form; and the assertion callback. Their state is
 //! [`Diagnostics`]'s, whose fields no file but this one reads.
 
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
@@ -1446,16 +1447,36 @@ impl Request {
     /// throwable handed to the handler standing, which is taken down
     /// onto the stack while it runs and stands again after unless it
     /// set one of its own. The throwable is released once the handler
-    /// returns; what the handler throws is rendered as the uncaught
-    /// fatal, since no handler stands to take it, which ends the
-    /// request as php's `zend_throw_exception_internal` does with no
-    /// frame standing. Nothing is done for the unwind exit.
-    pub(crate) fn user_exception_handler(&mut self) {
+    /// returns. What the handler throws, or an `exit` in it, is
+    /// rendered as the uncaught fatal by `zend_call_function`'s tail,
+    /// since no frame and no handler stands to take it, and the request
+    /// leaves by `zend_bailout`, the `Break` here: php's jump skips the
+    /// rest of this function, so the handler stays taken down, and a
+    /// throwable raised with no frame after it is rendered uncaught
+    /// (`ext/zend_test`'s throwing resource is the witness). Nothing is
+    /// done for the unwind exit.
+    ///
+    /// ```php
+    /// set_exception_handler(function ($e) { echo "handler: ", $e->getMessage(), "\n"; throw new Exception("h"); });
+    /// register_shutdown_function(function () { var_dump(get_exception_handler()); });
+    /// throw new Exception("main");
+    /// ```
+    /// ```expect exit=255
+    /// handler: main
+    ///
+    /// Fatal error: Uncaught Exception: h in %s:2
+    /// Stack trace:
+    /// #0 [internal function]: {closure:%s:2}(Object(Exception))
+    /// #1 {main}
+    ///   thrown in %s on line 2
+    /// NULL
+    /// ```
+    pub(crate) fn user_exception_handler(&mut self) -> ControlFlow<()> {
         if self.diagnostics.exception_handler.is_none() {
-            return;
+            return ControlFlow::Continue(());
         }
         let Some(throwable) = self.take_pending_view() else {
-            return;
+            return ControlFlow::Continue(());
         };
         let handler = self.diagnostics.exception_handler.take();
         self.diagnostics.exception_handlers.push(handler.clone());
@@ -1463,10 +1484,17 @@ impl Request {
             match crate::api::call::call_made(self, &handler, &[throwable.as_value()]) {
                 Ok(value) => self.release(value),
                 Err(thrown) => {
-                    self.leave_pending(&thrown);
-                    if let Err(fatal) = self.uncaught() {
-                        self.end_in(&fatal);
+                    // A frame standing hands the throwable back rather
+                    // than render it, which php never meets here; it is
+                    // rendered as the tail would have.
+                    if thrown.exception().is_some() {
+                        self.leave_pending(&thrown);
+                        if let Err(fatal) = self.exception_error(Level::Error) {
+                            self.end_in(&fatal);
+                        }
                     }
+                    self.release(throwable.as_value());
+                    return ControlFlow::Break(());
                 }
             }
         }
@@ -1476,6 +1504,7 @@ impl Request {
         {
             self.diagnostics.exception_handler = top;
         }
+        ControlFlow::Continue(())
     }
 }
 

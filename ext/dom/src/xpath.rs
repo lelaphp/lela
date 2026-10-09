@@ -10,7 +10,7 @@ use php_ext::coerce::{callable_checked, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_chained, throw_error,
 };
-use php_ext::request::Request;
+use php_ext::request::{Foreign, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::Errors;
@@ -150,9 +150,13 @@ impl Validation {
     }
 }
 
-/// `dom_xpath_object`'s own fields.
+/// `dom_xpath_object`'s own fields. The evaluator stays here for the
+/// span of an evaluation: the request keeps libxml's evaluator
+/// ([`Request::adopt`], ADR-0013) and the evaluation holds it, so PHP
+/// code a function serves reaches the object as php's does, evaluating
+/// again, registering on it or constructing it anew (#2318).
 pub(crate) struct XPathState {
-    ctx: ffi::XPath,
+    ctx: Foreign<ffi::XPath>,
     register_node_ns: bool,
     callbacks: XPathCallbacks,
 }
@@ -206,14 +210,6 @@ impl XPathCallbacks {
         }
         for value in &self.node_list {
             visit(**value);
-        }
-    }
-
-    /// `php_dom_xpath_callbacks_clean_node_list`: the values the calls of
-    /// one evaluation handed out let go of.
-    pub fn clean_node_list(&mut self, req: &mut Request) {
-        for value in std::mem::take(&mut self.node_list) {
-            value.give_up(req);
         }
     }
 
@@ -283,14 +279,51 @@ impl XPathCallbacks {
     /// document follows the spec, which decides the node class an answer
     /// is held to.
     pub fn call(
-        &mut self,
         req: &mut Request,
+        at: CallbacksAt,
         called: Called,
         operands: Vec<Operand>,
         modern: bool,
         proxy: &mut Proxy<'_>,
     ) -> Result<Returned, Thrown> {
-        dispatch(req, self, called, operands, modern, proxy)
+        dispatch(req, at, called, operands, modern, proxy)
+    }
+}
+
+/// Where an owner keeps its [`XPathCallbacks`]: the object, and how its
+/// payload is reached, read afresh at each step of a call, since the PHP
+/// code a call serves may register on them, replace them or free them,
+/// as php's table is the object's own throughout (#2318, #2319).
+#[derive(Clone, Copy)]
+pub struct CallbacksAt {
+    pub object: PhpObject,
+    pub reach: fn(&mut Request, PhpObject) -> Option<&mut XPathCallbacks>,
+}
+
+impl CallbacksAt {
+    fn get(self, req: &mut Request) -> Option<&mut XPathCallbacks> {
+        (self.reach)(req, self.object)
+    }
+
+    /// `php_dom_xpath_callbacks_clean_node_list`: the values the calls of
+    /// one evaluation handed out let go of, taken off the table first,
+    /// since letting one go can call a destructor that reaches it.
+    pub fn clean_node_list(self, req: &mut Request) {
+        let Some(callbacks) = self.get(req) else {
+            return;
+        };
+        for value in std::mem::take(&mut callbacks.node_list) {
+            value.give_up(req);
+        }
+    }
+
+    /// `zend_hash_next_index_insert(&ns->node_list, ..)`: `value` kept
+    /// alive with the callbacks, let go of where they are gone.
+    fn keep(self, req: &mut Request, value: Owner<Value>) {
+        match self.get(req) {
+            Some(callbacks) => callbacks.node_list.push(value),
+            None => value.give_up(req),
+        }
     }
 }
 
@@ -298,33 +331,55 @@ impl XPathCallbacks {
 /// php function stands as.
 pub type Proxy<'a> = dyn FnMut(&mut Request, Node) -> Result<Owner<Value>, Thrown> + 'a;
 
-/// The evaluator of `this`, taken out of the payload for one call.
-fn take(req: &mut Request, this: PhpObject) -> Option<Box<XPathState>> {
-    let d = dom_mut(req, this)?;
-    match std::mem::take(&mut d.extra) {
+/// The evaluator of `this`, where it has been constructed.
+fn state(req: &mut Request, this: PhpObject) -> Option<&mut XPathState> {
+    match &mut dom_mut(req, this)?.extra {
         Extra::XPath(state) => Some(state),
-        other => {
-            d.extra = other;
-            None
-        }
+        _ => None,
     }
 }
 
-fn put(req: &mut Request, this: PhpObject, state: Box<XPathState>) {
-    if let Some(d) = dom_mut(req, this) {
-        d.extra = Extra::XPath(state);
+/// The callbacks of `this`, as [`CallbacksAt`] reaches them.
+fn callbacks(req: &mut Request, this: PhpObject) -> Option<&mut XPathCallbacks> {
+    state(req, this).map(|state| &mut state.callbacks)
+}
+
+/// The evaluator of `this` taken off it, as it is freed or constructed
+/// anew: libxml's evaluator given up, closed now or as the evaluation that
+/// holds it ends, and its registrations let go of.
+fn discard(req: &mut Request, this: PhpObject) {
+    let Some(d) = dom_mut(req, this) else {
+        return;
+    };
+    let Extra::XPath(state) = std::mem::take(&mut d.extra) else {
+        return;
+    };
+    let XPathState { ctx, callbacks, .. } = *state;
+    drop(req.disown(ctx));
+    callbacks.release(req);
+}
+
+/// `f` over the callbacks of `this`, taken off it for a registration
+/// that can call PHP code (a name's `__toString`, an autoloader) and put
+/// back after, in place of any a constructor laid meanwhile.
+fn registering<R>(
+    req: &mut Request,
+    this: PhpObject,
+    f: impl FnOnce(&mut Request, &mut XPathCallbacks) -> R,
+) -> Option<R> {
+    let mut taken = std::mem::take(&mut state(req, this)?.callbacks);
+    let answer = f(req, &mut taken);
+    match state(req, this) {
+        Some(state) => std::mem::replace(&mut state.callbacks, taken).release(req),
+        None => taken.release(req),
     }
+    Some(answer)
 }
 
 /// `dom_xpath_document_read`.
 fn document_read(req: &mut Request, object: PhpObject) -> Read {
-    let doc = match dom(req, object) {
-        Some(d) => match &d.extra {
-            Extra::XPath(state) => state.ctx.doc(),
-            _ => None,
-        },
-        None => None,
-    };
+    let id = state(req, object).map(|state| state.ctx.id());
+    let doc = id.and_then(|id| req.foreign(id)).and_then(|ctx| ctx.doc());
     match doc {
         Some(doc) => Ok(Some(object_for(req, doc, Some(object))?)),
         None => Err(crate::dom_throw(req, Code::InvalidState)),
@@ -474,11 +529,45 @@ fn operand_values(
 /// string.
 const NOT_A_NAME: &str = "Handler name must be a string";
 
-/// `php_dom_xpath_callback_dispatch`.
-#[allow(clippy::too_many_lines)] // php's function, each owner given up on the path that leaves it
+/// What a namespace's table answers for one name.
+enum Lookup {
+    /// No table for the namespace: no registration made one.
+    NoTable,
+    /// `PHP_DOM_REG_FUNC_MODE_ALL`: any function by name.
+    Any,
+    /// The callable registered as the name, if one is.
+    Named(Option<Callable>),
+}
+
+impl Lookup {
+    /// What `callbacks` answers for `name` in `ns`, php's namespace where
+    /// none is given.
+    fn of(callbacks: Option<&XPathCallbacks>, ns: Option<&[u8]>, name: &[u8]) -> Lookup {
+        let namespace = match (ns, callbacks) {
+            (_, None) => None,
+            (None, Some(callbacks)) => callbacks.php_ns.as_deref(),
+            (Some(ns), Some(callbacks)) => callbacks
+                .namespaces
+                .iter()
+                .find(|(n, _)| n == ns)
+                .map(|(_, namespace)| namespace),
+        };
+        match namespace {
+            None => Lookup::NoTable,
+            Some(Namespace {
+                mode: Mode::All, ..
+            }) => Lookup::Any,
+            Some(namespace) => Lookup::Named(namespace.find(name).cloned()),
+        }
+    }
+}
+
+/// `php_dom_xpath_callback_dispatch`. The table is read where the call
+/// is made and again where it keeps what the call handed out, since the
+/// function called can register, replace or free it in between.
 fn dispatch(
     req: &mut Request,
-    state: &mut XPathCallbacks,
+    at: CallbacksAt,
     called: Called,
     operands: Vec<Operand>,
     modern: bool,
@@ -502,19 +591,10 @@ fn dispatch(
         Called::Custom { ns, name } => (Some(ns), name, operands),
     };
     let args = operand_values(req, proxy, operands)?;
-    let namespace = match &mode_ns {
-        None => state.php_ns.as_deref(),
-        Some(ns) => state
-            .namespaces
-            .iter()
-            .find(|(n, _)| n == ns)
-            .map(|(_, namespace)| namespace),
-    };
-    let callable = match namespace {
-        None => Err(throw_error(req, "Error", "No callbacks were registered")),
-        Some(Namespace {
-            mode: Mode::All, ..
-        }) => {
+    let callbacks = at.get(req).map(|callbacks| &*callbacks);
+    let callable = match Lookup::of(callbacks, mode_ns.as_deref(), &name) {
+        Lookup::NoTable => Err(throw_error(req, "Error", "No callbacks were registered")),
+        Lookup::Any => {
             let name_value = string(req, &name)?;
             let found = callable_checked(req, &name_value);
             name_value.give_up(req);
@@ -529,17 +609,14 @@ fn dispatch(
                 }
             })
         }
-        Some(namespace) => {
-            if let Some(callable) = namespace.find(&name) {
-                Ok(callable.clone())
-            } else {
-                let shown = String::from_utf8_lossy(&name).into_owned();
-                Err(throw_error(
-                    req,
-                    "Error",
-                    &format!("No callback handler \"{shown}\" registered"),
-                ))
-            }
+        Lookup::Named(Some(callable)) => Ok(callable),
+        Lookup::Named(None) => {
+            let shown = String::from_utf8_lossy(&name).into_owned();
+            Err(throw_error(
+                req,
+                "Error",
+                &format!("No callback handler \"{shown}\" registered"),
+            ))
         }
     };
     let callable = match callable {
@@ -555,7 +632,7 @@ fn dispatch(
     let answered = call(req, &callable, &views);
     for a in args {
         if a.as_object().is_some() || a.as_array().is_some() {
-            state.node_list.push(a);
+            at.keep(req, a);
         } else {
             a.give_up(req);
         }
@@ -566,7 +643,7 @@ fn dispatch(
         ValueRef::Object(o) if crate::instance_of(req, *o, node_class) => {
             match crate::node_of(req, *o) {
                 Some(node) => {
-                    state.node_list.push(answer);
+                    at.keep(req, answer);
                     return Ok(Returned::Node(node));
                 }
                 None => Ok(Returned::Sentinel),
@@ -604,11 +681,10 @@ fn eval(
         }
     };
     let modern = crate::modern::follows_spec(req, this);
-    let Some(mut state) = take(req, this) else {
+    let Some(id) = state(req, this).map(|state| state.ctx.id()) else {
         return Err(throw_error(req, "Error", "Invalid XPath Context"));
     };
-    let Some(doc) = state.ctx.doc() else {
-        put(req, this, state);
+    let Some(doc) = req.foreign(id).and_then(|ctx| ctx.doc()) else {
         if modern {
             return Err(throw_error(req, "Error", "Invalid XPath Document Pointer"));
         }
@@ -616,17 +692,10 @@ fn eval(
         return Ok(Owner::bool(false));
     };
     let node = match context {
-        Some(o) => match fetch(req, o) {
-            Ok(n) => Some(n),
-            Err(thrown) => {
-                put(req, this, state);
-                return Err(thrown);
-            }
-        },
+        Some(o) => Some(fetch(req, o)?),
         None => doc.root(),
     };
     if node.is_some_and(|n| n.doc() != Some(doc)) {
-        put(req, this, state);
         return Err(throw_error(req, "Error", "Node from wrong document"));
     }
     let in_scope = match node {
@@ -641,15 +710,19 @@ fn eval(
         (true, false) => Scope::InScope,
         (true, true) => Scope::List(&in_scope),
     };
-    let (answer, raised, thrown) = {
-        let XPathState { ctx, callbacks, .. } = &mut *state;
-        let mut proxy = |req: &mut Request, node: Node| object_for(req, node, Some(this));
-        let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
-            dispatch(req, callbacks, called, operands, modern, &mut proxy)
-        };
-        ctx.eval_scoped(req, expr, node, scope, &mut handler)
+    let at = CallbacksAt {
+        object: this,
+        reach: callbacks,
     };
-    put(req, this, state);
+    let mut proxy = |req: &mut Request, node: Node| object_for(req, node, Some(this));
+    let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
+        XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
+    };
+    let Some((answer, raised, thrown)) =
+        ffi::XPath::eval_held(req, id, expr, node, scope, &mut handler)
+    else {
+        return Err(throw_error(req, "Error", "Invalid XPath Context"));
+    };
     let mut raised = raised;
     for error in &mut raised {
         error.route = Route::Generic;
@@ -797,25 +870,53 @@ impl DOMXPath {
         let Some(ctx) = ffi::XPath::new(doc) else {
             return Err(crate::dom_throw(req, Code::InvalidState));
         };
-        if let Some(old) = take(req, this) {
-            old.callbacks.release(req);
-        }
+        discard(req, this);
         let shared = crate::shared_doc(req, doc_obj);
         if let Some(mut obj) = crate::libxml_half(req, this) {
             obj.decrement_doc_ref(req);
             obj.share(req, shared, doc);
         }
         let state = XPathState {
-            ctx,
+            ctx: req.adopt(ctx),
             register_node_ns: registerNodeNS,
             callbacks: XPathCallbacks::default(),
         };
-        put(req, this, Box::new(state));
+        match dom_mut(req, this) {
+            Some(d) => d.extra = Extra::XPath(Box::new(state)),
+            None => drop(req.disown(state.ctx)),
+        }
         Ok(())
     }
 
     /// `DOMXPath::evaluate(string $expression, ?DOMNode $contextNode = null, bool $registerNodeNS = true): mixed`;
     /// an omitted `$registerNodeNS` is the evaluator's `registerNodeNamespaces`.
+    ///
+    /// The evaluator stays on the object while it evaluates, so a
+    /// function the expression calls evaluates on it again, and what it
+    /// registers holds for the rest of the evaluation and after (#2318).
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a>1</a><b>2</b></r>');
+    /// $x = new DOMXPath($d);
+    /// function inner($n) {
+    ///     global $x;
+    ///     var_dump($x->evaluate('count(//b)'), $x->registerNamespace('p', 'urn:p'));
+    ///     $x->registerPhpFunctions(['strtoupper']);
+    ///     return 'v';
+    /// }
+    /// $x->registerNamespace('php', 'http://php.net/xpath');
+    /// $x->registerPhpFunctions(['inner']);
+    /// var_dump($x->evaluate('string(php:function("inner", //a))'));
+    /// var_dump($x->evaluate('count(//p:z)'), $x->evaluate('php:function("strtoupper", "x")'));
+    /// ```
+    /// ```expect
+    /// float(1)
+    /// bool(true)
+    /// string(1) "v"
+    /// float(0)
+    /// string(1) "X"
+    /// ```
     #[php(tentative)]
     fn evaluate(
         req: &mut Request,
@@ -919,17 +1020,10 @@ impl DOMXPath {
         prefix: PhpString,
         namespace: PhpString,
     ) -> Result<bool, Thrown> {
-        let took = match dom(req, this.object()) {
-            Some(d) => match &d.extra {
-                Extra::XPath(state) => Some(
-                    state
-                        .ctx
-                        .register_ns(prefix.as_bytes(), namespace.as_bytes()),
-                ),
-                _ => None,
-            },
-            None => None,
-        };
+        let id = state(req, this.object()).map(|state| state.ctx.id());
+        let took = id
+            .and_then(|id| req.foreign(id))
+            .map(|ctx| ctx.register_ns(prefix.as_bytes(), namespace.as_bytes()));
         match took {
             Some(ok) => Ok(ok),
             None => Err(throw_error(req, "Error", "Invalid XPath Context")),
@@ -1004,16 +1098,17 @@ impl DOMXPath {
         #[php(default = null)] restrict: Option<Union<PhpString, PhpArray>>,
     ) -> Result<(), Thrown> {
         let this = this.object();
-        let Some(mut state) = take(req, this) else {
-            return Err(throw_error(req, "Error", "Invalid XPath Context"));
-        };
         let restrict = restrict.map(|given| match given {
             Union::A(name) => Value::string(name),
             Union::B(array) => Value::array(array),
         });
-        let answered = state.callbacks.register_php(req, restrict);
-        put(req, this, state);
-        answered
+        let registered = registering(req, this, |req, callbacks| {
+            callbacks.register_php(req, restrict)
+        });
+        match registered {
+            Some(answered) => answered,
+            None => Err(throw_error(req, "Error", "Invalid XPath Context")),
+        }
     }
 
     /// `DOMXPath::registerPhpFunctionNS(string $namespaceURI, string $name, callable $callable): void`.
@@ -1080,16 +1175,18 @@ impl DOMXPath {
                 "not be \"http://php.net/xpath\" because it is reserved by PHP",
             ));
         }
-        let Some(mut state) = take(req, this) else {
+        let value = callable.value();
+        let Some(registered) = registering(req, this, |req, callbacks| {
+            callbacks.register_ns(req, &ns, &name, &value)
+        }) else {
             return Err(throw_error(req, "Error", "Invalid XPath Context"));
         };
-        let registered = state
-            .callbacks
-            .register_ns(req, &ns, &name, &callable.value());
         if registered.is_ok() {
-            state.ctx.register_custom(&ns, &name);
+            let id = state(req, this).map(|state| state.ctx.id());
+            if let Some(ctx) = id.and_then(|id| req.foreign(id)) {
+                ctx.register_custom(&ns, &name);
+            }
         }
-        put(req, this, state);
         registered
     }
 
@@ -1275,9 +1372,7 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
     /// `dom_xpath_objects_free_storage`: `xmlXPathFreeContext`, then the
     /// document let go of.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some(state) = take(req, object) {
-            state.callbacks.release(req);
-        }
+        discard(req, object);
         crate::release_libxml(req, object);
     }
 

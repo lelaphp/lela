@@ -13,7 +13,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::constants as c;
-use crate::ffi::{CFile, Easy, Hook, Slist};
+use crate::ffi::{CFile, EasyId, Hook, Slist};
 use crate::handle::{Curl, CurlHandle, Handler, HeaderTo, ReadFrom, WriteTo, easy_of};
 
 /// The three transfer channels a callable can take over.
@@ -409,7 +409,7 @@ fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -
         return Err(throw_error(req, "ValueError", &text));
     }
     let easy = easy_of(req, object)?;
-    let code = easy.set_str(option, Some(value));
+    let code = easy.set_str(req, option, Some(value));
     saved(req, object, code)
 }
 
@@ -418,7 +418,11 @@ fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -
 pub(crate) fn set_url(req: &mut Request, object: PhpObject, url: &[u8]) -> Set {
     if basedir(req) {
         let easy = easy_of(req, object)?;
-        easy.set_long(c::CURLOPT_PROTOCOLS, c::CURLPROTO_ALL & !c::CURLPROTO_FILE);
+        easy.set_long(
+            req,
+            c::CURLOPT_PROTOCOLS,
+            c::CURLPROTO_ALL & !c::CURLPROTO_FILE,
+        );
     }
     option_str(req, object, c::CURLOPT_URL, url)
 }
@@ -517,7 +521,7 @@ fn set_hook(
     }
     let handler = callable(req, value, option, in_array)?;
     *payload(req, object)?.hook_mut(hook) = handler;
-    easy_of(req, object)?.set_hook(hook);
+    easy_of(req, object)?.set_hook(req, hook);
     saved(req, object, 0)
 }
 
@@ -612,7 +616,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
     if which == StreamOpt::Stderr {
         let easy = easy_of(req, object)?;
         let file = what.and_then(|(_, fd)| CFile::open(fd));
-        code = easy.set_stderr(file);
+        code = easy.set_stderr(req, file);
     }
     if let Some(old) = old {
         req.release(old);
@@ -644,7 +648,7 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
         return Ok(false);
     };
     let easy = easy_of(req, object)?;
-    let code = easy.set_slist(option, list);
+    let code = easy.set_slist(req, option, list);
     saved(req, object, code)
 }
 
@@ -655,14 +659,14 @@ fn set_post_fields(req: &mut Request, object: PhpObject, value: &Value) -> Set {
     if let Some(array) = value.as_array().copied() {
         if array.is_empty() {
             let easy = easy_of(req, object)?;
-            let code = easy.set_post_fields(b"");
+            let code = easy.set_post_fields(req, b"");
             return saved(req, object, code);
         }
         return crate::file::build_mime(req, object, array);
     }
     let body = with_string(req, &value, <[u8]>::to_vec)?;
     let easy = easy_of(req, object)?;
-    let code = easy.set_post_fields(&body);
+    let code = easy.set_post_fields(req, &body);
     saved(req, object, code)
 }
 
@@ -675,7 +679,7 @@ fn set_share(req: &mut Request, object: PhpObject, value: &Value) -> Set {
     let Some(handle) = crate::share::share_of(req, share) else {
         return saved(req, object, 0);
     };
-    easy_of(req, object)?.set_share(&handle);
+    easy_of(req, object)?.set_share(req, handle);
     req.addref(&share.as_value());
     let old = payload(req, object)?.share.replace(share);
     if let Some(old) = old {
@@ -702,7 +706,7 @@ pub(crate) fn setopt(
         payload(req, object)?.err = 48;
         return Err(argument_error(req, "ValueError", 2, tail));
     };
-    let easy: Easy = easy_of(req, object)?;
+    let easy: EasyId = easy_of(req, object)?;
     match kind {
         Opt::Channel(chan) => set_channel(req, object, chan, value, option, in_array),
         Opt::Hook(hook) => set_hook(req, object, hook, value, option, in_array),
@@ -714,10 +718,10 @@ pub(crate) fn setopt(
                     Level::Notice,
                     "CURLOPT_SSL_VERIFYHOST no longer accepts the value 1, value 2 will be used instead",
                 );
-                let code = easy.set_long(option, 2);
+                let code = easy.set_long(req, option, 2);
                 return saved(req, object, code);
             }
-            let code = easy.set_long(option, n);
+            let code = easy.set_long(req, option, n);
             saved(req, object, code)
         }
         Opt::Long | Opt::Protocols => {
@@ -730,7 +734,7 @@ pub(crate) fn setopt(
                 );
                 return Ok(false);
             }
-            let code = easy.set_long(option, n);
+            let code = easy.set_long(req, option, n);
             saved(req, object, code)
         }
         Opt::SafeUpload => {
@@ -761,7 +765,7 @@ pub(crate) fn setopt(
         }
         Opt::NullableStr => {
             if matches!(value.deref().as_ref(), ValueRef::Null) {
-                let code = easy.set_str(option, None);
+                let code = easy.set_str(req, option, None);
                 return saved(req, object, code);
             }
             let text = with_string(req, value, <[u8]>::to_vec)?;
@@ -790,12 +794,12 @@ pub(crate) fn setopt(
         }
         Opt::OffT => {
             let n = to_long(req, &value.deref())?;
-            let code = easy.set_off(option, n);
+            let code = easy.set_off(req, option, n);
             saved(req, object, code)
         }
         Opt::PostRedir => {
             let n = to_long(req, &value.deref())?;
-            let code = easy.set_long(option, n & c::CURL_REDIR_POST_ALL);
+            let code = easy.set_long(req, option, n & c::CURL_REDIR_POST_ALL);
             saved(req, object, code)
         }
         Opt::Path => {
@@ -814,13 +818,14 @@ pub(crate) fn setopt(
                 ));
             }
             let on = truthy(req, &value.deref());
-            easy.set_debug(on);
-            easy.set_long(c::CURLOPT_VERBOSE, i64::from(on));
+            easy.set_debug(req, on);
+            easy.set_long(req, c::CURLOPT_VERBOSE, i64::from(on));
             saved(req, object, 0)
         }
         Opt::Share => set_share(req, object, value),
         Opt::Blob => {
-            let code = with_string(req, value, |blob| easy.set_blob(option, blob))?;
+            let blob = with_string(req, value, <[u8]>::to_vec)?;
+            let code = easy.set_blob(req, option, &blob);
             saved(req, object, code)
         }
     }

@@ -60,6 +60,14 @@ abi::CloneObjWith
 abi::Compiled
 abi::ConstArray
 abi::ConstValue
+abi::Coroutine
+abi::Coroutine::destroy
+abi::Coroutine::init
+abi::Coroutine::release
+abi::Coroutine::resume
+abi::Coroutine::status
+abi::Coroutine::suspend
+abi::CoroutineStatus
 abi::CurrentPlace
 abi::DebugInfo
 abi::Dependency
@@ -156,6 +164,8 @@ abi::FromArgument::hold
 abi::Header
 abi::Header::header
 abi::Header::register
+abi::HoldsCoroutine
+abi::HoldsCoroutine::coroutine
 abi::IniStage
 abi::IniVerdict
 abi::Instance
@@ -239,6 +249,9 @@ abi::Observed::walk
 abi::ObservedFiber
 abi::ObservedFiber::destroyed
 abi::ObservedFiber::fiber
+abi::ObservedFiber::has_caller
+abi::ObservedFiber::is_fiber
+abi::ObservedFiber::resumed_by
 abi::ObservedFiber::status
 abi::ObservedFiber::threw
 abi::ObserverHandlers

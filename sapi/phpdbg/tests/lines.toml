@@ -1,0 +1,642 @@
+# phpdbg's own lines, each run by `xtask witness` under the pinned phpdbg
+# (oracle.toml's [sapi]) and then under this crate's, in one directory laid
+# afresh, and held equal: a startup that ends the process under an ini of the
+# line's own, which a fence cannot carry (#1634; #1975, as #2468 ruled). No
+# byte here is the oracle's; the oracle's run is the expectation. The grammar
+# is xtask/src/witness/host.rs's.
+
+# A refusal answered after every extension started, at `zend_post_startup`
+# inside `php_module_startup`: opcache's `ACCEL_LOG_FATAL` in
+# `accel_post_startup` for `opcache.file_cache_only` with no
+# `opcache.file_cache`. php ends the process there, before phpdbg reads its
+# line further, so the file named on the line is never run (#1943).
+# `zend_accel_error` writes the time `asctime` prints and the process's id
+# before its message.
+[[line]]
+name = "post-startup-refused"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "-qrr", "/nonexistent/t.php"]
+mask = [['(?m)^.{24} \(\d+\): ', '<asctime> (<pid>): ']]
+
+# An extension whose engine start refuses, php's `MINIT` returning `FAILURE`
+# (ADR-0010): `ffi.preload` naming a header that is not there. php ends the
+# process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed
+# `MINIT` (`Z/main/main.c:1505-1507`), before the host does anything of its
+# own (#1802). phpdbg displays nothing under its `display_errors` and logs
+# each diagnostic as its log function does before it is booted, a line on
+# stdout; under `display_errors=1` each is logged, then displayed, before the
+# next, in the order `php_error_cb` writes them; under
+# `display_errors=stderr` the display goes to stderr, as `php_error_cb`
+# writes it for a host named `phpdbg`, and the log stays on stdout.
+[[line]]
+name = "startup-refused"
+args = ["-qrr", "-n", "-d", "ffi.preload=/nonexistent/startup-refused.h", "/nonexistent/t.php"]
+[[line.then]]
+args = ["-qrr", "-n", "-d", "display_errors=1", "-d", "fatal_error_backtraces=0", "-d", "ffi.preload=/nonexistent/startup-refused.h", "/nonexistent/t.php"]
+[[line.then]]
+args = ["-qrr", "-n", "-d", "display_errors=stderr", "-d", "fatal_error_backtraces=0", "-d", "ffi.preload=/nonexistent/startup-refused.h", "/nonexistent/t.php"]
+
+# A session at the prompt: the program laid as `t.php` (or the file a line
+# names) in the line's directory, the commands on stdin, and an init file
+# laid as `init` where `-i` names it. A session that loops is cut at
+# `head`, its first cycles.
+
+# `-e` compiles with extended info (`Z/sapi/phpdbg/phpdbg.c:1250`, `:1498`):
+# the main op array of `f(1)`'s echo is eight oplines with its `EXT_STMT`,
+# `EXT_FCALL_BEGIN` and `EXT_FCALL_END`, and five without; the listing goes to
+# the second stream (#1822).
+[[line]]
+name = "extended-info-compiles-php-s-oplines-into-the-listing"
+args = ["-qIb", "-n", "-e", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f($a) { return $a; }\necho f(1);\n" }
+stdin = "print exec\nq\n"
+
+# The same listing without `-e` (#1822).
+[[line]]
+name = "without-extended-info-the-listing-is-five-oplines"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f($a) { return $a; }\necho f(1);\n" }
+stdin = "print exec\nq\n"
+
+# `-rr` runs the file and quits with php's quitting flag set, so a run that
+# ends normally writes no closing notice.
+[[line]]
+name = "run-twice-on-the-line-quits-without-the-closing-notice"
+args = ["-qrr", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php echo \"x\\n\";\n" }
+
+# `-rr` over a program that exits with 3.
+[[line]]
+name = "run-twice-on-the-line-quits-with-the-program-s-exit-status"
+args = ["-qrr", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php echo \"x\\n\"; exit(3);\n" }
+
+# Under `-rr` the loop checks nothing between handlers, so an uncaught
+# throwable stops at no prompt: the run's end reports it and the status is its
+# fatal's.
+[[line]]
+name = "run-twice-on-the-line-reports-an-uncaught-throwable-at-the-end"
+args = ["-qrrb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php throw new Exception(\"boo\");\n" }
+
+# The init file's commands run before the startup run, in its request, a line
+# at a time: a line that names no command writes its error with the line and
+# the next line still runs (`-qrrb`).
+[[line]]
+name = "the-init-file-runs-before-the-startup-run"
+args = ["-qrrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$i = 1;\necho $x ?? \"unset\", \"\\n\";\n", "init" = "b 3\nev $x = 7\nnope\n" }
+stdin = ""
+
+# The same init file under `-qrb`, whose startup run stops at the breakpoint
+# the file set.
+[[line]]
+name = "the-init-file-runs-before-the-startup-run-that-stops"
+args = ["-qrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$i = 1;\necho $x ?? \"unset\", \"\\n\";\n", "init" = "b 3\nev $x = 7\nnope\n" }
+stdin = "q\n"
+
+# An init line that names no command is quoted as php's lexer left it, each
+# quoted word unquoted in place over its opening quote and the tail kept.
+[[line]]
+name = "an-unrecognized-init-line-is-quoted-as-the-lexer-left-it"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho 1;\n", "init" = "echo \"cmd\"\nfoo \"ab\" 'c\\'d' x\n" }
+stdin = "q\n"
+
+# Without `-b`, notices and errors are coloured whether or not stdout is a
+# terminal, the prompt never.
+[[line]]
+name = "notices-and-errors-are-coloured-unless-boring"
+args = ["-qrr", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$i = 1;\necho $x ?? \"unset\", \"\\n\";\n", "init" = "b 3\nev $x = 7\nnope\n" }
+stdin = ""
+
+# An uncaught throwable's report under `-qrr`, coloured.
+[[line]]
+name = "an-uncaught-throwable-is-coloured-unless-boring"
+args = ["-qrr", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php throw new Exception(\"boo\");\n" }
+
+# A run at the prompt under `-qIb`.
+[[line]]
+name = "the-prompt-is-never-coloured"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"x\\n\";\n" }
+stdin = "r\nq\n"
+
+# A cycle's end exports the breakpoints as `break` lines, and the next cycle
+# starts its tables empty and its count at zero: the init file numbers its
+# line #0 again, the lines run again after it with nothing written, and the
+# breakpoints still stop. The file's lines are past the eighth: under it php
+# lists a file's breakpoints off a packed table it reads as a hash, which
+# drops rows or crashes.
+[[line]]
+name = "a-cycle-starts-the-breakpoints-over-and-carries-them"
+args = ["-qrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n\n\n\n\n\n\n$a = 1;\n$b = 2;\n$c = 3;\necho \"x\\n\";\n", "init" = "b 9\n" }
+stdin = "c\nb 9\nb 10\ninfo break\nq\n"
+
+# A deleted breakpoint is not carried into the next cycle, and the numbers
+# close up.
+[[line]]
+name = "a-deleted-breakpoint-is-not-carried-and-the-numbers-close-up"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction foo() { echo \"foo\\n\"; }\nfunction bar() { echo \"bar\\n\"; }\nfunction baz() { echo \"baz\\n\"; }\nfoo();\nbar();\nbaz();\n" }
+stdin = "b foo\nb bar\nb del 0\nr\nc\nb baz\ninfo break\nr\nq\n"
+
+# `info` with no sub-command writes the execution context's overview: in the
+# init file, before the context is compiled; at the prompt the compile left,
+# with the main op array's sizes; and at a breakpoint, executing, with what
+# the last handler answered. The tables' sizes are what each build loads, and
+# are masked.
+[[line]]
+name = "info-writes-the-execution-context-overview"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\nfunction f($x) { $y = $x; return $y; }\nf(1);\n", "init" = "info\n" }
+stdin = "info\nb f\nr\ninfo\nq\n"
+mask = [['(?m)^(Classes|Functions|Constants)( +)\d+$', '$1${2}N']]
+
+# `-v` clears quietness, so a step writes each opline the loop reaches to
+# stderr; `set break` disables one breakpoint and `set breaks` all, and a
+# restart starts the cycle over with the line's flags, the breakpoints on and
+# quietness as `-v` left it, the one disabled carried enabled.
+[[line]]
+name = "set-breaks-and-quiet-read-as-php-writes-them-across-a-cycle"
+args = ["-qvb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f($x) {\n  $y = $x + 1;\n  return $y;\n}\necho f(1), \"\\n\";\necho \"end\\n\";\n" }
+stdin = "b f\nr\ns\nn\nset break 0 off\nset quiet\nset breaks off\nset breaks\nr\ny\nset breaks\nset quiet\ninfo break\nq\n"
+
+# An init file's code block runs where its `:>` stands, its lines joined with
+# nothing between them, a comment and a blank line among them skipped, as
+# `phpdbginit code`: what it defines the program finds, and what it raises
+# names that file (`-qb -n`).
+[[line]]
+name = "an-init-code-block-runs-as-phpdbginit-code"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho $x ?? \"unset\", \"\\n\";\nf();\n", "init" = "<:\n$x = 5;\nfunction f() { echo \"f\\n\"; }\n  echo \"a\";\n# comment\n\n echo $undef, \"b\\n\";\n:>\nev $x\n" }
+stdin = "q\n"
+
+# An init file's code block runs where its `:>` stands, its lines joined with
+# nothing between them, a comment and a blank line among them skipped, as
+# `phpdbginit code`: what it defines the program finds, and what it raises
+# names that file (`-qrb -n`).
+[[line]]
+name = "an-init-code-block-runs-as-phpdbginit-code-under-r"
+args = ["-qrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho $x ?? \"unset\", \"\\n\";\nf();\n", "init" = "<:\n$x = 5;\nfunction f() { echo \"f\\n\"; }\n  echo \"a\";\n# comment\n\n echo $undef, \"b\\n\";\n:>\nev $x\n" }
+stdin = "q\n"
+
+# An init file's code block runs where its `:>` stands, its lines joined with
+# nothing between them, a comment and a blank line among them skipped, as
+# `phpdbginit code`: what it defines the program finds, and what it raises
+# names that file (`-qrrb -n`).
+[[line]]
+name = "an-init-code-block-runs-as-phpdbginit-code-under-rr"
+args = ["-qrrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho $x ?? \"unset\", \"\\n\";\nf();\n", "init" = "<:\n$x = 5;\nfunction f() { echo \"f\\n\"; }\n  echo \"a\";\n# comment\n\n echo $undef, \"b\\n\";\n:>\nev $x\n" }
+stdin = ""
+
+# What a code block leaves pending, a parse error, is rendered by the next
+# `ev`, which writes nothing else.
+[[line]]
+name = "a-parse-error-a-code-block-leaves-is-the-next-ev-s"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho $x ?? \"unset\", \"\\n\";\nf();\n", "init" = "<:\n$y =\n:>\nev 2\nev 3\n" }
+stdin = "q\n"
+
+# A throwable nothing catches stops the loop first, at a prompt with no
+# listing of `phpdbginit code` to show, and the next `ev` renders it.
+[[line]]
+name = "a-throwable-a-code-block-leaves-stops-the-loop-first"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho $x ?? \"unset\", \"\\n\";\nf();\n", "init" = "<:\necho \"a\\n\";\nthrow new Exception(\"boo\");\n:>\nev 1\nev 2\n" }
+stdin = "c\nq\n"
+
+# A fatal ends the reading of the init files, its log listing nothing, and
+# stops at no prompt in the first cycle.
+[[line]]
+name = "a-fatal-in-a-code-block-ends-the-reading-of-the-init-files"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho $x ?? \"unset\", \"\\n\";\nf();\n", "init" = "<:\nini_set(\"memory_limit\", \"2M\");\nstr_repeat(\"x\", 4 << 20);\n:>\nev 2\n" }
+stdin = "c\nq\n"
+
+# php runs the init file before it compiles the context, so where the context
+# does not compile, what the file writes comes first, the compiler's log after
+# it, and the prompt stands in the request the file ran in, with what it left;
+# a `print exec` there compiles the context again and writes the log again.
+[[line]]
+name = "an-init-file-runs-before-a-context-that-does-not-compile"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n$b =\n", "init" = "b 3\nev $x = 3\nprint exec\n" }
+stdin = "ev $x\nprint exec\nc\nr\nq\n"
+
+# `print exec` in the init file compiles the context there, with its notice,
+# once a cycle, and the context's own compile after the file writes it again.
+[[line]]
+name = "print-exec-in-the-init-file-compiles-the-context-first"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n", "init" = "print exec\nev 5\nprint exec\n" }
+stdin = "q\n"
+
+# `run` in the init file compiles the context and runs it there, the
+# breakpoints the file set not stopping it, and the file's next lines run
+# after it, an `ev` among them writing nothing; under `-rr` the startup run
+# then finds the program executing and asks, and the end of the input quits.
+[[line]]
+name = "run-in-the-init-file-runs-the-program-there"
+args = ["-qrrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n", "init" = "ev 1\nb 3\nrun\nev 2\nb 3\n" }
+stdin = "q\n"
+
+# Without `-rr` php's cycle ends and starts again with the init file, which
+# runs the program again, for as long as the session lasts: its first cycles.
+[[line]]
+name = "run-in-the-init-file-runs-the-program-every-cycle"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n", "init" = "ev 1\nb 3\nrun\nev 2\nb 3\n" }
+stdin = "q\n"
+head = 4096
+
+# With no `-i` and no `-I`, the init files are `PHP_CONFIG_FILE_PATH`'s
+# `.phpdbginit`, one in each directory of `PHP_INI_SCAN_DIR`, and the working
+# directory's; php's walk of `PHP_INI_SCAN_DIR` cuts it at its first `:` where
+# it stands in the environment, so the program reads the first directory
+# alone, and so does every cycle after the first.
+[[line]]
+name = "the-default-init-files-are-read-where-php-reads-them"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho getenv(\"PHP_INI_SCAN_DIR\"), \"\\n\";\n", "a/.phpdbginit" = "ev \"A\"\n", "b/.phpdbginit" = "ev \"B\"\n", ".phpdbginit" = "ev \"W\"\n" }
+env = { PHP_INI_SCAN_DIR = "{dir}/a:{dir}/b" }
+stdin = "r\nr\nq\n"
+
+# Under `-r` php's startup run compiles a context that does not compile once
+# the session is fully started, so its log stands at a prompt, and nothing is
+# logged from there: a `run` or a `print exec` refused again writes nothing,
+# and `ev` no warning.
+[[line]]
+name = "a-refusal-inside-the-log-leaves-its-guard-set"
+args = ["-qrb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "ev 2\nr\nev $x\nprint exec\nr\nq\n"
+
+# Such a refusal bails out of the log past the line that clears its guard, so
+# nothing is logged after it either.
+[[line]]
+name = "a-refusal-inside-the-log-leaves-its-guard-set-at-print-exec"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "print exec\nprint exec\nc\nprint exec\nq\n"
+
+# The same, a `run` at the prompt included.
+[[line]]
+name = "a-refusal-inside-the-log-leaves-its-guard-set-at-run"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "r\nev 1\nc\nr\nev $x\nr\nq\n"
+
+# `run` with arguments in the init file rebuilds `argv` in the request the
+# file runs in and runs the program there, as php's `run` does with
+# `php_build_argv`, every cycle: the first cycles.
+[[line]]
+name = "run-with-arguments-in-the-init-file-runs-inline"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $argv[1] ?? \"none\", \" \", $argc, \"\\n\";\n", "init" = "ev 1\nrun foo\nev 2\n" }
+stdin = "q\n"
+head = 4096
+
+# Under `-r`, a yes to the question the startup run asks after the init file
+# ran the program has php's next cycle resubmit the line the file read after
+# its run, which the cleaned cycle bails out of without asking: the first
+# cycles.
+[[line]]
+name = "a-yes-after-the-init-file-s-run-resubmits-the-line-it-read-after"
+args = ["-qrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $argv[1] ?? \"none\", \" \", $argc, \"\\n\";\n", "init" = "ev 1\nrun\nb 3\n" }
+stdin = "y\nq\n"
+head = 4096
+
+# With no line after the run, the next cycle runs it again and asks again: the
+# first cycles.
+[[line]]
+name = "a-yes-after-the-init-file-s-run-asks-again-where-nothing-followed-it"
+args = ["-qrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $argv[1] ?? \"none\", \" \", $argc, \"\\n\";\n", "init" = "run bar\n" }
+stdin = "y\ny\nq\n"
+head = 4096
+
+# `run <file` in the init file opens the file as the program's stdin in the
+# request the file runs in, `STDIN` registered again over it, and runs the
+# program there, as php's `run` does with its `stdin_file`; under `-r` the
+# startup run asks after it: the first cycles (`-qb -n`).
+[[line]]
+name = "run-with-a-stdin-file-in-the-init-file-runs-inline"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"got \", fgets(STDIN);\n", "init" = "run <data.txt\nev 3\n", "data.txt" = "line one\nline two\n" }
+stdin = "q\n"
+head = 4096
+
+# `run <file` in the init file opens the file as the program's stdin in the
+# request the file runs in, `STDIN` registered again over it, and runs the
+# program there, as php's `run` does with its `stdin_file`; under `-r` the
+# startup run asks after it: the first cycles (`-qrb -n`).
+[[line]]
+name = "run-with-a-stdin-file-in-the-init-file-runs-inline-under-r"
+args = ["-qrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"got \", fgets(STDIN);\n", "init" = "run <data.txt\nev 3\n", "data.txt" = "line one\nline two\n" }
+stdin = "y\nq\n"
+head = 4096
+
+# A yes to a `run` the init file reads after its run has php count a startup
+# run and read on, so the startup run asks again after the file, where the
+# last cycle kept no line to resubmit; where it kept one, the startup run
+# resubmits it and asks nothing (`-qb -n`, stdin "y\nq\n").
+[[line]]
+name = "a-yes-to-a-second-run-in-the-init-file-reads-on"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"prog \", $argv[1] ?? \"none\", \"\\n\";\n", "init" = "run x\nprint exec\nrun y\n" }
+stdin = "y\nq\n"
+
+# A yes to a `run` the init file reads after its run has php count a startup
+# run and read on, so the startup run asks again after the file, where the
+# last cycle kept no line to resubmit; where it kept one, the startup run
+# resubmits it and asks nothing (`-qrb -n`, stdin "y\nq\n").
+[[line]]
+name = "a-yes-to-a-second-run-in-the-init-file-reads-on-under-r"
+args = ["-qrb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"prog \", $argv[1] ?? \"none\", \"\\n\";\n", "init" = "run x\nprint exec\nrun y\n" }
+stdin = "y\nq\n"
+
+# A yes to a `run` the init file reads after its run has php count a startup
+# run and read on, so the startup run asks again after the file, where the
+# last cycle kept no line to resubmit; where it kept one, the startup run
+# resubmits it and asks nothing (`-qb -n`, stdin "n\ny\n").
+[[line]]
+name = "a-yes-to-a-second-run-in-the-init-file-reads-on-a-no-first"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"prog \", $argv[1] ?? \"none\", \"\\n\";\n", "init" = "run x\nprint exec\nrun y\n" }
+stdin = "n\ny\n"
+
+# After `clean` over a context that does not compile, php's next cycle
+# compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its log
+# stands at a prompt that writes nothing: `ev`'s value is written, its newline
+# not; nothing is logged there; a refusal there bails out of it, and so does
+# `c` (`-qb -n`, then "clean\nev 1\nq\n"). The counts `clean` writes are each
+# build's, and are masked.
+[[line]]
+name = "after-clean-the-refused-context-stands-at-an-invisible-prompt-ev"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "clean\nev 1\nq\n"
+mask = [['(?m)^(Classes|Functions|Constants)( +)\d+$', '$1${2}N']]
+
+# After `clean` over a context that does not compile, php's next cycle
+# compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its log
+# stands at a prompt that writes nothing: `ev`'s value is written, its newline
+# not; nothing is logged there; a refusal there bails out of it, and so does
+# `c` (`-qb -n`, then "clean\nprint exec\nprint exec\nq\n"). The counts
+# `clean` writes are each build's, and are masked.
+[[line]]
+name = "after-clean-the-refused-context-stands-at-an-invisible-prompt-print"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "clean\nprint exec\nprint exec\nq\n"
+mask = [['(?m)^(Classes|Functions|Constants)( +)\d+$', '$1${2}N']]
+
+# After `clean` over a context that does not compile, php's next cycle
+# compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its log
+# stands at a prompt that writes nothing: `ev`'s value is written, its newline
+# not; nothing is logged there; a refusal there bails out of it, and so does
+# `c` (`-qb -n`, then "clean\nev $x\nc\nev $x\nprint exec\nq\n"). The counts
+# `clean` writes are each build's, and are masked.
+[[line]]
+name = "after-clean-the-refused-context-stands-at-an-invisible-prompt-c"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "clean\nev $x\nc\nev $x\nprint exec\nq\n"
+mask = [['(?m)^(Classes|Functions|Constants)( +)\d+$', '$1${2}N']]
+
+# After `clean` over a context that does not compile, php's next cycle
+# compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its log
+# stands at a prompt that writes nothing: `ev`'s value is written, its newline
+# not; nothing is logged there; a refusal there bails out of it, and so does
+# `c` (`-qrb -n`, then "clean\nev 1\nq\n"). The counts `clean` writes are each
+# build's, and are masked.
+[[line]]
+name = "after-clean-the-refused-context-stands-at-an-invisible-prompt-ev-under-r"
+args = ["-qrb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "clean\nev 1\nq\n"
+mask = [['(?m)^(Classes|Functions|Constants)( +)\d+$', '$1${2}N']]
+
+# After `clean` over a context that does not compile, php's next cycle
+# compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its log
+# stands at a prompt that writes nothing: `ev`'s value is written, its newline
+# not; nothing is logged there; a refusal there bails out of it, and so does
+# `c` (`-qrb -n`, then "clean\nprint exec\nprint exec\nq\n"). The counts
+# `clean` writes are each build's, and are masked.
+[[line]]
+name = "after-clean-the-refused-context-stands-at-an-invisible-prompt-print-under-r"
+args = ["-qrb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "clean\nprint exec\nprint exec\nq\n"
+mask = [['(?m)^(Classes|Functions|Constants)( +)\d+$', '$1${2}N']]
+
+# After `clean` over a context that does not compile, php's next cycle
+# compiles it under `PHPDBG_DISCARD_OUTPUT` once fully started, so its log
+# stands at a prompt that writes nothing: `ev`'s value is written, its newline
+# not; nothing is logged there; a refusal there bails out of it, and so does
+# `c` (`-qrb -n`, then "clean\nev $x\nc\nev $x\nprint exec\nq\n"). The counts
+# `clean` writes are each build's, and are masked.
+[[line]]
+name = "after-clean-the-refused-context-stands-at-an-invisible-prompt-c-under-r"
+args = ["-qrb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction (\n" }
+stdin = "clean\nev $x\nc\nev $x\nprint exec\nq\n"
+mask = [['(?m)^(Classes|Functions|Constants)( +)\d+$', '$1${2}N']]
+
+# phpdbg opens the context as a stream (`php_stream_open_for_zend_ex`) to
+# compile it, so the id after `STDERR` is spent before the program runs, at
+# the prompt's `r`.
+[[line]]
+name = "compiling-the-context-spends-a-resource-id"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php var_dump(STDIN, STDERR, fopen(__FILE__, \"r\"));\n" }
+stdin = "r\nq\n"
+
+# The same in an init file's `run`; `run <file` registers the three handles
+# again after that compile: the first cycles.
+[[line]]
+name = "compiling-the-context-spends-a-resource-id-at-an-init-file-s-run"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php var_dump(STDIN, STDERR, fopen(__FILE__, \"r\"));\n", "init" = "run\n", "data.txt" = "x\n" }
+stdin = "q\n"
+head = 4096
+
+# The same in an init file's `run x`; `run <file` registers the three handles
+# again after that compile: the first cycles.
+[[line]]
+name = "compiling-the-context-spends-a-resource-id-at-an-init-file-s-run-with-arguments"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php var_dump(STDIN, STDERR, fopen(__FILE__, \"r\"));\n", "init" = "run x\n", "data.txt" = "x\n" }
+stdin = "q\n"
+head = 4096
+
+# The same in an init file's `run <data.txt`; `run <file` registers the three
+# handles again after that compile: the first cycles.
+[[line]]
+name = "compiling-the-context-spends-a-resource-id-at-an-init-file-s-run-with-a-stdin-file"
+args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php var_dump(STDIN, STDERR, fopen(__FILE__, \"r\"));\n", "init" = "run <data.txt\n", "data.txt" = "x\n" }
+stdin = "q\n"
+head = 4096
+
+# `exec` to a second context that does not compile, at the prompt of a first
+# that does not: its refusal is logged with a prompt inside the log, at which
+# nothing is compiled, so `ev` evaluates; under `-r` the prompt `exec` is read
+# at stands inside the first refusal's log, and the second refusal is logged
+# nowhere (`-qb -n`).
+[[line]]
+name = "ev-after-exec-to-a-second-refused-context-evaluates"
+args = ["-qb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php function (", "b.php" = "<?php class {" }
+stdin = "exec b.php\nev 1\nc\nev 2\nq\n"
+
+# `exec` to a second context that does not compile, at the prompt of a first
+# that does not: its refusal is logged with a prompt inside the log, at which
+# nothing is compiled, so `ev` evaluates; under `-r` the prompt `exec` is read
+# at stands inside the first refusal's log, and the second refusal is logged
+# nowhere (`-qrb -n`).
+[[line]]
+name = "ev-after-exec-to-a-second-refused-context-evaluates-under-r"
+args = ["-qrb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php function (", "b.php" = "<?php class {" }
+stdin = "exec b.php\nev 1\nc\nev 2\nq\n"
+
+# A breakpoint on an opline of a function, a method or a file's code is
+# resolved before each opline of that op array runs, where its name is the op
+# array's as declared, and php says so each time
+# (`phpdbg_resolve_op_array_breaks`, `Z/sapi/phpdbg/phpdbg_bp.c:536`), with
+# the number and the address of the breakpoint the opline table took last: a
+# function's. The address is masked.
+[[line]]
+name = "an-opline-breakpoint-is-resolved-before-each-opline-of-a-function"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nfunction bar() {\n  return 2;\n}\nif (true) {\n  function baz() {\n    return 3;\n  }\n}\nfoo();\nbar();\nbaz();\n" }
+stdin = "b foo#0\nr\nc\nq\n"
+mask = [['\(opline #\d+\)', '(opline #N)']]
+
+# A breakpoint on an opline of a function, a method or a file's code is
+# resolved before each opline of that op array runs, where its name is the op
+# array's as declared, and php says so each time
+# (`phpdbg_resolve_op_array_breaks`, `Z/sapi/phpdbg/phpdbg_bp.c:536`), with
+# the number and the address of the breakpoint the opline table took last: a
+# function declared where the run reaches it. The address is masked.
+[[line]]
+name = "an-opline-breakpoint-is-resolved-before-each-opline-of-a-pending-function"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nfunction bar() {\n  return 2;\n}\nif (true) {\n  function baz() {\n    return 3;\n  }\n}\nfoo();\nbar();\nbaz();\n" }
+stdin = "b baz#0\nr\nc\nq\n"
+mask = [['\(opline #\d+\)', '(opline #N)']]
+
+# A breakpoint on an opline of a function, a method or a file's code is
+# resolved before each opline of that op array runs, where its name is the op
+# array's as declared, and php says so each time
+# (`phpdbg_resolve_op_array_breaks`, `Z/sapi/phpdbg/phpdbg_bp.c:536`), with
+# the number and the address of the breakpoint the opline table took last: an
+# opline past the op array's end, refused. The address is masked.
+[[line]]
+name = "an-opline-breakpoint-is-resolved-before-each-opline-of-past-the-op-array-s-end"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nfunction bar() {\n  return 2;\n}\nif (true) {\n  function baz() {\n    return 3;\n  }\n}\nfoo();\nbar();\nbaz();\n" }
+stdin = "b baz#8\nr\nq\n"
+mask = [['\(opline #\d+\)', '(opline #N)']]
+
+# The same for a method's opline.
+[[line]]
+name = "an-opline-breakpoint-is-resolved-before-each-opline-of-a-method"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nclass A {\n  function b() {\n    $x = 2;\n    return $x;\n  }\n}\n(new A)->b();\n" }
+stdin = "b A::b#0\nr\nc\nq\n"
+mask = [['\(opline #\d+\)', '(opline #N)']]
+
+# The notice names the breakpoint and the address the opline table took last,
+# which need not be the one resolved: foo's notice names bar's breakpoint.
+[[line]]
+name = "a-resolved-notice-names-the-opline-table-s-last-breakpoint"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nfunction bar() {\n  return 2;\n}\nif (true) {\n  function baz() {\n    return 3;\n  }\n}\nfoo();\nbar();\nbaz();\n" }
+stdin = "b foo#0\nb bar#0\nr\nc\nc\nq\n"
+mask = [['\(opline #\d+\)', '(opline #N)']]
+
+# A file's own code is resolved by its path.
+[[line]]
+name = "a-file-s-own-code-is-resolved-by-its-path"
+args = ["-qIb", "-n", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nfunction bar() {\n  return 2;\n}\nif (true) {\n  function baz() {\n    return 3;\n  }\n}\nfoo();\nbar();\nbaz();\n" }
+stdin = "b {dir}/t.php:#0\nr\nq\n"
+mask = [['\(opline #\d+\)', '(opline #N)']]
+
+# php runs an included file whose code is its one `RETURN` of a constant only
+# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6569-6572`);
+# under phpdbg's it executes it, so the loop steps that `RETURN` and a
+# breakpoint on its line stops there. The address php prints is masked.
+[[line]]
+name = "an-included-file-of-declarations-alone-is-stepped-a-line"
+args = ["-qIb", "-n", "{dir}/g.php"]
+files = { "inc.php" = "<?php\nfunction bar() {\n  $b = 3;\n  return $b;\n}\n", "g.php" = "<?php\ninclude __DIR__ . '/inc.php';\nbar();\n" }
+stdin = "b {dir}/inc.php:6\nr\nc\nq\n"
+mask = [['#\d{10,}', '#N']]
+
+# php runs an included file whose code is its one `RETURN` of a constant only
+# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6569-6572`);
+# under phpdbg's it executes it, so the loop steps that `RETURN` and a
+# breakpoint on its opline stops there. The address php prints is masked.
+[[line]]
+name = "an-included-file-of-declarations-alone-is-stepped-its-opline"
+args = ["-qIb", "-n", "{dir}/g.php"]
+files = { "inc.php" = "<?php\nfunction bar() {\n  $b = 3;\n  return $b;\n}\n", "g.php" = "<?php\ninclude __DIR__ . '/inc.php';\nbar();\n" }
+stdin = "b {dir}/inc.php:#0\nr\nc\nq\n"
+mask = [['#\d{10,}', '#N']]
+
+# `b f.php:#N` keeps the file as typed (`phpdbg_set_breakpoint_file_opline`,
+# `Z/sapi/phpdbg/phpdbg_bp.c:738`): a relative name is pending under that name
+# and never resolves against the compiled `/abs/f.php`.
+[[line]]
+name = "a-relative-file-opline-breakpoint-keeps-its-name"
+args = ["-qIb", "-n", "{dir}/f.php"]
+files = { "f.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nclass A { function b() { return 2; } }\nfoo();\n(new A)->b();\n" }
+stdin = "b f.php:#0\nr\nq\n"
+mask = [['#\d{10,}', '#N']]
+
+# An absolute one at a prompt with a frame of that file's code executing is
+# resolved at once (`phpdbg_resolve_opline_break`, `:591-603`), and resolved
+# again before each opline of that code. The address is masked.
+[[line]]
+name = "an-absolute-file-opline-breakpoint-resolves-in-an-executing-frame"
+args = ["-qIb", "-n", "{dir}/f.php"]
+files = { "f.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nclass A { function b() { return 2; } }\nfoo();\n(new A)->b();\n" }
+stdin = "b foo\nr\nb {dir}/f.php:#0\nc\nq\n"
+mask = [['#\d{10,}', '#N']]
+
+# php keeps a function, method or file opline breakpoint, once resolved, in
+# `PHPDBG_BREAK_OPLINE` too, and `info break` lists it under `Opline
+# Breakpoints` with its address and the kind it was resolved from
+# (`phpdbg_print_breakpoints`), above the named tables. The address is masked.
+[[line]]
+name = "info-break-lists-resolved-opline-breakpoints-under-the-opline-table"
+args = ["-qIb", "-n", "{dir}/f.php"]
+files = { "f.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nclass A { function b() { return 2; } }\nfoo();\n(new A)->b();\n" }
+stdin = "b foo\nr\nb foo#0\nb A::b#0\nb {dir}/f.php:#0\ni b\nq\n"
+mask = [['#\d{10,}', '#N']]
+
+# A second opline breakpoint on one opline of one function or method is
+# refused after its notice and its number given back
+# (`Z/sapi/phpdbg/phpdbg_bp.c:676-682`, `:719-725`): nothing is added to the
+# named tables, while the opline table, which php updated before it refused,
+# keeps the refused number under a resolved opline. The address is masked.
+[[line]]
+name = "a-second-opline-breakpoint-on-one-opline-is-refused"
+args = ["-qIb", "-n", "{dir}/f.php"]
+files = { "f.php" = "<?php\nfunction foo() {\n  $a = 1;\n  return $a;\n}\nclass A { function b() { return 2; } }\nfoo();\n(new A)->b();\n" }
+stdin = "b foo#0\nb foo#0\nb baz#0\nb baz#0\nb A::b#0\nb A::b#0\ni b\nq\n"
+mask = [['#\d{10,}', '#N']]

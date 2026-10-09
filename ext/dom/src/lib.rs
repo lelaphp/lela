@@ -68,7 +68,7 @@ use document::{XML_NS, XMLNS_NS};
 use map::{Map, MapKind};
 use object::{Code, Dom, Extra, State};
 use props::Prop;
-pub use xpath::{Proxy, XPathCallbacks};
+pub use xpath::{CallbacksAt, Proxy, XPathCallbacks};
 
 /// Core's interfaces the lists implement and hand out, named for
 /// `implements` and the types that hold them.
