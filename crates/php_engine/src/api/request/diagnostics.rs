@@ -1183,6 +1183,24 @@ impl Request {
         self.diagnostics.error_reporting = level;
     }
 
+    /// `body` called with `EG(error_reporting)` lowered by `levels`, and the
+    /// word as it stood put back after, whatever `body` set it to: what
+    /// `php_http.c`'s `http_connect` does around a connect, so a masked
+    /// diagnostic is not shown and still reaches `error_get_last()` and a
+    /// user's handler.
+    pub fn reporting_without<T>(
+        &mut self,
+        levels: &[Level],
+        body: impl FnOnce(&mut Request) -> T,
+    ) -> T {
+        let standing = self.error_reporting();
+        let masked = levels.iter().fold(0, |m, level| m | level.bit());
+        self.set_error_reporting(standing & !masked);
+        let answer = body(self);
+        self.set_error_reporting(standing);
+        answer
+    }
+
     /// The write `error_reporting(int $error_level)` makes
     /// (`Z/Zend/zend_builtin_functions.c:470-497`): the entry's value
     /// replaced by the number's decimal text, `zend_long_to_str`, past

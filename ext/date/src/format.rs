@@ -832,15 +832,17 @@ fn strftime(
 /// `gmstrftime(string $format, ?int $timestamp = null): string|false`,
 /// deprecated since 8.1. `%z` is the C library's: glibc reads the
 /// `tm_gmtoff` php sets to 0, and macOS's the process's `TZ`, whatever
-/// the time's zone, in php as here.
+/// the time's zone, in php as here; the recipe's `TZ` is `UTC` on both
+/// sides of a witness (#1130).
 ///
 /// ```php
 /// date_default_timezone_set('Europe/Amsterdam');
-/// var_dump(gmstrftime('%Y-%m-%d %H:%M:%S %Z %c', 1700000000));
+/// var_dump(gmstrftime('%Y-%m-%d %H:%M:%S %Z %z %c', 1700000000), @gmstrftime('%z', 0));
 /// ```
 /// ```expect
 /// Deprecated: Function gmstrftime() is deprecated since 8.1, use IntlDateFormatter::format() instead in %s on line 3
-/// string(48) "2023-11-14 22:13:20 GMT Tue Nov 14 22:13:20 2023"
+/// string(54) "2023-11-14 22:13:20 GMT +0000 Tue Nov 14 22:13:20 2023"
+/// string(5) "+0000"
 /// ```
 ///
 /// Under the request's `LC_TIME`.

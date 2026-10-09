@@ -54,9 +54,8 @@ impl Built {
         let wanted = package
             .targets
             .iter()
-            .filter(|t| t.required_features.is_empty())
             .filter(|t| match targets {
-                Targets::Tests => t.test,
+                Targets::Tests => t.test && t.required_features.is_empty(),
                 Targets::All => !t.kind.iter().any(|k| k == "custom-build"),
             })
             .map(|t| t.name.clone())
@@ -187,13 +186,36 @@ struct Target {
     required_features: Vec<String>,
 }
 
-/// Which of a package's targets a run builds.
+/// Which of a package's targets a run builds, and under which features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Targets {
-    /// The targets `cargo test` runs: each with `test = true`.
+    /// The targets `cargo test` runs in the default build, `--tests`: each
+    /// with `test = true` and no required feature.
     Tests,
-    /// Every target but `build.rs`: `--all-targets`.
+    /// Every target but `build.rs` under every feature each crate
+    /// declares, `--all-targets --all-features`: the set `clippy` lints
+    /// under (#140). A module behind a feature is a target the run must
+    /// reach as any other: `php_bundle::test`, each extension's line in
+    /// the bundle's `enabled()`, `sapi/cli`'s `php-linked`. Every feature,
+    /// because no two in the workspace conflict and the lanes already
+    /// build each but one: the `php` binary turns on the bundle's
+    /// extensions, and `php-linked` its `linked` and `test`. The one is
+    /// `php_bundle`'s `jit`, in the set on purpose: it enables nothing
+    /// until `php_jit` exists, and then the tier is linted with the rest.
+    /// A selected crate's features no longer depend on what else the run
+    /// selects, so its reading out of the one run is the one a run over
+    /// it alone gives.
     All,
+}
+
+impl Targets {
+    /// The flags that select these targets, and their features.
+    fn flags(self) -> &'static [&'static str] {
+        match self {
+            Targets::Tests => &["--tests"],
+            Targets::All => &["--all-targets", "--all-features"],
+        }
+    }
 }
 
 /// One run over a set of crates.
@@ -217,9 +239,10 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    /// `cargo <args> --message-format=json -p <each crate>` at `root`,
-    /// read back crate by crate. `targets` says which of each package's
-    /// targets the run must build for the crate to be whole.
+    /// `cargo <args> <targets' flags> --message-format=json -p <each
+    /// crate>` at `root`, read back crate by crate. `targets` says which
+    /// of each package's targets the run builds, and must build for the
+    /// crate to be whole.
     pub(crate) fn of(
         root: &Path,
         args: &[&str],
@@ -252,6 +275,7 @@ impl Run {
         let mut command = Command::new("cargo");
         command
             .args(args)
+            .args(targets.flags())
             .args(["--message-format=json", "--color", "never"])
             .current_dir(root)
             .stdout(Stdio::piped())

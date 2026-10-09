@@ -1390,6 +1390,12 @@ pub fn now() -> Result<Datetime> {
         .with_context(|| format!("{text} is not a datetime"))
 }
 
+/// The instant `days` days before now, in seconds since 1970: where a
+/// window over the log starts.
+pub(crate) fn days_ago(days: i64) -> Result<i64> {
+    Ok(epoch_seconds(&now()?)? - days * 86_400)
+}
+
 /// Seconds since 1970-01-01 of a reading's `at`, which `now` writes in UTC
 /// to the second; what a window such as the fourteen days of the silent
 /// query (harness-design.md §7) is measured in.

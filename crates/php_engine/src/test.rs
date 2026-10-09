@@ -98,21 +98,25 @@ impl Engine {
     /// fresh-process adapter runs it there, so an `include` of the
     /// witness's own file reads the same file under both.
     pub fn serve_capture_in(&self, dir: &Path, name: &[u8], source: &str, sink: Capture) -> Served {
-        self.serve_capture_with(dir, name, source, sink, false)
+        self.serve_capture_with(dir, name, source, Vec::new(), sink, false)
     }
 
-    /// [`Engine::serve_capture_in`] with every native the request enters
-    /// recorded in [`Served::entered`]: what the witness lane's linked
-    /// adapter serves a fence through, so coverage is what the fence ran
-    /// (harness §4.5 condition 2, revision 58).
+    /// [`Engine::serve_capture_in`] under the environment `env`, what
+    /// `getenv()`, `$_ENV` and `$_SERVER` read, with every native the
+    /// request enters recorded in [`Served::entered`]: what the witness
+    /// lane's linked adapter serves a fence through, under the recipe's
+    /// environment as the oracle runs (#1077), so coverage is what the
+    /// fence ran (harness §4.5 condition 2, revision 58). The others
+    /// serve under none, so what a test reads is the same on any shell.
     pub fn serve_capture_traced_in(
         &self,
         dir: &Path,
         name: &[u8],
         source: &str,
+        env: Vec<(Vec<u8>, Vec<u8>)>,
         sink: Capture,
     ) -> Served {
-        self.serve_capture_with(dir, name, source, sink, true)
+        self.serve_capture_with(dir, name, source, env, sink, true)
     }
 
     fn serve_capture_with(
@@ -120,6 +124,7 @@ impl Engine {
         dir: &Path,
         name: &[u8],
         source: &str,
+        env: Vec<(Vec<u8>, Vec<u8>)>,
         mut sink: Capture,
         traced: bool,
     ) -> Served {
@@ -142,6 +147,7 @@ impl Engine {
         .collect();
         let description = RequestDescription {
             argv: vec![name.to_vec()],
+            env,
             server,
             sapi_name: String::from("cli"),
             script_name: Some(name.to_vec()),

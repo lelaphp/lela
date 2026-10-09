@@ -1,0 +1,120 @@
+//! A callback C calls from a thread of its own while the request runs
+//! PHP code (#1640): the thread waits, and the request serves the call
+//! at its next interrupt check, or lends itself to the thread while it
+//! blocks, or ends with the call still posted and C reads zero. The C
+//! side is a Rust function with C's calling convention, reached from
+//! PHP code by `FFI::cast` of its address; its thread writes what the
+//! callback returned to a file of its own, which the test reads.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use php_ext::test::{Capture, Engine};
+
+/// The callback's type as C sees it.
+type Callback = extern "C" fn(i32) -> i32;
+
+/// Where the thread a test's C library starts writes what the callback
+/// returned to it.
+fn returned_to(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("ffi-threads-{name}"))
+}
+
+/// A C library that keeps the callback and calls it from a thread of
+/// its own, `delay` after the call that handed it over, which has
+/// returned by then.
+fn call_later(callback: Callback, delay: Duration, name: &'static str) {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        let returned = callback(21);
+        std::fs::write(returned_to(name), returned.to_string()).ok();
+    });
+}
+
+extern "C" fn later_sleeping(callback: Callback) {
+    call_later(callback, Duration::from_millis(100), "sleeping");
+}
+
+extern "C" fn later_ending(callback: Callback) {
+    call_later(callback, Duration::from_millis(100), "ending");
+}
+
+/// One request that hands `later` a callback, and what the callback
+/// returned to C once the thread wrote it: `None` where the thread was
+/// still waiting ten seconds on.
+fn served(later: extern "C" fn(Callback), name: &str, source: &str) -> (String, Option<String>) {
+    let out = returned_to(name);
+    std::fs::create_dir_all(env!("CARGO_TARGET_TMPDIR")).ok();
+    std::fs::remove_file(&out).ok();
+    let at = later as usize;
+    let source = format!(
+        "<?php\n$ffi = FFI::cdef('typedef int (*cb)(int); typedef void (*later)(cb);');\n$later = $ffi->cast('later', {at});\n{source}"
+    );
+    let engine = Engine::builder()
+        .extensions(&[
+            php_ext_lexbor::extension(),
+            php_ext_uri::extension(),
+            php_ext_standard::extension(),
+            php_ext_ffi::extension(),
+        ])
+        .ini("ffi.enable", "1")
+        .ini("html_errors", "0")
+        .build();
+    let served = engine.serve_capture(&source, Capture::default());
+    let stdout = String::from_utf8_lossy(&served.stdout).into_owned();
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        if let Ok(returned) = std::fs::read_to_string(&out) {
+            return (stdout, Some(returned));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    (stdout, None)
+}
+
+/// The thread calls back while the request sleeps in `usleep`: the
+/// request is lent to it, so the callback runs inside the sleep, on the
+/// thread, and C reads what it returned.
+#[test]
+fn a_callback_posted_while_the_request_sleeps_is_served_in_the_sleep() {
+    let (stdout, returned) = served(
+        later_sleeping,
+        "sleeping",
+        r#"$t0 = hrtime(true);
+$later(function ($x) use ($t0) {
+    echo "called $x ", hrtime(true) - $t0 < 600000000 ? "inside" : "after", " the sleep\n";
+    return $x * 2;
+});
+usleep(1200000);
+echo "slept\n";
+"#,
+    );
+    assert_eq!(stdout, "called 21 inside the sleep\nslept\n");
+    assert_eq!(returned.as_deref(), Some("42"));
+}
+
+/// The thread calls back while the request is in a native that does not
+/// lend it, and the request reaches its next check only to end there,
+/// on `max_execution_time`: the call is still posted at the request's
+/// end, nothing calls the callable, and C reads zero.
+#[test]
+fn a_callback_still_posted_at_the_request_s_end_returns_zero() {
+    let (stdout, returned) = served(
+        later_ending,
+        "ending",
+        r#"set_time_limit(1);
+$later(function ($x) { echo "called $x\n"; return $x * 2; });
+shell_exec("sleep 1.5");
+echo "not reached\n";
+"#,
+    );
+    assert!(
+        stdout.contains("Maximum execution time of 1 second exceeded"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("called") && !stdout.contains("not reached"),
+        "{stdout}"
+    );
+    assert_eq!(returned.as_deref(), Some("0"));
+}

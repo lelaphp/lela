@@ -6,8 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
-# A target built only with a feature no run turns on, as `sapi/cli`'s
-# `php-linked` is: the crate is whole without it.
+# A target built only with a feature, as `sapi/cli`'s `php-linked` is: a
+# test run, which turns on no feature, builds the crate whole without it,
+# and a clippy run, under every feature, lints it (#140).
 [features]
 extra = []
 

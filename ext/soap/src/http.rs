@@ -11,10 +11,10 @@ use std::time::Duration;
 
 use php_ext::call::{call, lookup_function, new_object};
 use php_ext::coerce::{numeric_string, to_callable};
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{
     Handshake, OwnedStream as _, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx,
-    Streams as _, Xport,
+    Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_standard::md5::Md5;
@@ -628,10 +628,58 @@ fn default_timeout(req: &Request) -> Option<Duration> {
 /// `CONNECT` the proxy answers and the method php picks for the tunnel.
 /// None where the connect, the `CONNECT` or the handshake failed.
 ///
-/// php lowers `error_reporting` around the whole of it, so the warning
-/// its connect raises for a refused connect is not shown; the engine's
-/// connect raises none, and the warnings of the TLS layer stand.
+/// `error_reporting` is lowered by `E_WARNING`, `E_NOTICE`,
+/// `E_USER_WARNING` and `E_USER_NOTICE` around the whole of it
+/// (`php_http.c:192-193`, `:323`), so the warning a refused connect
+/// raises is not shown and still reaches `error_get_last()` and a handler;
+/// the client's `stream_context` is handed to the connect, which reads
+/// its `socket` options (`bindto`) itself.
+///
+/// ```php
+/// $s = stream_socket_server('tcp://127.0.0.1:0'); $at = stream_socket_get_name($s, false); fclose($s);
+/// $c = new SoapClient(null, ['location' => "http://$at/", 'uri' => 'urn:x']);
+/// try { $c->f(); } catch (SoapFault $e) { echo $e->getMessage(), "\n"; }
+/// echo str_replace($at, 'ADDR', error_get_last()['message']), "\n";
+/// set_error_handler(function ($no, $str) { echo "$no $str\n"; return true; });
+/// try { $c->f(); } catch (SoapFault $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(error_reporting() === E_ALL);
+/// ini_set('default_socket_timeout', 1);
+/// $s = stream_socket_server('tcp://127.0.0.1:0'); $at = stream_socket_get_name($s, false);
+/// $f = stream_socket_server('tcp://127.0.0.1:0'); $from = stream_socket_get_name($f, false); fclose($f);
+/// $c = new SoapClient(null, ['location' => "http://$at/", 'uri' => 'urn:x', 'stream_context' => stream_context_create(['socket' => ['bindto' => $from]])]);
+/// try { $c->f(); } catch (SoapFault $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(stream_socket_get_name(stream_socket_accept($s, 1), true) === $from);
+/// ```
+/// ```expect
+/// Could not connect to host
+/// SoapClient::__doRequest(): connect() failed: Connection refused
+/// 2 SoapClient::__doRequest(): connect() failed: Connection refused
+/// Could not connect to host
+/// bool(true)
+/// Error Fetching http headers
+/// bool(true)
+/// ```
 fn http_connect(
+    req: &mut Request,
+    this: PhpObject,
+    uri: &UriStruct,
+    use_ssl: bool,
+    context: Option<StreamCtx>,
+    use_proxy: &mut bool,
+) -> R<Option<Owner<Stream>>> {
+    const MASKED: [Level; 4] = [
+        Level::Warning,
+        Level::Notice,
+        Level::UserWarning,
+        Level::UserNotice,
+    ];
+    req.reporting_without(&MASKED, |req| {
+        connect(req, this, uri, use_ssl, context, use_proxy)
+    })
+}
+
+/// [`http_connect`] under its lowered `error_reporting`.
+fn connect(
     req: &mut Request,
     this: PhpObject,
     uri: &UriStruct,
@@ -673,8 +721,19 @@ fn http_connect(
         socket: SocketOptions::default(),
         context,
     };
-    let Ok(stream) = req.xport_create(&name, xport)? else {
-        return Ok(None);
+    let stream = match req.xport_create(&name, xport)? {
+        Ok(stream) => stream,
+        // `ERR_RETURN(error_string, error_text, "connect() failed: %s")`
+        // with no `error_string` asked for.
+        Err(XportFailure { text, .. }) => {
+            let text = if text.is_empty() {
+                "Unspecified error"
+            } else {
+                &text
+            };
+            docref(req, Level::Warning, &format!("connect() failed: {text}"));
+            return Ok(None);
+        }
     };
     if !(*use_proxy && use_ssl) {
         return Ok(Some(stream));

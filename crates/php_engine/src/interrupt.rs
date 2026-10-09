@@ -1,7 +1,7 @@
 //! The interrupt (design §5.6, §5.8; `CONTEXT.md`, Interrupt): the
 //! engine's half of the one thing on a request that the execution timer,
-//! a periodic interrupt and signal delivery raise and nothing else
-//! touches. The interrupt
+//! a periodic interrupt, signal delivery and a deferred FFI callback
+//! raise and nothing else touches. The interrupt
 //! itself is [`crate::api::request::Interrupt`], on the request, because
 //! signal delivery is an extension's and the compiled tier tests the
 //! same atomic once per loop iteration through its `ExitCtx`

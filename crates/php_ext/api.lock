@@ -567,6 +567,8 @@ request::Interrupt::raise
 request::Interrupt::raised
 request::Interrupt::receive_signals
 request::Invalidation
+request::Lent
+request::Lent::at
 request::MethodRow
 request::MethodRow::class
 request::MethodRow::scope
@@ -624,11 +626,10 @@ request::Receiving
 request::Reentry
 request::Reentry::defer
 request::Reentry::give_back
-request::Reentry::lend
-request::Reentry::new
-request::Reentry::reclaim
+request::Reentry::serve_waiting
 request::Reentry::take_deferred
 request::Reentry::take_lent
+request::Reentry::wait
 request::Refused
 request::Request
 request::Request::absolutize
@@ -645,6 +646,7 @@ request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
 request::Request::bailing_out
+request::Request::blocking
 request::Request::buffer_handler
 request::Request::buffer_handler_started
 request::Request::buffer_status
@@ -782,6 +784,7 @@ request::Request::raised
 request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear
+request::Request::reentry
 request::Request::register_constant
 request::Request::register_shutdown_function
 request::Request::register_tick_function
@@ -790,6 +793,7 @@ request::Request::registered
 request::Request::release
 request::Request::remove_begin_handler
 request::Request::remove_end_handler
+request::Request::reporting_without
 request::Request::request_headers
 request::Request::request_method
 request::Request::request_time
@@ -996,6 +1000,7 @@ request::Unresolved
 request::Upload
 request::UrlStat
 request::UrlStat::found
+request::Waited
 request::Whence
 request::Whence::from_int
 request::WrapperOp
@@ -1233,6 +1238,7 @@ values::PhpObject::replace_table
 values::PhpObject::row
 values::PhpObject::row_place
 values::PhpObject::row_ref
+values::PhpObject::set_class
 values::PhpObject::set_prop
 values::PhpObject::set_row
 values::PhpObject::set_slot

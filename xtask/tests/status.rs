@@ -761,6 +761,28 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     );
 }
 
+/// The pin's tag and commit as `[source]` states them (#66), beside its
+/// path: the section names the pin whole, which the corpus section clones
+/// at, so no reader parses `oracle.toml` for either.
+#[test]
+fn oracle_states_the_pins_tag_and_commit() {
+    let root = scratch("oracle-source");
+    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let json = oracle_json(&root, None, None);
+    assert_eq!(json["pin"]["tag"], source.tag.as_str());
+    assert_eq!(json["pin"]["commit"], source.commit.as_str());
+    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains(&format!("| tag |  | {} | the pin's |", source.tag)),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!("| commit |  | {} | the pin's |", source.commit)),
+        "{md}"
+    );
+}
+
 /// The corpus CI checks out (#1713): the pin's tag, commit and count of
 /// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
 /// key of the commit and a digest of the patterns, the same on every call,
@@ -978,6 +1000,107 @@ fn a_row_clips_its_message_and_leaves_zeros_out_and_the_json_has_them() {
     assert_eq!(reading["message"], phpt.message.as_str());
     assert_eq!(reading["numbers"]["passed"], 0);
     assert_eq!(reading["numbers"]["percent"], 0.0);
+}
+
+/// The week's ticket closes (#1157), from the stores alone: a close is
+/// written into the main worktree's store by the merge that lands it, and
+/// a withdrawal into the checkout's where its session ran, so a worktree
+/// counts both. A ready record, a read, a refused close and a close older
+/// than the week count nothing.
+#[test]
+fn tickets_counts_the_weeks_closes_in_the_main_worktrees_store_and_the_checkouts() {
+    let main = scratch("tickets");
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "first",
+    ]);
+    run(&["worktree", "add", "-q", "-b", "t1", "wt"]);
+    let checkout = main.join("wt");
+    for file in ["seams.toml", "oracle.toml", "docs/divergence.toml"] {
+        std::fs::create_dir_all(checkout.join(file).parent().unwrap()).unwrap();
+        std::fs::copy(main.join(file), checkout.join(file)).unwrap();
+    }
+    let now = xtask::reading::now().unwrap();
+    let ticket = |scope: &str, status: Status, numbers: &[(&str, i64)], at: &str| {
+        let mut r = Reading::new("ticket", scope);
+        r.status = status;
+        r.at = if at.is_empty() {
+            now
+        } else {
+            at.parse().unwrap()
+        };
+        for (key, n) in numbers {
+            r.numbers.insert((*key).to_owned(), (*n).into());
+        }
+        r
+    };
+    Store::of_workspace(&main)
+        .record(&[
+            ticket("1", Status::Pass, &[("opens", 2), ("withdrawn", 0)], ""),
+            ticket("2", Status::Pass, &[("opens", 1), ("withdrawn", 0)], ""),
+            ticket("3", Status::Pass, &[("opens", 4)], ""),
+            ticket("4", Status::Fail, &[("opens", 3), ("withdrawn", 0)], ""),
+            ticket(
+                "5",
+                Status::Pass,
+                &[("opens", 9), ("withdrawn", 0)],
+                "2020-01-01T00:00:00Z",
+            ),
+        ])
+        .unwrap();
+    Store::of_workspace(&checkout)
+        .record(&[
+            ticket("6", Status::Pass, &[("opens", 0), ("withdrawn", 1)], ""),
+            ticket("7", Status::Pass, &[("criteria", 2)], ""),
+        ])
+        .unwrap();
+
+    let (ok, md, err) = status(&checkout, &["--section", "tickets"]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        md,
+        "the last 7 days: 3 closes, 1 of them withdrawals, opened 3 tickets, 1.00 per close\n"
+    );
+    let (ok, json, err) = status(&checkout, &["--section", "tickets", "--format", "json"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["closes"], 3);
+    assert_eq!(json["withdrawn"], 1);
+    assert_eq!(json["opens"], 3);
+    assert_eq!(json["opens_per_close"], 1.0);
+    // The main worktree reads its own store once, and has no withdrawal.
+    let (ok, md, err) = status(&main, &["--section", "tickets"]);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains(": 2 closes, 0 of them withdrawals, opened 3 tickets"),
+        "{md}"
+    );
+    let (ok, _, err) = status(&main, &["--section", "tickets", "--tracked"]);
+    assert!(
+        !ok && err.contains("--tracked renders the tree alone"),
+        "{err}"
+    );
 }
 
 /// `git` is volatile: the log and the status of the working tree.

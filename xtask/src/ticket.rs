@@ -1385,15 +1385,45 @@ fn counted(
         .map_or_else(String::new, |first| first.rule.clone());
     match act {
         Act::Close(verdict, successors, _) => {
-            reading.count("opens", successors.tickets().len() as u64)?;
-            reading.count("withdrawn", u64::from(verdict.withdrawn().is_some()))?;
+            reading.count(OPENS, successors.tickets().len() as u64)?;
+            reading.count(WITHDRAWN, u64::from(verdict.withdrawn().is_some()))?;
         }
         Act::Ready(successors) => {
-            reading.count("opens", successors.tickets().len() as u64)?;
+            reading.count(OPENS, successors.tickets().len() as u64)?;
         }
         Act::Read => {}
     }
     Ok(())
+}
+
+/// The successors a ready record or a close names, counted.
+const OPENS: &str = "opens";
+/// Whether a close was a withdrawal, 1 or 0: counted on a close alone,
+/// which is how a close's reading is told from a ready record's.
+const WITHDRAWN: &str = "withdrawn";
+
+/// A close as its reading says it, read back from the store: what it
+/// opened and whether it withdrew the ticket (#1157).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Closed {
+    pub(crate) opens: u64,
+    pub(crate) withdrawn: bool,
+}
+
+impl Closed {
+    /// The close `reading` records; none for a reading of a read, a ready
+    /// record or a merge that left a ticket open, and for a close refused.
+    pub(crate) fn of(reading: &Reading) -> Option<Closed> {
+        let count = |key| match reading.numbers.get(key)? {
+            crate::reading::Number::Int(n) => u64::try_from(*n).ok(),
+            crate::reading::Number::Float(_) => None,
+        };
+        (reading.instrument == INSTRUMENT && reading.status == Status::Pass).then_some(())?;
+        Some(Closed {
+            withdrawn: count(WITHDRAWN)? > 0,
+            opens: count(OPENS)?,
+        })
+    }
 }
 
 /// The tickets the merge commits `since..HEAD` name, each closed as it

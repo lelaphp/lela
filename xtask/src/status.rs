@@ -20,7 +20,9 @@ use serde_json::{Map, Value, json};
 
 pub(crate) mod every;
 mod graph;
+mod invocation;
 mod parity;
+mod tickets;
 pub(crate) use every::PerReading;
 
 use crate::api_check::{self, lock::Lock};
@@ -91,8 +93,8 @@ impl<'a> Against<'a> {
         Ok(files.readings)
     }
 
-    /// The checkout's store, for a section [`checkouts_alone`] names,
-    /// which `render` refuses against the tree before it asks.
+    /// The checkout's store, for a section [`refuse_under_tracked`] refuses
+    /// against the tree before it asks.
     fn checkout(self) -> Result<&'a Store> {
         match self {
             Against::Checkout(store) => Ok(store),
@@ -103,11 +105,11 @@ impl<'a> Against<'a> {
     }
 }
 
-/// The sections whose rows are this checkout's alone, its store's log or
-/// what its machine holds, which no tracked region carries: `--tracked`
-/// refuses them.
-fn checkouts_alone(section: Section) -> bool {
-    matches!(
+/// Refuses `section` under `--tracked` where its rows are this checkout's
+/// alone, its store's log or what its machine holds, which no tracked
+/// region carries.
+fn refuse_under_tracked(section: Section, against: Against<'_>) -> Result<()> {
+    let alone = matches!(
         section,
         Section::Phpt
             | Section::Track
@@ -117,7 +119,17 @@ fn checkouts_alone(section: Section) -> bool {
             | Section::Oracle
             | Section::Corpus
             | Section::Parity
-    )
+            | Section::Tickets
+    );
+    if alone && matches!(against, Against::Tree) {
+        bail!(
+            "the {} section is this checkout's, and --tracked renders the tree alone",
+            section
+                .to_possible_value()
+                .map_or_else(String::new, |v| v.get_name().to_owned())
+        );
+    }
+    Ok(())
 }
 
 /// Render one section to a string in the asked format; `week` picks one
@@ -142,14 +154,7 @@ pub fn render(
     if session_id.is_some() && section != Section::Permits {
         bail!("--session-id names this session of the permits section; use --section permits");
     }
-    if matches!(against, Against::Tree) && checkouts_alone(section) {
-        bail!(
-            "the {} section is this checkout's, and --tracked renders the tree alone",
-            section
-                .to_possible_value()
-                .map_or_else(String::new, |v| v.get_name().to_owned())
-        );
-    }
+    refuse_under_tracked(section, against)?;
     let readings = against.readings()?;
     let (rows, columns): (Vec<Row>, Columns) = match section {
         Section::Rules => (
@@ -189,6 +194,7 @@ pub fn render(
         Section::PortMap => (instrument(&readings, port_map::INSTRUMENT), INSTRUMENT),
         Section::Crosscheck => (instrument(&readings, crosscheck::INSTRUMENT), INSTRUMENT),
         Section::Ticket => (instrument(&readings, "ticket"), TICKET),
+        Section::Tickets => return tickets::render(against.checkout()?, root, format),
         Section::Track => (
             last_run(&against.checkout()?.history(track_work::INSTRUMENT)?),
             TRACK,
@@ -220,6 +226,7 @@ pub fn render(
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
+        Section::Invocation => return invocation::render(root, format),
         Section::Parity => {
             return parity::render(manifest, against.checkout()?, root, format);
         }
@@ -347,9 +354,10 @@ pub(crate) fn session_of_stdin() -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The map and the local facts, the latter followed, when `session_id`
-/// is known and the log holds a denial of its own, by the rules this
-/// session fired with their counts (§4.6, "this session"). As Markdown
+/// The map and the local facts, the latter followed by the week's ticket
+/// closes in one line ([`tickets`], #1157) and, when `session_id` is
+/// known and the log holds a denial of its own, by the rules this session
+/// fired with their counts (§4.6, "this session"). As Markdown
 /// the two are one text, the map first; as JSON they are the object
 /// `{"map", "facts"}`, since the engine caps a context block and the hook
 /// hands them over as two (#64). The map is tracked and must exist; the
@@ -383,6 +391,9 @@ pub fn session(
         facts.push_str(UNRENDERED);
         facts.push('\n');
     }
+    // A log the week cannot be read from costs the line, never the block.
+    let week = tickets::line(store, root).unwrap_or_else(|err| format!("unread: {err:#}"));
+    write!(facts, "\n## tickets\n\n{week}\n").ok();
     if let Some(id) = session_id {
         let log = store.history(permit::INSTRUMENT)?;
         let rows: Vec<Row> = permit_rows(
@@ -1159,7 +1170,7 @@ fn instruments(
     let since = match window_days {
         Some(days) => {
             let days = i64::try_from(days).context("silent_days is past the calendar")?;
-            Some(reading::epoch_seconds(&reading::now()?)? - days * 86_400)
+            Some(reading::days_ago(days)?)
         }
         None => None,
     };
@@ -1511,9 +1522,11 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 }
 
 /// The `oracle` section: the pin as this machine has it (#36), from the
-/// pin and the process's environment alone. Five rows: the tree's
+/// pin and the process's environment alone. Seven rows: the tree's
 /// variable by name, its value and whether it is set; the promise's
-/// likewise; the pin's path and whether it is a directory; where
+/// likewise; the pin's path and whether it is a directory; its tag and
+/// commit as `[source]` states them, which the corpus section clones at
+/// (#66); where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
 /// pin's, or the absence it named; and the pinned php, its version, keg
 /// path and md5. CI reads the two names
@@ -1549,6 +1562,8 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             "pin": {
                 "path": pinned.display().to_string(),
                 "directory": pinned.is_dir(),
+                "tag": source.tag,
+                "commit": source.commit,
             },
             "found": {
                 "path": found.as_ref().ok().map(|p| p.display().to_string()),
@@ -1590,6 +1605,8 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 }
             )
             .ok();
+            writeln!(out, "| tag |  | {} | the pin's |", cell(&source.tag)).ok();
+            writeln!(out, "| commit |  | {} | the pin's |", cell(&source.commit)).ok();
             let (path, state) = match &found {
                 Ok(tree) => (
                     tree.display().to_string(),

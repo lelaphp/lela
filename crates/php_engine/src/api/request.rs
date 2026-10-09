@@ -191,10 +191,12 @@ pub use crate::interrupt::Periodic;
 /// asynchronous delivery raises this request's interrupt. The record is
 /// the engine's, since signal dispositions are the process's and an
 /// extension holds no atomic (ADR-0005). Beside it, [`Reentry`] is how a
-/// function C calls back reaches its request, lent during a call into C
-/// and otherwise a [`Deferred`] call the interrupt check serves.
+/// function C calls back reaches its request ([`Request::reentry`]):
+/// [`Lent`] while the request waits in a call into C or blocks
+/// ([`Request::blocking`]), and otherwise a [`Deferred`] call or one a
+/// thread waits on ([`Waited`]) that the interrupt check serves.
 pub use crate::signal::{
-    DEFERRED_WORDS, Deferred, Receiving, Reentry, SIGNAL_POST, Siginfo, take_signals,
+    DEFERRED_WORDS, Deferred, Lent, Receiving, Reentry, SIGNAL_POST, Siginfo, Waited, take_signals,
 };
 
 /// Which side of [`Request::fork`] the caller stands on, and the child's

@@ -41,14 +41,13 @@ mod preload;
 mod types;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_class;
 use php_ext::call::lookup_class;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, fatal, throw, throw_error};
-use php_ext::request::{Reentry, Request};
+use php_ext::request::Request;
 use php_ext::values::{ClassId, Emalloc};
 
 use crate::types::Types;
@@ -68,7 +67,6 @@ pub(crate) const PRELOAD: &str = "ffi.preload";
 struct State {
     types: Types,
     callbacks: Vec<call::Callback>,
-    reentry: Option<Arc<Reentry>>,
     classes: Option<Classes>,
     imported: Vec<(Vec<u8>, parse::Scope)>,
     heap: HashMap<usize, Emalloc>,
@@ -106,17 +104,6 @@ pub(crate) fn classes(req: &mut Request) -> Result<Classes, Thrown> {
 /// The request's type arena.
 pub(crate) fn types(req: &mut Request) -> &mut Types {
     &mut req.state::<State>().types
-}
-
-/// How a callback C calls reaches this request, made at the first call
-/// into C or the first callback.
-pub(crate) fn reentry(req: &mut Request) -> Arc<Reentry> {
-    if let Some(reentry) = &req.state::<State>().reentry {
-        return Arc::clone(reentry);
-    }
-    let reentry = Arc::new(Reentry::new(req.interrupt()));
-    req.state::<State>().reentry = Some(Arc::clone(&reentry));
-    reentry
 }
 
 /// `zend_throw_error(zend_ffi_exception_ce, ...)`.

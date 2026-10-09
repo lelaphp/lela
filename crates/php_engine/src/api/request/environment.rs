@@ -56,7 +56,16 @@ impl Environment {
 impl Request {
     /// `getenv(name)`: `sapi_getenv`, the request's own variable, which
     /// no name `HTTP_PROXY` begins with answers (bug #72573), then the
-    /// bytes the host's environment holds.
+    /// bytes the host's environment holds. The CLI's is the process's,
+    /// which the witness recipe clears and rebuilds (#1077):
+    ///
+    /// ```php
+    /// var_dump(getenv('TZ'), $_ENV['LANG'] ?? null);
+    /// ```
+    /// ```expect
+    /// string(3) "UTC"
+    /// string(1) "C"
+    /// ```
     #[must_use]
     pub fn env(&self, name: &[u8]) -> Option<&[u8]> {
         let proxy = b"HTTP_PROXY";
