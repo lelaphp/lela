@@ -228,6 +228,11 @@ fn suite(root: &Path, krate: &Crate) -> Result<Suite> {
             }
             return Ok(suite);
         }
+        // A test the skip did not reach would end every run again.
+        if run.ended.iter().all(|(name, _)| judged.contains(name)) {
+            suite.after = Some(format!("a skipped test ran again\n{}", tail(&stderr, 20)));
+            return Ok(suite);
+        }
         for (name, said) in run.ended {
             judged.push(name.clone());
             suite.failed.push((name, Ended::of(&said)));
