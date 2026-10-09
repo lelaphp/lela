@@ -408,7 +408,7 @@ fn assert(
         // code written before the throw, which `zend_throw_exception_hook`
         // is told of.
         let coded = |req: &mut Request, object: &PhpObject| -> Result<(), Thrown> {
-            let code = Owner::take(req, Value::int(E_ERROR));
+            let code = Owner::int(E_ERROR);
             php_ext::call::write_prop(req, object, b"code", code)
         };
         let thrown = if let Some(previous) = pending {
@@ -517,7 +517,7 @@ fn assert_options(
                 Some(callback) => Owner::take(req, callback),
                 None => match req.ini_get(b"assert.callback").map(<[u8]>::to_vec) {
                     Some(cb) if !cb.is_empty() => PhpString::new(req, &cb)?.into_value(),
-                    _ => Owner::take(req, Value::null()),
+                    _ => Owner::null(),
                 },
             };
             if let Some(value) = value {
@@ -540,5 +540,5 @@ fn assert_options(
         text.give_up(req);
         set?;
     }
-    Ok(Owner::take(req, Value::int(i64::from(old))))
+    Ok(Owner::int(i64::from(old)))
 }

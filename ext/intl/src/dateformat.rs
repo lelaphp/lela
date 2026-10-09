@@ -1100,7 +1100,7 @@ fn parse_text(
         };
         let key = PhpString::new(req, key.as_bytes())?;
         let key = Key::from_string(req, key);
-        table.set(req, key, Owner::take(req, Value::int(value)))?;
+        table.set(req, key, Owner::int(value))?;
     }
     let mut status = Code::ZERO;
     let dst = udatf.calendar_field(None, &mut status);
@@ -1111,7 +1111,7 @@ fn parse_text(
     }
     let key = PhpString::new(req, b"tm_isdst")?;
     let key = Key::from_string(req, key);
-    table.set(req, key, Owner::take(req, Value::int(i64::from(dst == 1))))?;
+    table.set(req, key, Owner::int(i64::from(dst == 1)))?;
     Ok(OrFalse::Value(Union::B(table)))
 }
 

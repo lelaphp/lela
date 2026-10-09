@@ -445,12 +445,7 @@ fn password_get_info(req: &mut Request, hash: PhpString) -> Result<Owner<PhpArra
                 Algo::Bcrypt => {
                     let cost = argon2::sscanf_long(hash.get(4..).unwrap_or_default())
                         .unwrap_or(BCRYPT_COST);
-                    set(
-                        req,
-                        &mut options,
-                        "cost",
-                        Owner::take(req, Value::int(cost)),
-                    )?;
+                    set(req, &mut options, "cost", Owner::int(cost))?;
                 }
                 Algo::Argon2(_) => {
                     let costs = argon2::get_info(hash);
@@ -458,25 +453,15 @@ fn password_get_info(req: &mut Request, hash: PhpString) -> Result<Owner<PhpArra
                         req,
                         &mut options,
                         "memory_cost",
-                        Owner::take(req, Value::int(costs.memory_cost)),
+                        Owner::int(costs.memory_cost),
                     )?;
-                    set(
-                        req,
-                        &mut options,
-                        "time_cost",
-                        Owner::take(req, Value::int(costs.time_cost)),
-                    )?;
-                    set(
-                        req,
-                        &mut options,
-                        "threads",
-                        Owner::take(req, Value::int(costs.threads)),
-                    )?;
+                    set(req, &mut options, "time_cost", Owner::int(costs.time_cost))?;
+                    set(req, &mut options, "threads", Owner::int(costs.threads))?;
                 }
             }
         }
     } else {
-        set(req, &mut array, "algo", Owner::take(req, Value::null()))?;
+        set(req, &mut array, "algo", Owner::null())?;
         let unknown = PhpString::new(req, b"unknown")?.into_value();
         set(req, &mut array, "algoName", unknown)?;
     }

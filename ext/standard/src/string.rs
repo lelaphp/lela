@@ -2348,7 +2348,7 @@ fn count_chars(
             array.set(
                 req,
                 Owner::take(req, Key::Int(long(inx))),
-                Owner::take(req, Value::int(long(*count))),
+                Owner::int(long(*count)),
             )?;
         }
     }

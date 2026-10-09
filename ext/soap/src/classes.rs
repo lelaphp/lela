@@ -149,8 +149,7 @@ impl SoapHeader {
             let data = Owner::take(req, data.deref());
             object.set_slot(req, 2, data)?;
         }
-        let must_understand = Owner::take(req, Value::bool(mustUnderstand));
-        object.set_slot(req, 3, must_understand)?;
+        object.set_slot(req, 3, Owner::bool(mustUnderstand))?;
         match actor {
             Some(Union::A(s)) => {
                 if s.len() > 2 {
@@ -162,8 +161,7 @@ impl SoapHeader {
             }
             Some(Union::B(n)) => {
                 if (1..=3).contains(&n) {
-                    let n = Owner::take(req, Value::int(n));
-                    object.set_slot(req, 4, n)?;
+                    object.set_slot(req, 4, Owner::int(n))?;
                 } else {
                     return Err(arg_value_error(
                         req,
@@ -432,8 +430,7 @@ fn clear_fault(req: &mut Request, object: PhpObject) -> R<()> {
         FaultSlot::Name,
         FaultSlot::HeaderFault,
     ] {
-        let null = Owner::take(req, Value::null());
-        set_fault_slot(req, object, slot, null)?;
+        set_fault_slot(req, object, slot, Owner::null())?;
     }
     let empty = string(req, b"")?;
     set_fault_slot(req, object, FaultSlot::Lang, empty)
@@ -558,8 +555,7 @@ impl SoapVar {
         let object = this.object();
         match encoding {
             None => {
-                let unknown = Owner::take(req, Value::int(model::ty::UNKNOWN_TYPE.into()));
-                object.set_slot(req, 0, unknown)?;
+                object.set_slot(req, 0, Owner::int(model::ty::UNKNOWN_TYPE.into()))?;
             }
             Some(t) => {
                 let known = i32::try_from(t)
@@ -572,8 +568,7 @@ impl SoapVar {
                         "is not a valid encoding",
                     ));
                 }
-                let t = Owner::take(req, Value::int(t));
-                object.set_slot(req, 0, t)?;
+                object.set_slot(req, 0, Owner::int(t))?;
             }
         }
         if !matches!(data.as_ref(), ValueRef::Null | ValueRef::Undef) {

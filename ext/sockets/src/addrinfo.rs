@@ -405,29 +405,24 @@ fn socket_addrinfo_explain(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let info = entry(req, address)?;
     let mut out = PhpArray::new(req)?;
-    put(
-        req,
-        &mut out,
-        "ai_flags",
-        Owner::take(req, Value::int(i64::from(info.flags))),
-    )?;
+    put(req, &mut out, "ai_flags", Owner::int(i64::from(info.flags)))?;
     put(
         req,
         &mut out,
         "ai_family",
-        Owner::take(req, Value::int(i64::from(info.family))),
+        Owner::int(i64::from(info.family)),
     )?;
     put(
         req,
         &mut out,
         "ai_socktype",
-        Owner::take(req, Value::int(i64::from(info.socktype))),
+        Owner::int(i64::from(info.socktype)),
     )?;
     put(
         req,
         &mut out,
         "ai_protocol",
-        Owner::take(req, Value::int(i64::from(info.protocol))),
+        Owner::int(i64::from(info.protocol)),
     )?;
     if let Some(name) = &info.canonname {
         let name = string(req, name)?;
@@ -436,12 +431,7 @@ fn socket_addrinfo_explain(
     let mut addr = PhpArray::new(req)?;
     match &info.addr {
         Addr::V4(v4) if info.family == libc::AF_INET => {
-            put(
-                req,
-                &mut addr,
-                "sin_port",
-                Owner::take(req, Value::int(i64::from(v4.port()))),
-            )?;
+            put(req, &mut addr, "sin_port", Owner::int(i64::from(v4.port())))?;
             let text = string(req, v4.ip().to_string().as_bytes())?;
             put(req, &mut addr, "sin_addr", text)?;
         }
@@ -450,7 +440,7 @@ fn socket_addrinfo_explain(
                 req,
                 &mut addr,
                 "sin6_port",
-                Owner::take(req, Value::int(i64::from(v6.port()))),
+                Owner::int(i64::from(v6.port())),
             )?;
             let text = string(req, v6.ip().to_string().as_bytes())?;
             put(req, &mut addr, "sin6_addr", text)?;

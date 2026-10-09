@@ -436,7 +436,7 @@ fn groups(
     for (i, &(beg, end)) in all.iter().enumerate() {
         let value = match slice(beg, end) {
             Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
-            None => Owner::take(req, Value::bool(false)),
+            None => Owner::bool(false),
         };
         let at = Key::Int(i64::try_from(i).unwrap_or(0));
         out.set(req, Owner::take(req, at), value)?;
@@ -452,7 +452,7 @@ fn groups(
             .filter(|(b, e)| b < e && *e <= subject.len());
         let value = match named {
             Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
-            None => Owner::take(req, Value::bool(false)),
+            None => Owner::bool(false),
         };
         let key = new_string(req, &name)?;
         let key = Key::from_string(req, key);
@@ -760,7 +760,7 @@ fn replace(
                         .filter(|(b, e)| b < e && *e <= subject.len());
                     let value = match named {
                         Some((b, e)) => new_string(req, &subject[b..e])?.into_value(),
-                        None => Owner::take(req, Value::bool(false)),
+                        None => Owner::bool(false),
                     };
                     let key = new_string(req, &name)?;
                     let key = Key::from_string(req, key);
@@ -1125,8 +1125,8 @@ pub(crate) fn mb_ereg_search_pos(
         .and_then(|region| region.groups().first().copied())
         .unwrap_or((0, 0));
     let mut out = PhpArray::new(req)?;
-    out.append(req, Owner::take(req, Value::int(i64::from(beg))))?;
-    out.append(req, Owner::take(req, Value::int(i64::from(end - beg))))?;
+    out.append(req, Owner::int(i64::from(beg)))?;
+    out.append(req, Owner::int(i64::from(end - beg)))?;
     Ok(OrFalse::Value(out))
 }
 

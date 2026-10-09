@@ -5,7 +5,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, Value};
+use php_ext::values::{Owner, PhpArray};
 
 use crate::constants as c;
 use crate::ffi::{Version, version};
@@ -57,27 +57,15 @@ fn add_str(
 
 fn array(req: &mut Request, d: &Version) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = Assoc::new(req)?;
-    out.add(
-        req,
-        "version_number",
-        Owner::take(req, Value::int(d.version_num)),
-    )?;
-    out.add(req, "age", Owner::take(req, Value::int(d.age)))?;
-    out.add(req, "features", Owner::take(req, Value::int(d.features)))?;
+    out.add(req, "version_number", Owner::int(d.version_num))?;
+    out.add(req, "age", Owner::int(d.age))?;
+    out.add(req, "features", Owner::int(d.features))?;
     let mut features = Assoc::new(req)?;
     for (name, bit) in FEATURES {
-        features.add(
-            req,
-            name,
-            Owner::take(req, Value::bool(d.features & bit != 0)),
-        )?;
+        features.add(req, name, Owner::bool(d.features & bit != 0))?;
     }
     out.add(req, "feature_list", features.value())?;
-    out.add(
-        req,
-        "ssl_version_number",
-        Owner::take(req, Value::int(d.ssl_version_num)),
-    )?;
+    out.add(req, "ssl_version_number", Owner::int(d.ssl_version_num))?;
     add_str(req, &mut out, "version", Some(&d.version))?;
     add_str(req, &mut out, "host", Some(&d.host))?;
     add_str(req, &mut out, "ssl_version", d.ssl_version.as_deref())?;
@@ -86,25 +74,17 @@ fn array(req: &mut Request, d: &Version) -> Result<Owner<PhpArray>, Thrown> {
     out.add(req, "protocols", protocols)?;
     if d.age >= 1 {
         add_str(req, &mut out, "ares", d.ares.as_deref())?;
-        out.add(req, "ares_num", Owner::take(req, Value::int(d.ares_num)))?;
+        out.add(req, "ares_num", Owner::int(d.ares_num))?;
     }
     if d.age >= 2 {
         add_str(req, &mut out, "libidn", d.libidn.as_deref())?;
     }
     if d.age >= 3 {
-        out.add(
-            req,
-            "iconv_ver_num",
-            Owner::take(req, Value::int(d.iconv_ver_num)),
-        )?;
+        out.add(req, "iconv_ver_num", Owner::int(d.iconv_ver_num))?;
         add_str(req, &mut out, "libssh_version", d.libssh_version.as_deref())?;
     }
     if d.age >= 4 {
-        out.add(
-            req,
-            "brotli_ver_num",
-            Owner::take(req, Value::int(d.brotli_ver_num)),
-        )?;
+        out.add(req, "brotli_ver_num", Owner::int(d.brotli_ver_num))?;
         add_str(req, &mut out, "brotli_version", d.brotli_version.as_deref())?;
     }
     Ok(out.0)

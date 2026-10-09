@@ -437,10 +437,7 @@ fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArr
             }
         };
         let count = out.get(&key).and_then(|v| v.as_int()).unwrap_or(0);
-        let (key, count) = (
-            Owner::take(req, key),
-            Owner::take(req, Value::int(count + 1)),
-        );
+        let (key, count) = (Owner::take(req, key), Owner::int(count + 1));
         out.set(req, key, count)?;
         Ok(ControlFlow::Continue(()))
     })?;
@@ -1387,7 +1384,7 @@ fn binop(
     name: &str,
     initial: i64,
 ) -> Result<Owner<Value>, Thrown> {
-    let mut total = Some(Owner::take(req, Value::int(initial)));
+    let mut total = Some(Owner::int(initial));
     // `ZEND_HASH_FOREACH_VAL(input, entry)` (`Z/ext/standard/array.c:6457`),
     // no owner of the table taken: the argument holds it while an object's
     // `cast_object` and a warning's handler run. The running total is the
@@ -1477,7 +1474,7 @@ fn binop(
     });
     match (walked, total) {
         (Ok(_), Some(total)) => Ok(total),
-        (Ok(_), None) => Ok(Owner::take(req, Value::int(initial))),
+        (Ok(_), None) => Ok(Owner::int(initial)),
         (Err(thrown), total) => {
             if let Some(total) = total {
                 total.give_up(req);

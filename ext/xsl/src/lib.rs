@@ -198,8 +198,7 @@ impl ObjectHandlers for Handlers {
             (b"maxTemplateVars", vars),
         ] {
             let name = PhpString::new(req, name)?;
-            let n = Owner::take(req, Value::int(n));
-            Std.write_property(req, object, name, n)?;
+            Std.write_property(req, object, name, Owner::int(n))?;
         }
         Ok(())
     }
@@ -271,8 +270,7 @@ impl ObjectHandlers for Handlers {
             }
         };
         if now < 0 {
-            let old = Owner::take(req, Value::int(old));
-            Std.write_property(req, object, again, old)?;
+            Std.write_property(req, object, again, Owner::int(old))?;
             let class = class_name(req, object.class());
             let message = format!("{class}::${shown} must be greater than or equal to 0");
             return Err(throw_error(req, "ValueError", &message));
@@ -757,11 +755,15 @@ impl XSLTProcessor {
             return Ok(OrFalse::False);
         };
         let Some(class) = class else {
-            let value = php_ext_dom::create_object(req, result, None)?;
-            let object = value.as_object().copied();
-            let answer = object.map_or(OrFalse::False, |o| OrFalse::Value(Owner::take(req, o)));
-            value.give_up(req);
-            return Ok(answer);
+            return Ok(
+                match php_ext_dom::create_object(req, result, None)?.into_object() {
+                    Ok(object) => OrFalse::Value(object),
+                    Err(value) => {
+                        value.give_up(req);
+                        OrFalse::False
+                    }
+                },
+            );
         };
         if !compatible(req, class, document.class())? {
             result.free_document();

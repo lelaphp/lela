@@ -556,15 +556,13 @@ fn fill_token(
     line: i64,
     pos: i64,
 ) -> Result<(), Thrown> {
-    let id = Owner::take(req, Value::int(id));
-    if let Err(thrown) = object.set_slot(req, 0, id) {
+    if let Err(thrown) = object.set_slot(req, 0, Owner::int(id)) {
         text.give_up(req);
         return Err(thrown);
     }
     object.set_slot(req, 1, text)?;
-    let line = Owner::take(req, Value::int(line));
-    object.set_slot(req, 2, line)?;
-    let pos = Owner::take(req, Value::int(pos));
+    object.set_slot(req, 2, Owner::int(line))?;
+    let pos = Owner::int(pos);
     object.set_slot(req, 3, pos)
 }
 
@@ -1028,9 +1026,9 @@ fn token_get_all(
         match token.name.and_then(names::id_of) {
             Some(id) => {
                 let mut row = PhpArray::new(req)?;
-                row.append(req, Owner::take(req, Value::int(id)))?;
+                row.append(req, Owner::int(id))?;
                 row.append(req, text)?;
-                row.append(req, Owner::take(req, Value::int(i64::from(token.line))))?;
+                row.append(req, Owner::int(i64::from(token.line)))?;
                 rows.append(req, row.into_value())?;
             }
             None => rows.append(req, text)?,

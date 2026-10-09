@@ -6,7 +6,7 @@ use php_ext::call::call;
 use php_ext::coerce::{is_callable, to_callable};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, Value};
+use php_ext::values::Owner;
 
 use crate::constants::{
     FILTER_FLAG_ALLOW_FRACTION, FILTER_FLAG_ALLOW_SCIENTIFIC, FILTER_FLAG_ALLOW_THOUSAND,
@@ -102,7 +102,7 @@ pub(crate) fn string(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, 
     let encoded = encode_html(&stripped, &html_map(run.flags, true));
     let out = php_ext_standard::strip_tags_ex(&encoded, None, true);
     if out.is_empty() && run.flags & FILTER_FLAG_EMPTY_STRING_NULL != 0 {
-        return Ok(Outcome::Value(Owner::take(req, Value::null())));
+        return Ok(Outcome::Value(Owner::null()));
     }
     value(req, &out)
 }
@@ -195,7 +195,7 @@ pub(crate) fn unsafe_raw(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outco
         return value(req, &encode_html(&strip(s, run.flags), &map));
     }
     if s.is_empty() && run.flags & FILTER_FLAG_EMPTY_STRING_NULL != 0 {
-        return Ok(Outcome::Value(Owner::take(req, Value::null())));
+        return Ok(Outcome::Value(Owner::null()));
     }
     value(req, s)
 }

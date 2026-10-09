@@ -749,50 +749,40 @@ impl Conv {
         match addr {
             Addr::Other(0) => {
                 out.give_up(req);
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             Addr::V4(v4) => {
                 put(
                     req,
                     &mut out,
                     "family",
-                    Owner::take(req, Value::int(i64::from(libc::AF_INET))),
+                    Owner::int(i64::from(libc::AF_INET)),
                 )?;
                 let text = string(req, &ntop(addr))?;
                 put(req, &mut out, "addr", text)?;
-                put(
-                    req,
-                    &mut out,
-                    "port",
-                    Owner::take(req, Value::int(i64::from(v4.port()))),
-                )?;
+                put(req, &mut out, "port", Owner::int(i64::from(v4.port())))?;
             }
             Addr::V6(v6) => {
                 put(
                     req,
                     &mut out,
                     "family",
-                    Owner::take(req, Value::int(i64::from(libc::AF_INET6))),
+                    Owner::int(i64::from(libc::AF_INET6)),
                 )?;
                 let text = string(req, &ntop(addr))?;
                 put(req, &mut out, "addr", text)?;
-                put(
-                    req,
-                    &mut out,
-                    "port",
-                    Owner::take(req, Value::int(i64::from(v6.port()))),
-                )?;
+                put(req, &mut out, "port", Owner::int(i64::from(v6.port())))?;
                 put(
                     req,
                     &mut out,
                     "flowinfo",
-                    Owner::take(req, Value::int(i64::from(v6.flowinfo()))),
+                    Owner::int(i64::from(v6.flowinfo())),
                 )?;
                 put(
                     req,
                     &mut out,
                     "scope_id",
-                    Owner::take(req, Value::int(i64::from(v6.scope_id()))),
+                    Owner::int(i64::from(v6.scope_id())),
                 )?;
             }
             Addr::Unix(path) => {
@@ -800,7 +790,7 @@ impl Conv {
                     req,
                     &mut out,
                     "family",
-                    Owner::take(req, Value::int(i64::from(libc::AF_UNIX))),
+                    Owner::int(i64::from(libc::AF_UNIX)),
                 )?;
                 let text = string(req, path)?;
                 put(req, &mut out, "path", text)?;
@@ -830,7 +820,7 @@ impl Conv {
             req,
             &mut out,
             "ifindex",
-            Owner::take(req, Value::int(i64::from(u32::from_ne_bytes(index)))),
+            Owner::int(i64::from(u32::from_ne_bytes(index))),
         )?;
         Ok(out)
     }
@@ -841,11 +831,11 @@ impl Conv {
         let word = |at: usize| [data[at], data[at + 1], data[at + 2], data[at + 3]];
         let mut out = PhpArray::new(req)?;
         let pid = i64::from(i32::from_ne_bytes(word(0)));
-        put(req, &mut out, "pid", Owner::take(req, Value::int(pid)))?;
+        put(req, &mut out, "pid", Owner::int(pid))?;
         let uid = i64::from(u32::from_ne_bytes(word(4)));
-        put(req, &mut out, "uid", Owner::take(req, Value::int(uid)))?;
+        put(req, &mut out, "uid", Owner::int(uid))?;
         let gid = i64::from(u32::from_ne_bytes(word(8)));
-        put(req, &mut out, "gid", Owner::take(req, Value::int(gid)))?;
+        put(req, &mut out, "gid", Owner::int(gid))?;
         Ok(out)
     }
 
@@ -895,29 +885,19 @@ impl Conv {
     fn cmsghdr_value(&mut self, req: &mut Request, at: &[u8]) -> Result<Owner<Value>, Thrown> {
         let (length, level, ty) = cmsg::header(at);
         let mut out = PhpArray::new(req)?;
-        put(
-            req,
-            &mut out,
-            "level",
-            Owner::take(req, Value::int(i64::from(level))),
-        )?;
-        put(
-            req,
-            &mut out,
-            "type",
-            Owner::take(req, Value::int(i64::from(ty))),
-        )?;
+        put(req, &mut out, "level", Owner::int(i64::from(level)))?;
+        put(req, &mut out, "type", Owner::int(i64::from(ty)))?;
         let data = self.under("data", |c| -> Result<Owner<Value>, Thrown> {
             let Some(entry) = Ancillary::of(level, ty) else {
                 c.fail(&format!("cmsghdr with level {level} and type {ty} not supported"));
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             };
             if cmsg::len(entry.size()) > length {
                 c.fail(&format!(
                     "the cmsghdr structure is unexpectedly small; expected a length of at least {}, but got {length}",
                     cmsg::len(entry.size())
                 ));
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             let body = &at[cmsg::DATA_AT.min(at.len())..length.min(at.len())];
             match entry {
@@ -925,7 +905,7 @@ impl Conv {
                 Ancillary::Int => {
                     let mut b = [0u8; 4];
                     b.copy_from_slice(&body[..4]);
-                    Ok(Owner::take(req, Value::int(i64::from(i32::from_ne_bytes(b)))))
+                    Ok(Owner::int(i64::from(i32::from_ne_bytes(b))))
                 }
                 Ancillary::Rights => c.fd_array_value(req, body),
                 #[cfg(target_os = "linux")]
@@ -947,7 +927,7 @@ impl Conv {
         let mut out = PhpArray::new(req)?;
         let name = match &got.name {
             Some(addr) => self.under("name", |c| c.sockaddr_value(req, addr))?,
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         };
         put(req, &mut out, "name", name)?;
         let control = self.under("control", |c| c.control_value(req, &got.control))?;
@@ -959,12 +939,7 @@ impl Conv {
             iov.append(req, bytes)?;
         }
         put(req, &mut out, "iov", iov.into_value())?;
-        put(
-            req,
-            &mut out,
-            "flags",
-            Owner::take(req, Value::int(i64::from(got.flags))),
-        )?;
+        put(req, &mut out, "flags", Owner::int(i64::from(got.flags)))?;
         Ok(out.into_value())
     }
 

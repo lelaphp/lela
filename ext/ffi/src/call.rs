@@ -9,7 +9,7 @@ use php_ext::abi::{Beneath, Callable, chain};
 use php_ext::coerce::{callable_checked, to_double, to_long, truthy, value_name, with_string};
 use php_ext::raising::{Thrown, fatal, while_pending};
 use php_ext::request::Request;
-use php_ext::values::{Owner, Value, ValueRef};
+use php_ext::values::{Owner, PhpObject, Value, ValueRef};
 
 use crate::cdata::{Fetch, as_cdata, func_pointee, to_value, type_name, view, write_value};
 use crate::decls::function_symbol;
@@ -19,10 +19,17 @@ use crate::{State, ffi_error, types};
 
 /// A callback C may call: libffi's closure over the PHP callable, kept
 /// until the request ends as php keeps `FFI_G(callbacks)`.
+///
+/// It owns what php's `zend_ffi_create_callback` owns, which is narrower
+/// than [`Owner<Callable>`]: a `Closure` object's one count,
+/// `GC_ADDREF(ZEND_CLOSURE_OBJECT(fcc.function_handler))`
+/// (`Z/ext/ffi/ffi.c:1110`), and nothing of any other callable, so an
+/// `[$obj, 'm']` callback leaves `$obj` to its PHP owners.
 pub(crate) struct Callback {
     closure: Closure,
     callable: Callable,
-    value: Value,
+    /// The `Closure` object the callable is, its owner.
+    owned: Option<Owner<PhpObject>>,
     ty: TypeId,
 }
 
@@ -44,7 +51,7 @@ pub(crate) struct Callback {
 pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let name = req.active_function_name();
     let Some(this) = req.this() else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let Some((ty, addr)) = function_symbol(req, this, name.as_bytes()) else {
         let message = format!("Attempt to call undefined C function '{name}'");
@@ -66,7 +73,7 @@ pub(crate) fn trampoline(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// ```
 pub(crate) fn invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(this) = req.this() else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let v = view(req, this);
     let Some(func) = func_pointee(req, v.ty) else {
@@ -180,7 +187,7 @@ fn call(req: &mut Request, name: &str, func: TypeId, addr: usize) -> Result<Owne
         return Err(thrown);
     }
     if matches!(types(req).get(shape.ret).kind, Kind::Void) {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     to_value(
         req,
@@ -434,6 +441,34 @@ fn pass_var_arg(
 /// ```expect
 /// 1234
 /// ```
+///
+/// The callback owns a `Closure` and nothing of another callable
+/// ([`Callback`]): an `[$obj, 'm']` callback's object is destructed at
+/// its last PHP owner, a closure made of one at the request's end.
+///
+/// ```php
+/// class A { function m($x) { return $x + 1; } function __destruct() { echo "dtor\n"; } }
+/// $ffi = FFI::cdef("typedef int (*cb)(int); typedef struct { cb f; } S;");
+/// $s = $ffi->new("S");
+/// $a = new A;
+/// $s->f = [$a, 'm'];
+/// var_dump(($s->f)(1));
+/// unset($a);
+/// echo "unset\n";
+/// $c = new A;
+/// $s->f = Closure::fromCallable([$c, 'm']);
+/// unset($c);
+/// var_dump(($s->f)(5));
+/// echo "end\n";
+/// ```
+/// ```expect
+/// int(2)
+/// dtor
+/// unset
+/// int(6)
+/// end
+/// dtor
+/// ```
 pub(crate) fn create_callback(
     req: &mut Request,
     func: TypeId,
@@ -482,12 +517,17 @@ pub(crate) fn create_callback(
         Err(ClosureError::Prepare) => return Err(ffi_error(req, "Cannot prepare callback")),
     };
     let code = closure.code();
-    let value = value.deref();
-    req.addref(&value);
+    let owned = callable
+        .value()
+        .deref()
+        .as_object()
+        .copied()
+        .filter(|object| object.closure(req).is_some())
+        .map(|object| Owner::take(req, object));
     req.state::<State>().callbacks.push(Callback {
         closure,
         callable,
-        value,
+        owned,
         ty: func,
     });
     Ok(code)
@@ -670,17 +710,15 @@ pub(crate) fn rshutdown(req: &mut Request) {
     crate::cdata::forget_types(req);
 }
 
-/// The callbacks given up at the end of the request, each callable's
-/// owner released and its code freed, as php's `RSHUTDOWN` destroys
-/// `FFI_G(callbacks)`.
+/// The callbacks given up at the end of the request, each one's code
+/// freed and the `Closure` it owned given up, as php's `RSHUTDOWN`
+/// destroys `FFI_G(callbacks)` (`zend_ffi_callback_hash_dtor`).
 fn release_callbacks(req: &mut Request) {
     let callbacks = std::mem::take(&mut req.state::<State>().callbacks);
     for callback in callbacks {
         drop(callback.closure);
-        // The callable names its value and holds no owner of it; the
-        // owner `create_callback` took is the value's, released next, as
-        // `zend_ffi_callback_hash_dtor` releases a closure's object.
-        drop(callback.callable);
-        req.release(callback.value);
+        if let Some(owned) = callback.owned {
+            owned.give_up(req);
+        }
     }
 }

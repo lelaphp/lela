@@ -300,7 +300,7 @@ pub(super) fn value(
         Ok(value) => value,
         Err(failure) => {
             stmt::record(req, object, failure)?;
-            Owner::take(req, Value::null())
+            Owner::null()
         }
     };
     let (nulls, stringify) = stmt::dbh_of(req, object)
@@ -308,7 +308,7 @@ pub(super) fn value(
         .unwrap_or((Nulls::Natural, false));
     if nulls == Nulls::EmptyString && value.as_str_bytes().is_some_and(<[u8]>::is_empty) {
         value.give_up(req);
-        value = Owner::take(req, Value::null());
+        value = Owner::null();
     }
     let ty = if stringify { Some(BindKind::Str) } else { ty };
     if let Some(ty) = ty
@@ -364,7 +364,7 @@ fn convert(req: &mut Request, value: Value, ty: BindKind) -> Result<Option<Owner
 /// the bytes, at its start.
 fn memory_stream(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     let Some(stream) = req.open_stream(b"php://memory", b"w+b", false)? else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     stream.write(req, bytes);
     stream.seek(req, 0, php_ext::request::Whence::Set);
@@ -471,10 +471,10 @@ fn shaped(
         return Ok(None);
     }
     let Some(kind) = mode.kind else {
-        return Ok(Some((Owner::take(req, Value::null()), None)));
+        return Ok(Some((Owner::null(), None)));
     };
     match kind {
-        Kind::Bound => return Ok(Some((Owner::take(req, Value::bool(true)), None))),
+        Kind::Bound => return Ok(Some((Owner::bool(true), None))),
         Kind::Lazy => return crate::row::lazy(req, object).map(|v| Some((v, None))),
         Kind::Column => return column_row(req, object, flags, target.column(), grouped),
         _ => {}
@@ -541,7 +541,7 @@ fn made(
         }
         Kind::Func if with.func.is_none() => return failed(req, "No fetch function specified"),
         Kind::Func | Kind::Lazy | Kind::Bound | Kind::Column | Kind::KeyPair => {
-            Out::Value(Owner::take(req, Value::null()))
+            Out::Value(Owner::null())
         }
     };
     fill(
@@ -1371,7 +1371,7 @@ pub(super) fn fetch(
         out.give_up(req);
         paired?;
         stmt::handle_error(req, object, false)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     if let Some((value, _)) = shaped(
         req,
@@ -1385,7 +1385,7 @@ pub(super) fn fetch(
         Ok(value)
     } else {
         stmt::handle_error(req, object, false)?;
-        Ok(Owner::take(req, Value::bool(false)))
+        Ok(Owner::bool(false))
     }
 }
 
@@ -1445,19 +1445,15 @@ pub(super) fn fetch_object(
         func: None,
     };
     if let Some((value, _)) = shaped(req, object, 8, Orientation::Forward, 0, false, &with)? {
-        // The row's object, its owner taken as the object it is.
-        let made = value
-            .as_object()
-            .copied()
-            .map(|made| Owner::take(req, made));
-        value.give_up(req);
-        if let Some(made) = made {
-            Ok(OrFalse::Value(made))
-        } else {
-            Err(php_ext::raising::fatal(
-                req,
-                "InternalError: PDOStatement::fetchObject() made no object",
-            ))
+        match value.into_object() {
+            Ok(made) => Ok(OrFalse::Value(made)),
+            Err(value) => {
+                value.give_up(req);
+                Err(php_ext::raising::fatal(
+                    req,
+                    "InternalError: PDOStatement::fetchObject() made no object",
+                ))
+            }
         }
     } else {
         stmt::handle_error(req, object, false)?;
@@ -1475,7 +1471,7 @@ pub(super) fn fetch_column(
     stmt::clear_error(req, object);
     if !common(req, object, Orientation::Forward, 0)? {
         stmt::handle_error(req, object, false)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     value(req, object, column, None)
 }

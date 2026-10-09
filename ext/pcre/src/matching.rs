@@ -154,7 +154,7 @@ fn match_value(
 ) -> Result<Owner<Value>, Thrown> {
     if start == ffi::PCRE2_UNSET {
         return if unmatched_as_null {
-            Ok(Owner::take(req, Value::null()))
+            Ok(Owner::null())
         } else {
             Ok(PhpString::new(req, b"")?.into_value())
         };
@@ -173,19 +173,16 @@ pub(super) fn offset_pair(
     let mut pair = PhpArray::new(req)?;
     if start == ffi::PCRE2_UNSET {
         let text = if unmatched_as_null {
-            Owner::take(req, Value::null())
+            Owner::null()
         } else {
             PhpString::new(req, b"")?.into_value()
         };
         pair.append(req, text)?;
-        pair.append(req, Owner::take(req, Value::int(-1)))?;
+        pair.append(req, Owner::int(-1))?;
     } else {
         let text = piece(req, subject, start, end)?;
         pair.append(req, text)?;
-        pair.append(
-            req,
-            Owner::take(req, Value::int(i64::try_from(start).unwrap_or(i64::MAX))),
-        )?;
+        pair.append(req, Owner::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
     }
     Ok(pair.into_value())
 }
@@ -252,7 +249,7 @@ pub(super) fn populate(
             let value = if offsets {
                 offset_pair(req, subject, unset, true)?
             } else {
-                Owner::take(req, Value::null())
+                Owner::null()
             };
             insert(req, into, name(group), value, true)?;
         }

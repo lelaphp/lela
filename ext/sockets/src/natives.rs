@@ -1123,7 +1123,7 @@ fn socket_recv(
     let got = ffi::recv(fd, &mut buf, c_int(flags));
     let value = match got {
         Ok(n) if n > 0 => string(req, &buf[..n])?,
-        _ => Owner::take(req, Value::null()),
+        _ => Owner::null(),
     };
     assign(req, &data, value)?;
     match got {

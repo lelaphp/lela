@@ -1986,7 +1986,7 @@ fn deserialize_parameters(
             for p in rp.values() {
                 let val = get_node(params, p.param_name.as_deref().unwrap_or_default(), None);
                 match val {
-                    None => out.push(Owner::take(req, Value::null())),
+                    None => out.push(Owner::null()),
                     Some(v) => match master_to_zval(req, cx, p.encode, v) {
                         Ok(z) => out.push(z),
                         Err(e) => {
@@ -2416,7 +2416,7 @@ fn deserialize_function_call_in<'a>(
                 function_name: Some(hname),
                 must_understand,
                 parameters,
-                retval: Owner::take(req, Value::null()),
+                retval: Owner::null(),
                 hdr,
             });
         }

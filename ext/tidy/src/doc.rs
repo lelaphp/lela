@@ -92,9 +92,9 @@ impl ObjectHandlers for Handlers {
         to: TypeTag,
     ) -> Result<Option<Owner<Value>>, Thrown> {
         Ok(Some(match to {
-            TypeTag::Int | TypeTag::Number => Owner::take(req, Value::int(0)),
-            TypeTag::Float => Owner::take(req, Value::float(0.0)),
-            TypeTag::Bool => Owner::take(req, Value::bool(true)),
+            TypeTag::Int | TypeTag::Number => Owner::int(0),
+            TypeTag::Float => Owner::float(0.0),
+            TypeTag::Bool => Owner::bool(true),
             TypeTag::String => {
                 let bytes = if self.node {
                     node::text(req, object)?.unwrap_or_default()
@@ -775,8 +775,8 @@ fn opt_value(req: &mut Request, doc: &ffi::Doc, opt: ffi::Opt) -> Result<Owner<V
             new_string(req, &text)?.into_value()
         }
         #[allow(clippy::cast_possible_wrap)]
-        OptType::Integer => Owner::take(req, Value::int(doc.get_int(opt) as i64)),
-        OptType::Boolean => Owner::take(req, Value::bool(doc.get_bool(opt))),
+        OptType::Integer => Owner::int(doc.get_int(opt) as i64),
+        OptType::Boolean => Owner::bool(doc.get_bool(opt)),
     })
 }
 

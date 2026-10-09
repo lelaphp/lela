@@ -726,9 +726,9 @@ impl ArrayObject {
         let flags = ar_flags(req, this)?;
         let iterator_class = payload(req, this)?.iterator_class;
         let mut out = PhpArray::new(req)?;
-        out.append(req, Owner::take(req, Value::int(flags & CLONE_MASK)))?;
+        out.append(req, Owner::int(flags & CLONE_MASK))?;
         let stored = if flags & IS_SELF != 0 {
-            Owner::take(req, Value::null())
+            Owner::null()
         } else {
             storage(req, this)?
         };
@@ -740,7 +740,7 @@ impl ArrayObject {
                 let name = crate::class_name(req, class);
                 crate::string_value(req, &name)?
             }
-            _ => Owner::take(req, Value::null()),
+            _ => Owner::null(),
         };
         out.append(req, class)?;
         Ok(out)
@@ -2128,7 +2128,7 @@ impl ObjectHandlers for Handlers {
             if silent {
                 let at = offset.copied().unwrap_or_default();
                 if !has(req, object, &at, 0, true)? {
-                    return Ok(Owner::take(req, Value::null()));
+                    return Ok(Owner::null());
                 }
             }
             // `if (!offset) { ZVAL_UNDEF(&tmp); offset = &tmp; }`: `$o[]`
@@ -2160,7 +2160,7 @@ impl ObjectHandlers for Handlers {
             }
         }
         let Some(offset) = offset else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         match read {
             // The slot hands the engine an owner of what it read.
@@ -2173,7 +2173,7 @@ impl ObjectHandlers for Handlers {
             DimensionRead::Write | DimensionRead::ReadWrite | DimensionRead::Unset => {
                 Ok(match place(req, object, offset, read)? {
                     Some(cell) => cell.into_value(),
-                    None => Owner::take(req, Value::null()),
+                    None => Owner::null(),
                 })
             }
         }
@@ -2254,8 +2254,7 @@ impl ObjectHandlers for Handlers {
             if fetch == DimensionRead::ReadWrite {
                 warning(req, &format!("Undefined array key {}", shown(&key)));
             }
-            let null = Owner::take(req, Value::null());
-            table.set(req, &key, null)?;
+            table.set(req, &key, Owner::null())?;
         }
         match table {
             Table::Array(owner, _) => {

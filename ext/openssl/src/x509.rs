@@ -627,12 +627,7 @@ fn openssl_x509_parse(
         let hash = format!("{:08x}", cert.subject_hash());
         put_bytes(req, &mut out, b"hash", hash.as_bytes())?;
         name_entries(req, &mut out, Some(b"issuer"), &cert.issuer(), short_names)?;
-        put(
-            req,
-            &mut out,
-            b"version",
-            Owner::take(req, Value::int(cert.version())),
-        )?;
+        put(req, &mut out, b"version", Owner::int(cert.version()))?;
         let (Some(hex_serial), Some(serial)) = cert.serial() else {
             store_errors(req);
             return Ok(OrFalse::False);
@@ -643,19 +638,9 @@ fn openssl_x509_parse(
         put_bytes(req, &mut out, b"validFrom", &from.data)?;
         put_bytes(req, &mut out, b"validTo", &to.data)?;
         let from = time_t(req, &from);
-        put(
-            req,
-            &mut out,
-            b"validFrom_time_t",
-            Owner::take(req, Value::int(from)),
-        )?;
+        put(req, &mut out, b"validFrom_time_t", Owner::int(from))?;
         let to = time_t(req, &to);
-        put(
-            req,
-            &mut out,
-            b"validTo_time_t",
-            Owner::take(req, Value::int(to)),
-        )?;
+        put(req, &mut out, b"validTo_time_t", Owner::int(to))?;
         if let Some(alias) = cert.alias() {
             put_bytes(req, &mut out, b"alias", &alias)?;
         }
@@ -668,7 +653,7 @@ fn openssl_x509_parse(
             req,
             &mut out,
             b"signatureTypeNID",
-            Owner::take(req, Value::int(i64::from(nid))),
+            Owner::int(i64::from(nid)),
         )?;
 
         let mut purposes = PhpArray::new(req)?;
@@ -677,12 +662,12 @@ fn openssl_x509_parse(
             row.set(
                 req,
                 Owner::take(req, Key::Int(0)),
-                Owner::take(req, Value::bool(purpose.fit != 0)),
+                Owner::bool(purpose.fit != 0),
             )?;
             row.set(
                 req,
                 Owner::take(req, Key::Int(1)),
-                Owner::take(req, Value::bool(purpose.fit_ca != 0)),
+                Owner::bool(purpose.fit_ca != 0),
             )?;
             let label = if short_names {
                 purpose.short

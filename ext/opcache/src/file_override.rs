@@ -38,7 +38,7 @@ fn in_cache(req: &mut Request) -> Result<Owner<Value>, Thrown> {
         && overriding(req)
         && req.unit_cache().holds(&name, None)?
     {
-        return Ok(Owner::take(req, Value::bool(true)));
+        return Ok(Owner::bool(true));
     }
     passthrough(req, None)
 }

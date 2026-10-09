@@ -86,7 +86,7 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
             Some(name) => Ok(
                 match P::read(req, object, name, read == PropertyRead::Silent)? {
                     Some(value) => value,
-                    None => Owner::take(req, Value::null()),
+                    None => Owner::null(),
                 },
             ),
             None => Std.read_property(req, object, name, read),
@@ -164,20 +164,22 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
-        let mut table = PhpArray::new(req)?;
-        for name in P::NAMES {
-            if let Some(value) = P::read(req, object, name, true)? {
-                // The table's row takes the value's owner.
-                let key = match PhpString::new(req, name.as_bytes()) {
-                    Ok(key) => key.into_key(),
-                    Err(thrown) => {
-                        value.give_up(req);
-                        return Err(thrown);
-                    }
-                };
-                table.set(req, key, value)?;
+        let table = PhpArray::filled(req, |req, table| {
+            for name in P::NAMES {
+                if let Some(value) = P::read(req, object, name, true)? {
+                    // The table's row takes the value's owner.
+                    let key = match PhpString::new(req, name.as_bytes()) {
+                        Ok(key) => key.into_key(),
+                        Err(thrown) => {
+                            value.give_up(req);
+                            return Err(thrown);
+                        }
+                    };
+                    table.set(req, key, value)?;
+                }
             }
-        }
+            Ok(())
+        })?;
         Ok(Some(DebugInfo::from(table)))
     }
 }
@@ -218,7 +220,7 @@ pub(crate) fn error_list(
         let mut row = PhpArray::new(req)?;
         let state_end = sqlstate.iter().position(|b| *b == 0).unwrap_or(5);
         for (key, value) in [
-            ("errno", Owner::take(req, Value::int(i64::from(*errno)))),
+            ("errno", Owner::int(i64::from(*errno))),
             ("sqlstate", crate::string(req, &sqlstate[..state_end])?),
             ("error", crate::string(req, error)?),
         ] {

@@ -623,8 +623,8 @@ impl ResultSet {
         let _ = self.conn.0.with(req, |req, conn| conn.error.reset(req));
         let row = match self.fetch(req)? {
             Fetched::Row(row) => row,
-            Fetched::Done => return Ok(Owner::take(req, Value::null())),
-            Fetched::Failed => return Ok(Owner::take(req, Value::bool(false))),
+            Fetched::Done => return Ok(Owner::null()),
+            Fetched::Failed => return Ok(Owner::bool(false)),
         };
         let mut array = match php_ext::values::PhpArray::new(req) {
             Ok(array) => array,

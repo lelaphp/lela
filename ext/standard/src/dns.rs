@@ -302,7 +302,7 @@ fn record_array(req: &mut Request, record: Record) -> Result<Owner<Value>, Throw
     let mut array = PhpArray::new(req)?;
     for (name, field) in record {
         let value = match field {
-            Field::Int(n) => Owner::take(req, Value::int(n)),
+            Field::Int(n) => Owner::int(n),
             Field::Str(s) => text(req, &s)?,
             Field::List(entries) => {
                 let mut list = PhpArray::new(req)?;
@@ -431,7 +431,7 @@ fn dns_get_mx(
     if with_weights {
         let mut list = PhpArray::new(req)?;
         for weight in found.weights {
-            list.append(req, Owner::take(req, Value::int(weight)))?;
+            list.append(req, Owner::int(weight))?;
         }
         weights.set(req, Untyped(list.into_value()))?;
     }

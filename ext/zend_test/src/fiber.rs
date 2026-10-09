@@ -165,7 +165,7 @@ impl _ZendTestFiber {
         }
         let named = args.named().to_vec();
         lay_down(req, this, args.positional, named)?;
-        let back = run(req, this, Owner::take(req, Value::null()));
+        let back = run(req, this, Owner::null());
         delegate(req, this, back)
     }
 
@@ -495,7 +495,7 @@ fn run(req: &mut Request, object: PhpObject, value: Owner<Value>) -> Result<Owne
             .and_then(|()| lay_down(req, target, vec![argument], Vec::new()))
             .and_then(|()| {
                 req.state::<State>().active_fiber = Some(target);
-                let null = Owner::take(req, Value::null());
+                let null = Owner::null();
                 Coroutine::resume::<ZendTestFiber>(req, target, null)
             });
         ran = target;
@@ -527,7 +527,7 @@ fn delegate(
     let value = back?;
     if payload(req, this)?.coroutine.status() == CoroutineStatus::Dead {
         value.give_up(req);
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     Ok(value)
 }

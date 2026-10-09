@@ -780,14 +780,13 @@ fn error_fields(req: &mut Request, object: PhpObject, error: &Raised) -> Result<
         (b"column", i64::from(error.column)),
     ];
     for (name, n) in numbers {
-        let n = Owner::take(req, Value::int(n));
-        write_prop(req, &object, name, n)?;
+        write_prop(req, &object, name, Owner::int(n))?;
     }
     let message = PhpString::new(req, &error.message)?;
     write_prop(req, &object, b"message", message.into_value())?;
     let file = PhpString::new(req, error.file.as_deref().unwrap_or_default())?;
     write_prop(req, &object, b"file", file.into_value())?;
-    let line = Owner::take(req, Value::int(i64::from(error.line)));
+    let line = Owner::int(i64::from(error.line));
     write_prop(req, &object, b"line", line)
 }
 

@@ -823,7 +823,7 @@ fn zend_call_method_if_exists(
     pair.append(req, Owner::take(req, Value::string(method)))?;
     let served = match callable_checked(req, &pair.to_value()) {
         Ok(callable) => call(req, &callable, &args.0),
-        Err(_) => Ok(Owner::take(req, Value::null())),
+        Err(_) => Ok(Owner::null()),
     };
     pair.give_up(req);
     served
@@ -943,7 +943,7 @@ fn zend_test_fill_packed_array(req: &mut Request, array: Ref<PhpArray>) -> Resul
         return Err(arg_value_error(req, 1, "be a packed array"));
     }
     for i in 0..10 {
-        held.append(req, Owner::take(req, Value::int(i)))?;
+        held.append(req, Owner::int(i))?;
     }
     Ok(())
 }

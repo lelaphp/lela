@@ -26,7 +26,7 @@ fn user(
 ) -> Option<Owner<Value>> {
     let callable = object
         .native::<Curl>(cx.req)
-        .and_then(|curl| pick(curl).map(|handler| handler.callable.clone()))?;
+        .and_then(|curl| pick(curl).map(|handler| (**handler).clone()))?;
     let mut arguments = vec![object.as_value()];
     arguments.extend_from_slice(rest);
     set_in_callback(cx.req, object, true);
@@ -241,10 +241,7 @@ pub(crate) fn debug(cx: &mut Cx<'_>, object: PhpObject, kind: i64, data: &[u8]) 
     if kind == c::CURLINFO_HEADER_OUT {
         curl.header_out = Some(data.to_vec());
     }
-    let Some(callable) = curl
-        .hook(Hook::Debug)
-        .map(|handler| handler.callable.clone())
-    else {
+    let Some(callable) = curl.hook(Hook::Debug).map(|handler| (**handler).clone()) else {
         return 0;
     };
     let Some(text) = string(cx, data) else {

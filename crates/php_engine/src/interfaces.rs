@@ -1058,7 +1058,7 @@ impl InternalIterator {
                 key.give_up(req);
                 value
             }
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         })
     }
 
@@ -1074,7 +1074,7 @@ impl InternalIterator {
                 value.give_up(req);
                 key
             }
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         })
     }
 

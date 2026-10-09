@@ -222,14 +222,12 @@ fn bind_params(req: &mut Request, taken: &Taken, params: &mut [Bound]) -> Result
             match param.kind {
                 Kind::Integer => {
                     let n = to_long(req, &value)?;
-                    let converted = Owner::take(req, Value::int(n));
-                    param.value.convert(req, converted);
+                    param.value.convert(req, Owner::int(n));
                     stmt.bind_int(at, n)
                 }
                 Kind::Float => {
                     let f = to_double(req, &value)?;
-                    let converted = Owner::take(req, Value::float(f));
-                    param.value.convert(req, converted);
+                    param.value.convert(req, Owner::float(f));
                     stmt.bind_double(at, f)
                 }
                 Kind::Blob if matches!(value.as_ref(), ValueRef::Resource(_)) => {

@@ -6,7 +6,7 @@ use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Refusals, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
-use php_ext::request::{Request, Stream, Streams as _, Whence};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Emalloc, Owner, PhpObject};
 
 use crate::ffi::{self, Font, Glyphs, Im, Image, Reported};
@@ -379,8 +379,7 @@ fn imageloadfont(
     };
     let header = Emalloc::new(req, 24)?;
     let read = load(req, *stream);
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     let glyphs = match read? {
         Ok((nchars, offset, w, h, data)) => Glyphs {
             nchars,

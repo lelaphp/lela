@@ -454,7 +454,7 @@ fn item_value(req: &mut Request, object: PhpObject, index: i64) -> Result<Owner<
     let tokens = tokens(req, object);
     match usize::try_from(index).ok().and_then(|i| tokens.get(i)) {
         Some(token) => string(req, token),
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -462,10 +462,7 @@ fn item_value(req: &mut Request, object: PhpObject, index: i64) -> Result<Owner<
 #[allow(clippy::unnecessary_wraps)] // the reader shape every row of a property table has
 fn length_read(req: &mut Request, object: PhpObject) -> crate::Read {
     let n = tokens(req, object).len();
-    Ok(Some(Owner::take(
-        req,
-        Value::int(i64::try_from(n).unwrap_or(i64::MAX)),
-    )))
+    Ok(Some(Owner::int(i64::try_from(n).unwrap_or(i64::MAX))))
 }
 
 /// `dom_token_list_value_read`: the attribute's value, not the set's.
@@ -535,7 +532,7 @@ impl ClassIterator for TokenIter {
         .flatten();
         match token {
             Some(token) => string(req, &token),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         }
     }
 
@@ -553,7 +550,7 @@ impl ClassIterator for TokenIter {
         if let Some(counted) = counted {
             self.index = i64::try_from(counted).unwrap_or(i64::MAX);
         }
-        Ok(Owner::take(req, Value::int(self.index)))
+        Ok(Owner::int(self.index))
     }
 
     /// `dom_token_list_it_move_forward`: where a change under the walk

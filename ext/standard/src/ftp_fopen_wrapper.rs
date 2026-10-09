@@ -18,10 +18,10 @@ use php_ext::request::{
     Closer, DirListing, Handshake, Notification, NotifyCode, Opening, OwnedStream as _, Request,
     SocketOptions, Stream, StreamCtx, StreamWrapper, Streams as _, Xport, XportFailure,
 };
-use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, ValueRef};
 use php_ext_uri::UriStruct;
 
-use crate::http_fopen_wrapper::{closed, file_ini, url_wrap_http};
+use crate::http_fopen_wrapper::{file_ini, url_wrap_http};
 use crate::sockets::{default_timeout, timeval};
 use crate::streamsfuncs::{notify, notify_error, notify_info};
 use crate::url::{UriParser, php_raw_url_decode};
@@ -732,7 +732,7 @@ fn open(
         transfer,
     });
     if let Err(thrown) = data.set_closer(req, closer) {
-        closed(req, data);
+        data.free(req);
         return Err(thrown);
     }
     Ok(Some(data))
@@ -825,12 +825,12 @@ fn start(
     let reply = match get_result(req, control) {
         Ok(reply) => reply,
         Err(thrown) => {
-            closed(req, data);
+            data.free(req);
             return Err(thrown);
         }
     };
     if reply.code != 150 && reply.code != 125 {
-        closed(req, data);
+        data.free(req);
         return Ok(Started::Refused(reply, None));
     }
     let init = Notification::ProgressInit {
@@ -838,11 +838,11 @@ fn start(
         max: file_size,
     };
     if let Err(thrown) = notify(req, ctx, init) {
-        closed(req, data);
+        data.free(req);
         return Err(thrown);
     }
     if !data_secured(req, *data, ctx, ssl_on_data) {
-        closed(req, data);
+        data.free(req);
         return Ok(Started::Refused(Reply::default(), None));
     }
     Ok(Started::Data(data))
@@ -1054,7 +1054,7 @@ fn url_stat(req: &mut Request, url: &[u8]) -> Result<Option<Owner<PhpArray>>, Th
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
         let key = PhpString::new(req, name)?.into_key();
-        out.set(req, key, Owner::take(req, Value::int(field)))?;
+        out.set(req, key, Owner::int(field))?;
     }
     Ok(Some(out))
 }

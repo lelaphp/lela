@@ -6,7 +6,7 @@
 //! server's answer read whatever happened.
 
 use php_ext::raising::Thrown;
-use php_ext::request::{Opening, Request, Streams as _};
+use php_ext::request::{Opening, OwnedStream as _, Request, Streams as _};
 
 use crate::conn::ConnData;
 use crate::consts::{Com, client, cr};
@@ -68,8 +68,7 @@ pub(crate) fn handle(
     }
     if let Some(dir) = &directory {
         if let Some(stream) = req.open_dir(dir)? {
-            stream.close(req);
-            stream.give_up(req);
+            stream.free(req);
         } else {
             conn.error.client(
                 req,
@@ -162,13 +161,11 @@ fn send_file(
             == 0
         {
             conn.error.client(req, cr::SERVER_LOST, LOST_CONN)?;
-            stream.close(req);
-            stream.give_up(req);
+            stream.free(req);
             return Ok((false, false));
         }
     }
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     if conn.net.send(req, &[], &mut conn.stats, &mut conn.error)? == 0 {
         conn.error.client(req, cr::SERVER_LOST, LOST_CONN)?;
         return Ok((false, false));

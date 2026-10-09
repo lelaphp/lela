@@ -178,7 +178,7 @@ pub(crate) fn int(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
     };
     match parsed {
         Some(n) if min.is_none_or(|m| n >= m) && max.is_none_or(|m| n <= m) => {
-            Ok(Outcome::Value(Owner::take(req, Value::int(n))))
+            Ok(Outcome::Value(Owner::int(n)))
         }
         _ => Ok(Outcome::Failed),
     }
@@ -210,14 +210,14 @@ pub(crate) fn int(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thr
 /// string(1) "d"
 /// ```
 #[allow(clippy::unnecessary_wraps)] // the shape every entry of `filter_list` has
-pub(crate) fn boolean(req: &mut Request, _: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
+pub(crate) fn boolean(_: &mut Request, _: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     let p = trim(s);
     let is = |word: &[u8]| p.eq_ignore_ascii_case(word);
     Ok(
         if p.is_empty() || is(b"0") || is(b"no") || is(b"off") || is(b"false") {
-            Outcome::Value(Owner::take(req, Value::bool(false)))
+            Outcome::Value(Owner::bool(false))
         } else if is(b"1") || is(b"on") || is(b"yes") || is(b"true") {
-            Outcome::Value(Owner::take(req, Value::bool(true)))
+            Outcome::Value(Owner::bool(true))
         } else {
             Outcome::Failed
         },
@@ -345,9 +345,7 @@ pub(crate) fn float(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, T
     if pos != end {
         return Ok(Outcome::Failed);
     }
-    Ok(numeric(&num, min, max).map_or(Outcome::Failed, |f| {
-        Outcome::Value(Owner::take(req, Value::float(f)))
-    }))
+    Ok(numeric(&num, min, max).map_or(Outcome::Failed, |f| Outcome::Value(Owner::float(f))))
 }
 
 /// The tail of `php_filter_float`: what `is_numeric_string` reads the

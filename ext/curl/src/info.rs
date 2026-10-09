@@ -211,12 +211,12 @@ fn rows(
 ) -> Result<(), Thrown> {
     for (key, info, row) in rows {
         let value = match (easy.info(req, *info), row) {
-            (Some(Info::Str(None)), Row::OrNull) => Owner::take(req, Value::null()),
+            (Some(Info::Str(None)), Row::OrNull) => Owner::null(),
             (Some(Info::Str(text)), _) => {
                 PhpString::new(req, &text.unwrap_or_default())?.into_value()
             }
-            (Some(Info::Long(n) | Info::OffT(n)), _) => Owner::take(req, Value::int(n)),
-            (Some(Info::Double(f)), _) => Owner::take(req, Value::float(f)),
+            (Some(Info::Long(n) | Info::OffT(n)), _) => Owner::int(n),
+            (Some(Info::Double(f)), _) => Owner::float(f),
             (None | Some(Info::List(_) | Info::Certs(_)), _) => continue,
         };
         out.add(req, key, value)?;
@@ -271,23 +271,23 @@ fn curl_getinfo(
     let value = match option {
         c::CURLINFO_HEADER_OUT => match curl(req, handle)?.header_out.clone() {
             Some(header) => PhpString::new(req, &header)?.into_value(),
-            None => Owner::take(req, Value::bool(false)),
+            None => Owner::bool(false),
         },
         c::CURLINFO_PRIVATE => match curl(req, handle)?.private {
             Some(private) => Owner::take(req, private),
-            None => Owner::take(req, Value::bool(false)),
+            None => Owner::bool(false),
         },
         _ => match easy.info(req, option) {
             Some(Info::Str(Some(text))) => PhpString::new(req, &text)?.into_value(),
-            Some(Info::Long(n) | Info::OffT(n)) => Owner::take(req, Value::int(n)),
-            Some(Info::Double(f)) => Owner::take(req, Value::float(f)),
+            Some(Info::Long(n) | Info::OffT(n)) => Owner::int(n),
+            Some(Info::Double(f)) => Owner::float(f),
             Some(Info::List(lines)) => list(req, &lines)?,
             Some(Info::Certs(certs)) => {
                 let mut array = PhpArray::new(req)?;
                 certinfo(req, &certs, &mut array)?;
                 array.into_value()
             }
-            Some(Info::Str(None)) | None => Owner::take(req, Value::bool(false)),
+            Some(Info::Str(None)) | None => Owner::bool(false),
         },
     };
     Ok(value)

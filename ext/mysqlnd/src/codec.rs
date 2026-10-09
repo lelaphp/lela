@@ -133,7 +133,7 @@ pub(crate) fn decode_binary(
         let start = p.position();
         let value = if is_null {
             stats.inc(Stat::BinaryTypeFetchedNull);
-            Owner::take(req, Value::null())
+            Owner::null()
         } else {
             if start >= bytes.len() {
                 docref(
@@ -220,13 +220,13 @@ fn fetch(
     };
     let long = |bits: Bits, req: &mut Request| -> Result<Owner<Value>, Thrown> {
         match bits {
-            Bits::Long(n) => Ok(Owner::take(req, Value::int(n))),
+            Bits::Long(n) => Ok(Owner::int(n)),
             Bits::Text(s) => text(req, s.as_bytes()),
         }
     };
     let ty = field.field_type();
     Ok(Some(match ty {
-        FieldType::Null => Owner::take(req, Value::null()),
+        FieldType::Null => Owner::null(),
         FieldType::Tiny => match fixed(req, p, 1) {
             Some(b) => long(from_1_to_8_bytes(field, &b), req)?,
             None => return Ok(None),
@@ -251,14 +251,14 @@ fn fetch(
                 } else {
                     Some(field.decimals as usize)
                 };
-                Owner::take(req, Value::float(float_to_double(f, decimals)))
+                Owner::float(float_to_double(f, decimals))
             }
             None => return Ok(None),
         },
         FieldType::Double => match fixed(req, p, 8) {
             Some(b) => {
                 let d = f64::from_le_bytes(b.as_slice().try_into().unwrap_or([0; 8]));
-                Owner::take(req, Value::float(d))
+                Owner::float(d)
             }
             None => return Ok(None),
         },

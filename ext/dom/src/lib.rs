@@ -584,7 +584,7 @@ fn dom_error_message(
     if strict {
         let exception = new_throwable(req, "DOMException", message)?;
         if let Some(object) = exception.as_object().copied() {
-            let code = Owner::take(req, Value::int(code as i64));
+            let code = Owner::int(code as i64);
             let set = php_ext::call::write_prop(req, &object, b"code", code);
             if let Err(thrown) = set {
                 exception.give_up(req);
@@ -699,7 +699,7 @@ fn passed(given: Passed<PhpString>) -> Option<Vec<u8>> {
 fn nullable_string(req: &mut Request, bytes: Option<&[u8]>) -> Result<Owner<Value>, Thrown> {
     match bytes {
         Some(b) => string(req, b),
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -796,7 +796,7 @@ fn nullable_object(
 ) -> Result<Owner<Value>, Thrown> {
     match node {
         Some(n) => object_for(req, n, context),
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -856,7 +856,7 @@ fn read_property(
     match handler(req, object, name) {
         Some(prop) => Ok(match (prop.read)(req, object)? {
             Some(read) => read,
-            None => Owner::take(req, Value::null()),
+            None => Owner::null(),
         }),
         None => Std.read_property(req, object, name, read),
     }
@@ -1029,21 +1029,41 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
     // `zend_array_dup(zend_std_get_properties(object))`.
     let own = object.property_table(req)?;
     let own: Vec<(Key, Value)> = walk::rows(req, own).collect();
-    let mut out = PhpArray::new(req)?;
-    for (key, value) in own {
-        let value = Owner::take(req, value);
-        out.set(req, Owner::take(req, key), value)?;
-    }
-    let Some(table) = table_of(req, object) else {
-        return Ok(Some(out.into()));
-    };
     let mut pending: Option<Thrown> = None;
-    let omitted = string(req, b"(object value omitted)")?;
-    req.state::<State>().suppress_warnings = true;
+    let out = PhpArray::filled(req, |req, out| {
+        for (key, value) in own {
+            let value = Owner::take(req, value);
+            out.set(req, Owner::take(req, key), value)?;
+        }
+        let Some(table) = table_of(req, object) else {
+            return Ok(());
+        };
+        let omitted = string(req, b"(object value omitted)")?;
+        req.state::<State>().suppress_warnings = true;
+        let read = prop_rows(req, object, table, out, *omitted, &mut pending);
+        req.state::<State>().suppress_warnings = false;
+        omitted.give_up(req);
+        read
+    })?;
+    Ok(Some(DebugInfo {
+        table: out,
+        thrown: pending,
+    }))
+}
+
+/// The rows `dom_get_debug_info_helper` reads off the property table:
+/// each reader's value, an object shown as `omitted`. A reader that
+/// fails is left out, its throwable kept in `pending` for the dumper; a
+/// fatal or an exit ends the dump, handed on with what was pending.
+fn prop_rows(
+    req: &mut Request,
+    object: PhpObject,
+    table: &[&[Prop]],
+    out: &mut Owner<PhpArray>,
+    omitted: Value,
+    pending: &mut Option<Thrown>,
+) -> Result<(), Thrown> {
     for prop in table.iter().flat_map(|t| t.iter()) {
-        // A reader that fails is left out, as `dom_get_debug_info_helper`
-        // leaves it out, its throwable kept for the dumper; a fatal or an
-        // exit ends the dump.
         let read = match (prop.read)(req, object) {
             Ok(Some(v)) => v,
             Ok(None) => continue,
@@ -1053,30 +1073,22 @@ fn debug_info(req: &mut Request, object: PhpObject) -> Result<Option<DebugInfo>,
                     None => thrown,
                 };
                 if thrown.exception().is_none() {
-                    req.state::<State>().suppress_warnings = false;
-                    omitted.give_up(req);
-                    out.give_up(req);
                     return Err(thrown);
                 }
-                pending = Some(thrown);
+                *pending = Some(thrown);
                 continue;
             }
         };
         let shown = if read.as_object().is_some() {
             read.give_up(req);
-            Owner::take(req, *omitted)
+            Owner::take(req, omitted)
         } else {
             read
         };
         let key = PhpString::new(req, prop.name)?.into_key();
         out.set(req, key, shown)?;
     }
-    omitted.give_up(req);
-    req.state::<State>().suppress_warnings = false;
-    Ok(Some(DebugInfo {
-        table: out,
-        thrown: pending,
-    }))
+    Ok(())
 }
 
 /// `DOM_PROP_NODE`: the node, php's "Invalid State Error" where the object
@@ -1204,7 +1216,7 @@ fn content_value(
     };
     match content {
         Some(bytes) => string(req, &bytes),
-        None if null_on_failure => Ok(Owner::take(req, Value::null())),
+        None if null_on_failure => Ok(Owner::null()),
         None => empty_string(req),
     }
 }
@@ -2017,12 +2029,12 @@ fn coerce_property(
             ValueRef::Bool(_) => Ok(Owner::take(req, v)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Str(_) => {
                 let truth = truthy(req, &v);
-                Ok(Owner::take(req, Value::bool(truth)))
+                Ok(Owner::bool(truth))
             }
             _ => Err(fail(req, "bool")),
         },
         Declared::String { nullable } => match v.as_ref() {
-            ValueRef::Null if nullable => Ok(Owner::take(req, Value::null())),
+            ValueRef::Null if nullable => Ok(Owner::null()),
             ValueRef::Str(_) => Ok(Owner::take(req, v)),
             ValueRef::Int(_) | ValueRef::Float(_) | ValueRef::Bool(_) => {
                 Ok(to_string(req, &v)?.into_value())

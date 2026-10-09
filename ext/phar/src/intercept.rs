@@ -364,7 +364,7 @@ fn file_function(req: &mut Request, kind: Fs) -> Result<Owner<Value>, Thrown> {
 /// for any other.
 fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value>, Thrown> {
     if filename.is_empty() {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     if !relative(filename) {
         return passthrough(req, None);
@@ -399,7 +399,7 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value
                 .is_some_and(|a| a.virtual_dirs.contains(&entry)) =>
             {
                 if kind.exists_check() {
-                    return Ok(Owner::take(req, Value::bool(true)));
+                    return Ok(Owner::bool(true));
                 }
                 dir_stat(req)
             }
@@ -420,7 +420,7 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value
         .is_some_and(|a| a.virtual_dirs.contains(&held))
     {
         if kind.exists_check() {
-            return Ok(Owner::take(req, Value::bool(true)));
+            return Ok(Owner::bool(true));
         }
         dir_stat(req)
     } else {
@@ -432,14 +432,14 @@ fn file_stat(req: &mut Request, filename: &[u8], kind: Fs) -> Result<Owner<Value
             );
             docref(req, Level::Warning, &text);
         }
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     if kind.exists_check() {
-        return Ok(Owner::take(req, Value::bool(true)));
+        return Ok(Owner::bool(true));
     }
     match stated {
         Some(sb) => fancy_stat(req, sb, kind),
-        None => Ok(Owner::take(req, Value::bool(false))),
+        None => Ok(Owner::bool(false)),
     }
 }
 
@@ -531,15 +531,15 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
     } else {
         0
     };
-    let answer = match kind {
-        Fs::Perms => Value::int(mode),
-        Fs::Inode => Value::int(sb[1]),
-        Fs::Size => Value::int(sb[7]),
-        Fs::Owner => Value::int(sb[4]),
-        Fs::Group => Value::int(sb[5]),
-        Fs::Atime => Value::int(sb[8]),
-        Fs::Mtime => Value::int(sb[9]),
-        Fs::Ctime => Value::int(sb[10]),
+    Ok(match kind {
+        Fs::Perms => Owner::int(mode),
+        Fs::Inode => Owner::int(sb[1]),
+        Fs::Size => Owner::int(sb[7]),
+        Fs::Owner => Owner::int(sb[4]),
+        Fs::Group => Owner::int(sb[5]),
+        Fs::Atime => Owner::int(sb[8]),
+        Fs::Mtime => Owner::int(sb[9]),
+        Fs::Ctime => Owner::int(sb[10]),
         Fs::Type => {
             let name: &[u8] = if is(0o120_000) {
                 b"link"
@@ -555,26 +555,25 @@ fn fancy_stat(req: &mut Request, sb: [i64; 13], kind: Fs) -> Result<Owner<Value>
                 );
                 b"unknown"
             };
-            return Ok(PhpString::new(req, name)?.into_value());
+            PhpString::new(req, name)?.into_value()
         }
-        Fs::IsW => Value::bool(mode & (0o2 << triad) != 0),
-        Fs::IsR => Value::bool(mode & (0o4 << triad) != 0),
-        Fs::IsX => Value::bool(mode & (0o1 << triad) != 0 && !is(0o040_000)),
-        Fs::IsDir => Value::bool(is(0o040_000)),
-        Fs::Exists => Value::bool(true),
-        Fs::Lstat | Fs::Stat => {
-            let mut out = PhpArray::new(req)?;
+        Fs::IsW => Owner::bool(mode & (0o2 << triad) != 0),
+        Fs::IsR => Owner::bool(mode & (0o4 << triad) != 0),
+        Fs::IsX => Owner::bool(mode & (0o1 << triad) != 0 && !is(0o040_000)),
+        Fs::IsDir => Owner::bool(is(0o040_000)),
+        Fs::Exists => Owner::bool(true),
+        Fs::Lstat | Fs::Stat => PhpArray::filled(req, |req, out| {
             for field in sb {
-                out.append(req, Owner::take(req, Value::int(field)))?;
+                out.append(req, Owner::int(field))?;
             }
             for (name, field) in NAMES.iter().zip(sb) {
                 let key = PhpString::new(req, name)?.into_key();
-                out.set(req, key, Owner::take(req, Value::int(field)))?;
+                out.set(req, key, Owner::int(field))?;
             }
-            return Ok(out.into_value());
-        }
-    };
-    Ok(Owner::take(req, answer))
+            Ok(())
+        })?
+        .into_value(),
+    })
 }
 
 /// The shift of the permission triad an access check reads of an entry
@@ -614,7 +613,7 @@ fn is_entry(req: &mut Request, link: bool) -> Result<Owner<Value>, Thrown> {
         return passthrough(req, None);
     };
     let Ok(id) = archive::get_archive(req, &arch, None) else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     let entry = fixed(req, &filename);
     let held = entry.strip_prefix(b"/").unwrap_or(&entry);
@@ -622,7 +621,7 @@ fn is_entry(req: &mut Request, link: bool) -> Result<Owner<Value>, Thrown> {
         .get(id)
         .and_then(|a| a.manifest.get(held))
         .is_some_and(|e| if link { e.link.is_some() } else { !e.is_dir });
-    Ok(Owner::take(req, Value::bool(answer)))
+    Ok(Owner::bool(answer))
 }
 
 fn is_file(req: &mut Request) -> Result<Owner<Value>, Thrown> {

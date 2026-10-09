@@ -378,17 +378,17 @@ fn moved(
         Pointed::Built(array) => **array,
         Pointed::Object(object) => {
             if !object.pointer_move(req, how)? {
-                return Ok(Owner::take(req, Value::bool(false)));
+                return Ok(Owner::bool(false));
             }
             if !req.return_value_used() {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             let current = object.pointer_row(req, Some(how))?.map(|(_, value)| value);
             return Ok(owned_current(req, current));
         }
     };
     let current = if array.is_empty() {
-        Owner::take(req, Value::bool(false))
+        Owner::bool(false)
     } else {
         match how {
             PointerMove::Reset => array.cursor_reset(),

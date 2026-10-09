@@ -4,7 +4,7 @@
 
 use php_ext::abi::Union;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Request, Resolve, Streams as _, WrapperOp};
+use php_ext::request::{OwnedStream as _, Request, Resolve, Streams as _, WrapperOp};
 use php_ext::values::{Key, PhpArray, PhpObject, PhpString, ValueRef};
 
 use crate::archive::FL_UNCHANGED;
@@ -174,8 +174,7 @@ fn extract_file(
         }
     }
     let touched = req.wrapper_op(&full, WrapperOp::Touch(Some((st.mtime, st.mtime))));
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     touched?;
     Ok(true)
 }

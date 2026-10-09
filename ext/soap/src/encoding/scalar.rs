@@ -43,7 +43,7 @@ fn encoding(req: &mut Request) -> Option<Vec<u8>> {
 /// `to_zval_string`, `to_zval_stringr` and `to_zval_stringc`.
 pub(super) fn to_zval_string(req: &mut Request, data: Node, space: Space) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let Some(child) = data.children() else {
         return string(req, b"");
@@ -77,7 +77,7 @@ pub(super) fn to_zval_string(req: &mut Request, data: Node, space: Space) -> Res
 /// `to_zval_base64`.
 pub(super) fn to_zval_base64(req: &mut Request, data: Node) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let Some(child) = data.children() else {
         return string(req, b"");
@@ -114,7 +114,7 @@ fn hex_decode(content: &[u8]) -> Option<Vec<u8>> {
 /// `to_zval_hexbin`.
 pub(super) fn to_zval_hexbin(req: &mut Request, data: Node) -> Res<Owner<Value>> {
     if xml_nil(data) {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let Some(child) = data.children() else {
         return string(req, b"");
@@ -748,7 +748,7 @@ pub(super) fn to_xml_user(
 /// `to_zval_user`.
 pub(super) fn to_zval_user(req: &mut Request, e: &Enc, node: Node) -> Res<Owner<Value>> {
     let Some(f) = map_fn(req, e, false) else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let dumped = match node.copy(None, 1) {
         Some(copy) => {

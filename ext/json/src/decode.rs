@@ -426,13 +426,13 @@ enum Attached {
 
 impl Open {
     /// What the bracket became, `null` where nothing was built.
-    fn into_value(self, req: &Request) -> Owner<Value> {
+    fn into_value(self) -> Owner<Value> {
         match self {
             Open::Array { array, .. } => match array {
                 Some(array) => array.into_value(),
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             },
-            Open::Object { holder, .. } => holder.into_value(req),
+            Open::Object { holder, .. } => holder.into_value(),
         }
     }
 
@@ -598,10 +598,10 @@ impl Parser<'_> {
             return Ok(Begun::Refused);
         }
         let built = match token {
-            Token::True => Owner::take(req, Value::bool(true)),
-            Token::False => Owner::take(req, Value::bool(false)),
-            Token::Int(n) => Owner::take(req, Value::int(n)),
-            Token::Double(d) => Owner::take(req, Value::float(d)),
+            Token::True => Owner::bool(true),
+            Token::False => Owner::bool(false),
+            Token::Int(n) => Owner::int(n),
+            Token::Double(d) => Owner::float(d),
             Token::Str(bytes) if !self.validating => PhpString::new(req, &bytes)?.into_value(),
             Token::ArrayOpen => {
                 self.advance();
@@ -622,7 +622,7 @@ impl Parser<'_> {
                 };
                 return self.opened(req, frame, open);
             }
-            _ => Owner::take(req, Value::null()),
+            _ => Owner::null(),
         };
         self.advance();
         Ok(Begun::Value(built))
@@ -787,7 +787,7 @@ impl Parser<'_> {
         self.advance();
         self.depth -= 1;
         self.stack = at + 1;
-        Some(frame.into_value(req))
+        Some(frame.into_value())
     }
 
     /// `PHP_JSON_DEPTH_INC`: one level deeper, or the depth refusal.
@@ -819,11 +819,11 @@ impl Parser<'_> {
 
 impl Holder {
     /// What the holder became, `null` where nothing was built.
-    fn into_value(self, req: &Request) -> Owner<Value> {
+    fn into_value(self) -> Owner<Value> {
         match self {
             Holder::Object(object) => object.into_value(),
             Holder::Array(array) => array.into_value(),
-            Holder::Nothing => Owner::take(req, Value::null()),
+            Holder::Nothing => Owner::null(),
         }
     }
 

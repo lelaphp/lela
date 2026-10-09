@@ -428,16 +428,11 @@ fn gd_info(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let mut info = PhpArray::new(req)?;
     let version = PhpString::new(req, constants::GD_VERSION.as_bytes())?;
     set(req, &mut info, "GD Version", version.into_value())?;
-    set(
-        req,
-        &mut info,
-        "FreeType Support",
-        Owner::take(req, Value::bool(true)),
-    )?;
+    set(req, &mut info, "FreeType Support", Owner::bool(true))?;
     let linkage = PhpString::new(req, b"with freetype")?;
     set(req, &mut info, "FreeType Linkage", linkage.into_value())?;
     for (name, on) in SUPPORT {
-        set(req, &mut info, name, Owner::take(req, Value::bool(on)))?;
+        set(req, &mut info, name, Owner::bool(on))?;
     }
     Ok(info)
 }

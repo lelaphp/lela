@@ -248,13 +248,13 @@ fn readline_info(
         let mut array = PhpArray::new(req)?;
         let rows = [
             (b"line_buffer".as_slice(), string(req, &ffi::line_buffer())?),
-            (b"point", Owner::take(req, Value::int(ffi::point()))),
-            (b"end", Owner::take(req, Value::int(ffi::end()))),
+            (b"point", Owner::int(ffi::point())),
+            (b"end", Owner::int(ffi::end())),
             (b"library_version", string(req, &ffi::library_version())?),
             (b"readline_name", string(req, &ffi::readline_name())?),
             (
                 b"attempted_completion_over",
-                Owner::take(req, Value::int(ffi::attempted_completion_over())),
+                Owner::int(ffi::attempted_completion_over()),
             ),
         ];
         for (key, row) in rows {
@@ -275,8 +275,8 @@ fn readline_info(
             }
             Ok(old)
         }
-        b"point" => Ok(Owner::take(req, Value::int(ffi::point()))),
-        b"end" => Ok(Owner::take(req, Value::int(ffi::end()))),
+        b"point" => Ok(Owner::int(ffi::point())),
+        b"end" => Ok(Owner::int(ffi::end())),
         b"library_version" => string(req, &ffi::library_version()),
         b"readline_name" => {
             let old = string(req, &ffi::readline_name())?;
@@ -294,9 +294,9 @@ fn readline_info(
                 let value = to_long(req, &value)?;
                 ffi::set_attempted_completion_over(value);
             }
-            Ok(Owner::take(req, Value::int(old)))
+            Ok(Owner::int(old))
         }
-        _ => Ok(Owner::take(req, Value::null())),
+        _ => Ok(Owner::null()),
     }
 }
 
@@ -522,7 +522,7 @@ pub(crate) fn callback_line(req: &mut Request, line: Option<Vec<u8>>) {
             Ok(value) => value,
             Err(_) => return,
         },
-        None => Owner::take(req, Value::null()),
+        None => Owner::null(),
     };
     let called = call(req, &callable, &[*argument]);
     argument.give_up(req);

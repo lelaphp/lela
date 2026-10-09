@@ -5229,7 +5229,7 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
     if let Some(offset) = unit.halt_offset {
         let key = crate::api::request::halt_offset_key(&unit.main.filename.0);
         if req.constant_named(&key).is_none() {
-            let offset = crate::api::values::Owner::take(req, Value::int(offset));
+            let offset = crate::api::values::Owner::int(offset);
             req.define_constant(&key, offset);
         }
     }

@@ -111,11 +111,11 @@ fn zip_open(req: &mut Request, filename: Path) -> Result<Untyped<Owner<Value>>, 
         return Err(arg_value_error(req, 1, "not be empty"));
     }
     if basedir_refuses(req, &filename) {
-        return Ok(Untyped(Owner::take(req, Value::bool(false))));
+        return Ok(Untyped(Owner::bool(false)));
     }
     let Some(resolved) = expand(req, &filename) else {
         docref(req, Level::Warning, "No such file or directory");
-        return Ok(Untyped(Owner::take(req, Value::bool(false))));
+        return Ok(Untyped(Owner::bool(false)));
     };
     let host = {
         use std::os::unix::ffi::OsStrExt;
@@ -132,7 +132,7 @@ fn zip_open(req: &mut Request, filename: Path) -> Result<Untyped<Owner<Value>>, 
             };
             Ok(Untyped(Resource::new(req, kind, dir)?.into_value()))
         }
-        Err(status) => Ok(Untyped(Owner::take(req, Value::int(i64::from(status.zip))))),
+        Err(status) => Ok(Untyped(Owner::int(i64::from(status.zip)))),
     }
 }
 
@@ -176,20 +176,20 @@ fn zip_read(req: &mut Request, zip: Resource) -> Result<Untyped<Owner<Value>>, T
     let res = fetch(req, zip, kind, "Zip Directory", "zip_read")?;
     let id = res.id();
     let Some(dir) = res.native_mut::<Dir>(req) else {
-        return Ok(Untyped(Owner::take(req, Value::bool(false))));
+        return Ok(Untyped(Owner::bool(false)));
     };
     if dir.index >= dir.num_files {
-        return Ok(Untyped(Owner::take(req, Value::bool(false))));
+        return Ok(Untyped(Owner::bool(false)));
     }
     let index = dir.index;
     let Some(za) = dir.za.as_deref_mut() else {
-        return Ok(Untyped(Owner::take(req, Value::bool(false))));
+        return Ok(Untyped(Owner::bool(false)));
     };
     let Ok(sb) = za.stat_index(index, 0) else {
-        return Ok(Untyped(Owner::take(req, Value::bool(false))));
+        return Ok(Untyped(Owner::bool(false)));
     };
     let Ok(opened) = za.fopen(index, 0, None) else {
-        return Ok(Untyped(Owner::take(req, Value::bool(false))));
+        return Ok(Untyped(Owner::bool(false)));
     };
     dir.index += 1;
     let kind = entry_type(req);

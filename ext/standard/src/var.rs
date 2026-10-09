@@ -351,7 +351,7 @@ impl ObjectHandlers for Incomplete {
     ) -> Result<Owner<Value>, Thrown> {
         let message = incomplete_message(req, object, "access a property");
         docref(req, Level::Warning, &message);
-        Ok(Owner::take(req, Value::null()))
+        Ok(Owner::null())
     }
 
     fn write_property(

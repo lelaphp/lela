@@ -119,18 +119,8 @@ fn get_option(
                 return failed(req, errno, "Unable to retrieve socket option");
             }
             let mut out = PhpArray::new(req)?;
-            put(
-                req,
-                &mut out,
-                "l_onoff",
-                Owner::take(req, Value::int(word(&buf, 0))),
-            )?;
-            put(
-                req,
-                &mut out,
-                "l_linger",
-                Owner::take(req, Value::int(word(&buf, 4))),
-            )?;
+            put(req, &mut out, "l_onoff", Owner::int(word(&buf, 0)))?;
+            put(req, &mut out, "l_linger", Owner::int(word(&buf, 4)))?;
             return Ok(OrFalse::Value(Union::A(out)));
         }
         if option == i64::from(libc::SO_RCVTIMEO) || option == i64::from(libc::SO_SNDTIMEO) {
@@ -141,17 +131,12 @@ fn get_option(
             let sec_width = std::mem::size_of::<ffi::TimeT>();
             let usec_width = std::mem::size_of::<ffi::SusecondsT>();
             let mut out = PhpArray::new(req)?;
-            put(
-                req,
-                &mut out,
-                "sec",
-                Owner::take(req, Value::int(wide(&buf, 0, sec_width))),
-            )?;
+            put(req, &mut out, "sec", Owner::int(wide(&buf, 0, sec_width)))?;
             put(
                 req,
                 &mut out,
                 "usec",
-                Owner::take(req, Value::int(wide(&buf, sec_width, usec_width))),
+                Owner::int(wide(&buf, sec_width, usec_width)),
             )?;
             return Ok(OrFalse::Value(Union::A(out)));
         }
@@ -204,12 +189,7 @@ fn meminfo(req: &mut Request, socket: Instance<Socket>, fd: i32) -> Result<Answe
     let mut out = PhpArray::init_size(req, 9)?;
     for (name, word) in NAMES.iter().zip(buf.chunks_exact(4)) {
         let n = u32::from_ne_bytes([word[0], word[1], word[2], word[3]]);
-        put(
-            req,
-            &mut out,
-            name,
-            Owner::take(req, Value::int(i64::from(n))),
-        )?;
+        put(req, &mut out, name, Owner::int(i64::from(n)))?;
     }
     Ok(OrFalse::Value(Union::A(out)))
 }

@@ -102,7 +102,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         let (entry, mut table) = self.shutdown_entry(callback, arguments)?;
         let index = self.shutdown_functions.slot(entry);
-        if let Err(thrown) = table.append(self, Owner::take(self, Value::int(index))) {
+        if let Err(thrown) = table.append(self, Owner::int(index)) {
             self.drop_shutdown_entry(index);
             return Err(thrown);
         }
@@ -171,7 +171,7 @@ impl Request {
             }
         };
         let index = self.shutdown_functions.slot(entry);
-        let set = table.set(self, key, Owner::take(self, Value::int(index)));
+        let set = table.set(self, key, Owner::int(index));
         if set.is_err() {
             self.drop_shutdown_entry(index);
         }

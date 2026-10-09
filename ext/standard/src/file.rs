@@ -1175,15 +1175,15 @@ fn fstat(req: &mut Request, stream: Stream) -> Result<OrFalse<Owner<PhpArray>>, 
 /// ```
 pub fn php_fstat(req: &mut Request, stream: Stream) -> Result<Owner<Value>, Thrown> {
     let Some(sb) = stream.stat(req) else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     let mut out = PhpArray::new(req)?;
     for field in sb {
-        out.append(req, Owner::take(req, Value::int(field)))?;
+        out.append(req, Owner::int(field))?;
     }
     for (name, field) in STAT_NAMES.iter().zip(sb) {
         let key = PhpString::new(req, name)?.into_key();
-        out.set(req, key, Owner::take(req, Value::int(field)))?;
+        out.set(req, key, Owner::int(field))?;
     }
     Ok(out.into_value())
 }
@@ -3233,7 +3233,7 @@ fn fgetcsv(
     }
     let mut array = PhpArray::new(req)?;
     match fields {
-        None => array.append(req, Owner::take(req, Value::null()))?,
+        None => array.append(req, Owner::null())?,
         Some(fields) => {
             for field in fields {
                 let value = PhpString::new(req, &field)?.into_value();

@@ -459,8 +459,7 @@ fn open(
             return Ok(None);
         };
         if inner.cast(req, Cast::Fd, true).is_none() {
-            inner.close(req);
-            inner.give_up(req);
+            inner.free(req);
             return Ok(None);
         }
         Handle::Stream(inner)
@@ -913,11 +912,7 @@ fn bzerror(req: &mut Request, bz: Stream) -> Result<Owner<PhpArray>, Thrown> {
     let code = last_error(req, bz)?;
     let mut array = PhpArray::new(req)?;
     let errno = PhpString::new(req, b"errno")?;
-    array.set(
-        req,
-        errno.into_key(),
-        Owner::take(req, Value::int(code.number())),
-    )?;
+    array.set(req, errno.into_key(), Owner::int(code.number()))?;
     let errstr = PhpString::new(req, b"errstr")?;
     let text = PhpString::new(req, error_text(code).as_bytes())?;
     array.set(req, errstr.into_key(), text.into_value())?;

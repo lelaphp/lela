@@ -23,8 +23,8 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, callable_name, to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref, raise, throw_error};
 use php_ext::request::{
-    Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, StreamCtx, Streams as _,
-    XportFactory,
+    Crypto, CryptoSocket, Handshake, OwnedStream as _, Readiness, Request, Stream, StreamCtx,
+    Streams as _, XportFactory,
 };
 use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk};
@@ -1252,7 +1252,7 @@ impl Layer {
                     }
                     array.into_value()
                 }
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             };
             let set = context.set_option(req, b"ssl", b"peer_certificate_chain", &value);
             value.give_up(req);
@@ -1603,8 +1603,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
         found.unwrap_or(false)
     });
     if remote {
-        stream.close(req);
-        stream.give_up(req);
+        stream.free(req);
         raise(
             req,
             Level::Warning,
@@ -1643,8 +1642,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
             }
         }
     }
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     if added == 0 {
         raise(
             req,
@@ -1859,12 +1857,7 @@ impl Crypto for Layer {
         let (name, bits, version) =
             cipher.map_or((Vec::new(), 0, Vec::new()), |c| (c.name, c.bits, c.version));
         crate::put_bytes(req, &mut array, b"cipher_name", &name)?;
-        crate::put(
-            req,
-            &mut array,
-            b"cipher_bits",
-            Owner::take(req, Value::int(i64::from(bits))),
-        )?;
+        crate::put(req, &mut array, b"cipher_bits", Owner::int(i64::from(bits)))?;
         crate::put_bytes(req, &mut array, b"cipher_version", &version)?;
         if let Some(alpn) = tls.alpn_selected() {
             crate::put_bytes(req, &mut array, b"alpn_protocol", &alpn)?;

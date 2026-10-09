@@ -488,7 +488,7 @@ impl Request {
             trace.give_up(self);
             return Err(thrown);
         }
-        let line = Owner::take(self, Value::int(i64::from(self.current_line())));
+        let line = Owner::int(i64::from(self.current_line()));
         if let Err(thrown) = write_prop(self, &throwable, b"line", line) {
             trace.give_up(self);
             return Err(thrown);

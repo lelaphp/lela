@@ -435,7 +435,7 @@ impl Stmt {
             .as_mut()
             .and_then(|b| b.get_mut(n as usize))
         {
-            if let Some(old) = bind.zv.replace(Owner::take(req, Value::null())) {
+            if let Some(old) = bind.zv.replace(Owner::null()) {
                 old.give_up(req);
             }
             bind.bound = true;

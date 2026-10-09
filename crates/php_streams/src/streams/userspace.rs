@@ -132,11 +132,8 @@ fn string_arg(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
 }
 
 /// Integer arguments, owners of no count beside the others a call takes.
-fn ints(req: &Request, numbers: &[i64]) -> Vec<Owner<Value>> {
-    numbers
-        .iter()
-        .map(|n| Owner::take(req, Value::int(*n)))
-        .collect()
+fn ints(numbers: &[i64]) -> Vec<Owner<Value>> {
+    numbers.iter().map(|n| Owner::int(*n)).collect()
 }
 
 /// The arguments' views, for a call their owners outlive.
@@ -310,9 +307,8 @@ fn open_with(
     let built = (|| -> Result<(), Thrown> {
         args.push(string_arg(req, path)?);
         args.push(string_arg(req, mode)?);
-        args.extend(ints(req, &[options]));
-        let null = Owner::take(req, Value::null());
-        args.push(PhpRef::new(req, null)?.into_value());
+        args.extend(ints(&[options]));
+        args.push(PhpRef::new(req, Owner::null())?.into_value());
         Ok(())
     })();
     if let Err(thrown) = built {
@@ -396,7 +392,7 @@ fn open_dir_with(
             return Err(thrown);
         }
     };
-    args.extend(ints(req, &[0]));
+    args.extend(ints(&[0]));
     let called = call(req, object, b"dir_opendir", &views(&args));
     give_up_all(req, args);
     let answer = match called {
@@ -1087,7 +1083,7 @@ pub(crate) fn url_stat(
     flags: i64,
 ) -> Result<Option<StatBuf>, Thrown> {
     let mut args = vec![string_arg(req, url)?];
-    args.extend(ints(req, &[flags]));
+    args.extend(ints(&[flags]));
     let called = path_call(req, user, b"url_stat", &views(&args));
     give_up_all(req, args);
     let sb = match called? {
@@ -1125,15 +1121,15 @@ pub(crate) fn path_op(
         WrapperOp::Rename { to } => (b"rename", string_arg(req, to).map(|to| vec![to])),
         WrapperOp::Mkdir { mode, recursive } => (
             b"mkdir",
-            Ok(ints(req, &[mode, i64::from(recursive) | REPORT_ERRORS])),
+            Ok(ints(&[mode, i64::from(recursive) | REPORT_ERRORS])),
         ),
-        WrapperOp::Rmdir => (b"rmdir", Ok(ints(req, &[REPORT_ERRORS]))),
+        WrapperOp::Rmdir => (b"rmdir", Ok(ints(&[REPORT_ERRORS]))),
         WrapperOp::Touch(times) => (b"stream_metadata", touch_args(req, times)),
-        WrapperOp::Owner(uid) => (b"stream_metadata", Ok(ints(req, &[3, uid]))),
-        WrapperOp::Group(gid) => (b"stream_metadata", Ok(ints(req, &[5, gid]))),
+        WrapperOp::Owner(uid) => (b"stream_metadata", Ok(ints(&[3, uid]))),
+        WrapperOp::Group(gid) => (b"stream_metadata", Ok(ints(&[5, gid]))),
         WrapperOp::OwnerName(name) => (b"stream_metadata", named_args(req, 2, name)),
         WrapperOp::GroupName(name) => (b"stream_metadata", named_args(req, 4, name)),
-        WrapperOp::Chmod(mode) => (b"stream_metadata", Ok(ints(req, &[6, mode]))),
+        WrapperOp::Chmod(mode) => (b"stream_metadata", Ok(ints(&[6, mode]))),
     };
     match rest {
         Ok(rest) => args.extend(rest),
@@ -1152,14 +1148,14 @@ fn touch_args(req: &mut Request, times: Option<(i64, i64)>) -> Result<Vec<Owner<
     let mut array = PhpArray::new(req)?;
     if let Some((mtime, atime)) = times {
         let appended = array
-            .append(req, Owner::take(req, Value::int(mtime)))
-            .and_then(|()| array.append(req, Owner::take(req, Value::int(atime))));
+            .append(req, Owner::int(mtime))
+            .and_then(|()| array.append(req, Owner::int(atime)));
         if let Err(thrown) = appended {
             array.give_up(req);
             return Err(thrown);
         }
     }
-    let mut args = ints(req, &[1]);
+    let mut args = ints(&[1]);
     args.push(array.into_value());
     Ok(args)
 }
@@ -1167,7 +1163,7 @@ fn touch_args(req: &mut Request, times: Option<(i64, i64)>) -> Result<Vec<Owner<
 /// `stream_metadata`'s option and a user or group name.
 fn named_args(req: &mut Request, option: i64, name: &[u8]) -> Result<Vec<Owner<Value>>, Thrown> {
     let name = string_arg(req, name)?;
-    let mut args = ints(req, &[option]);
+    let mut args = ints(&[option]);
     args.push(name);
     Ok(args)
 }

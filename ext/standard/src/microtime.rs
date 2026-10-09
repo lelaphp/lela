@@ -8,7 +8,7 @@ use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::ffi::{Who, rusage};
 use crate::uniqid::now;
@@ -81,7 +81,7 @@ fn getrusage(
     let mut usage = PhpArray::new(req)?;
     for (name, value) in fields {
         let key = PhpString::new(req, name.as_bytes())?.into_key();
-        usage.set(req, key, Owner::take(req, Value::int(value)))?;
+        usage.set(req, key, Owner::int(value))?;
     }
     Ok(OrFalse::Value(usage))
 }
@@ -195,7 +195,7 @@ fn gettimeofday(
     ];
     for (name, value) in rows {
         let key = PhpString::new(req, name)?.into_key();
-        array.set(req, key, Owner::take(req, Value::int(value)))?;
+        array.set(req, key, Owner::int(value))?;
     }
     Ok(Union::A(array))
 }

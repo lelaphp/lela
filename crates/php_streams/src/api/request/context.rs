@@ -599,7 +599,7 @@ fn call_user_notifier(
             let text = text.split(|b| *b == 0).next().unwrap_or_default();
             PhpString::new(req, text)?.into_value()
         }
-        None => Owner::take(req, Value::null()),
+        None => Owner::null(),
     };
     let long = |n: usize| Value::int(i64::try_from(n).unwrap_or(i64::MAX));
     let arguments = [

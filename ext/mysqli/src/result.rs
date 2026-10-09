@@ -459,7 +459,7 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
     let row = with_rows(req, on.object, |req, set| fetch_row(req, set, NUM))?;
     let Some(array) = row.as_array().copied() else {
         row.give_up(req);
-        return Ok(AsIs::new(Owner::take(req, Value::bool(false))));
+        return Ok(AsIs::new(Owner::bool(false)));
     };
     let value = array.get(&Key::Int(column)).unwrap_or_default();
     let value = Owner::take(req, value);
@@ -579,10 +579,7 @@ fn lengths_of(set: &ResultSet) -> Option<Vec<u64>> {
 fn lengths_array(req: &mut Request, lengths: &[u64]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for n in lengths {
-        out.append(
-            req,
-            Owner::take(req, Value::int(i64::try_from(*n).unwrap_or(i64::MAX))),
-        )?;
+        out.append(req, Owner::int(i64::try_from(*n).unwrap_or(i64::MAX)))?;
     }
     Ok(out)
 }
@@ -1049,8 +1046,8 @@ impl ClassIterator for RowIter {
         Ok(Owner::take(req, row))
     }
 
-    fn key(&mut self, req: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
-        Ok(Owner::take(req, Value::int(self.row_num)))
+    fn key(&mut self, _: &mut Request, _: PhpObject) -> Result<Owner<Value>, Thrown> {
+        Ok(Owner::int(self.row_num))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
@@ -1093,14 +1090,11 @@ impl Props for ResultProps {
             return props::gone(req, object, quiet);
         };
         let value = match name {
-            "current_field" => Owner::take(
-                req,
-                Value::int(i64::try_from(set.field_tell()).unwrap_or(0)),
-            ),
-            "field_count" => Owner::take(req, Value::int(i64::from(set.num_fields()))),
+            "current_field" => Owner::int(i64::try_from(set.field_tell()).unwrap_or(0)),
+            "field_count" => Owner::int(i64::from(set.num_fields())),
             "lengths" => match lengths_of(set).filter(|_| set.num_fields() > 0) {
                 Some(lengths) => lengths_array(req, &lengths)?.into_value(),
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             },
             "num_rows" => long_or_string(req, set.num_rows())?,
             "type" => {
@@ -1109,9 +1103,9 @@ impl Props for ResultProps {
                 } else {
                     link::USE
                 };
-                Owner::take(req, Value::int(kind))
+                Owner::int(kind)
             }
-            _ => Owner::take(req, Value::null()),
+            _ => Owner::null(),
         };
         if let Some(slot) = crate::payload::<Rows>(req, object) {
             *slot = rows;

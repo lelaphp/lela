@@ -174,14 +174,14 @@ pub(super) fn open_blob(
         let flags = flags.hold(req)?;
         let writable = flags & i64::from(ffi::SQLITE_OPEN_READWRITE) != 0;
         let Some(handle) = (conn as &mut dyn std::any::Any).downcast_mut::<Handle>() else {
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         };
         let blob = match handle.db.blob_open(&dbname, &table, &column, row, writable) {
             Ok(blob) => blob,
             Err(text) => {
                 let text = String::from_utf8_lossy(&text).into_owned();
                 warning(req, &format!("Unable to open blob: {text}"));
-                return Ok(Owner::take(req, Value::bool(false)));
+                return Ok(Owner::bool(false));
             }
         };
         let read_only = flags & i64::from(ffi::SQLITE_OPEN_READONLY) != 0;

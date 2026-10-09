@@ -1193,7 +1193,7 @@ pub(crate) fn links_stats(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
     let mut out = PhpArray::new(req)?;
     for (name, n) in counts {
         let key = PhpString::new(req, name.as_bytes())?.into_key();
-        out.set(req, key, Owner::take(req, Value::int(n)))?;
+        out.set(req, key, Owner::int(n))?;
     }
     Ok(out)
 }
@@ -1796,10 +1796,7 @@ impl Props for LinkProps {
                 return string(req, CLIENT_INFO.as_bytes()).map(Some);
             }
             "client_version" => {
-                return Ok(Some(Owner::take(
-                    req,
-                    Value::int(i64::try_from(CLIENT_VERSION).unwrap_or(0)),
-                )));
+                return Ok(Some(Owner::int(i64::try_from(CLIENT_VERSION).unwrap_or(0))));
             }
             "connect_errno" => {
                 let errno = Value::int(req.state::<State>().connect_errno);
@@ -1808,7 +1805,7 @@ impl Props for LinkProps {
             "connect_error" => {
                 return match req.state::<State>().connect_error.clone() {
                     Some(error) => string(req, &error).map(Some),
-                    None => Ok(Some(Owner::take(req, Value::null()))),
+                    None => Ok(Some(Owner::null())),
                 };
             }
             _ => {}
@@ -1835,25 +1832,22 @@ impl Props for LinkProps {
         let s = mysql.status(req);
         let value = match name {
             "affected_rows" => affected(req, s.affected_rows)?,
-            "errno" => Owner::take(req, Value::int(i64::from(s.errno))),
+            "errno" => Owner::int(i64::from(s.errno)),
             "error" => string(req, &s.error)?,
             "error_list" => props::error_list(req, &s.error_list)?.into_value(),
-            "field_count" => Owner::take(req, Value::int(i64::from(s.field_count))),
+            "field_count" => Owner::int(i64::from(s.field_count)),
             "host_info" => string(req, s.host_info.as_deref().unwrap_or_default())?,
             "info" => match s.info {
                 Some(info) => string(req, &info)?,
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             },
             "insert_id" => long_or_string(req, s.insert_id)?,
             "server_info" => string(req, s.server_info.as_deref().unwrap_or_default())?,
-            "server_version" => Owner::take(
-                req,
-                Value::int(i64::try_from(s.server_version).unwrap_or(0)),
-            ),
+            "server_version" => Owner::int(i64::try_from(s.server_version).unwrap_or(0)),
             "sqlstate" => string(req, &s.sqlstate)?,
-            "protocol_version" => Owner::take(req, Value::int(i64::from(s.proto_info))),
-            "thread_id" => Owner::take(req, Value::int(i64::try_from(s.thread_id).unwrap_or(0))),
-            "warning_count" => Owner::take(req, Value::int(i64::from(s.warning_count))),
+            "protocol_version" => Owner::int(i64::from(s.proto_info)),
+            "thread_id" => Owner::int(i64::try_from(s.thread_id).unwrap_or(0)),
+            "warning_count" => Owner::int(i64::from(s.warning_count)),
             _ => return Ok(None),
         };
         Ok(Some(value))

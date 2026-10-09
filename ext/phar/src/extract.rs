@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use php_ext::abi::Union;
 use php_ext::raising::{Thrown, throw};
-use php_ext::request::{Opening, Request, Resolve, Streams as _};
+use php_ext::request::{Opening, OwnedStream as _, Request, Resolve, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{PhpArray, PhpString};
 
@@ -139,21 +139,18 @@ fn extract_file(
     let bytes = match read(req) {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(error)) => {
-            out.close(req);
-            out.give_up(req);
+            out.free(req);
             return Ok(Err(format!(
                 "Cannot extract \"{shown}\" to \"{full}\", unable to open internal file pointer: {error}"
             )));
         }
         Err(thrown) => {
-            out.close(req);
-            out.give_up(req);
+            out.free(req);
             return Err(thrown);
         }
     };
     let written = out.write(req, &bytes);
-    out.close(req);
-    out.give_up(req);
+    out.free(req);
     if !bytes.is_empty() && written != Some(bytes.len()) {
         return Ok(Err(format!(
             "Cannot extract \"{shown}\" to \"{full}\", copying contents failed"

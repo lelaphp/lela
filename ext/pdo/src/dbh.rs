@@ -15,7 +15,7 @@ use php_ext::decl::Name;
 use php_ext::raising::{
     Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
 };
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef,
@@ -838,8 +838,7 @@ fn dsn_from_uri(req: &mut Request, uri: &[u8]) -> Result<Option<Vec<u8>>, Thrown
         return Ok(None);
     };
     let line = stream.get_line(req, Some(512));
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     line
 }
 
@@ -1685,7 +1684,7 @@ impl PDO {
             error::fetch_error(req, this, on, &mut out)?;
         }
         while out.len() < 3 {
-            out.append(req, Owner::take(req, Value::null()))?;
+            out.append(req, Owner::null())?;
         }
         Ok(out)
     }
@@ -1772,20 +1771,20 @@ impl PDO {
                 d.stringify,
             )
         }) else {
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         };
         let (persistent, case, nulls, mode, name, class, args, fetch, stringify) = state;
         match attr {
-            PDO::ATTR_PERSISTENT => return Ok(Owner::take(req, Value::bool(persistent))),
-            PDO::ATTR_CASE => return Ok(Owner::take(req, Value::int(case.code()))),
-            PDO::ATTR_ORACLE_NULLS => return Ok(Owner::take(req, Value::int(nulls.code()))),
+            PDO::ATTR_PERSISTENT => return Ok(Owner::bool(persistent)),
+            PDO::ATTR_CASE => return Ok(Owner::int(case.code())),
+            PDO::ATTR_ORACLE_NULLS => return Ok(Owner::int(nulls.code())),
             PDO::ATTR_ERRMODE => {
                 let code = match mode {
                     OnError::Silent => 0,
                     OnError::Warn => 1,
                     OnError::Throw => 2,
                 };
-                return Ok(Owner::take(req, Value::int(code)));
+                return Ok(Owner::int(code));
             }
             PDO::ATTR_DRIVER_NAME => {
                 return crate::string(req, name.unwrap_or("").as_bytes());
@@ -1804,18 +1803,18 @@ impl PDO {
                 return Ok(out.into_value());
             }
             PDO::ATTR_DEFAULT_FETCH_MODE => {
-                return Ok(Owner::take(req, Value::int(i64::from(fetch))));
+                return Ok(Owner::int(i64::from(fetch)));
             }
-            PDO::ATTR_STRINGIFY_FETCHES => return Ok(Owner::take(req, Value::bool(stringify))),
+            PDO::ATTR_STRINGIFY_FETCHES => return Ok(Owner::bool(stringify)),
             _ => {}
         }
         match on_connection(req, this, |req, conn| conn.attribute(req, attr))? {
             Ok(Some(Some(value))) => Ok(value),
             Ok(Some(None)) => unsupported(req, this, "driver does not support that attribute")
-                .map(|()| Owner::take(req, Value::bool(false))),
-            Ok(None) => Ok(Owner::take(req, Value::bool(false))),
+                .map(|()| Owner::bool(false)),
+            Ok(None) => Ok(Owner::bool(false)),
             Err(()) => unsupported(req, this, "driver does not support getting attributes")
-                .map(|()| Owner::take(req, Value::bool(false))),
+                .map(|()| Owner::bool(false)),
         }
     }
 

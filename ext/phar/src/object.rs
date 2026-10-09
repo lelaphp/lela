@@ -12,7 +12,7 @@ use php_ext::call::{instantiate, known_method, lookup_class};
 use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{Thrown, arg_type_error, arg_value_error, arity, throw};
-use php_ext::request::{Request, Stream, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Other};
 
@@ -470,8 +470,7 @@ impl Phar {
         };
         let name = localName.map_or(file, |n| n.as_bytes().to_vec());
         let added = crate::build::add_file(req, id, &name, crate::build::Source::Stream(*stream));
-        stream.close(req);
-        stream.give_up(req);
+        stream.free(req);
         added
     }
 
@@ -874,7 +873,7 @@ impl Phar {
     ) -> Result<Owner<Value>, Thrown> {
         let id = held(req, this.object())?;
         let Some(a) = archives(req).get_mut(id) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let mut meta = std::mem::take(&mut a.metadata);
         let value = metadata_value(req, &mut meta, unserializeOptions, "Phar::getMetadata");
@@ -1753,7 +1752,7 @@ pub(crate) fn metadata_value(
     function: &str,
 ) -> Result<Owner<Value>, Thrown> {
     if !meta.has_data() {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     }
     let options = match options {
         Passed::Given(options) if !options.is_empty() => Some(options),

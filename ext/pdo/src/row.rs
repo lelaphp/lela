@@ -176,14 +176,14 @@ impl ObjectHandlers for Handlers {
         read: PropertyRead,
     ) -> Result<Owner<Value>, Thrown> {
         let Some(stmt) = statement(req, object) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         if name == b"queryString" {
             return Std.read_property(req, stmt, name, read);
         }
         match by_key(req, stmt, name)? {
             Some(column) => Ok(column),
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
         }
     }
 
@@ -200,12 +200,12 @@ impl ObjectHandlers for Handlers {
             return Err(throw_error(req, "Error", "Cannot append to PDORow offset"));
         };
         let Some(stmt) = statement(req, object) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         if let ValueRef::Int(n) = offset.deref().as_ref() {
             return match by_number(req, stmt, n)? {
                 Some(column) => Ok(column),
-                None => Ok(Owner::take(req, Value::null())),
+                None => Ok(Owner::null()),
             };
         }
         let name = to_string(req, &offset.deref())?;

@@ -962,7 +962,7 @@ fn array_handler(
         let Some(found) = lookup(req, input, name.as_bytes(), false) else {
             if add_empty {
                 let key = Owner::take(req, Key::Str(name));
-                out.set(req, key, Owner::take(req, Value::null()))?;
+                out.set(req, key, Owner::null())?;
             }
             return Ok(ControlFlow::Continue(()));
         };
@@ -1086,7 +1086,7 @@ fn filter_input(
     let name = var_name.as_bytes();
     if !id_exists(filter) {
         unknown_filter(req, filter);
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let array = storage(req, r#type)?;
     let found = array
@@ -1216,7 +1216,7 @@ fn filter_var(
 ) -> Result<Owner<Value>, Thrown> {
     if !id_exists(filter) {
         unknown_filter(req, filter);
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let value = Owner::take(req, value);
     filter_call(

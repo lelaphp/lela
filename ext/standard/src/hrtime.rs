@@ -12,7 +12,7 @@ use php_ext::abi::{OrFalse, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, Value};
+use php_ext::values::{Owner, PhpArray};
 
 /// `ZEND_NANO_IN_SEC`.
 const NANO_IN_SEC: u64 = 1_000_000_000;
@@ -78,7 +78,7 @@ fn hrtime(req: &mut Request, #[php(default = false)] as_number: bool) -> Result<
         return Ok(Union::B(Union::A(long(t))));
     }
     let mut pair = PhpArray::new(req)?;
-    pair.append(req, Owner::take(req, Value::int(long(t / NANO_IN_SEC))))?;
-    pair.append(req, Owner::take(req, Value::int(long(t % NANO_IN_SEC))))?;
+    pair.append(req, Owner::int(long(t / NANO_IN_SEC)))?;
+    pair.append(req, Owner::int(long(t % NANO_IN_SEC)))?;
     Ok(Union::A(pair))
 }

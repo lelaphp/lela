@@ -1278,7 +1278,7 @@ impl ObjectHandlers for Handlers {
                 let made = make(req, Data::holding(ty, sym.addr, true))?;
                 Ok(made.into_value())
             }
-            _ => Ok(Owner::take(req, Value::int(sym.value))),
+            _ => Ok(Owner::int(sym.value)),
         }
     }
 
@@ -1422,11 +1422,11 @@ impl ObjectHandlers for Handlers {
     /// `zend_fake_cast_object`.
     fn cast_object(
         &self,
-        req: &mut Request,
+        _: &mut Request,
         _: PhpObject,
         to: TypeTag,
     ) -> Result<Option<Owner<Value>>, Thrown> {
-        Ok((to == TypeTag::Bool).then(|| Owner::take(req, Value::bool(true))))
+        Ok((to == TypeTag::Bool).then(|| Owner::bool(true)))
     }
 
     /// `get_debug_info = NULL` over `zend_fake_get_properties`: nothing.

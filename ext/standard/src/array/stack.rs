@@ -233,7 +233,7 @@ fn array_pop(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, Th
         stack.array.cursor_end();
         let (Some(key), Some(value)) = (stack.array.cursor_key(), stack.array.cursor_current())
         else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let taken = Owner::take(req, value);
         let popped = stack.array.unset(req, &key);
@@ -340,7 +340,7 @@ fn array_shift(req: &mut Request, array: Ref<PhpArray>) -> Result<Owner<Value>, 
         // the stack holds keeps until it is replaced.
         let rows: Vec<(Key, Value)> = walk::rows(req, stack.array).collect();
         let Some((_, first)) = rows.first().cloned() else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let mut rebuilt = PhpArray::new(req)?;
         for (key, element) in rows.into_iter().skip(1) {

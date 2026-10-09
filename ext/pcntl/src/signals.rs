@@ -332,78 +332,33 @@ pub(crate) fn siginfo(
     posted: &Siginfo,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut info = PhpArray::new(req)?;
-    put(
-        req,
-        &mut info,
-        b"signo",
-        Owner::take(req, Value::int(posted.number.into())),
-    )?;
-    put(
-        req,
-        &mut info,
-        b"errno",
-        Owner::take(req, Value::int(posted.errno.into())),
-    )?;
-    put(
-        req,
-        &mut info,
-        b"code",
-        Owner::take(req, Value::int(posted.code.into())),
-    )?;
+    put(req, &mut info, b"signo", Owner::int(posted.number.into()))?;
+    put(req, &mut info, b"errno", Owner::int(posted.errno.into()))?;
+    put(req, &mut info, b"code", Owner::int(posted.code.into()))?;
     let Ok(signal) = Signal::try_from(number) else {
         realtime(req, &mut info, number, posted)?;
         return Ok(info);
     };
     match signal {
         Signal::SIGCHLD => {
-            put(
-                req,
-                &mut info,
-                b"status",
-                Owner::take(req, Value::int(posted.status.into())),
-            )?;
+            put(req, &mut info, b"status", Owner::int(posted.status.into()))?;
             #[cfg(target_os = "linux")]
             for (key, ticks) in [(&b"utime"[..], posted.utime), (b"stime", posted.stime)] {
                 #[allow(clippy::cast_precision_loss)]
                 let ticks = Value::float(ticks as f64);
                 put(req, &mut info, key, Owner::take(req, ticks))?;
             }
-            put(
-                req,
-                &mut info,
-                b"pid",
-                Owner::take(req, Value::int(posted.pid.into())),
-            )?;
-            put(
-                req,
-                &mut info,
-                b"uid",
-                Owner::take(req, Value::int(posted.uid.into())),
-            )?;
+            put(req, &mut info, b"pid", Owner::int(posted.pid.into()))?;
+            put(req, &mut info, b"uid", Owner::int(posted.uid.into()))?;
         }
         Signal::SIGUSR1 | Signal::SIGUSR2 => {
-            put(
-                req,
-                &mut info,
-                b"pid",
-                Owner::take(req, Value::int(posted.pid.into())),
-            )?;
-            put(
-                req,
-                &mut info,
-                b"uid",
-                Owner::take(req, Value::int(posted.uid.into())),
-            )?;
+            put(req, &mut info, b"pid", Owner::int(posted.pid.into()))?;
+            put(req, &mut info, b"uid", Owner::int(posted.uid.into()))?;
         }
         Signal::SIGILL | Signal::SIGFPE | Signal::SIGSEGV | Signal::SIGBUS => {
             #[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]
             let addr = posted.addr as i64 as f64;
-            put(
-                req,
-                &mut info,
-                b"addr",
-                Owner::take(req, Value::float(addr)),
-            )?;
+            put(req, &mut info, b"addr", Owner::float(addr))?;
         }
         #[cfg(target_os = "linux")]
         Signal::SIGIO => {
@@ -428,18 +383,8 @@ fn realtime(
     posted: &Siginfo,
 ) -> Result<(), Thrown> {
     if (libc::SIGRTMIN()..=libc::SIGRTMAX()).contains(&number) {
-        put(
-            req,
-            info,
-            b"pid",
-            Owner::take(req, Value::int(posted.pid.into())),
-        )?;
-        put(
-            req,
-            info,
-            b"uid",
-            Owner::take(req, Value::int(posted.uid.into())),
-        )?;
+        put(req, info, b"pid", Owner::int(posted.pid.into()))?;
+        put(req, info, b"uid", Owner::int(posted.uid.into()))?;
     }
     Ok(())
 }
@@ -521,7 +466,7 @@ pub(crate) fn pcntl_sigprocmask(
         for number in 1..NUMBERS {
             let member = i32::try_from(number).is_ok_and(|n| old.contains(n));
             if member {
-                numbers.append(req, Owner::take(req, Value::int(number)))?;
+                numbers.append(req, Owner::int(number))?;
             }
         }
         old_signals.set(req, Untyped(numbers.into_value()))?;

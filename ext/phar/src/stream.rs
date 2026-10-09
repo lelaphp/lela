@@ -5,9 +5,10 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    DirListing, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
+    DirListing, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper, Streams as _,
+    Whence,
 };
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 use crate::archive::{self, ArchiveId, archives, lossy};
 use crate::entry::{self, Dir, EntryData, Target};
@@ -447,7 +448,7 @@ fn stat_array(req: &mut Request, sb: [i64; 13]) -> Result<Owner<PhpArray>, Throw
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
         let key = PhpString::new(req, name)?.into_key();
-        out.set(req, key, Owner::take(req, Value::int(field)))?;
+        out.set(req, key, Owner::int(field))?;
     }
     Ok(out)
 }
@@ -610,15 +611,13 @@ fn list_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
             Ok(Some(name)) => name,
             Ok(None) => break,
             Err(thrown) => {
-                dir.close(req);
-                dir.give_up(req);
+                dir.free(req);
                 return Err(thrown);
             }
         };
         out.push(name);
     }
-    dir.close(req);
-    dir.give_up(req);
+    dir.free(req);
     Ok(Some(out))
 }
 

@@ -443,7 +443,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     ];
     for (name, value) in chars {
         let key = PhpString::new(req, name)?.into_key();
-        array.set(req, key, Owner::take(req, Value::int(i64::from(value))))?;
+        array.set(req, key, Owner::int(i64::from(value)))?;
     }
     for (name, grouping) in [
         (&b"grouping"[..], &lconv.grouping),
@@ -452,11 +452,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut list = PhpArray::new(req)?;
         for (at, byte) in (0i64..).zip(grouping) {
             let value = i64::from(c_char::from_ne_bytes([*byte]));
-            list.set(
-                req,
-                Owner::take(req, Key::Int(at)),
-                Owner::take(req, Value::int(value)),
-            )?;
+            list.set(req, Owner::take(req, Key::Int(at)), Owner::int(value))?;
         }
         let key = PhpString::new(req, name)?.into_key();
         array.set(req, key, list.into_value())?;

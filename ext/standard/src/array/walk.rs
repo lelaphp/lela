@@ -481,7 +481,7 @@ fn array_reduce(
     });
     match (walked, carry) {
         (Ok(_), Some(carry)) => Ok(carry),
-        (Ok(_), None) => Ok(Owner::take(req, Value::null())),
+        (Ok(_), None) => Ok(Owner::null()),
         (Err(thrown), carry) => {
             if let Some(carry) = carry {
                 carry.give_up(req);
@@ -643,7 +643,7 @@ fn array_find(
             value.give_up(req);
             Ok(inner)
         }
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -672,7 +672,7 @@ fn array_find_key(
             key.give_up(req);
             Ok(shown)
         }
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     }
 }
 
@@ -782,7 +782,7 @@ fn array_map(
     let mapped = mapped(req, callback, array, arrays)?;
     let mapped = match mapped {
         Some(mapped) => mapped.into_value(),
-        None => Owner::take(req, Value::null()),
+        None => Owner::null(),
     };
     Ok(mapped.into_raw())
 }

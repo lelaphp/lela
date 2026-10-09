@@ -84,7 +84,7 @@ impl ObjectHandlers for Handlers {
             easy.give_up(req);
         }
         if let Some(push) = mh.push {
-            push.release(req);
+            push.give_up(req);
         }
     }
 
@@ -97,7 +97,7 @@ impl ObjectHandlers for Handlers {
             return;
         };
         if let Some(push) = &mh.push {
-            visit(push.value());
+            push.visit(visit);
         }
         for easy in &mh.easy {
             visit(easy.as_value());
@@ -413,8 +413,8 @@ fn curl_multi_info_read(
         queued_messages.set(req, Untyped(Value::int(done.queued)))?;
     }
     let mut out = Assoc::new(req)?;
-    out.add(req, "msg", Owner::take(req, Value::int(done.msg)))?;
-    out.add(req, "result", Owner::take(req, Value::int(done.result)))?;
+    out.add(req, "msg", Owner::int(done.msg))?;
+    out.add(req, "result", Owner::int(done.result))?;
     if let Some(handle) = find(req, multi_handle.object(), done.easy) {
         if let Some(curl) = handle.native_mut::<Curl>(req) {
             curl.err = done.result;
@@ -559,6 +559,31 @@ fn curl_multi_strerror(
 /// curl_multi_setopt(): Argument #2 ($option) must be a valid callback for option CURLMOPT_PUSHFUNCTION, function "nope" not found or invalid function name
 /// int(6)
 /// ```
+///
+/// `CURLMOPT_PUSHFUNCTION` keeps what php's `zend_fcc_dup` keeps: a
+/// `'Class::method'` string set with `$this` in scope keeps the object
+/// it resolved to until the `CurlMultiHandle` is freed.
+///
+/// ```php
+/// class A {
+///     function p($parent, $pushed, $headers) { return CURL_PUSH_DENY; }
+///     function go() {
+///         $mh = curl_multi_init();
+///         curl_multi_setopt($mh, CURLMOPT_PUSHFUNCTION, 'A::p');
+///         return $mh;
+///     }
+///     function __destruct() { echo "dtor\n"; }
+/// }
+/// $mh = (new A)->go();
+/// echo "kept\n";
+/// unset($mh);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// kept
+/// dtor
+/// end
+/// ```
 #[php_function]
 fn curl_multi_setopt(
     req: &mut Request,
@@ -584,7 +609,7 @@ fn curl_multi_setopt(
         }
         c::CURLMOPT_PUSHFUNCTION => {
             if let Some(old) = mh(req, multi_handle)?.push.take() {
-                old.release(req);
+                old.give_up(req);
             }
             let value = value.deref();
             let callable = match callable_checked(req, &value) {
@@ -597,7 +622,7 @@ fn curl_multi_setopt(
                     return Err(argument_error(req, "TypeError", 2, &tail));
                 }
             };
-            mh(req, multi_handle)?.push = Some(Handler::keep(req, callable, &value));
+            mh(req, multi_handle)?.push = Some(Owner::take(req, callable));
             let code = multi.set_push(req);
             if code != 0 {
                 return Ok(false);
@@ -639,7 +664,7 @@ pub(crate) fn push(
     }
     let Some(callable) = multi
         .native::<Mh>(cx.req)
-        .and_then(|mh| mh.push.as_ref().map(|push| push.callable.clone()))
+        .and_then(|mh| mh.push.as_ref().map(|push| (**push).clone()))
     else {
         return false;
     };

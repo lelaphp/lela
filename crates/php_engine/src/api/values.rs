@@ -462,6 +462,25 @@ impl PhpArray {
         Ok(Owner::adopt(req, made))
     }
 
+    /// A new array [`PhpArray::new`] makes and `fill` writes, given up
+    /// where a step of `fill` throws, so the throwable is handed on and
+    /// nothing is held: php's `array_init` into a return value or a
+    /// debug table, which `RETURN_THROWS` leaves to the engine's free.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn filled(
+        req: &mut Request,
+        fill: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<(), Thrown>,
+    ) -> Result<Owner<PhpArray>, Thrown> {
+        let mut table = PhpArray::new(req)?;
+        match fill(req, &mut table) {
+            Ok(()) => Ok(table),
+            Err(thrown) => {
+                table.give_up(req);
+                Err(thrown)
+            }
+        }
+    }
+
     /// `zend_new_array(size)` and `zend_hash_init(ht, size, ...)`, an
     /// empty array whose first write lays its table down for `size`
     /// elements, the size held to `zend_hash_check_size`: the header
@@ -2966,13 +2985,10 @@ mod tests {
             return;
         };
         let key = Owner::take(&req, Key::Int(5));
-        let value = Owner::take(&req, Value::int(1));
-        assert!(a.set(&mut req, key, value).is_ok());
-        let value = Owner::take(&req, Value::int(2));
-        assert!(a.append(&mut req, value).is_ok());
+        assert!(a.set(&mut req, key, Owner::int(1)).is_ok());
+        assert!(a.append(&mut req, Owner::int(2)).is_ok());
         let key = Owner::take(&req, Key::Int(-4));
-        let value = Owner::take(&req, Value::null());
-        assert!(a.set(&mut req, key, value).is_ok());
+        assert!(a.set(&mut req, key, Owner::null()).is_ok());
         assert_eq!(a.len(), 3);
         assert_eq!(a.get(&Key::Int(6)), Some(Value::int(2)));
         assert!(!a.is_list());
@@ -2998,8 +3014,7 @@ mod tests {
         let Ok(mut a) = PhpArray::new(&mut req).map(Owner::hand_on) else {
             return;
         };
-        let value = Owner::take(&req, Value::int(1));
-        assert!(a.append(&mut req, value).is_ok());
+        assert!(a.append(&mut req, Owner::int(1)).is_ok());
         let first = Value::array(a);
         let second = first;
         assert_eq!(first.refcount(), 1, "a copy touches no refcount");
@@ -3008,8 +3023,7 @@ mod tests {
         let Some(mut b) = second.as_array().copied() else {
             return;
         };
-        let value = Owner::take(&req, Value::int(2));
-        assert!(b.append(&mut req, value).is_ok());
+        assert!(b.append(&mut req, Owner::int(2)).is_ok());
         assert_eq!(first.refcount(), 1, "the write took the second owner away");
         assert_eq!(b.len(), 2);
         assert_eq!(first.as_array().map(PhpArray::len), Some(1));
@@ -3105,8 +3119,7 @@ mod tests {
     fn a_reference_is_a_cell_of_the_heap_and_is_followed_by_deref() {
         let mut req = crate::test::request();
         let start = req.memory_usage(false);
-        let three = Owner::take(&req, Value::int(3));
-        let Ok(r) = PhpRef::new(&mut req, three) else {
+        let Ok(r) = PhpRef::new(&mut req, Owner::int(3)) else {
             return;
         };
         assert_eq!(req.memory_usage(false) - start, 32);
@@ -3148,8 +3161,7 @@ mod tests {
         )]
         fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
             let seen = r.native::<u32>(req).copied().unwrap_or(0);
-            let seen = Owner::take(req, Value::int(i64::from(seen)));
-            req.define_constant(b"dtor", seen);
+            req.define_constant(b"dtor", Owner::int(i64::from(seen)));
             Ok(())
         }
         let mut req = crate::test::request();

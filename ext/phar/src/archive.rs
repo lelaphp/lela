@@ -716,8 +716,7 @@ pub(crate) fn read_file(
         return Ok(None);
     };
     let bytes = copy_all(req, *stream);
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     Ok(Some(bytes?))
 }
 
@@ -780,7 +779,6 @@ pub(crate) fn filter_bytes(
         Ok(None) => Ok(None),
         Err(thrown) => Err(thrown),
     };
-    temp.close(req);
-    temp.give_up(req);
+    temp.free(req);
     out
 }

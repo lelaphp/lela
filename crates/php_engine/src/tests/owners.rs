@@ -58,7 +58,7 @@ fn fresh(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
 #[php_function]
 fn appended(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut owner = Owner::take(req, array);
-    owner.append(req, Owner::take(req, Value::int(1)))?;
+    owner.append(req, Owner::int(1))?;
     Ok(owner)
 }
 
@@ -73,6 +73,31 @@ fn held_past_the_limit(req: &mut Request, value: Value, bytes: i64) -> Result<()
     made.give_up(req);
     owner.give_up(req);
     Ok(())
+}
+
+/// `as_object(mixed $value): ?object`: the object `$value` is, returned
+/// as the owner taken of `$value` recast; `null`, that owner given up,
+/// where it is no object.
+#[php_function]
+fn as_object(req: &mut Request, value: Value) -> Owner<Value> {
+    match Owner::take(req, value).into_object() {
+        Ok(object) => object.into_value(),
+        Err(other) => {
+            other.give_up(req);
+            Owner::null()
+        }
+    }
+}
+
+/// `filled_past_a_throw(mixed $value): array`: a table filled with
+/// `$value` whose next step throws, the table given up by
+/// [`PhpArray::filled`] as the throwable is handed on.
+#[php_function]
+fn filled_past_a_throw(req: &mut Request, value: Value) -> Result<Owner<PhpArray>, Thrown> {
+    PhpArray::filled(req, |req, table| {
+        table.append(req, Owner::take(req, value))?;
+        Err(crate::api::raising::throw_error(req, "Error", "thrown"))
+    })
 }
 
 /// The line of `held_past_a_throw`'s [`Owner::take`].
@@ -100,6 +125,8 @@ fn owners() -> Extension {
             appended::declared(),
             held_past_the_limit::declared(),
             held_past_a_throw::declared(),
+            as_object::declared(),
+            filled_past_a_throw::declared(),
         ])
         .build("owners")
 }
@@ -240,4 +267,37 @@ fn an_owner_dropped_on_an_exceptions_path_is_reported() {
     );
     assert!(!stdout.contains("went on"), "{stdout}");
     assert_eq!(served.exit_code, 255);
+}
+
+/// An owner of a value recast to an owner of the object it is keeps the
+/// one count: the object is destroyed at its last PHP owner's unset, not
+/// before and not at the request's end; anything else is handed back and
+/// given up, a counted string freed with it.
+#[test]
+fn an_owner_of_an_object_value_is_recast_with_its_count() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        &format!("<?php {COUNTED} class D {{ function __destruct() {{ echo \"d\\n\"; }} }}\n$o = as_object(new D);\necho get_class($o), \"\\n\";\nunset($o);\necho 'end', \"\\n\";\nvar_dump(as_object(1), as_object(s('x')));\n"),
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "D\nd\nend\nNULL\nNULL\n"
+    );
+    assert_eq!(served.exit_code, 0);
+}
+
+/// A table [`PhpArray::filled`] makes is given up where a step of its
+/// fill throws: nothing is reported, and what it held is freed with it,
+/// the object's destructor served once the throwable, whose trace holds
+/// the argument, is let go.
+#[test]
+fn a_filled_table_is_given_up_where_its_fill_throws() {
+    let engine = Engine::cli_builder().extensions(&[owners()]).build();
+    let served = engine.serve_capture(
+        "<?php class D { function __destruct() { echo \"d\\n\"; } }\ntry { filled_past_a_throw(new D); } catch (Error $e) { echo $e->getMessage(), \"\\n\"; unset($e); }\necho 'end', \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "thrown\nd\nend\n");
+    assert_eq!(served.exit_code, 0);
 }

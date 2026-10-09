@@ -134,7 +134,7 @@ impl Prop {
     /// `php_zip_property_reader`.
     fn read(self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let Some(i) = object.native::<Intern>(req) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         let status = i.za.as_ref().map_or(i.err, |za| za.error);
         let scalar = match self {

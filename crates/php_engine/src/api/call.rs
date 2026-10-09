@@ -857,7 +857,7 @@ fn at_site(req: &mut Request, thrown: Thrown, file: &[u8], line: u32) -> Thrown 
         let placed = PhpString::new(req, file)
             .and_then(|file| write_prop(req, &object, b"file", file.into_value()))
             .and_then(|()| {
-                let line = Owner::take(req, Value::int(i64::from(line)));
+                let line = Owner::int(i64::from(line));
                 write_prop(req, &object, b"line", line)
             });
         if let Err(other) = placed {
@@ -1547,7 +1547,7 @@ pub fn passthrough(req: &mut Request, first: Option<Owner<Value>>) -> Result<Own
         if let Some(first) = first {
             first.give_up(req);
         }
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     if let Some(first) = first {
         // The frame's argument slot holds the count from here.

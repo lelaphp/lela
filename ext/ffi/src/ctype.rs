@@ -646,11 +646,11 @@ impl ObjectHandlers for Handlers {
     /// `zend_fake_cast_object`.
     fn cast_object(
         &self,
-        req: &mut Request,
+        _: &mut Request,
         _: PhpObject,
         to: TypeTag,
     ) -> Result<Option<Owner<Value>>, Thrown> {
-        Ok((to == TypeTag::Bool).then(|| Owner::take(req, Value::bool(true))))
+        Ok((to == TypeTag::Bool).then(|| Owner::bool(true)))
     }
 
     /// `zend_ffi_ctype_get_debug_info`: nothing to show.

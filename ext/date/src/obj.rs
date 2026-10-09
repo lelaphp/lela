@@ -525,7 +525,7 @@ pub(super) fn date_fields(req: &mut Request, t: &Time) -> Result<Fields, Thrown>
     let text = lent(req, |l| date_format(l, b"x-m-d H:i:s.u", t, true))?;
     let mut fields = vec![(&b"date"[..], PhpString::new(req, &text)?.into_value())];
     if t.is_localtime != 0 {
-        let zone_type = Owner::take(req, Value::int(i64::from(t.zone_type)));
+        let zone_type = Owner::int(i64::from(t.zone_type));
         fields.push((b"timezone_type", zone_type));
         let zone: Vec<u8> = match t.zone_type {
             ZONETYPE_ID => t.zone().map(|z| z.name().to_vec()).unwrap_or_default(),
@@ -542,7 +542,7 @@ pub(super) fn date_fields(req: &mut Request, t: &Time) -> Result<Fields, Thrown>
 /// `date_timezone_object_to_hash`.
 pub(super) fn tz_fields(req: &mut Request, kind: &TzKind) -> Result<Fields, Thrown> {
     let name = PhpString::new(req, &kind.name())?.into_value();
-    let zone_type = Owner::take(req, Value::int(kind.zone_type()));
+    let zone_type = Owner::int(kind.zone_type());
     Ok(vec![
         (&b"timezone_type"[..], zone_type),
         (b"timezone", name),
@@ -557,7 +557,7 @@ pub(super) fn interval_fields(
 ) -> Result<Fields, Thrown> {
     if let Some(text) = date_string {
         let text = PhpString::new(req, text)?.into_value();
-        let from_string = Owner::take(req, Value::bool(true));
+        let from_string = Owner::bool(true);
         return Ok(vec![
             (&b"from_string"[..], from_string),
             (b"date_string", text),
@@ -599,10 +599,10 @@ pub(super) fn period_date(
 ) -> Result<Owner<Value>, Thrown> {
     let Some(class) = class else {
         release(req, copy)?;
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     let Some(copy) = copy else {
-        return Ok(Owner::take(req, Value::null()));
+        return Ok(Owner::null());
     };
     Ok(new_date(req, class, copy)?.into_value())
 }
@@ -649,7 +649,7 @@ pub(super) fn period_fields(req: &mut Request, object: PhpObject) -> Result<Fiel
     }
     let interval = match interval {
         Some(diff) => new_interval(req, diff, 0, None).map(Owner::into_value),
-        None => Ok(Owner::take(req, Value::null())),
+        None => Ok(Owner::null()),
     };
     push_field(req, &mut fields, b"interval", interval)?;
     for (name, value) in [
@@ -1325,7 +1325,7 @@ impl ObjectHandlers for PeriodHandlers {
                 value.give_up(req);
             }
         }
-        Ok(found.unwrap_or_else(|| Owner::take(req, Value::null())))
+        Ok(found.unwrap_or_else(Owner::null))
     }
 
     fn write_property(

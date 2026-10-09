@@ -125,24 +125,24 @@ pub(crate) fn replace_child(
     let strict = strict(req, this);
     if new_child.doc() != parent.doc() && new_child.doc().is_some() {
         dom_error(req, Code::WrongDocument, strict)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     if modern {
         replace_validity(req, parent, new_child, old_child)?;
     } else {
         if !children_valid(parent) || parent.children().is_none() {
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         if !check_legacy_insertion(req, parent, new_child, strict, false)? {
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         if (old_child.kind() == Kind::Attribute) != (new_child.kind() == Kind::Attribute) {
             dom_error(req, Code::HierarchyRequest, strict)?;
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         if old_child.parent() != Some(parent) {
             dom_error(req, Code::NotFound, strict)?;
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
     }
     if new_child.doc().is_none() && parent.doc().is_some() {
@@ -871,11 +871,11 @@ fn append_child(
     let parent = fetch(req, this)?;
     let child = fetch(req, child)?;
     if !children_valid(parent) {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let strict = strict(req, this);
     if !check_legacy_insertion(req, parent, child, strict, true)? {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     if child.doc().is_none() && parent.doc().is_some() {
         child.set_tree_doc(parent.doc());
@@ -930,7 +930,7 @@ fn append_child(
                     "A document may only contain one document type",
                     strict,
                 )?;
-                return Ok(Owner::take(req, Value::bool(false)));
+                return Ok(Owner::bool(false));
             }
             let added = parent.add_child(child);
             if let (Some(d), Some(a)) = (doc, added) {
@@ -948,7 +948,7 @@ fn append_child(
     };
     let Some(new_child) = new_child else {
         dom_error(req, Code::InvalidState, strict)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     invalidate(req, this);
     object_for(req, new_child, Some(this))
@@ -965,18 +965,18 @@ fn insert_before(
     let parent = fetch(req, this)?;
     let child = fetch(req, child)?;
     if !children_valid(parent) {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let strict = strict(req, this);
     if !check_legacy_insertion(req, parent, child, strict, true)? {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let refp = match reference {
         Some(r) => {
             let refp = fetch(req, r)?;
             if refp.parent() != Some(parent) {
                 dom_error(req, Code::NotFound, strict)?;
-                return Ok(Owner::take(req, Value::bool(false)));
+                return Ok(Owner::bool(false));
             }
             Some(refp)
         }
@@ -1123,11 +1123,11 @@ fn remove_child(
     let strict = strict(req, this);
     if parent.children().is_none() || child.parent() != Some(parent) {
         dom_error(req, Code::NotFound, strict)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     if is_read_only(parent) || child.parent().is_some_and(is_read_only) {
         dom_error(req, Code::NoModificationAllowed, strict)?;
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     child.unlink();
     invalidate(req, this);
@@ -1147,7 +1147,7 @@ fn clone_node_of(
             let mut private = Private::new(req)?;
             let Some(node) = clone_node_modern(&mut private.mapper, n, n.doc(), recursive) else {
                 private.free(req);
-                return Ok(Owner::take(req, Value::bool(false)));
+                return Ok(Owner::bool(false));
             };
             let copy =
                 crate::modern::document_object(req, modern_document_class(n), node, private)?;
@@ -1159,12 +1159,12 @@ fn clone_node_of(
             None => clone_node(n, n.doc(), recursive),
         };
         let Some(node) = cloned else {
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         };
         return cloned_object(req, this, n, node);
     }
     let Some(node) = clone_node(n, n.doc(), recursive) else {
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     };
     if is_document {
         let value = object_for(req, node, None)?;

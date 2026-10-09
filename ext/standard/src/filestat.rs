@@ -165,12 +165,12 @@ fn realpath_cache_get(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let mut row = PhpArray::new(req)?;
         for (name, value) in [
             (&b"key"[..], Owner::take(req, key)),
-            (b"is_dir", Owner::take(req, Value::bool(entry.is_dir))),
+            (b"is_dir", Owner::bool(entry.is_dir)),
             (
                 b"realpath",
                 PhpString::new(req, &entry.realpath)?.into_value(),
             ),
-            (b"expires", Owner::take(req, Value::int(entry.expires))),
+            (b"expires", Owner::int(entry.expires)),
         ] {
             let name = PhpString::new(req, name)?.into_key();
             row.set(req, name, value)?;
@@ -401,17 +401,17 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Owner<Valu
     let bad = filename.is_empty() || filename.contains(&0);
     if ty.is_access_check() {
         if bad {
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
         if let Some(answer) = plain_access(req, filename, ty) {
-            return Ok(Owner::take(req, Value::bool(answer)));
+            return Ok(Owner::bool(answer));
         }
     }
     if bad {
         if !filename.is_empty() && !ty.is_exists_check() {
             docref(req, Level::Warning, "Filename contains null byte");
         }
-        return Ok(Owner::take(req, Value::bool(false)));
+        return Ok(Owner::bool(false));
     }
     let link = ty.is_link_operation();
     let answered = if ty.is_exists_check() {
@@ -422,7 +422,7 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Owner<Valu
     let sb = match answered {
         UrlStat::Found(sb) => sb,
         // `php_stat`'s own guard refused it, with its warning.
-        UrlStat::Refused => return Ok(Owner::take(req, Value::bool(false))),
+        UrlStat::Refused => return Ok(Owner::bool(false)),
         UrlStat::Failed | UrlStat::Unsupported => {
             if !ty.is_exists_check() {
                 let text = format!(
@@ -432,7 +432,7 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Owner<Valu
                 );
                 docref(req, Level::Warning, &text);
             }
-            return Ok(Owner::take(req, Value::bool(false)));
+            return Ok(Owner::bool(false));
         }
     };
     let mode = sb[2];
@@ -486,11 +486,11 @@ pub fn php_stat(req: &mut Request, filename: &[u8], ty: Fs) -> Result<Owner<Valu
         Fs::Lstat | Fs::Stat => {
             let mut out = PhpArray::new(req)?;
             for field in sb {
-                out.append(req, Owner::take(req, Value::int(field)))?;
+                out.append(req, Owner::int(field))?;
             }
             for (name, field) in STAT_NAMES.iter().zip(sb) {
                 let key = PhpString::new(req, name)?.into_key();
-                out.set(req, key, Owner::take(req, Value::int(field)))?;
+                out.set(req, key, Owner::int(field))?;
             }
             return Ok(out.into_value());
         }

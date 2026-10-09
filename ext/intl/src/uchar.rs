@@ -701,7 +701,7 @@ fn mapped(req: &mut Request, codepoint: Codepoint, f: impl Fn(i32) -> i32) -> Ma
 fn version(req: &mut Request, c: Option<i32>) -> Result<Owner<PhpArray>, Thrown> {
     let mut list = PhpArray::new(req)?;
     for part in icu::version(c) {
-        list.append(req, Owner::take(req, Value::int(i64::from(part))))?;
+        list.append(req, Owner::int(i64::from(part)))?;
     }
     Ok(list)
 }

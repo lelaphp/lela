@@ -648,7 +648,7 @@ pub(crate) fn not_initialized(req: &mut Request, object: PhpObject) -> Thrown {
 /// any other as its decimal string.
 pub(crate) fn long_or_string(req: &mut Request, n: u64) -> Result<Owner<Value>, Thrown> {
     match i64::try_from(n) {
-        Ok(n) if n < i64::MAX => Ok(Owner::take(req, Value::int(n))),
+        Ok(n) if n < i64::MAX => Ok(Owner::int(n)),
         _ => string(req, n.to_string().as_bytes()),
     }
 }
@@ -656,7 +656,7 @@ pub(crate) fn long_or_string(req: &mut Request, n: u64) -> Result<Owner<Value>, 
 /// `mysql_affected_rows` as mysqli answers it: `~0` is `-1`.
 pub(crate) fn affected(req: &mut Request, n: u64) -> Result<Owner<Value>, Thrown> {
     if n == u64::MAX {
-        return Ok(Owner::take(req, Value::int(-1)));
+        return Ok(Owner::int(-1));
     }
     long_or_string(req, n)
 }
@@ -692,7 +692,7 @@ pub(crate) fn add_facts(
                 PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes))?.into_value()
             }
             Fact::Str(s) => Owner::take(req, Value::string(*s)),
-            Fact::Int(n) => Owner::take(req, Value::int(*n)),
+            Fact::Int(n) => Owner::int(*n),
         };
         php_ext::call::write_prop(req, &object, name.as_bytes(), value)?;
     }

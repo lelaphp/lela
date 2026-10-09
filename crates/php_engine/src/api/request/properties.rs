@@ -1817,7 +1817,7 @@ impl Request {
                     || (silent && self.serves_accessor(class, b"__isset"));
                 if placed.typed && (o.slot_uninit(placed.slot) || !magic) {
                     if quiet {
-                        return Ok(Owner::take(self, Value::null()));
+                        return Ok(Owner::null());
                     }
                     return Err(self.uninitialized_property(placed.declaring, name));
                 }
@@ -1903,7 +1903,7 @@ impl Request {
             let class = self.class_name(class);
             crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
         }
-        Ok(Owner::take(self, Value::null()))
+        Ok(Owner::null())
     }
 
     /// `zend_std_write_property`'s `found` arm over a slot that holds a

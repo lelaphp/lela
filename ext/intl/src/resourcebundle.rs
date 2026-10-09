@@ -127,7 +127,7 @@ fn extract(req: &mut Request, object: PhpObject, child: Bundle) -> Result<Elemen
             let size = u32::try_from(ints.len()).unwrap_or(u32::MAX);
             let mut array = PhpArray::sized(req, size, Layout::Packed)?;
             for n in ints {
-                array.append(req, Owner::take(req, Value::int(i64::from(n))))?;
+                array.append(req, Owner::int(i64::from(n)))?;
             }
             Union::B(Union::A(array))
         }
@@ -565,7 +565,7 @@ impl ClassIterator for Elements {
     fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let key = self.read(req, object)?.map(|(_, key)| key.to_vec());
         if !self.table {
-            return Ok(Owner::take(req, Value::int(i64::from(self.i))));
+            return Ok(Owner::int(i64::from(self.i)));
         }
         Ok(PhpString::new(req, &key.unwrap_or_default())?.into_value())
     }

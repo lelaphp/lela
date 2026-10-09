@@ -163,8 +163,7 @@ fn create_from(
     let data = match data {
         Ok(data) => data,
         Err(thrown) => {
-            stream.close(req);
-            stream.give_up(req);
+            stream.free(req);
             return Err(thrown);
         }
     };
@@ -172,8 +171,7 @@ fn create_from(
         let text = format!("Cannot read images with more than {} bytes", i32::MAX);
         docref(req, Level::Warning, &text);
         data.give_up(req);
-        stream.close(req);
-        stream.give_up(req);
+        stream.free(req);
         return Ok(OrFalse::False);
     }
     let format = match format {
@@ -187,8 +185,7 @@ fn create_from(
     };
     let image = gd(req, || Image::decode(format, data.as_bytes()));
     data.give_up(req);
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     let image = image?;
     if image.is_none() {
         let text = format!(
@@ -951,8 +948,7 @@ fn output_gd(
         Ok(bytes) => bytes.unwrap_or_default(),
         Err(thrown) => {
             if let Some(stream) = stream {
-                stream.close(req);
-                stream.give_up(req);
+                stream.free(req);
             }
             return Err(thrown);
         }
@@ -962,8 +958,7 @@ fn output_gd(
             if !bytes.is_empty() {
                 let _ = stream.write(req, &bytes);
             }
-            stream.close(req);
-            stream.give_up(req);
+            stream.free(req);
         }
         None => req.write(&bytes),
     }

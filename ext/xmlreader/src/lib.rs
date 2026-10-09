@@ -120,7 +120,7 @@ impl ObjectHandlers for Handlers {
         match Property::of(name) {
             Some(p) => Ok(match p.read(req, object)? {
                 Some(value) => value,
-                None => Owner::take(req, Value::null()),
+                None => Owner::null(),
             }),
             None => Std.read_property(req, object, name, read),
         }
@@ -205,33 +205,35 @@ impl ObjectHandlers for Handlers {
         // `zend_array_dup(zend_std_get_properties(object))`.
         let own = object.property_table(req)?;
         let own: Vec<(Key, Value)> = walk::rows(req, own).collect();
-        let mut table = PhpArray::new(req)?;
-        for (key, value) in own {
-            table.set(req, Owner::take(req, key), Owner::take(req, value))?;
-        }
         let mut thrown: Option<Thrown> = None;
-        for (name, p) in Property::ALL {
-            match p.read(req, object) {
-                Ok(Some(value)) => {
-                    // The table's row takes the value's owner.
-                    let key = match PhpString::new(req, name) {
-                        Ok(key) => key.into_key(),
-                        Err(thrown) => {
-                            value.give_up(req);
-                            return Err(thrown);
-                        }
-                    };
-                    table.set(req, key, value)?;
-                }
-                Ok(None) => {}
-                Err(t) => {
-                    thrown = Some(match thrown.take() {
-                        Some(earlier) => earlier.chain(req, t),
-                        None => t,
-                    });
+        let table = PhpArray::filled(req, |req, table| {
+            for (key, value) in own {
+                table.set(req, Owner::take(req, key), Owner::take(req, value))?;
+            }
+            for (name, p) in Property::ALL {
+                match p.read(req, object) {
+                    Ok(Some(value)) => {
+                        // The table's row takes the value's owner.
+                        let key = match PhpString::new(req, name) {
+                            Ok(key) => key.into_key(),
+                            Err(thrown) => {
+                                value.give_up(req);
+                                return Err(thrown);
+                            }
+                        };
+                        table.set(req, key, value)?;
+                    }
+                    Ok(None) => {}
+                    Err(t) => {
+                        thrown = Some(match thrown.take() {
+                            Some(earlier) => earlier.chain(req, t),
+                            None => t,
+                        });
+                    }
                 }
             }
-        }
+            Ok(())
+        })?;
         Ok(Some(DebugInfo { table, thrown }))
     }
 
@@ -390,7 +392,7 @@ impl Target {
         match self {
             Target::This(object) => {
                 put(req, object, reader);
-                Ok(Owner::take(req, Value::bool(true)))
+                Ok(Owner::bool(true))
             }
             Target::New(class) => match instantiate(req, class, &[]) {
                 Ok(object) => {
@@ -412,7 +414,7 @@ fn refuse(req: &mut Request, failure: Failure, message: &str) -> Result<Owner<Va
     match failure {
         Failure::Warn => {
             docref(req, Level::Warning, message);
-            Ok(Owner::take(req, Value::bool(false)))
+            Ok(Owner::bool(false))
         }
         Failure::Throw => Err(throw_error(req, "Error", message)),
     }
@@ -581,16 +583,16 @@ impl Property {
                 "Error",
                 "Failed to read property because no XML data has been read yet",
             )),
-            Some(Read::Number(n, true)) => Ok(Some(Owner::take(req, Value::bool(n != 0)))),
-            Some(Read::Number(n, false)) => Ok(Some(Owner::take(req, Value::int(i64::from(n))))),
+            Some(Read::Number(n, true)) => Ok(Some(Owner::bool(n != 0))),
+            Some(Read::Number(n, false)) => Ok(Some(Owner::int(i64::from(n)))),
             Some(Read::Text(t)) => {
                 let s = PhpString::new(req, t.as_deref().unwrap_or_default())?;
                 Ok(Some(s.into_value()))
             }
-            None if boolean => Ok(Some(Owner::take(req, Value::bool(false)))),
+            None if boolean => Ok(Some(Owner::bool(false))),
             None => match self {
                 Property::AttributeCount | Property::Depth | Property::NodeType => {
-                    Ok(Some(Owner::take(req, Value::int(0))))
+                    Ok(Some(Owner::int(0)))
                 }
                 _ => Ok(Some(PhpString::new(req, b"")?.into_value())),
             },
@@ -1241,13 +1243,13 @@ impl XMLReader {
             }
             Expanded::Copy(node) => {
                 let made = php_ext_dom::create_object(req, node, base)?;
-                let object = made.as_object().copied();
-                let answer = match object {
-                    Some(object) => OrFalse::Value(Owner::take(req, Instance::of(object))),
-                    None => OrFalse::False,
-                };
-                made.give_up(req);
-                Ok(answer)
+                Ok(match made.into_object() {
+                    Ok(object) => OrFalse::Value(object.into_instance()),
+                    Err(other) => {
+                        other.give_up(req);
+                        OrFalse::False
+                    }
+                })
             }
         }
     }
@@ -1255,15 +1257,15 @@ impl XMLReader {
 
 /// A new object a factory made, as `static`.
 fn static_of(req: &mut Request, made: Owner<Value>) -> Result<Owner<Static>, Thrown> {
-    let object = made.as_object().copied();
-    let made_static = object.map(|object| Owner::take(req, Static(object)));
-    made.give_up(req);
-    match made_static {
-        Some(object) => Ok(object),
-        None => Err(fatal(
-            req,
-            "InternalError: XMLReader factory made no object",
-        )),
+    match made.into_object() {
+        Ok(object) => Ok(object.into_static()),
+        Err(other) => {
+            other.give_up(req);
+            Err(fatal(
+                req,
+                "InternalError: XMLReader factory made no object",
+            ))
+        }
     }
 }
 

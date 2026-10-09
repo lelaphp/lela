@@ -169,10 +169,7 @@ impl SplHeap {
     fn insert(req: &mut Request, this: This<Self>, value: Value) -> Result<True, Thrown> {
         let this = this.object();
         consistent(req, this, true)?;
-        let elem = (
-            Owner::take(req, value.deref()),
-            Owner::take(req, Value::null()),
-        );
+        let elem = (Owner::take(req, value.deref()), Owner::null());
         heap_insert(req, this, elem)?;
         Ok(True)
     }
@@ -235,7 +232,7 @@ impl SplHeap {
             (h.queue, h.flags, h.elements.first().map(seen))
         })?;
         match top {
-            None => Ok(Owner::take(req, Value::null())),
+            None => Ok(Owner::null()),
             Some(top) if queue => extracted(req, top, flags),
             Some(top) => Ok(Owner::take(req, top.0.deref())),
         }
@@ -744,11 +741,8 @@ fn seen(elem: &Elem) -> (Value, Value) {
 
 /// The slot an element is moved out of, or into, `null` and `null`:
 /// php's hole, which `spl_heap_elem_copy` fills.
-fn hole(req: &Request) -> Elem {
-    (
-        Owner::take(req, Value::null()),
-        Owner::take(req, Value::null()),
-    )
+fn hole() -> Elem {
+    (Owner::null(), Owner::null())
 }
 
 /// `spl_heap_elem_copy(heap, elem(to), elem(from))` where `to` is the
@@ -775,7 +769,7 @@ fn fill(req: &mut Request, object: PhpObject, at: usize, elem: Elem) -> Result<(
 /// parent compares below the new element, the element written where the
 /// hole stops; a comparison that threw marks the heap corrupted.
 fn heap_insert(req: &mut Request, object: PhpObject, elem: Elem) -> Result<(), Thrown> {
-    let hole = hole(req);
+    let hole = hole();
     let count = with(req, object, |h| {
         h.locked = true;
         h.elements.push(hole);
@@ -811,7 +805,7 @@ fn delete_top(req: &mut Request, object: PhpObject) -> Result<Option<Elem>, Thro
         return Ok(None);
     }
     let limit = (count - 1) / 2;
-    let hole = hole(req);
+    let hole = hole();
     let top = with(req, object, |h| {
         h.locked = true;
         match h.elements.first_mut() {
@@ -982,13 +976,9 @@ fn heap_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     };
     let mangled = |field: &[u8]| [b"\0".as_slice(), base, b"\0", field].concat();
     let name = PhpString::new(req, &mangled(b"flags"))?;
-    out.set(req, name.into_key(), Owner::take(req, Value::int(flags)))?;
+    out.set(req, name.into_key(), Owner::int(flags))?;
     let name = PhpString::new(req, &mangled(b"isCorrupted"))?;
-    out.set(
-        req,
-        name.into_key(),
-        Owner::take(req, Value::bool(corrupted)),
-    )?;
+    out.set(req, name.into_key(), Owner::bool(corrupted))?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
@@ -1018,7 +1008,7 @@ fn serialize(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thro
     out.append(req, props.into_value())?;
     let mut state = PhpArray::new(req)?;
     let key = PhpString::new(req, b"flags")?;
-    state.set(req, key.into_key(), Owner::take(req, Value::int(flags)))?;
+    state.set(req, key.into_key(), Owner::int(flags))?;
     let mut heap = PhpArray::new(req)?;
     for elem in elements {
         let value = if queue {
@@ -1090,7 +1080,7 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
             };
             (Owner::take(req, d.deref()), Owner::take(req, p.deref()))
         } else {
-            (Owner::take(req, value), Owner::take(req, Value::null()))
+            (Owner::take(req, value), Owner::null())
         };
         heap_insert(req, this, elem)?;
         Ok(ControlFlow::Continue(()))

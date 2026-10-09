@@ -248,10 +248,11 @@ impl ObjectHandlers for WeakReferenceHandlers {
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
         let referent = object.native::<WeakRef>(req).and_then(|p| p.referent);
-        let mut table = PhpArray::new(req)?;
         let value = referent.map_or(Value::null(), |referent| referent.as_value());
-        let key = PhpString::new(req, b"object")?.into_key();
-        table.set(req, key, Owner::take(req, value))?;
+        let table = PhpArray::filled(req, |req, table| {
+            let key = PhpString::new(req, b"object")?.into_key();
+            table.set(req, key, Owner::take(req, value))
+        })?;
         Ok(Some(table.into()))
     }
 }
@@ -364,7 +365,7 @@ impl ObjectHandlers for WeakMapHandlers {
         let found = entries_of(req, object).and_then(|e| e.get(&Key::Int(i64::from(key.index()))));
         let Some(value) = found else {
             if read == DimensionRead::Silent {
-                return Ok(Owner::take(req, Value::null()));
+                return Ok(Owner::null());
             }
             let class = req.class_name(key.class());
             return Err(throw_error(
@@ -545,25 +546,28 @@ impl ObjectHandlers for WeakMapHandlers {
         req: &mut Request,
         object: PhpObject,
     ) -> Result<Option<DebugInfo>, Thrown> {
-        let mut table = PhpArray::new(req)?;
         // The map's own table, read under the borrowed request: building
         // the pairs runs no code of the program.
         let entries: Vec<(Key, Value)> = match entries_of(req, object) {
             Some(entries) => crate::api::values::walk::rows(req, entries).collect(),
             None => Vec::new(),
         };
-        for (key, value) in entries {
-            let Key::Int(id) = key else { continue };
-            let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id)) else {
-                continue;
-            };
-            let mut pair = PhpArray::new(req)?;
-            let at = PhpString::new(req, b"key")?.into_key();
-            pair.set(req, at, Owner::take(req, owner.as_value()))?;
-            let at = PhpString::new(req, b"value")?.into_key();
-            pair.set(req, at, Owner::take(req, value))?;
-            table.append(req, pair.into_value())?;
-        }
+        let table = PhpArray::filled(req, |req, table| {
+            for (key, value) in entries {
+                let Key::Int(id) = key else { continue };
+                let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id)) else {
+                    continue;
+                };
+                let pair = PhpArray::filled(req, |req, pair| {
+                    let at = PhpString::new(req, b"key")?.into_key();
+                    pair.set(req, at, Owner::take(req, owner.as_value()))?;
+                    let at = PhpString::new(req, b"value")?.into_key();
+                    pair.set(req, at, Owner::take(req, value))
+                })?;
+                table.append(req, pair.into_value())?;
+            }
+            Ok(())
+        })?;
         Ok(Some(table.into()))
     }
 
@@ -639,13 +643,13 @@ impl ClassIterator for MapIter {
     /// it points at one.
     fn current(&mut self, req: &mut Request, map: PhpObject) -> Result<Owner<Value>, Thrown> {
         let Some((_, key, value)) = self.here(req, map) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         if !self.by_ref || value.as_php_ref().is_some() {
             return Ok(Owner::take(req, value));
         }
         let Some(mut entries) = entries_of(req, map) else {
-            return Ok(Owner::take(req, Value::null()));
+            return Ok(Owner::null());
         };
         req.addref(&value);
         // The cell's one owner is the caller's, and the entry takes a

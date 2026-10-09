@@ -9,7 +9,7 @@
 use php_ext::abi::Callable;
 use php_ext::coerce::callable_checked;
 use php_ext::raising::{Level, Thrown, raise};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
 
 use crate::alloc::Pstr;
@@ -683,8 +683,7 @@ fn read_file(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thrown> 
         return Ok(None);
     };
     let read = stream.copy_to_mem(req, None);
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     let read = read?;
     let bytes = read.as_bytes().to_vec();
     read.give_up(req);
@@ -730,8 +729,7 @@ fn rsa_encrypt(req: &mut Request, pem: &[u8], data: &[u8]) -> Result<Option<Vec<
     let Some(encrypt) = native(req, b"openssl_public_encrypt")? else {
         return Ok(None);
     };
-    let null = Owner::take(req, Value::null());
-    let out = PhpRef::new(req, null)?;
+    let out = PhpRef::new(req, Owner::null())?;
     let data = PhpString::new(req, data)?;
     let pem = PhpString::new(req, pem)?;
     let args = [

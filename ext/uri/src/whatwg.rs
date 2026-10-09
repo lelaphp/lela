@@ -86,8 +86,7 @@ fn fill_errors(
         write_prop(req, &object, b"context", context.into_value())?;
         let kind_value = case_owner(req, kind)?;
         write_prop(req, &object, b"type", kind_value)?;
-        let failed = Owner::take(req, Value::bool(failure));
-        write_prop(req, &object, b"failure", failed)?;
+        write_prop(req, &object, b"failure", Owner::bool(failure))?;
         if failure {
             reason = Some(kind.case_name());
         }
@@ -366,7 +365,7 @@ impl InvalidUrlException {
             write_prop(req, &this, b"message", message)?;
         }
         if code != 0 {
-            let code = Owner::take(req, Value::int(code));
+            let code = Owner::int(code);
             write_prop(req, &this, b"code", code)?;
         }
         if let Some(previous) = previous {
@@ -548,7 +547,7 @@ impl UrlValidationError {
         if this.prop(req, b"failure").is_some() {
             return Err(readonly_property(req, class, "failure"));
         }
-        let failure = Owner::take(req, Value::bool(failure));
+        let failure = Owner::bool(failure);
         write_prop(req, &this, b"failure", failure)
     }
 }

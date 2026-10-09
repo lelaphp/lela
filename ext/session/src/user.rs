@@ -263,7 +263,7 @@ pub(super) fn destroy(req: &mut Request, id: &[u8]) -> Result<bool, Thrown> {
 /// `PS_GC_FUNC(user)`: `gc($max_lifetime)`, an int the count, `true`
 /// one, anything else `-1`.
 pub(super) fn gc(req: &mut Request, maxlifetime: i64) -> Result<i64, Thrown> {
-    let arguments = vec![Owner::take(req, Value::int(maxlifetime))];
+    let arguments = vec![Owner::int(maxlifetime)];
     let answered = call_handler(req, Slot::Gc, arguments)?;
     let Some(value) = answered else {
         return Ok(-1);

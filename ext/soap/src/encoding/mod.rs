@@ -880,7 +880,7 @@ fn to_xml(
 fn to_zval(req: &mut Request, cx: &mut Cx, e: &Enc, data: Node) -> Res<Owner<Value>> {
     match e.e.to_zval {
         ToZval::Guess => guess_zval_convert(req, cx, e, data),
-        ToZval::Null => Ok(Owner::take(req, Value::null())),
+        ToZval::Null => Ok(Owner::null()),
         ToZval::String => scalar::to_zval_string(req, data, scalar::Space::Keep),
         ToZval::StringR => scalar::to_zval_string(req, data, scalar::Space::Replace),
         ToZval::StringC => scalar::to_zval_string(req, data, scalar::Space::Collapse),
@@ -997,8 +997,7 @@ fn wrap_soap_var(
     let (cptype, ns) = parse_namespace(type_name);
     let nsptr = data.search_ns(ns);
     let fill = |req: &mut Request| -> Res<()> {
-        let type_ = Owner::take(req, Value::int(i64::from(e.details.type_)));
-        if let Err(err) = var.set_slot(req, VAR_ENC_TYPE, type_) {
+        if let Err(err) = var.set_slot(req, VAR_ENC_TYPE, Owner::int(i64::from(e.details.type_))) {
             ret.give_up(req);
             return Err(err.into());
         }

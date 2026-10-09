@@ -450,7 +450,7 @@ impl ClassIterator for Shared {
 
     fn key(&mut self, req: &mut Request, object: PhpObject) -> Result<Owner<Value>, Thrown> {
         let key = cursor(req, object).map_or(0, |c| c.walk.key(c.index).unwrap_or(c.index));
-        Ok(Owner::take(req, Value::int(key)))
+        Ok(Owner::int(key))
     }
 
     fn move_forward(&mut self, req: &mut Request, object: PhpObject) -> Result<(), Thrown> {

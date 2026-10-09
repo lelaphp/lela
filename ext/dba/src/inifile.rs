@@ -6,7 +6,7 @@
 //! is a C string, so a line and a key end at their first NUL.
 
 use php_ext::raising::{Level, Thrown, docref, throw};
-use php_ext::request::{Request, Stream, Streams as _, Whence};
+use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::Owner;
 
 use crate::flatfile::gets;
@@ -171,8 +171,7 @@ fn copy(req: &mut Request, from: Stream, to: Stream, len: Option<i64>) -> bool {
 /// `php_stream_free`.
 fn free(req: &mut Request, held: [Option<Owner<Stream>>; 2]) {
     for held in held.into_iter().flatten() {
-        held.close(req);
-        held.give_up(req);
+        held.free(req);
     }
 }
 

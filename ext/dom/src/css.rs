@@ -1529,7 +1529,7 @@ pub(crate) fn query_selector(
     raise(req, answer.status, answer.blank)?;
     match answer.sink {
         Sink::First(Some(found)) => object_for(req, found, Some(this)),
-        _ => Ok(Owner::take(req, Value::null())),
+        _ => Ok(Owner::null()),
     }
 }
 
@@ -1600,5 +1600,5 @@ pub(crate) fn closest(
         at = current.parent();
     }
     raise(req, Status::Ok, blank)?;
-    Ok(Owner::take(req, Value::null()))
+    Ok(Owner::null())
 }
