@@ -490,7 +490,7 @@ porting = true
 [[seam]]
 name = "heap"
 producer = "php_heap"
-consumers = ["php_unit", "php_compile", "php_engine", "php_jit"]
+consumers = ["php_unit", "php_compile", "php_link", "php_engine", "php_jit"]
 lock = "heap.lock"
 adr = "0003"
 [[seam]]
@@ -630,7 +630,7 @@ text = "Extension state is request-scoped, immutable engine-scoped or process-sc
 id = "unsafe.homes"
 allow = ["php_heap", "php_process", "ext/*/src/ffi/", "sapi/*/src/ffi/", "timelib_sys", "php_jit::table::code", "php_jit::enter"]
 adr = "0006"
-text = "unsafe is permitted in seven places; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
+text = "unsafe is permitted only in the homes this rule names; see design §4.1. Every other crate is #![forbid(unsafe_code)]; php_jit, and an extension or a host with bindings, are #![deny(unsafe_code)] with the allowance on the named module alone."
 
 [[rule]]
 id = "unsafe.one-op"
@@ -685,7 +685,7 @@ text = "A new pub item in xtask needs its xtask.lock line in the same commit."
 id = "ext.pub-beyond-extension"
 scope = "ext/*"
 on = "pub"
-text = "api-check prints each ext crate's pub items beyond extension(); each must be a row of design §4.10's list of surfaces, and an unlisted one fails api-check (#1826)."
+text = "api-check fails an ext crate's library dependency on another ext crate that no row of design §4.10's list of surfaces names with both crates, and diffs its pub items beyond extension() against its ext/<name>/surface.lock, which `api-check --write` rewrites and lands in the same commit (#2020, #2251)."
 
 [[rule]]
 id = "witness.exit-authored"
