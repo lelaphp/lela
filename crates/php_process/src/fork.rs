@@ -68,10 +68,33 @@ pub fn fork() -> io::Result<Forked> {
     let id = unsafe { libc::fork() };
     match id {
         -1 => Err(io::Error::last_os_error()),
-        0 => Ok(Forked::Child),
+        0 => {
+            executable_jit_pages();
+            Ok(Forked::Child)
+        }
         child => Ok(Forked::Parent { child: Pid(child) }),
     }
 }
+
+/// Makes the child's thread see its `MAP_JIT` pages executable, as the
+/// parent's thread did when it forked.
+///
+/// On Apple silicon whether such a page is writable or executable is a
+/// state of each thread, so the child sets its one thread's state itself.
+/// Whatever writes machine code in the process, libpcre2 and the compiled
+/// tier, leaves its pages executable between writes, so executable is the
+/// state the child is owed.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn executable_jit_pages() {
+    // SAFETY: sets one bit of this thread's state and touches no memory;
+    // it takes no lock, so the child of a process with other threads may
+    // make it.
+    unsafe { libc::pthread_jit_write_protect_np(1) };
+}
+
+/// Elsewhere a page's protection is the process's, which `fork` copies.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+const fn executable_jit_pages() {}
 
 #[cfg(test)]
 #[allow(
@@ -104,6 +127,66 @@ mod tests {
         assert_eq!(waited, child.as_raw());
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 7);
+        Ok(())
+    }
+
+    /// Code the parent wrote to a `MAP_JIT` page just before it forked
+    /// runs in the child, each of four thousand children exiting with
+    /// what the code returns.
+    #[test]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg_attr(miri, ignore = "Miri does not model fork(2)")]
+    fn a_child_runs_the_jit_code_its_parent_wrote() -> std::io::Result<()> {
+        unsafe extern "C" {
+            fn sys_icache_invalidate(start: *mut libc::c_void, len: libc::size_t);
+        }
+        /// `mov w0, #42; ret`.
+        const CODE: [u32; 2] = [0x5280_0540, 0xd65f_03c0];
+        const PAGE: usize = 16 * 1024;
+        let mut killed = 0;
+        for _ in 0..4000 {
+            // SAFETY: a fresh anonymous private mapping, no address hinted.
+            let page = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    PAGE,
+                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                    libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_JIT,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(page, libc::MAP_FAILED);
+            // SAFETY: lets this thread write its MAP_JIT pages.
+            unsafe { libc::pthread_jit_write_protect_np(0) };
+            // SAFETY: the page is PAGE bytes, writable to this thread now.
+            unsafe { std::ptr::copy_nonoverlapping(CODE.as_ptr(), page.cast::<u32>(), CODE.len()) };
+            // SAFETY: makes this thread's MAP_JIT pages executable again.
+            unsafe { libc::pthread_jit_write_protect_np(1) };
+            // SAFETY: the range is the code just written, inside the page.
+            unsafe { sys_icache_invalidate(page, size_of_val(&CODE)) };
+            // SAFETY: the page holds a complete function of this signature.
+            let run =
+                unsafe { std::mem::transmute::<*mut libc::c_void, extern "C" fn() -> i32>(page) };
+            assert_eq!(run(), 42);
+            let child = match fork()? {
+                // SAFETY: `_exit` is async-signal-safe; the call before it
+                // runs the page's two instructions and touches nothing else.
+                Forked::Child => unsafe { libc::_exit(run()) },
+                Forked::Parent { child } => child,
+            };
+            let mut status = 0;
+            // SAFETY: `status` is a live `c_int` that `waitpid` writes once.
+            while unsafe { libc::waitpid(child.as_raw(), &raw mut status, 0) } == -1 {}
+            if libc::WIFSIGNALED(status) {
+                killed += 1;
+            } else {
+                assert_eq!(libc::WEXITSTATUS(status), 42);
+            }
+            // SAFETY: the mapping made above, unmapped once.
+            unsafe { libc::munmap(page, PAGE) };
+        }
+        assert_eq!(killed, 0, "children killed running their parent's JIT code");
         Ok(())
     }
 }
