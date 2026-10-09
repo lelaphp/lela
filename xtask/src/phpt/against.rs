@@ -47,7 +47,8 @@
 //! keeps, and only the comparison reads `skip`, its message carrying the
 //! subset's own counts: a merge held against a commit nobody ran still
 //! measures the head, and `done` finds every touched subset's reading
-//! fresh (#1435).
+//! fresh (#1435). The skip names how to fetch the runs CI's dashboard
+//! keeps on `main` ([`fetch`], #2362) before how to take one.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -314,11 +315,33 @@ impl Base {
         let looked: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
         let looked = looked.join(", ");
         let Base { commit, tree } = self;
+        let fetch = roots.first().map_or_else(String::new, |root| {
+            format!(
+                "fetch the runs CI's dashboard keeps with `{}`, or ",
+                fetch(root, tree)
+            )
+        });
         Ok(Err(format!(
-            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; take one with `{}`, which builds the engine at {commit} in a worktree of its own and keeps the run in the main worktree",
+            "no run of {scope} is kept at {commit} (the engine's tree {tree}) in {looked}; {fetch}take one with `{}`, which builds the engine at {commit} in a worktree of its own and keeps the run in the main worktree",
             super::base::call(commit, scope)
         )))
     }
+}
+
+/// The name the dashboard's oracle job uploads [`RUNS`] under: every run
+/// its runner keeps, each under its engine's tree (#2362).
+pub(crate) const UPLOAD: &str = "phpt-runs";
+
+/// The line that lays the runs CI kept under the engine's tree `tree` into
+/// the workspace at `root`, where [`roots`] looks first (#2362): the
+/// latest [`UPLOAD`] downloaded apart, since `gh` writes over no file,
+/// and that tree's runs copied in where the workspace keeps none, as
+/// [`carry`] copies a worktree's.
+pub(crate) fn fetch(root: &Path, tree: &str) -> String {
+    format!(
+        "d=$(mktemp -d) && gh run download -n {UPLOAD} -D \"$d\" && rsync -a --ignore-existing \"$d/{tree}\" '{}/'",
+        root.join(RUNS).display()
+    )
 }
 
 /// The run of `scope` kept at `commit`'s engine tree in a workspace of

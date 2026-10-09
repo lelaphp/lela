@@ -2345,3 +2345,67 @@ fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
     assert_eq!(reading.status, Status::Fail);
     assert_eq!(reading.message, "the server did not answer");
 }
+
+/// The dashboard's oracle job, the one CI job that runs the phpt lane on
+/// `main`, uploads the runs it keeps beside its store (#2362): one upload
+/// is the store's log, `oracle`, which `publish` folds, and one is
+/// [`against::RUNS`] under [`against::UPLOAD`], the name the fetch line
+/// downloads, which `publish`'s download of the stores does not take. The
+/// job is the lines from its key to the next job's, each upload the
+/// lines from its `uses` to the next step.
+#[test]
+fn the_oracle_job_uploads_the_kept_runs_beside_its_store() {
+    let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    let job = |name: &str| -> String {
+        let key = |line: &str| {
+            line.strip_prefix("  ").is_some_and(|rest| {
+                rest.ends_with(':') && rest.starts_with(|c: char| c.is_ascii_lowercase())
+            })
+        };
+        let job: Vec<&str> = text
+            .lines()
+            .skip_while(|line| *line != format!("  {name}:"))
+            .enumerate()
+            .take_while(|(n, line)| *n == 0 || !key(line))
+            .map(|(_, line)| line)
+            .collect();
+        assert!(!job.is_empty(), "dashboard.yml has no {name} job");
+        job.join("\n") + "\n"
+    };
+    let oracle = &job("oracle");
+    let uploads: Vec<&str> = oracle
+        .match_indices("- uses: actions/upload-artifact")
+        .map(|(at, _)| {
+            let step = &oracle[at..];
+            &step[..step[1..]
+                .find("\n      - ")
+                .map_or(step.len(), |end| end + 1)]
+        })
+        .collect();
+    let named = |name: &str| {
+        uploads
+            .iter()
+            .copied()
+            .find(|step| step.contains(&format!("name: {name}\n")))
+            .unwrap_or_else(|| panic!("the oracle job uploads no {name}: {oracle}"))
+    };
+    assert!(
+        named("oracle").contains("path: target/harness/log/\n"),
+        "{}",
+        named("oracle")
+    );
+    let runs = named(against::UPLOAD);
+    assert!(
+        runs.contains(&format!("path: {}/\n", against::RUNS)),
+        "the upload is the kept runs: {runs}"
+    );
+    let publish = job("publish");
+    let stores = publish
+        .lines()
+        .find(|line| line.trim_start().starts_with("pattern:"))
+        .expect("publish downloads the stores by a pattern");
+    assert!(
+        stores.contains("oracle") && !stores.contains(against::UPLOAD),
+        "publish folds the store and not the runs: {stores}"
+    );
+}
