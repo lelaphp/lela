@@ -189,8 +189,8 @@ fn plain(dir: &Path) -> Vec<Vec<String>> {
 
 /// The run's request: the first the host served that observed anything,
 /// since the session's own requests before it run no program. The cycle
-/// after it, held at the context's first opline until `q`, is not the
-/// run's.
+/// after it, held at the context's first opline until `q`, observes
+/// nothing, as php executes nothing there (#2359).
 fn the_run(requests: &[Vec<String>]) -> &[String] {
     requests
         .iter()
@@ -306,4 +306,58 @@ fn a_fatal_raises_the_loop_s_events() {
             ),
         ],
     );
+}
+
+/// The execution context held at the prompt is compiled and not
+/// executed, as php's `phpdbg_compile` leaves it until `run`'s
+/// `zend_execute` (#2359): a session that quits there hands an observer
+/// nothing of the main file, nor does the cycle held again after a run;
+/// and the run's begin of the main file comes after what the prompt
+/// served before `r`, here an `ev`'s code.
+#[test]
+fn a_held_context_raises_nothing_until_run() {
+    let dir = laid(
+        "held",
+        "<?php\nfunction g($y) {\n  return $y * 2;\n}\n$f = new Fiber(function () { return g(2); });\n$f->start();\necho g(1), \"\\n\";\n",
+    );
+    let plain = plain(&dir);
+    let [loop_run] = plain.as_slice() else {
+        panic!("the plain loop served one request: {plain:#?}");
+    };
+    let (requests, out) = debugged(&dir, "q\n");
+    assert!(
+        requests.iter().all(Vec::is_empty),
+        "`q` at the held prompt observed something:\n{requests:#?}\n{out}"
+    );
+    for (commands, ran) in [("r\nq\n", 1), ("r\nr\nq\n", 2)] {
+        let (requests, out) = debugged(&dir, commands);
+        let runs: Vec<_> = requests.iter().filter(|r| !r.is_empty()).collect();
+        assert_eq!(
+            runs,
+            vec![loop_run; ran],
+            "{commands:?}: each run's events (left), the loop's (right), and no other request's:\n{out}"
+        );
+    }
+    let (requests, out) = debugged(&dir, "ev 7\nr\nq\n");
+    let runs: Vec<_> = requests.iter().filter(|r| !r.is_empty()).collect();
+    let [run] = runs.as_slice() else {
+        panic!("one request observed anything: {requests:#?}\n{out}");
+    };
+    let main = run
+        .iter()
+        .position(|event| event.contains("Begin(\"file 't.php'\")"))
+        .unwrap_or_else(|| panic!("the run began the main file: {run:#?}"));
+    assert!(
+        main > 0 && run[..main].iter().any(|event| event.contains("Begin(")),
+        "the main file began before the `ev` the prompt read first: {run:#?}"
+    );
+    assert_eq!(
+        &run[main..],
+        &loop_run[loop_run
+            .iter()
+            .position(|event| event.contains("Begin(\"file 't.php'\")"))
+            .unwrap_or_default()..],
+        "the run from its begin of the main file (left), the loop's (right)"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

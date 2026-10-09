@@ -325,6 +325,38 @@ pub fn function_named(req: &Request, name: &[u8]) -> Named {
         .map_or(Named::NoFunction, Named::Code)
 }
 
+/// `phpdbg_get_function` (`Z/sapi/phpdbg/phpdbg_utils.c:168-195`) and
+/// the names `phpdbg_dump_prototype` reads off what it finds: the
+/// function a backtrace row names, `name` in `class`'s function table
+/// where the row names a class and in `EG(function_table)` where it does
+/// not, both case-insensitive, and the names of its first `num_args`
+/// parameters, a native's from its arginfo; none where no table holds
+/// the name, as none holds a closure's. php's `?=`, for a function with
+/// no arginfo, and its `[`, for a variadic parameter among the first
+/// `num_args`, are never written: every declaration names its
+/// parameters, and `num_args` counts no variadic one
+/// (`Z/Zend/zend_compile.c:8005`, `Z/Zend/zend_API.c:3045`).
+pub fn declared_parameters(req: &mut Request, class: Option<&[u8]>, name: &[u8]) -> Vec<Vec<u8>> {
+    let decl = match class {
+        Some(class) => class_id(req, class)
+            .and_then(|class| req.method_row(class, name))
+            .and_then(|row| req.row_method(row))
+            .map(|method| &method.function),
+        None => req.functions().into_iter().find_map(|function| {
+            req.function_decl(function)
+                .filter(|decl| decl.name.0.eq_ignore_ascii_case(name))
+        }),
+    };
+    decl.map(|decl| {
+        decl.parameters
+            .iter()
+            .filter(|parameter| !parameter.variadic)
+            .map(|parameter| parameter.name.0.to_vec())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
 /// The method `name` of the class `class`, both case-insensitive, a
 /// leading `\` of the class's name dropped.
 pub fn method_named(req: &mut Request, class: &[u8], name: &[u8]) -> Named {

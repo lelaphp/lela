@@ -140,6 +140,7 @@ impl Request {
         }
         let standing = self.vm.frames().len();
         let callee = self.push_frame(unit)?;
+        crate::observer::call(self, callee);
         let reenter = self.shared.loops.reenter;
         let served = self.serve_host_string(|req| reenter(req, callee));
         while self.vm.frames().len() > standing {
@@ -226,9 +227,12 @@ impl Request {
             return Ok(Evaluation::Refused);
         }
         let standing = self.vm.frames().len();
-        let callee = match scope {
-            Some(frame) => self.push_code_frame(unit, frame, None)?,
-            None => self.push_frame(unit)?,
+        let callee = if let Some(frame) = scope {
+            self.push_code_frame(unit, frame, None)?
+        } else {
+            let frame = self.push_frame(unit)?;
+            crate::observer::call(self, frame);
+            frame
         };
         let reenter = self.shared.loops.reenter;
         let served = self.serve_host_string(|req| reenter(req, callee));

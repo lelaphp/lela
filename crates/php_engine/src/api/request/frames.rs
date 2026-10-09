@@ -272,7 +272,9 @@ impl Request {
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
     /// `FrameRef`. A VM stack whose page the memory limit refuses is
-    /// the fatal php raises there, and nothing is pushed.
+    /// the fatal php raises there, and nothing is pushed. The frame is
+    /// not begun: its observer begin is the caller's, which `execute`
+    /// raises as `zend_execute` does.
     pub(crate) fn push_frame(&mut self, unit: Arc<Unit>) -> Result<FrameRef, Fatal> {
         let code = exec::code_of(&unit);
         let slots = usize::try_from(code.num_cvs.saturating_add(code.num_tmps)).unwrap_or(0);
@@ -287,7 +289,6 @@ impl Request {
             state.symbol_table = Some(TableId::GLOBAL);
         }
         self.attach_symbol_table(frame);
-        crate::observer::call(self, frame);
         Ok(frame)
     }
 
