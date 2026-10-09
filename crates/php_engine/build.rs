@@ -202,7 +202,12 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
     let call = |kinds: &[&str]| {
         let mut params = String::new();
         for kind in kinds {
-            write!(params, ", crate::operand::{}", kind_type(kind)).ok();
+            write!(
+                params,
+                ", crate::operand::{}",
+                kind_type(kind).unwrap_or_default()
+            )
+            .ok();
         }
         format!(
             "crate::handlers::{}::<T{params}>(req, frame, code, op)",
@@ -219,6 +224,16 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
             handler.ident
         ));
     }
+    let mut read = spec
+        .op1
+        .iter()
+        .chain(spec.op2.iter().filter(|_| handler.operands > 1));
+    if let Some(kind) = read.find(|kind| kind_type(kind).is_none()) {
+        return Err(format!(
+            "`fn {}` is generic over its operands' kinds and ops.toml lists `{kind}` among them, which crate::operand has no type for",
+            handler.ident
+        ));
+    }
     let mut out = String::new();
     match handler.operands {
         1 => {
@@ -227,7 +242,7 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
                 writeln!(
                     out,
                     "            php_unit::OperandKind::{} => {},",
-                    kind_type(a),
+                    kind_type(a).unwrap_or_default(),
                     call(&[a])
                 )
                 .ok();
@@ -244,8 +259,8 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
                     writeln!(
                         out,
                         "            (php_unit::OperandKind::{}, php_unit::OperandKind::{}) => {},",
-                        kind_type(a),
-                        kind_type(b),
+                        kind_type(a).unwrap_or_default(),
+                        kind_type(b).unwrap_or_default(),
                         call(&[a, b])
                     )
                     .ok();
@@ -271,14 +286,15 @@ fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
     Ok(out)
 }
 
-/// The operand kind's type in `crate::operand`, as `ops.toml` names it.
-fn kind_type(kind: &str) -> &'static str {
+/// The operand kind's type in `crate::operand`, as `ops.toml` names it;
+/// none for `UNUSED`, which no inline path reads.
+fn kind_type(kind: &str) -> Option<&'static str> {
     match kind {
-        "CONST" => "Const",
-        "TMP" => "Tmp",
-        "VAR" => "Var",
-        "CV" => "Cv",
-        _ => "Unused",
+        "CONST" => Some("Const"),
+        "TMP" => Some("Tmp"),
+        "VAR" => Some("Var"),
+        "CV" => Some("Cv"),
+        _ => None,
     }
 }
 
