@@ -1230,25 +1230,134 @@ fn steps<B>(
 /// php's `TypeError` once a live walk's holder holds no array or object.
 const NO_TABLE: &str = "Iterated value is no longer an array or object";
 
+/// Where a hash iterator's step leaves it past the row it found: php's
+/// two ways, which differ where a row lands in a hole the step passed
+/// over, as one appended after the last row was unset does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Advance {
+    /// One past the row, `pos++` in `FE_FETCH_RW`'s loop
+    /// (`Z/Zend/zend_vm_def.h`, `ZEND_FE_FETCH_RW`).
+    Past,
+    /// The next live row, `zend_hash_move_forward_ex`, as
+    /// `php_array_walk` moves before its call.
+    NextLive,
+}
+
+/// One step of hash iterator `at` over the array the reference `holder`
+/// holds, `array`: its position (`zend_hash_iterator_pos_ex`), which
+/// separates an array the program shared and moves the iterator onto
+/// an array the program put in the reference, the reference made to
+/// hold the copy (`ZVAL_ARR(array, zend_array_dup(ht))`); the first
+/// live row from there; and the iterator left past it as `advance`
+/// says. The table the row is in, its position, its key and its value,
+/// or `None` past the last row. `FE_FETCH_RW` and the Live walk both
+/// step through it.
+pub(crate) fn array_step(
+    req: &mut Request,
+    holder: PhpRef,
+    array: PhpArray,
+    at: u32,
+    advance: Advance,
+) -> Result<Option<(Arr, u32, php_heap::Key, Zval)>, php_heap::Fatal> {
+    let (pos, table) = req.heap_mut().iterator_pos_ex(at, array.heap())?;
+    if !table.is_same(array.heap()) {
+        holder.heap().val_ref().write(Zval::array(table));
+    }
+    let Some((found, key, value)) = table.live_from(pos) else {
+        return Ok(None);
+    };
+    let past = found.saturating_add(1);
+    let next = match advance {
+        Advance::Past => past,
+        Advance::NextLive => table.live_from(past).map_or(past, |(next, _, _)| next),
+    };
+    req.heap_mut().iterator_set_pos(at, next);
+    Ok(Some((table, found, key, value)))
+}
+
+/// One step of hash iterator `at` over an object's property table in
+/// php's positions, the declared slots and then the dynamic table: the
+/// iterator moved onto `table` first (`zend_hash_iterator_pos`), so
+/// one the program left on another object's table stands at this
+/// table's pointer, and only then its place read, among the slots its
+/// lead and in the table its position; the first row from there that
+/// holds a value and that `admits` (php's scope check, or none), a slot
+/// nothing holds stepped over as php steps over an `IS_UNDEF` behind an
+/// `IS_INDIRECT`; and the iterator left past it as `advance` says. Its
+/// position, what stands there and its value, or `None` past the last,
+/// the iterator then at the end. `stepped` says whether the declared
+/// slots are walked from the lead or the dynamic table alone
+/// ([`Stepped`]). `FE_FETCH_RW` and `FE_FETCH_R` over an object
+/// ([`Request::object_walk`]) and the Live walk step through it.
+pub(crate) fn object_step(
+    req: &mut Request,
+    at: u32,
+    (table, stepped): (PropertyTable, Stepped),
+    advance: Advance,
+    mut admits: impl FnMut(&Request, &TableRow) -> bool,
+) -> Option<(u32, TableRow, Zval)> {
+    let declared = table.declared();
+    let pos = req.heap_mut().iterator_pos(at, table.table());
+    let lead = req.heap_mut().iterator_lead(at);
+    let mut from = match stepped {
+        Stepped::Positions if lead < declared => lead,
+        Stepped::Positions | Stepped::Dynamic => declared + pos,
+    };
+    let end = table.used();
+    let found = loop {
+        let Some((found, row, value)) = held_at(table, from, end) else {
+            break None;
+        };
+        from = found.saturating_add(1);
+        if admits(req, &row) {
+            break Some((found, row, value));
+        }
+    };
+    let next = match (found, advance) {
+        (None, _) => end,
+        (Some((found, ..)), Advance::Past) => found.saturating_add(1),
+        (Some((found, ..)), Advance::NextLive) => {
+            let mut next = found.saturating_add(1);
+            while next < end && table.row_at(next).is_none() {
+                next = next.saturating_add(1);
+            }
+            next
+        }
+    };
+    let heap = req.heap_mut();
+    if next < declared {
+        heap.iterator_set_lead(at, next);
+    } else {
+        if stepped == Stepped::Positions {
+            heap.iterator_set_lead(at, declared);
+        }
+        heap.iterator_set_pos(at, next - declared);
+    }
+    found
+}
+
+/// What an [`object_step`] walks of an object's positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stepped {
+    /// The declared slots from the iterator's lead, then the dynamic
+    /// table.
+    Positions,
+    /// The dynamic table alone, the lead left as it stands: a hooked
+    /// class's walk keeps its own place among its declared rows
+    /// (`zend_hooked_object_get_iterator`).
+    Dynamic,
+}
+
 /// The row iterator `at` stands at in what `holder` holds now, the
-/// iterator moved past it; `None` past the last row.
+/// iterator moved past it ([`array_step`], [`object_step`]); `None`
+/// past the last row.
 fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, Thrown> {
     let now = holder.get();
     if let Some(array) = now.as_array().copied() {
-        let moved = req.heap_mut().iterator_pos_ex(at, array.heap());
-        let (pos, table) = req.fatal_of(moved)?;
-        if !table.is_same(array.heap()) {
-            // `ZVAL_ARR(array, zend_array_dup(ht))`: the reference holds
-            // the copy from here, the shared table one owner fewer.
-            holder.heap().val_ref().write(php_heap::Zval::array(table));
-        }
-        let Some((found, key, value)) = table.live_from(pos) else {
+        let stepped = array_step(req, holder, array, at, Advance::NextLive);
+        let Some((table, found, key, value)) = req.fatal_of(stepped)? else {
             return Ok(None);
         };
-        // `zend_hash_move_forward_ex`: the next live bucket, or the end.
-        let next = found.saturating_add(1);
-        let next = table.live_from(next).map_or(next, |(next, _, _)| next);
-        req.heap_mut().iterator_set_pos(at, next);
         return Ok(Some(Row {
             key: Keep::lent(req, Key::of(key), Lent::Owned),
             value: Keep::lent(req, Value::of_zval(value), Lent::Owned),
@@ -1264,11 +1373,9 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
     Err(throw_error(req, "TypeError", NO_TABLE))
 }
 
-/// [`next_row`] over an object's property table in php's positions: the
-/// declared slots, then the dynamic table, the iterator's place among
-/// the slots its lead and its place in the table its position. A slot
-/// nothing holds is stepped over, as php steps over an `IS_UNDEF` behind
-/// an `IS_INDIRECT`; a declared row's key is its mangled name.
+/// [`next_row`] over an object's property table in php's positions
+/// ([`object_step`]), every row admitted, as `php_array_walk` reads the
+/// table with no scope check; a declared row's key is its mangled name.
 fn object_row(
     req: &mut Request,
     holder: PhpRef,
@@ -1277,29 +1384,15 @@ fn object_row(
     owner: PhpObject,
     table: PropertyTable,
 ) -> Result<Option<Row>, Thrown> {
-    let declared = table.declared();
-    let pos = req.heap_mut().iterator_pos(iterator, table.table());
-    let lead = req.heap_mut().iterator_lead(iterator);
-    let from = if lead < declared {
-        lead
-    } else {
-        declared + pos
-    };
-    let Some((found, row, value)) = held_at(table, from, table.used()) else {
+    let Some((found, row, value)) = object_step(
+        req,
+        iterator,
+        (table, Stepped::Positions),
+        Advance::NextLive,
+        |_, _| true,
+    ) else {
         return Ok(None);
     };
-    // `zend_hash_move_forward_ex`: the next live position, or the end.
-    let mut next = found.saturating_add(1);
-    while next < table.used() && table.row_at(next).is_none() {
-        next = next.saturating_add(1);
-    }
-    let heap = req.heap_mut();
-    if next < declared {
-        heap.iterator_set_lead(iterator, next);
-    } else {
-        heap.iterator_set_lead(iterator, declared);
-        heap.iterator_set_pos(iterator, next - declared);
-    }
     let (key, at) = match row {
         TableRow::Slot(slot) => {
             let Some(name) = req.slot_name(owner.class(), slot)? else {
@@ -1316,7 +1409,10 @@ fn object_row(
             };
             (Key::Str(PhpString::of(name)), at)
         }
-        TableRow::Entry(key) => (Key::of(key), At::Bucket(table.table(), found - declared)),
+        TableRow::Entry(key) => (
+            Key::of(key),
+            At::Bucket(table.table(), found - table.declared()),
+        ),
     };
     Ok(Some(Row {
         key: Keep::lent(req, key, Lent::Owned),

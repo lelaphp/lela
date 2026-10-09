@@ -3133,7 +3133,9 @@ impl Request {
     /// an object whose class has no `get_iterator`, and the object arm
     /// of `FE_FETCH_RW`: the next property the executing scope may see
     /// from where iterator `idx` stands, with its key and where it sits,
-    /// the iterator left one past it. The order is `Z_OBJPROP`'s: the
+    /// the iterator left one past it ([`walk::object_step`]), moved onto
+    /// the object's table at its pointer first where the loop's variable
+    /// now holds another object. The order is `Z_OBJPROP`'s: the
     /// class's declared instance properties in declaration order, which
     /// php's table carries as its first buckets and this heap walks by
     /// the iterator's lead ([`php_heap::Heap::iterator_lead`]), then the
@@ -3157,10 +3159,17 @@ impl Request {
         if self.object_handlers(o).properties_overloaded() {
             return self.answered_walk(object, idx);
         }
+        // `zend_hash_iterator_pos(.., Z_OBJPROP_P(array))`: the table laid
+        // down as php's `rebuild_object_properties` lays it, and the
+        // iterator moved onto it at its pointer where the loop's
+        // variable now holds another object, before its place is read.
+        let laid = self.heap.object_property_table(o);
+        let table = self.fatal_of(laid)?;
+        self.heap.iterator_pos(idx, table.table());
         // `zend_hooked_object_get_iterator`: a class with a hooked
         // property walks its declared rows in the table's order, each
-        // hooked one read through its hook.
-        if self.class_has_hooks(class) {
+        // hooked one read through its hook, and then the dynamic rows.
+        let stepped = if self.class_has_hooks(class) {
             let mut lead = self.heap.iterator_lead(idx) as usize;
             let found = self.hooked_object_walk(object, &mut lead, by_ref);
             self.heap
@@ -3168,51 +3177,50 @@ impl Request {
             if let Some((key, walked)) = found? {
                 return Ok(Some((php_heap::Key::Str(key.heap()), walked)));
             }
+            walk::Stepped::Dynamic
         } else {
-            // A table that holds copies of the declared rows is walked
-            // alone, each of them a row of its own.
-            let declared: Vec<(Box<[u8]>, ClassId)> = match o.declared_rows() {
-                php_heap::DeclaredRows::Slots => self
-                    .placed(class)
-                    .map(|(_, declaring, p)| (p.name.0.clone(), declaring))
-                    .collect(),
-                php_heap::DeclaredRows::Copied => Vec::new(),
-            };
-            let mut at = self.heap.iterator_lead(idx) as usize;
-            while let Some((name, declaring)) = declared.get(at) {
-                let slot = u32::try_from(at).unwrap_or(u32::MAX);
-                if !o.slot(slot).is_undef()
-                    && self.property_row_visible(class, name, Some(*declaring))
-                {
-                    let interned = self.heap.intern(name);
-                    let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
-                    self.heap.iterator_set_lead(idx, slot.saturating_add(1));
-                    return Ok(Some((key, Walked::Slot(slot))));
-                }
-                at = at.saturating_add(1);
-            }
-            self.heap
-                .iterator_set_lead(idx, u32::try_from(declared.len()).unwrap_or(u32::MAX));
-        }
-        let Some(table) = o.properties() else {
-            return Ok(None);
+            walk::Stepped::Positions
         };
-        // A dynamic row whose name the scope finds declared, and not
-        // public, is stepped over (`zend_check_property_access`).
-        let mut pos = self.heap.iterator_pos(idx, table);
-        loop {
-            let Some((found, key, _)) = table.live_from(pos) else {
-                return Ok(None);
-            };
-            pos = found.saturating_add(1);
-            self.heap.iterator_set_pos(idx, pos);
-            let visible = match key {
-                php_heap::Key::Str(name) => self.property_row_visible(class, name.bytes(), None),
-                php_heap::Key::Long(_) => true,
-            };
-            if visible {
-                return Ok(Some((key, Walked::Dynamic(key))));
+        // A row the executing scope may not reach is stepped over
+        // (`zend_check_property_access`): a declared one by its
+        // declaration, a dynamic one whose name the scope finds declared
+        // and not public.
+        let found = walk::object_step(
+            self,
+            idx,
+            (table, stepped),
+            walk::Advance::Past,
+            |req, row| match row {
+                TableRow::Slot(slot) => req
+                    .placed(class)
+                    .find(|(at, _, _)| u32::try_from(*at).ok() == Some(*slot))
+                    .is_some_and(|(_, declaring, p)| {
+                        req.property_row_visible(class, &p.name.0, Some(declaring))
+                    }),
+                TableRow::Entry(php_heap::Key::Str(name)) => {
+                    req.property_row_visible(class, name.bytes(), None)
+                }
+                TableRow::Entry(php_heap::Key::Long(_)) => true,
+            },
+        );
+        match found {
+            None => Ok(None),
+            Some((_, TableRow::Slot(slot), _)) => {
+                let Some(name) = self
+                    .placed(class)
+                    .find(|(at, _, _)| u32::try_from(*at).ok() == Some(slot))
+                    .map(|(_, _, p)| p.name.0.clone())
+                else {
+                    return Err(crate::api::raising::fatal(
+                        self,
+                        "InternalError: an object walk's slot with no declaration",
+                    ));
+                };
+                let interned = self.heap.intern(&name);
+                let key = self.fatal_of(interned).map(php_heap::Key::Str)?;
+                Ok(Some((key, Walked::Slot(slot))))
             }
+            Some((_, TableRow::Entry(key), _)) => Ok(Some((key, Walked::Dynamic(key)))),
         }
     }
 
