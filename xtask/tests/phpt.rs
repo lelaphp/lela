@@ -1282,6 +1282,15 @@ fn a_system_v_subset_killed_mid_run_leaves_a_claim_the_next_run_takes() {
         .map(|entry| entry.unwrap().path())
         .collect();
     assert_eq!(left.len(), 1, "the killed run left its claim: {left:?}");
+    // Its journal names each program as it started, the test's own among
+    // them, and its last write bounds the window the next run takes.
+    let journal = fs::read_to_string(&left[0]).unwrap();
+    assert!(
+        journal
+            .lines()
+            .any(|line| line.starts_with("started ") && line.ends_with(&format!(" {pid}"))),
+        "the claim names the test's program {pid}: {journal}"
+    );
     fs::write(
         dir.join("leaves.phpt"),
         "--TEST--\nquick\n--FILE--\n<?php echo 'quick';\n--EXPECT--\nquick\n",
