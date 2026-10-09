@@ -1173,22 +1173,27 @@ fn a_pool_value_s_refusal_reaches_no_request() {
     );
 }
 
-/// What a process a request execs holds (#2428), each descriptor named
-/// by what it is: the oracle's php-fpm, a static pool of one child with
-/// its master's stderr on a file, lists `0` `/dev/null`, `1` the pipe
-/// `shell_exec` reads, `2` `/dev/null`, `5` the master's stderr, which
-/// `fpm_stdio_save_original_stderr` dup'd without `FD_CLOEXEC` and no
-/// child closes, and `7` the request's script, which php holds open while
-/// it runs and the engine does not yet (#2458, which adds it to the list
-/// held here). The accepted connection and the listening socket are
-/// not among them: `fcgi_accept_request` and `fpm_child_cloexec` set
-/// `FD_CLOEXEC` on both, as the child here does, and the engine's other
-/// descriptors (`/dev/urandom`, opcache's lock file in php) are
-/// close-on-exec in both. What this test's own process leaves open past
-/// its stdio, a harness's jobserver pipe, reaches the master and every
-/// process after it under either, and is left out.
+/// What a process a request execs holds (#2428, #2458), each descriptor
+/// named by what it is: the oracle's php-fpm, a static pool of one child
+/// with its master's stderr on a file, lists `0` `/dev/null`, `1` the
+/// pipe `shell_exec` reads, `2` `/dev/null`, `5` the master's stderr,
+/// which `fpm_stdio_save_original_stderr` dup'd without `FD_CLOEXEC` and
+/// no child closes, and, for the first request, `7` the request's script,
+/// which `php_fopen_primary_script`'s `zend_stream_open` opened with no
+/// `O_CLOEXEC` and which stays open through the shutdown functions, since
+/// `fpm_main` leaves the handle the scanner listed to `shutdown_executor`.
+/// The second request's script is opcache's, held from the first under
+/// `opcache.file_update_protection=0`, which caches a file written this
+/// second, and `persistent_stream_open_function` answers its open
+/// without opening it, so no descriptor of it is listed. The accepted connection and the
+/// listening socket are not among them: `fcgi_accept_request` and
+/// `fpm_child_cloexec` set `FD_CLOEXEC` on both, as the child here does,
+/// and the engine's other descriptors (`/dev/urandom`, opcache's lock
+/// file in php) are close-on-exec in both. What this test's own process
+/// leaves open past its stdio, a harness's jobserver pipe, reaches the
+/// master and every process after it under either, and is left out.
 #[test]
-fn a_process_a_request_execs_holds_the_master_s_saved_stderr_and_no_socket() {
+fn a_process_a_request_execs_holds_the_master_s_saved_stderr_the_script_and_no_socket() {
     use std::os::unix::fs::MetadataExt;
     let dir = tree("exec-fds");
     let socket = socket(&dir);
@@ -1196,7 +1201,11 @@ fn a_process_a_request_execs_holds_the_master_s_saved_stderr_and_no_socket() {
     let script = dir.join("index.php");
     std::fs::write(
         &script,
-        "<?php echo shell_exec('for f in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done');",
+        "<?php
+function listed() { return shell_exec('for f in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done'); }
+register_shutdown_function(function () { echo \"--\\n\", listed(); });
+echo listed();
+",
     )
     .unwrap();
     let stderr = dir.join("stderr");
@@ -1206,16 +1215,21 @@ fn a_process_a_request_execs_holds_the_master_s_saved_stderr_and_no_socket() {
         .map(|m| m.ino())
         .collect();
     let mut master = php_fpm()
-        .args(["-n", "-F", "-y"])
+        .args(["-n", "-d", "opcache.file_update_protection=0", "-F", "-y"])
         .arg(&path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&stderr).unwrap())
         .spawn()
         .unwrap();
-    let body = connect(&socket, Instant::now())
-        .map(|s| response(s, &script))
-        .unwrap_or_default();
+    let started = Instant::now();
+    let bodies: Vec<Vec<u8>> = (0..2)
+        .map(|_| {
+            connect(&socket, started)
+                .map(|s| response(s, &script))
+                .unwrap_or_default()
+        })
+        .collect();
     Command::new("kill")
         .arg("-TERM")
         .arg(master.id().to_string())
@@ -1228,28 +1242,39 @@ fn a_process_a_request_execs_holds_the_master_s_saved_stderr_and_no_socket() {
         (inode(&script), "the script"),
     ];
     std::fs::remove_dir_all(&dir).ok();
-    let body = String::from_utf8_lossy(&body);
-    let listed = body.split_once("\r\n\r\n").map_or(&*body, |(_, rest)| rest);
-    let held: Vec<&str> = listed
-        .lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace();
-            let ino: u64 = words.next()?.parse().ok()?;
-            let fd: u32 = words.next()?.strip_prefix("/dev/fd/")?.parse().ok()?;
-            if fd > 2 && ours.contains(&ino) {
-                return None;
-            }
-            Some(
-                named
-                    .iter()
-                    .find(|(at, _)| *at == ino)
-                    .map_or("other", |(_, name)| name),
-            )
+    let held = |listed: &str| -> Vec<&'static str> {
+        listed
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                let ino: u64 = words.next()?.parse().ok()?;
+                let fd: u32 = words.next()?.strip_prefix("/dev/fd/")?.parse().ok()?;
+                if fd > 2 && ours.contains(&ino) {
+                    return None;
+                }
+                Some(
+                    named
+                        .iter()
+                        .find(|(at, _)| *at == ino)
+                        .map_or("other", |(_, name)| name),
+                )
+            })
+            .collect()
+    };
+    let lists: Vec<(Vec<&str>, Vec<&str>)> = bodies
+        .iter()
+        .map(|body| {
+            let body = String::from_utf8_lossy(body);
+            let listed = body.split_once("\r\n\r\n").map_or(&*body, |(_, rest)| rest);
+            let (running, shutting) = listed.split_once("--\n").unwrap_or((listed, ""));
+            (held(running), held(shutting))
         })
         .collect();
+    let first = vec!["null", "other", "null", "the master's stderr", "the script"];
+    let second = vec!["null", "other", "null", "the master's stderr"];
     assert_eq!(
-        held,
-        ["null", "other", "null", "the master's stderr"],
-        "{listed}"
+        lists,
+        [(first.clone(), first), (second.clone(), second)],
+        "{bodies:?}"
     );
 }

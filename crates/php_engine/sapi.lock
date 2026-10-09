@@ -31,6 +31,7 @@ PHP_VERSION
 Pid
 Primary
 ProcessTitle
+ProgramFile
 RequestDescription
 ResponseHead
 Routed

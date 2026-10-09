@@ -3,7 +3,9 @@
 //! of one fd with a timeout, which `php_pollfd_for` is and which a
 //! socket's timed read and `accept` wait on, and of many, which
 //! `php_select` is for `mysqlnd_poll`; and `fcntl(2)`'s
-//! `O_NONBLOCK`, which `PHP_STREAM_OPTION_BLOCKING` sets on a pipe; and
+//! `O_NONBLOCK`, which `PHP_STREAM_OPTION_BLOCKING` sets on a pipe, and
+//! `FD_CLOEXEC`, cleared on a file php opens for an exec'd process to
+//! inherit; and
 //! `recv(2)` under `MSG_PEEK`, which `STREAM_PEEK` asks of any socket;
 //! and `fsync(2)` and `fdatasync(2)`, which `fsync()` asks of a file;
 //! and `dup(2)` of an fd named by its number with `getdtablesize(2)`,
@@ -128,6 +130,29 @@ pub fn set_fd_blocking(fd: BorrowedFd<'_>, blocking: bool) -> std::io::Result<bo
         return Err(std::io::Error::last_os_error());
     }
     Ok(was_blocking)
+}
+
+/// `FD_CLOEXEC` cleared, so a process the request execs inherits the fd,
+/// as it inherits each one php opens with `open(2)` and no `O_CLOEXEC`:
+/// a plain file `fopen()` opens without `e` in its `$mode`
+/// (`php_stream_parse_fopen_modes`, `Z/main/streams/plain_wrapper.c:108`)
+/// and the primary file php holds while the program is served. `std`
+/// opens every file with `O_CLOEXEC`. The `Err` is the `errno` of a `-1`
+/// from either `fcntl(2)`.
+pub fn inherit_fd(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+    let raw = fd.as_raw_fd();
+    // SAFETY: `fcntl` with `F_GETFD` reads nothing through its arguments
+    // and answers the fd's flags or `-1`.
+    let flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fcntl` with `F_SETFD` reads nothing through its arguments
+    // but the flags, a number.
+    if unsafe { libc::fcntl(raw, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// `fsync(2)` of the fd, or `fdatasync(2)` for `data_only`, the call

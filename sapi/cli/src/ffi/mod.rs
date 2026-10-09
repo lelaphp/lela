@@ -207,7 +207,9 @@ pub(crate) fn asctime_now() -> Option<String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?;
-    let seconds = libc::time_t::try_from(now.as_secs()).ok()?;
+    // `time_t`, read off the call: the libc crate deprecates its alias on
+    // musl, whose 1.2.0 made it 64 bits everywhere (rust-lang/libc#1848).
+    let seconds = now.as_secs().try_into().ok()?;
     let mut tm = MaybeUninit::<libc::tm>::uninit();
     // SAFETY: `localtime_r` reads the one `time_t` it is handed and writes
     // the whole of the `tm` it is handed, both live for the call; it

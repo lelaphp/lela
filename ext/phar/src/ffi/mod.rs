@@ -21,7 +21,9 @@ pub(crate) type Tm = libc::tm;
 /// `php_localtime_r(&time, &tmbuf)`: `time` broken down in the host's
 /// local time, or `None` where the C library cannot represent it.
 pub(crate) fn local_time(time: i64) -> Option<Tm> {
-    let time: libc::time_t = time;
+    // `time` is handed as the `time_t` it is, 64 bits on every target the
+    // engine builds for; the libc crate's alias for it is deprecated on
+    // musl (rust-lang/libc#1848), so it goes unnamed.
     let mut tm = MaybeUninit::<Tm>::uninit();
     // SAFETY: both pointers are to live storage of their types; the call
     // reads `time` and writes the whole of `tm` when it answers non-null.

@@ -199,6 +199,23 @@ impl Request {
         ))
     }
 
+    /// opcache's `persistent_zend_resolve_path` for the primary file,
+    /// which leaves `persistent_stream_open_function` to answer its open
+    /// without opening it: whether the accelerator is on for the request
+    /// and holds a unit under the file's full path.
+    pub(crate) fn accelerator_holds(&mut self, path: &[u8]) -> bool {
+        let full = full_path(path, &self.cwd);
+        let on = matches!(
+            self.admission(&full),
+            Admission::Held { validation, .. } if validation != Validation::EveryHit
+        );
+        let shared = Arc::clone(&self.shared);
+        on && shared
+            .units
+            .find(&self.arena.files, &UnitKey::full(&full))
+            .is_some()
+    }
+
     /// `persistent_compile_file`'s first lookup, by the path as written:
     /// the file held under `written`'s name, a hit served without the
     /// path resolved or the file stat'ed, where the answer for it looks

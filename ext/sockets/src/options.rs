@@ -29,8 +29,8 @@ type Answer = OrFalse<Union<Owner<PhpArray>, i64>>;
 /// `struct timeval` as the platform lays it out.
 fn timeval_bytes(sec: i64, usec: i64) -> Vec<u8> {
     let tv = libc::timeval {
-        tv_sec: libc::time_t::try_from(sec).unwrap_or(libc::time_t::MAX),
-        tv_usec: libc::suseconds_t::try_from(usec).unwrap_or(libc::suseconds_t::MAX),
+        tv_sec: ffi::TimeT::try_from(sec).unwrap_or(ffi::TimeT::MAX),
+        tv_usec: ffi::SusecondsT::try_from(usec).unwrap_or(ffi::SusecondsT::MAX),
     };
     let mut out = Vec::new();
     out.extend_from_slice(&tv.tv_sec.to_ne_bytes());
@@ -138,8 +138,8 @@ fn get_option(
             if let Err(errno) = ffi::getsockopt(fd, lvl, opt, &mut buf) {
                 return failed(req, errno, "Unable to retrieve socket option");
             }
-            let sec_width = std::mem::size_of::<libc::time_t>();
-            let usec_width = std::mem::size_of::<libc::suseconds_t>();
+            let sec_width = std::mem::size_of::<ffi::TimeT>();
+            let usec_width = std::mem::size_of::<ffi::SusecondsT>();
             let mut out = PhpArray::new(req)?;
             put(
                 req,

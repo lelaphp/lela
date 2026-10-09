@@ -86,7 +86,7 @@ pub use constants::{
 pub use engine::LeakSensor;
 pub use engine::{
     Aborted, Body, Dispatched, Engine, EngineBuilder, FileHandles, HostPage, HostServes, HostValue,
-    IniOrigin, Method, NotAlone, Observables, OutputSink, Primary, ProcessTitle,
+    IniOrigin, Method, NotAlone, Observables, OutputSink, Primary, ProcessTitle, ProgramFile,
     RequestDescription, ResponseHead, Routed, Uncaught, WebRequest,
 };
 pub use fork::{Forked, Pid, fork};
