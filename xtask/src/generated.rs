@@ -2,7 +2,8 @@
 //! rule each is derived from (harness-design.md §4.1, §13 D.19). Today that
 //! is `ext/clippy.toml` from `ext.no-locks`: the `disallowed-types` list
 //! with the rule's text as each reason, wildcards expanded from
-//! `Cargo.lock`, and the `disallowed-macros` list from the rule's
+//! `Cargo.lock` to the paths a package's types are reachable at (#1910),
+//! and the `disallowed-macros` list from the rule's
 //! `deny_macros` where it carries one (#1781). The committed copy is held
 //! to the rendering by `budget`.
 
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::lock::{CargoLock, package_of};
+use crate::lock::{CargoLock, Expanded, package_of};
 use crate::manifest::{Manifest, Rule};
 
 /// Every generated file the manifest names, with its rendering.
@@ -94,30 +95,36 @@ fn clippy_toml(root: &Path, rule: &Rule, file: &str) -> Result<String> {
                 }
                 paths
             }
-            None => vec![ty.clone()],
+            None => vec![Expanded {
+                path: ty.clone(),
+                gated: false,
+            }],
         };
-        for path in expanded {
-            entry(&mut out, &path, &reason);
+        for ty in expanded {
+            entry(&mut out, &ty.path, &reason, ty.gated);
         }
     }
     out.push_str("]\n");
     if let Some(macros) = &rule.predicate.deny_macros {
         out.push_str("disallowed-macros = [\n");
         for path in macros {
-            entry(&mut out, path, &reason);
+            entry(&mut out, path, &reason, false);
         }
         out.push_str("]\n");
     }
     Ok(out)
 }
 
-/// One `{ path, reason }` row of a `disallowed-*` list.
-fn entry(out: &mut String, path: &str, reason: &str) {
+/// One `{ path, reason }` row of a `disallowed-*` list. A `gated` path,
+/// one a build of its package can leave out, carries `allow-invalid`, so
+/// clippy denies it where the build has it and says nothing where not.
+fn entry(out: &mut String, path: &str, reason: &str, gated: bool) {
     writeln!(
         out,
-        "    {{ path = {}, reason = {} }},",
+        "    {{ path = {}, reason = {}{} }},",
         toml_string(path),
-        toml_string(reason)
+        toml_string(reason),
+        if gated { ", allow-invalid = true" } else { "" }
     )
     .ok();
 }
