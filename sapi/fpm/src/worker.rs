@@ -10,7 +10,7 @@
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, TcpStream};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
@@ -386,6 +386,13 @@ pub(crate) fn init(fpm: &mut Fpm, pool: usize, slot: usize) -> Worker {
         failed(&name)
     };
     crate::stdio::init_child();
+    // `fd_stderr_original`, the master's stderr as
+    // `fpm_stdio_save_original_stderr` dup'd it, with no `FD_CLOEXEC`: php's
+    // child never closes it, so a process a request execs holds it, and
+    // this child lets go of it unclosed (#2428).
+    if let Some(saved) = fpm.stderr_original.take() {
+        let _unclosed = saved.into_raw_fd();
+    }
     let access = AccessLog::new(
         fpm.pools[pool].access_log.take(),
         config

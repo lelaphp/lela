@@ -1167,3 +1167,84 @@ fn a_pool_value_s_refusal_reaches_no_request() {
         "X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n\r\nok UTC\n"
     );
 }
+
+/// What a process a request execs holds (#2428), each descriptor named
+/// by what it is: the oracle's php-fpm, a static pool of one child with
+/// its master's stderr on a file, lists `0` `/dev/null`, `1` the pipe
+/// `shell_exec` reads, `2` `/dev/null`, `5` the master's stderr, which
+/// `fpm_stdio_save_original_stderr` dup'd without `FD_CLOEXEC` and no
+/// child closes, and `7` the request's script, which php holds open while
+/// it runs and the engine does not yet (#2458, which adds it to the list
+/// held here). The accepted connection and the listening socket are
+/// not among them: `fcgi_accept_request` and `fpm_child_cloexec` set
+/// `FD_CLOEXEC` on both, as the child here does, and the engine's other
+/// descriptors (`/dev/urandom`, opcache's lock file in php) are
+/// close-on-exec in both. What this test's own process leaves open past
+/// its stdio, a harness's jobserver pipe, reaches the master and every
+/// process after it under either, and is left out.
+#[test]
+fn a_process_a_request_execs_holds_the_master_s_saved_stderr_and_no_socket() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = tree("exec-fds");
+    let socket = socket(&dir);
+    let path = conf(&dir, &socket.display().to_string());
+    let script = dir.join("index.php");
+    std::fs::write(
+        &script,
+        "<?php echo shell_exec('for f in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -e /dev/fd/$f ] && /bin/ls -iLd /dev/fd/$f; done');",
+    )
+    .unwrap();
+    let stderr = dir.join("stderr");
+    let inode = |path: &Path| std::fs::metadata(path).map_or(0, |m| m.ino());
+    let ours: Vec<u64> = (3..64)
+        .filter_map(|fd| std::fs::metadata(format!("/dev/fd/{fd}")).ok())
+        .map(|m| m.ino())
+        .collect();
+    let mut master = php_fpm()
+        .args(["-n", "-F", "-y"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let body = connect(&socket, Instant::now())
+        .map(|s| response(s, &script))
+        .unwrap_or_default();
+    Command::new("kill")
+        .arg("-TERM")
+        .arg(master.id().to_string())
+        .status()
+        .ok();
+    master.wait().ok();
+    let named = [
+        (inode(Path::new("/dev/null")), "null"),
+        (inode(&stderr), "the master's stderr"),
+        (inode(&script), "the script"),
+    ];
+    std::fs::remove_dir_all(&dir).ok();
+    let body = String::from_utf8_lossy(&body);
+    let listed = body.split_once("\r\n\r\n").map_or(&*body, |(_, rest)| rest);
+    let held: Vec<&str> = listed
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let ino: u64 = words.next()?.parse().ok()?;
+            let fd: u32 = words.next()?.strip_prefix("/dev/fd/")?.parse().ok()?;
+            if fd > 2 && ours.contains(&ino) {
+                return None;
+            }
+            Some(
+                named
+                    .iter()
+                    .find(|(at, _)| *at == ino)
+                    .map_or("other", |(_, name)| name),
+            )
+        })
+        .collect();
+    assert_eq!(
+        held,
+        ["null", "other", "null", "the master's stderr"],
+        "{listed}"
+    );
+}
