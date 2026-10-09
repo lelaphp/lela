@@ -791,18 +791,29 @@ fn new_with_payload<T: Any + Send + Default>(
     heap.object_with(class, slots, custom, T::default())
 }
 
-/// One extension (design §7.1): declarations paired with entries,
-/// constants, ini entries, the lifecycle functions, and the two state
-/// declarations. Built by [`ExtensionBuilder`], linked by the engine.
+/// One extension (design §7.1): what it declares into the engine's
+/// tables ([`Declarations`]) and the rest of its entry, the ini
+/// entries, lifecycle functions and state declarations
+/// ([`ExtensionEntry`]). Built by [`ExtensionBuilder`], linked by the
+/// engine, which moves the declarations into its own tables and keeps
+/// the entry.
 #[derive(Clone)]
 pub struct Extension {
+    pub(crate) entry: ExtensionEntry,
+    pub(crate) declarations: Declarations,
+}
+
+/// One extension as the engine holds it once built, php's
+/// `zend_module_entry` with its function table registered and gone: the
+/// name, version, ini entries, lifecycle functions and the two state
+/// declarations. Its functions, classes and constants are rows of the
+/// engine's tables, each naming the extension that declared it.
+#[derive(Clone)]
+pub(crate) struct ExtensionEntry {
     pub(crate) name: String,
     /// `zend_module_entry.version`, what [`ExtensionBuilder::version`]
     /// declared, `PHP_VERSION` where it declared none.
     pub(crate) version: &'static str,
-    pub(crate) functions: Vec<(FunctionDecl, Entry)>,
-    pub(crate) classes: Vec<NativeClassDecl>,
-    pub(crate) constants: Vec<ConstDecl>,
     pub(crate) ini: Vec<IniDecl>,
     pub(crate) on_modify: Vec<(Vec<u8>, OnModify)>,
     pub(crate) dependencies: Vec<Dependency>,
@@ -823,6 +834,17 @@ pub struct Extension {
     /// ([`crate::supplied`]), taken out as the engine is built.
     pub(crate) supplies: Supplies,
     pub(crate) info: Option<Info>,
+}
+
+/// What one extension declares into the engine's tables, which the
+/// engine's build moves into them row by row, so no declaration is held
+/// twice: its functions, classes and constants, and what it adds to the
+/// classes of others.
+#[derive(Clone)]
+pub(crate) struct Declarations {
+    pub(crate) functions: Vec<(FunctionDecl, Entry)>,
+    pub(crate) classes: Vec<NativeClassDecl>,
+    pub(crate) constants: Vec<ConstDecl>,
     /// What [`ExtensionBuilder::constants_with`] was handed.
     pub(crate) constants_link: Option<ConstantsLink>,
     /// What [`ExtensionBuilder::class_constants`] was handed: each
@@ -834,12 +856,21 @@ pub struct Extension {
     pub(crate) trampolines: Vec<(Name, MethodDecl, Entry)>,
 }
 
+/// An extension handed by reference to
+/// [`crate::engine::EngineBuilder::extensions`], cloned, as a host that
+/// builds more than one engine from one bundle hands it.
+impl From<&Extension> for Extension {
+    fn from(extension: &Extension) -> Extension {
+        extension.clone()
+    }
+}
+
 impl std::fmt::Debug for Extension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Extension")
-            .field("name", &self.name)
-            .field("functions", &self.functions.len())
-            .field("classes", &self.classes.len())
+            .field("name", &self.entry.name)
+            .field("functions", &self.declarations.functions.len())
+            .field("classes", &self.declarations.classes.len())
             .finish_non_exhaustive()
     }
 }
@@ -1732,31 +1763,35 @@ impl ExtensionBuilder {
     #[must_use]
     pub fn build(self, name: &str) -> Extension {
         Extension {
-            name: name.to_owned(),
-            version: self.version.unwrap_or(crate::api::request::PHP_VERSION),
-            functions: self.functions,
-            classes: self.classes,
-            constants: self.constants,
-            ini: self.ini,
-            on_modify: self.on_modify,
-            dependencies: self.dependencies,
-            request_state: self.request_state,
-            process_state: self.process_state,
-            engine_state: self.engine_state,
-            rinit: self.rinit,
-            rshutdown: self.rshutdown,
-            deactivate: self.deactivate,
-            post_deactivate: self.post_deactivate,
-            engine_end: self.engine_end,
-            supplies: Supplies {
-                statement_handler: self.zend.as_ref().and_then(|row| row.statement_handler),
-                ..self.supplies
+            entry: ExtensionEntry {
+                name: name.to_owned(),
+                version: self.version.unwrap_or(crate::api::request::PHP_VERSION),
+                ini: self.ini,
+                on_modify: self.on_modify,
+                dependencies: self.dependencies,
+                request_state: self.request_state,
+                process_state: self.process_state,
+                engine_state: self.engine_state,
+                rinit: self.rinit,
+                rshutdown: self.rshutdown,
+                deactivate: self.deactivate,
+                post_deactivate: self.post_deactivate,
+                engine_end: self.engine_end,
+                supplies: Supplies {
+                    statement_handler: self.zend.as_ref().and_then(|row| row.statement_handler),
+                    ..self.supplies
+                },
+                zend: self.zend,
+                info: self.info,
             },
-            zend: self.zend,
-            info: self.info,
-            constants_link: self.constants_link,
-            class_constants: self.class_constants,
-            trampolines: self.trampolines,
+            declarations: Declarations {
+                functions: self.functions,
+                classes: self.classes,
+                constants: self.constants,
+                constants_link: self.constants_link,
+                class_constants: self.class_constants,
+                trampolines: self.trampolines,
+            },
         }
     }
 }
@@ -2964,7 +2999,7 @@ mod tests {
             )
             .build("refusals");
         let served = Engine::cli_builder()
-            .extensions(&[extension])
+            .extensions([extension])
             .build()
             .serve_capture(
                 r#"<?php

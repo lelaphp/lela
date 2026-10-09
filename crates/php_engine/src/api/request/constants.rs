@@ -129,13 +129,7 @@ impl Request {
     /// row.
     pub(crate) fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
         let decls = self.shared.declared().constants;
-        let mut modules: Vec<&str> = Vec::with_capacity(decls.len());
-        for extension in &self.shared.extensions {
-            modules.extend(std::iter::repeat_n(
-                extension.name.as_str(),
-                extension.constants.len(),
-            ));
-        }
+        let modules = (self.shared.constant_modules.iter()).map(|&at| self.extension_name(at));
         let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = decls
             .iter()
             .zip(modules)
@@ -151,7 +145,7 @@ impl Request {
                 });
                 let value = self.shared.constant(&decl.name.0);
                 sapi.into_iter()
-                    .chain(value.map(|value| (Some(module), decl.name.0.to_vec(), value)))
+                    .chain(value.map(|value| (module, decl.name.0.to_vec(), value)))
             })
             .collect();
         rows.extend(self.constants.constants.iter().map(|row| {

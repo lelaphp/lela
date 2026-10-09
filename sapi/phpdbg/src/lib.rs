@@ -178,7 +178,7 @@ pub fn main_with(argv: &[Vec<u8>], beside: &[Extension]) -> ExitCode {
     let builder = Engine::builder()
         .ini_files(php_sapi::ini::search(NAME, &line.search, true))
         .sapi_name(NAME)
-        .extensions(&extensions)
+        .extensions(extensions)
         .tier::<debugger::Debugger>()
         .additional_extension(natives::extension())
         .skip_shebang()

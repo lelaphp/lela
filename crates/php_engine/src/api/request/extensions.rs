@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 
 use php_unit::decl::Name;
 
-use crate::api::abi::{Dependency, Extension, ZendExtension};
+use crate::api::abi::{Dependency, ExtensionEntry, ZendExtension};
 use crate::api::call::Function;
 use crate::api::raising::Level;
 use crate::api::values::ClassId;
@@ -215,15 +215,7 @@ impl Request {
     #[must_use]
     pub fn class_extension(&self, class: ClassId) -> Option<ExtensionId> {
         let at = usize::try_from(class.0).ok()?;
-        let mut start = 0usize;
-        for (i, extension) in self.shared.extensions.iter().enumerate() {
-            let end = start.saturating_add(extension.classes.len());
-            if (start..end).contains(&at) {
-                return u32::try_from(i).ok().map(ExtensionId);
-            }
-            start = end;
-        }
-        None
+        self.shared.class_modules.get(at).copied()
     }
 
     /// `ce->info.internal.module->name` as `_class_string` and
@@ -427,7 +419,7 @@ impl Request {
         self.write(&out);
     }
 
-    pub(super) fn extension_of(&self, extension: ExtensionId) -> Option<&Extension> {
+    pub(super) fn extension_of(&self, extension: ExtensionId) -> Option<&ExtensionEntry> {
         self.shared
             .extensions
             .get(usize::try_from(extension.0).ok()?)

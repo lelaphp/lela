@@ -226,7 +226,7 @@ fn builder(startup: &Startup) -> php_sapi::EngineBuilder {
     Engine::builder()
         .ini_files(startup.files.clone())
         .sapi_name(worker::NAME)
-        .extensions(&extensions)
+        .extensions(extensions)
         .configure(php_bundle::CONFIGURE)
         .tier::<php_bundle::Tier>()
         .extended_info(startup.extended_info)

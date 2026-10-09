@@ -86,7 +86,7 @@ enum Phase {
 impl Phase {
     /// The phase `extension` installs what it supplies in.
     fn of(extension: &Extension) -> Phase {
-        if extension.zend.is_some() {
+        if extension.entry.zend.is_some() {
             Phase::ZendExtension
         } else {
             Phase::Minit
@@ -147,7 +147,7 @@ impl Suppliers {
         Suppliers(
             extensions
                 .into_iter()
-                .map(|(by, e)| (by, Phase::of(e), std::mem::take(&mut e.supplies)))
+                .map(|(by, e)| (by, Phase::of(e), std::mem::take(&mut e.entry.supplies)))
                 .collect(),
         )
     }
