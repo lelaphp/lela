@@ -60,15 +60,110 @@ pub(super) struct Ini {
     locked: Vec<Vec<u8>>,
     /// The stage an entry's `on_modify` is served at ([`IniStage`]).
     stage: IniStage,
+    /// The entries a hot path reads, typed, as the request holds them
+    /// now ([`TypedIni`]).
+    typed: TypedIni,
 }
 
-impl Default for Ini {
-    fn default() -> Ini {
+impl Ini {
+    /// The ini state a request starts with: nothing changed, and the
+    /// typed entries the engine's master values give.
+    pub(super) fn new(typed: TypedIni) -> Ini {
         Ini {
             changed: Vec::new(),
             bytes: None,
             locked: Vec::new(),
             stage: IniStage::Runtime,
+            typed,
+        }
+    }
+}
+
+/// The core entries a path reads once per opline or per throw, typed as
+/// php keeps them in `EG` and `PG` once the entry's `OnUpdate*` has
+/// read its text:
+/// `EG(precision)` and `PG(serialize_precision)`, `OnSetPrecision` and
+/// `OnSetSerializePrecision`'s `ZEND_ATOL` cast to `int`
+/// (`Z/main/main.c:120-141`), `EG(exception_ignore_args)`,
+/// `OnUpdateBool`'s, and `EG(exception_string_param_max_len)`,
+/// `OnSetExceptionStringParamMaxLen`'s `ZEND_ATOL` (`Z/Zend/zend.c:177`).
+/// The engine lays them from its master values and each request keeps
+/// its own, changed with the entry's value, so a read neither scans the
+/// entries nor parses one. The text is php's `ZEND_ATOL`, so a value
+/// `ini_set()` takes is read up to its first byte that is not a digit,
+/// and one past `int` is cut to it as php's cast cuts it:
+///
+/// ```php
+/// var_dump(ini_set('precision', '5x')); echo 1/3, "\n";
+/// var_dump(ini_set('serialize_precision', ' 3abc')); var_dump(1/3); echo json_encode(1/3), "\n";
+/// ini_restore('precision'); ini_restore('serialize_precision');
+/// echo 1/3, "\n"; var_dump(1/3);
+/// ini_set('precision', '4294967301'); echo 1/3, "\n";
+/// ```
+/// ```expect
+/// string(2) "14"
+/// 0.33333
+/// string(2) "-1"
+/// float(0.333)
+/// 0.333
+/// 0.33333333333333
+/// float(0.3333333333333333)
+/// 0.33333
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TypedIni {
+    pub(crate) precision: i32,
+    pub(crate) serialize_precision: i32,
+    pub(crate) exception_ignore_args: bool,
+    pub(crate) exception_string_param_max_len: usize,
+}
+
+impl TypedIni {
+    /// The entries typed here, each in [`TypedIni::update`].
+    const NAMES: [&'static [u8]; 4] = [
+        b"precision",
+        b"serialize_precision",
+        b"zend.exception_ignore_args",
+        b"zend.exception_string_param_max_len",
+    ];
+
+    /// What `value` gives each entry, `value` answering an entry's text,
+    /// the empty string where it has none, as `zend_ini_get_value` does;
+    /// php's built-in default where it has no such entry.
+    pub(crate) fn of<'a>(value: impl Fn(&[u8]) -> Option<&'a [u8]>) -> TypedIni {
+        let mut typed = TypedIni {
+            precision: 14,
+            serialize_precision: -1,
+            exception_ignore_args: false,
+            exception_string_param_max_len: 15,
+        };
+        for name in TypedIni::NAMES {
+            if let Some(text) = value(name) {
+                typed.update(name, Some(text));
+            }
+        }
+        typed
+    }
+
+    /// The entry `name` holding `value` now, `None` where it holds php's
+    /// `NULL`, read as its `OnUpdate*` reads it; an entry not typed here
+    /// changes nothing.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "php's `(int) ZEND_ATOL(...)`, which cuts a value past `int`"
+    )]
+    pub(crate) fn update(&mut self, name: &[u8], value: Option<&[u8]>) {
+        let text = value.unwrap_or_default();
+        match name {
+            b"precision" => self.precision = ini_atol(text) as i32,
+            b"serialize_precision" => self.serialize_precision = ini_atol(text) as i32,
+            b"zend.exception_ignore_args" => {
+                self.exception_ignore_args = Request::ini_parse_bool(text);
+            }
+            b"zend.exception_string_param_max_len" => {
+                self.exception_string_param_max_len = usize::try_from(ini_atol(text)).unwrap_or(0);
+            }
+            _ => {}
         }
     }
 }
@@ -341,6 +436,7 @@ impl Request {
     /// among the entries the request changed, or last where it had not
     /// changed it yet.
     fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) {
+        self.ini.typed.update(name, value);
         let value = value.map(<[u8]>::to_vec);
         if let Some((_, held, _)) = self
             .ini
@@ -492,6 +588,8 @@ impl Request {
                 if let Some(string) = string {
                     self.release(Value::string(string));
                 }
+                let master = self.shared.ini_default(&name);
+                self.ini.typed.update(&name, master);
             }
             if name == b"error_reporting" {
                 self.update_error_reporting();
@@ -1368,6 +1466,11 @@ impl Request {
             .unwrap_or(default)
     }
 
+    /// The typed entries as this request holds them now ([`TypedIni`]).
+    pub(crate) fn typed_ini(&self) -> &TypedIni {
+        &self.ini.typed
+    }
+
     pub(super) fn ini_parse_bytes_of(&self, name: &str) -> i64 {
         self.ini_get(name.as_bytes())
             .map_or(0, Request::ini_parse_bytes)
@@ -1427,8 +1530,11 @@ impl Request {
         }
     }
 
-    pub(crate) fn precision(&self) -> i32 {
-        self.ini_number(b"precision", 14)
+    /// `precision`, `EG(precision)`: the digits a float converts to a
+    /// string with, and compares at, as `OnSetPrecision` read the entry.
+    #[must_use]
+    pub fn precision(&self) -> i32 {
+        self.ini.typed.precision
     }
 
     /// `short_open_tag`, php's `CG(short_tags)`: whether a `<?` opens
@@ -1487,7 +1593,7 @@ impl Request {
     /// shortest text that reads back as the same double.
     #[must_use]
     pub fn serialize_precision(&self) -> i32 {
-        self.ini_number(b"serialize_precision", -1)
+        self.ini.typed.serialize_precision
     }
 }
 

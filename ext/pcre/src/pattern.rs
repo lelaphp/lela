@@ -121,7 +121,7 @@ pub(super) fn compiled_under(
             raise_while_pending(req, pending, Level::Warning, &text);
         }
     };
-    let jit = crate::ini_bool(req, "pcre.jit");
+    let jit = crate::limits(req).jit;
     let mut jit_failure = None;
     let ctype = req.ctype_locale().map(<[u8]>::to_vec);
     let tables = |patterns: Option<&Patterns>| {

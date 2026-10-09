@@ -40,7 +40,7 @@ pub use regex::Regex;
 use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, warning};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString};
 
@@ -68,6 +68,131 @@ struct State {
     error_code: i64,
     data: Option<ffi::MatchData>,
     context: Option<ffi::Context>,
+    limits: Limits,
+}
+
+/// `PCRE_G(backtrack_limit)`, `PCRE_G(recursion_limit)` and
+/// `PCRE_G(jit)`: the three ini entries as their `OnUpdate*` left them,
+/// laid from the entries as the request starts ([`rinit`]) and kept by
+/// each entry's `on_modify`, so a match reads them and looks no entry up.
+/// A limit is the `uint32_t` php hands `pcre2_set_match_limit` and
+/// `pcre2_set_depth_limit`. `ini_set()` and `ini_restore()` take effect
+/// on the next match, and a value that is no quantity is php's warning:
+///
+/// ```php
+/// $re = '/(?:\D+|<\d+>)*[!?]/'; $s = 'foobar foo';
+/// var_dump(ini_set('pcre.backtrack_limit', '2x'), preg_match($re, $s), preg_last_error_msg());
+/// ini_restore('pcre.backtrack_limit');
+/// var_dump(preg_match($re, $s), preg_last_error_msg());
+/// var_dump(ini_set('pcre.jit', '0'), ini_set('pcre.recursion_limit', '2'), preg_match('/(a)+$/', 'aaaaabc'), preg_last_error_msg());
+/// ini_restore('pcre.recursion_limit');
+/// var_dump(preg_match('/(a)+$/', 'aaaaabc'), preg_last_error_msg(), ini_get('pcre.jit'));
+/// ini_restore('pcre.jit');
+/// var_dump(ini_get('pcre.jit'));
+/// ```
+/// ```expect capture
+/// Warning: Invalid "pcre.backtrack_limit" setting. Invalid quantity "2x": unknown multiplier "x", interpreting as "2" for backwards compatibility in %SCRATCH%/witness.php on line 3
+/// string(7) "1000000"
+/// bool(false)
+/// string(25) "Backtrack limit exhausted"
+/// int(0)
+/// string(8) "No error"
+/// string(1) "1"
+/// string(6) "100000"
+/// bool(false)
+/// string(25) "Recursion limit exhausted"
+/// int(0)
+/// string(8) "No error"
+/// string(1) "0"
+/// string(1) "1"
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Limits {
+    backtrack: u32,
+    recursion: u32,
+    jit: bool,
+}
+
+impl Default for Limits {
+    /// The entries' defaults ([`INI`]), what a request holds until
+    /// [`rinit`] lays the values in force.
+    fn default() -> Limits {
+        let mut limits = Limits {
+            backtrack: 0,
+            recursion: 0,
+            jit: false,
+        };
+        for (name, default) in INI {
+            limits.update(name.as_bytes(), default.as_bytes());
+        }
+        limits
+    }
+}
+
+impl Limits {
+    /// The entry `name` holding `value`, as its `OnUpdate*` reads it:
+    /// `OnUpdateLong`'s quantity for a limit, answering the text's error
+    /// where it is no quantity, and `OnUpdateBool` for `pcre.jit`.
+    fn update(&mut self, name: &[u8], value: &[u8]) -> Option<String> {
+        let held = match name {
+            b"pcre.backtrack_limit" => &mut self.backtrack,
+            b"pcre.recursion_limit" => &mut self.recursion,
+            b"pcre.jit" => {
+                self.jit = Request::ini_parse_bool(value);
+                return None;
+            }
+            _ => return None,
+        };
+        let (quantity, error) = Request::ini_parse_quantity(value);
+        *held = limit(quantity);
+        error
+    }
+}
+
+/// `(uint32_t)PCRE_G(backtrack_limit)`: the low 32 bits, as C's cast.
+fn limit(value: i64) -> u32 {
+    u32::try_from(value.rem_euclid(1 << 32)).unwrap_or(u32::MAX)
+}
+
+/// The request's `PCRE_G` limits, as the entries in force give them.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `rinit` slot's shape, which a hook that throws needs"
+)]
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    let mut limits = Limits::default();
+    for (name, _) in INI {
+        if let Some(value) = req.ini_get(name.as_bytes()) {
+            limits.update(name.as_bytes(), value);
+        }
+    }
+    req.state::<State>().limits = limits;
+    Ok(())
+}
+
+/// `OnUpdateBacktrackLimit`, `OnUpdateRecursionLimit` and `OnUpdateJit`
+/// (`Z/ext/pcre/php_pcre.c:315-343`): the value taken into the
+/// request's [`Limits`], a limit read as `zend_ini_parse_quantity_warn`
+/// reads it, with its warning; none is ever refused.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `on_modify` slot's shape, which a handler that throws needs"
+)]
+fn on_update<const AT: usize>(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    let (name, _) = INI[AT];
+    let error = req
+        .state::<State>()
+        .limits
+        .update(name.as_bytes(), value.unwrap_or_default());
+    if let Some(error) = error {
+        warning(req, &format!("Invalid \"{name}\" setting. {error}"));
+    }
+    Ok(true)
+}
+
+/// The request's `PCRE_G` limits ([`Limits`]).
+fn limits(req: &mut Request) -> Limits {
+    req.state::<State>().limits
 }
 
 /// The extension value (design §7.1): the constants, the eleven
@@ -150,7 +275,11 @@ pub fn extension() -> Extension {
                 })
                 .collect(),
         )
+        .on_modify(INI[0].0.as_bytes(), on_update::<0>)
+        .on_modify(INI[1].0.as_bytes(), on_update::<1>)
+        .on_modify(INI[2].0.as_bytes(), on_update::<2>)
         .request_state::<State>()
+        .rinit(rinit)
         .engine_state(|start| Ok(pattern::engine_state(start)))
         .info(pcre_info)
         .build("pcre")
@@ -233,18 +362,6 @@ pub(crate) mod constants {
 /// What `Z_PARAM_ARRAY_HT_OR_STR` holds, `array|string`: the pattern,
 /// replacement and subject of the replacing natives.
 pub(crate) type Either = Union<PhpArray, PhpString>;
-
-/// An ini entry of the extension read as `OnUpdateLong` reads it.
-fn ini_long(req: &Request, name: &str) -> i64 {
-    req.ini_get(name.as_bytes())
-        .map_or(0, Request::ini_parse_bytes)
-}
-
-/// An ini entry read as `OnUpdateBool` reads it.
-fn ini_bool(req: &Request, name: &str) -> bool {
-    req.ini_get(name.as_bytes())
-        .is_some_and(Request::ini_parse_bool)
-}
 
 /// `PCRE_G(error_code) = code`.
 fn set_error(req: &mut Request, code: i64) {

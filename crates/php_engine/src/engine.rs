@@ -37,7 +37,8 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, Placed, PropertyInfo, Request, Sink, ini_truth, placed_of,
+    BuildDefs, Ending, ExtensionId, Placed, PropertyInfo, Request, Sink, TypedIni, ini_truth,
+    placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -660,6 +661,9 @@ pub(crate) struct Shared {
     constants: Vec<ConstDecl>,
     pub(crate) engine_states: States<Box<dyn Any + Send + Sync>>,
     ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// The typed entries `ini`'s master values give, which each request
+    /// starts with ([`TypedIni`]).
+    pub(crate) typed_ini: TypedIni,
     /// The constants' values, the string ones interned into the engine's
     /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
     /// a request reading one allocates nothing and counts nothing;
@@ -1429,10 +1433,7 @@ impl Shared {
     /// source under its own ([`CompileIni`]).
     fn compile_ini(&self) -> CompileIni {
         CompileIni {
-            precision: self
-                .ini_default(b"precision")
-                .and_then(|value| String::from_utf8_lossy(value).parse().ok())
-                .unwrap_or(14),
+            precision: self.typed_ini.precision,
             short_open_tag: self
                 .ini_default(b"short_open_tag")
                 .is_none_or(Request::ini_parse_bool),
@@ -1569,10 +1570,15 @@ impl Shared {
     /// `zend_ini_get_value` reads it, the empty string where it has none
     /// (php's `NULL`); `None` where php has no such entry.
     pub(crate) fn ini_default(&self, name: &[u8]) -> Option<&[u8]> {
-        self.ini
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, v)| v.as_deref().unwrap_or_default())
+        master_of(&self.ini, name)
+    }
+
+    /// The master value of the entry `name` set to `value`, the entry
+    /// moved last, and the typed entries with it.
+    fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
+        self.typed_ini.update(&name, value.as_deref());
+        self.ini.retain(|(n, _)| *n != name);
+        self.ini.push((name, value));
     }
 
     /// The value the entry `name` starts every request with as php holds
@@ -3076,6 +3082,7 @@ impl EngineBuilder {
                 placed,
                 constants,
                 engine_states: States::new(),
+                typed_ini: TypedIni::of(|name| master_of(&ini, name)),
                 ini,
                 constant_values,
                 sapi_names,
@@ -3806,12 +3813,10 @@ impl Engine {
         for (name, value) in taken {
             startup.retain(|(n, _)| *n != name);
             startup.push((name.clone(), value.clone()));
-            shared.ini.retain(|(n, _)| *n != name);
-            shared.ini.push((name, value));
+            shared.set_ini_default(name, value);
         }
         for (name, value) in activated {
-            shared.ini.retain(|(n, _)| *n != name);
-            shared.ini.push((name, value));
+            shared.set_ini_default(name, value);
         }
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
@@ -5198,6 +5203,15 @@ fn serve_rinits(req: &mut Request, extensions: &[Extension]) -> Result<(), Throw
         }
     }
     served
+}
+
+/// The master value of the entry `name` among `ini` as
+/// `zend_ini_get_value` reads it, the empty string where it has none
+/// (php's `NULL`); `None` where php has no such entry.
+fn master_of<'a>(ini: &'a [(Vec<u8>, Option<Vec<u8>>)], name: &[u8]) -> Option<&'a [u8]> {
+    ini.iter()
+        .find(|(n, _)| n.as_slice() == name)
+        .map(|(_, v)| v.as_deref().unwrap_or_default())
 }
 
 #[cfg(test)]

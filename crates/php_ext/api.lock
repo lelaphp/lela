@@ -779,6 +779,7 @@ request::Request::parse_encoding_list
 request::Request::parse_query
 request::Request::periods_elapsed
 request::Request::phpinfo_as_text
+request::Request::precision
 request::Request::preloading
 request::Request::raised
 request::Request::realpath

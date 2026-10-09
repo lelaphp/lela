@@ -488,14 +488,6 @@ pub(super) fn to_xml_long(
     Ok(ret)
 }
 
-/// `EG(precision)`.
-fn precision(req: &Request) -> i32 {
-    req.ini_get(b"precision")
-        .and_then(|t| std::str::from_utf8(t).ok())
-        .and_then(|t| t.trim().parse().ok())
-        .unwrap_or(14)
-}
-
 /// `to_xml_double`.
 pub(super) fn to_xml_double(
     req: &mut Request,
@@ -509,7 +501,7 @@ pub(super) fn to_xml_double(
         return Ok(ret);
     }
     let d = to_double(req, &data)?;
-    let s = float_format(d, precision(req), Exponent::Upper);
+    let s = float_format(d, req.precision(), Exponent::Upper);
     ret.set_content_len(s.as_bytes());
     if style == Use::Encoded {
         set_ns_and_type(req, ret, &e.e);

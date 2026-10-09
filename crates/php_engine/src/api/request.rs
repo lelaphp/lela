@@ -79,7 +79,7 @@ mod include;
 mod ini;
 pub(crate) mod ini_files;
 pub use ini::IniEntry;
-pub(crate) use ini::{ini_atol, ini_truth};
+pub(crate) use ini::{TypedIni, ini_atol, ini_truth};
 pub use ini_files::IniFiles;
 mod hold;
 mod hooks;
@@ -699,6 +699,7 @@ impl Request {
         let arena = shared
             .arena
             .enter(|arena| shared.units.restart(&arena.files));
+        let typed_ini = shared.typed_ini;
         let mut req = Request {
             // Read before `shared` moves in, as fields are in the order written.
             paths: paths::Paths::startup(&shared),
@@ -712,7 +713,7 @@ impl Request {
             vm: Vm::default(),
             map: MapTable::new(),
             state: state::RequestState::default(),
-            ini: ini::Ini::default(),
+            ini: ini::Ini::new(typed_ini),
             diagnostics: diagnostics::Diagnostics::default(),
             response: response::Response::new(output),
             ending: None,
