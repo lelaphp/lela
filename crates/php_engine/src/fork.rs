@@ -12,7 +12,8 @@
 //! thread the engine starts holds one while it stands, so the process
 //! knows how many things stand inside the engine, and [`Alone`] is the one
 //! type that forks, which the engine can hold only while that number is
-//! the caller's own. A thread started any other way than [`spawn`] is
+//! the caller's own. A host's thread that serves requests starts here too,
+//! through [`host_thread`]. A thread started any other way than [`spawn`] is
 //! one no fork waits for, and a thread started through it that a fork
 //! does not join first leaves the fork refused rather than a child that
 //! hangs. What the engine cannot see is a host's own thread that holds
@@ -96,19 +97,57 @@ pub(crate) struct Thread {
 /// `body` on a thread of its own named `name`, counted inside the engine
 /// until it is joined; `None` where the system refuses a thread.
 pub(crate) fn spawn(name: &str, body: impl FnOnce() + Send + 'static) -> Option<Thread> {
+    start(thread::Builder::new().name(name.to_owned()), body).ok()
+}
+
+/// `body` on the thread `builder` describes, counted inside the engine
+/// from before it exists to after it is joined.
+fn start(builder: thread::Builder, body: impl FnOnce() + Send + 'static) -> io::Result<Thread> {
     let inside = Inside::enter();
     #[expect(
         clippy::disallowed_methods,
-        reason = "the home: every thread the engine owns starts here, counted until it is joined"
+        reason = "the home: every thread of the engine's process starts here, counted until it is joined"
     )]
-    let handle = thread::Builder::new()
-        .name(name.to_owned())
-        .spawn(body)
-        .ok()?;
-    Some(Thread {
+    let handle = builder.spawn(body)?;
+    Ok(Thread {
         handle,
         _inside: inside,
     })
+}
+
+/// A thread a host serves requests on, each through its own
+/// [`Engine::serve`](crate::Engine::serve), as a server that keeps a pool
+/// of request threads does (design §5.14): started through the engine's
+/// one home, so it stands inside the engine from before it exists to
+/// after it is joined, as a thread the engine starts does, and a fork
+/// asked while it stands is refused.
+#[derive(Debug)]
+pub struct HostThread(Thread);
+
+impl HostThread {
+    /// Joined, once the host has told it to end.
+    pub fn join(self) {
+        self.0.join();
+    }
+}
+
+/// `body` on a host's thread named `name` with a stack of `stack_size`
+/// bytes: the stack a request served on it has, whose bounds the engine
+/// reads for php's "Maximum call stack size" (design §12), so a host
+/// sizes it as the process it stands in for serves on.
+///
+/// # Errors
+///
+/// The error the system refused the thread with.
+pub fn host_thread(
+    name: &str,
+    stack_size: usize,
+    body: impl FnOnce() + Send + 'static,
+) -> io::Result<HostThread> {
+    let builder = thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(stack_size);
+    start(builder, body).map(HostThread)
 }
 
 impl Thread {
@@ -219,7 +258,7 @@ pub fn fork() -> io::Result<Forked> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EBUSY, FORKING, INSIDE, Inside, fork, spawn};
+    use super::{EBUSY, FORKING, INSIDE, Inside, fork, host_thread, spawn};
     use std::sync::atomic::Ordering;
 
     /// A thread started through the home is inside the engine while it
@@ -234,6 +273,22 @@ mod tests {
             return;
         };
         assert!(INSIDE.load(Ordering::Relaxed) & !FORKING >= 1);
+        drop(tx);
+        thread.join();
+    }
+
+    /// A host's thread stands inside the engine while it runs, so a fork
+    /// asked meanwhile is refused.
+    #[test]
+    fn a_host_thread_is_inside_while_it_stands() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let Ok(thread) = host_thread("php-host", 3 << 20, move || {
+            rx.recv().ok();
+        }) else {
+            return;
+        };
+        assert!(INSIDE.load(Ordering::Relaxed) & !FORKING >= 1);
+        assert_eq!(fork().err().and_then(|e| e.raw_os_error()), Some(EBUSY));
         drop(tx);
         thread.join();
     }
