@@ -228,6 +228,30 @@ fn fd(
 /// real
 /// bool(true)
 /// ```
+///
+/// php walks the names with `php_strtok_r(pathdup + 1, "/", ...)` over
+/// its copy of the path cut at `/resource=`. Where `/resource=` starts
+/// the path, the cut is the copy's first byte, so the walk starts past
+/// it and reads the resource itself: each `/`-separated segment of
+/// `resource=<path>` is taken for a filter name and raises both
+/// warnings on each chain `$mode` names, and the resource is still
+/// opened:
+///
+/// ```php
+/// var_dump(file_get_contents('php://filter/resource=data:text/plain,abc'));
+/// var_dump(file_get_contents('php://filter//resource=data:,abc'));
+/// ```
+/// ```expect
+/// Warning: file_get_contents(): Unable to locate filter "resource=data:text" in %s on line 2
+///
+/// Warning: file_get_contents(): Unable to create filter (resource=data:text) in %s on line 2
+///
+/// Warning: file_get_contents(): Unable to locate filter "plain,abc" in %s on line 2
+///
+/// Warning: file_get_contents(): Unable to create filter (plain,abc) in %s on line 2
+/// string(3) "abc"
+/// string(3) "abc"
+/// ```
 fn filter(
     req: &mut Request,
     path: &[u8],
@@ -245,7 +269,10 @@ fn filter(
     };
     let read = mode.contains(&b'r') || mode.contains(&b'+');
     let write = mode.iter().any(|b| matches!(b, b'w' | b'+' | b'a'));
-    for part in path[..at].split(|b| *b == b'/').filter(|p| !p.is_empty()) {
+    // `php_strtok_r(pathdup + 1, "/", &token)` past the cut at
+    // `/resource=`: where the cut is `pathdup[0]`, past it is the resource.
+    let names = if at == 0 { &path[1..] } else { &path[1..at] };
+    for part in names.split(|b| *b == b'/').filter(|p| !p.is_empty()) {
         let (list, chains) = if part.len() >= 5 && part[..5].eq_ignore_ascii_case(b"read=") {
             (&part[5..], (true, false))
         } else if part.len() >= 6 && part[..6].eq_ignore_ascii_case(b"write=") {
