@@ -257,7 +257,7 @@ impl<'a> FrameView<'a> {
             walk.extend(
                 req.placeholder_links(generator)
                     .iter()
-                    .map(|link| ChainFrame::of(req, self.stack, self.vm, link)),
+                    .filter_map(|link| ChainFrame::of(req, self.stack, self.vm, link)),
             );
         }
         let calls = state.map_or(0, |state| {
@@ -326,8 +326,10 @@ fn file_of(state: &FrameState) -> Option<&[u8]> {
 }
 
 impl<'a> ChainFrame<'a> {
-    /// The frame `link`, on the stack `stack` counts down the chain.
-    fn of(req: &'a Request, stack: usize, vm: &'a Vm, link: &Link<'a>) -> ChainFrame<'a> {
+    /// The frame `link`, on the stack `stack` counts down the chain;
+    /// none for php's `execute_fake`, which a walk meets as the frames
+    /// it expands into (`zend_generator_check_placeholder_frame`).
+    fn of(req: &'a Request, stack: usize, vm: &'a Vm, link: &Link<'a>) -> Option<ChainFrame<'a>> {
         let read = match *link {
             Link::Frame(Slots::Stack(_, at), _) => Read::Stack(FrameView {
                 req,
@@ -338,8 +340,9 @@ impl<'a> ChainFrame<'a> {
             Link::Frame(Slots::Kept(_), state) => Read::Kept(state),
             Link::Call(call) => Read::Native(call.function),
             Link::Site(site) => Read::Site(site),
+            Link::Fake(_) => return None,
         };
-        ChainFrame { req, read }
+        Some(ChainFrame { req, read })
     }
 
     /// The frame read whole, where it is a user frame standing on a
@@ -587,7 +590,7 @@ impl Request {
     ) -> impl Iterator<Item = ChainFrame<'a>> {
         links_of(on, vm, frames, calls, &|root| self.placeholder_links(root))
             .into_iter()
-            .map(move |link| ChainFrame::of(self, stack, vm, &link))
+            .filter_map(move |link| ChainFrame::of(self, stack, vm, &link))
     }
 
     /// The stacks below the one `from` counts down the chain, each

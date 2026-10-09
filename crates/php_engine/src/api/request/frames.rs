@@ -66,8 +66,10 @@ pub(super) fn links_of<'a>(
             let vm = self.vm;
             for mark in vm.placeholders().iter().filter(|mark| mark.frame == at) {
                 self.take_below(mark.calls);
-                self.links
-                    .extend((self.expand)(mark.generator).into_iter().rev());
+                let expanded = (self.expand)(mark.generator);
+                let generators = expanded.len();
+                self.links.extend(expanded.into_iter().rev());
+                self.links.push(Link::Fake(generators));
             }
             for site in vm.sites().iter().filter(|site| site.frame == at) {
                 self.take_below(site.calls);
@@ -124,6 +126,13 @@ pub(super) enum Link<'a> {
     /// code that serves no function, has no `$this` and no scope, and
     /// makes no trace row of its own.
     Site(&'a exec::Site),
+    /// php's `execute_fake` placeholder where a delegating generator's
+    /// frame stood ([`exec::Placeholder`]), the frame gone while what it
+    /// held is released, so a destructor that release serves is called
+    /// from it: no function and no row of its own, it stands for the
+    /// kept frames of the generators the next links are, this many of
+    /// them, and its `prev_execute_data` is the resumer below those.
+    Fake(usize),
 }
 
 /// Where the slots of a frame on the chain are: on a VM stack at its
