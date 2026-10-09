@@ -143,6 +143,20 @@ pub(crate) struct Fibers {
     /// switch would break (a `ZEND_TICKS` round, a signal dispatch),
     /// while which no fiber starts, suspends or resumes.
     switch_blocking: u32,
+    /// The fibers set aside while the request runs on a resumer's stack
+    /// to serve a frame there ([`Fibers::set_aside_above`]), the last
+    /// set aside last.
+    aside: Vec<Aside>,
+}
+
+/// The running fibers above a resumer's stack, set aside while the
+/// request runs on that stack: the first one's `below` holds the
+/// execution the request ran on, and `base` is how many fibers ran
+/// below them, so one started on the resumer's stack meanwhile is told
+/// apart.
+struct Aside {
+    running: Vec<Running>,
+    base: usize,
 }
 
 /// `GC_G(dtor_fiber)` and the walk it serves (`Z/Zend/zend_gc.c:1859-1990`,
@@ -176,9 +190,51 @@ impl Fibers {
     }
 
     /// `EG(active_fiber)`: the innermost fiber running, none on the
-    /// request's own stack.
+    /// request's own stack. Running on a resumer's stack to serve a
+    /// frame there leaves it the fiber that was innermost, as php moves
+    /// no `EG(active_fiber)` for a debugger's evaluation.
     pub(crate) fn active(&self) -> Option<PhpObject> {
-        self.running.last().map(|running| running.fiber)
+        let aside = self
+            .aside
+            .last()
+            .filter(|aside| aside.base == self.running.len())
+            .and_then(|aside| aside.running.last());
+        aside.or(self.running.last()).map(|running| running.fiber)
+    }
+
+    /// The running fibers above the `stack`-th stack down the chain
+    /// [`Fibers::below`] walks set aside, the first of them holding
+    /// the execution standing on that stack, which is handed out for
+    /// the request to serve on in place of its own; `None` where no stack
+    /// stands there. [`Fibers::put_back`] undoes it.
+    pub(crate) fn set_aside_above(&mut self, stack: usize) -> Option<&mut Execution> {
+        if stack == 0 || stack > self.below().count() {
+            return None;
+        }
+        let base = self.running.len().checked_sub(stack)?;
+        let running = self.running.split_off(base);
+        self.aside.push(Aside { running, base });
+        self.aside
+            .last_mut()
+            .and_then(|aside| aside.running.first_mut())
+            .map(|first| &mut first.below)
+    }
+
+    /// The execution [`Fibers::set_aside_above`] handed out, to be
+    /// handed back.
+    pub(crate) fn set_aside_execution(&mut self) -> Option<&mut Execution> {
+        self.aside
+            .last_mut()
+            .and_then(|aside| aside.running.first_mut())
+            .map(|first| &mut first.below)
+    }
+
+    /// The fibers [`Fibers::set_aside_above`] set aside running again,
+    /// above the ones running below them.
+    pub(crate) fn put_back(&mut self) {
+        if let Some(aside) = self.aside.pop() {
+            self.running.extend(aside.running);
+        }
     }
 
     /// The request's own VM stack, below every fiber running, which is

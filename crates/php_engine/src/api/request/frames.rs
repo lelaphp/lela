@@ -190,14 +190,50 @@ impl Request {
     /// stack its frames stand on, the swap php's observer makes at the
     /// switch's notice (`Z/Zend/zend_observer.c:423-424`).
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
-        // The execution left off the running chain keeps what it was
-        // lent ([`exec::Receiver`]).
+        self.switch_stack(other);
+        self.swap_error_reporting(&mut other.error_reporting);
+        self.swap_stack_limit(&mut other.stack_limit);
+    }
+
+    /// The stack the request runs on and `other`'s change places, the
+    /// frames' engine half and the chain of open observed frames with
+    /// it; the execution left off the running chain keeps what it was
+    /// lent ([`exec::Receiver`]).
+    fn switch_stack(&mut self, other: &mut crate::fiber::Execution) {
         self.own_lent_receivers();
         std::mem::swap(&mut self.stack, &mut other.stack);
         std::mem::swap(&mut self.vm, &mut other.vm);
         self.swap_observing(&mut other.observing);
-        self.swap_error_reporting(&mut other.error_reporting);
-        self.swap_stack_limit(&mut other.stack_limit);
+    }
+
+    /// `f` served with the request running on the `stack`-th stack
+    /// down the chain [`Request::executions`] walks, as a debugger
+    /// serves a frame below a fiber with `EG(current_execute_data)`
+    /// moved there: that stack is the running one for `f`, the fibers
+    /// above it set aside, so the chain runs from it into the stacks
+    /// below, and its frames are the ones a [`FrameRef`] names. The
+    /// error-reporting level and the machine stack's limit stay the
+    /// running fiber's, as php moves neither, and no fiber starts,
+    /// suspends or resumes meanwhile, since `f` is served on the
+    /// running fiber's machine stack. `None` where no stack stands
+    /// there.
+    pub(super) fn on_stack<R>(
+        &mut self,
+        stack: usize,
+        f: impl FnOnce(&mut Request) -> R,
+    ) -> Option<R> {
+        if stack == 0 {
+            return Some(f(self));
+        }
+        let mut other = std::mem::take(self.fibers.set_aside_above(stack)?);
+        self.switch_stack(&mut other);
+        let served = self.with_fiber_switch_blocked(f);
+        self.switch_stack(&mut other);
+        if let Some(slot) = self.fibers.set_aside_execution() {
+            *slot = other;
+        }
+        self.fibers.put_back();
+        Some(served)
     }
 
     /// The stacks php's one `prev_execute_data` chain runs through: the

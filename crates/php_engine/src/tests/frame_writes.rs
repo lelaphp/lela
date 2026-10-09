@@ -211,21 +211,78 @@ fn what_an_evaluation_throws_is_handed_back_and_the_program_goes_on() {
     );
 }
 
-/// A frame below a fiber, on the stack that resumed it, is refused, as
-/// its slots stand on a stack the fiber's does not reach, and it goes on
-/// as it stood.
+/// A frame below a fiber, on the stack that resumed it, is written and
+/// evaluated in, the request running on that stack for it, and the
+/// frame reads the write when the fiber returns, as it reads the same
+/// write typed into it by hand.
 #[test]
-fn a_frame_below_a_fiber_is_refused() {
+fn a_frame_below_a_fiber_is_written_and_evaluated_in() {
     let out = serve(
         Plan {
             depth: 1,
             write: Some(("v", 9)),
-            code: "$v",
+            code: "$v * 2",
             traced: false,
         },
         "<?php\nfunction pause() {}\nfunction outer() {\n    $v = 1;\n    $f = new Fiber(function () { pause(); });\n    $f->start();\n    echo $v, \"\\n\";\n}\nouter();\n",
     );
-    assert_eq!(out, "[set refused][eval refused]1\n");
+    assert_eq!(out, "[set ok][eval int(18)]9\n");
+}
+
+thread_local! {
+    /// The frame the first stop kept, for the stops after it.
+    static KEPT: Cell<Option<FrameId>> = const { Cell::new(None) };
+}
+
+/// `pause()` begun: the first stop keeps its caller's frame; every one
+/// after writes `$x` of the kept frame and evaluates `$x * 2` there.
+fn stop_kept(observed: &mut Observed<'_>) {
+    let Some(frame) = KEPT.get() else {
+        KEPT.set(observed.caller().map(|caller| caller.id()));
+        return;
+    };
+    let value = Owner::take(observed, Value::int(5));
+    let set = observed.set_frame_var(frame, b"x", value);
+    let line = format!("[set {}]", if set { "ok" } else { "refused" });
+    observed.write(line.as_bytes());
+    let answered = observed.eval_in_frame(frame, b"$x * 2", b"debugger");
+    let line = format!("[eval {}]", shown(observed, answered, false));
+    observed.write(line.as_bytes());
+}
+
+fn init_kept(observed: &mut Observed<'_>) -> ObserverHandlers {
+    let named = observed
+        .function()
+        .and_then(|function| observed.function_decl(function))
+        .is_some_and(|decl| decl.name.0.as_ref() == b"pause");
+    ObserverHandlers {
+        begin: named.then_some(stop_kept as fn(&mut Observed<'_>)),
+        end: None,
+    }
+}
+
+/// A suspended generator's frame, kept as a [`FrameId`] while it ran, is
+/// written and evaluated in, stood where a resumption stands it, and
+/// the generator reads the write when it is resumed; once the generator
+/// has returned, the frame is refused.
+#[test]
+fn a_suspended_generators_frame_is_written_and_evaluated_in() {
+    KEPT.set(None);
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .observer(init_kept)
+            .build("debugger")])
+        .build();
+    let served = engine.serve_capture(
+        "<?php\nfunction pause() {}\nfunction g() {\n    $x = 1;\n    pause();\n    yield 1;\n    echo $x, \"\\n\";\n}\n\
+         $g = g();\n$g->current();\npause();\n$g->next();\npause();\n",
+        Capture::default(),
+    );
+    KEPT.set(None);
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "[set ok][eval int(10)]5\n[set refused][eval refused]"
+    );
 }
 
 /// A fatal the evaluation ends in is rendered where it is raised, the

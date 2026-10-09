@@ -58,6 +58,10 @@ pub struct FrameId {
     at: FrameRef,
     /// The frame's identity, which [`FrameState`] holds.
     id: Identity,
+    /// The generator whose frame it is, no owner: where
+    /// [`Request::in_frame`] looks for it while the generator is
+    /// suspended and its frame on no stack.
+    generator: Option<crate::api::values::PhpObject>,
 }
 
 /// The number a request gives one frame and no other, held in the
@@ -120,7 +124,11 @@ impl<'a> FrameView<'a> {
                 }
                 id
             });
-        FrameId { at: self.at, id }
+        FrameId {
+            at: self.at,
+            id,
+            generator: state.and_then(|state| state.generator),
+        }
     }
 
     /// The frame's state; a view is only made of a frame that stands, so
@@ -442,18 +450,20 @@ impl Request {
     /// table holds under the name where it has one, else the compiled
     /// variable of that name, so no table is built for the read; `UNDEF`
     /// where the name is one and holds nothing. `None` where the frame
-    /// knows no such name, or is not one this reaches: popped,
-    /// suspended, or below a fiber.
+    /// knows no such name, or is not one this reaches
+    /// ([`Request::in_frame`]).
     pub fn frame_var(&mut self, frame: FrameId, name: &[u8]) -> Option<Value> {
-        let at = self.running_frame_of(frame)?;
-        if let Some(table) = self.vm.at(at).and_then(|state| state.symbol_table) {
-            return self.symbol_value(table, name);
-        }
-        let cv = self
-            .frame_var_names(at)
-            .iter()
-            .position(|held| held.as_slice() == name)?;
-        Some(self.slot(at, u32::try_from(cv).ok()?))
+        self.in_frame(frame, |req, at| {
+            if let Some(table) = req.vm.at(at).and_then(|state| state.symbol_table) {
+                return req.symbol_value(table, name);
+            }
+            let cv = req
+                .frame_var_names(at)
+                .iter()
+                .position(|held| held.as_slice() == name)?;
+            Some(req.slot(at, u32::try_from(cv).ok()?))
+        })
+        .flatten()
     }
 
     /// `zend_rebuild_symbol_table()` over the frame `id` names, and each
@@ -463,26 +473,43 @@ impl Request {
     /// `info vars` walks them. `None`
     /// where the frame is not one this reaches.
     pub fn frame_vars(&mut self, frame: FrameId) -> Option<Vec<(Vec<u8>, Value)>> {
-        let at = self.running_frame_of(frame)?;
-        let table = self.rebuild_symbol_table(at);
-        let entries = self.table_mut(table).map(|rows| rows.clone())?;
-        Some(
-            entries
-                .into_iter()
-                .map(|(name, symbol)| {
-                    let value = self.symbol_read(table, symbol);
-                    (name, value)
-                })
-                .collect(),
-        )
+        self.in_frame(frame, |req, at| {
+            let table = req.rebuild_symbol_table(at);
+            let entries = req.table_mut(table).map(|rows| rows.clone())?;
+            Some(
+                entries
+                    .into_iter()
+                    .map(|(name, symbol)| {
+                        let value = req.symbol_read(table, symbol);
+                        (name, value)
+                    })
+                    .collect(),
+            )
+        })
+        .flatten()
     }
 
-    /// Where the frame `id` names stands, where that is the running
-    /// stack: the frames a write or an evaluation reaches
-    /// ([`Request::set_frame_var`], [`Request::eval_in_frame`]).
-    pub(super) fn running_frame_of(&self, id: FrameId) -> Option<FrameRef> {
-        let view = self.frame_of(id)?;
-        (view.stack == 0).then_some(view.at)
+    /// `f` served at the frame `id` names, with the request running on
+    /// the stack it stands on, where it stands at its place: the frames
+    /// a read, a write or an evaluation reaches
+    /// ([`Request::set_frame_var`], [`Request::eval_in_frame`]). That
+    /// is a frame on the running stack; one below a fiber, on the stack
+    /// that resumed it, which the request runs on for `f`
+    /// ([`Request::on_stack`]); and a suspended generator's, kept as a
+    /// [`FrameId`] while it ran, which stands on top of the running
+    /// stack for `f` as a resumption stands it and is suspended again
+    /// after ([`crate::generator::with_kept_frame`]). `None` for a frame
+    /// popped, and for a suspended fiber's, which no stack the request
+    /// runs on holds.
+    pub(super) fn in_frame<R>(
+        &mut self,
+        id: FrameId,
+        f: impl FnOnce(&mut Request, FrameRef) -> R,
+    ) -> Option<R> {
+        if let Some((stack, at)) = self.frame_of(id).map(|view| (view.stack, view.at)) {
+            return self.on_stack(stack, |req| f(req, at));
+        }
+        crate::generator::with_kept_frame(self, id.generator?, id.id, f)
     }
 
     /// `frame` on the running stack, read: what an observer's handler is
