@@ -561,8 +561,12 @@ impl Heap {
     /// may re-enter, and the heap is theirs: it is asked for at each
     /// step and again after every call up, since the destructor may have
     /// grown it.
+    #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release(hooks: &mut dyn HeapHooks, z: Zval) {
+        if !z.is_refcounted() {
+            return;
+        }
         match Heap::give_up(hooks, z) {
             GivenUp::Owned => Heap::gc_check_possible_root(hooks, z),
             GivenUp::Freed => {}
@@ -575,8 +579,12 @@ impl Heap {
     /// temporary operand this way (`FREE_OP`), and an internal call's
     /// arguments, since neither is a place a cycle is left behind in.
     /// Whether owners are left.
+    #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn release_nogc(hooks: &mut dyn HeapHooks, z: Zval) -> bool {
+        if !z.is_refcounted() {
+            return false;
+        }
         match Heap::give_up(hooks, z) {
             GivenUp::Owned => true,
             GivenUp::Freed => false,

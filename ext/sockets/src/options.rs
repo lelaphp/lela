@@ -18,6 +18,10 @@ use crate::conv::{Conv, find, put};
 use crate::ffi::{self, Addr};
 use crate::natives::c_int;
 use crate::socket::{Socket, sock, socket_error, valid};
+#[cfg(target_os = "linux")]
+use crate::{addr::c_str, natives::string};
+#[cfg(target_os = "linux")]
+use php_ext::raising::{Level, docref};
 
 /// What `socket_get_option` answers: a structure's fields, or an `int`.
 type Answer = OrFalse<Union<Owner<PhpArray>, i64>>;
@@ -93,7 +97,22 @@ fn get_option(
         let value = Conv::in6_pktinfo_value(req, &buf)?;
         return Ok(OrFalse::Value(Union::A(value)));
     }
+    #[cfg(target_os = "linux")]
+    if level == i64::from(libc::IPPROTO_TCP) && option == i64::from(libc::TCP_CONGESTION) {
+        let mut name = [0u8; 16];
+        if let Err(errno) = ffi::getsockopt(fd, lvl, opt, &mut name) {
+            return failed(req, errno, "Unable to retrieve socket option");
+        }
+        let mut out = PhpArray::new(req)?;
+        let name = string(req, c_str(&name))?;
+        put(req, &mut out, "name", name)?;
+        return Ok(OrFalse::Value(Union::A(out)));
+    }
     if level == i64::from(libc::SOL_SOCKET) {
+        #[cfg(target_os = "linux")]
+        if option == i64::from(libc::SO_MEMINFO) {
+            return meminfo(req, socket, fd);
+        }
         if is_linger(option) {
             let mut buf = [0u8; std::mem::size_of::<libc::linger>()];
             if let Err(errno) = ffi::getsockopt(fd, lvl, opt, &mut buf) {
@@ -148,6 +167,51 @@ fn get_option(
         word(&buf, 0)
     };
     Ok(OrFalse::Value(Union::B(value)))
+}
+
+/// `SO_MEMINFO`'s nine counters, `SK_MEMINFO_VARS` of them, each under
+/// php's name for it; php's warning where the kernel filled fewer.
+#[cfg(target_os = "linux")]
+fn meminfo(req: &mut Request, socket: Instance<Socket>, fd: i32) -> Result<Answer, Thrown> {
+    const NAMES: [&str; 9] = [
+        "rmem_alloc",
+        "rcvbuf",
+        "wmem_alloc",
+        "sndbuf",
+        "fwd_alloc",
+        "wmem_queued",
+        "optmem",
+        "backlog",
+        "drops",
+    ];
+    let mut buf = [0u8; 4 * NAMES.len()];
+    match ffi::getsockopt(fd, libc::SOL_SOCKET, libc::SO_MEMINFO, &mut buf) {
+        Ok(len) if len == buf.len() => {}
+        Ok(_) => {
+            docref(
+                req,
+                Level::Warning,
+                "Unable to retrieve all socket meminfo data",
+            );
+            return Ok(OrFalse::False);
+        }
+        Err(errno) => {
+            let text = "Unable to retrieve socket option";
+            socket_error(req, socket.object(), text, errno as i32);
+            return Ok(OrFalse::False);
+        }
+    }
+    let mut out = PhpArray::init_size(req, 9)?;
+    for (name, word) in NAMES.iter().zip(buf.chunks_exact(4)) {
+        let n = u32::from_ne_bytes([word[0], word[1], word[2], word[3]]);
+        put(
+            req,
+            &mut out,
+            name,
+            Owner::take(req, Value::int(i64::from(n))),
+        )?;
+    }
+    Ok(OrFalse::Value(Union::A(out)))
 }
 
 /// `socket_get_option(Socket $socket, int $level, int $option):
@@ -274,21 +338,89 @@ enum Set {
     Pass,
 }
 
-/// `php_do_mcast_opt` over `MCAST_JOIN_GROUP` and `MCAST_LEAVE_GROUP`,
-/// the only two where there is no RFC 3678 API: the group and the
-/// interface, then `_php_mcast_join_leave`.
+/// `multicast.c`'s `PHP_MCAST_*` options, as the platform numbers them:
+/// `IP_ADD_MEMBERSHIP` and `IP_DROP_MEMBERSHIP` where there is no RFC
+/// 3678 API, and RFC 3678's group and source options where there is.
+#[derive(Debug, Clone, Copy)]
+enum Mcast {
+    Join,
+    Leave,
+    /// `HAS_MCAST_EXT`'s four source options.
+    #[cfg(target_os = "linux")]
+    Source(i32),
+}
+
+impl Mcast {
+    /// The option `option` is, at either IP level.
+    fn of(option: i32) -> Option<Mcast> {
+        use crate::constants as c;
+        let n = i64::from(option);
+        if n == c::MCAST_JOIN_GROUP {
+            return Some(Mcast::Join);
+        }
+        if n == c::MCAST_LEAVE_GROUP {
+            return Some(Mcast::Leave);
+        }
+        #[cfg(target_os = "linux")]
+        if [
+            c::MCAST_BLOCK_SOURCE,
+            c::MCAST_UNBLOCK_SOURCE,
+            c::MCAST_JOIN_SOURCE_GROUP,
+            c::MCAST_LEAVE_SOURCE_GROUP,
+        ]
+        .contains(&n)
+        {
+            return Some(Mcast::Source(option));
+        }
+        None
+    }
+}
+
+/// `php_do_mcast_opt`: the option's table read, then the group, the
+/// source of a source option and the interface out of it, in that order.
 fn mcast(
     req: &mut Request,
     socket: Instance<Socket>,
     fd: i32,
     level: i32,
-    join: bool,
+    op: Mcast,
     value: &Value,
 ) -> Result<Set, Thrown> {
-    let table = table(req, value, "MCAST_LEAVE_GROUP")?;
-    let set = mcast_table(req, socket, fd, (level, join), *table);
+    let shown = match op {
+        Mcast::Join | Mcast::Leave => "MCAST_LEAVE_GROUP",
+        #[cfg(target_os = "linux")]
+        Mcast::Source(_) => "MCAST_LEAVE_SOURCE_GROUP",
+    };
+    let table = table(req, value, shown)?;
+    let set = mcast_table(req, socket, fd, (level, op), *table);
     table.give_up(req);
     set
+}
+
+/// `php_get_address_from_array`: the address under `key`, read in the
+/// socket's family; php's `ValueError` where the key is missing, and
+/// `None` after a lookup's warning.
+fn mcast_addr(
+    req: &mut Request,
+    socket: Instance<Socket>,
+    table: PhpArray,
+    key: &str,
+) -> Result<Option<Addr>, Thrown> {
+    let Some(value) = find(table, key) else {
+        let text = format!("No key \"{key}\" passed in optval");
+        return Err(throw_error(req, "ValueError", &text));
+    };
+    let text = to_string(req, &value)?;
+    let family = match sock(req, socket) {
+        Ok(sock) => sock.family,
+        Err(thrown) => {
+            text.give_up(req);
+            return Err(thrown);
+        }
+    };
+    let addr = inet46_addr(req, socket.object(), family, text.as_bytes());
+    text.give_up(req);
+    addr
 }
 
 /// [`mcast`] over the option's table.
@@ -296,29 +428,19 @@ fn mcast_table(
     req: &mut Request,
     socket: Instance<Socket>,
     fd: i32,
-    (level, join): (i32, bool),
+    (level, op): (i32, Mcast),
     table: PhpArray,
 ) -> Result<Set, Thrown> {
-    let object = socket.object();
-    let Some(group) = find(table, "group") else {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "No key \"group\" passed in optval",
-        ));
-    };
-    let group = to_string(req, &group)?;
-    let family = match sock(req, socket) {
-        Ok(sock) => sock.family,
-        Err(thrown) => {
-            group.give_up(req);
-            return Err(thrown);
-        }
-    };
-    let addr = inet46_addr(req, object, family, group.as_bytes());
-    group.give_up(req);
-    let Some(group) = addr? else {
+    let Some(group) = mcast_addr(req, socket, table, "group")? else {
         return Ok(Set::Done(false));
+    };
+    #[cfg(target_os = "linux")]
+    let source = match op {
+        Mcast::Source(_) => match mcast_addr(req, socket, table, "source")? {
+            Some(source) => Some(source),
+            None => return Ok(Set::Done(false)),
+        },
+        Mcast::Join | Mcast::Leave => None,
     };
     let index = match find(table, "interface") {
         Some(value) => match if_index(req, &value)? {
@@ -327,10 +449,54 @@ fn mcast_table(
         },
         None => 0,
     };
-    let (optname, bytes) = match (&group, family) {
+    #[cfg(target_os = "linux")]
+    let applied = {
+        let option = match op {
+            Mcast::Join => libc::MCAST_JOIN_GROUP,
+            Mcast::Leave => libc::MCAST_LEAVE_GROUP,
+            Mcast::Source(option) => option,
+        };
+        ffi::mcast_group(fd, level, option, index, &group, source.as_ref())
+    };
+    #[cfg(not(target_os = "linux"))]
+    let applied = {
+        let Some((optname, bytes)) = mreq(req, socket, &group, index, op)? else {
+            return Ok(Set::Done(false));
+        };
+        ffi::setsockopt(fd, level, optname, &bytes)
+    };
+    Ok(Set::Done(match applied {
+        Ok(()) => true,
+        Err(errno) => {
+            socket_error(
+                req,
+                socket.object(),
+                "Unable to set socket option",
+                errno as i32,
+            );
+            false
+        }
+    }))
+}
+
+/// `_php_mcast_join_leave` where there is no RFC 3678 API: an `ip_mreq`
+/// with the interface's first address, or an `ipv6_mreq` with its
+/// index, under the socket's family; `None` after php's warning about
+/// the interface, php's `ValueError` for any other family.
+#[cfg(not(target_os = "linux"))]
+fn mreq(
+    req: &mut Request,
+    socket: Instance<Socket>,
+    group: &Addr,
+    index: u32,
+    op: Mcast,
+) -> Result<Option<(i32, Vec<u8>)>, Thrown> {
+    let join = matches!(op, Mcast::Join);
+    let family = sock(req, socket)?.family;
+    match (group, family) {
         (Addr::V4(v4), libc::AF_INET) => {
             let Some(interface) = if_index_to_addr4(req, index) else {
-                return Ok(Set::Done(false));
+                return Ok(None);
             };
             let mut mreq = v4.ip().octets().to_vec();
             mreq.extend_from_slice(&interface.octets());
@@ -339,7 +505,7 @@ fn mcast_table(
             } else {
                 libc::IP_DROP_MEMBERSHIP
             };
-            (op, mreq)
+            Ok(Some((op, mreq)))
         }
         (Addr::V6(v6), libc::AF_INET6) => {
             let mut mreq = v6.ip().octets().to_vec();
@@ -349,7 +515,7 @@ fn mcast_table(
             } else {
                 IPV6_LEAVE_GROUP
             };
-            (op, mreq)
+            Ok(Some((op, mreq)))
         }
         _ => {
             let which = if join {
@@ -358,18 +524,9 @@ fn mcast_table(
                 "MCAST_LEAVE_GROUP"
             };
             let text = format!("Option {which} is inapplicable to this socket type");
-            return Err(throw_error(req, "ValueError", &text));
+            Err(throw_error(req, "ValueError", &text))
         }
-    };
-    Ok(Set::Done(
-        match ffi::setsockopt(fd, level, optname, &bytes) {
-            Ok(()) => true,
-            Err(errno) => {
-                socket_error(req, object, "Unable to set socket option", errno as i32);
-                false
-            }
-        },
-    ))
+    }
 }
 
 /// `setsockopt(2)` of bytes an option was laid out as, php's
@@ -405,9 +562,10 @@ fn ip_mcast(
     value: &Value,
 ) -> Result<Set, Thrown> {
     let level = libc::IPPROTO_IP;
+    if let Some(op) = Mcast::of(option) {
+        return mcast(req, socket, fd, level, op, value);
+    }
     let bytes = match option {
-        libc::IP_ADD_MEMBERSHIP => return mcast(req, socket, fd, level, true, value),
-        libc::IP_DROP_MEMBERSHIP => return mcast(req, socket, fd, level, false, value),
         libc::IP_MULTICAST_IF => {
             let Some(index) = if_index(req, value)? else {
                 return Ok(Set::Done(false));
@@ -439,13 +597,10 @@ fn ipv6_mcast(
     value: &Value,
 ) -> Result<Set, Thrown> {
     let level = libc::IPPROTO_IPV6;
-    #[cfg(target_os = "macos")]
-    let (join, leave) = (libc::IP_ADD_MEMBERSHIP, libc::IP_DROP_MEMBERSHIP);
-    #[cfg(not(target_os = "macos"))]
-    let (join, leave) = (libc::MCAST_JOIN_GROUP, libc::MCAST_LEAVE_GROUP);
+    if let Some(op) = Mcast::of(option) {
+        return mcast(req, socket, fd, level, op, value);
+    }
     let bytes = match option {
-        _ if option == join => return mcast(req, socket, fd, level, true, value),
-        _ if option == leave => return mcast(req, socket, fd, level, false, value),
         libc::IPV6_MULTICAST_IF => {
             let Some(index) = if_index(req, value)? else {
                 return Ok(Set::Done(false));
@@ -506,6 +661,21 @@ fn set_option(
     if let Set::Done(done) = handled {
         return Ok(done);
     }
+    #[cfg(target_os = "linux")]
+    if level == i64::from(libc::IPPROTO_TCP) && option == i64::from(libc::TCP_CONGESTION) {
+        let ValueRef::Str(s) = value.as_ref() else {
+            let given = value_name(req, value);
+            let tail = format!(
+                "be of type string when argument #3 ($option) is TCP_CONGESTION, {given} given"
+            );
+            return Err(arg_type_error(req, 4, &tail));
+        };
+        return Ok(apply(req, socket, fd, lvl, opt, s.as_bytes()));
+    }
+    #[cfg(target_os = "linux")]
+    if option == i64::from(libc::SO_ATTACH_REUSEPORT_CBPF) {
+        return attach_cbpf(req, socket, fd, lvl, value);
+    }
     let bytes = if is_linger(option) {
         let table = table(req, value, "SO_LINGER")?;
         let read = |req: &mut Request, table: PhpArray| -> Result<Vec<u8>, Thrown> {
@@ -547,9 +717,57 @@ fn set_option(
         };
         s.as_bytes().to_vec()
     } else {
-        c_int(to_long(req, value)?).to_ne_bytes().to_vec()
+        let n = to_long(req, value)?;
+        #[cfg(target_os = "linux")]
+        if option == i64::from(libc::UDP_SEGMENT) && !(0..=65535).contains(&n) {
+            return Err(arg_value_error(req, 4, "be of between 0 and 65535"));
+        }
+        c_int(n).to_ne_bytes().to_vec()
     };
     Ok(apply(req, socket, fd, lvl, opt, &bytes))
+}
+
+/// `SO_ATTACH_REUSEPORT_CBPF`: `0` detaches the program, `SO_DETACH_BPF`
+/// with an `int` of `1`; `SKF_AD_CPU` or `SKF_AD_QUEUE` attaches the
+/// program that picks the socket by that word; any other number is
+/// php's warning and `false`.
+#[cfg(target_os = "linux")]
+fn attach_cbpf(
+    req: &mut Request,
+    socket: Instance<Socket>,
+    fd: i32,
+    level: i32,
+    value: &Value,
+) -> Result<bool, Thrown> {
+    let n = to_long(req, value)?;
+    if n == 0 {
+        return Ok(apply(
+            req,
+            socket,
+            fd,
+            level,
+            libc::SO_DETACH_BPF,
+            &1i32.to_ne_bytes(),
+        ));
+    }
+    let k = u32::try_from(n & 0xffff_ffff).unwrap_or(0);
+    let known = [libc::SKF_AD_CPU, libc::SKF_AD_QUEUE];
+    if !known.iter().any(|ad| ad.cast_unsigned() == k) {
+        docref(req, Level::Warning, "Unsupported CBPF filter");
+        return Ok(false);
+    }
+    match ffi::attach_cbpf(fd, level, k) {
+        Ok(()) => Ok(true),
+        Err(errno) => {
+            socket_error(
+                req,
+                socket.object(),
+                "Unable to set socket option",
+                errno as i32,
+            );
+            Ok(false)
+        }
+    }
 }
 
 /// `socket_set_option(Socket $socket, int $level, int $option, $value):
@@ -607,7 +825,7 @@ fn socket_set_option(
 
 /// Whether `optname` is `SO_BINDTODEVICE`, where the platform has it.
 fn is_bindtodevice(option: i64) -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if option == crate::constants::SO_BINDTODEVICE {
         return true;
     }
@@ -616,14 +834,9 @@ fn is_bindtodevice(option: i64) -> bool {
 }
 
 /// `IPV6_JOIN_GROUP` and `IPV6_LEAVE_GROUP`, the names `multicast.c`
-/// uses: macOS and the BSDs declare them, and glibc aliases them to
-/// `IPV6_ADD_MEMBERSHIP` and `IPV6_DROP_MEMBERSHIP`, which is all the
-/// `libc` crate carries for Linux.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const IPV6_JOIN_GROUP: libc::c_int = libc::IPV6_ADD_MEMBERSHIP;
-#[cfg(any(target_os = "linux", target_os = "android"))]
-const IPV6_LEAVE_GROUP: libc::c_int = libc::IPV6_DROP_MEMBERSHIP;
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+/// uses where there is no RFC 3678 API; Linux takes RFC 3678's
+/// `group_req` instead (`multicast.h`'s `RFC3678_API`).
+#[cfg(not(target_os = "linux"))]
 const IPV6_JOIN_GROUP: libc::c_int = libc::IPV6_JOIN_GROUP;
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(not(target_os = "linux"))]
 const IPV6_LEAVE_GROUP: libc::c_int = libc::IPV6_LEAVE_GROUP;

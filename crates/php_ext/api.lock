@@ -1188,6 +1188,7 @@ values::Owner::replace
 values::Owner::separate
 values::Owner::set
 values::Owner::set_next_free
+values::Owner::set_str
 values::Owner::sort_by
 values::Owner::take
 values::Owner::try_append
@@ -1228,6 +1229,7 @@ values::PhpArray::replace
 values::PhpArray::separate
 values::PhpArray::set
 values::PhpArray::set_next_free
+values::PhpArray::set_str
 values::PhpArray::sized
 values::PhpArray::sort_by
 values::PhpArray::to_value

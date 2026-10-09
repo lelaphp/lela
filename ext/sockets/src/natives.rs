@@ -342,9 +342,10 @@ fn socket_accept(
     socket: Instance<Socket>,
 ) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     let fd = valid(req, socket)?;
+    let blocking = sock(req, socket)?.blocking;
     let owner = laid(req)?;
     let object = *owner;
-    let (new, family) = match ffi::accept(fd) {
+    let (new, family) = match accept(fd, blocking) {
         Ok(accepted) => accepted,
         Err(errno) => {
             socket_error(
@@ -356,6 +357,7 @@ fn socket_accept(
             return Ok(dropped(req, owner));
         }
     };
+    #[cfg(not(target_os = "linux"))]
     if let Err(errno) = ffi::set_cloexec(std::os::fd::AsRawFd::as_raw_fd(&new)) {
         socket_error(
             req,
@@ -366,6 +368,26 @@ fn socket_accept(
         return Ok(dropped(req, owner));
     }
     Ok(opened(req, owner, Sock::owning(new, family)))
+}
+
+/// `php_accept_connect`'s call: `accept4(2)` where php has
+/// `HAVE_ACCEPT4`, the new fd close-on-exec and, under a listener that
+/// is not blocking, non-blocking as it is made; `accept(2)` elsewhere,
+/// with close-on-exec set after it.
+#[cfg(target_os = "linux")]
+fn accept(fd: RawFd, blocking: bool) -> Result<(std::os::fd::OwnedFd, i32), nix::errno::Errno> {
+    let flags = if blocking {
+        libc::SOCK_CLOEXEC
+    } else {
+        libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK
+    };
+    ffi::accept4(fd, flags)
+}
+
+/// [`accept`] where there is no `accept4(2)`.
+#[cfg(not(target_os = "linux"))]
+fn accept(fd: RawFd, _blocking: bool) -> Result<(std::os::fd::OwnedFd, i32), nix::errno::Errno> {
+    ffi::accept(fd)
 }
 
 /// `socket_set_nonblock` and `socket_set_block`: the stream's own
@@ -674,6 +696,10 @@ fn name(
         Addr::V4(v4) => Some(v4.port()),
         Addr::V6(v6) => Some(v6.port()),
         Addr::Unix(_) => None,
+        #[cfg(target_os = "linux")]
+        Addr::Other(libc::AF_PACKET) if !peer => {
+            return packet_name(req, socket, fd, address, port);
+        }
         Addr::Other(_) => {
             let tail = if peer {
                 "be one of AF_UNIX, AF_INET, or AF_INET6"
@@ -688,6 +714,41 @@ fn name(
     if let Some(at) = at {
         assign(req, port, Value::int(i64::from(at)))?;
     }
+    Ok(true)
+}
+
+/// `socket_getsockname`'s `AF_PACKET` arm: the name of the interface
+/// the socket is bound to, and its index in `$port`; php's `Error`
+/// where the index names no interface.
+#[cfg(target_os = "linux")]
+fn packet_name(
+    req: &mut Request,
+    socket: Instance<Socket>,
+    fd: RawFd,
+    address: &Out,
+    port: &Out,
+) -> Result<bool, Thrown> {
+    let index = match ffi::packet_index(fd) {
+        Ok(index) => index,
+        Err(errno) => {
+            socket_error(
+                req,
+                socket.object(),
+                "unable to retrieve socket name",
+                errno as i32,
+            );
+            return Ok(false);
+        }
+    };
+    let named = u32::try_from(index)
+        .ok()
+        .and_then(|i| nix::net::if_::if_indextoname(i).ok());
+    let Some(name) = named else {
+        return Err(throw_error(req, "Error", "invalid interface index"));
+    };
+    let value = string(req, name.as_bytes())?;
+    assign(req, address, value)?;
+    assign(req, port, Value::int(i64::from(index)))?;
     Ok(true)
 }
 
@@ -760,6 +821,29 @@ fn check_type(req: &mut Request, ty: i64) -> Result<(), Thrown> {
     Ok(())
 }
 
+/// Whether `domain` is `AF_PACKET`, where the platform has it.
+#[cfg(target_os = "linux")]
+fn is_packet(domain: i64) -> bool {
+    domain == i64::from(libc::AF_PACKET)
+}
+
+/// [`is_packet`] where there is no `AF_PACKET`.
+#[cfg(not(target_os = "linux"))]
+const fn is_packet(_: i64) -> bool {
+    false
+}
+
+/// `PHP_ETH_PROTO_CHECK`: an `AF_PACKET` socket's protocol, an Ethernet
+/// type no greater than `USHRT_MAX`, in network byte order, as `htons`
+/// takes it, its low 16 bits; any other protocol as it is.
+pub(crate) fn eth_proto(protocol: i64, family: i64) -> i64 {
+    if is_packet(family) && protocol <= 0xffff {
+        let low = u16::try_from(protocol.rem_euclid(0x1_0000)).unwrap_or(0);
+        return i64::from(low.to_be());
+    }
+    protocol
+}
+
 fn inet_family(domain: i64) -> bool {
     [libc::AF_UNIX, libc::AF_INET, libc::AF_INET6]
         .iter()
@@ -790,7 +874,7 @@ fn socket_create(
     r#type: i64,
     protocol: i64,
 ) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
-    if !inet_family(domain) {
+    if !inet_family(domain) && !is_packet(domain) {
         return Err(arg_value_error(
             req,
             1,
@@ -798,6 +882,7 @@ fn socket_create(
         ));
     }
     check_type(req, r#type)?;
+    let protocol = eth_proto(protocol, domain);
     let owner = laid(req)?;
     match ffi::socket(c_int(domain), c_int(r#type), c_int(protocol)) {
         Ok(fd) => Ok(opened(req, owner, Sock::owning(fd, c_int(domain)))),
@@ -955,6 +1040,10 @@ fn socket_bind(
     if !(0..=65535).contains(&port) {
         return Err(arg_value_error(req, 3, "be between 0 and 65535"));
     }
+    #[cfg(target_os = "linux")]
+    if family(req, socket)? == libc::AF_PACKET {
+        return bind_packet(req, socket, fd, address.as_bytes());
+    }
     let Some(to) = target(
         req,
         socket,
@@ -972,6 +1061,31 @@ fn socket_bind(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// `socket_bind`'s `AF_PACKET` arm: the socket bound to the interface
+/// `name` names, up to its first NUL, or to every interface where it
+/// names none, as `if_nametoindex`'s `0` binds it; php's `ValueError`
+/// where the socket has no name to read.
+#[cfg(target_os = "linux")]
+fn bind_packet(
+    req: &mut Request,
+    socket: Instance<Socket>,
+    fd: RawFd,
+    name: &[u8],
+) -> Result<bool, Thrown> {
+    let name = c_str(name);
+    let index = nix::net::if_::if_nametoindex(name).unwrap_or(0);
+    match ffi::bind_packet(fd, index) {
+        Ok(()) => Ok(true),
+        Err(ffi::PacketBind::Invalid) => {
+            Err(throw_error(req, "ValueError", "invalid AF_PACKET socket"))
+        }
+        Err(ffi::PacketBind::Bind(errno)) => {
+            socket_error(req, socket.object(), "Unable to bind address", errno as i32);
+            Ok(false)
+        }
+    }
 }
 
 /// `socket_recv(Socket $socket, &$data, int $length, int $flags):

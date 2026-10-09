@@ -45,7 +45,10 @@ const RECEIVERS: usize = 64;
 /// One signal as the process took it: the number and what its
 /// `siginfo_t` said, which php's `pcntl_siginfo_to_zval` renders. An
 /// extension's handler fills it from the kernel's structure, and
-/// `waitid` hands the same fields back.
+/// `waitid` hands the same fields back. `utime`, `stime`, `band` and
+/// `fd` are Linux's members, `SIGCHLD`'s clock ticks and `SIGPOLL`'s
+/// band and file number, which `<signal.h>` names there alone; elsewhere
+/// they stay zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Siginfo {
     pub number: i32,
@@ -55,6 +58,10 @@ pub struct Siginfo {
     pub uid: u32,
     pub status: i32,
     pub addr: usize,
+    pub utime: i64,
+    pub stime: i64,
+    pub band: i64,
+    pub fd: i32,
 }
 
 static POOL: Pool<Siginfo, SLOTS> = Pool::new(Siginfo {
@@ -65,6 +72,10 @@ static POOL: Pool<Siginfo, SLOTS> = Pool::new(Siginfo {
     uid: 0,
     status: 0,
     addr: 0,
+    utime: 0,
+    stime: 0,
+    band: 0,
+    fd: 0,
 });
 
 static WAKE: WakeSet<RECEIVERS> = WakeSet::new();
