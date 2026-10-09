@@ -191,7 +191,7 @@ pub fn judges(checkout: &Path, root: &Path, built_root: &Path) -> Result<Judge, 
 
 /// Whether two paths name one directory, however each is spelled: `root`
 /// is as the command line gave it and `checkout` as the call resolved it.
-fn same_directory(one: &Path, other: &Path) -> bool {
+pub(crate) fn same_directory(one: &Path, other: &Path) -> bool {
     match (one.canonicalize(), other.canonicalize()) {
         (Ok(one), Ok(other)) => one == other,
         _ => one == other,

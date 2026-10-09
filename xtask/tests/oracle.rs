@@ -681,6 +681,47 @@ fn no_workflow_holds_a_directory_of_the_corpus() {
     );
 }
 
+/// `oracle.toml` has one reader, the oracle module (#66): no workflow or
+/// action parses it, and what a job needs of the pin it reads off a
+/// `status` section's JSON with `jq`, the tag the corpus is cloned at and
+/// the key its tree is kept under off the corpus section (#1713), the keg
+/// a runner pours off the oracle section's `binary` (#2253). A line
+/// outside a comment naming the file is a read of it, an action's
+/// `description:` excepted, which says in prose what the action pours;
+/// so is one spelling a table of the pin, `[source]`, `[oracle]` or a
+/// `[recipe` one, which a parse would match on and a step that reads the
+/// section has no reason to write.
+#[test]
+fn no_workflow_parses_the_pin_and_the_tag_and_key_are_read_off_the_corpus_section() {
+    let mut reads = Vec::new();
+    for (name, text) in ci_files() {
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim_start();
+            if line.starts_with('#') || line.starts_with("description:") {
+                continue;
+            }
+            for spelled in ["oracle.toml", "[source]", "[oracle]", "[recipe", "[variant"] {
+                assert!(
+                    !line.contains(spelled),
+                    "{name}:{}: {spelled} is the pin read a second time; read the fact off `xtask status --section oracle` or `corpus`: {line}",
+                    n + 1
+                );
+            }
+            for key in [".tag", ".key"] {
+                if line.contains(&format!("jq -er {key} ")) {
+                    reads.push(key);
+                }
+            }
+        }
+    }
+    for key in [".tag", ".key"] {
+        assert!(
+            reads.contains(&key),
+            "the corpus is cloned at the section's {key}: {reads:?}"
+        );
+    }
+}
+
 /// The variable's name is stated in one place that both the code and CI
 /// read (#36): `oracle::TREE_VARIABLE`, which `status --section oracle`
 /// renders and CI reads off it, setting the tree under that name through

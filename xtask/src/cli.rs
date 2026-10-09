@@ -771,6 +771,11 @@ pub enum Section {
     /// The ticket readings, one row per ticket: its criteria, what closed
     /// it and the session.
     Ticket,
+    /// The last 7 days of `ticket` readings in the main worktree's store
+    /// and this checkout's: the closes, the successors they opened, the
+    /// withdrawals among them and the successors opened per close, in
+    /// one line (#1157).
+    Tickets,
     /// The last run of `xtask track work`: one row per ticket it worked,
     /// with the outcome, what its session spent and the commit its branch
     /// is at, and the run's own row last with the usd total.
@@ -801,8 +806,9 @@ pub enum Section {
     /// `locks` totals (#1795).
     Modules,
     /// The pin as this machine has it: the tree's variable and the
-    /// promise's, each by name and whether it is set, the pin's path, and
-    /// which of the two places the tree was found at. CI reads the names
+    /// promise's, each by name and whether it is set, the pin's path, tag
+    /// and commit (#66), which of the two places the tree was found at,
+    /// and the pinned binary. CI reads the names
     /// here and spells them nowhere (#36).
     Oracle,
     /// The corpus CI checks out at the pin: the tag, the commit, the
@@ -817,6 +823,11 @@ pub enum Section {
     /// with the ruling that put them there or as not built (design §1,
     /// §12; #1761).
     Parity,
+    /// The fields of `oracle::Invocation` past the binary and the
+    /// program, read from the type's source: each one's type, whether a
+    /// `.phpt` section adds it or none gives it, and the first sentence
+    /// of its rustdoc; harness-design.md §4.3's region (#1319).
+    Invocation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

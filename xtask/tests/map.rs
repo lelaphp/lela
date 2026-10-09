@@ -247,11 +247,50 @@ fn xtask_args(opener: &str) -> Vec<String> {
         .collect()
 }
 
+/// A scratch workspace holding what the tracked regions read: the tracked
+/// locks, and each file a region names among its inputs as the tree holds
+/// it, so a section that reads one, `invocation` the type's source,
+/// renders it.
+fn tracked_tree(root: &Path, regions: &[(String, String)]) {
+    scratch_workspace(workspace(), root).unwrap();
+    let locks = Command::new("git")
+        .args(["ls-files", "-z", "--", "*.lock"])
+        .current_dir(workspace())
+        .output()
+        .unwrap();
+    for lock in String::from_utf8(locks.stdout).unwrap().split('\0') {
+        if lock.is_empty() || lock == "Cargo.lock" {
+            continue;
+        }
+        let to = root.join(lock);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(workspace().join(lock), to).unwrap();
+    }
+    // An input is relative to its region's file.
+    for (file, opener) in regions {
+        for input in inputs(opener).filter(|i| !i.contains('*')) {
+            let mut path = std::path::PathBuf::new();
+            for part in Path::new(file).parent().unwrap().join(input).components() {
+                match part {
+                    std::path::Component::ParentDir => {
+                        path.pop();
+                    }
+                    other => path.push(other),
+                }
+            }
+            let to = root.join(&path);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(workspace().join(&path), to).unwrap();
+        }
+    }
+}
+
 /// A tracked region renders against an empty store, every reading `no
 /// reading`, since a store is one machine's and its render would churn
 /// the map on every checkout; the live numbers are the local file's
 /// (harness-design.md §5, revision 6; #630). Each `xtask status` region
-/// is rendered over a scratch workspace with the tracked locks, once with
+/// is rendered over a scratch workspace with the tracked locks and the
+/// files the regions read ([`tracked_tree`]), once with
 /// no store and once after a reading for every seam, rule and bundle edge
 /// is recorded: the bytes are the same, and no row carries a reading.
 #[test]
@@ -283,20 +322,7 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
     }
 
     let root = Tree::new("map-tracked").unwrap();
-    scratch_workspace(workspace(), &root).unwrap();
-    let locks = Command::new("git")
-        .args(["ls-files", "-z", "--", "*.lock"])
-        .current_dir(workspace())
-        .output()
-        .unwrap();
-    for lock in String::from_utf8(locks.stdout).unwrap().split('\0') {
-        if lock.is_empty() || lock == "Cargo.lock" {
-            continue;
-        }
-        let to = root.join(lock);
-        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-        std::fs::copy(workspace().join(lock), to).unwrap();
-    }
+    tracked_tree(&root, &regions);
     let render = || -> Vec<String> {
         regions
             .iter()
@@ -360,6 +386,107 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
         "{}",
         full[seams]
     );
+}
+
+/// The paths an opener's `inputs=` names, comma-separated.
+fn inputs(opener: &str) -> impl Iterator<Item = &str> {
+    opener
+        .split(" inputs=")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap_or_default()
+        .split(',')
+        .filter(|i| !i.is_empty())
+}
+
+/// harness-design.md §4.3's fields of an `Invocation` are the type's
+/// (#1305, #1319): the region renders `status --section invocation` and
+/// names the type's source among its inputs, as `computed affected`
+/// says, so a field the type gains, here added to a copy of the source
+/// beside the staged design, fails `computed check` until the region is
+/// rendered again, and the render reads the field.
+#[test]
+fn the_invocation_region_is_the_types_and_a_field_it_gains_stales_it() {
+    const SOURCE: &str = "xtask/src/oracle/mod.rs";
+    let design = staged(workspace(), "harness-design.md");
+    let opener = opener(&design, "invocation").expect("§4.3 carries the invocation region");
+    assert_eq!(
+        xtask_args(opener),
+        ["status", "--section", "invocation", "--tracked"]
+    );
+    assert!(inputs(opener).any(|i| i == SOURCE), "{opener}");
+
+    let root = Tree::new("map-invocation").unwrap();
+    let regions: Vec<(String, String)> = design
+        .lines()
+        .filter(|l| l.starts_with("<!-- computed exec "))
+        .map(|l| ("harness-design.md".to_owned(), l.to_owned()))
+        .collect();
+    tracked_tree(&root, &regions);
+    std::fs::write(root.join("harness-design.md"), &design).unwrap();
+    let check = || {
+        Command::new("computed")
+            .args(["check", "harness-design.md"])
+            .current_dir(&*root)
+            .output()
+            .expect("computed is on PATH, as CI installs it")
+    };
+    let fresh = check();
+    assert!(
+        fresh.status.success(),
+        "the staged region is fresh: {}{}",
+        String::from_utf8_lossy(&fresh.stdout),
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let out = Command::new("computed")
+        .args(["affected", SOURCE])
+        .current_dir(&*root)
+        .output()
+        .expect("computed is on PATH, as CI installs it");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.lines()
+            .any(|l| l.starts_with("harness-design.md:") && l.contains(" invocation ")),
+        "{SOURCE} is no input of the invocation region: {said}"
+    );
+
+    let source = read(SOURCE);
+    let gained = source.replacen(
+        "    pub raw: bool,\n",
+        "    pub raw: bool,\n    /// A field the type gained.\n    ///\n    /// No section gives it.\n    pub gained: u8,\n",
+        1,
+    );
+    assert_ne!(gained, source, "{SOURCE} declares `pub raw: bool`");
+    std::fs::write(root.join(SOURCE), gained).unwrap();
+    let stale = check();
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&stale.stdout),
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    assert!(
+        !stale.status.success() && said.contains("invocation") && said.contains("stale"),
+        "a field the type gains stales the region until it is rendered: {said}"
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("--root")
+        .arg(&*root)
+        .args(xtask_args(opener))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rendered = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        rendered.contains("| `gained` | `u8` | no section gives it | A field the type gained. |"),
+        "{rendered}"
+    );
+    let body = region(&design, "invocation").join("\n");
+    assert!(body.contains("| `raw` | `bool` |"), "{body}");
+    assert!(!body.contains("gained"), "{body}");
 }
 
 /// The `seams` region names every lock its section counts among its
@@ -623,11 +750,14 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         )
         .ok();
     }
-    // What `session()` appends after the local file: the rules this
-    // session fired, each with its count, and the unreadable-log note,
-    // one line. Every rule of the permits section with its count across
-    // sessions bounds the block: a session fires no rule the section
-    // does not list, and no rule more often than the log does.
+    // What `session()` appends after the local file: the week's ticket
+    // closes in one line, from this workspace's stores (#1157).
+    write!(facts, "\n## tickets\n\n{}", section("tickets")).ok();
+    // And the rules this session fired, each with its count, and the
+    // unreadable-log note, one line. Every rule of the permits section
+    // with its count across sessions bounds the block: a session fires
+    // no rule the section does not list, and no rule more often than the
+    // log does.
     let mut this_session = String::from("| rule | this session |\n|---|---|\n");
     for row in section("permits").lines().skip(2) {
         let cells: Vec<&str> = row.split(" | ").collect();
