@@ -19,7 +19,7 @@ use php_proto::fcgi::{self, Input, Kind, Outgoing};
 use php_sapi::cgi::ini_text;
 use php_sapi::{
     Aborted, Body, Engine, HostPage, HostServes, HostValue, IniEvent, IniOrigin, NotAlone,
-    OutputSink, RequestDescription, ResponseHead, WebRequest,
+    OutputSink, ProgramFile, RequestDescription, ResponseHead, WebRequest,
 };
 
 use crate::access::AccessLog;
@@ -1114,6 +1114,7 @@ impl Worker {
             web: Some(web),
             script_name: info.path_translated.clone(),
             ini,
+            program_file: ProgramFile::Listed,
             ..RequestDescription::default()
         }
     }
