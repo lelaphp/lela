@@ -3,8 +3,7 @@
 //! track's under the ticket that blocks it, so a session reads the whole
 //! frontier and what waits behind it in one call instead of walking
 //! `blockedBy` ticket by ticket. A ticket blocks as `track next` judges
-//! it, [`waits_on`]: while it is open, or while the branch recording it
-//! is not yet in `main` (#1850). A chain starts at a ticket no open ticket
+//! it, [`crate::ticket::BlockedBy::open`]: while it is open (#2326). A chain starts at a ticket no open ticket
 //! shown blocks and runs down through what it unblocks; a ticket with two
 //! blockers is written out under the first by number and named under the
 //! others. Tickets that block nothing and wait on nothing follow the
@@ -29,7 +28,7 @@ use serde::Serialize;
 
 use crate::ticket::{Gh, Open};
 use crate::track::{Records, Ticket};
-use crate::track_next::{PERSON, READY, is_tracks, waits_on};
+use crate::track_next::{PERSON, READY, is_tracks};
 
 /// The `--crate` value that keeps the tickets naming no crate.
 const NO_CRATE: &str = "none";
@@ -43,8 +42,7 @@ pub struct Row {
     pub labels: Vec<String>,
     /// The branch of this clone that records the ticket, when one does.
     pub branch: Option<String>,
-    /// The tickets blocking it as the frontier judges them, open or on a
-    /// branch not yet in `main`, shown here or not.
+    /// The open tickets blocking it, shown here or not.
     pub waits_on: Vec<u64>,
     /// The tickets shown here that it blocks.
     pub blocks: Vec<u64>,
@@ -108,7 +106,7 @@ impl Chains {
         let shown: BTreeSet<u64> = kept.iter().map(|ticket| ticket.number).collect();
         let mut blocks: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for ticket in &kept {
-            for blocker in waits_on(ticket, records).filter(|n| shown.contains(n)) {
+            for blocker in ticket.blocked_by.open().filter(|n| shown.contains(n)) {
                 blocks.entry(blocker).or_default().push(ticket.number);
             }
         }
@@ -118,7 +116,7 @@ impl Chains {
                 branch: records
                     .branch(Ticket::new(ticket.number))
                     .map(str::to_owned),
-                waits_on: waits_on(&ticket, records).collect(),
+                waits_on: ticket.blocked_by.open().collect(),
                 blocks: blocks.remove(&ticket.number).unwrap_or_default(),
                 labels: ticket.label_names().map(str::to_owned).collect(),
                 number: ticket.number,
@@ -264,7 +262,7 @@ fn is_crate(word: &str) -> bool {
 /// or as one JSON object; no reading.
 pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Result<()> {
     let open = Gh::on_path().open(root)?;
-    let chains = Chains::of(open, track, krate, &Records::read(root)?);
+    let chains = Chains::of(open, track, krate, &Records::read(root));
     if json {
         println!("{}", serde_json::to_string_pretty(&chains)?);
     } else {
@@ -275,8 +273,6 @@ pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Res
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::{Chains, names};
     use crate::ticket::{BlockedBy, Blocker, Label, Open, State};
     use crate::track::{Records, Ticket};
@@ -306,8 +302,8 @@ mod tests {
 
     /// A chain runs from the blocker down; a ticket with two blockers is
     /// written out under the first and named under the second; a closed
-    /// blocker is no wait, unless the branch recording it is not yet in
-    /// `main` (#1850); a ticket with no edge stands on its own; a blocker
+    /// blocker is no wait, whether or not `main` holds the branch
+    /// recording it (#2326); a ticket with no edge stands on its own; a blocker
     /// labelled another track is a wait but not a row.
     #[test]
     fn chains_are_written_from_the_blocker_down() {
@@ -340,11 +336,11 @@ mod tests {
             ("t8".to_owned(), Ticket::new(8)),
             ("t9".to_owned(), Ticket::new(9)),
         ];
-        let records = Records::of(recorded, &BTreeSet::from(["t5", "t8"]));
+        let records = Records::of(recorded);
         let chains = Chains::of(open, "main", None, &records);
         assert_eq!(
             chains.render(),
-            "main: 6 open, 2 no ticket blocks, 4 waiting on a blocker, 1 a person's\n\
+            "main: 6 open, 3 no ticket blocks, 3 waiting on a blocker, 1 a person's\n\
              \n\
              #1 php_engine: a [ready]\n\
              \x20 #2 php_compile: b [ready, waits on #1]\n\
@@ -354,7 +350,7 @@ mod tests {
              3 on their own: no open ticket shown blocks them and they block nothing shown\n\
              #4 xtask: d [no label, waits on #7]\n\
              #5 ext/json: e [ready, on t5]\n\
-             #6 ext/pcre: g [ready, waits on #8]\n"
+             #6 ext/pcre: g [ready]\n"
         );
     }
 
