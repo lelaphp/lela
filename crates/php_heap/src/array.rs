@@ -1895,12 +1895,7 @@ fn write_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<Written
         && !a.is_packed()
         && let Some(idx) = a.find_str(key)
     {
-        let mut b = a.read_bucket(idx);
-        let old = b.val;
-        b.val = z;
-        b.val.set_next(old.next());
-        a.write_bucket(idx, b);
-        return Ok(Written::Replaced(old));
+        return Ok(Written::Replaced(a.replace_at(idx, z)));
     }
     append_str(mm, a, key, z)?;
     Ok(Written::Added)
@@ -1911,32 +1906,75 @@ fn write_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<Written
 /// the head of its chain, so a table that held the key already holds it
 /// twice and a lookup finds this one, as php's does.
 fn append_str(mm: &mut dyn Allocate, a: Arr, key: Str, z: Zval) -> Result<(), Fatal> {
-    let h = key.hash();
-    let header = a.header();
-    if a.is_uninitialized() {
-        a.real_init_mixed(mm)?;
-    } else if a.is_packed() {
-        a.packed_to_hash(mm)?;
-    } else if a.num_used() >= a.table_size() {
-        a.do_resize(mm)?;
-    }
+    a.make_room_for_str(mm)?;
     if !key.is_interned() {
         key.addref();
-        header.flags.set(header.flags.get() & !STATIC_KEYS);
     }
-    let idx = a.num_used();
-    header.num_used.set(idx + 1);
-    header.num_elements.set(header.num_elements.get() + 1);
-    a.write_bucket(
-        idx,
-        Bucket {
-            val: z,
-            h,
-            key: Some(key),
-        },
-    );
-    a.link(idx);
+    a.place_str(key, z);
     Ok(())
+}
+
+impl Arr {
+    /// The value at bucket `idx` replaced by `z`, which keeps the chain
+    /// link; the old value handed back to release.
+    fn replace_at(self, idx: u32, z: Zval) -> Zval {
+        let mut b = self.read_bucket(idx);
+        let old = b.val;
+        b.val = z;
+        b.val.set_next(old.next());
+        self.write_bucket(idx, b);
+        old
+    }
+
+    /// What `_zend_hash_add_or_update_i` and `_zend_hash_str_add_or_update_i`
+    /// do to the table before a string key's bucket goes in: lay it down
+    /// where it is uninitialised; else turn a packed table into a hash of
+    /// the same size, and then, `ZEND_HASH_IF_FULL_DO_RESIZE`, grow it
+    /// where it is full, a packed table just turned among them.
+    ///
+    /// ```php
+    /// $m = memory_get_usage(); $c = []; for ($i = 0; $i < 8; $i++) $c[] = $i;
+    /// $c['k'] = 1; $c['l'] = 2;
+    /// echo memory_get_usage() - $m, ' ', count($c), ' ', $c['k'] + $c['l'] + $c[7], "\n";
+    /// ```
+    /// ```expect capture
+    /// 696 10 10
+    /// ```
+    fn make_room_for_str(self, mm: &mut dyn Allocate) -> Result<(), Fatal> {
+        if self.is_uninitialized() {
+            return self.real_init_mixed(mm);
+        }
+        if self.is_packed() {
+            self.packed_to_hash(mm)?;
+        }
+        if self.num_used() >= self.table_size() {
+            self.do_resize(mm)?;
+        }
+        Ok(())
+    }
+
+    /// The bucket of `key` and `z` appended to a table with room for it
+    /// and linked at the head of its chain. The bucket takes the owner of
+    /// `key` it is handed.
+    fn place_str(self, key: Str, z: Zval) {
+        let h = key.hash();
+        let header = self.header();
+        if !key.is_interned() {
+            header.flags.set(header.flags.get() & !STATIC_KEYS);
+        }
+        let idx = self.num_used();
+        header.num_used.set(idx + 1);
+        header.num_elements.set(header.num_elements.get() + 1);
+        self.write_bucket(
+            idx,
+            Bucket {
+                val: z,
+                h,
+                key: Some(key),
+            },
+        );
+        self.link(idx);
+    }
 }
 
 impl crate::Heap {
@@ -2805,6 +2843,39 @@ mod tests {
         assert_eq!(key.refcount(), 2, "the bucket holds the key");
         assert_eq!(a.get(Key::Str(key)).and_then(Zval::as_long), Some(10));
         assert_eq!(a.get(Key::Long(3)).and_then(Zval::as_long), Some(4));
+        nothing.heap.release_string(key);
+        Heap::release(&mut nothing, Zval::array(a));
+        assert_eq!(nothing.heap.memory_usage(false), start);
+    }
+
+    /// A string key added to a packed table that is full turns it into a
+    /// hash of the same size and then, as `_zend_hash_add_or_update_i`
+    /// does past `zend_hash_packed_to_hash`, grows it before the bucket
+    /// goes in: php's `memory_get_usage()` reads 56 + 640 + 32 after
+    /// eight appends and `$a['name'] = 9`, and the ninth bucket is inside
+    /// the table, not past its end.
+    #[test]
+    fn a_string_key_on_a_full_packed_table_grows_it_after_the_conversion() {
+        let _alone = alone();
+        let mut nothing = Nothing::new();
+        let start = nothing.heap.memory_usage(false);
+        let Ok(a) = nothing.heap.array() else { return };
+        for i in 0..8 {
+            assert!(matches!(
+                nothing.heap.array_append(a, Zval::long(i)),
+                Ok(true)
+            ));
+        }
+        assert_eq!(a.table_size(), 8);
+        let Ok(key) = nothing.heap.string(b"name") else {
+            return;
+        };
+        assert!(Heap::array_update(&mut nothing, a, Key::Str(key), Zval::long(9)).is_ok());
+        assert!(!a.is_packed());
+        assert_eq!(a.table_size(), 16);
+        assert_eq!(nothing.heap.memory_usage(false), start + 56 + 640 + 32);
+        assert_eq!(a.get(Key::Str(key)).and_then(Zval::as_long), Some(9));
+        assert_eq!(a.get(Key::Long(7)).and_then(Zval::as_long), Some(7));
         nothing.heap.release_string(key);
         Heap::release(&mut nothing, Zval::array(a));
         assert_eq!(nothing.heap.memory_usage(false), start);

@@ -2820,7 +2820,9 @@ impl ObjectHandlers for DualHandlers {
                 object.give_up(req);
             }
             crate::give_up(req, cache);
-            let _ = callback;
+            // A view: the owner of its value is `callback_value`'s, given
+            // up above.
+            drop(callback);
         }
     }
 

@@ -14,7 +14,7 @@ use crate::source::{Diagnostic, Level};
 
 fn lex_diags(input: &[u8]) -> Vec<Diagnostic> {
     let lexed = lex(F, input, &LexOptions::default());
-    let _ = pairs(&lexed, input);
+    pairs(&lexed, input);
     lexed.diagnostics
 }
 

@@ -445,7 +445,10 @@ impl ConnData {
             ok = false;
             let version = self.server_version();
             if version > 50113 && version < 50118 {
-                let _ = self.read_ok(req)?;
+                // `redundant_error_packet`: 5.1.14 to 5.1.17 send one more
+                // packet after the error, read and freed
+                // (`Z/ext/mysqlnd/mysqlnd_auth.c:476-484`).
+                drop(self.read_ok(req)?);
             }
         }
         if ok {

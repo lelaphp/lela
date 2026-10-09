@@ -552,7 +552,7 @@ enum Bodiless {
 
 fn bodiless(input: ParseStream<'_>) -> syn::Result<Bodiless> {
     let attrs = input.call(Attribute::parse_outer)?;
-    let _: syn::Visibility = input.parse()?;
+    input.parse::<syn::Visibility>()?;
     if input.peek(syn::Token![const]) {
         input.parse::<syn::Token![const]>()?;
         let ident = Ident::parse_any(input)?;
