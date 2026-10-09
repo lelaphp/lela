@@ -1027,6 +1027,22 @@ fn throwing_resource(req: &mut Request) -> ResourceType {
 /// #0 {main}
 ///   thrown in [no active file] on line 0
 /// ```
+///
+/// Released with a returning or an unwinding frame's variables, it is
+/// raised with the caller current, as `zend_leave_helper` moves
+/// `EG(current_execute_data)` before `i_free_compiled_variables`: the
+/// caller's line, and the frame left off the trace.
+///
+/// ```php
+/// function f() { $r = zend_test_create_throwing_resource(); return 1; }
+/// function u() { $r = zend_test_create_throwing_resource(); throw new LogicException("first"); }
+/// try { f(); } catch (Exception $e) { echo $e->getLine(), " ", $e->getTraceAsString(), "\n"; }
+/// try { u(); } catch (Exception $e) { echo $e->getLine(), " ", $e->getTraceAsString(), " ", $e->getPrevious()->getLine(), "\n"; }
+/// ```
+/// ```expect
+/// 4 #0 {main}
+/// 5 #0 {main} 3
+/// ```
 fn throw_from_dtor(req: &mut Request, _resource: Resource) -> Result<(), Thrown> {
     Err(throw(
         req,
