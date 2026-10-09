@@ -25,38 +25,135 @@ use crate::object::{Code, Dom, Extra};
 use crate::props::Prop;
 use crate::{Read, dom, dom_mut, fetch, object_for, string};
 
-/// `PHP_DOM_REG_FUNC_MODE_*`: which php functions one namespace lets an
-/// expression call.
+/// `PHP_DOM_REG_FUNC_MODE_*`: how one namespace serves a call.
+///
+/// php lays a namespace down at `PHP_DOM_REG_FUNC_MODE_NONE`, which its
+/// dispatch serves as `SET` (the `ZEND_ASSERT` that tells them apart is
+/// gone from a release build): a refused registration leaves the
+/// namespace there, and a call looks the table up all the same.
 #[derive(Default)]
 enum Mode {
-    /// Nothing registered: a call is php's `Error`.
+    /// A call is served from the table, by name.
     #[default]
-    None,
-    /// `registerPhpFunctions()` with no argument: any function by name.
+    Set,
+    /// `registerPhpFunctions()` with no argument: any function by name,
+    /// the table kept for a later set.
     All,
-    /// The functions registered by name.
-    Set(Vec<Function>),
 }
 
-/// One function registered by name: the callable, and the value it was
-/// read off, the namespace's owner of it.
-type Function = (Vec<u8>, Callable, Owner<Value>);
+/// One entry of a namespace's `functions` table.
+struct Function {
+    /// The name an expression calls it by.
+    name: Vec<u8>,
+    callable: Callable,
+    /// The value `callable` was read off, the namespace's owner of it.
+    value: Owner<Value>,
+}
 
-impl Mode {
-    /// `functions`, `None` left behind them.
-    fn take_functions(&mut self) -> Vec<Function> {
-        match std::mem::take(self) {
-            Mode::Set(functions) => functions,
-            Mode::All | Mode::None => Vec::new(),
+/// `php_dom_xpath_callback_ns`: one namespace's `functions` table,
+/// filled as a registration walks its argument, and the `mode` beside it.
+#[derive(Default)]
+struct Namespace {
+    /// `functions`, in the order names were first registered.
+    functions: Vec<Function>,
+    /// `mode`, which the table outlives.
+    mode: Mode,
+}
+
+impl Namespace {
+    /// `zend_hash_update(&ns->functions, name, ..)`: `name` registered,
+    /// in the place it already held, the owner it replaces let go of.
+    fn insert(&mut self, req: &mut Request, function: Function) {
+        if let Some(slot) = self.functions.iter_mut().find(|f| f.name == function.name) {
+            std::mem::replace(slot, function).value.give_up(req);
+        } else {
+            self.functions.push(function);
         }
     }
 
-    /// `functions`, as they stand.
-    fn functions(&self) -> &[Function] {
-        match self {
-            Mode::Set(functions) => functions,
-            Mode::All | Mode::None => &[],
+    /// The callable registered as `name`.
+    fn find(&self, name: &[u8]) -> Option<&Callable> {
+        self.functions
+            .iter()
+            .find(|f| f.name == name)
+            .map(|f| &f.callable)
+    }
+
+    /// `php_dom_xpath_callback_ns_update_method_handler`: each entry of
+    /// an array, or the one name, registered as it is read, so a refusal
+    /// leaves the ones before it in the table; no argument sets the `mode`
+    /// alone.
+    fn update(&mut self, req: &mut Request, restrict: Option<Value>) -> Result<(), Thrown> {
+        let Some(restrict) = restrict else {
+            self.mode = Mode::All;
+            return Ok(());
+        };
+        if let Some(array) = restrict.as_array().copied() {
+            for (key, value) in &array {
+                let (callable, owner) = callable_of(req, &value, 1, true)?;
+                let name = match key {
+                    Key::Str(s) => Ok(s.as_bytes().to_vec()),
+                    Key::Int(_) => with_string(req, &value, <[u8]>::to_vec),
+                };
+                let name = match name {
+                    Ok(name) if Validation::Nulls.holds(&name) => name,
+                    Ok(_) => {
+                        owner.give_up(req);
+                        let tail = "be an array containing valid callback names";
+                        return Err(arg_value_error(req, 1, tail));
+                    }
+                    Err(thrown) => {
+                        owner.give_up(req);
+                        return Err(thrown);
+                    }
+                };
+                let function = Function {
+                    name,
+                    callable,
+                    value: owner,
+                };
+                self.insert(req, function);
+            }
+        } else {
+            let name = restrict
+                .as_str_bytes()
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default();
+            if !Validation::Nulls.holds(&name) {
+                return Err(arg_value_error(req, 1, "be a valid callback name"));
+            }
+            let (callable, value) = callable_of(req, &restrict, 1, false)?;
+            self.insert(
+                req,
+                Function {
+                    name,
+                    callable,
+                    value,
+                },
+            );
         }
+        self.mode = Mode::Set;
+        Ok(())
+    }
+}
+
+/// `php_dom_xpath_callback_name_validation`: what a callback's name is
+/// held to.
+#[derive(Clone, Copy)]
+enum Validation {
+    /// `PHP_DOM_XPATH_CALLBACK_NAME_VALIDATE_NULLS`: no NUL byte.
+    Nulls,
+    /// `PHP_DOM_XPATH_CALLBACK_NAME_VALIDATE_NCNAME`: an `NCName`.
+    NcName,
+}
+
+impl Validation {
+    /// `php_dom_xpath_is_callback_name_valid`: `name` is not empty and
+    /// passes this validation.
+    fn holds(self, name: &[u8]) -> bool {
+        !name.is_empty()
+            && !name.contains(&0)
+            && (matches!(self, Validation::Nulls) || Name::valid_ncname(name))
     }
 }
 
@@ -74,11 +171,14 @@ pub(crate) struct XPathState {
 /// calls handed out, kept alive as long as their owner.
 #[derive(Default)]
 pub struct XPathCallbacks {
-    /// `php_ns`, the functions of `php:function`.
-    php_ns: Mode,
+    /// `php_ns`, the functions of `php:function`, laid down by the first
+    /// `registerPhpFunctions`; boxed as php allocates it, so the owner's
+    /// payload fits the struct php allocates (`#[php_class(size = ..)]`,
+    /// `XSLTProcessor`'s among them).
+    php_ns: Option<Box<Namespace>>,
     /// `namespaces`: the functions `registerPhpFunctionNS` registered, by
     /// namespace in registration order.
-    namespaces: Vec<(Vec<u8>, Mode)>,
+    namespaces: Vec<(Vec<u8>, Namespace)>,
     /// `node_list`: the values a call handed a function or had back, kept
     /// alive as long as the evaluator, its owner of each.
     node_list: Vec<Owner<Value>>,
@@ -88,11 +188,14 @@ impl XPathCallbacks {
     /// `php_dom_xpath_callbacks_dtor`: every registered function and kept
     /// value let go of.
     pub fn release(self, req: &mut Request) {
-        for mut mode in
-            std::iter::once(self.php_ns).chain(self.namespaces.into_iter().map(|(_, m)| m))
-        {
-            for (_, _, value) in mode.take_functions() {
-                value.give_up(req);
+        let namespaces = self
+            .php_ns
+            .map(|n| *n)
+            .into_iter()
+            .chain(self.namespaces.into_iter().map(|(_, n)| n));
+        for namespace in namespaces {
+            for function in namespace.functions {
+                function.value.give_up(req);
             }
         }
         for value in self.node_list {
@@ -102,9 +205,10 @@ impl XPathCallbacks {
 
     /// `php_dom_xpath_callbacks_get_gc`: every value the table holds.
     pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
-        for mode in std::iter::once(&self.php_ns).chain(self.namespaces.iter().map(|(_, m)| m)) {
-            for (_, _, value) in mode.functions() {
-                visit(**value);
+        let namespaces = self.php_ns.as_deref().into_iter();
+        for namespace in namespaces.chain(self.namespaces.iter().map(|(_, n)| n)) {
+            for function in &namespace.functions {
+                visit(*function.value);
             }
         }
         for value in &self.node_list {
@@ -129,7 +233,10 @@ impl XPathCallbacks {
         req: &mut Request,
         restrict: Option<Value>,
     ) -> Result<(), Thrown> {
-        register_into(req, &mut self.php_ns, restrict)
+        let restrict = restrict
+            .map(|v| v.deref())
+            .filter(|v| !matches!(v.as_ref(), ValueRef::Null));
+        self.php_ns.get_or_insert_default().update(req, restrict)
     }
 
     /// `php_dom_xpath_callbacks_update_single_method_handler` under
@@ -142,25 +249,27 @@ impl XPathCallbacks {
         name: &[u8],
         callable: &Value,
     ) -> Result<(), Thrown> {
-        if name.is_empty() || !Name::valid_ncname(name) {
+        if !Validation::NcName.holds(name) {
             return Err(arg_value_error(req, 2, "be a valid callback name"));
         }
         let (callable, value) = callable_of(req, callable, 3, false)?;
         let at = if let Some(at) = self.namespaces.iter().position(|(n, _)| n == ns) {
             at
         } else {
-            self.namespaces.push((ns.to_vec(), Mode::None));
+            self.namespaces.push((ns.to_vec(), Namespace::default()));
             self.namespaces.len() - 1
         };
-        let mut functions = self.namespaces[at].1.take_functions();
-        if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
-            let old = std::mem::replace(&mut slot.2, value);
-            slot.1 = callable;
-            old.give_up(req);
-        } else {
-            functions.push((name.to_vec(), callable, value));
-        }
-        self.namespaces[at].1 = Mode::Set(functions);
+        let namespace = &mut self.namespaces[at].1;
+        let name = name.to_vec();
+        namespace.insert(
+            req,
+            Function {
+                name,
+                callable,
+                value,
+            },
+        );
+        namespace.mode = Mode::Set;
         Ok(())
     }
 
@@ -170,10 +279,13 @@ impl XPathCallbacks {
     #[must_use]
     pub fn registered(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut out = Vec::new();
-        for (ns, mode) in &self.namespaces {
-            if let Mode::Set(functions) = mode {
-                out.extend(functions.iter().map(|(n, _, _)| (ns.clone(), n.clone())));
-            }
+        for (ns, namespace) in &self.namespaces {
+            out.extend(
+                namespace
+                    .functions
+                    .iter()
+                    .map(|f| (ns.clone(), f.name.clone())),
+            );
         }
         out
     }
@@ -404,17 +516,19 @@ fn dispatch(
         Called::Custom { ns, name } => (Some(ns), name, operands),
     };
     let args = operand_values(req, proxy, operands)?;
-    let mode = match &mode_ns {
-        None => Some(&state.php_ns),
+    let namespace = match &mode_ns {
+        None => state.php_ns.as_deref(),
         Some(ns) => state
             .namespaces
             .iter()
             .find(|(n, _)| n == ns)
-            .map(|(_, m)| m),
+            .map(|(_, namespace)| namespace),
     };
-    let callable = match mode {
-        None | Some(Mode::None) => Err(throw_error(req, "Error", "No callbacks were registered")),
-        Some(Mode::All) => {
+    let callable = match namespace {
+        None => Err(throw_error(req, "Error", "No callbacks were registered")),
+        Some(Namespace {
+            mode: Mode::All, ..
+        }) => {
             let name_value = string(req, &name)?;
             let found = callable_checked(req, &name_value);
             name_value.give_up(req);
@@ -429,9 +543,9 @@ fn dispatch(
                 }
             })
         }
-        Some(Mode::Set(functions)) => {
-            if let Some((_, c, _)) = functions.iter().find(|(n, _, _)| *n == name) {
-                Ok(c.clone())
+        Some(namespace) => {
+            if let Some(callable) = namespace.find(&name) {
+                Ok(callable.clone())
             } else {
                 let shown = String::from_utf8_lossy(&name).into_owned();
                 Err(throw_error(
@@ -649,79 +763,6 @@ fn callable_of(
     }
 }
 
-/// The names and callbacks `restrict` registers, pushed onto `adding`
-/// one by one, each callback's value an owner [`callable_of`] took; on
-/// the `Err` those already pushed are the caller's to give up.
-fn collect(req: &mut Request, restrict: Value, adding: &mut Vec<Function>) -> Result<(), Thrown> {
-    if let Some(array) = restrict.as_array().copied() {
-        for (key, value) in &array {
-            let name = match key {
-                Key::Str(s) => s.as_bytes().to_vec(),
-                Key::Int(_) => with_string(req, &value, <[u8]>::to_vec)?,
-            };
-            if name.is_empty() || name.contains(&0) {
-                return Err(arg_value_error(
-                    req,
-                    1,
-                    "be an array containing valid callback names",
-                ));
-            }
-            let (callable, value) = callable_of(req, &value, 1, true)?;
-            adding.push((name, callable, value));
-        }
-    } else {
-        let name = restrict
-            .as_str_bytes()
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
-        if name.is_empty() || name.contains(&0) {
-            return Err(arg_value_error(req, 1, "be a valid callback name"));
-        }
-        let (callable, value) = callable_of(req, &restrict, 1, false)?;
-        adding.push((name, callable, value));
-    }
-    Ok(())
-}
-
-/// `php_dom_xpath_callback_ns_update_method_handler`.
-fn register_into(
-    req: &mut Request,
-    mode: &mut Mode,
-    restrict: Option<Value>,
-) -> Result<(), Thrown> {
-    let restrict = restrict
-        .map(|v| v.deref())
-        .filter(|v| !matches!(v.as_ref(), ValueRef::Null));
-    let Some(restrict) = restrict else {
-        // The set the mode held is let go of with the mode (#2128 is
-        // php's table that outlives it).
-        for (_, _, value) in mode.take_functions() {
-            value.give_up(req);
-        }
-        *mode = Mode::All;
-        return Ok(());
-    };
-    let mut adding = Vec::new();
-    if let Err(thrown) = collect(req, restrict, &mut adding) {
-        for (_, _, value) in adding {
-            value.give_up(req);
-        }
-        return Err(thrown);
-    }
-    let mut functions = mode.take_functions();
-    for (name, callable, value) in adding {
-        if let Some(slot) = functions.iter_mut().find(|(n, _, _)| *n == name) {
-            let old = std::mem::replace(&mut slot.2, value);
-            slot.1 = callable;
-            old.give_up(req);
-        } else {
-            functions.push((name, callable, value));
-        }
-    }
-    *mode = Mode::Set(functions);
-    Ok(())
-}
-
 /// `class DOMXPath`, `@not-serializable`: an evaluator over one
 /// document, its `document` and `registerNodeNamespaces` `@virtual`,
 /// served by [`HANDLERS`].
@@ -929,6 +970,47 @@ impl DOMXPath {
     /// No callback handler "strrev" registered
     /// DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be of type array|string|null, Closure given
     /// ```
+    ///
+    /// The namespace's table is filled as the array is walked, so a
+    /// refused entry leaves the ones before it registered, and a refusal
+    /// lays the namespace down; a call with no argument lets any function
+    /// be called and keeps the table, which a later set calls by name
+    /// again.
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r><a>x</a></r>');
+    /// $x = new DOMXPath($d);
+    /// $x->registerNamespace('php', 'http://php.net/xpath');
+    /// try { $x->registerPhpFunctions(['f' => fn($s) => "f$s", 'g' => 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
+    /// var_dump($x->evaluate('php:functionString("f", //a)'));
+    /// try { $x->evaluate('php:functionString("g", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $y = new DOMXPath($d);
+    /// $y->registerNamespace('php', 'http://php.net/xpath');
+    /// try { $y->registerPhpFunctions('no_such_function'); } catch (TypeError $e) { echo get_class($e), "\n"; }
+    /// try { $y->evaluate('php:functionString("g", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $x->registerPhpFunctions(['up' => fn($s) => "U$s"]);
+    /// $x->registerPhpFunctions();
+    /// var_dump($x->evaluate('php:functionString("strtoupper", //a)'));
+    /// try { $x->evaluate('php:functionString("up", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $x->registerPhpFunctions(['rev' => 'strrev']);
+    /// var_dump($x->evaluate('php:functionString("up", //a)'), $x->evaluate('php:functionString("f", //a)'));
+    /// try { $x->registerPhpFunctions(['' => 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
+    /// try { $x->registerPhpFunctions(['' => 'strlen']); } catch (ValueError $e) { echo get_class($e), "\n"; }
+    /// ```
+    /// ```expect
+    /// TypeError
+    /// string(2) "fx"
+    /// No callback handler "g" registered
+    /// TypeError
+    /// No callback handler "g" registered
+    /// string(1) "X"
+    /// Invalid callback up, function "up" not found or invalid function name
+    /// string(2) "Ux"
+    /// string(2) "fx"
+    /// TypeError
+    /// ValueError
+    /// ```
     #[php(tentative)]
     fn registerPhpFunctions(
         req: &mut Request,
@@ -943,7 +1025,7 @@ impl DOMXPath {
             Union::A(name) => Value::string(name),
             Union::B(array) => Value::array(array),
         });
-        let answered = register_into(req, &mut state.callbacks.php_ns, restrict);
+        let answered = state.callbacks.register_php(req, restrict);
         put(req, this, state);
         answered
     }
