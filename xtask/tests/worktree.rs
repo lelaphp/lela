@@ -836,6 +836,68 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
     assert!(found.contains("this run measured no engine"), "{found}");
 }
 
+/// A run CI's dashboard kept at a `main` commit, fetched by the line the
+/// comparison's skip names, is found as that commit's base run (#2362).
+/// The skip names the fetch before the call that takes a run; a stand-in
+/// `gh` answers the line's download by laying the upload as `gh` extracts
+/// it, the kept runs each under its engine's tree, here a run of
+/// `ext/pcre` under the tree the skip named; the line run as it is
+/// printed lays it in the checkout, and the comparison finds it there.
+#[test]
+fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    if Promise::Tree
+        .or_skip(manifest.pin.source.tree())
+        .unwrap()
+        .is_none()
+    {
+        return;
+    }
+    let root = repository("ci-runs");
+    let unkept = phpt_against_head(&root, "ext/pcre");
+    assert!(unkept.contains("no run of ext/pcre is kept"), "{unkept}");
+    let tree = unkept
+        .split_once("(the engine's tree ")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map_or_else(|| panic!("{unkept}"), |(tree, _)| tree.to_owned());
+    let (fetch, take) = unkept
+        .split_once("fetch the runs CI's dashboard keeps with `")
+        .and_then(|(_, rest)| rest.split_once("`, or take one with `"))
+        .unwrap_or_else(|| panic!("the skip names the fetch before the take: {unkept}"));
+    assert!(take.starts_with("cargo xtask phpt --base "), "{unkept}");
+
+    let upload = Tree::new("worktree-ci-runs-upload").unwrap();
+    write(
+        &upload,
+        &format!("{tree}/ext/pcre.json"),
+        "{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"CI's\", \"verdicts\": {}}\n",
+    );
+    let bin = Tree::new("worktree-ci-runs-gh").unwrap();
+    write(
+        &bin,
+        "gh",
+        &format!(
+            "#!/bin/sh\n[ \"$1 $2 $3 $4 $5\" = 'run download -n phpt-runs -D' ] || exit 2\ncp -R '{}'/. \"$6\"/\n",
+            upload.display()
+        ),
+    );
+    executable(&bin.join("gh"));
+    let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
+    let fetched = Command::new("sh")
+        .args(["-c", fetch])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(fetched.status.success(), "{fetch}: {fetched:?}");
+
+    let found = phpt_against_head(&root, "ext/pcre");
+    assert!(!found.contains("no run of ext/pcre is kept"), "{found}");
+    assert!(found.contains("this run measured no engine"), "{found}");
+}
+
 fn executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();

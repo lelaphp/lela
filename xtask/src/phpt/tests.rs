@@ -1755,19 +1755,26 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
 /// #1091), so the second waits for the first, its batch's, and the third,
 /// in a batch of its own, is done before the first is past its limit; on
 /// a pool of one, the negative control, the third starts after it too.
-/// The limit runs from the spawn and the span from the program's first
-/// line, so the line between the two is drawn half a second early. The
-/// verdicts are the same either way: the first fails naming the limit.
+/// The verdicts are the same either way: the first fails naming the limit.
+///
+/// The limit runs from the spawn and the spans from each program's first
+/// line, so a php's start-up stands on both sides of the line between
+/// "done before the first is past its limit" and "after it", and it took
+/// more than 1.7 s at a load average of 50 to 108 (#2293). The line is
+/// drawn at half a limit of ten seconds past the first's first line, so
+/// the start-ups of two programs may differ by five seconds, and the
+/// third's 300 ms run may start that late, before load crosses it
+/// (#2315); a limit of three and a line half a second early left 0.5 s.
 #[test]
 fn a_test_past_the_limit_holds_up_only_its_batch_and_what_it_conflicts_with() {
-    const LIMIT: u64 = 3;
+    const LIMIT: u64 = 10;
     if oracle().is_none() {
         return;
     }
     let tests = ["a-never.phpt", "b-quick.phpt", "c-quick.phpt"];
     let (tree, subset) = fixture_subset("past-limit");
     #[allow(clippy::cast_precision_loss)]
-    let past = |span: &[(f64, f64)]| span[0].0 + LIMIT as f64 - 0.5;
+    let past = |span: &[(f64, f64)]| span[0].0 + LIMIT as f64 / 2.0;
     let pooled = run_on(&subset, 3, LIMIT);
     let span = spans(&tree, &tests);
     assert!(
@@ -1805,6 +1812,11 @@ fn stands(pid: i32) -> bool {
 /// program's process group, which the runner kills whole, so neither
 /// outlives its run. Each program writes the child's pid beside itself,
 /// which is how the test learns it; the child ran, which is the control.
+/// A program that exits pays none of its limit, so the first has thirty
+/// seconds of room; the second's limit is ten, past which its `sleep(60)`
+/// always runs and before which its php has started and written the pid
+/// under any load (#2315), where two seconds raced a start-up that took
+/// more than 1.7 s at a load average of 50 to 108 (#2293).
 #[test]
 fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
     if oracle().is_none() {
@@ -1818,12 +1830,12 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
              var_dump(posix_kill($pid, 0));\n{then}\n--EXPECT--\nbool(true)\n"
         )
     };
-    for (name, then, went) in [
-        ("exits", "", Judgement::Pass),
-        ("past-limit", "sleep(60);", Judgement::Fail),
+    for (name, then, limit, went) in [
+        ("exits", "", 30, Judgement::Pass),
+        ("past-limit", "sleep(60);", 10, Judgement::Fail),
     ] {
         let (root, subset) = rooted(name, &leaves(then));
-        let tally = run_on(&subset, 1, 2);
+        let tally = run_on(&subset, 1, limit);
         assert_eq!(only(&tally).0, went, "{name}: {tally:#?}");
         let pid: i32 = fs::read_to_string(root.join("ext/fixture/tests/child.pid"))
             .unwrap()
@@ -2332,4 +2344,68 @@ fn a_subset_a_full_volume_kept_from_running_is_a_skip_and_not_a_refusal() {
     let reading = super::refused(&snapshot, &manifest, "ext/ctype", &other).unwrap();
     assert_eq!(reading.status, Status::Fail);
     assert_eq!(reading.message, "the server did not answer");
+}
+
+/// The dashboard's oracle job, the one CI job that runs the phpt lane on
+/// `main`, uploads the runs it keeps beside its store (#2362): one upload
+/// is the store's log, `oracle`, which `publish` folds, and one is
+/// [`against::RUNS`] under [`against::UPLOAD`], the name the fetch line
+/// downloads, which `publish`'s download of the stores does not take. The
+/// job is the lines from its key to the next job's, each upload the
+/// lines from its `uses` to the next step.
+#[test]
+fn the_oracle_job_uploads_the_kept_runs_beside_its_store() {
+    let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    let job = |name: &str| -> String {
+        let key = |line: &str| {
+            line.strip_prefix("  ").is_some_and(|rest| {
+                rest.ends_with(':') && rest.starts_with(|c: char| c.is_ascii_lowercase())
+            })
+        };
+        let job: Vec<&str> = text
+            .lines()
+            .skip_while(|line| *line != format!("  {name}:"))
+            .enumerate()
+            .take_while(|(n, line)| *n == 0 || !key(line))
+            .map(|(_, line)| line)
+            .collect();
+        assert!(!job.is_empty(), "dashboard.yml has no {name} job");
+        job.join("\n") + "\n"
+    };
+    let oracle = &job("oracle");
+    let uploads: Vec<&str> = oracle
+        .match_indices("- uses: actions/upload-artifact")
+        .map(|(at, _)| {
+            let step = &oracle[at..];
+            &step[..step[1..]
+                .find("\n      - ")
+                .map_or(step.len(), |end| end + 1)]
+        })
+        .collect();
+    let named = |name: &str| {
+        uploads
+            .iter()
+            .copied()
+            .find(|step| step.contains(&format!("name: {name}\n")))
+            .unwrap_or_else(|| panic!("the oracle job uploads no {name}: {oracle}"))
+    };
+    assert!(
+        named("oracle").contains("path: target/harness/log/\n"),
+        "{}",
+        named("oracle")
+    );
+    let runs = named(against::UPLOAD);
+    assert!(
+        runs.contains(&format!("path: {}/\n", against::RUNS)),
+        "the upload is the kept runs: {runs}"
+    );
+    let publish = job("publish");
+    let stores = publish
+        .lines()
+        .find(|line| line.trim_start().starts_with("pattern:"))
+        .expect("publish downloads the stores by a pattern");
+    assert!(
+        stores.contains("oracle") && !stores.contains(against::UPLOAD),
+        "publish folds the store and not the runs: {stores}"
+    );
 }
