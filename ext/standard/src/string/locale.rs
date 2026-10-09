@@ -174,7 +174,10 @@ impl Locale {
 
 /// The name `setlocale(category, "")` reads for one category off the
 /// request's environment: `LC_ALL`, then the category's variable, then
-/// `LANG`, then `C`.
+/// `LANG`, then `C`. A name the C library refuses fails the call, as php
+/// built without libintl fails it; the pinned oracle's libintl falls back
+/// category by category instead (`trace:setlocale-libintl-fallback`,
+/// #1126), which `tests/locale.rs` holds the engine's side of.
 fn from_environment(req: &Request, category: usize) -> Vec<u8> {
     let variable = CATEGORIES
         .iter()
