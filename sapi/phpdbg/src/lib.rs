@@ -27,6 +27,7 @@ mod list;
 mod natives;
 mod out;
 mod prompt;
+mod read;
 mod session;
 mod shown;
 mod watch;

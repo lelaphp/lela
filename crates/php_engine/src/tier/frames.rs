@@ -1,50 +1,26 @@
-//! The frame reads a tier makes between the steps it drives
-//! (`jit-design.md` §2.4, revision 8; design §5.8, revision 51): where a
-//! frame stands and what it serves, the frame below it, the serving's
-//! entry frame, and the throwable it has pending. Each is a copy taken
-//! when asked, so a tier holds no borrow of the request across the next
-//! [`step`](super::step), and none names a thing the engine does not
-//! already hold for a diagnostic or a backtrace.
+//! The mechanism a tier drives between its steps (`jit-design.md`
+//! §2.4, revision 8; design §5.8, revision 51), and what it writes: the
+//! serving's entry frame and the frames below it on the stack a step
+//! hands out, whether a frame takes what is pending, and the code a
+//! tier has the engine serve on its own account. What a frame is, its
+//! function, file, line, op array and variables, a tier reads through
+//! the native face ([`frame`]), as an extension reads it (#1911).
+
+use std::os::fd::OwnedFd;
 
 use php_heap::FrameRef;
 use php_unit::{CacheSlot, Opcode};
 
-use crate::api::request::{Raised, Request};
-use crate::api::values::Value;
+use crate::api::request::{FrameView, Raised, Request};
 use crate::exec;
 
-/// Where a frame stands: the file and line of the opline the loop
-/// dispatches next, its index in the op array, its opcode, and the lines
-/// the op array spans.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Position {
-    pub file: Vec<u8>,
-    pub line: u32,
-    pub opline: u32,
-    pub opcode: Opcode,
-    /// `op_array->line_start` and `line_end`.
-    pub lines: (u32, u32),
-    /// `op_array->last`, how many oplines the op array holds.
-    pub oplines: u32,
-    /// The first opline past the `RECV*` oplines, `num_args` and one more
-    /// for a variadic: where a function's body begins.
-    pub body: u32,
-}
-
-/// What a frame serves: a function or a method by the name it was
-/// declared under, with the class it was declared in, or the code of a
-/// file or an `eval`, which is no function.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Serves {
-    /// A file's or an `eval`'s own code, php's `op_array->function_name`
-    /// being `NULL`.
-    Code,
-    /// A function, a closure or a method: `function_name`, and `scope`'s
-    /// name where it has one.
-    Function {
-        name: Vec<u8>,
-        class: Option<Vec<u8>>,
-    },
+/// The frame a safepoint or a step handed out, read through the native
+/// face as an extension reads one ([`FrameView`]); none for a position
+/// no frame stands at.
+#[must_use]
+pub fn frame(req: &Request, frame: FrameRef) -> Option<FrameView<'_>> {
+    req.vm().at(frame)?;
+    Some(req.frame_view(frame))
 }
 
 /// The entry frame of the innermost serving: the frame whose return
@@ -53,14 +29,6 @@ pub enum Serves {
 #[must_use]
 pub fn entry(req: &Request) -> FrameRef {
     req.stack().entry()
-}
-
-/// `EX(prev_execute_data)` where it is user code: the frame an opline of
-/// which pushed `frame`, or which the loop stood in when a native or the
-/// engine served it; none for the bottom of the chain.
-#[must_use]
-pub fn caller(req: &Request, frame: FrameRef) -> Option<FrameRef> {
-    req.vm().at(frame).and_then(|state| state.caller.frame())
 }
 
 /// The next user frame `EX(prev_execute_data)`'s chain reaches from
@@ -75,79 +43,6 @@ pub fn caller(req: &Request, frame: FrameRef) -> Option<FrameRef> {
 pub fn below(req: &Request, frame: FrameRef) -> Option<FrameRef> {
     let under = FrameRef(frame.0.checked_sub(1)?);
     req.vm().at(under).map(|_| under)
-}
-
-/// Where `frame` stands; none for a frame that is not standing.
-#[must_use]
-pub fn position(req: &Request, frame: FrameRef) -> Option<Position> {
-    let state = req.vm().at(frame)?;
-    let code = exec::body_of(&state.unit, state.body)?;
-    let op = exec::opline_at(code, state.opline)?;
-    Some(Position {
-        file: code.filename.0.to_vec(),
-        line: op.lineno,
-        opline: state.opline,
-        opcode: op.opcode,
-        lines: (code.line_start, code.line_end),
-        oplines: u32::try_from(code.oplines.len()).unwrap_or(u32::MAX),
-        body: code.safepoints.first().map_or(0, |at| at.0),
-    })
-}
-
-/// Each opline of the op array `frame` serves, its opcode and its line,
-/// in order: what phpdbg's `until`, `next`, `finish` and `leave` read to
-/// know where a seek ends.
-#[must_use]
-pub fn oplines(req: &Request, frame: FrameRef) -> Vec<(Opcode, u32)> {
-    req.vm()
-        .serving(frame)
-        .and_then(|serving| {
-            serving.code().map(|code| {
-                code.oplines
-                    .iter()
-                    .map(|op| (op.opcode, op.lineno))
-                    .collect()
-            })
-        })
-        .unwrap_or_default()
-}
-
-/// What `frame` serves; a file's code for a frame that is not standing.
-#[must_use]
-pub fn serves(req: &Request, frame: FrameRef) -> Serves {
-    let Some(function) = req.vm().at(frame).and_then(|state| state.function) else {
-        return Serves::Code;
-    };
-    let class = req
-        .frame_scope(frame)
-        .map(|class| req.class_name(class).into_bytes());
-    Serves::Function {
-        name: req.declared_name(function).into_bytes(),
-        class,
-    }
-}
-
-/// What stands pending on the request where a tier stops for it: a
-/// throwable, which phpdbg reads its class, `file`, `line` and
-/// `message` off (`phpdbg_prompt.c:1690-1696`), or the graceful exit a
-/// destroyed fiber is resumed with, which php makes an object of class
-/// `GracefulExit` with none of them and this engine makes no object.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Thrown {
-    /// The throwable, a view.
-    Object(Value),
-    GracefulExit,
-}
-
-/// What stands pending on the request; none while nothing is, or an
-/// exit is what stands.
-#[must_use]
-pub fn pending(req: &Request) -> Option<Thrown> {
-    if req.raised() == Some(Raised::GracefulExit) {
-        return Some(Thrown::GracefulExit);
-    }
-    req.pending()
-        .map(|object| Thrown::Object(object.as_value()))
 }
 
 /// Whether `frame` takes the throwable pending on the request, as
@@ -212,13 +107,6 @@ pub fn exit(req: &mut Request) {
         req.release(object.as_value());
     }
     req.throw_unwind_exit();
-}
-
-/// Whether `exit`'s unwind exit is what the request is unwinding, or a
-/// fatal is leaving: nothing a tier stops at.
-#[must_use]
-pub fn exiting(req: &Request) -> bool {
-    req.is_pending() && req.pending().is_none() && req.raised() != Some(Raised::GracefulExit)
 }
 
 /// What stands pending on the request, set aside while a tier serves
@@ -310,12 +198,6 @@ pub enum Argument {
     Str(Vec<u8>),
 }
 
-/// Whether the request's function table holds a function of this name.
-#[must_use]
-pub fn function_exists(req: &Request, name: &[u8]) -> bool {
-    crate::api::call::lookup_function(req, name).is_some()
-}
-
 /// How a call a tier made ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Called {
@@ -346,6 +228,24 @@ pub fn call(req: &mut Request, under: Under, name: &[u8], arguments: &[Argument]
     req.call_by_name(under, name, arguments)
 }
 
+/// `SG(request_info).argv` replaced in the request standing, and `$argv`,
+/// `$argc` and a made `$_SERVER`'s rebuilt from it, as phpdbg's `run`
+/// with arguments does before it executes (`php_build_argv`,
+/// `Z/sapi/phpdbg/phpdbg_prompt.c:830-838`); a write that meets the
+/// memory limit leaves what it had not reached.
+pub fn set_argv(req: &mut Request, argv: Vec<Vec<u8>>) {
+    req.build_argv(argv).ok();
+}
+
+/// `stdin` the program's stdin in the request standing, `STDIN`,
+/// `STDOUT` and `STDERR` registered again over it, as phpdbg's `run
+/// <file` does before it executes (`phpdbg_register_file_handles`,
+/// `Z/sapi/phpdbg/phpdbg_prompt.c:790-796`); a host that asked for no
+/// handles has nothing replaced.
+pub fn set_stdin(req: &mut Request, stdin: OwnedFd) {
+    req.reregister_file_handles(stdin).ok();
+}
+
 #[cfg(test)]
 mod tests {
     //! The face as a debugging host drives it: a tier that takes the
@@ -357,28 +257,27 @@ mod tests {
 
     use php_heap::FrameRef;
 
-    use crate::api::request::Request;
+    use crate::api::request::{Raised, Request};
     use crate::engine::Engine;
     use crate::test::Capture;
-    use crate::tier::{Flow, Site, Stepped, Thrown, Tier};
+    use crate::tier::{Flow, Site, Stepped, Tier};
 
-    /// The class of what stands pending, and the `file` and `line` a
-    /// throwable carries, as phpdbg reads them off it.
-    fn described(req: &Request, thrown: Thrown) -> (String, String, i64) {
-        let Thrown::Object(object) = thrown else {
-            return (String::from("GracefulExit"), String::new(), 0);
+    /// The class of the throwable pending, and the `file` and `line` it
+    /// carries, read through the native face as phpdbg reads them off it.
+    fn described(req: &Request) -> Option<(String, String, i64)> {
+        let Some(Raised::Throwable(object)) = req.raised() else {
+            return None;
         };
-        let prop = |name: &[u8]| object.as_object().and_then(|o| o.prop(req, name));
-        let class = crate::tier::class_of(req, object).unwrap_or_default();
+        let prop = |name: &[u8]| object.prop(req, name);
         let file = prop(b"file")
             .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
             .unwrap_or_default();
         let line = prop(b"line").and_then(|v| v.as_int()).unwrap_or(0);
-        (
-            String::from_utf8_lossy(&class).into_owned(),
+        Some((
+            req.class_name(object.class()),
             String::from_utf8_lossy(&file).into_owned(),
             line,
-        )
+        ))
     }
 
     thread_local! {
@@ -396,14 +295,13 @@ mod tests {
             let mut at = frame;
             let mut unwinding = false;
             loop {
-                let Some(position) = super::position(req, at) else {
+                let Some((line, opcode)) = super::frame(req, at).map(|v| (v.line(), v.opcode()))
+                else {
                     return Flow::Resume(at);
                 };
-                let what = match super::pending(req) {
-                    Some(thrown) if unwinding => {
-                        format!("{} threw {}", position.line, described(req, thrown).0)
-                    }
-                    _ => format!("{} {}", position.line, position.opcode.name()),
+                let what = match described(req) {
+                    Some((class, _, _)) if unwinding => format!("{line} threw {class}"),
+                    _ => format!("{line} {opcode}"),
                 };
                 SEEN.with_borrow_mut(|seen| seen.push(what));
                 let stepped = if unwinding {
@@ -411,7 +309,7 @@ mod tests {
                         return Flow::Resume(at);
                     }
                     crate::tier::unwind(req, at)
-                } else if at == super::entry(req) && position.opcode == php_unit::Opcode::Return {
+                } else if at == super::entry(req) && opcode == "ZEND_RETURN" {
                     return Flow::Resume(at);
                 } else {
                     crate::tier::step(req, at)
@@ -503,10 +401,8 @@ mod tests {
             }
             for code in CODE.with_borrow_mut(std::mem::take) {
                 let evaluated = super::evaluate_code(req, b"phpdbginit code", code);
-                let pending = super::pending(req).map(|thrown| {
-                    let (class, file, line) = described(req, thrown);
-                    format!(" {class} in {file}:{line}")
-                });
+                let pending =
+                    described(req).map(|(class, file, line)| format!(" {class} in {file}:{line}"));
                 SEEN.with_borrow_mut(|seen| {
                     seen.push(format!("{evaluated:?}{}", pending.unwrap_or_default()));
                 });

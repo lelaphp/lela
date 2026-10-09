@@ -4,7 +4,8 @@
 //! the frame a throw left from; the uncaught throwable rendered as
 //! `zend_exception_error` renders it; and what the entry frame of the
 //! innermost serving returned. The pending slot and the returned value
-//! stay on the request, since the tier face and the loader read them.
+//! stay on the request, since the tier face, the native face and the
+//! loader read them.
 
 use php_heap::Fatal;
 

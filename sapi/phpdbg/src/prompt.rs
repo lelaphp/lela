@@ -8,12 +8,14 @@
 
 use std::collections::BTreeSet;
 
-use php_sapi::tier::{self, Argument, FrameRef, Opcode, Request};
+use php_ext::request::Opcode;
+use php_sapi::tier::{self, Argument, FrameRef, Request};
 
 use crate::bp::{Kind, OpArray, Resolution};
 use crate::cmd::{self, Command, Param};
 use crate::input::{self, Line};
 use crate::out;
+use crate::read;
 use crate::session::{Context, Execution, Origin, Seek, SeekKind, Session, Stop};
 
 /// Where the prompt stands.
@@ -1279,7 +1281,7 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
     // An exit or a fatal served where nothing was executing bailed out of
     // the `phpdbg_execute_ex` that `zend_execute` entered.
     if under == tier::Under::Nothing
-        && (tier::exiting(req) || evaluated == tier::Evaluated::BailedOut)
+        && (read::exiting(req) || evaluated == tier::Evaluated::BailedOut)
     {
         bailed_out(s);
     }
@@ -1308,8 +1310,8 @@ fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
 /// The oplines of the frame the prompt stands in, and the frame.
 fn seek_over(here: &mut Here<'_>, keep: impl Fn(Opcode, u32, u32) -> bool) -> Option<Seek> {
     let (req, frame) = here.standing()?;
-    let position = tier::position(req, frame)?;
-    let oplines: BTreeSet<u32> = tier::oplines(req, frame)
+    let position = read::position(req, frame)?;
+    let oplines: BTreeSet<u32> = read::oplines(req, frame)
         .into_iter()
         .enumerate()
         .filter(|(_, (opcode, line))| keep(*opcode, *line, position.line))
@@ -1370,7 +1372,7 @@ fn seek_to_end(s: &mut Session, here: &mut Here<'_>, kind: SeekKind) -> bool {
     };
     let at = here
         .standing()
-        .and_then(|(req, frame)| tier::position(req, frame))
+        .and_then(|(req, frame)| read::position(req, frame))
         .map_or(0, |position| position.opline);
     if seek.oplines.contains(&at) {
         s.seek = None;
@@ -1452,7 +1454,7 @@ fn print_exec(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     compiled_in_init(s);
     let entry = tier::entry(req);
     let main = main_frame(req, entry);
-    if let Some(code) = tier::frame_code(req, main) {
+    if let Some(code) = read::frame_code(req, main) {
         out::notice(format!("Context {} ({} ops)", lossy(&exec), code.ops.len()).as_bytes());
         out::dump(&code.dump);
     }
@@ -1616,7 +1618,7 @@ fn print_opline(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 /// `print opline` asks for it and where the loop reaches it stepping
 /// with quietness off.
 pub fn print_opline_ex(req: &Request, frame: FrameRef) {
-    if let (Some(code), Some(position)) = (tier::frame_code(req, frame), tier::position(req, frame))
+    if let (Some(code), Some(position)) = (read::frame_code(req, frame), read::position(req, frame))
         && let Some(line) = opline_line(&code.dump, position.opline)
     {
         out::dump(&[line, b"\n"].concat());
@@ -1635,15 +1637,15 @@ fn print_class(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
     };
-    let class = here.request().and_then(|req| tier::class_named(req, name));
+    let class = here.request().and_then(|req| read::class_named(req, name));
     let Some(class) = class else {
         out::error(format!("The class {} could not be found", lossy(name)).as_bytes());
         return Ret::Success;
     };
     let shape = match class.shape {
-        tier::Shape::Interface => "Interface",
-        tier::Shape::AbstractClass => "Abstract Class",
-        tier::Shape::Class => "Class",
+        read::Shape::Interface => "Interface",
+        read::Shape::AbstractClass => "Abstract Class",
+        read::Shape::Class => "Class",
     };
     out::notice(
         format!(
@@ -1661,7 +1663,7 @@ fn print_class(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 }
 
 /// `phpdbg_print_function_helper`.
-fn print_function(code: &tier::Code) {
+fn print_function(code: &read::Code) {
     if code.user {
         out::dump(&code.dump);
         return;
@@ -1678,11 +1680,11 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Method { class, name }) = params.first() else {
         return Ret::Failure;
     };
-    let found = here.request().map_or(tier::Named::NoClass, |req| {
-        tier::method_named(req, class, name)
+    let found = here.request().map_or(read::Named::NoClass, |req| {
+        read::method_named(req, class, name)
     });
     match found {
-        tier::Named::Code(code) => {
+        read::Named::Code(code) => {
             out::notice(
                 format!(
                     "{} Method {} ({} ops)",
@@ -1694,7 +1696,7 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             );
             print_function(&code);
         }
-        tier::Named::NoFunction => out::error(
+        read::Named::NoFunction => out::error(
             format!(
                 "The method {}::{} could not be found",
                 lossy(class),
@@ -1702,7 +1704,7 @@ fn print_method(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             )
             .as_bytes(),
         ),
-        tier::Named::NoClass => {
+        read::Named::NoClass => {
             out::error(format!("The class {} could not be found", lossy(class)).as_bytes());
         }
     }
@@ -1714,11 +1716,11 @@ fn print_func(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let Some(Param::Str(name)) = params.first() else {
         return Ret::Failure;
     };
-    let found = here.request().map_or(tier::Named::NoFunction, |req| {
-        tier::function_named(req, name)
+    let found = here.request().map_or(read::Named::NoFunction, |req| {
+        read::function_named(req, name)
     });
     match found {
-        tier::Named::Code(code) => {
+        read::Named::Code(code) => {
             out::notice(
                 format!(
                     "{} {} {} ({} ops)",
@@ -1735,7 +1737,7 @@ fn print_func(_: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
             );
             print_function(&code);
         }
-        tier::Named::NoFunction | tier::Named::NoClass => {
+        read::Named::NoFunction | read::Named::NoClass => {
             out::error(format!("The function {} could not be found", lossy(name)).as_bytes());
         }
     }
@@ -1749,7 +1751,7 @@ fn print_stack(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::error(b"Not Executing!");
         return Ret::Success;
     };
-    let Some(code) = tier::frame_code(req, frame) else {
+    let Some(code) = read::frame_code(req, frame) else {
         return Ret::Success;
     };
     let title = match (&code.class, code.name.is_empty()) {
@@ -1790,7 +1792,7 @@ fn breakpoint(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let current = here
         .standing()
         .filter(|_| executing)
-        .and_then(|(req, frame)| tier::position(req, frame))
+        .and_then(|(req, frame)| read::position(req, frame))
         .map(|position| (position.file, position.line));
     match params.first() {
         None => match (&s.exec, current) {
@@ -1925,8 +1927,8 @@ fn executing_code(here: &mut Here<'_>, name: &[u8]) -> Option<u32> {
     let (req, frame) = here.standing()?;
     let mut at = Some(frame);
     while let Some(frame) = at {
-        if tier::serves(req, frame) == tier::Serves::Code
-            && let Some(position) = tier::position(req, frame)
+        if read::serves(req, frame) == read::Serves::Code
+            && let Some(position) = read::position(req, frame)
             && position.file == name
         {
             return Some(position.oplines);
@@ -1947,13 +1949,13 @@ fn named_opline(
 ) -> Option<Resolution> {
     let found = match here.request() {
         Some(req) => match class {
-            Some(class) => tier::method_named(req, class, name),
-            None => tier::function_named(req, name),
+            Some(class) => read::method_named(req, class, name),
+            None => read::function_named(req, name),
         },
-        None => tier::Named::NoClass,
+        None => read::Named::NoClass,
     };
     let message = match found {
-        tier::Named::Code(code) if !code.user => match class {
+        read::Named::Code(code) if !code.user => match class {
             Some(class) => format!(
                 "{}::{} is not a user defined method, no oplines exist",
                 lossy(class),
@@ -1964,7 +1966,7 @@ fn named_opline(
                 lossy(name)
             ),
         },
-        tier::Named::Code(code) if code.ops.len() <= opline as usize => match class {
+        read::Named::Code(code) if code.ops.len() <= opline as usize => match class {
             Some(class) => format!(
                 "There are only {} oplines in method {}::{} (breaking at opline {opline} impossible)",
                 code.ops.len(),
@@ -1977,7 +1979,7 @@ fn named_opline(
                 lossy(name)
             ),
         },
-        tier::Named::Code(code) => {
+        read::Named::Code(code) => {
             let op = OpArray {
                 file: &code.file,
                 function: Some(&code.name),
@@ -1985,12 +1987,12 @@ fn named_opline(
             };
             return Some(Resolution::At(crate::bp::address(op, opline)));
         }
-        tier::Named::NoFunction if class.is_some() => format!(
+        read::Named::NoFunction if class.is_some() => format!(
             "Method {} doesn't exist in class {}",
             lossy(name),
             class.map(|c| lossy(c)).unwrap_or_default()
         ),
-        tier::Named::NoFunction | tier::Named::NoClass => return Some(Resolution::Pending),
+        read::Named::NoFunction | read::Named::NoClass => return Some(Resolution::Pending),
     };
     out::error(message.as_bytes());
     None
@@ -2193,7 +2195,7 @@ fn frame(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         Some(call) => out::notice(format!("{switched}: {call}").as_bytes()),
         None => out::notice(switched.as_bytes()),
     }
-    if let Some(position) = tier::position(req, target) {
+    if let Some(position) = read::position(req, target) {
         crate::list::code(s, &position.file, position.line);
     }
     Ret::Success
@@ -2204,7 +2206,7 @@ fn list(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
     let executing = here.executing();
     let current = here
         .standing()
-        .and_then(|(req, frame)| tier::position(req, frame));
+        .and_then(|(req, frame)| read::position(req, frame));
     let (file, line) = if let (Some(position), true) = (&current, executing) {
         (position.file.clone(), position.line)
     } else {
@@ -2283,7 +2285,7 @@ fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let main = if here.compiled() {
         here.request().and_then(|req| {
             let entry = tier::entry(req);
-            tier::frame_code(req, main_frame(req, entry))
+            read::frame_code(req, main_frame(req, entry))
         })
     } else {
         None
@@ -2303,7 +2305,7 @@ fn info_overview(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         out::writeln(format!("VM Return  {}", s.vmret).as_bytes());
     }
     let [classes, functions, constants, included] =
-        here.request().map_or([0; 4], |req| tier::table_sizes(req));
+        here.request().map_or([0; 4], |req| read::table_sizes(req));
     out::writeln(format!("Classes    {classes}").as_bytes());
     out::writeln(format!("Functions  {functions}").as_bytes());
     out::writeln(format!("Constants  {constants}").as_bytes());
@@ -2320,7 +2322,7 @@ fn clean(s: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     }
     out::out(b"Cleaning Execution Environment\n");
     let [classes, functions, constants, includes] =
-        here.request().map_or([0; 4], |req| tier::table_sizes(req));
+        here.request().map_or([0; 4], |req| read::table_sizes(req));
     out::writeln(format!("Classes    {classes}").as_bytes());
     out::writeln(format!("Functions  {functions}").as_bytes());
     out::writeln(format!("Constants  {constants}").as_bytes());
@@ -2680,7 +2682,7 @@ fn register(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
         );
         return Ret::Success;
     };
-    if tier::function_exists(req, &lowered) {
+    if php_ext::call::lookup_function(req, &lowered).is_some() {
         out::notice(format!("Registered {}", lossy(&lowered)).as_bytes());
         s.registered.push(lowered);
     } else {

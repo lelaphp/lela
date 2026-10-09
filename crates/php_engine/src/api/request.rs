@@ -29,7 +29,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, PhpObject, PhpRef, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{RequestDescription, Shared};
-use crate::exec::{self, TableId, Vm};
+use crate::exec::{self, Vm};
 pub use crate::open_basedir::{HostPath, Refused};
 use crate::output::Output;
 pub use crate::virtual_cwd::Resolve;

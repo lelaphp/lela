@@ -510,6 +510,33 @@ fn info_writes_the_execution_context_overview() {
     );
 }
 
+/// `clean` counts `EG(class_table)`'s keys: an alias's among them, the
+/// engine's and `class_alias()`'s, and the iterator wrapper php never
+/// adds not: what `get_declared_classes()`, `get_declared_interfaces()`
+/// and `get_declared_traits()` list together, read through the native
+/// face's linked tables (#1911).
+#[test]
+fn clean_counts_the_class_tables_keys() {
+    let (out, _) = debugged(
+        "clean-classes",
+        "<?php\nclass A {}\ninterface I {}\ntrait T {}\nclass_alias('A', 'B');\nclass_alias('A', 'C');\necho count(get_declared_classes()) + count(get_declared_interfaces()) + count(get_declared_traits()), \"\\n\";\necho 1;\n",
+        "b 8\nr\nclean\ny\nq\n",
+    );
+    let listed = out
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("prompt> ")
+                .filter(|rest| rest.parse::<u32>().is_ok())
+        })
+        .map(str::to_owned);
+    let counted = out
+        .lines()
+        .find_map(|line| line.strip_prefix("Classes    "))
+        .map(str::to_owned);
+    assert!(listed.is_some(), "{out}");
+    assert_eq!(listed, counted, "{out}");
+}
+
 /// What the binary wrote on stdout and stderr, and its status, for
 /// `flags` over a program of `source`, with `init` as the file `-i`
 /// names where there is one and `stdin` on its stdin: killed after ten

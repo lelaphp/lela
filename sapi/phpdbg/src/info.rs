@@ -2,11 +2,12 @@
 //! (`phpdbg_frame.c`): what the request holds, as phpdbg lists it, and
 //! the values in the short and flat forms phpdbg prints them in.
 
-use php_sapi::tier::{self, FrameRef, Request};
+use php_sapi::tier::{FrameRef, Request};
 
 use crate::cmd::Param;
 use crate::out;
 use crate::prompt::{Here, Ret};
+use crate::read;
 use crate::session::Session;
 use crate::shown::{self, Key, Shown, TraceRow};
 
@@ -24,7 +25,7 @@ pub fn breaks(s: &mut Session, _: &mut Here<'_>, _: &[Param]) -> Ret {
 pub fn files(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let files = here
         .request()
-        .map_or_else(Vec::new, |req| tier::included_files(req));
+        .map_or_else(Vec::new, |req| req.included_files());
     out::notice(format!("Included files: {}", files.len()).as_bytes());
     for file in files {
         out::writeln(format!("File: {}", lossy(&file)).as_bytes());
@@ -33,19 +34,17 @@ pub fn files(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 }
 
 /// `phpdbg_print_class_name`'s type word.
-fn class_word(shape: tier::Shape) -> &'static str {
+fn class_word(shape: read::Shape) -> &'static str {
     match shape {
-        tier::Shape::Interface => "Interface",
-        tier::Shape::AbstractClass => "Abstract Class",
-        tier::Shape::Class => "Class",
+        read::Shape::Interface => "Interface",
+        read::Shape::AbstractClass => "Abstract Class",
+        read::Shape::Class => "Class",
     }
 }
 
 /// `PHPDBG_INFO(classes)`.
 pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
-    let classes = here
-        .request()
-        .map_or_else(Vec::new, |req| tier::user_classes(req));
+    let classes = here.request().map_or_else(Vec::new, read::user_classes);
     out::notice(format!("User Classes ({})", classes.len()).as_bytes());
     for class in classes {
         out::writeln(
@@ -77,7 +76,7 @@ pub fn classes(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 pub fn funcs(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     let functions = here
         .request()
-        .map_or_else(Vec::new, |req| tier::user_functions(req));
+        .map_or_else(Vec::new, |req| read::user_functions(req));
     out::notice(format!("User Functions ({})", functions.len()).as_bytes());
     for function in functions {
         out::write(format!("|-------- {}", lossy(&function.name)).as_bytes());
@@ -90,7 +89,7 @@ pub fn funcs(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
 
 /// `PHPDBG_INFO(error)`.
 pub fn error(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
-    match here.request().and_then(|req| tier::last_error(req)) {
+    match here.request().and_then(read::last_error) {
         Some((message, file, line)) => out::writeln(
             format!(
                 "Last error: {} at {} line {line}",
@@ -164,8 +163,8 @@ pub fn vars(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
         return Ret::Success;
     };
     let rows = shown::variables(req, frame);
-    let title = match tier::serves(req, frame) {
-        tier::Serves::Function {
+    let title = match read::serves(req, frame) {
+        read::Serves::Function {
             name,
             class: Some(class),
         } => format!(
@@ -174,11 +173,11 @@ pub fn vars(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             lossy(&name),
             rows.len()
         ),
-        tier::Serves::Function { name, class: None } => {
+        read::Serves::Function { name, class: None } => {
             format!("Variables in {}() ({})", lossy(&name), rows.len())
         }
-        tier::Serves::Code => {
-            let file = tier::position(req, frame)
+        read::Serves::Code => {
+            let file = read::position(req, frame)
                 .map(|p| p.file)
                 .unwrap_or_default();
             format!("Variables in {} ({})", lossy(&file), rows.len())
@@ -234,8 +233,8 @@ pub fn literal(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
     };
     let literals = shown::literals(req, frame);
     let count = literals.len().saturating_sub(1);
-    let title = match tier::serves(req, frame) {
-        tier::Serves::Function {
+    let title = match read::serves(req, frame) {
+        read::Serves::Function {
             name,
             class: Some(class),
         } => format!(
@@ -243,11 +242,11 @@ pub fn literal(_: &mut Session, here: &mut Here<'_>, _: &[Param]) -> Ret {
             lossy(&class),
             lossy(&name)
         ),
-        tier::Serves::Function { name, class: None } => {
+        read::Serves::Function { name, class: None } => {
             format!("Literal Constants in {}() ({count})", lossy(&name))
         }
-        tier::Serves::Code => {
-            let file = tier::position(req, frame)
+        read::Serves::Code => {
+            let file = read::position(req, frame)
                 .map(|p| p.file)
                 .unwrap_or_default();
             format!("Literal Constants in {} ({count})", lossy(&file))
@@ -430,36 +429,16 @@ fn trace_from(req: &mut Request, above: u32, limit: usize) -> Vec<TraceRow> {
 /// file's own code, whose `function_name` php's `smart_str_append`
 /// faults on, which `phpdbg_try_access` catches.
 pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<String> {
-    let tier::Serves::Function { name, class } = tier::serves(req, frame) else {
+    let read::Serves::Function { name, class } = read::serves(req, frame) else {
         return None;
     };
-    let position = tier::position(req, frame)?;
+    let position = read::position(req, frame)?;
     let args = trace_from(req, above, 1)
         .into_iter()
         .next()
         .map(|row| row.args)
         .unwrap_or_default();
-    // `op_array->num_args`, the parameters before a variadic one, named
-    // as the frame's first compiled variables are, read only where an
-    // argument was passed, since the read builds the frame's table.
-    let declared = tier::frame_code(req, frame)
-        .filter(|_| !args.is_empty())
-        .map_or(0, |code| {
-            let variadic = code
-                .params
-                .checked_sub(1)
-                .and_then(|last| code.ops.get(last as usize))
-                .is_some_and(|(opcode, _)| *opcode == tier::Opcode::RecvVariadic);
-            code.params - u32::from(variadic)
-        });
-    let names: Vec<Vec<u8>> = match declared {
-        0 => Vec::new(),
-        declared => tier::variables(req, frame)
-            .into_iter()
-            .take(declared as usize)
-            .map(|(name, _)| name)
-            .collect(),
-    };
+    let names = read::parameter_names(req, frame);
     let args: Vec<String> = args
         .iter()
         .enumerate()
@@ -485,7 +464,7 @@ pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<Stri
 /// named, the first at `frame`'s, and `{main}` last.
 pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
     let rows = trace_from(req, above, limit);
-    let position = tier::position(req, frame);
+    let position = read::position(req, frame);
     let mut file = position.as_ref().map(|p| p.file.clone());
     let mut line = position.map_or(0, |p| i64::from(p.line));
     let mut last_function = Vec::new();

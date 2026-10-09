@@ -126,8 +126,10 @@ impl Request {
     /// under `Core`, then each extension's in bundle order, then what
     /// `define()` and `const` wrote. A value is a view, no owner taken;
     /// a declared constant whose value the engine did not publish is no
-    /// row.
-    pub(crate) fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
+    /// row. What `get_defined_constants(true)` groups and phpdbg's `info
+    /// constants` walks for the program's own.
+    #[must_use]
+    pub fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
         let decls = self.shared.declared().constants.rows();
         let modules = (self.shared.constant_modules.iter()).map(|&at| self.extension_name(at));
         let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = (decls.iter().enumerate())

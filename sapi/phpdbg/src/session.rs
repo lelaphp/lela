@@ -12,7 +12,8 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use php_sapi::tier::{FrameRef, Opcode};
+use php_ext::request::Opcode;
+use php_sapi::tier::FrameRef;
 
 use crate::bp::Breakpoints;
 use crate::cmd::Command;
@@ -265,7 +266,7 @@ pub struct Session {
     pub program_held: bool,
     /// The program a `run` in the init files ran, kept for a `print exec`
     /// after it, which compiles it again where no request stands.
-    pub ran_code: Option<php_sapi::tier::Code>,
+    pub ran_code: Option<crate::read::Code>,
     /// A cycle of php's main loop has started and its first request has
     /// not yet run the init files.
     pub init_due: bool,

@@ -12,11 +12,13 @@
 //! the program runs at the interpreter's speed.
 
 use php_ext::abi::AfterLog;
-use php_sapi::tier::{self, Flow, FrameRef, Hooked, Opcode, Request, Site, Stepped, Tier};
+use php_ext::request::Opcode;
+use php_sapi::tier::{self, Flow, FrameRef, Hooked, Request, Site, Stepped, Tier};
 
 use crate::bp::{At, OpArray};
 use crate::out;
 use crate::prompt::{self, Here, Outcome};
+use crate::read;
 use crate::session::{self, AfterRun, Context, Execution, Origin, Plan, SeekKind, Session};
 use crate::shown;
 
@@ -295,7 +297,7 @@ fn inline(session: &mut Session, req: &mut Request, frame: FrameRef) {
     session.seek = None;
     session.handled = None;
     session.breaks.reset_hits();
-    session.ran_code = tier::frame_code(req, frame);
+    session.ran_code = read::frame_code(req, frame);
     session.init_compiled = false;
 }
 
@@ -315,7 +317,7 @@ fn idle_prompt(session: &mut Session, req: &mut Request, quits: bool) {
 /// `Could not open file`, and the context is not compiled. True where
 /// that is so.
 fn unopened(session: &mut Session, req: &mut Request) -> bool {
-    if tier::pending(req).is_none() && !tier::exiting(req) {
+    if read::pending(req).is_none() && !read::exiting(req) {
         return false;
     }
     // `run` compiles it again, and writes the notice then.
@@ -373,7 +375,7 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     // `run`'s `zend_execute` serves nothing while a throwable stands
     // pending, as one an `ev` that did not compile leaves, and the run
     // ends in it.
-    if tier::pending(req).is_some() {
+    if read::pending(req).is_some() {
         return Flow::Returned;
     }
     drive(req, frame)
@@ -500,7 +502,7 @@ pub fn fatal_logged(req: &mut Request) -> AfterLog {
     let standing = session
         .standing
         .filter(|_| session.execution == Execution::Run)
-        .and_then(|frame| tier::position(req, frame).map(|position| (frame, position)));
+        .and_then(|frame| read::position(req, frame).map(|position| (frame, position)));
     let (file, line) = standing
         .as_ref()
         .map_or((prompt::NO_ACTIVE_FILE, 0), |(_, position)| {
@@ -579,10 +581,10 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         raised_line: 0,
     };
     loop {
-        let Some(position) = tier::position(req, at.frame) else {
+        let Some(position) = read::position(req, at.frame) else {
             return Flow::Resume(at.frame);
         };
-        if tier::exiting(req) {
+        if read::exiting(req) {
             return Flow::Resume(at.frame);
         }
         if at.unwinding {
@@ -603,7 +605,7 @@ fn stepped(req: &mut Request, frame: FrameRef) -> Flow {
         // return of nothing; a throwable the entry does not catch is the
         // loop's to end the serving with.
         let next = if at.unwinding {
-            if at.frame != entry || tier::catches(req, at.frame) || tier::pending(req).is_none() {
+            if at.frame != entry || tier::catches(req, at.frame) || read::pending(req).is_none() {
                 Next::Unwind
             } else {
                 Next::HandBack
@@ -662,7 +664,7 @@ fn vm_return(req: &Request, before: FrameRef, edge: Stepped) -> i32 {
     };
     if after == before {
         0
-    } else if tier::caller(req, after) == Some(before) {
+    } else if read::entered_from(req, after, before) {
         1
     } else {
         2
@@ -685,15 +687,15 @@ fn leaves(opcode: Opcode) -> bool {
 /// What php checks before a handler runs, in `phpdbg_execute_ex`'s
 /// order, and the prompt where one of them stops: `Some` where the
 /// prompt ended the request.
-fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Option<Flow> {
+fn checked(req: &mut Request, at: &Standing, position: &read::Position) -> Option<Flow> {
     // `PHPDBG_BP_RESOLVE_MASK` (`phpdbg_prompt.c:1650-1653`), first,
     // whatever else the loop is under: the breakpoints set on this op
     // array's oplines resolved, and said so, before each of its oplines.
     if session::with(|s| s.breaks.resolves()).unwrap_or(false) {
-        let serves = tier::serves(req, at.frame);
+        let serves = read::serves(req, at.frame);
         let (function, class) = match &serves {
-            tier::Serves::Code => (None, None),
-            tier::Serves::Function { name, class } => (Some(name.as_slice()), class.as_deref()),
+            read::Serves::Code => (None, None),
+            read::Serves::Function { name, class } => (Some(name.as_slice()), class.as_deref()),
         };
         let op = OpArray {
             file: &position.file,
@@ -719,7 +721,7 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
     if session::with(|s| s.after_run == AfterRun::Quit).unwrap_or(false) {
         if !at.unwinding {
             stepped_opline(req, at.frame);
-            logged(req, at.frame, position, &tier::serves(req, at.frame));
+            logged(req, at.frame, position, &read::serves(req, at.frame));
         }
         return None;
     }
@@ -732,10 +734,10 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
         position.line
     };
     let line = if at.unwinding { 0 } else { position.line };
-    let serves = tier::serves(req, at.frame);
+    let serves = read::serves(req, at.frame);
     let (function, class) = match &serves {
-        tier::Serves::Code => (None, None),
-        tier::Serves::Function { name, class } => (Some(name.as_slice()), class.as_deref()),
+        read::Serves::Code => (None, None),
+        read::Serves::Function { name, class } => (Some(name.as_slice()), class.as_deref()),
     };
     let here = At {
         file: &position.file,
@@ -766,7 +768,7 @@ fn checked(req: &mut Request, at: &Standing, position: &tier::Position) -> Optio
     let stops = stop || decide(req, &here, &checks);
     // A report that ran PHP code, a header callback, ended the request
     // where a prompt inside it quit.
-    if tier::exiting(req) {
+    if read::exiting(req) {
         return Some(Flow::Resume(at.frame));
     }
     if !stops {
@@ -862,17 +864,17 @@ fn stepped_opline(req: &Request, frame: FrameRef) {
 /// last, where one is; and the file whose code the loop reached first at
 /// this opline kept among the session's sources, as `phpdbg_compile_file`
 /// keeps what it compiles.
-fn logged(req: &mut Request, frame: FrameRef, position: &tier::Position, serves: &tier::Serves) {
+fn logged(req: &mut Request, frame: FrameRef, position: &read::Position, serves: &read::Serves) {
     let (function, class) = match serves {
-        tier::Serves::Code => (None, None),
-        tier::Serves::Function { name, class } => (Some(name.clone()), class.clone()),
+        read::Serves::Code => (None, None),
+        read::Serves::Function { name, class } => (Some(name.clone()), class.clone()),
     };
     let fresh = function.is_none()
         && position.opline == 0
         && session::with(|s| !s.sources.iter().any(|source| source.file == position.file))
             .unwrap_or(false);
     let code = if fresh {
-        tier::frame_code(req, frame)
+        read::frame_code(req, frame)
     } else {
         None
     };

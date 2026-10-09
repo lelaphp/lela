@@ -19,14 +19,16 @@
 //! file's, and from a function, [`Request::op_array`], which answers
 //! none for a native, as php's `ZEND_USER_CODE(func->type)` does.
 //!
-//! The debugging host's reads of the same op arrays are the tier's
-//! ([`crate::tier::Code`]), copies taken by name; whether that host
-//! reads this face instead is #1911's question, and this face does not
-//! answer it.
+//! The debugging host reads the same op arrays here, as an extension
+//! does (#1911): its `print` writes one as [`Request::dump_op_array`]
+//! dumps it, then each function its body declares
+//! ([`OpArrayView::dynamic_functions`]), as phpdbg's
+//! `phpdbg_print_function_helper` does.
 //!
 //! [`FrameView::op_array`]: super::FrameView::op_array
 
-use php_unit::{OpArray, OperandKind, Opline};
+use php_unit::decl::FunctionDecl;
+use php_unit::{OpArray, OperandKind, Opline, Unit};
 
 pub use php_unit::{ConstIdx, Opcode, OplineIdx};
 
@@ -40,6 +42,9 @@ use super::Request;
 /// method, a closure or an included, evaluated or main file holds it.
 #[derive(Clone, Copy)]
 pub struct OpArrayView<'a> {
+    /// The unit the op array was compiled into, which holds the
+    /// functions its body declares.
+    unit: &'a Unit,
     code: &'a OpArray,
 }
 
@@ -53,8 +58,8 @@ impl std::fmt::Debug for OpArrayView<'_> {
 }
 
 impl<'a> OpArrayView<'a> {
-    pub(crate) fn of(code: &'a OpArray) -> OpArrayView<'a> {
-        OpArrayView { code }
+    pub(crate) fn of(unit: &'a Unit, code: &'a OpArray) -> OpArrayView<'a> {
+        OpArrayView { unit, code }
     }
 
     /// `op_array->last`: how many oplines it holds, the compiler's own
@@ -130,6 +135,20 @@ impl<'a> OpArrayView<'a> {
     #[must_use]
     pub fn lines(&self) -> (u32, u32) {
         (self.code.line_start, self.code.line_end)
+    }
+
+    /// `op_array->dynamic_func_defs`: each function or closure its body
+    /// declares, in the order the compiler met them, with its
+    /// declaration and its own op array; empty for an op array that
+    /// declares none.
+    pub fn dynamic_functions(
+        &self,
+    ) -> impl Iterator<Item = (&'a FunctionDecl, OpArrayView<'a>)> + use<'a> {
+        let unit = self.unit;
+        self.code.dynamic_func_defs.iter().filter_map(move |at| {
+            let (decl, code) = unit.dynamic.get(*at as usize)?;
+            Some((decl, OpArrayView { unit, code }))
+        })
     }
 }
 
@@ -258,6 +277,20 @@ impl Request {
     #[must_use]
     pub fn op_array(&self, function: Function) -> Option<OpArrayView<'_>> {
         let user = self.user_function(function)?;
-        exec::body_of(&user.unit, user.body).map(OpArrayView::of)
+        exec::body_of(&user.unit, user.body).map(|code| OpArrayView::of(&user.unit, code))
+    }
+
+    /// `zend_dump_op_array(op_array, ZEND_DUMP_LINE_NUMBERS, NULL, NULL)`
+    /// (`Z/Zend/Optimizer/zend_dump.c`), what phpdbg's `print` writes: a
+    /// blank line, `name`, the counts with `parameters` the declared
+    /// parameters less a variadic one, the file with the line range,
+    /// then each opline opened by `L` and its line, and the
+    /// `try`/`catch` table. A `FRAMELESS_ICALL_*` prints the native its
+    /// `extended_value` indexes in `zend_flf_functions`, which is the
+    /// engine's, so the dump is the request's to write.
+    #[must_use]
+    pub fn dump_op_array(&self, code: OpArrayView<'_>, name: &str, parameters: usize) -> String {
+        let frameless = self.shared.frameless_names();
+        code.code.dump_lines(name, parameters, &frameless)
     }
 }

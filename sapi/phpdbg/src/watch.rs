@@ -8,12 +8,13 @@
 //! `WATCH_ON_ZVAL`; a string changed in place as a `WATCH_ON_STR`; an
 //! array that grew or shrank as a `WATCH_ON_HASHTABLE`.
 
-use php_sapi::tier::{self, FrameRef, Request};
+use php_sapi::tier::{FrameRef, Request};
 
 use crate::cmd::Param;
 use crate::info::flat;
 use crate::out;
 use crate::prompt::{Here, Ret};
+use crate::read;
 use crate::session::{self, Origin, Session};
 use crate::shown::{self, Key, Shown};
 
@@ -445,7 +446,7 @@ fn zval_differs(old: &Shown, new: &Shown) -> bool {
 /// Whether the report must stop: what it wrote ran PHP code, a header
 /// callback, that ended the request, `quit` at a prompt inside it.
 fn ended(req: &mut Request) -> bool {
-    tier::exiting(req) || session::with(|s| s.stopped.is_some()).unwrap_or(true)
+    read::exiting(req) || session::with(|s| s.stopped.is_some()).unwrap_or(true)
 }
 
 /// `phpdbg_print_watch_diff` for a zval: the labels to phpdbg's own

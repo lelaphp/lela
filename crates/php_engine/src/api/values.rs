@@ -56,11 +56,13 @@ use crate::api::request::Request;
 
 mod emalloc;
 mod fresh;
+mod identity;
 mod owner;
 mod smart_str;
 pub mod walk;
 pub use emalloc::Emalloc;
 pub use fresh::FreshString;
+pub use identity::Identity;
 pub use owner::{Owner, ResourceView, View};
 pub(crate) use owner::{adopted, adopted_some};
 pub use smart_str::SmartStr;

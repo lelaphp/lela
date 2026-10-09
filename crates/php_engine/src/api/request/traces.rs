@@ -1171,6 +1171,17 @@ impl Request {
         adopted(self, made)
     }
 
+    /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
+    /// what a debugger stopped between two oplines builds, as phpdbg's
+    /// `back` and `frame` build it: every row of the chain from the
+    /// innermost frame down, none skipped, under php's options and
+    /// limit.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn backtrace_here(&mut self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
+        let made = self.fetch_debug_backtrace(false, options, limit);
+        adopted(self, made)
+    }
+
     /// `zend_hash_str_update` on a row: `value` at the string key `name`,
     /// the key a string of the request's that the array takes.
     fn set_string_key(
