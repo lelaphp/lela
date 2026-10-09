@@ -111,7 +111,7 @@ impl ConnData {
         packet.extend_from_slice(&[0; 23]);
         if self
             .net
-            .send(req, &packet, &mut self.stats, &mut self.error)
+            .send(req, &packet, &mut self.stats, &mut self.error)?
             == 0
         {
             self.state = ConnState::QuitSent;
@@ -126,8 +126,11 @@ impl ConnData {
         };
         if !self.net.enable_ssl(req)? {
             self.state = ConnState::QuitSent;
-            self.error
-                .client(cr::CONNECTION_ERROR, "Cannot connect to MySQL using SSL");
+            self.error.client(
+                req,
+                cr::CONNECTION_ERROR,
+                "Cannot connect to MySQL using SSL",
+            )?;
             return Ok(false);
         }
         Ok(true)
@@ -137,7 +140,7 @@ impl ConnData {
     fn close_gone(&mut self, req: &mut Request) -> Result<bool, Thrown> {
         self.state = ConnState::QuitSent;
         self.send_close(req)?;
-        self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
+        self.error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
         Ok(false)
     }
 
@@ -169,9 +172,10 @@ impl ConnData {
                 } else {
                     let name = String::from_utf8_lossy(&requested).into_owned();
                     self.error.client(
+                        req,
                         cr::NOT_IMPLEMENTED,
                         &format!("The server requested authentication method unknown to the client [{name}]"),
-                    );
+                    )?;
                     return Ok(false);
                 }
             }
@@ -237,9 +241,10 @@ impl ConnData {
             Plugin::Native => {
                 if data.len() < SCRAMBLE_LENGTH {
                     self.error.client(
+                        req,
                         cr::MALFORMED_PACKET,
                         "The server sent wrong length for scramble",
-                    );
+                    )?;
                     return Ok(Vec::new());
                 }
                 if password.is_empty() {
@@ -263,9 +268,10 @@ impl ConnData {
             Plugin::CachingSha2 => {
                 if data.len() < SCRAMBLE_LENGTH {
                     self.error.client(
+                        req,
                         cr::MALFORMED_PACKET,
                         "The server sent wrong length for scramble",
-                    );
+                    )?;
                     return Ok(Vec::new());
                 }
                 if password.is_empty() {
@@ -329,12 +335,12 @@ impl ConnData {
             packet.extend_from_slice(&self.options.max_allowed_packet.to_le_bytes());
             packet.push(charset_no.to_le_bytes()[0]);
             packet.extend_from_slice(&[0; 23]);
-            if !self.auth_body(req, &mut packet, user, db, scrambled, Some(protocol), false) {
+            if !self.auth_body(req, &mut packet, user, db, scrambled, Some(protocol), false)? {
                 return Ok((false, None));
             }
             if self
                 .net
-                .send(req, &packet, &mut self.stats, &mut self.error)
+                .send(req, &packet, &mut self.stats, &mut self.error)?
                 == 0
             {
                 self.state = ConnState::QuitSent;
@@ -343,11 +349,11 @@ impl ConnData {
             self.charset = charset::by_nr(charset_no);
         } else if self
             .net
-            .send(req, scrambled, &mut self.stats, &mut self.error)
+            .send(req, scrambled, &mut self.stats, &mut self.error)?
             == 0
         {
             self.state = ConnState::QuitSent;
-            self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
+            self.error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
             return Ok((false, None));
         }
         if plugin == Some(Plugin::CachingSha2) {
@@ -356,13 +362,13 @@ impl ConnData {
                 Err(switch) => return Ok((false, switch)),
             }
         }
-        let Some(response) = self.read_auth_response(req) else {
+        let Some(response) = self.read_auth_response(req)? else {
             return Ok((false, None));
         };
         if response.response_code == 0xFE {
             return match response.new_auth_protocol {
                 None => {
-                    self.error.client(cr::UNKNOWN_ERROR, OLD_PASSWD);
+                    self.error.client(req, cr::UNKNOWN_ERROR, OLD_PASSWD)?;
                     Ok((false, None))
                 }
                 Some(protocol) => Ok((false, Some((protocol, response.new_auth_protocol_data)))),
@@ -371,7 +377,7 @@ impl ConnData {
         if response.response_code == 0xFF {
             if let Some(e) = response.error {
                 self.error
-                    .set(e.errno, crate::consts::UNKNOWN_SQLSTATE, &e.error);
+                    .set(req, e.errno, crate::consts::UNKNOWN_SQLSTATE, &e.error)?;
             }
             return Ok((false, None));
         }
@@ -395,21 +401,21 @@ impl ConnData {
         let old_charset = self.charset;
         if full {
             let mut payload = Vec::with_capacity(128);
-            if !self.auth_body(req, &mut payload, user, db, scrambled, Some(protocol), true) {
+            if !self.auth_body(req, &mut payload, user, db, scrambled, Some(protocol), true)? {
                 return Ok((false, None));
             }
             if !self.send_command(req, crate::consts::Com::ChangeUser, &payload, silent)? {
                 self.state = ConnState::QuitSent;
-                self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
+                self.error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
                 return Ok((false, None));
             }
         } else if self
             .net
-            .send(req, scrambled, &mut self.stats, &mut self.error)
+            .send(req, scrambled, &mut self.stats, &mut self.error)?
             == 0
         {
             self.state = ConnState::QuitSent;
-            self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
+            self.error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
             return Ok((false, None));
         }
         if plugin == Some(Plugin::CachingSha2) {
@@ -418,19 +424,19 @@ impl ConnData {
                 Err(switch) => return Ok((false, switch)),
             }
         }
-        let response = self.read_change_user_response(req);
+        let response = self.read_change_user_response(req)?;
         let mut ok = response.is_some();
         let mut switch = None;
         let asked_323 = response.as_ref().is_some_and(|r| r.asked_323);
         if let Some(response) = response {
             match &response.error {
-                Some(e) => e.set_on(&mut self.error),
-                None => self.error.reset(),
+                Some(e) => e.set_on(req, &mut self.error)?,
+                None => self.error.reset(req),
             }
             if response.response_code == 0xFE {
                 ok = false;
                 match response.new_auth_protocol {
-                    None => self.error.client(cr::UNKNOWN_ERROR, OLD_PASSWD),
+                    None => self.error.client(req, cr::UNKNOWN_ERROR, OLD_PASSWD)?,
                     Some(protocol) => switch = Some((protocol, response.new_auth_protocol_data)),
                 }
             }
@@ -439,7 +445,7 @@ impl ConnData {
             ok = false;
             let version = self.server_version();
             if version > 50113 && version < 50118 {
-                let _ = self.read_ok(req);
+                let _ = self.read_ok(req)?;
             }
         }
         if ok {
@@ -451,14 +457,14 @@ impl ConnData {
                 ok = self.set_charset(req, old.name.as_bytes())?;
             }
         } else if asked_323 {
-            self.error.client(cr::UNKNOWN_ERROR, OLD_PASSWD);
+            self.error.client(req, cr::UNKNOWN_ERROR, OLD_PASSWD)?;
         }
         Ok((ok, switch))
     }
 
     /// The common half of `php_mysqlnd_auth_write`: the user, the auth
     /// data, the database, the change-user charset, the method's name and
-    /// the connection attributes.
+    /// the connection attributes; the `Err` is the memory limit's fatal.
     #[allow(clippy::too_many_arguments)]
     fn auth_body(
         &mut self,
@@ -469,15 +475,15 @@ impl ConnData {
         auth_data: &[u8],
         plugin_name: Option<&[u8]>,
         change_user: bool,
-    ) -> bool {
+    ) -> Result<bool, Thrown> {
         let user = &user[..user.iter().position(|b| *b == 0).unwrap_or(user.len())];
         p.extend_from_slice(&user[..user.len().min(MAX_ALLOWED_USER_LEN)]);
         p.push(0);
         if auth_data.len() > 0xFF {
             let msg = "Authentication data too long. Won't fit into the buffer and will be truncated. Authentication will thus fail";
-            self.error.client(cr::UNKNOWN_ERROR, msg);
+            self.error.client(req, cr::UNKNOWN_ERROR, msg)?;
             php_ext::raising::docref(req, Level::Warning, msg);
-            return false;
+            return Ok(false);
         }
         p.push(u8::try_from(auth_data.len()).unwrap_or(u8::MAX));
         p.extend_from_slice(auth_data);
@@ -514,7 +520,7 @@ impl ConnData {
             store_length(p, attrs.len() as u64);
             p.extend_from_slice(&attrs);
         }
-        true
+        Ok(true)
     }
 
     /// `mysqlnd_caching_sha2_handle_server_response`: after the scramble,
@@ -530,14 +536,14 @@ impl ConnData {
         if password.is_empty() {
             return Ok(Ok(()));
         }
-        let Some(result) = self.read_cached_sha2(req) else {
+        let Some(result) = self.read_cached_sha2(req)? else {
             return Ok(Ok(()));
         };
         match result.response_code {
             0xFF => {
                 if let Some(e) = result.error {
                     self.error
-                        .set(e.errno, crate::consts::UNKNOWN_SQLSTATE, &e.error);
+                        .set(req, e.errno, crate::consts::UNKNOWN_SQLSTATE, &e.error)?;
                 }
                 Ok(Err(None))
             }
@@ -559,14 +565,15 @@ impl ConnData {
                     }
                 };
                 self.net
-                    .send(req, &payload, &mut self.stats, &mut self.error);
+                    .send(req, &payload, &mut self.stats, &mut self.error)?;
                 Ok(Ok(()))
             }
             other => {
                 self.error.client(
+                    req,
                     cr::NOT_IMPLEMENTED,
                     &format!("Unexpected server response while doing caching_sha2 auth: {other}"),
-                );
+                )?;
                 Ok(Ok(()))
             }
         }
@@ -594,7 +601,7 @@ impl ConnData {
         let request: &[u8] = if caching { b"\x02" } else { b"\x01" };
         if self
             .net
-            .send(req, request, &mut self.stats, &mut self.error)
+            .send(req, request, &mut self.stats, &mut self.error)?
             == 0
         {
             raise(
@@ -608,7 +615,7 @@ impl ConnData {
             self.state = ConnState::QuitSent;
             return Ok(None);
         }
-        if let Some(key) = self.read_public_key(req) {
+        if let Some(key) = self.read_public_key(req)? {
             return Ok(Some(key));
         }
         raise(
@@ -645,7 +652,8 @@ impl ConnData {
             return Ok(None);
         };
         if size <= password.len() + 41 {
-            self.error.client(cr::UNKNOWN_ERROR, "password is too long");
+            self.error
+                .client(req, cr::UNKNOWN_ERROR, "password is too long")?;
             return Ok(None);
         }
         rsa_encrypt(req, pem, &xored)

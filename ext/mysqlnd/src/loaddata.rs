@@ -60,9 +60,10 @@ pub(crate) fn handle(
     let mut ok = true;
     if !enabled && directory.is_none() {
         conn.error.client(
+            req,
             cr::LOAD_DATA_LOCAL_INFILE_REJECTED,
             "LOAD DATA LOCAL INFILE is forbidden, check related settings like mysqli.allow_local_infile|mysqli.local_infile_directory or Pdo\\Mysql::ATTR_LOCAL_INFILE|Pdo\\Mysql::ATTR_LOCAL_INFILE_DIRECTORY",
-        );
+        )?;
         ok = false;
     }
     if let Some(dir) = &directory {
@@ -71,9 +72,10 @@ pub(crate) fn handle(
             stream.give_up(req);
         } else {
             conn.error.client(
+                req,
                 cr::LOAD_DATA_LOCAL_INFILE_REJECTED,
                 "cannot open local_infile_directory",
-            );
+            )?;
             ok = false;
         }
     }
@@ -83,13 +85,14 @@ pub(crate) fn handle(
         && !req.within_basedir(dir, filename)
     {
         conn.error.client(
+            req,
             cr::LOAD_DATA_LOCAL_INFILE_REJECTED,
             "LOAD DATA LOCAL INFILE DIRECTORY restriction in effect. Unable to open file",
-        );
+        )?;
         ok = false;
     }
     if !ok {
-        conn.net.send(req, &[], &mut conn.stats, &mut conn.error);
+        conn.net.send(req, &[], &mut conn.stats, &mut conn.error)?;
         conn.handle_response(req, false, false, Com::Query, false)?;
         return Ok((false, true));
     }
@@ -109,17 +112,17 @@ fn send_file(
     // `mysqlnd_local_infile_init`.
     let open_basedir = req.ini_get(b"open_basedir").is_some_and(|v| !v.is_empty());
     let refused = |conn: &mut ConnData, req: &mut Request, errno: u32, text: &str| {
-        conn.error.client(errno, text);
-        conn.net.send(req, &[], &mut conn.stats, &mut conn.error);
-        (false, true)
+        conn.error.client(req, errno, text)?;
+        conn.net.send(req, &[], &mut conn.stats, &mut conn.error)?;
+        Ok::<_, Thrown>((false, true))
     };
     if open_basedir && req.check_open_basedir(filename, false).is_err() {
-        return Ok(refused(
+        return refused(
             conn,
             req,
             cr::UNKNOWN_ERROR,
             "open_basedir restriction in effect. Unable to open file",
-        ));
+        );
     }
     let opening = Opening {
         use_path: false,
@@ -133,12 +136,12 @@ fn send_file(
     };
     let Some(stream) = req.open_stream_with(filename, b"r", opening)? else {
         let shown: String = String::from_utf8_lossy(filename).chars().take(64).collect();
-        return Ok(refused(
+        return refused(
             conn,
             req,
             cr::EE_FILENOTFOUND,
             &format!("Can't find file '{shown}'."),
-        ));
+        );
     };
     let mut failed_read = false;
     // `mysqlnd_local_infile_read`'s `php_stream_read` into the buffer
@@ -153,8 +156,12 @@ fn send_file(
                 break;
             }
         };
-        if conn.net.send(req, chunk, &mut conn.stats, &mut conn.error) == 0 {
-            conn.error.client(cr::SERVER_LOST, LOST_CONN);
+        if conn
+            .net
+            .send(req, chunk, &mut conn.stats, &mut conn.error)?
+            == 0
+        {
+            conn.error.client(req, cr::SERVER_LOST, LOST_CONN)?;
             stream.close(req);
             stream.give_up(req);
             return Ok((false, false));
@@ -162,12 +169,13 @@ fn send_file(
     }
     stream.close(req);
     stream.give_up(req);
-    if conn.net.send(req, &[], &mut conn.stats, &mut conn.error) == 0 {
-        conn.error.client(cr::SERVER_LOST, LOST_CONN);
+    if conn.net.send(req, &[], &mut conn.stats, &mut conn.error)? == 0 {
+        conn.error.client(req, cr::SERVER_LOST, LOST_CONN)?;
         return Ok((false, false));
     }
     if failed_read {
-        conn.error.client(cr::UNKNOWN_ERROR, "Error reading file");
+        conn.error
+            .client(req, cr::UNKNOWN_ERROR, "Error reading file")?;
         return Ok((false, true));
     }
     Ok((true, false))

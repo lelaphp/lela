@@ -607,7 +607,10 @@ pub(crate) fn attr_set(req: &mut Request, on: On, attr: i64, value: i64) -> Resu
                 ));
             }
         };
-        if !s.stmt.attr_set(which, u64::try_from(value).unwrap_or(0)) {
+        if !s
+            .stmt
+            .attr_set(req, which, u64::try_from(value).unwrap_or(0))?
+        {
             report_stmt(req, &s.stmt)?;
             return Ok(false);
         }

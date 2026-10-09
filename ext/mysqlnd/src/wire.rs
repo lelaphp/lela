@@ -3,7 +3,7 @@
 //! decoded once, into the type here, from the bytes the frame codec
 //! handed over; `mysql_common` serves the scrambles (`auth`).
 
-use php_ext::raising::{Level, docref};
+use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 
 use crate::conn::ConnData;
@@ -275,9 +275,10 @@ impl PacketError {
         }
     }
 
-    /// `SET_CLIENT_ERROR(info, errno, sqlstate, error)`.
-    pub(crate) fn set_on(&self, info: &mut ErrorInfo) {
-        info.set(self.errno, &self.sqlstate, &self.error);
+    /// `SET_CLIENT_ERROR(info, errno, sqlstate, error)`; the `Err` is
+    /// the memory limit's fatal.
+    pub(crate) fn set_on(&self, req: &mut Request, info: &mut ErrorInfo) -> Result<(), Thrown> {
+        info.set(req, self.errno, &self.sqlstate, &self.error)
     }
 }
 
@@ -588,35 +589,41 @@ pub(crate) struct PrepareResponse {
 }
 
 /// The packet readers: each answers the packet it read and parsed, or
-/// `None` for php's `FAIL`, after whatever php set or warned.
+/// `None` for php's `FAIL`, after whatever php set or warned; the `Err`
+/// is the memory limit's fatal, met by the error list's element.
 impl ConnData {
     /// `mysqlnd_read_packet_header_and_body`: one packet's body, counted
     /// under its kind, the connection marked gone where the server is.
-    pub(crate) fn read_packet(&mut self, req: &mut Request, kind: Prot) -> Option<Vec<u8>> {
+    pub(crate) fn read_packet(
+        &mut self,
+        req: &mut Request,
+        kind: Prot,
+    ) -> Result<Option<Vec<u8>>, Thrown> {
         let Some(size) = self.net.read_header(req, &mut self.stats, &mut self.error) else {
             self.state = ConnState::QuitSent;
             if self.error.errno == 0 {
-                self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
+                self.error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
             }
-            return None;
+            return Ok(None);
         };
         if self.net.cmd_buffer_len() < size {
             self.error.client(
+                req,
                 cr::INVALID_BUFFER_USE,
                 "Packet buffer wasn't big enough; as a workaround consider increasing value of net_cmd_buffer_size",
-            );
-            return None;
+            )?;
+            return Ok(None);
         }
         let Some(body) = self.net.receive(req, size, &mut self.stats) else {
             self.state = ConnState::QuitSent;
-            self.error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
-            return None;
+            self.error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
+            return Ok(None);
         };
         if let Some((bytes, packets)) = kind.stats() {
             self.stats.add(bytes, (HEADER_SIZE + size) as u64);
             self.stats.inc(packets);
         }
-        Some(body)
+        Ok(Some(body))
     }
 
     /// A packet read and parsed, the premature end warned as php warns
@@ -626,9 +633,11 @@ impl ConnData {
         req: &mut Request,
         kind: Prot,
         parse: impl FnOnce(&mut Request, &[u8], usize) -> Result<T, Short>,
-    ) -> Option<T> {
-        let body = self.read_packet(req, kind)?;
-        match parse(req, &body, self.net.cmd_buffer_len()) {
+    ) -> Result<Option<T>, Thrown> {
+        let Some(body) = self.read_packet(req, kind)? else {
+            return Ok(None);
+        };
+        Ok(match parse(req, &body, self.net.cmd_buffer_len()) {
             Ok(packet) => Some(packet),
             Err(Short(usize::MAX | 0)) => None,
             Err(Short(short)) => {
@@ -639,42 +648,53 @@ impl ConnData {
                 );
                 None
             }
-        }
+        })
     }
 
     /// `php_mysqlnd_greet_read`.
-    pub(crate) fn read_greet(&mut self, req: &mut Request) -> Option<Greet> {
+    pub(crate) fn read_greet(&mut self, req: &mut Request) -> Result<Option<Greet>, Thrown> {
         self.parsed(req, Prot::Greet, |_, body, _| greet(body))
     }
 
     /// `php_mysqlnd_auth_response_read`.
-    pub(crate) fn read_auth_response(&mut self, req: &mut Request) -> Option<AuthResponse> {
+    pub(crate) fn read_auth_response(
+        &mut self,
+        req: &mut Request,
+    ) -> Result<Option<AuthResponse>, Thrown> {
         self.parsed(req, Prot::Ok, |req, body, _| auth_response(req, body))
     }
 
     /// `php_mysqlnd_ok_read`.
-    pub(crate) fn read_ok(&mut self, req: &mut Request) -> Option<Ok> {
+    pub(crate) fn read_ok(&mut self, req: &mut Request) -> Result<Option<Ok>, Thrown> {
         self.parsed(req, Prot::Ok, |_, body, cmd| ok(body, cmd))
     }
 
     /// `php_mysqlnd_eof_read`.
-    pub(crate) fn read_eof(&mut self, req: &mut Request) -> Option<Eof> {
+    pub(crate) fn read_eof(&mut self, req: &mut Request) -> Result<Option<Eof>, Thrown> {
         self.parsed(req, Prot::Eof, |_, body, _| eof(body))
     }
 
     /// `php_mysqlnd_rset_header_read`.
-    pub(crate) fn read_rset_header(&mut self, req: &mut Request) -> Option<RsetHeader> {
+    pub(crate) fn read_rset_header(
+        &mut self,
+        req: &mut Request,
+    ) -> Result<Option<RsetHeader>, Thrown> {
         self.parsed(req, Prot::RsetHeader, |req, body, _| rset_header(req, body))
     }
 
     /// `php_mysqlnd_stats_read`: the server's text as it came.
-    pub(crate) fn read_stats(&mut self, req: &mut Request) -> Option<Vec<u8>> {
+    pub(crate) fn read_stats(&mut self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
         self.read_packet(req, Prot::Stats)
     }
 
     /// `php_mysqlnd_prepare_read`.
-    pub(crate) fn read_prepare_response(&mut self, req: &mut Request) -> Option<PrepareResponse> {
-        let body = self.read_packet(req, Prot::PrepareResponse)?;
+    pub(crate) fn read_prepare_response(
+        &mut self,
+        req: &mut Request,
+    ) -> Result<Option<PrepareResponse>, Thrown> {
+        let Some(body) = self.read_packet(req, Prot::PrepareResponse)? else {
+            return Ok(None);
+        };
         let mut p = Body::new(&body);
         let mut r = PrepareResponse::default();
         if body.is_empty() {
@@ -683,12 +703,12 @@ impl ConnData {
                 Level::Warning,
                 "PREPARE packet 1 bytes shorter than expected",
             );
-            return None;
+            return Ok(None);
         }
         let code = p.u8();
         if code == ERROR_MARKER {
             r.error = Some(PacketError::read_from(p.rest()));
-            return Some(r);
+            return Ok(Some(r));
         }
         let size = body.len();
         if size != 9 && size < 12 {
@@ -697,7 +717,7 @@ impl ConnData {
                 Level::Warning,
                 &format!("Wrong COM_STMT_PREPARE response size. Received {size}"),
             );
-            return None;
+            return Ok(None);
         }
         r.stmt_id = p.u32();
         r.field_count = u32::from(p.u16());
@@ -706,11 +726,14 @@ impl ConnData {
             p.skip(1);
             r.warning_count = u32::from(p.u16());
         }
-        Some(r)
+        Ok(Some(r))
     }
 
     /// `php_mysqlnd_chg_user_read`.
-    pub(crate) fn read_change_user_response(&mut self, req: &mut Request) -> Option<AuthResponse> {
+    pub(crate) fn read_change_user_response(
+        &mut self,
+        req: &mut Request,
+    ) -> Result<Option<AuthResponse>, Thrown> {
         let capabilities = self.server_capabilities;
         self.parsed(req, Prot::ChangeUser, move |_, body, _| {
             let mut p = Body::new(body);
@@ -738,7 +761,7 @@ impl ConnData {
 
     /// `php_mysqlnd_sha256_pk_request_response_read`: the PEM after the
     /// first byte.
-    pub(crate) fn read_public_key(&mut self, req: &mut Request) -> Option<Vec<u8>> {
+    pub(crate) fn read_public_key(&mut self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
         self.parsed(req, Prot::Sha256PkResponse, |_, body, _| {
             let mut p = Body::new(body);
             p.check()?;
@@ -751,7 +774,10 @@ impl ConnData {
     /// `php_mysqlnd_cached_sha2_result_read`: the code, `0xFF` with the
     /// error, `0xFE` with the switch request, else `0x01` followed by the
     /// fast-auth answer (3) or the full-auth request (4).
-    pub(crate) fn read_cached_sha2(&mut self, req: &mut Request) -> Option<AuthResponse> {
+    pub(crate) fn read_cached_sha2(
+        &mut self,
+        req: &mut Request,
+    ) -> Result<Option<AuthResponse>, Thrown> {
         self.parsed(req, Prot::CachedSha2, |_, body, _| {
             let mut p = Body::new(body);
             let mut r = AuthResponse::default();
