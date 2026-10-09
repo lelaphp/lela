@@ -59,12 +59,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     if crates.is_empty() {
         return Ok(Vec::new());
     }
-    let built = Run::of(
-        root,
-        &["build", "--tests", "--keep-going"],
-        &crates,
-        Targets::Tests,
-    )?;
+    let built = Run::of(root, &["build", "--keep-going"], &crates, Targets::Tests)?;
     let docs = doctests(root, &built, &crates)?;
     crates
         .iter()

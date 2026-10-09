@@ -1,7 +1,8 @@
-# A fixture of #2165: six crates measured in one cargo run. php_heap is
+# A fixture of #2165: seven crates measured in one cargo run. php_heap is
 # clean; php_unit carries a clippy lint; php_syntax is built on php_unit;
 # php_compile does not compile; php_engine is built on php_compile;
-# php_macros is a proc-macro crate with a test. Each
+# php_macros is a proc-macro crate with a test; php_link is clean but for
+# a lint behind its feature `gated` (#140). Each
 # crate's reading out of the one run is the reading a run over it alone
 # gives, so a crate's lint or compile error is its own and the ones built
 # on it are judged on what they are.
@@ -39,4 +40,8 @@ budget = 100
 
 [[crate]]
 name = "php_macros"
+budget = 100
+
+[[crate]]
+name = "php_link"
 budget = 100
