@@ -37,5 +37,5 @@ text = "No thread in ext/* (fixture)."
 
 [[rule]]
 id = "generated.committed"
-generated = { "ext/clippy.toml" = "ext.no-locks" }
+generated = ["ext/clippy.toml"]
 text = "ext/clippy.toml is generated and committed; a stale copy fails budget (fixture)."

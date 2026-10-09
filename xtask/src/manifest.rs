@@ -610,7 +610,51 @@ pub struct Predicates {
     pub deny_lints: Option<Vec<String>>,
     pub check: Option<String>,
     pub avoid_from: Option<AvoidFrom>,
-    pub generated: Option<BTreeMap<String, String>>,
+    pub generated: Option<Generated>,
+}
+
+/// `generated`: the files the manifest renders, each from every rule whose
+/// scope reaches its directory ([`crate::generated`]), so the row names
+/// files and no rule (#2473). A file that is not a `clippy.toml` would
+/// need its source named again; [`crate::generated::render`] says where.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "GeneratedShape", into = "Vec<String>")]
+pub struct Generated(Vec<String>);
+
+impl Generated {
+    /// The files, relative to the root, as the row lists them.
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
+}
+
+impl From<Generated> for Vec<String> {
+    fn from(generated: Generated) -> Vec<String> {
+        generated.0
+    }
+}
+
+/// `generated` as the file spells it: the list of files, or the map of
+/// each file to the one rule #1950's generator outgrew, whose rule is read
+/// no more. The map shape goes once #2474 lands the list in seams.toml
+/// (#2513).
+#[derive(Deserialize)]
+#[serde(
+    untagged,
+    expecting = "a list of the files the manifest renders, such as [\"ext/clippy.toml\"]"
+)]
+enum GeneratedShape {
+    Files(Vec<String>),
+    Map(BTreeMap<String, String>),
+}
+
+impl From<GeneratedShape> for Generated {
+    fn from(shape: GeneratedShape) -> Generated {
+        match shape {
+            GeneratedShape::Files(files) => Generated(files),
+            GeneratedShape::Map(map) => Generated(map.into_keys().collect()),
+        }
+    }
 }
 
 /// `avoid_from`: the glossary a `vocab` rule reads for its `_Avoid_` lists,
@@ -1156,6 +1200,15 @@ impl Manifest {
             .find(|r| r.id == id && r.predicate.on.as_deref() == Some("pub"))
     }
 
+    /// Every file a `generated` rule names, in the manifest's order.
+    pub fn generated_files(&self) -> Vec<&str> {
+        self.rules
+            .iter()
+            .filter_map(|r| r.predicate.generated.as_ref())
+            .flat_map(Generated::files)
+            .collect()
+    }
+
     /// The path a reading's `tree` is hashed over, relative to the root:
     /// the one mapping from a scope to its sources, so what an instrument
     /// stamps and what `done` hashes agree (harness-design.md §4.2, §4.5
@@ -1203,12 +1256,7 @@ impl Manifest {
                     .map_or_else(|| PathBuf::from("."), Crate::path),
             );
         }
-        let generated = self
-            .rules
-            .iter()
-            .flat_map(|r| r.predicate.generated.iter().flatten())
-            .any(|(file, _)| file == name);
-        if generated {
+        if self.generated_files().contains(&name) {
             let dir = name.rsplit_once('/').map_or(".", |(dir, _)| dir);
             return Some(PathBuf::from(dir));
         }

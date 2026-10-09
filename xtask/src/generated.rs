@@ -1,8 +1,9 @@
-//! The files the manifest's `generated` predicate names, rendered from the
-//! rules they are derived from (harness-design.md §4.1, §13 D.19). Each is
-//! a `clippy.toml`, which clippy finds by nearest-file search: the one at
-//! `<dir>/clippy.toml` carries every rule whose scope reaches `<dir>`, so a
-//! crate under it is held to all of them. `deny_types` renders to
+//! The files the manifest's `generated` predicate names, each rendered
+//! from every rule whose scope reaches its directory ([`reaches`];
+//! harness-design.md §4.1, §13 D.19): the row names the files and no rule
+//! (#2473). Each is a `clippy.toml`, which clippy finds by nearest-file
+//! search: the one at `<dir>/clippy.toml` carries every rule whose scope
+//! reaches `<dir>`, so a crate under it is held to all of them. `deny_types` renders to
 //! `disallowed-types`, with the rule's text as each reason and wildcards
 //! expanded from `Cargo.lock` to the paths a package's types are reachable
 //! at (#1910); its `deny_macros` to `disallowed-macros` (#1781); and
@@ -50,10 +51,8 @@ const CARGO_CONFIGS: [&str; 2] = [".cargo/config.toml", ".cargo/config"];
 /// Every generated file the manifest names, with its rendering.
 pub(crate) fn render_all(root: &Path, manifest: &Manifest) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    for rule in &manifest.rules {
-        for (file, from) in rule.predicate.generated.iter().flatten() {
-            out.insert(file.clone(), render(root, manifest, file, from)?);
-        }
+    for file in manifest.generated_files() {
+        out.insert(file.to_owned(), render(root, manifest, file)?);
     }
     Ok(out)
 }
@@ -72,17 +71,20 @@ pub fn write_all(root: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>> {
     Ok(written)
 }
 
-/// Render one generated file from the rule it is derived from.
-pub(crate) fn render(root: &Path, manifest: &Manifest, file: &str, from: &str) -> Result<String> {
-    let rule = manifest.rule(from).with_context(|| {
-        format!("{file} is generated from rule {from}, which the manifest lacks")
-    })?;
+/// Render one generated file from the rules that reach it. Only a
+/// `clippy.toml` has a generator, its rules read off the scopes; a file of
+/// another kind would have no scope to read its source off, so it would
+/// name that source again in the row, as a `{ file, from }` entry beside
+/// the paths, and its generator would be an arm here.
+pub(crate) fn render(root: &Path, manifest: &Manifest, file: &str) -> Result<String> {
     match file
         .rsplit_once('/')
         .map_or(("", file), |(dir, name)| (dir, name))
     {
-        (dir, "clippy.toml") => clippy_toml(root, manifest, rule, file, dir),
-        _ => bail!("no generator renders {file} (from rule {from})"),
+        (dir, "clippy.toml") => clippy_toml(root, manifest, file, dir),
+        _ => bail!(
+            "no generator renders {file}: only a clippy.toml is generated, from the rules whose scope reaches it"
+        ),
     }
 }
 
@@ -214,11 +216,7 @@ pub(crate) fn conf_dir_set(root: &Path) -> Result<Vec<&'static str>> {
 /// Every clippy rule's scope has its `clippy.toml` among the generated
 /// files, so no such rule renders to nothing.
 fn every_scope_rendered(manifest: &Manifest) -> Result<()> {
-    let files: Vec<&String> = manifest
-        .rules
-        .iter()
-        .flat_map(|r| r.predicate.generated.iter().flatten().map(|(file, _)| file))
-        .collect();
+    let files = manifest.generated_files();
     for rule in manifest.rules.iter().filter(|r| renders_to_clippy(r)) {
         for dir in clippy_dirs(rule)? {
             let file = if dir.is_empty() {
@@ -226,7 +224,7 @@ fn every_scope_rendered(manifest: &Manifest) -> Result<()> {
             } else {
                 format!("{dir}/clippy.toml")
             };
-            if !files.contains(&&file) {
+            if !files.contains(&file.as_str()) {
                 bail!(
                     "rule {}'s scope reaches {dir}/, and no generated rule renders {file}, so clippy would hold nothing there",
                     rule.id
@@ -238,20 +236,14 @@ fn every_scope_rendered(manifest: &Manifest) -> Result<()> {
 }
 
 /// The `clippy.toml` in `dir`: every clippy rule whose scope reaches the
-/// directory, `from` among them, each list a rule renders under its key.
-fn clippy_toml(
-    root: &Path,
-    manifest: &Manifest,
-    from: &Rule,
-    file: &str,
-    dir: &str,
-) -> Result<String> {
+/// directory, each list a rule renders under its key. A file no rule
+/// reaches would carry nothing, and is refused.
+fn clippy_toml(root: &Path, manifest: &Manifest, file: &str, dir: &str) -> Result<String> {
     every_scope_rendered(manifest)?;
     let rules = carried(manifest, dir)?;
-    if !rules.iter().any(|r| r.id == from.id) {
+    if rules.is_empty() {
         bail!(
-            "{file} is generated from rule {}, which renders nothing to clippy.toml or whose scope does not reach {dir}/",
-            from.id
+            "{file} is generated, and no clippy rule's scope reaches {dir}/, so it would carry nothing"
         );
     }
     let lock = CargoLock::load(root)?;
