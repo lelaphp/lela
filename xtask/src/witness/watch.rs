@@ -29,7 +29,8 @@
 //! is cut off before it removes it, and php's own `msg_get_queue(0)`,
 //! which leaves one nobody can use, leave objects the kernel's small
 //! tables keep after every process is gone. When the served process ends,
-//! however it ends, what the run made and nothing holds is removed; a run
+//! however it ends, what was made while it ran and nothing holds is
+//! removed, the run's or another of the runner's that left it so; a run
 //! whose watching process was killed too leaves its claim, and the next
 //! run removes what it left before it starts. Each reading of the run
 //! counts what was removed as `sysv_removed` and its message names it.
@@ -302,7 +303,7 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
             in_flight(&kept)
         );
     }
-    let settled = said("of what its fences left", claim.settle());
+    let settled = said("of what was left while it ran", claim.settle());
     let swept: Vec<(u64, String)> = [reclaimed, settled].into_iter().flatten().collect();
     if !swept.is_empty() {
         let removed = swept.iter().map(|(n, _)| n).sum();
