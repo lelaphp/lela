@@ -191,7 +191,7 @@ impl Net {
         let tcp = scheme.starts_with(b"tcp://") && scheme.len() > 6;
         let unix = scheme.starts_with(b"unix://") && scheme.len() > 7;
         if !tcp && !unix {
-            error.client(cr::CONNECTION_ERROR, "No handler for this scheme");
+            error.client(req, cr::CONNECTION_ERROR, "No handler for this scheme")?;
             return Ok(false);
         }
         let timeout = (self.options.timeout_connect > 0)
@@ -219,7 +219,7 @@ impl Net {
                 } else {
                     failure.text
                 };
-                error.client(cr::CONNECTION_ERROR, &text);
+                error.client(req, cr::CONNECTION_ERROR, &text)?;
                 return Ok(false);
             }
         };
@@ -422,14 +422,15 @@ impl Net {
     /// `MYSQLND_MAX_PACKET_SIZE`, an empty one after a frame of exactly
     /// that size, each numbered, each in an envelope of its own where the
     /// protocol is compressed; the bytes sent, `0` where the stream took
-    /// none, with php's `CR_SERVER_GONE_ERROR`.
+    /// none, with php's `CR_SERVER_GONE_ERROR`; the `Err` is the memory limit's
+    /// fatal, met by the error list's element.
     pub(crate) fn send(
         &mut self,
         req: &mut Request,
         payload: &[u8],
         stats: &mut Stats,
         error: &mut ErrorInfo,
-    ) -> usize {
+    ) -> Result<usize, Thrown> {
         let mut left = payload;
         let mut packets = 1u64;
         let mut sent;
@@ -467,10 +468,10 @@ impl Net {
         stats.add(Stat::ProtocolOverheadOut, overhead);
         stats.add(Stat::PacketsSent, packets);
         if sent == 0 {
-            error.client(cr::SERVER_GONE_ERROR, SERVER_GONE);
-            return 0;
+            error.client(req, cr::SERVER_GONE_ERROR, SERVER_GONE)?;
+            return Ok(0);
         }
-        sent
+        Ok(sent)
     }
 
     /// `write_compressed_packet`: one envelope, deflated where zlib's

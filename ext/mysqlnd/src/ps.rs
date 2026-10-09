@@ -168,7 +168,7 @@ impl StmtData {
             result_bind: None,
             send_types_to_server: false,
             upsert: Upsert::default(),
-            error: ErrorInfo::default(),
+            error: ErrorInfo::new(false),
             cursor: CursorType::NoCursor,
             cursor_exists: false,
             update_max_length: false,
@@ -218,9 +218,9 @@ impl Held {
 }
 
 /// Both error infos emptied, `SET_EMPTY_ERROR` on each.
-fn empty_errors(stmt: &mut StmtData, conn: &mut ConnData) {
-    stmt.error.reset();
-    conn.error.reset();
+fn empty_errors(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) {
+    stmt.error.reset(req);
+    conn.error.reset(req);
 }
 
 impl Stmt {
@@ -308,17 +308,17 @@ impl Stmt {
     ) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
-            stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
+            stmt.error.client(req, cr::NO_PREPARE_STMT, NOT_PREPARED)?;
             value.give_up(req);
             return Ok(false);
         }
         if n >= stmt.parameter_count {
             stmt.error
-                .client(cr::INVALID_PARAMETER_NO, "Invalid parameter number");
+                .client(req, cr::INVALID_PARAMETER_NO, "Invalid parameter number")?;
             value.give_up(req);
             return Ok(false);
         }
-        stmt.error.reset();
+        stmt.error.reset(req);
         if stmt.param_bind.is_none() {
             let count = stmt.parameter_count as usize;
             let list = (0..count).map(|_| ParamBind::default()).collect();
@@ -336,8 +336,8 @@ impl Stmt {
         }
         bind.ty = Some(ty);
         stmt.send_types_to_server = true;
-        self.call(req, |_, _, conn| {
-            conn.error.reset();
+        self.call(req, |req, _, conn| {
+            conn.error.reset(req);
             Ok(())
         })
         .ok();
@@ -355,13 +355,13 @@ impl Stmt {
     ) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
-            stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
+            stmt.error.client(req, cr::NO_PREPARE_STMT, NOT_PREPARED)?;
             for (v, _) in params {
                 v.give_up(req);
             }
             return Ok(false);
         }
-        stmt.error.reset();
+        stmt.error.reset(req);
         if stmt.parameter_count == 0 {
             for (v, _) in params {
                 v.give_up(req);
@@ -387,18 +387,18 @@ impl Stmt {
     }
 
     /// `mysqlnd_stmt_refresh_bind_param`: the types sent again with the
-    /// next `COM_STMT_EXECUTE`.
-    pub fn rebind_parameters(&mut self) -> bool {
+    /// next `COM_STMT_EXECUTE`; the `Err` is the memory limit's fatal.
+    pub fn rebind_parameters(&mut self, req: &mut Request) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
-            stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
-            return false;
+            stmt.error.client(req, cr::NO_PREPARE_STMT, NOT_PREPARED)?;
+            return Ok(false);
         }
-        stmt.error.reset();
+        stmt.error.reset(req);
         if stmt.parameter_count > 0 {
             stmt.send_types_to_server = true;
         }
-        true
+        Ok(true)
     }
 
     /// `mysqlnd_stmt_execute`: `send_execute`, then the answer parsed.
@@ -416,15 +416,15 @@ impl Stmt {
     pub fn bind_column(&mut self, req: &mut Request, n: u32) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
-            stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
+            stmt.error.client(req, cr::NO_PREPARE_STMT, NOT_PREPARED)?;
             return Ok(false);
         }
         if n >= stmt.field_count {
             stmt.error
-                .client(cr::INVALID_PARAMETER_NO, "Invalid parameter number");
+                .client(req, cr::INVALID_PARAMETER_NO, "Invalid parameter number")?;
             return Ok(false);
         }
-        stmt.error.reset();
+        stmt.error.reset(req);
         if stmt.result_bind.is_none() {
             let count = stmt.field_count as usize;
             let list = (0..count).map(|_| ResultBind::default()).collect();
@@ -454,13 +454,13 @@ impl Stmt {
     ) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
-            stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
+            stmt.error.client(req, cr::NO_PREPARE_STMT, NOT_PREPARED)?;
             for v in values {
                 v.give_up(req);
             }
             return Ok(false);
         }
-        stmt.error.reset();
+        stmt.error.reset(req);
         if stmt.field_count == 0 {
             for v in values {
                 v.give_up(req);
@@ -542,7 +542,7 @@ impl Stmt {
             error: s.error.error.clone(),
             error_list: s
                 .error
-                .list
+                .list()
                 .iter()
                 .map(|e| (e.errno, e.sqlstate, e.error.clone()))
                 .collect(),
@@ -605,8 +605,13 @@ impl Stmt {
         self.data.result.as_mut().is_some_and(|r| r.data_seek(row))
     }
 
-    /// `mysqlnd_stmt_attr_set`.
-    pub fn attr_set(&mut self, attr: StmtAttr, value: u64) -> bool {
+    /// `mysqlnd_stmt_attr_set`; the `Err` is the memory limit's fatal.
+    pub fn attr_set(
+        &mut self,
+        req: &mut Request,
+        attr: StmtAttr,
+        value: u64,
+    ) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         match attr {
             StmtAttr::UpdateMaxLength => stmt.update_max_length = value != 0,
@@ -618,11 +623,12 @@ impl Stmt {
                 };
             }
             StmtAttr::CursorType | StmtAttr::PrefetchRows => {
-                stmt.error.client(cr::NOT_IMPLEMENTED, "Not implemented");
-                return false;
+                stmt.error
+                    .client(req, cr::NOT_IMPLEMENTED, "Not implemented")?;
+                return Ok(false);
             }
         }
-        true
+        Ok(true)
     }
 
     /// `mysqlnd_stmt_attr_get`.
@@ -655,8 +661,8 @@ impl Stmt {
     /// mysqli's `close_stmt_and_copy_errors`: the statement closed, and
     /// its error, which the close clears, put on the connection in place
     /// of the connection's, with the connection's affected rows kept.
-    pub fn close_into_connection(self, req: &mut Request) -> Result<bool, Thrown> {
-        let error = self.data.error.clone();
+    pub fn close_into_connection(mut self, req: &mut Request) -> Result<bool, Thrown> {
+        let error = self.data.error.keep();
         let conn = self.conn;
         let affected = conn
             .handle()
@@ -664,8 +670,8 @@ impl Stmt {
             .unwrap_or(u64::MAX);
         let held = conn.acquire(req);
         let closed = self.close(req, false);
-        let _ = held.handle().with(req, |_, c| {
-            c.error = error;
+        let _ = held.handle().with(req, |req, c| {
+            c.error.restore(req, error);
             c.upsert.affected_rows = affected;
         });
         held.release(req);
@@ -698,6 +704,8 @@ impl Stmt {
         if let Some(result) = self.data.result.take() {
             result.release(req);
         }
+        // `free_stmt_result`'s `zend_llist_clean(&stmt->error_info->error_list)`.
+        self.data.error.clean(req);
         self.held.free(req);
         self.conn.release(req);
         closed
@@ -715,18 +723,18 @@ fn prepare(
 ) -> Result<bool, Thrown> {
     stmt.upsert.affected_rows_to_error();
     conn.upsert.affected_rows_to_error();
-    empty_errors(stmt, conn);
+    empty_errors(req, stmt, conn);
     if !conn.send_command(req, Com::StmtPrepare, sql, false)? {
-        stmt.error.copy_from(&conn.error);
+        stmt.error.copy_from(req, &conn.error)?;
         return Ok(false);
     }
     // `mysqlnd_stmt_read_prepare_response`.
-    let Some(response) = conn.read_prepare_response(req) else {
+    let Some(response) = conn.read_prepare_response(req)? else {
         return Ok(false);
     };
     if let Some(e) = response.error {
-        e.set_on(&mut stmt.error);
-        e.set_on(&mut conn.error);
+        e.set_on(req, &mut stmt.error)?;
+        e.set_on(req, &mut conn.error)?;
         return Ok(false);
     }
     stmt.stmt_id = response.stmt_id;
@@ -740,10 +748,22 @@ fn prepare(
         // dropped, as libmysql does, over a pool of their own that none
         // of them is carved from.
         let pool = Pool::create(req)?;
-        let skipped =
-            (0..stmt.parameter_count).all(|_| conn.read_packet(req, Prot::RsetField).is_some());
+        let mut skipped = true;
+        for _ in 0..stmt.parameter_count {
+            match conn.read_packet(req, Prot::RsetField) {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    skipped = false;
+                    break;
+                }
+                Err(thrown) => {
+                    pool.destroy(req);
+                    return Err(thrown);
+                }
+            }
+        }
         pool.destroy(req);
-        if !skipped || !prepare_read_eof(req, stmt, conn) {
+        if !skipped || !prepare_read_eof(req, stmt, conn)? {
             return Ok(false);
         }
     }
@@ -754,7 +774,7 @@ fn prepare(
         if let Some(old) = stmt.result.replace(result) {
             old.release(req);
         }
-        if !read || !prepare_read_eof(req, stmt, conn) {
+        if !read || !prepare_read_eof(req, stmt, conn)? {
             return Ok(false);
         }
     }
@@ -764,18 +784,22 @@ fn prepare(
 
 /// `mysqlnd_stmt_prepare_read_eof`: the EOF after the column definitions, its
 /// status the statement's; a failed read leaves the statement as new.
-fn prepare_read_eof(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> bool {
-    let Some(eof) = conn.read_eof(req) else {
+fn prepare_read_eof(
+    req: &mut Request,
+    stmt: &mut StmtData,
+    conn: &mut ConnData,
+) -> Result<bool, Thrown> {
+    let Some(eof) = conn.read_eof(req)? else {
         if let Some(result) = stmt.result.take() {
             result.release(req);
             *stmt = StmtData::new();
         }
-        return false;
+        return Ok(false);
     };
     stmt.upsert.server_status = eof.server_status;
     stmt.upsert.warning_count = eof.warning_count;
     stmt.state = StmtState::Prepared;
-    true
+    Ok(true)
 }
 
 // ---- executing
@@ -796,26 +820,29 @@ fn send_execute(
         }
         stmt.state = StmtState::Prepared;
     } else if stmt.state < StmtState::Prepared {
-        stmt.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+        stmt.error
+            .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
         return Ok(false);
     }
     if stmt.parameter_count > 0 {
         let Some(binds) = &stmt.param_bind else {
             stmt.error.client(
+                req,
                 cr::PARAMS_NOT_BOUND,
                 "No data supplied for parameters in prepared statement",
-            );
+            )?;
             return Ok(false);
         };
         let not_bound = binds.iter().filter(|b| b.zv.is_none()).count();
         if not_bound > 0 {
             let plural = if not_bound > 1 { "s" } else { "" };
             stmt.error.client(
+                req,
                 cr::PARAMS_NOT_BOUND,
                 &format!(
                     "No data supplied for {not_bound} parameter{plural} in prepared statement"
                 ),
-            );
+            )?;
             return Ok(false);
         }
     }
@@ -823,14 +850,15 @@ fn send_execute(
         Ok(request) => request,
         Err(thrown) => {
             stmt.error.client(
+                req,
                 cr::UNKNOWN_ERROR,
                 "Couldn't generate the request. Possibly OOM.",
-            );
+            )?;
             return Err(thrown);
         }
     };
     if !conn.send_command(req, Com::StmtExecute, &request, false)? {
-        stmt.error.copy_from(&conn.error);
+        stmt.error.copy_from(req, &conn.error)?;
         return Ok(false);
     }
     stmt.execute_count += 1;
@@ -849,7 +877,7 @@ fn parse_execute_response(
     conn.state = ConnState::QuerySent;
     let mut ok = conn.read_result_set_header(req, Some(&mut stmt.result))?;
     if ok {
-        empty_errors(stmt, conn);
+        empty_errors(req, stmt, conn);
         stmt.upsert.warning_count = conn.upsert.warning_count;
         stmt.upsert.affected_rows = conn.upsert.affected_rows;
         stmt.upsert.server_status = conn.upsert.server_status;
@@ -896,7 +924,7 @@ fn parse_execute_response(
             };
         }
     } else {
-        stmt.error.copy_from(&conn.error);
+        stmt.error.copy_from(req, &conn.error)?;
         let affected = conn.upsert.affected_rows;
         stmt.upsert.reset();
         stmt.upsert.affected_rows = affected;
@@ -1095,7 +1123,7 @@ fn cursor_fetch(
     let mut payload = stmt.stmt_id.to_le_bytes().to_vec();
     payload.extend_from_slice(&rows.to_le_bytes());
     if !conn.send_command(req, Com::StmtFetch, &payload, false)? {
-        stmt.error.copy_from(&conn.error);
+        stmt.error.copy_from(req, &conn.error)?;
         return Ok(false);
     }
     Ok(true)
@@ -1111,11 +1139,12 @@ fn store_result(
         return Ok(false);
     }
     if !check_state(stmt, conn) {
-        stmt.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+        stmt.error
+            .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
         return Ok(false);
     }
     stmt.handler = Handler::Store;
-    empty_errors(stmt, conn);
+    empty_errors(req, stmt, conn);
     conn.stats.inc(Stat::PsBufferedSets);
     if stmt.cursor_exists && !cursor_fetch(req, stmt, conn, u32::MAX)? {
         return Ok(false);
@@ -1128,7 +1157,7 @@ fn store_result(
         stmt.state = StmtState::UseOrStoreCalled;
         return Ok(true);
     }
-    stmt.error.copy_from(&conn.error);
+    stmt.error.copy_from(req, &conn.error)?;
     if let Some(result) = stmt.result.take() {
         result.release(req);
     }
@@ -1142,10 +1171,11 @@ fn use_result(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Re
         return Ok(false);
     }
     if stmt.field_count == 0 || !check_state(stmt, conn) {
-        conn.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+        conn.error
+            .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
         return Ok(false);
     }
-    stmt.error.reset();
+    stmt.error.reset(req);
     conn.stats.inc(Stat::PsUnbufferedSets);
     let cursor = stmt.cursor_exists.then_some(stmt.stmt_id);
     if let Some(result) = stmt.result.as_mut() {
@@ -1182,10 +1212,11 @@ fn get_result(
         return Ok(None);
     }
     if !check_state(stmt, conn) {
-        stmt.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+        stmt.error
+            .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
         return Ok(None);
     }
-    empty_errors(stmt, conn);
+    empty_errors(req, stmt, conn);
     conn.stats.inc(Stat::BufferedSets);
     if stmt.cursor_exists && !cursor_fetch(req, stmt, conn, u32::MAX)? {
         return Ok(None);
@@ -1194,7 +1225,7 @@ fn get_result(
     let stored = result.store(req, conn, true)?;
     stmt.state = StmtState::Prepared;
     if !stored {
-        stmt.error.copy_from(&conn.error);
+        stmt.error.copy_from(req, &conn.error)?;
         result.free(req, conn, true)?;
         return Ok(None);
     }
@@ -1207,14 +1238,15 @@ fn get_result(
 /// through) and the values of the unbound ones given back.
 fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<StmtFetch, Thrown> {
     if stmt.result.is_none() || stmt.state < StmtState::WaitingUseOrStore {
-        stmt.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+        stmt.error
+            .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
         return Ok(StmtFetch::Failed);
     }
     if stmt.state == StmtState::WaitingUseOrStore {
         run_handler(req, stmt, conn)?;
     }
     stmt.state = StmtState::UserFetching;
-    empty_errors(stmt, conn);
+    empty_errors(req, stmt, conn);
     let Some(result) = stmt.result.as_mut() else {
         return Ok(StmtFetch::Failed);
     };
@@ -1235,7 +1267,7 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
         Ok(None) => Ok(StmtFetch::NoData),
         Err(()) => {
             if conn.error.errno != 0 {
-                stmt.error.copy_from(&conn.error);
+                stmt.error.copy_from(req, &conn.error)?;
             }
             Ok(StmtFetch::Failed)
         }
@@ -1352,7 +1384,7 @@ fn free_result(
 
 /// `mysqlnd_stmt::reset`.
 fn reset(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<bool, Thrown> {
-    empty_errors(stmt, conn);
+    empty_errors(req, stmt, conn);
     if stmt.stmt_id == 0 {
         return Ok(true);
     }
@@ -1367,7 +1399,7 @@ fn reset(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
         ok = conn.send_command(req, Com::StmtReset, &stmt.stmt_id.to_le_bytes(), false)?
             && conn.handle_response(req, false, false, Com::StmtReset, true)?;
         if !ok {
-            stmt.error.copy_from(&conn.error);
+            stmt.error.copy_from(req, &conn.error)?;
         }
     }
     stmt.upsert = conn.upsert;
@@ -1382,13 +1414,14 @@ fn send_long_data(
     n: u32,
     data: &[u8],
 ) -> Result<bool, Thrown> {
-    empty_errors(stmt, conn);
+    empty_errors(req, stmt, conn);
     if stmt.state < StmtState::Prepared {
-        stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
+        stmt.error.client(req, cr::NO_PREPARE_STMT, NOT_PREPARED)?;
         return Ok(false);
     }
     let Some(binds) = stmt.param_bind.as_mut() else {
-        stmt.error.client(cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC);
+        stmt.error
+            .client(req, cr::COMMANDS_OUT_OF_SYNC, OUT_OF_SYNC)?;
         return Ok(false);
     };
     let Some(bind) = binds
@@ -1396,11 +1429,12 @@ fn send_long_data(
         .filter(|_| n < stmt.parameter_count)
     else {
         stmt.error
-            .client(cr::INVALID_PARAMETER_NO, "Invalid parameter number");
+            .client(req, cr::INVALID_PARAMETER_NO, "Invalid parameter number")?;
         return Ok(false);
     };
     if bind.ty != Some(FieldType::LongBlob) {
-        stmt.error.client(cr::INVALID_BUFFER_USE, NOT_BOUND_AS_BLOB);
+        stmt.error
+            .client(req, cr::INVALID_BUFFER_USE, NOT_BOUND_AS_BLOB)?;
         return Ok(false);
     }
     if conn.state != ConnState::Ready {
@@ -1412,7 +1446,7 @@ fn send_long_data(
     payload.extend_from_slice(data);
     let sent = conn.send_command(req, Com::StmtSendLongData, &payload, false)?;
     if !sent {
-        stmt.error.copy_from(&conn.error);
+        stmt.error.copy_from(req, &conn.error)?;
     }
     Ok(sent)
 }
@@ -1441,7 +1475,7 @@ fn free_stmt_result(
     if let Some(result) = stmt.result.take() {
         result.free(req, conn, true)?;
     }
-    stmt.error.list.clear();
+    stmt.error.clean(req);
     Ok(())
 }
 
@@ -1467,7 +1501,7 @@ fn close_on_server(
     conn: &mut ConnData,
     implicit: bool,
 ) -> Result<bool, Thrown> {
-    empty_errors(stmt, conn);
+    empty_errors(req, stmt, conn);
     loop {
         if stmt.state == StmtState::WaitingUseOrStore {
             run_handler(req, stmt, conn)?;
@@ -1492,7 +1526,7 @@ fn close_on_server(
         if conn.state == ConnState::Ready
             && !conn.send_command(req, Com::StmtClose, &stmt.stmt_id.to_le_bytes(), false)?
         {
-            stmt.error.copy_from(&conn.error);
+            stmt.error.copy_from(req, &conn.error)?;
             return Ok(false);
         }
     }
