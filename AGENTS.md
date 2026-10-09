@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=19571c57355a5fcba5ddfaa9d4bde33f99a8ba755f552718ec39ca748e6ef48d out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=6c3c9086a8315e4ad19378056d4307535ee7070ce016ba5360e14b15d47498b1 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=7c4174b5a90b30a14d15e5031a55d036920804146d11f519dca97808ea3c55d5 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=63ee4e23142bb3b0e82a0873bea38a763158fc6ba431707b2845796c43080eb9 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -130,7 +130,7 @@ third-engine-design.md
 | tier | tier.lock | 67 |  | no reading |
 | harness | xtask.lock | 380 |  | no reading |
 
-<!-- /computed in=98902da21722031bbe617e712e61d7e3c5511a4219fed1bf7c34c88c384ebbb5 out=e5e5fc861821da42057cab568d34560ae17f622911ba35a0bcc42c4a2bf7fd20 -->
+<!-- /computed in=b4f1f572731f41d7dc24b7afb8047b1dec2b8e80415846651b168de8188b251d out=e5e5fc861821da42057cab568d34560ae17f622911ba35a0bcc42c4a2bf7fd20 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -165,7 +165,7 @@ third-engine-design.md
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=b17e08bdb54b3123c45841245804e315017f7de7e97f6a04f12d39cdc037075e out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
+<!-- /computed in=ed5475d067e518dbbfbab83ccb9f234fefdf6373a3194d49cff3587587039ec1 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -203,7 +203,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=25c3162eda33be785bc8a913dda2af37d5b9798bca9cec1b4c16bf04fa2b64f8 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
+<!-- /computed in=7d3c2a992f934cd06012fde4b9b5b9f348149452302320ea05d9042797662017 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

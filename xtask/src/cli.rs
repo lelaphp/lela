@@ -823,6 +823,11 @@ pub enum Section {
     /// with the ruling that put them there or as not built (design §1,
     /// §12; #1761).
     Parity,
+    /// The fields of `oracle::Invocation` past the binary and the
+    /// program, read from the type's source: each one's type, whether a
+    /// `.phpt` section adds it or none gives it, and the first sentence
+    /// of its rustdoc; harness-design.md §4.3's region (#1319).
+    Invocation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

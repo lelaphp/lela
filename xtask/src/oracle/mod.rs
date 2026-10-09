@@ -832,52 +832,76 @@ impl fmt::Display for PastLimit {
 
 impl std::error::Error for PastLimit {}
 
-/// One invocation under the pin's recipe: which binary runs, which program,
-/// which regime, and the four things a `.phpt` section adds to a run. Every
-/// field past the program is empty for a witness, which is why `run` takes
-/// none of them.
+/// One invocation under the pin's recipe: which binary runs and which
+/// program, and what the run carries over the recipe. Each field past the
+/// program ends its rustdoc in one of harness-design.md §4.3's two groups,
+/// what a `.phpt` section adds or what no section gives, and §4.3 renders
+/// them from here (`status --section invocation`, #1319). Every field past
+/// the program is empty for a witness, which is why `run` takes none of
+/// them.
 #[derive(Debug, Clone)]
 pub struct Invocation<'a> {
     /// The pinned php for the oracle; the engine's own binary for a phpt
     /// lane, so that both run under one recipe.
     pub binary: &'a Path,
     pub program: Program<'a>,
-    /// The `[regime.<name>]`s of the pin the run stands under, in order:
-    /// each one's args after the recipe's and the regimes' before it, and
-    /// each one's ini after the recipe's and the regimes' before it, so a
-    /// lane composes the rows a person wrote rather than a row of its own
-    /// (`compile-identity` dumps under `dump` and one more, #1822).
+    /// The `[regime.<name>]`s of the pin the run stands under, in order.
+    /// Each one's args come after the recipe's and the regimes' before it,
+    /// and each one's ini after the recipe's and the regimes' before it,
+    /// so a lane composes the rows a person wrote rather than a row of its
+    /// own (`compile-identity` dumps under `dump` and one more, #1822).
+    ///
+    /// No section gives it.
     pub regimes: &'a [&'a str],
     /// Ini after the recipe's and the regime's: a test's `--INI--`.
+    ///
+    /// A `.phpt` section adds it.
     pub ini: &'a [String],
-    /// Flags before the program's path, where php takes a mode of its own:
+    /// Flags before the program's path, where php takes a mode of its own.
     /// `-l`, which compiles a file and does not run it, is the
     /// compile-identity lane's, and both binaries get it from here so that
     /// one recipe stands behind both. Empty for a phpt test and a witness,
     /// which run what they are given.
+    ///
+    /// No section gives it.
     pub flags: &'a [String],
     /// Arguments after the program's path: a test's `--ARGS--`.
+    ///
+    /// A `.phpt` section adds it.
     pub args: &'a [String],
     /// Environment entries over the recipe's, a later one of a name over
-    /// an earlier: a test's environment as run-tests.php builds it, and the
-    /// request a CGI-shaped test describes, whose values are the bytes the
-    /// test wrote and no encoding of them. An entry whose value is empty
-    /// takes the name out of the environment, the recipe's included, as
-    /// php's `proc_open` leaves an empty value out of the environment it
-    /// hands a program (`php_array_to_envp`, `ext/standard/proc_open.c:174`),
-    /// and run-tests.php hands every program through it (#1186).
+    /// an earlier. They are a test's environment as run-tests.php builds
+    /// it, and the request a CGI-shaped test describes, whose values are
+    /// the bytes the test wrote and no encoding of them. An entry whose value is empty takes
+    /// the name out of the environment, the recipe's included, as php's
+    /// `proc_open` leaves an empty value out of the environment it hands a
+    /// program (`php_array_to_envp`, `ext/standard/proc_open.c:174`), and
+    /// run-tests.php hands every program through it (#1186).
+    ///
+    /// A `.phpt` section adds it.
     pub env: &'a [(String, OsString)],
-    /// What the program reads on stdin.
+    /// What the program reads on stdin: a test's `--STDIN--`, or a
+    /// CGI-shaped test's body.
+    ///
+    /// A `.phpt` section adds it.
     pub stdin: Stdin<'a>,
-    /// How the program's two streams out are taken.
+    /// How the program's two streams out are taken: to files apart, or
+    /// through pipes as run-tests.php takes a test's, stderr into stdout
+    /// where its `--CAPTURE_STDIO--` captures both.
+    ///
+    /// A `.phpt` section adds it.
     pub streams: Streams,
     /// The working directory: the program's own where `None`, which is
     /// a witness's; php-src's root for a phpt test and the sections run
     /// beside it, as run-tests.php runs them (#952).
+    ///
+    /// No section gives it.
     pub cwd: Option<&'a Path>,
     /// Whether what the program wrote is handed back as it wrote it and
     /// not normalised: a CGI run's, whose headers run-tests.php parts
     /// from the body before it trims (run-tests.php:2530-2533).
+    ///
+    /// No section gives it.
     pub raw: bool,
 }
 

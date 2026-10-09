@@ -20,6 +20,7 @@ use serde_json::{Map, Value, json};
 
 pub(crate) mod every;
 mod graph;
+mod invocation;
 mod parity;
 mod tickets;
 pub(crate) use every::PerReading;
@@ -225,6 +226,7 @@ pub fn render(
         Section::Git => return git_section(root, format),
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
+        Section::Invocation => return invocation::render(root, format),
         Section::Parity => {
             return parity::render(manifest, against.checkout()?, root, format);
         }
