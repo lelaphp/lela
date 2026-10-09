@@ -35,7 +35,7 @@ pub use php_heap::{Fatal, FrameRef};
 
 mod frames;
 pub use frames::{
-    Argument, Aside, Called, Evaluated, Under, below, call, catches, entry, evaluate,
+    Argument, Aside, Called, Evaluated, Under, begin, below, call, catches, entry, evaluate,
     evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 
@@ -97,6 +97,14 @@ pub trait Tier: 'static {
     /// compiled under it, so its calls are the ones `zend_get_call_op`
     /// picks for the same host (design §4.3, revision 58).
     const HOOKED: Hooked = Hooked::NONE;
+
+    /// Whether the tier holds the frame a serving's `execute` enters
+    /// before it executes it, as phpdbg holds the program it compiled at
+    /// its prompt and executes it at `run`: `execute` then
+    /// raises no observer begin for that frame (seam 9), and the tier
+    /// raises it with [`begin`] where it executes the frame, so a frame
+    /// it never executes is never begun and never ended.
+    const HOLDS: bool = false;
 
     /// The tier's engine state, request state and ini, under seam 3
     /// without being an extension; `None` declares nothing.
@@ -256,8 +264,10 @@ impl Loops {
     }
 }
 
-/// The dispatch loop over `frame` until the entry frame returns, asking
-/// `T` at the safepoints. `Ok(())` exactly when the entry frame has
+/// `zend_execute` over a frame its caller pushed for a main op array:
+/// the frame's observer begin, `ZEND_OBSERVER_FCALL_BEGIN`, unless `T`
+/// holds it ([`Tier::HOLDS`]), then the dispatch loop over `frame`
+/// until the entry frame returns, asking `T` at the safepoints. `Ok(())` exactly when the entry frame has
 /// returned or left a throwable it did not catch pending; `Err` carries
 /// the fatal. The throwable is rendered by the caller once the frame is
 /// popped, as php's `zend_execute_scripts` calls `zend_exception_error`
@@ -280,6 +290,9 @@ pub(crate) fn execute<T: Tier, D: Telling>(
     req: &mut Request,
     frame: FrameRef,
 ) -> Result<(), Fatal> {
+    if !T::HOLDS {
+        crate::observer::call(req, frame);
+    }
     serving::<T, D>(req, frame)
 }
 

@@ -97,6 +97,17 @@ pub fn catches(req: &mut Request, frame: FrameRef) -> bool {
     exec::opline_at(code, op_num).is_some_and(|op| op.opcode == Opcode::Catch)
 }
 
+/// The observer's begin of the frame a serving's `execute` entered, which
+/// a tier that holds that frame before executing it raises where it
+/// executes it ([`super::Tier::HOLDS`]), as php's `zend_execute` raises
+/// `ZEND_OBSERVER_FCALL_BEGIN` before `zend_execute_ex`
+/// (`Z/Zend/zend_vm_execute.h:121973`); phpdbg's `run` is that
+/// `zend_execute` over the program it compiled and held
+/// (`Z/sapi/phpdbg/phpdbg_prompt.c:866`).
+pub fn begin(req: &mut Request, frame: FrameRef) {
+    crate::observer::call(req, frame);
+}
+
 /// The unwind exit, standing where a throwable would, as `exit` leaves
 /// it: a tier that hands the frame back with `Flow::Resume` has the loop
 /// unwind every frame of the serving without entering a `finally`
