@@ -83,3 +83,39 @@ fn the_tracked_parity_table_is_the_seven_suites_under_1167() {
         }]
     );
 }
+
+/// A suite is ruled out once, under one ruling: one listed twice, under
+/// two rulings or one, or one inside another ruled suite, is refused,
+/// naming both entries and their rulings (#1930).
+#[test]
+fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
+    let cases = [
+        (
+            "{ suites = [\"ext/ldap\"], ruling = 1167 }, { suites = [\"ext/ldap\"], ruling = 1168 }",
+            ["ext/ldap", "#1167", "ext/ldap", "#1168"],
+        ),
+        (
+            "{ suites = [\"ext/ldap\", \"ext/snmp\", \"ext/ldap\"], ruling = 1167 }",
+            ["ext/ldap", "#1167", "ext/ldap", "#1167"],
+        ),
+        (
+            "{ suites = [\"ext/x\"], ruling = 1167 }, { suites = [\"ext/x/tests\"], ruling = 1168 }",
+            ["ext/x", "#1167", "ext/x/tests", "#1168"],
+        ),
+        (
+            "{ suites = [\"ext/x/tests\"], ruling = 1168 }, { suites = [\"ext/x\"], ruling = 1167 }",
+            ["ext/x/tests", "#1168", "ext/x", "#1167"],
+        ),
+    ];
+    for (out, named) in cases {
+        let text = format!("{MINIMAL}[parity]\nout = [{out}]\n");
+        let refused = format!("{:#}", Manifest::parse(&text).unwrap_err());
+        for name in named {
+            assert!(refused.contains(name), "{out}: {name} in {refused}");
+        }
+    }
+    let apart = format!(
+        "{MINIMAL}[parity]\nout = [{{ suites = [\"ext/x\"], ruling = 1167 }}, {{ suites = [\"ext/xy\"], ruling = 1168 }}]\n"
+    );
+    assert!(Manifest::parse(&apart).is_ok());
+}

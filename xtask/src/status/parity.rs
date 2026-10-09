@@ -263,7 +263,8 @@ fn inside(manifest: &Manifest) -> BTreeSet<PathBuf> {
 }
 
 /// The suites outside parity: every one `[parity] out` names, under its
-/// ruling, whether a reading measured it or not; then the suite of each
+/// one ruling (`Parity::hold` refuses a suite ruled twice or inside
+/// another, #1930), whether a reading measured it or not; then the suite of each
 /// place nothing owns, a run a reading measured or a subset of the pinned
 /// tree's corpus, by the suite its first two segments name under `ext/` or
 /// `sapi/`, as not built.
