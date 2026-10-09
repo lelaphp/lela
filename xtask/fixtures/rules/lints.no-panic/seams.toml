@@ -1,0 +1,40 @@
+# A negative-control fixture (harness-design.md §4.1): a workspace that must
+# fail the instrument named by its directory. The pin is the real one, by path.
+# The deny_lints sensor of the `clippy` instrument (#1917): php_heap denies
+# the rule's lints at its root and php_sapi through its Cargo [lints], so
+# both pass; php_unit denies one of the six and php_syntax's binary, a
+# crate root of its own, none, so both fail naming the source.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "php_heap"
+budget = 100
+
+[[crate]]
+name = "php_unit"
+budget = 100
+
+[[crate]]
+name = "php_sapi"
+budget = 100
+
+[[crate]]
+name = "php_syntax"
+budget = 100
+
+[[rule]]
+id = "lints.no-panic"
+scope = "crates/*"
+exempt = ["tests"]
+deny_lints = ["clippy::unwrap_used", "clippy::expect_used", "clippy::panic", "clippy::unreachable", "clippy::todo", "clippy::unimplemented"]
+text = "Internal invariant failures are InternalError fatals with a message, not panics (fixture)."

@@ -1,0 +1,31 @@
+# A negative-control fixture (harness-design.md §4.1): a workspace that must
+# fail the instrument named by its directory. The pin is the real one, by path.
+# The deny_lints sensor of the `clippy` instrument (#1917) over a scope
+# inside crates: ext/ctype's bindings deny the rule's lints at their module
+# root, ext/pcre's deny nothing, so pcre fails naming its bindings and
+# ctype passes; neither library root is covered.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "ext/pcre"
+budget = 100
+
+[[crate]]
+name = "ext/ctype"
+budget = 100
+
+[[rule]]
+id = "unsafe.one-op"
+scope = "ext/*/src/ffi/**"
+deny_lints = ["clippy::undocumented_unsafe_blocks", "clippy::multiple_unsafe_ops_per_block"]
+text = "Every unsafe block is one operation with a SAFETY comment (fixture)."
