@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=4f7ba62d4dd2bb0fdf1f155c6a9bc97f1a4e29064ae9c22f739855e4564d4c9e out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=0bd7f8f85dc7cf7c3bbe67dd791f966e51ae1a9aef676423c99176f9c880586d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -205,7 +205,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=970b627c97536471cf55b1da7ea6de0182bb8d383f612bc91fa3a651368d3c2c out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
+<!-- /computed in=3832a06c18316940fb7c2687e7324214bc96f762a443f430e5305fa79f78c6df out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
