@@ -1,0 +1,6 @@
+# A negative control (harness-design.md §4.1, §7's Miri row; #1916): a
+# workspace of its own, apart from the one around it, whose `php_heap`
+# reads a value after freeing it, which `xtask miri` must fail on.
+[workspace]
+resolver = "3"
+members = ["crates/php_heap"]

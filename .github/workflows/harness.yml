@@ -141,6 +141,33 @@ jobs:
           if-no-files-found: warn
           retention-days: 1 # read by `done`'s job, minutes later
 
+  miri:
+    name: Miri on php_heap
+    # Design §9's Miri on `php_heap`'s tests per commit (harness §7, #1916):
+    # `xtask miri` on the nightly `xtask::miri::TOOLCHAIN` names, which
+    # rustup installs here with its `miri` component where the runner has
+    # not yet; `xtask/tests/miri.rs` holds this line to the constant. The
+    # negative control runs here too, since the build job has no nightly
+    # and its copy of the test returns on the skip.
+    runs-on: [self-hosted, linux, dax-build]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+          fetch-depth: 0 # one history the runner keeps, fetched incrementally
+      - uses: ./.github/actions/workspace
+      - run: rustup toolchain install nightly-2025-01-08 --profile minimal --component miri,rust-src
+      - run: cargo xtask miri
+      - run: cargo test -p xtask --test miri
+      - name: this job's readings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-miri
+          path: target/harness
+          if-no-files-found: warn
+          retention-days: 1 # read by `done`'s job, minutes later
+
   oracle:
     name: the witnesses, the crosscheck and the oracle's tests
     runs-on: [self-hosted, macos, dax-oracle]
@@ -192,8 +219,8 @@ jobs:
 
   done:
     name: done
-    needs: [per-commit, oracle]
-    # Run whatever the two found, so its list names every unmet condition.
+    needs: [per-commit, miri, oracle]
+    # Run whatever the three found, so its list names every unmet condition.
     if: ${{ !cancelled() }}
     runs-on: [self-hosted, linux, dax-build]
     outputs:
@@ -204,9 +231,9 @@ jobs:
           clean: false
           fetch-depth: 0 # done measures since the merge base with main
       - uses: ./.github/actions/workspace
-      # The two jobs' stores, one store again: each instrument keeps its
+      # The three jobs' stores, one store again: each instrument keeps its
       # own files, and no instrument ran on both runners.
-      - name: the two jobs' readings, one store
+      - name: the three jobs' readings, one store
         uses: actions/download-artifact@v4
         with:
           pattern: store-*
@@ -257,7 +284,7 @@ jobs:
   # `DRY_RUN=1` prints what it would write.
   red-main:
     name: a red main, filed
-    needs: [regions, per-commit, oracle, done]
+    needs: [regions, per-commit, miri, oracle, done]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, dax-build]
     permissions:

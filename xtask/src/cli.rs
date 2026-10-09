@@ -269,6 +269,14 @@ pub(crate) enum Command {
         #[arg(long)]
         staged: bool,
     },
+    /// `cargo miri test` on `php_heap`, or on the crates named, as the
+    /// lane design §9 runs per commit; one reading per crate, with what
+    /// ran, failed and was ignored in its numbers.
+    Miri {
+        /// Only these crates, by manifest name; default `php_heap`.
+        #[arg(long = "crate", value_name = "NAME")]
+        crates: Vec<String>,
+    },
     /// Run the pinned `.phpt` corpus through the engine and hold each test
     /// to its `--EXPECT*--` section; one reading per subset, scoped to the
     /// crate whose subset it is.

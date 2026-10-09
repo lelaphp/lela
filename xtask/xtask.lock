@@ -125,6 +125,10 @@ manifest::Telemetry
 manifest::Week
 manifest::Where
 manifest::scope_matches
+miri::CRATES
+miri::FEATURES
+miri::TOOLCHAIN
+miri::run
 new_ext::Laid
 new_ext::run
 new_sapi::run

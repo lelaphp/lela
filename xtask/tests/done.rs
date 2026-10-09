@@ -1323,8 +1323,8 @@ fn ci_per_commit_runs_the_instruments_then_done_and_uploads_only_the_store() {
     let uploads = text.match_indices("upload-artifact").collect::<Vec<_>>();
     assert_eq!(
         uploads.len(),
-        3,
-        "the two jobs' stores and the run's: {text}"
+        4,
+        "the three jobs' stores and the run's: {text}"
     );
     let mut kept = 0;
     for (upload, _) in uploads {
