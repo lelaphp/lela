@@ -818,6 +818,7 @@ request::Request::registered
 request::Request::release
 request::Request::remove_begin_handler
 request::Request::remove_end_handler
+request::Request::reporting_without
 request::Request::request_headers
 request::Request::request_method
 request::Request::request_time
