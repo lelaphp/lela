@@ -985,6 +985,47 @@ fn the_fastcgi_mapping_reads_nginx_s_lines_as_typed_params() {
     assert!(err.to_string().contains("[fastcgi]"), "{err}");
 }
 
+/// The tracked pin's mapping (#2334): nginx's stock `fastcgi_params` at
+/// the release it names, its source at that release's tag, and
+/// `SCRIPT_FILENAME` first as nginx's `fastcgi.conf` sets it.
+#[test]
+fn the_tracked_pin_maps_http_to_fastcgi_as_nginx_s_stock_params() {
+    let pin = Manifest::load(workspace()).unwrap().pin;
+    let mapping = pin.fastcgi().unwrap();
+    assert!(
+        mapping
+            .source
+            .contains(&format!("release-{}/conf/fastcgi_params", mapping.nginx)),
+        "{mapping:?}"
+    );
+    let names: Vec<&str> = mapping.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "SCRIPT_FILENAME",
+            "QUERY_STRING",
+            "REQUEST_METHOD",
+            "CONTENT_TYPE",
+            "CONTENT_LENGTH",
+            "SCRIPT_NAME",
+            "REQUEST_URI",
+            "DOCUMENT_URI",
+            "DOCUMENT_ROOT",
+            "SERVER_PROTOCOL",
+            "REQUEST_SCHEME",
+            "HTTPS",
+            "GATEWAY_INTERFACE",
+            "SERVER_SOFTWARE",
+            "REMOTE_ADDR",
+            "REMOTE_PORT",
+            "SERVER_ADDR",
+            "SERVER_PORT",
+            "SERVER_NAME",
+            "REDIRECT_STATUS",
+        ]
+    );
+}
+
 #[test]
 fn compare_is_same_on_equal_bytes() {
     let verdict = oracle::compare(&registry(), "witness:abc", b"x\n", b"x\n");

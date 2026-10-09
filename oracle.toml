@@ -233,3 +233,50 @@ linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "36a4972
 cgi = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/php-cgi", md5 = "66f6a8919f22d92b7978ae66305f873c" }
 fpm = { path = "/opt/homebrew/Cellar/php/8.5.9/sbin/php-fpm", md5 = "58aa917bf815cde59ed9e550e1f10f39" }
 phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/phpdbg", md5 = "6bb7d99d6dc623367ea110ae49bd054b" }
+
+[fastcgi]
+# The HTTP-to-FastCGI mapping `[sapi] fpm` is driven under, so the pinned
+# php-fpm is the oracle for what PHP code sees under a host php does not
+# ship (research/production-server.r2.md §5.4; Mitchell, 2026-10-09, on
+# #2334). Under FPM the web server, not php, fills the CGI variables (RFC 3875
+# §4.1): this is nginx's stock conf/fastcgi_params, the mapping most php-fpm
+# deployments see, copied verbatim at the release tag below and held to its
+# md5, and SCRIPT_FILENAME as nginx sets it in conf/fastcgi.conf at the same
+# tag, which is this file with that one parameter first. nginx then passes
+# every request header as HTTP_<NAME> (`fastcgi_pass_request_headers on`, its
+# default). What crosses the wire is held to the RFCs, not to this oracle: a
+# difference there is a `wire:<suite>/<case>` row of the registry. Stage 1's
+# RFC 9112 case corpus is sapi/makala's own tests (#2340) and pins nothing
+# here; h2spec is pinned beside the oracle at stage 2. Read by
+# `oracle::Pin::fastcgi` as one typed value.
+nginx = "1.30.5"
+source = "https://github.com/nginx/nginx/blob/release-1.30.5/conf/fastcgi_params"
+md5 = "4729c30112ca3071f4650479707993ad"
+script_filename = "$document_root$fastcgi_script_name"
+params = '''
+
+fastcgi_param  QUERY_STRING       $query_string;
+fastcgi_param  REQUEST_METHOD     $request_method;
+fastcgi_param  CONTENT_TYPE       $content_type;
+fastcgi_param  CONTENT_LENGTH     $content_length;
+
+fastcgi_param  SCRIPT_NAME        $fastcgi_script_name;
+fastcgi_param  REQUEST_URI        $request_uri;
+fastcgi_param  DOCUMENT_URI       $document_uri;
+fastcgi_param  DOCUMENT_ROOT      $document_root;
+fastcgi_param  SERVER_PROTOCOL    $server_protocol;
+fastcgi_param  REQUEST_SCHEME     $scheme;
+fastcgi_param  HTTPS              $https if_not_empty;
+
+fastcgi_param  GATEWAY_INTERFACE  CGI/1.1;
+fastcgi_param  SERVER_SOFTWARE    nginx/$nginx_version;
+
+fastcgi_param  REMOTE_ADDR        $remote_addr;
+fastcgi_param  REMOTE_PORT        $remote_port;
+fastcgi_param  SERVER_ADDR        $server_addr;
+fastcgi_param  SERVER_PORT        $server_port;
+fastcgi_param  SERVER_NAME        $server_name;
+
+# PHP only, required if PHP was built with --enable-force-cgi-redirect
+fastcgi_param  REDIRECT_STATUS    200;
+'''
