@@ -431,11 +431,33 @@ fn serve_from<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<
         }
         let serving = exec::standing(req, frame)?;
         let code = exec::serving_code(&serving, frame)?;
+        stepped = serve_frame::<T, D>(req, frame, code, declared)?;
+    }
+}
+
+/// The loop inside one frame: its oplines dispatched one after another
+/// for as long as each answers [`Stepped::Same`] of the frame, and the
+/// first other edge handed back to [`serve_from`]. The unit the frame
+/// serves is held by the caller across them, so a step pays for the
+/// opline's fetch and the dispatch and nothing else, as php's
+/// `execute_ex` keeps `EX(func)` in hand between handlers (design §5.8);
+/// what the frame serves is looked up again only where the edge leaves
+/// it.
+fn serve_frame<T: Tier, D: Telling>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &php_unit::OpArray,
+    declared: D,
+) -> Result<Stepped, Fatal> {
+    loop {
         let op = *at_opline(req, frame, code)?;
         declared.before(req, frame, op.opcode);
-        stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
+        let stepped = dispatch::dispatch::<T>(req, frame, code, &op)?;
         #[cfg(debug_assertions)]
         req.sensed_after(code, &op)?;
+        if stepped != Stepped::Same(frame) {
+            return Ok(stepped);
+        }
     }
 }
 
