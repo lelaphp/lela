@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=6a5caa28bc12340d34d952276da948f985573374b25b596caa4a7764db77084d out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=43b0fc43d9f19839f483892c9eac84e48c82a43bcd7a26429809c7ea046d380a out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -129,9 +129,9 @@ third-engine-design.md
 | sapi | sapi.lock | 43 |  | no reading |
 | tier | tier.lock | 67 |  | no reading |
 | layer | layer.lock | 36 |  | no reading |
-| harness | xtask.lock | 380 |  | no reading |
+| harness | xtask.lock | 385 |  | no reading |
 
-<!-- /computed in=1c2e8e76830c3b9d1c6ce53d431156f5dd0e77690868c0e4e7c5cc59b9b15176 out=cb37f2b73f74bb1650dc38bfc57371da137e72a4669dbfc0a3bae2c72b016b8a -->
+<!-- /computed in=757e495b85460b06f43c8f6e96c1cdfd933b69549518e8490115c7876372bed9 out=48f8cd13a612b26212b603f7b514bf5e1220c51294edea700fdd4915867beb11 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -187,6 +187,7 @@ Commands:
   budget             Hold every crate to its line ceiling and the workspace to [budget]; refuse committed generated code and a stale generated file
   clippy             `cargo clippy` with every warning denied, on every target of each crate, as the reading `done` reads; one reading per crate
   test               `cargo test` on each crate, as the reading `done` reads; one reading per crate, with what passed, failed, was ignored and was filtered out in its numbers
+  miri               `cargo miri test` on `php_heap`, or on the crates named, as the lane design §9 runs per commit; one reading per crate, with what ran, failed and was ignored in its numbers
   phpt               Run the pinned `.phpt` corpus through the engine and hold each test to its `--EXPECT*--` section; one reading per subset, scoped to the crate whose subset it is
   port-map           Join the Mahout census to `api.lock`: each item `same`, `renamed` or `gone`, the rows not yet taken as the number; one reading, at the lock's crate
   compile-identity   Compile a corpus under the oracle's dump recipe and under the engine, and hold every file to byte-identity; one reading per corpus, scoped to the corpus
@@ -204,7 +205,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=7d3c2a992f934cd06012fde4b9b5b9f348149452302320ea05d9042797662017 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
+<!-- /computed in=fe5e20b9ea105ad0f1e28b2a23f1007bb13939893d2b47e96323a47ca66dd06c out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

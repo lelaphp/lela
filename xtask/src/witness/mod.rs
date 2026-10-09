@@ -65,6 +65,17 @@
 //! call, and this is why: nothing an agent writes can put a number
 //! there. Read the diff it produces.
 //!
+//! **What `--accept --streams` writes** (harness §8, #801). The same, and
+//! into each fence marked `capture` the oracle's two streams after the
+//! recipe's normalisation, the `expect` fence's body and a `stderr`
+//! fence's; a fence not marked is left byte for byte. The oracle runs the
+//! snippet again from a scratch directory apart
+//! ([`oracle::Place::Apart`]), and a fence whose two runs differ is not
+//! written: the line that differs is named and the fence is `unpinned`
+//! until its author writes that line with a wildcard by hand, since the
+//! capture never invents one. What it wrote is printed fence by fence,
+//! and held as any fence is.
+//!
 //! **What coverage is.** The manifest's `witness.coverage` rule names the
 //! scope, `crates/php_engine/src/ops/**` and `ext/*/src/**`; a kernel or a
 //! native there without a witness raises `missing`, and `done` prints it
@@ -221,15 +232,16 @@ impl tally::Judgement for Judgement {
 /// name, the judgement and the note.
 pub(crate) type Judged = tally::Judged<Judgement>;
 
-/// The one thing `--accept` writes: a fence line, by the file and the line
-/// it stands on.
+/// The one thing `--accept` writes: a block's fence lines, by the file and
+/// the line the first stands on, the `expect` fence's line alone for a
+/// status and the fences whole for the streams.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Captured {
     pub file: PathBuf,
     /// 1-based.
     pub line: usize,
-    pub was: String,
-    pub now: String,
+    pub was: Vec<String>,
+    pub now: Vec<String>,
 }
 
 /// What one crate's run came to: the witnesses judged, and the coverage
@@ -423,15 +435,49 @@ fn declared_ms(wall: Duration) -> u64 {
 pub struct Ask {
     /// Only these crates, by manifest name; empty is every crate that exists.
     pub crates: Vec<String>,
-    /// Capture the oracle's status onto each fence line that does not
-    /// already pin it.
-    pub accept: bool,
+    /// What the run writes from the oracle's runs onto the fences.
+    pub accept: Accept,
     /// Only the crates with a staged change, pre-commit's touched crates
     /// (harness §6), as `clippy --staged` runs over; with `crates` empty.
     pub staged: bool,
     /// Which of each crate's fences the run serves, and so whether what it
     /// judged is a reading.
     pub scope: Scope,
+}
+
+/// What `--accept` writes (design §8; harness §8, #801).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Accept {
+    /// Nothing: the run judges and writes no fence.
+    #[default]
+    Nothing,
+    /// `--accept`: the oracle's status onto each bare `exit`.
+    Status,
+    /// `--accept --streams`: the status, and the oracle's two streams into
+    /// each fence marked `capture`, where a second run from a scratch
+    /// directory apart prints them byte for byte.
+    Streams,
+}
+
+impl From<crate::cli::Accepting> for Accept {
+    fn from(asked: crate::cli::Accepting) -> Accept {
+        match (asked.accept, asked.streams) {
+            (false, _) => Accept::Nothing,
+            (true, false) => Accept::Status,
+            (true, true) => Accept::Streams,
+        }
+    }
+}
+
+impl Accept {
+    /// The flags that carry it to the served process ([`watch`]).
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            Accept::Nothing => &[],
+            Accept::Status => &["--accept"],
+            Accept::Streams => &["--accept", "--streams"],
+        }
+    }
 }
 
 /// Which of a crate's fences a run serves (#1146). A crate's reading is a
@@ -785,16 +831,21 @@ fn finished_reading(
     {
         println!("witness: {n} of {} did not run; {why}", krate.name);
     }
-    if ask.accept && !tally.captured.is_empty() {
+    if ask.accept != Accept::Nothing && !tally.captured.is_empty() {
         capture(root, &tally.captured)?;
         *snapshot = Snapshot::disk(root)?;
     }
+    // The diff is the review, fence by fence, as a person reads it before
+    // the commit (#801).
     for captured in &tally.captured {
-        println!(
-            "accepted {}:{}: {}",
+        print!(
+            "accepted {}:{}:\n{}",
             captured.file.display(),
             captured.line,
-            captured.now.trim()
+            crate::oracle::diff(
+                captured.was.join("\n").as_bytes(),
+                captured.now.join("\n").as_bytes()
+            )
         );
     }
     // `wall=D` is disclosure and gates nothing; the budget line is
@@ -1120,27 +1171,30 @@ fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime
 /// Write the fence lines a run captured: each file under `root` read, the
 /// lines replaced, the file written back. Nothing else of the file moves,
 /// which is what makes the diff `--accept` produces one a person can read.
+/// A file's blocks are replaced from its last up, so a block whose lines
+/// grow or shrink moves no line a block above it was read at.
 pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
     let mut by_file: BTreeMap<&Path, Vec<&Captured>> = BTreeMap::new();
     for one in captured {
         by_file.entry(&one.file).or_default().push(one);
     }
-    for (name, lines) in by_file {
+    for (name, mut blocks) in by_file {
         let file = root.join(name);
         let text =
             fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
         let ends_with_newline = text.ends_with('\n');
         let mut kept: Vec<String> = text.lines().map(str::to_owned).collect();
-        for one in lines {
+        blocks.sort_by_key(|one| std::cmp::Reverse(one.line));
+        for one in blocks {
             let at = one.line - 1;
-            if kept.get(at) != Some(&one.was) {
+            if kept.get(at..at + one.was.len()) != Some(&one.was[..]) {
                 bail!(
-                    "{}:{} is not the fence line it was when it was read; run the instrument again",
+                    "{}:{} is not the fence it was when it was read; run the instrument again",
                     file.display(),
                     one.line
                 );
             }
-            kept[at].clone_from(&one.now);
+            kept.splice(at..at + one.was.len(), one.now.iter().cloned());
         }
         let mut out = kept.join("\n");
         if ends_with_newline {
@@ -1199,7 +1253,7 @@ pub(crate) fn command(
     };
     let ask = Ask {
         crates,
-        accept: asked.accept,
+        accept: asked.accepting.into(),
         staged: asked.staged,
         scope,
     };

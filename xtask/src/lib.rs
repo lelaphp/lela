@@ -47,6 +47,7 @@ mod layout;
 mod lines;
 mod lock;
 pub mod manifest;
+pub mod miri;
 pub mod new_ext;
 pub mod new_sapi;
 pub mod oracle;
@@ -178,6 +179,7 @@ fn command_line() -> Result<()> {
         Command::Test { crates, staged } => {
             test::command(&root, &manifest, &store, &crates, staged)
         }
+        Command::Miri { crates } => miri::command(&root, &manifest, &store, &crates),
         Command::Phpt(ask) => phpt_command(&root, &manifest, &store, ask),
         Command::PortMap { tree } => port_map::command(&root, &manifest, &store, tree.as_deref()),
         Command::CompileIdentity(ask) => identity_command(&root, &manifest, &store, ask),

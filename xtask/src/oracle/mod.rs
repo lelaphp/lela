@@ -715,6 +715,7 @@ impl Pin {
             pin: self,
             digest: OnceLock::new(),
             spawned: Spawned::default(),
+            place: Place::Named,
         }
     }
 
@@ -1120,6 +1121,31 @@ pub struct Oracle<'a> {
     digest: OnceLock<Result<(), String>>,
     /// Every process a program of the run was spawned as.
     spawned: Spawned,
+    /// Where the run's programs stand.
+    place: Place,
+}
+
+/// Where the scratch trees a run's programs stand in are made: under the
+/// names their callers give them, or under longer names apart from those.
+/// The second is how `witness --accept --streams` runs a fence again from
+/// a directory whose path differs from the first's in its length as well
+/// as its name, so a number the path moves, a `string(92)` or a memory
+/// count over `$_SERVER`, differs between the two runs and is refused
+/// rather than written (#801).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Place {
+    Named,
+    Apart,
+}
+
+impl Place {
+    /// A scratch tree named for `name` in this place.
+    pub(crate) fn tree(self, name: &str) -> Result<Tree> {
+        match self {
+            Place::Named => Tree::new(name),
+            Place::Apart => Tree::new(&format!("{name}-apart-from-the-first")),
+        }
+    }
 }
 
 /// The processes the programs of one run were spawned as, each the leader
@@ -1225,7 +1251,22 @@ impl<'a> Oracle<'a> {
             pin,
             digest,
             spawned: Spawned::default(),
+            place: Place::Named,
         }
+    }
+
+    /// The same run with its programs standing [`Place::Apart`]: the
+    /// digest as this one asserted it, and the programs it spawns its own.
+    pub(crate) fn apart(&self) -> Oracle<'a> {
+        Oracle {
+            place: Place::Apart,
+            ..self.beside(self.pin)
+        }
+    }
+
+    /// A scratch tree named for `name` where this run's programs stand.
+    pub(crate) fn tree(&self, name: &str) -> Result<Tree> {
+        self.place.tree(name)
     }
 
     /// The processes this run's programs were spawned as since the last
@@ -1262,7 +1303,7 @@ impl<'a> Oracle<'a> {
             .collect::<Result<Vec<_>>>()?;
         let recipe = &pin.recipe;
 
-        let scratch = Scratch::for_program(recipe, call.program)?;
+        let scratch = Scratch::for_program(recipe, call.program, self.place)?;
         let mut cmd = match pin.wrapper.split_first() {
             Some((wrapper, before)) => {
                 let mut cmd = Command::new(wrapper);
@@ -1744,10 +1785,14 @@ pub(crate) struct Scratch {
 }
 
 impl Scratch {
-    pub(crate) fn for_program(recipe: &Recipe, program: Program<'_>) -> Result<Scratch> {
+    pub(crate) fn for_program(
+        recipe: &Recipe,
+        program: Program<'_>,
+        place: Place,
+    ) -> Result<Scratch> {
         Ok(match program {
             Program::Snippet(code) => {
-                let own = Tree::new("oracle")?;
+                let own = place.tree("oracle")?;
                 let script = PathBuf::from(&recipe.script_name);
                 own.write(&script, format!("{}{code}", recipe.preamble))?;
                 Scratch {

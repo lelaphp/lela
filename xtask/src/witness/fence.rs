@@ -62,6 +62,16 @@
 //! fences carry it is refused, not judged, where the server does not
 //! answer, as `phpt` refuses a `MySQL` subset (#1366).
 //!
+//! A `capture` says the fence's streams are the oracle's to write: `xtask
+//! witness --accept --streams` writes the oracle's stdout into the
+//! `expect` fence and its stderr into a `stderr` fence, after the recipe's
+//! normalisation, and leaves every fence without it as its author wrote it
+//! (harness-design.md §8, #801). The marker is a word and not an empty
+//! `expect` fence, since an empty fence is what a snippet that prints
+//! nothing pins; and it stays on the fence once written, so the text under
+//! it is known to be the oracle's and the next capture, after an oracle
+//! bump, writes it again. It is no part of the divergence key.
+//!
 //! A `locale=<name>`, which may stand more than once, says the snippet
 //! needs the host to know that locale, as a `.phpt` whose `--SKIPIF--`
 //! dies on `!setlocale(LC_CTYPE, "de_DE")` does: where neither the oracle
@@ -160,10 +170,12 @@ pub struct Witness {
     pub item: Option<String>,
     /// 1-based, the `php` fence's line: where a person looks.
     pub line: usize,
-    /// 1-based, the `expect` fence's line: the one `--accept` rewrites.
+    /// 1-based, the `expect` fence's line: the first `--accept` rewrites.
     pub fence: usize,
-    /// The `expect` fence's line as it stands, which `--accept` rewrites.
-    pub fence_line: String,
+    /// The block's lines from the `expect` fence's through the line that
+    /// closes the last fence, as they stand: what `--accept` rewrites, the
+    /// first alone for a status and all of them for the streams.
+    pub fences: Vec<String>,
     /// The program, without the `<?php` the recipe's preamble puts on line 1.
     pub snippet: String,
     /// The pinned first stream.
@@ -179,6 +191,9 @@ pub struct Witness {
     pub wall: Option<Duration>,
     /// What serves the snippet beside the oracle.
     pub served: Served,
+    /// `capture`: the streams are the oracle's, written by `--accept
+    /// --streams` (#801).
+    pub capture: bool,
     /// `mysql`: the snippet needs the `MySQL` server.
     pub server: bool,
     /// The locales the snippet needs, each a `locale=<name>` in the order
@@ -401,7 +416,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             file,
             opened,
             format!(
-                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>`, `locale=<name>`, `process` and `mysql`, and the ini a regime carries is the pin's"
+                "`{unknown}` on an expect fence; the attributes are `exit`, `exit=<status>`, `wall=<duration>`, `regime=<name>`, `locale=<name>`, `process`, `mysql` and `capture`, and the ini a regime carries is the pin's"
             ),
         ));
     }
@@ -424,7 +439,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             item: None,
             line: start + 1,
             fence: opened + 1,
-            fence_line: (*lines.get(opened).unwrap_or(&"")).to_owned(),
+            fences: lines[opened..after].iter().map(|&l| l.to_owned()).collect(),
             snippet,
             stdout,
             stderr,
@@ -436,6 +451,7 @@ fn block_at(file: &Path, lines: &[&str], start: usize) -> Result<(Witness, usize
             } else {
                 attributes.served
             },
+            capture: attributes.capture,
             server: attributes.server,
             locales: attributes.locales,
             request,
@@ -511,6 +527,8 @@ struct Attributes {
     regime: Option<String>,
     /// `process`: served by the binary.
     served: Served,
+    /// `capture`: the streams are the oracle's to write.
+    capture: bool,
     /// `mysql`: the snippet needs the `MySQL` server.
     server: bool,
     /// Each `locale=<name>`, in the order written.
@@ -531,6 +549,8 @@ impl Attributes {
                 out.served = Served::Binary;
             } else if word == "mysql" {
                 out.server = true;
+            } else if word == "capture" {
+                out.capture = true;
             } else if let Some(status) = word.strip_prefix("exit=") {
                 match status.parse() {
                     Ok(status) => out.exit = Exit::Pinned(status),
@@ -695,6 +715,59 @@ pub fn pinned(line: &str, status: i32) -> String {
         None => words.insert(1.min(words.len()), pin),
     }
     format!("{head}```{}", words.join(" "))
+}
+
+/// The block's fences as `--accept --streams` writes them (#801): `head`,
+/// the `expect` fence's line as the status leaves it, then `stdout`, and a
+/// `stderr` fence over `stderr` where it is not empty; each line under the
+/// head's indentation and marker, an empty one under the marker alone. A
+/// text the grammar would not read back as written, a line that closes a
+/// fence or ends in a space the reading drops, is refused with the first
+/// line that does not, since the capture writes nothing it cannot hold.
+pub fn streams(head: &str, stdout: &str, stderr: &str) -> Result<Vec<String>, String> {
+    let prefix = head.find("```").map_or(head, |at| &head[..at]);
+    let line = |text: &str| match text {
+        "" => prefix.trim_end().to_owned(),
+        text => format!("{prefix}{text}"),
+    };
+    let close = format!("{prefix}```");
+    let mut out = vec![head.to_owned()];
+    out.extend(stdout.lines().map(line));
+    out.push(close.clone());
+    if !stderr.is_empty() {
+        out.push(format!("{prefix}```{STDERR}"));
+        out.extend(stderr.lines().map(line));
+        out.push(close);
+    }
+    let block = format!(
+        "{prefix}```{PHP}\n{prefix}x\n{prefix}```\n{}\n",
+        out.join("\n")
+    );
+    let found = extract(Path::new(""), &block);
+    let Some(read) = found.witnesses.first() else {
+        return Err(format!("`{head}` opens no fence the grammar reads"));
+    };
+    let reread = read.stderr.as_deref().unwrap_or_default();
+    for (stream, wrote, read) in [
+        ("stdout", stdout, read.stdout.as_str()),
+        ("stderr", stderr, reread),
+    ] {
+        if wrote == read {
+            continue;
+        }
+        let (mut wrote, mut read) = (wrote.split('\n'), read.split('\n'));
+        let mut at = 1;
+        let (one, two) = loop {
+            match (wrote.next(), read.next()) {
+                (one, two) if one == two && one.is_some() => at += 1,
+                (one, two) => break (one.unwrap_or_default(), two.unwrap_or_default()),
+            }
+        };
+        return Err(format!(
+            "{stream} line {at}, `{one}`, reads back from the fence as `{two}`"
+        ));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1032,6 +1105,66 @@ mod tests {
         );
         assert_eq!(pinned("    /// ```expect", 3), "    /// ```expect exit=3");
         assert_eq!(pinned("/// ```expect exit=1", 0), "/// ```expect exit=0");
+    }
+
+    /// `capture` opts a fence into `--accept --streams` and is no part of
+    /// the key; the fences a block spans are what the capture rewrites.
+    #[test]
+    fn a_capture_fence_spans_its_expect_and_stderr_fences_under_the_same_key() {
+        let marked = php(concat!(
+            "/// ```php\n/// echo 1;\n/// ```\n",
+            "/// ```expect capture\n/// 1\n/// ```\n/// ```stderr\n/// e\n/// ```\n",
+            "pub fn k() {}\n"
+        ));
+        let plain = php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\n");
+        assert!(marked.problems.is_empty(), "{:#?}", marked.problems);
+        let witness = &marked.witnesses[0];
+        assert!(witness.capture && !plain.witnesses[0].capture);
+        assert_eq!(witness.id(), plain.witnesses[0].id());
+        assert_eq!(witness.fence, 4);
+        assert_eq!(
+            witness.fences,
+            [
+                "/// ```expect capture",
+                "/// 1",
+                "/// ```",
+                "/// ```stderr",
+                "/// e",
+                "/// ```"
+            ]
+        );
+    }
+
+    /// What `--accept --streams` writes reads back as the streams it was
+    /// given, under the head's indentation and marker, an empty line under
+    /// the marker alone, and a `stderr` fence only for a stream that is not
+    /// empty; a line the grammar would read otherwise is refused by name.
+    #[test]
+    fn the_streams_are_written_as_the_grammar_reads_them_back() {
+        assert_eq!(
+            streams("    /// ```expect capture exit=255", "a\n\n b", "").unwrap(),
+            [
+                "    /// ```expect capture exit=255",
+                "    /// a",
+                "    ///",
+                "    ///  b",
+                "    /// ```"
+            ]
+        );
+        assert_eq!(
+            streams("//! ```expect capture", "", "e").unwrap(),
+            [
+                "//! ```expect capture",
+                "//! ```",
+                "//! ```stderr",
+                "//! e",
+                "//! ```"
+            ]
+        );
+        let trailing = streams("/// ```expect capture", "a\nb ", "").unwrap_err();
+        assert!(trailing.contains("stdout line 2, `b `"), "{trailing}");
+        let closing = streams("/// ```expect capture", "", "```").unwrap_err();
+        assert!(closing.contains("stderr line 1"), "{closing}");
     }
 
     #[test]

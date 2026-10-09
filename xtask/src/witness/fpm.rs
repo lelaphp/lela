@@ -23,7 +23,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::oracle::{Ended, Observation, Oracle, normalise_in};
 use crate::phpt::environment::Environment;
 use crate::phpt::{cgi, file::Phpt};
-use crate::scratch::Tree;
 
 /// `FCGI_BEGIN_REQUEST`, `FCGI_END_REQUEST`, `FCGI_PARAMS`, `FCGI_STDIN`,
 /// `FCGI_STDOUT` and `FCGI_STDERR`, the record types a request uses.
@@ -171,7 +170,7 @@ pub(crate) fn served_as_fpm(
     env: &[(String, OsString)],
 ) -> Result<Observation> {
     let recipe = &oracle.pin().recipe;
-    let own = Tree::new("witness-fpm")?;
+    let own = oracle.tree("witness-fpm")?;
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
     let path = own.join("witness.phpt");

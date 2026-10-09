@@ -23,7 +23,7 @@ use xtask::manifest::{Crate, Manifest};
 use xtask::oracle::Promise;
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
-use xtask::witness::{self, Ask, Scope};
+use xtask::witness::{self, Accept, Ask, Scope};
 
 mod common;
 use common::scratch_workspace;
@@ -118,7 +118,7 @@ fn fixture_manifest() -> Manifest {
 }
 
 /// The one reading of `ext/fixture` over `root`.
-fn run(root: &Path, registry: &Registry, accept: bool) -> Reading {
+fn run(root: &Path, registry: &Registry, accept: Accept) -> Reading {
     let readings = witness::run(
         root,
         &fixture_manifest(),
@@ -167,7 +167,7 @@ fn a_witness_whose_bytes_are_the_oracle_s_passes() {
         return;
     }
     let root = scratch("pass", &block("/// ```expect\n/// 1\n/// ```\n"));
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "run"), 1);
     assert_eq!(count(&reading, "passed"), 1);
@@ -261,7 +261,7 @@ fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
             &registry(""),
             &Ask {
                 crates: vec!["ext/fixture".to_owned()],
-                accept: true,
+                accept: Accept::Status,
                 scope,
                 ..Ask::default()
             },
@@ -332,7 +332,7 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
         return;
     }
     let root = scratch("differs", &block("/// ```expect\n/// 2\n/// ```\n"));
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(&reading, "failed"), 1);
     assert!(
@@ -350,7 +350,7 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
             witness_id(snippet)
         )
     };
-    let reading = run(&root, &registry(&accepted("echo 1;")), false);
+    let reading = run(&root, &registry(&accepted("echo 1;")), Accept::Nothing);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
 
     // A fence the oracle meets and the engine misses: the bundle
@@ -362,11 +362,14 @@ fn a_witness_that_differs_is_a_difference_the_registry_can_accept() {
         "diverged",
         "/// ```php\n/// var_dump(extension_loaded('zend_test'));\n/// ```\n/// ```expect\n/// bool(false)\n/// ```\npub fn native() {}\n",
     );
-    assert_eq!(run(&root, &registry(""), false).status, Status::Fail);
+    assert_eq!(
+        run(&root, &registry(""), Accept::Nothing).status,
+        Status::Fail
+    );
     let reading = run(
         &root,
         &registry(&accepted("var_dump(extension_loaded('zend_test'));")),
-        false,
+        Accept::Nothing,
     );
     assert_eq!(
         reading.status,
@@ -391,7 +394,7 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     let root = scratch("accept", text);
     let file = root.join("ext/fixture/src/lib.rs");
 
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(&reading, "unpinned"), 1);
     assert_eq!(count(&reading, "accepted"), 0);
@@ -401,7 +404,7 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
         "a run that does not accept writes nothing"
     );
 
-    let reading = run(&root, &registry(""), true);
+    let reading = run(&root, &registry(""), Accept::Status);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "accepted"), 1);
     let written = fs::read_to_string(&file).unwrap();
@@ -419,7 +422,7 @@ fn a_bare_exit_fails_the_run_and_accept_is_what_writes_it() {
     assert_eq!(reading.key(), now.key(Path::new("ext/fixture")).unwrap());
 
     // The witness now pins the status, so a second run accepts nothing.
-    let again = run(&root, &registry(""), true);
+    let again = run(&root, &registry(""), Accept::Status);
     assert_eq!(again.status, Status::Pass, "{again:#?}");
     assert_eq!(count(&again, "accepted"), 0);
     assert_eq!(fs::read_to_string(&file).unwrap(), written);
@@ -439,7 +442,7 @@ fn accept_writes_the_bare_opt_in_alone_and_never_repins_a_status() {
     ] {
         let text = format!("/// ```php\n/// exit(3);\n/// ```\n{fences}pub fn native() {{}}\n");
         let root = scratch(name, &text);
-        let reading = run(&root, &registry(""), true);
+        let reading = run(&root, &registry(""), Accept::Status);
         assert_eq!(reading.status, Status::Fail, "{reading:#?}");
         assert_eq!(count(&reading, "failed"), 1);
         assert_eq!(count(&reading, "accepted"), 0);
@@ -449,6 +452,102 @@ fn accept_writes_the_bare_opt_in_alone_and_never_repins_a_status() {
             "nothing is written"
         );
     }
+}
+
+/// `--accept --streams` writes the oracle's normalised streams into each
+/// fence marked `capture`, the `expect` fence's body and a `stderr` fence's,
+/// and leaves a fence not marked byte for byte; the blocks of one file are
+/// written whatever their lengths become, and a second run writes nothing
+/// (harness §8, #801).
+#[test]
+fn accept_streams_writes_the_marked_fences_alone() {
+    if oracle().is_none() {
+        return;
+    }
+    let unmarked =
+        "/// ```php\n/// echo 2;\n/// ```\n/// ```expect\n/// %d\n/// ```\npub fn two() {}\n";
+    let text = format!(
+        "{}{unmarked}{}",
+        "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo \"one\\n\\ntwo\", $u;\n/// ```\n/// ```expect capture\n/// stale\n/// ```\npub fn one() {}\n",
+        "/// ```php\n/// echo 3;\n/// ```\n/// ```expect capture\n/// x\n/// ```\npub fn three() {}\n",
+    );
+    let root = scratch("streams", &text);
+    let file = root.join("ext/fixture/src/lib.rs");
+
+    let reading = run(&root, &registry(""), Accept::Status);
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(&reading, "accepted"), 0);
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        text,
+        "`--accept` alone writes no stream"
+    );
+
+    let reading = run(&root, &registry(""), Accept::Streams);
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "accepted"), 2, "{reading:#?}");
+    let written = fs::read_to_string(&file).unwrap();
+    assert!(
+        written.starts_with(concat!(
+            "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo \"one\\n\\ntwo\", $u;\n/// ```\n",
+            "/// ```expect capture\n/// one\n///\n/// two\n/// ```\n",
+            "/// ```stderr\n/// Warning: Undefined variable $u in %SCRATCH%/witness.php on line 3\n/// ```\n",
+            "pub fn one() {}\n",
+        )),
+        "{written}"
+    );
+    assert!(
+        written.contains(unmarked),
+        "the unmarked fence moved: {written}"
+    );
+    assert!(
+        written.ends_with("/// ```expect capture\n/// 3\n/// ```\npub fn three() {}\n"),
+        "{written}"
+    );
+
+    let again = run(&root, &registry(""), Accept::Streams);
+    assert_eq!(again.status, Status::Pass, "{again:#?}");
+    assert_eq!(count(&again, "accepted"), 0);
+    assert_eq!(fs::read_to_string(&file).unwrap(), written);
+}
+
+/// The negative control of the capture (harness §4.1, §8; #801): the
+/// fixture's one fence is marked `capture` and prints a length its scratch
+/// directory moves, so the oracle's two runs differ and the capture
+/// writes nothing and leaves the crate failing; the note naming the line
+/// is held beside the judge.
+#[test]
+fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = fixture_at("witness", "capture-moves");
+    let file = root.join("ext/pcre/src/lib.rs");
+    let before = fs::read_to_string(&file).unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    let readings = witness::run(
+        &root,
+        &manifest,
+        &Registry::default(),
+        &Ask {
+            crates: vec!["ext/pcre".to_owned()],
+            accept: Accept::Streams,
+            ..Ask::default()
+        },
+    )
+    .unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(reading, "unpinned"), 1, "{reading:#?}");
+    assert_eq!(count(reading, "accepted"), 0, "{reading:#?}");
+    assert!(reading.message.contains("lib.rs:15"), "{}", reading.message);
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        before,
+        "nothing is written"
+    );
 }
 
 /// The negative control of the manifest's coverage rule (harness §4.1, §12
@@ -480,7 +579,6 @@ fn a_kernel_or_native_without_a_witness_is_missing_and_fails_the_crate() {
             &Registry::default(),
             &Ask {
                 crates: vec!["ext/pcre".to_owned()],
-                accept: false,
                 staged: false,
                 ..Ask::default()
             },
@@ -538,7 +636,6 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
             &Registry::default(),
             &Ask {
                 crates: vec!["ext/pcre".to_owned()],
-                accept: false,
                 staged: false,
                 ..Ask::default()
             },
@@ -587,7 +684,6 @@ fn an_anchored_crate_counts_its_kernels_beside_its_natives() {
         &Registry::default(),
         &Ask {
             crates: vec!["php_engine".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -623,7 +719,6 @@ fn served_by_a_stand_in(name: &str, host: PathBuf) -> Reading {
         &Registry::default(),
         &Ask {
             crates: vec!["ext/pcre".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -713,7 +808,6 @@ fn a_native_under_a_cfg_the_target_denies_is_no_subject() {
         &Registry::default(),
         &Ask {
             crates: vec!["ext/pcre".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -774,7 +868,6 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_fails_the_crate_and_names_it()
             &Registry::default(),
             &Ask {
                 crates: vec!["ext/pcre".to_owned()],
-                accept: false,
                 staged: false,
                 ..Ask::default()
             },
@@ -816,7 +909,6 @@ fn a_fence_the_oracle_does_not_meet_fails_the_crate() {
         &Registry::default(),
         &Ask {
             crates: vec!["ext/pcre".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -844,7 +936,6 @@ fn a_crate_whose_witnesses_cannot_run_for_want_of_the_oracle_is_a_skip_never_a_p
         &registry(""),
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -871,7 +962,7 @@ fn the_reading_carries_run_failed_and_missing_and_is_scoped_to_the_crate() {
         return;
     }
     let root = scratch("scoped", &block("/// ```expect\n/// 1\n/// ```\n"));
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.instrument, "witness");
     assert_eq!(reading.scope, "ext/fixture");
     assert_eq!(reading.status, Status::Pass);
@@ -896,7 +987,7 @@ fn with_no_binary_built_the_linked_engine_serves_the_witness() {
         let binary = root.join("target").join(profile).join("php");
         assert!(!binary.is_file(), "{} stands", binary.display());
     }
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "run"), 1);
     assert_eq!(count(&reading, "passed"), 1);
@@ -921,7 +1012,7 @@ fn a_binary_in_the_tree_is_not_what_serves_a_witness() {
     let root = scratch("binary-stands", &block("/// ```expect\n/// 1\n/// ```\n"));
     a_binary_where_the_engine_s_would_be(&root);
     assert!(root.join("target/debug/php").is_file());
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "run"), 1);
     assert_eq!(count(&reading, "passed"), 1);
@@ -936,7 +1027,7 @@ fn with_no_binary_built_a_witness_the_linked_engine_misses_fails() {
         return;
     }
     let root = scratch("linked-differs", &block("/// ```expect\n/// 2\n/// ```\n"));
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(&reading, "failed"), 1);
     assert!(
@@ -1078,7 +1169,7 @@ fn a_crate_with_no_witness_and_nothing_that_needs_one_passes_with_the_oracle() {
         return;
     }
     let root = scratch("nothing", "pub fn native() {}\n");
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert_eq!(count(&reading, "run"), 0);
     assert!(
@@ -1099,7 +1190,6 @@ fn a_crate_with_no_witness_and_the_oracle_absent_is_a_skip_that_says_so() {
         &registry(""),
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -1138,7 +1228,6 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
         &registry(""),
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -1167,7 +1256,6 @@ fn a_kernel_without_a_witness_fails_whether_or_not_the_oracle_is_here() {
         &registry(""),
         &Ask {
             crates: vec!["ext/fixture".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -1190,7 +1278,7 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
         "unread-block",
         "/// ```php\n/// echo 1;\n/// ```\n/// prose\npub fn native() {}\n",
     );
-    let reading = run(&root, &registry(""), false);
+    let reading = run(&root, &registry(""), Accept::Nothing);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert_eq!(count(&reading, "unread"), 1);
     assert!(
@@ -1209,7 +1297,6 @@ fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
         &Registry::default(),
         &Ask {
             crates: vec!["php_proto".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -1224,7 +1311,6 @@ fn the_instrument_writes_one_reading_per_crate_and_names_an_unknown_one() {
         &Registry::default(),
         &Ask {
             crates: vec!["php_nope".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -1243,7 +1329,6 @@ fn the_harness_crate_carries_no_witness_of_its_own() {
         &Registry::default(),
         &Ask {
             crates: vec!["xtask".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -1302,7 +1387,6 @@ fn a_crate_whose_sources_cannot_be_read_fails_and_names_the_crate() {
         &Registry::default(),
         &Ask {
             crates: vec!["ext/pcre".to_owned()],
-            accept: false,
             staged: false,
             ..Ask::default()
         },
@@ -1331,7 +1415,6 @@ fn staged_narrows_the_run_to_the_crates_with_a_staged_change() {
             &Registry::default(),
             &Ask {
                 crates,
-                accept: false,
                 staged: true,
                 ..Ask::default()
             },
