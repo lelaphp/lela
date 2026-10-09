@@ -1876,7 +1876,8 @@ impl Callable {
     /// The value the callable came from, a view and no owner taken. A
     /// list that holds the callable past the call frame it was read off
     /// holds an [`Owner`] of the callable, not of this alone.
-    pub(crate) const fn value(&self) -> Value {
+    #[must_use]
+    pub const fn value(&self) -> Value {
         self.value
     }
 

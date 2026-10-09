@@ -35,6 +35,7 @@ abi::Cache::new
 abi::Callable
 abi::Callable::made_again
 abi::Callable::required
+abi::Callable::value
 abi::Callable::with_called_scope
 abi::Cases
 abi::Cases::CASES
