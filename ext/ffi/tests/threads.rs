@@ -6,6 +6,11 @@
 //! PHP code by `FFI::cast` of its address; its thread writes what the
 //! callback returned to a file of its own, which the test reads.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 

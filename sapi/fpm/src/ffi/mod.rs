@@ -6,6 +6,10 @@
 //! priority and title, the local time `strftime` writes, and the stop
 //! and the task port or the attachment a slow request's trace takes. Each
 //! `unsafe` block is one operation with its `SAFETY` comment.
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
 
 mod signals;
 mod title;
@@ -106,9 +110,9 @@ pub(crate) fn clear_env() {
 
 /// `initgroups(3)`, which `nix` leaves out on macOS.
 pub(crate) fn initgroups(user: &std::ffi::CStr, group: u32) -> nix::Result<()> {
+    #[allow(clippy::cast_possible_wrap)] // macOS takes the gid as an `int`
     // SAFETY: `initgroups` reads the NUL-ended name, live for the call,
     // and the group id.
-    #[allow(clippy::cast_possible_wrap)] // macOS takes the gid as an `int`
     let done = unsafe { libc::initgroups(user.as_ptr(), group as _) };
     nix::errno::Errno::result(done).map(|_| ())
 }

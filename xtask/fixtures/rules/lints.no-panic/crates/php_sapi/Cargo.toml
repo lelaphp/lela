@@ -1,0 +1,13 @@
+[package]
+name = "php_sapi"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = { level = "deny", priority = 1 }
+panic = "forbid"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"

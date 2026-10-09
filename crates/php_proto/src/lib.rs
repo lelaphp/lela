@@ -5,6 +5,15 @@
 //! Nothing here names the engine or the heap, so a protocol test builds
 //! this crate alone.
 #![forbid(unsafe_code)]
+// seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unreachable,
+    clippy::todo,
+    clippy::unimplemented
+)]
 
 pub mod cgi;
 pub mod fcgi;

@@ -60,6 +60,10 @@ mod signal;
 mod statement;
 mod supplied;
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
 mod tests;
 // The test face is on for an extension's dev-dependency, and for this
 // crate's own tests, which read a served request the same way.

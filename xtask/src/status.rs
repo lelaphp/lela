@@ -605,7 +605,9 @@ fn rules(manifest: &Manifest, readings: &[Reading]) -> Vec<Row> {
                     ),
                     ("text", json!(rule.text)),
                 ],
-                latest(readings, |r| r.rule == rule.id),
+                // A clippy reading names every `deny_lints` rule that
+                // reaches its crate, comma-separated.
+                latest(readings, |r| r.rule.split(", ").any(|id| id == rule.id)),
             )
         })
         .collect()

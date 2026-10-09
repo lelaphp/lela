@@ -9,6 +9,11 @@
 //! generates every locale these tests and the witnesses name
 //! (`.github/workflows/harness.yml`), so there it runs.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use std::path::Path;
 use std::thread;
 

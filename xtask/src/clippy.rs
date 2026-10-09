@@ -13,10 +13,23 @@
 //! warning is counted against the crate it is of, by its package
 //! ([`batch::Run`]), and a crate fails on any. The verdict over a crate is the one `-D warnings`
 //! gave it, and one crate's lint no longer blocks the crates above it.
+//!
+//! The reading is also the sensor of the manifest's `deny_lints` rules
+//! (`lints.no-panic`, `unsafe.one-op`; #1917): a clean run says nothing of
+//! a lint the crate never turned on, so each source a rule's scope covers
+//! must sit under a module that denies, or forbids, every lint the rule
+//! lists, read off the inner attributes of the source and of each module
+//! file above it to the crate root, and at the root off the crate's
+//! Cargo `[lints]`, the workspace's where it inherits them. A crate a
+//! rule reaches carries the rule's id on its reading, and fails naming
+//! the sources and the lints no module above them denies.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use syn::punctuated::Punctuated;
 
 use crate::batch::{Run, Targets, tail};
 use crate::key::Snapshot;
@@ -50,7 +63,10 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
     let checked = Run::of(root, &["clippy", "--keep-going"], &crates, Targets::All)?;
     crates
         .iter()
-        .map(|krate| reading(&snapshot, krate, &checked))
+        .map(|krate| {
+            let denied = Denied::of(root, manifest, krate)?;
+            reading(&snapshot, krate, &checked, &denied)
+        })
         .collect()
 }
 
@@ -83,21 +99,39 @@ pub(crate) fn command(
 }
 
 /// One crate's reading: pass when every target was checked and clippy
-/// said nothing of the crate, fail with what it said otherwise.
-fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run) -> Result<Reading> {
+/// said nothing of the crate and every `deny_lints` rule reaching it is
+/// met, fail with what was not otherwise.
+fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run, denied: &Denied) -> Result<Reading> {
     let mut reading = Reading::for_crate(INSTRUMENT, krate, snapshot)?;
+    reading.rule = denied.rules.join(", ");
+    reading.adr = denied.adrs.join(", ");
+    clippy_said(&mut reading, krate, run)?;
+    if !denied.unmet.is_empty() {
+        reading.status = Status::Fail;
+        reading.message = format!(
+            "{}: {}\n{}",
+            krate.name,
+            denied.unmet.join("; "),
+            reading.message
+        );
+    }
+    Ok(reading)
+}
+
+/// What clippy said of the crate, as the reading's status and message.
+fn clippy_said(reading: &mut Reading, krate: &Crate, run: &Run) -> Result<()> {
     let name = &krate.name;
     let Some(checked) = run.crates.get(name) else {
         reading.status = Status::Fail;
         reading.message = format!("{name}: clippy did not check it\n{}", tail(&run.stderr, 40));
-        return Ok(reading);
+        return Ok(());
     };
     let warnings = checked.count("warning");
     let errors = checked.count("error");
     if checked.whole && warnings == 0 && errors == 0 {
         reading.status = Status::Pass;
         reading.message = format!("{name}: clippy clean, warnings denied");
-        return Ok(reading);
+        return Ok(());
     }
     reading.count("warnings", warnings as u64)?;
     reading.count("errors", errors as u64)?;
@@ -111,5 +145,301 @@ fn reading(snapshot: &Snapshot, krate: &Crate, run: &Run) -> Result<Reading> {
     } else {
         format!("{name}: clippy is not clean\n{}", tail(&said, 40))
     };
-    Ok(reading)
+    Ok(())
+}
+
+/// What the manifest's `deny_lints` rules ask of one crate: the rules
+/// whose scope covers a source of it, their ADRs, and one line per rule
+/// a covered source is not held to.
+#[derive(Debug, Default)]
+struct Denied {
+    rules: Vec<String>,
+    adrs: Vec<String>,
+    unmet: Vec<String>,
+}
+
+impl Denied {
+    fn of(root: &Path, manifest: &Manifest, krate: &Crate) -> Result<Denied> {
+        let src = krate.path().join("src");
+        let sources: Vec<PathBuf> = sources::rust(root, krate)?
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|p| p.starts_with(&src))
+            .collect();
+        let cargo = cargo_lints(root, krate)?;
+        let mut files = Files::default();
+        let mut out = Denied::default();
+        for rule in &manifest.rules {
+            let Some(lints) = &rule.predicate.deny_lints else {
+                continue;
+            };
+            let covered: Vec<&PathBuf> = sources
+                .iter()
+                .filter(|p| rule.covers(p) && !rule.exempts(p))
+                .collect();
+            if covered.is_empty() {
+                continue;
+            }
+            let mut lacking = BTreeSet::new();
+            let mut not_held = Vec::new();
+            for source in covered {
+                let missing: Vec<String> = match files.levels(root, &src, source, &cargo) {
+                    Ok(levels) => lints
+                        .iter()
+                        .filter(|l| !levels.get(*l).is_some_and(|level| level.denies()))
+                        .cloned()
+                        .collect(),
+                    Err(e) => vec![format!("{e:#}")],
+                };
+                if !missing.is_empty() {
+                    lacking.extend(missing);
+                    not_held.push(source.display().to_string());
+                }
+            }
+            out.rules.push(rule.id.clone());
+            out.adrs.extend(rule.adr.iter().map(str::to_owned));
+            if let Some(first) = not_held.first() {
+                let more = match not_held.len() {
+                    1 => String::new(),
+                    n => format!(" and {} more", n - 1),
+                };
+                let cited = rule.adr.adr_cited();
+                out.unmet.push(format!(
+                    "{first}{more}: {} not denied at the source, a module above it or the crate root (seams.toml rule {}: {}{}{cited})",
+                    lacking.into_iter().collect::<Vec<_>>().join(", "),
+                    rule.id,
+                    rule.text,
+                    if cited.is_empty() { "" } else { " " },
+                ));
+            }
+        }
+        out.adrs.sort();
+        out.adrs.dedup();
+        Ok(out)
+    }
+}
+
+/// A lint's level as an attribute or a `[lints]` table sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Level {
+    Deny,
+    /// A denial no module below can lift.
+    Forbid,
+    /// `allow`, `warn` or `expect`: a module below lifted the denial.
+    Lifted,
+}
+
+impl Level {
+    fn of(name: &str) -> Option<Level> {
+        match name {
+            "deny" => Some(Level::Deny),
+            "forbid" => Some(Level::Forbid),
+            "allow" | "warn" | "expect" => Some(Level::Lifted),
+            _ => None,
+        }
+    }
+
+    fn denies(self) -> bool {
+        self != Level::Lifted
+    }
+}
+
+/// Lints and their levels, a later setting standing over an earlier one
+/// as rustc's do, a `forbid` over all.
+type Levels = BTreeMap<String, Level>;
+
+fn apply(levels: &mut Levels, set: &Levels) {
+    for (lint, level) in set {
+        if levels.get(lint) != Some(&Level::Forbid) {
+            levels.insert(lint.clone(), *level);
+        }
+    }
+}
+
+/// The files whose lint attributes reach `source`, from the crate root
+/// down to the source itself: `lib.rs`, or `main.rs` in a crate without
+/// one, then each module on the path at `<dir>.rs` or `<dir>/mod.rs` as
+/// rustc finds it; `main.rs` beside a `lib.rs`, and a file under
+/// `src/bin/`, are roots of their own.
+fn modules(root: &Path, src: &Path, source: &Path) -> Vec<PathBuf> {
+    let rel = source.strip_prefix(src).unwrap_or(source);
+    let alone = rel == Path::new("main.rs") || rel.starts_with("bin");
+    let mut out = Vec::new();
+    if !alone {
+        let lib = src.join("lib.rs");
+        out.push(if root.join(&lib).is_file() {
+            lib
+        } else {
+            src.join("main.rs")
+        });
+        let mut dir = src.to_path_buf();
+        for part in rel.parent().into_iter().flat_map(Path::components) {
+            dir.push(part);
+            let file = dir.with_extension("rs");
+            out.push(if root.join(&file).is_file() {
+                file
+            } else {
+                dir.join("mod.rs")
+            });
+        }
+    }
+    if out.last().map(PathBuf::as_path) != Some(source) {
+        out.push(source.to_path_buf());
+    }
+    out
+}
+
+/// One module file's lint attributes: its own inner ones, and the outer
+/// ones on each `mod` item it declares, by the module's name.
+#[derive(Debug, Default)]
+struct Module {
+    inner: Levels,
+    children: BTreeMap<String, Levels>,
+}
+
+/// Each module file's attributes, parsed once.
+#[derive(Default)]
+struct Files(BTreeMap<PathBuf, Module>);
+
+impl Files {
+    /// The levels the lints stand at in `source`: the crate's Cargo
+    /// `[lints]`, then each module from the root down, the attributes on
+    /// its `mod` item in the file above and its own inner ones.
+    fn levels(&mut self, root: &Path, src: &Path, source: &Path, cargo: &Levels) -> Result<Levels> {
+        let mut levels = cargo.clone();
+        let chain = modules(root, src, source);
+        for (at, file) in chain.iter().enumerate() {
+            if at > 0 {
+                let name = match file.file_stem().and_then(|s| s.to_str()) {
+                    Some("mod") => file.parent().and_then(Path::file_name),
+                    _ => file.file_stem(),
+                };
+                let declared = name.and_then(|n| n.to_str()).and_then(|n| {
+                    self.module(root, &chain[at - 1])
+                        .ok()?
+                        .children
+                        .get(n)
+                        .cloned()
+                });
+                apply(&mut levels, &declared.unwrap_or_default());
+            }
+            let inner = self.module(root, file)?.inner.clone();
+            apply(&mut levels, &inner);
+        }
+        Ok(levels)
+    }
+
+    /// A file's attributes; none for a file not there.
+    fn module(&mut self, root: &Path, file: &Path) -> Result<&Module> {
+        if !self.0.contains_key(file) {
+            let module = match fs::read_to_string(root.join(file)) {
+                Ok(text) => {
+                    let parsed = syn::parse_file(&text)
+                        .with_context(|| format!("parsing {}", file.display()))?;
+                    let mut module = Module {
+                        inner: levels_of(&parsed.attrs, file)?,
+                        children: BTreeMap::new(),
+                    };
+                    for item in &parsed.items {
+                        if let syn::Item::Mod(declared) = item {
+                            module.children.insert(
+                                declared.ident.to_string(),
+                                levels_of(&declared.attrs, file)?,
+                            );
+                        }
+                    }
+                    module
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Module::default(),
+                Err(e) => return Err(e).with_context(|| format!("reading {}", file.display())),
+            };
+            self.0.insert(file.to_path_buf(), module);
+        }
+        Ok(&self.0[file])
+    }
+}
+
+/// The lints a list of attributes sets a level for, in order, as written
+/// (`clippy::unwrap_used`).
+fn levels_of(attrs: &[syn::Attribute], file: &Path) -> Result<Levels> {
+    let mut levels = Levels::new();
+    for attr in attrs {
+        let Some(level) = attr
+            .path()
+            .get_ident()
+            .and_then(|i| Level::of(&i.to_string()))
+        else {
+            continue;
+        };
+        let metas = attr
+            .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+            .with_context(|| format!("reading {}'s lints", file.display()))?;
+        let named = metas.iter().filter_map(|meta| match meta {
+            syn::Meta::Path(path) => Some(path_text(path)),
+            _ => None,
+        });
+        let mut set = Levels::new();
+        for lint in named {
+            set.insert(lint, level);
+        }
+        apply(&mut levels, &set);
+    }
+    Ok(levels)
+}
+
+fn path_text(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// The levels the crate's Cargo `[lints]` set, the workspace's
+/// `[workspace.lints]` where the crate inherits them: `clippy::<name>`
+/// for a linter's table, the name alone for `rust`'s.
+fn cargo_lints(root: &Path, krate: &Crate) -> Result<Levels> {
+    let read = |path: PathBuf| -> Result<toml::Table> {
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str(&text).with_context(|| format!("{}", path.display()))
+    };
+    let own = read(root.join(krate.path()).join("Cargo.toml"))?;
+    let Some(lints) = own.get("lints").and_then(toml::Value::as_table) else {
+        return Ok(Levels::new());
+    };
+    let workspace;
+    let lints = if lints.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+        workspace = read(root.join("Cargo.toml"))?;
+        match workspace
+            .get("workspace")
+            .and_then(|w| w.get("lints"))
+            .and_then(toml::Value::as_table)
+        {
+            Some(inherited) => inherited,
+            None => return Ok(Levels::new()),
+        }
+    } else {
+        lints
+    };
+    let mut out = Levels::new();
+    for (linter, table) in lints.iter().filter_map(|(t, v)| Some((t, v.as_table()?))) {
+        for (name, level) in table {
+            let level = level
+                .as_str()
+                .or_else(|| level.get("level").and_then(toml::Value::as_str))
+                .and_then(Level::of);
+            if let Some(level) = level {
+                out.insert(
+                    if linter == "rust" {
+                        name.clone()
+                    } else {
+                        format!("{linter}::{name}")
+                    },
+                    level,
+                );
+            }
+        }
+    }
+    Ok(out)
 }

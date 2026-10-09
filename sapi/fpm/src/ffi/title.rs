@@ -33,7 +33,10 @@ pub(crate) fn save_title_area() {
                 // SAFETY: `at` is an array of at least `count` pointers the
                 // C runtime laid out, `argc` for `argv`, and for `environ`
                 // up to the NULL `count_of` found.
-                unsafe { *at.add(i) }
+                let slot = unsafe { at.add(i) };
+                // SAFETY: the slot is inside that array, which the C runtime
+                // initialised.
+                unsafe { *slot }
             })
             .collect()
     };
@@ -84,7 +87,9 @@ pub(crate) fn set_title(title: &[u8]) {
     let argv = ARGV.load(Ordering::Relaxed) as *mut *mut c_char;
     // SAFETY: `argv` holds at least one pointer after `argv[0]`, the NULL
     // ending it where `argc` is 1; setting it NULL is php's own write.
-    unsafe { *argv.add(1) = std::ptr::null_mut() };
+    let slot = unsafe { argv.add(1) };
+    // SAFETY: as above, the slot is inside the array.
+    unsafe { *slot = std::ptr::null_mut() };
 }
 
 /// `strlen`.
@@ -100,7 +105,9 @@ fn count_of(array: *mut *mut c_char) -> usize {
     loop {
         // SAFETY: the array is `environ`, ended by a NULL pointer, and the
         // loop stops at it.
-        let at = unsafe { *array.add(count) };
+        let slot = unsafe { array.add(count) };
+        // SAFETY: as above, the slot is at or before the NULL.
+        let at = unsafe { *slot };
         if at.is_null() {
             return count;
         }
@@ -129,11 +136,17 @@ fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
     // SAFETY: the three answer the C runtime's own pointers to the
     // process's `argc`, `argv` and `environ`, always valid in an
     // executable.
-    let count = unsafe { *libc::_NSGetArgc() };
+    let at = unsafe { libc::_NSGetArgc() };
+    // SAFETY: the address is the C runtime's own, valid and aligned.
+    let count = unsafe { *at };
     // SAFETY: as above.
-    let vector = unsafe { *libc::_NSGetArgv() };
+    let at = unsafe { libc::_NSGetArgv() };
+    // SAFETY: the address is the C runtime's own, valid and aligned.
+    let vector = unsafe { *at };
     // SAFETY: as above.
-    let environment = unsafe { *libc::_NSGetEnviron() };
+    let at = unsafe { libc::_NSGetEnviron() };
+    // SAFETY: the address is the C runtime's own, valid and aligned.
+    let environment = unsafe { *at };
     Some((count, vector, environment))
 }
 
@@ -141,7 +154,10 @@ fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
 fn set_environ(moved: *mut *mut c_char) {
     // SAFETY: `_NSGetEnviron` answers the address of `environ`, which
     // nothing else writes: no thread has started yet.
-    unsafe { *libc::_NSGetEnviron() = moved };
+    let at = unsafe { libc::_NSGetEnviron() };
+    // SAFETY: as above: the C runtime's own `environ`, aligned, which no
+    // other thread writes, since none has started.
+    unsafe { *at = moved };
 }
 
 #[cfg(target_os = "linux")]

@@ -240,10 +240,15 @@ fn the_committed_clippy_toml_is_the_manifests_rendering() {
         .iter()
         .filter(|r| r.rule == "generated.committed")
         .collect();
-    assert_eq!(generated.len(), 1, "{generated:#?}");
-    let clippy = generated[0];
-    assert_eq!(clippy.scope, "ext/clippy.toml");
-    assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
+    let scopes: Vec<&str> = generated.iter().map(|r| r.scope.as_str()).collect();
+    assert_eq!(
+        scopes,
+        ["crates/clippy.toml", "ext/clippy.toml", "sapi/clippy.toml"],
+        "{generated:#?}"
+    );
+    for clippy in generated {
+        assert_eq!(clippy.status, Status::Pass, "{}", clippy.message);
+    }
 }
 
 /// The rendering is read as committed, which the test above holds equal
@@ -453,6 +458,167 @@ fn clippy_refuses_a_once_type_and_a_thread_local_under_the_ruled_row() {
             }
             None => assert!(out.status.success(), "{call}: {stderr}"),
         }
+    }
+}
+
+/// The fixture whose `fork.threads` row is the one #1950 ruled: one
+/// source per denied path, named for it with `::` written `-`, and
+/// `home.rs`, the call the rule allows.
+fn methods_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/rules/fork.threads")
+}
+
+/// Whether the target the test runs on declares the function: libc's
+/// `vfork` and nix's `daemon` are Linux's and not Apple's, and their
+/// fixtures are compiled where they are declared.
+fn declared_here(path: &str) -> bool {
+    cfg!(target_os = "linux") || !["libc::vfork", "nix::unistd::daemon"].contains(&path)
+}
+
+/// `deny_methods` renders to `disallowed-methods` in the `clippy.toml` its
+/// scope reaches, a third-party package's path `allow-invalid` since its
+/// functions differ by target and feature (#1950); and clippy, under the
+/// rendering and with every warning denied, refuses the call each
+/// fixture makes, however it is imported, and passes the home's call
+/// under its `#[expect]` and a test module's under its `allow`.
+#[test]
+fn clippy_refuses_each_denied_method_under_the_generated_file() {
+    let fixture = methods_fixture();
+    let manifest = Manifest::load(&fixture).unwrap();
+    let rule = manifest.rule("fork.threads").unwrap();
+    let methods = rule.predicate.deny_methods.as_ref().unwrap();
+    let root = scratch("deny-methods");
+    for file in ["Cargo.lock", "rust-toolchain.toml"] {
+        std::fs::copy(workspace().join(file), root.join(file)).unwrap();
+    }
+    let written = generated::write_all(&root, &manifest).unwrap();
+    assert_eq!(written, [root.join("crates/clippy.toml")]);
+    let text = std::fs::read_to_string(&written[0]).unwrap();
+    let parsed: toml::Value = toml::from_str(&text).unwrap();
+    let rows = parsed["disallowed-methods"].as_array().unwrap();
+    assert_eq!(rows.len(), methods.len(), "{text}");
+    for (row, path) in rows.iter().zip(methods) {
+        assert_eq!(row["path"].as_str(), Some(path.as_str()), "{text}");
+        let third_party = path.starts_with("libc::") || path.starts_with("nix::");
+        assert_eq!(
+            row.get("allow-invalid").is_some(),
+            third_party,
+            "{path}: {text}"
+        );
+    }
+
+    let dir = root.join("crates/fixture");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::copy(workspace().join("Cargo.lock"), dir.join("Cargo.lock")).unwrap();
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"fork_fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n\
+             [dependencies]\nlibc = \"0.2\"\nnix = {{ version = \"0.31\", features = [\"process\"] }}\n\
+             php_process = {{ path = {:?} }}\n",
+            workspace().join("crates/php_process")
+        ),
+    )
+    .unwrap();
+    let sources: Vec<String> = methods
+        .iter()
+        .map(|p| format!("{}.rs", p.replace("::", "-")))
+        .chain(["home.rs".to_owned()])
+        .collect();
+    let mut lib = Vec::new();
+    for (at, source) in sources.iter().enumerate() {
+        std::fs::copy(fixture.join(source), dir.join("src").join(source))
+            .unwrap_or_else(|e| panic!("no fixture {source}: {e}"));
+        lib.push(format!("#[path = {source:?}]\npub mod m{at};\n"));
+    }
+    std::fs::write(dir.join("src/lib.rs"), lib.concat()).unwrap();
+    let out = Command::new("cargo")
+        .args(["clippy", "-q", "--all-targets", "--", "-D", "warnings"])
+        .current_dir(&dir)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    let blocks: Vec<&str> = stderr.split("error: ").collect();
+    for (path, source) in methods.iter().zip(&sources) {
+        let refused = blocks.iter().any(|b| {
+            b.starts_with(&format!("use of a disallowed method `{path}`"))
+                && b.contains(&format!("src/{source}"))
+                && b.contains(&rule.text)
+        });
+        assert_eq!(refused, declared_here(path), "{path} in {source}: {stderr}");
+    }
+    assert!(!stderr.contains("home.rs"), "the home passes: {stderr}");
+    assert!(
+        !stderr.contains("does not refer to a reachable"),
+        "every entry resolves or is allow-invalid: {stderr}"
+    );
+}
+
+/// Every path a `deny_methods` rule of the workspace's manifest denies is
+/// one the fixture's row denies and has its source beside it, so a path
+/// added to the row is refused under clippy by the test above.
+#[test]
+fn every_method_the_manifest_denies_has_a_fixture() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let fixture = Manifest::load(&methods_fixture()).unwrap();
+    let mut seen = 0;
+    for rule in &manifest.rules {
+        let Some(methods) = &rule.predicate.deny_methods else {
+            continue;
+        };
+        let fixed = fixture
+            .rule(&rule.id)
+            .and_then(|r| r.predicate.deny_methods.as_ref());
+        for path in methods {
+            seen += 1;
+            assert!(
+                fixed.is_some_and(|f| f.contains(path)),
+                "{}: {path} is not in the fixture's row",
+                rule.id
+            );
+            let source = methods_fixture().join(format!("{}.rs", path.replace("::", "-")));
+            assert!(
+                source.is_file(),
+                "{}: no fixture {}",
+                rule.id,
+                source.display()
+            );
+        }
+    }
+    assert!(seen >= 8, "#1950's eight paths are denied");
+}
+
+/// A clippy rule clippy cannot hold as written is refused by `generate`,
+/// naming the rule and why: an `exempt`, which clippy never reads, where
+/// a site the rule allows carries `#[expect]`; a scope that is not a
+/// directory or its children, which no one `clippy.toml` stands above;
+/// and a directory the scope names with no generated file there, where
+/// the rule would render to nothing.
+#[test]
+fn a_clippy_rule_clippy_cannot_hold_is_refused_naming_why() {
+    let text = std::fs::read_to_string(methods_fixture().join("seams.toml")).unwrap();
+    let root = scratch("deny-methods-refused");
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let scope = "scope = \"crates/*\"";
+    for (written, said) in [
+        (
+            "scope = \"crates/*\"\nexempt = [\"crates/php_engine/src/fork.rs\"]",
+            "exempt",
+        ),
+        (
+            "scope = \"crates/*/src/**\"",
+            "not a directory or its children",
+        ),
+        (
+            "scope = [\"crates/*\", \"sapi/*\"]",
+            "no generated rule renders sapi/clippy.toml",
+        ),
+    ] {
+        let manifest = Manifest::parse(&text.replace(scope, written)).unwrap();
+        let err = format!("{:#}", generated::write_all(&root, &manifest).unwrap_err());
+        assert!(err.contains("fork.threads") && err.contains(said), "{err}");
     }
 }
 

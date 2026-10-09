@@ -6,6 +6,11 @@
 //! `file`, `line` and `trace` as dynamic properties, four deprecations
 //! before anything the request prints (#1867).
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use php_ext::abi::{Dependency, DependencyKind, ExtensionBuilder};
 use php_ext::request::Request;
 use php_ext::test::{Capture, Engine};

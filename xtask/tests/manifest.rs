@@ -201,20 +201,29 @@ fn a_qualifier_without_its_predicate_is_refused() {
     );
 }
 
-/// A macro is denied by its full path: clippy matches paths, and no
-/// table of a module's macros expands a wildcard, so the manifest refuses
-/// `deny_macros = ["std::*"]` rather than hand `generate` a row that denies
-/// nothing and `permit` a pattern that matches nothing (#1888).
+/// A macro or a method is denied by its full path: clippy matches paths,
+/// and no table of a module's macros or functions expands a wildcard, so
+/// the manifest refuses `deny_macros = ["std::*"]` and
+/// `deny_methods = ["std::thread::*"]` rather than hand `generate` a row
+/// that denies nothing and `permit` a pattern that matches nothing (#1888,
+/// #1950).
 #[test]
-fn a_wildcard_of_macros_is_refused() {
-    let text = format!(
-        "{MINIMAL}\n[[rule]]\nid = \"x.macros\"\nscope = \"ext/*\"\ndeny_types = [\"std::sync::OnceLock\"]\ndeny_macros = [\"std::*\"]\ntext = \"t\"\n"
-    );
-    let err = Manifest::parse(&text).unwrap_err().to_string();
-    assert!(
-        err.contains("x.macros") && err.contains("std::*") && err.contains("full path"),
-        "{err}"
-    );
+fn a_wildcard_of_macros_or_methods_is_refused() {
+    for (id, row) in [
+        (
+            "x.macros",
+            "deny_types = [\"std::sync::OnceLock\"]\ndeny_macros = [\"std::*\"]",
+        ),
+        ("x.methods", "deny_methods = [\"std::thread::*\"]"),
+    ] {
+        let text =
+            format!("{MINIMAL}\n[[rule]]\nid = \"{id}\"\nscope = \"ext/*\"\n{row}\ntext = \"t\"\n");
+        let err = Manifest::parse(&text).unwrap_err().to_string();
+        assert!(
+            err.contains(id) && err.contains("::*") && err.contains("full path"),
+            "{err}"
+        );
+    }
 }
 
 #[test]

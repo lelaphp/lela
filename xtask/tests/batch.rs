@@ -37,18 +37,27 @@ const CRATES: [&str; 7] = [
 /// tracked pin and registry beside its manifest: the instruments stamp
 /// each reading through git.
 fn repository(name: &str) -> Tree {
-    let root = Tree::new(name).unwrap();
-    let fixture = fixture();
-    let mut files = vec![
-        PathBuf::from("seams.toml"),
-        PathBuf::from("Cargo.toml"),
-        PathBuf::from("Cargo.lock"),
-    ];
-    for krate in CRATES {
-        files.push(Path::new("crates").join(krate).join("Cargo.toml"));
-        files.push(Path::new("crates").join(krate).join("src/lib.rs"));
+    committed(&fixture(), name)
+}
+
+/// Every file under `dir`, relative to it.
+fn files_under(dir: &Path, at: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir.join(at)).unwrap() {
+        let path = at.join(entry.unwrap().file_name());
+        if dir.join(&path).is_dir() {
+            files_under(dir, &path, out);
+        } else {
+            out.push(path);
+        }
     }
-    files.push(PathBuf::from("crates/php_heap/src/extra.rs"));
+}
+
+/// A fixture workspace whole as a repository of its own, as
+/// [`repository`] lays the batch fixture down.
+fn committed(fixture: &Path, name: &str) -> Tree {
+    let root = Tree::new(name).unwrap();
+    let mut files = Vec::new();
+    files_under(fixture, Path::new(""), &mut files);
     for file in &files {
         std::fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
         std::fs::copy(fixture.join(file), root.join(file)).unwrap();
@@ -221,5 +230,82 @@ fn one_clippy_run_reads_each_crate_as_a_run_over_it_alone() {
             verdict(of(&alone, krate)),
             "{krate}"
         );
+    }
+}
+
+/// A fixture's rule, the crates that fail with what each message names,
+/// and the crates that pass.
+type Expected<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a [&'a str]);
+
+/// The sensor of the manifest's `deny_lints` rules (#1917): every such
+/// rule has a fixture workspace under `xtask/fixtures/rules/<id>/` whose
+/// clippy readings carry the rule, fail where a source the scope covers
+/// sits under no module that denies the rule's lints, or under one that
+/// lifts a denial again (an inner `allow`, or one on the `mod` item),
+/// naming the source and the lints, and pass where the crate root, a
+/// module above the source or the crate's Cargo `[lints]` denies them.
+#[test]
+fn each_deny_lints_rule_fails_a_crate_whose_covered_source_no_module_denies_it_at() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let rules: Vec<_> = manifest
+        .rules
+        .iter()
+        .filter(|r| r.predicate.deny_lints.is_some())
+        .collect();
+    assert!(rules.len() >= 2, "lints.no-panic and unsafe.one-op");
+    let expected: [Expected; 2] = [
+        (
+            "lints.no-panic",
+            &[
+                (
+                    "php_unit",
+                    "crates/php_unit/src/lib.rs: clippy::expect_used, clippy::panic, clippy::todo, clippy::unimplemented, clippy::unreachable not denied",
+                ),
+                (
+                    "php_syntax",
+                    "crates/php_syntax/src/main.rs: clippy::expect_used",
+                ),
+                (
+                    "php_link",
+                    "crates/php_link/src/lifted.rs and 1 more: clippy::panic, clippy::unwrap_used not denied",
+                ),
+            ],
+            &["php_heap", "php_sapi"],
+        ),
+        (
+            "unsafe.one-op",
+            &[(
+                "ext/pcre",
+                "ext/pcre/src/ffi/inner.rs and 1 more: clippy::multiple_unsafe_ops_per_block, clippy::undocumented_unsafe_blocks not denied",
+            )],
+            &["ext/ctype"],
+        ),
+    ];
+    for rule in rules {
+        let (_, failing, passing) = expected
+            .iter()
+            .find(|(id, _, _)| *id == rule.id)
+            .unwrap_or_else(|| panic!("rule {} has no fixture this test reads", rule.id));
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/rules")
+            .join(&rule.id);
+        let root = committed(&fixture, &format!("deny-lints-{}", rule.id));
+        let manifest = Manifest::load(&root).unwrap();
+        let readings = clippy::run(&root, &manifest, &[]).unwrap();
+        for (krate, named) in *failing {
+            let reading = of(&readings, krate);
+            assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+            assert_eq!(reading.rule, rule.id);
+            assert!(
+                reading.message.contains(named) && reading.message.contains("(fixture)"),
+                "{}",
+                reading.message
+            );
+        }
+        for krate in *passing {
+            let reading = of(&readings, krate);
+            assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+            assert_eq!(reading.rule, rule.id);
+        }
     }
 }

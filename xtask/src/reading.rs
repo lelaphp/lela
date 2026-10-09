@@ -85,7 +85,9 @@ pub struct Reading {
     /// A crate, a corpus subset, a bar's id such as `G1`, a ticket's
     /// number, or `"workspace"`.
     pub scope: String,
-    /// A manifest rule id when one applies, else empty.
+    /// A manifest rule id when one applies, else empty; a `clippy`
+    /// reading names each `deny_lints` rule that reaches its crate,
+    /// separated by `, `.
     pub rule: String,
     pub status: Status,
     pub numbers: BTreeMap<String, Number>,

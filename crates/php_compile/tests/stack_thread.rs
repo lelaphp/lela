@@ -14,6 +14,11 @@
 //! main thread, and the larger environment is this binary started again
 //! with one variable more.
 
+#![allow(
+    clippy::disallowed_methods,
+    reason = "a test starts its own threads (seams.toml rule fork.threads)"
+)]
+
 use std::process::{Command, exit};
 
 use php_compile::{Options, StackLimit, compile_source};

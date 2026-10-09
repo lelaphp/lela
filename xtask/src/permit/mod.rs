@@ -14,8 +14,9 @@
 //! that rebuilds judges it (#118).
 //!
 //! What permit judges: `deny`, `deny_argv`, `deny_pattern`, `deny_types`
-//! (with the `deny_macros` beside it), `allow` and `on`. The other four
-//! predicates (`check`, `deny_lints`, `avoid_from`, `generated`) are sensors
+//! (with the `deny_macros` beside it), `allow` and `on`. The other five
+//! predicates (`deny_methods`, `check`, `deny_lints`, `avoid_from`,
+//! `generated`) are sensors
 //! that read the tree after the write and have no meaning for one call;
 //! their twins run on save and per commit (§6). A Bash line is read as the
 //! argv of each simple command it runs, quotes removed and heredoc bodies

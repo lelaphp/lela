@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=6c2e92af599de9f110b0dfb54452301cf8d629509ef7fae330bbf4117e0c3579 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=7a3eb4e0de01e3b074838b822eece5731ab64d4da56f521cc4a5f0f65298eb12 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -132,7 +132,7 @@ third-engine-design.md
 | layer | layer.lock | 36 |  | no reading |
 | harness | xtask.lock | 388 |  | no reading |
 
-<!-- /computed in=2eed47f43ed9f803b29db5c01487820cba3c2727ef60fe526bb6502868ad4342 out=cf8caddbd42ed2ff00d4fd5fec87253e1010406a50c63d0ec9ea4203d4a6cda3 -->
+<!-- /computed in=19064da969fa6c523091f2bdd8c942b28d47e3b5438493d1e7f1d2b4b056c9f0 out=cf8caddbd42ed2ff00d4fd5fec87253e1010406a50c63d0ec9ea4203d4a6cda3 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -141,6 +141,7 @@ third-engine-design.md
 | unsafe.homes | ADR-0006 | allow | no reading |
 | unsafe.one-op |  | deny_lints | no reading |
 | fork.home |  | deny_pattern | no reading |
+| fork.threads | ADR-0010 | deny_methods | no reading |
 | lints.no-panic |  | deny_lints | no reading |
 | engine.reentry-signature |  | check | no reading |
 | api.no-hot |  | deny_pattern | no reading |
@@ -167,7 +168,7 @@ third-engine-design.md
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=4820b2ee8c70ad105c5742a9511c282423233a4795c988877954b279d24c27e9 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
+<!-- /computed in=72028d7c6e25fd77e8ab1147822aefb7d114e9449e16ba9a87faec378ea660ac out=04a8ee21b115dbfead63d49ec50bcf84778230c7062ac9504eb6dd20a04991ab -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -210,6 +211,7 @@ Options:
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
+├── clippy.toml
 ├── php_bundle
 ├── php_compile
 ├── php_engine
@@ -225,7 +227,7 @@ Options:
 ├── php_unit
 └── timelib_sys
 ```
-<!-- /computed in=129a4d8e5520714a7cc6807e8d7dd8caaa431f1baf4d52f57918ea3246412329 out=856944cd342d0768a3ccd8ae41a3590292f0392fadf6f3b507505951bfc8917e -->
+<!-- /computed in=116a29f2690535535ce478cb1937672cf8a93a8cbbbc2d2ae9137c2e8a3ebf08 out=08232d13ccb389a8e7ddf2fe175d9cd15829207c42a1da48168957adbdc5f201 -->
 <!-- computed tree src=ext depth=1 name=layout-ext | do not edit; run computed -->
 ```
 .
@@ -298,7 +300,8 @@ Options:
 .
 ├── cgi
 ├── cli
+├── clippy.toml
 ├── fpm
 └── phpdbg
 ```
-<!-- /computed in=d9792c70e043b4549f1ed04bf5ddbc594d3104b27bce7a39b12cc5c2dc6ef79d out=470dec71ee5cf90528ce6b4eef3301fa86defac22de9048c8274b9ca2838028e -->
+<!-- /computed in=ff00b725fd502477c2e4da95e2f546d1a2daa4725e817a07230b65b5537a6789 out=a74b6afe808770cee178a25fa61f1bf0a1ddcaca7f2c84945037c021d4df5015 -->

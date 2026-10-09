@@ -1147,3 +1147,34 @@ fn a_witness_the_volume_had_no_room_for_is_no_bork() {
     assert_eq!(judged.judgement, Judgement::Bork);
     assert_eq!(judged.note, "the oracle did not run it: php ended");
 }
+
+/// A crate outside `ext/` that declares no native is counted by its
+/// kernels alone (#1917): under the coverage rule widened to `php_streams`,
+/// the textual count read every `pub` and `pub(crate)` function of the
+/// crate as a kernel or native, 28 of them and 27 without a fence, where
+/// it has neither. The fixture's `php_streams` has two such functions and
+/// one kernel in `ops`, the one subject; the extension beside it keeps
+/// the textual count.
+#[test]
+fn a_crate_outside_ext_with_no_native_counts_its_kernels_alone() {
+    let root = workspace().join("xtask/fixtures/witness/kernels-alone");
+    let manifest = Manifest::load(&root).unwrap();
+    let rule = super::coverage_rule(&manifest);
+    let subjects = |name: &str| -> Vec<String> {
+        let krate = manifest.crates.iter().find(|k| k.name == name).unwrap();
+        super::extract(&root, krate, rule, Target::built())
+            .unwrap()
+            .subjects
+            .iter()
+            .map(fence::Subject::at)
+            .collect()
+    };
+    assert_eq!(
+        subjects("php_streams"),
+        ["crates/php_streams/src/ops.rs:4 pub fn kernel"]
+    );
+    assert_eq!(
+        subjects("ext/lexbor"),
+        ["ext/lexbor/src/lib.rs:5 pub fn parse"]
+    );
+}

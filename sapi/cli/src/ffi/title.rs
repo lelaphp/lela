@@ -35,7 +35,10 @@ pub(crate) fn save_ps_args() -> Option<&'static [AtomicU8]> {
                 // SAFETY: `at` is the start of an array of at least `count`
                 // pointers the C runtime laid out, `argc` for `argv`, and
                 // for `environ` up to the NULL `count_of` found.
-                unsafe { *at.add(i) }
+                let slot = unsafe { at.add(i) };
+                // SAFETY: the slot is inside that array, which the C runtime
+                // initialised.
+                unsafe { *slot }
             })
             .collect()
     };
@@ -61,7 +64,9 @@ pub(crate) fn save_ps_args() -> Option<&'static [AtomicU8]> {
         // SAFETY: `argv` holds `argc` pointers, which the C runtime handed
         // this process to own; each after the first now points at the
         // area's last byte, a NUL, as php's `save_argv[i]` does.
-        unsafe { *vector.add(i) = end };
+        let slot = unsafe { vector.add(i) };
+        // SAFETY: as above, the slot is inside the array.
+        unsafe { *slot = end };
     }
     // SAFETY: the `size` bytes from `start` are the argv and environment
     // strings, contiguous as checked above, live for the whole process;
@@ -93,7 +98,9 @@ fn count_of(array: *mut *mut c_char) -> usize {
     loop {
         // SAFETY: the array is `environ`, ended by a NULL pointer, and the
         // loop stops at it.
-        let at = unsafe { *array.add(count) };
+        let slot = unsafe { array.add(count) };
+        // SAFETY: as above, the slot is at or before the NULL.
+        let at = unsafe { *slot };
         if at.is_null() {
             return count;
         }
@@ -131,11 +138,17 @@ fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
     // SAFETY: the three answer the C runtime's own pointers to the
     // process's `argc`, `argv` and `environ`, always valid in an
     // executable.
-    let count = unsafe { *libc::_NSGetArgc() };
+    let at = unsafe { libc::_NSGetArgc() };
+    // SAFETY: the address is the C runtime's own, valid and aligned.
+    let count = unsafe { *at };
     // SAFETY: as above.
-    let vector = unsafe { *libc::_NSGetArgv() };
+    let at = unsafe { libc::_NSGetArgv() };
+    // SAFETY: the address is the C runtime's own, valid and aligned.
+    let vector = unsafe { *at };
     // SAFETY: as above.
-    let environment = unsafe { *libc::_NSGetEnviron() };
+    let at = unsafe { libc::_NSGetEnviron() };
+    // SAFETY: the address is the C runtime's own, valid and aligned.
+    let environment = unsafe { *at };
     Some((count, vector, environment))
 }
 
@@ -143,7 +156,10 @@ fn process_args() -> Option<(c_int, *mut *mut c_char, *mut *mut c_char)> {
 fn set_environ(moved: *mut *mut c_char) {
     // SAFETY: `_NSGetEnviron` answers the address of `environ`, which
     // nothing else writes: no thread has started yet.
-    unsafe { *libc::_NSGetEnviron() = moved };
+    let at = unsafe { libc::_NSGetEnviron() };
+    // SAFETY: as above: the C runtime's own `environ`, aligned, which no
+    // other thread writes, since none has started.
+    unsafe { *at = moved };
 }
 
 /// `*_NSGetArgv() = new_argv`: the standard library reads its arguments
@@ -153,7 +169,10 @@ fn point_argv_at_copy(args: &[*mut c_char]) {
     let copied = copies(args);
     // SAFETY: `_NSGetArgv` answers the address of the C runtime's `argv`
     // pointer, which nothing else writes: no thread has started yet.
-    unsafe { *libc::_NSGetArgv() = copied };
+    let at = unsafe { libc::_NSGetArgv() };
+    // SAFETY: as above: the C runtime's own `argv` pointer, aligned,
+    // which no other thread writes, since none has started.
+    unsafe { *at = copied };
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
