@@ -79,14 +79,17 @@ impl Ini {
     }
 }
 
-/// The core entries a path reads once per opline or per throw, typed as
-/// php keeps them in `EG` and `PG` once the entry's `OnUpdate*` has
-/// read its text:
+/// The core entries a path reads once per opline, per throw or per
+/// compile, typed as php keeps them in `EG`, `PG` and `CG` once the
+/// entry's `OnUpdate*` has read its text:
 /// `EG(precision)` and `PG(serialize_precision)`, `OnSetPrecision` and
 /// `OnSetSerializePrecision`'s `ZEND_ATOL` cast to `int`
 /// (`Z/main/main.c:120-141`), `EG(exception_ignore_args)`,
-/// `OnUpdateBool`'s, and `EG(exception_string_param_max_len)`,
-/// `OnSetExceptionStringParamMaxLen`'s `ZEND_ATOL` (`Z/Zend/zend.c:177`).
+/// `OnUpdateBool`'s, `EG(exception_string_param_max_len)`,
+/// `OnSetExceptionStringParamMaxLen`'s `ZEND_ATOL` (`Z/Zend/zend.c:177`),
+/// and what every `eval` and include compiles under: `CG(short_tags)`,
+/// `EG(assertions)` (`OnUpdateAssertions`' quantity) and
+/// `CG(multibyte)`.
 /// The engine lays them from its master values and each request keeps
 /// its own, changed with the entry's value, so a read neither scans the
 /// entries nor parses one. The text is php's `ZEND_ATOL`, so a value
@@ -116,15 +119,21 @@ pub(crate) struct TypedIni {
     pub(crate) serialize_precision: i32,
     pub(crate) exception_ignore_args: bool,
     pub(crate) exception_string_param_max_len: usize,
+    pub(crate) short_open_tag: bool,
+    pub(crate) assertions: i64,
+    pub(crate) multibyte: bool,
 }
 
 impl TypedIni {
     /// The entries typed here, each in [`TypedIni::update`].
-    const NAMES: [&'static [u8]; 4] = [
+    const NAMES: [&'static [u8]; 7] = [
         b"precision",
         b"serialize_precision",
         b"zend.exception_ignore_args",
         b"zend.exception_string_param_max_len",
+        b"short_open_tag",
+        b"zend.assertions",
+        b"zend.multibyte",
     ];
 
     /// What `value` gives each entry, `value` answering an entry's text,
@@ -136,6 +145,9 @@ impl TypedIni {
             serialize_precision: -1,
             exception_ignore_args: false,
             exception_string_param_max_len: 15,
+            short_open_tag: true,
+            assertions: 1,
+            multibyte: false,
         };
         for name in TypedIni::NAMES {
             if let Some(text) = value(name) {
@@ -163,6 +175,9 @@ impl TypedIni {
             b"zend.exception_string_param_max_len" => {
                 self.exception_string_param_max_len = usize::try_from(ini_atol(text)).unwrap_or(0);
             }
+            b"short_open_tag" => self.short_open_tag = Request::ini_parse_bool(text),
+            b"zend.assertions" => self.assertions = Request::ini_parse_bytes(text),
+            b"zend.multibyte" => self.multibyte = ini_truth(Some(text)),
             _ => {}
         }
     }
@@ -1546,17 +1561,27 @@ impl Request {
     /// request's moves it. `token_get_all` reads the same entry, which
     /// is why it is the request's and not the engine's alone.
     pub(crate) fn short_open_tag(&self) -> bool {
-        self.ini_get(b"short_open_tag")
-            .is_none_or(Request::ini_parse_bool)
+        self.ini.typed.short_open_tag
     }
 
     /// `EG(assertions)`, php's `zend.assertions` read as
     /// `OnUpdateAssertions` reads it (`zend_ini_parse_quantity_warn`):
     /// `1` compiles and runs an assertion, `0` compiles it behind an
     /// `ASSERT_CHECK` that jumps over it, and `-1` compiles nothing of it.
+    /// What `ini_set()` and `ini_restore()` leave is what the next
+    /// compile reads:
+    ///
+    /// ```php
+    /// ini_set('zend.assertions', '0'); eval('assert(false); echo "skipped\n";');
+    /// ini_restore('zend.assertions');
+    /// try { eval('assert(false);'); } catch (AssertionError $e) { echo get_class($e), "\n"; }
+    /// ```
+    /// ```expect capture
+    /// skipped
+    /// AssertionError
+    /// ```
     pub(crate) fn assertions(&self) -> i64 {
-        self.ini_get(b"zend.assertions")
-            .map_or(1, Request::ini_parse_bytes)
+        self.ini.typed.assertions
     }
 
     /// `OnUpdateAssertions` (`Z/Zend/zend.c:156-172`) for an

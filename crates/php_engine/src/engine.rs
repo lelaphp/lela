@@ -37,8 +37,7 @@ use crate::api::abi::{
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::{
-    BuildDefs, Ending, ExtensionId, Placed, PropertyInfo, Request, Sink, TypedIni, ini_truth,
-    placed_of,
+    BuildDefs, Ending, ExtensionId, Placed, PropertyInfo, Request, Sink, TypedIni, placed_of,
 };
 use crate::api::values::{ClassId, Value};
 use crate::exec;
@@ -1375,7 +1374,7 @@ impl Shared {
             short_open_tag: req.short_open_tag(),
             assertions: req.assertions() >= 0,
             shebang: self.shebang,
-            multibyte: ini_truth(req.ini_get(b"zend.multibyte")),
+            multibyte: req.typed_ini().multibyte,
         };
         let bound = crate::multibyte::bound(req, ini.multibyte);
         let cwd = req.cwd();
@@ -1446,16 +1445,10 @@ impl Shared {
     fn compile_ini(&self) -> CompileIni {
         CompileIni {
             precision: self.typed_ini.precision,
-            short_open_tag: self
-                .ini_default(b"short_open_tag")
-                .is_none_or(Request::ini_parse_bool),
-            assertions: self
-                .ini_default(b"zend.assertions")
-                .is_none_or(|value| Request::ini_parse_bytes(value) >= 0),
+            short_open_tag: self.typed_ini.short_open_tag,
+            assertions: self.typed_ini.assertions >= 0,
             shebang: self.shebang,
-            multibyte: self
-                .ini_default(b"zend.multibyte")
-                .is_some_and(|value| ini_truth(Some(value))),
+            multibyte: self.typed_ini.multibyte,
         }
     }
 
