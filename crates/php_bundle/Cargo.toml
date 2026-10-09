@@ -24,9 +24,10 @@
 # build that registers an extension registers what php requires loaded
 # beside it, which `api-check` holds under the row's
 # `order = "registration"` in `seams.toml` (#1915). A feature may switch
-# on more, an extension whose state its crate reads (#1882); a crate's
-# link alone requires nothing, as sqlite3's of the libsqlite3 binding in
-# pdo_sqlite.
+# on more: an extension whose state, ini entries, classes or wrappers its
+# crate reads at run time, which the entry's comment names (#2356). A
+# crate's link alone requires nothing, as sqlite3's of the libsqlite3
+# binding in pdo_sqlite, and an entry whose link is code alone says so.
 [package]
 name = "php_bundle"
 version = "0.0.0"
@@ -86,46 +87,46 @@ linked = [
     "intl",
     "zend_test",
 ]
-standard = ["dep:php_ext_standard", "random", "date", "uri"] # array.c and string.c include ext/random/php_random.h, microtime.c ext/date/php_date.h, the url wrappers ext/uri/php_uri.h
-spl = ["dep:php_ext_spl", "json", "pcre", "standard"] # php_spl.c: ZEND_MOD_REQUIRED("json"), which the extension declares (#1914); pcre and standard, which the crate links (#1882)
+standard = ["dep:php_ext_standard", "random", "date", "uri"] # basic_functions.c: ZEND_MOD_REQUIRED("uri"); random, whose request state shuffle, str_shuffle and array_rand draw from (RANDOM_G), and date, whose default zone gettimeofday reads (#2356)
+spl = ["dep:php_ext_spl", "json", "pcre", "standard"] # php_spl.c: ZEND_MOD_REQUIRED("json"), which the extension declares (#1914); pcre, whose pattern cache and ini entries RegexIterator compiles through, and standard, whose serializer state and unserialize_max_depth the serialize() and unserialize() methods of ArrayObject, SplDoublyLinkedList and SplObjectStorage read (#2356)
 date = ["dep:php_ext_date"]
 reflection = ["dep:php_ext_reflection"]
 pcre = ["dep:php_ext_pcre"]
-mbstring = ["dep:php_ext_mbstring", "pcre", "standard"]
-session = ["dep:php_ext_session", "standard"]
+mbstring = ["dep:php_ext_mbstring", "pcre", "standard"] # mbstring.c: ZEND_MOD_REQUIRED("pcre"); standard, whose page uid and syslog state mb_send_mail reads through php_mail (#2356)
+session = ["dep:php_ext_session", "standard"] # standard, whose serializer state the php and php_serialize handlers read and whose URL rewriter keeps the trans-sid variable (#2356)
 pdo = ["dep:php_ext_pdo", "spl"] # pdo.c: ZEND_MOD_REQUIRED("spl"), which the extension declares (#1914)
 dom = ["dep:php_ext_dom", "lexbor", "libxml"]
 random = ["dep:php_ext_random"]
 pdo_mysql = ["dep:php_ext_pdo_mysql", "pdo", "mysqlnd"] # the `php` binary and the phpt lane, as php builds it with --with-pdo-mysql; php_pdo_mysql_int.h includes ext/mysqlnd/mysqlnd.h, and pdo_mysql.c ZEND_MOD_REQUIRED("pdo") (#1366)
-filter = ["dep:php_ext_filter", "pcre", "standard", "uri"] # config.m4: PHP_ADD_EXTENSION_DEP(filter, pcre); standard and uri, which the crate links (#1882)
+filter = ["dep:php_ext_filter", "pcre"] # config.m4: PHP_ADD_EXTENSION_DEP(filter, pcre), whose pattern cache and ini entries FILTER_VALIDATE_REGEXP compiles through; its links to standard and uri are code alone (#2356)
 tokenizer = ["dep:php_ext_tokenizer"]
 json = ["dep:php_ext_json"]
-openssl = ["dep:php_ext_openssl", "standard"]
+openssl = ["dep:php_ext_openssl", "standard"] # standard, whose http and ftp wrappers serve https and ftps over its user_agent entry and BG(last_http_headers) (#2356)
 curl = ["dep:php_ext_curl"]
-iconv = ["dep:php_ext_iconv", "standard"]
+iconv = ["dep:php_ext_iconv"] # its link to standard is base64 and quoted-printable code alone (#2356)
 pdo_sqlite = ["dep:php_ext_pdo_sqlite", "pdo"]
 ctype = ["dep:php_ext_ctype"]
-hash = ["dep:php_ext_hash", "standard"]
+hash = ["dep:php_ext_hash"] # its link to standard is the md5, sha1 and crc32 code alone (#2356)
 libxml = ["dep:php_ext_libxml", "standard"]
 lexbor = ["dep:php_ext_lexbor"]
-zlib = ["dep:php_ext_zlib", "standard"]
+zlib = ["dep:php_ext_zlib"] # its link to standard is the stream natives the gz* aliases call, over the engine's streams (#2356)
 pcntl = ["dep:php_ext_pcntl"] # the `php` binary and the phpt lane alone (design §7.2, revision 35)
 posix = ["dep:php_ext_posix"] # the `php` binary and the phpt lane alone (design §7.2, revision 35)
 sockets = ["dep:php_ext_sockets"] # the `php` binary and the phpt lane, as php builds it with --enable-sockets (design §7.2, revision 36)
-phar = ["dep:php_ext_phar", "hash", "spl", "standard"]
-bz2 = ["dep:php_ext_bz2", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-bz2 (design §7.2, revision 39)
+phar = ["dep:php_ext_phar", "hash", "spl", "standard"] # phar.c: ZEND_MOD_REQUIRED("hash") and ("spl"); standard, its ZEND_MOD_OPTIONAL, whose serializer state and unserialize_max_depth the metadata reads (#2356)
+bz2 = ["dep:php_ext_bz2"] # the `php` binary and the phpt lane, as php builds it with --with-bz2 (design §7.2, revision 39); its link to standard is the stream natives bzwrite and bzclose call (#2356)
 uri = ["dep:php_ext_uri", "lexbor"] # php_uri.c: ZEND_MOD_REQUIRED("lexbor")
 opcache = ["dep:php_ext_opcache"]
 bcmath = ["dep:php_ext_bcmath"] # the `php` binary and the phpt lane, as php builds it with --enable-bcmath (#1163)
 simplexml = ["dep:php_ext_simplexml", "libxml", "spl"] # simplexml.c: ZEND_MOD_REQUIRED("libxml") and ("spl"), which the extension declares (#1915)
 calendar = ["dep:php_ext_calendar"] # the `php` binary and the phpt lane, as php builds it with --enable-calendar (#1163)
-exif = ["dep:php_ext_exif", "mbstring", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-exif; exif.c decodes its multibyte tags through the functions mbstring hands zend_multibyte (#1323); standard, which the crate links (#1882)
+exif = ["dep:php_ext_exif", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-exif; exif.c: ZEND_MOD_REQUIRED("standard"), and mbstring its ZEND_MOD_OPTIONAL, whose multibyte functions it reads where loaded and does without as php does (#1323, #2356)
 shmop = ["dep:php_ext_shmop"] # the `php` binary and the phpt lane, as php builds it with --enable-shmop (#1323)
 sysvsem = ["dep:php_ext_sysvsem"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvsem (#1323)
-sysvmsg = ["dep:php_ext_sysvmsg", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvmsg (#1323)
-sysvshm = ["dep:php_ext_sysvshm", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvshm (#1323)
+sysvmsg = ["dep:php_ext_sysvmsg", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvmsg (#1323); standard, whose serializer state and unserialize_max_depth msg_send and msg_receive read (#2356)
+sysvshm = ["dep:php_ext_sysvshm", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-sysvshm (#1323); standard, whose serializer state and unserialize_max_depth shm_put_var and shm_get_var read (#2356)
 ftp = ["dep:php_ext_ftp", "openssl"] # the `php` binary and the phpt lane, as php builds it with --enable-ftp; ftp_ssl_connect secures its connections through the crypto layer openssl registers (#1323)
-xml = ["dep:php_ext_xml", "libxml", "standard"]
+xml = ["dep:php_ext_xml", "libxml"] # xml.c: ZEND_MOD_REQUIRED("libxml"); its link to standard is the UTF-8 decoder alone (#2356)
 xmlreader = ["dep:php_ext_xmlreader", "dom", "libxml"]
 xmlwriter = ["dep:php_ext_xmlwriter", "libxml"]
 mysqlnd = ["dep:php_ext_mysqlnd", "standard"] # turned on by pdo_mysql and mysqli, as php builds mysqlnd only for them; its config9.m4 gives no default (#1345, #1366); php_mysqlnd.c: ZEND_MOD_REQUIRED("standard"), which the extension declares (#1914)
@@ -133,18 +134,18 @@ mysqli = ["dep:php_ext_mysqli", "spl", "mysqlnd"] # the `php` binary and the php
 sqlite3 = ["dep:php_ext_sqlite3"] # sqlite3.c over the libsqlite3 ext/pdo_sqlite binds (#1501); php requires no module of it, so pdo_sqlite is the crate's link and not this feature's, and a build with sqlite3 alone registers no PDO (#1915)
 fileinfo = ["dep:php_ext_fileinfo"] # php's default ./configure builds it (#1166, #1451)
 dba = ["dep:php_ext_dba"] # the `php` binary and the phpt lane, as php builds it with --enable-dba (#1166, #1451)
-zip = ["dep:php_ext_zip", "pcre", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-zip; php_zip.c ZEND_MOD_REQUIRED("pcre"), and php_glob and the stream context through standard (design §7.2, revision 70; #1515)
-gmp = ["dep:php_ext_gmp", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-gmp, over the libgmp the pinned keg links; gmp.c includes ext/standard/php_var.h for the `C:` unserializer (design §7.2, revision 72; #1540, #1563)
+zip = ["dep:php_ext_zip", "pcre"] # the `php` binary and the phpt lane, as php builds it with --with-zip; php_zip.c ZEND_MOD_REQUIRED("pcre"); its link to standard is php_glob and php_basename code alone (design §7.2, revision 70; #1515, #2356)
+gmp = ["dep:php_ext_gmp"] # the `php` binary and the phpt lane, as php builds it with --with-gmp, over the libgmp the pinned keg links (design §7.2, revision 72; #1540, #1563); its link to standard is the `C:` form's unserializer, which only standard's own unserialize() reaches (#2356)
 xsl = ["dep:php_ext_xsl", "libxml", "dom"] # php_xsl.c: ZEND_MOD_REQUIRED("libxml") and ("dom"), over the platform's libxslt and libexslt (design §7.2, revision 72; #1564)
 tidy = ["dep:php_ext_tidy"] # the `php` binary and the phpt lane, as php builds it with --with-tidy over the keg's libtidy (design §7.2, revision 72; #1540)
-soap = ["dep:php_ext_soap", "libxml", "date", "standard", "uri"] # the `php` binary and the phpt lane, as php builds it with --enable-soap; soap.c ZEND_MOD_REQUIRED("date") and ("libxml"), php's own C ported over ext/libxml (design §7.2, revision 72; #1540, #1562); standard and uri, which the crate links (#1882)
+soap = ["dep:php_ext_soap", "libxml", "date", "standard"] # the `php` binary and the phpt lane, as php builds it with --enable-soap; soap.c ZEND_MOD_REQUIRED("date") and ("libxml"), php's own C ported over ext/libxml (design §7.2, revision 72; #1540, #1562); standard, whose user_agent and default_socket_timeout entries its HTTP client reads; its link to uri is code alone (#2356)
 gd = ["dep:php_ext_gd"] # the `php` binary and the phpt lane, as php builds it with --enable-gd --with-external-gd over the keg's libgd (design §7.2, revision 75; #1573, #1575)
 sodium = ["dep:php_ext_sodium", "standard"] # the `php` binary and the phpt lane, as php builds it with --with-sodium, over the libsodium the pinned keg links; libsodium.c ZEND_MOD_REQUIRED("standard") (design §7.2, revision 72; #1540, #1566)
 gettext = ["dep:php_ext_gettext"] # the `php` binary and the phpt lane, as php builds it with --with-gettext over the keg's libintl (design §7.2, revision 72; #1540, #1568)
 readline = ["dep:php_ext_readline"] # the `php` binary and the phpt lane, as php builds it with --with-libedit, over the platform's libedit; readline_cli.c's shell is `php -a` (design §7.2, revision 72; #1540, #1567)
 ffi = ["dep:php_ext_ffi"] # the `php` binary and the phpt lane, as php builds it --with-ffi over the platform's libffi (design §7.2, revision 75; #1573, #1576)
-intl = ["dep:php_ext_intl", "date"] # common_date.cpp, timezone_class.cpp and calendar_methods.cpp include ext/date/php_date.h; the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573)
-zend_test = ["dep:php_ext_zend_test", "standard"] # off by default, as php builds it only with --enable-zend-test; the phpt lane runs its subset under the oracle variant that loads it (#1782, #1816); standard, whose php_var_export_ex observer.c writes a return value with
+intl = ["dep:php_ext_intl", "date"] # the `php` binary and the phpt lane, as php builds it with --enable-intl over the keg's ICU, icu4c@78 (design §7.2, revision 75; #1573); date, whose DateTime and DateTimeZone classes and default zone IntlCalendar and IntlTimeZone read (#2356)
+zend_test = ["dep:php_ext_zend_test"] # off by default, as php builds it only with --enable-zend-test; the phpt lane runs its subset under the oracle variant that loads it (#1782, #1816); its link to standard is the php_var_export_ex code the observer writes a return value with (#2356)
 
 # The facade for `Extension` and `Nop`; the extensions as `new-ext` adds them.
 [dependencies]
