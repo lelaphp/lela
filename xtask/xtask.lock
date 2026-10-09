@@ -25,6 +25,7 @@ crosscheck::kept
 crosscheck::run
 divergence::Counts
 divergence::Counts::cell
+divergence::Counts::parity
 divergence::Divergence
 divergence::Divergence::ids
 divergence::FILE
@@ -35,6 +36,7 @@ divergence::Id::of
 divergence::Kind
 divergence::Kind::ALL
 divergence::Kind::as_str
+divergence::Kind::is_parity
 divergence::Kind::prefix
 divergence::Registry
 divergence::Registry::accepted

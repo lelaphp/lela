@@ -76,16 +76,17 @@ fn xtask(root: &Path, args: &[&str]) -> (bool, String, String) {
     )
 }
 
-/// The counts table's line for one kind, or `total`.
+/// The counts table's line for one kind, or `total`, the parity rows'.
 fn counts_line(registry: &Registry, kind: Option<Kind>) -> String {
     let counts = registry.counts();
     let of = |status: Status| match kind {
         Some(kind) => counts.cell(kind, status),
-        None => counts.by_status.get(&status).copied().unwrap_or(0),
+        None => counts.parity(status),
     };
-    let rows = kind.map_or(u64::try_from(registry.rows().len()).unwrap(), |k| {
-        counts.by_kind[&k]
-    });
+    let rows = kind.map_or_else(
+        || Status::ALL.into_iter().map(of).sum(),
+        |k| counts.by_kind[&k],
+    );
     format!(
         "| {} | {} | {} | {} | {rows} |",
         kind.map_or("total", Kind::as_str),
@@ -354,12 +355,7 @@ fn status_divergence_renders_the_rows_with_counts_by_kind_and_status() {
     );
     assert_eq!(
         value["counts"]["total"]["open"],
-        registry
-            .counts()
-            .by_status
-            .get(&Status::Open)
-            .copied()
-            .unwrap_or(0)
+        registry.counts().parity(Status::Open)
     );
 
     // One more accepted row changes the counts and nothing else of what
@@ -418,7 +414,7 @@ since = "2026-09-18"
     assert_eq!(Kind::Crosscheck.prefix(), "crosscheck:");
     assert_eq!(Kind::Crosscheck.as_str(), "crosscheck");
     assert!(parsed.accepted("crosscheck:ctype").is_some());
-    assert_eq!(Kind::ALL.len(), 6);
+    assert_eq!(Kind::ALL.len(), 7);
     assert_eq!(
         Kind::ALL.iter().position(|k| *k == Kind::Crosscheck),
         Kind::ALL
@@ -459,6 +455,115 @@ since = "2026-09-18"
     assert!(ok);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["counts"]["crosscheck"]["accepted"], 1);
+}
+
+/// The `php-ub` kind (#2220): a row recording php's undefined behaviour
+/// or crash parses under `php-ub:`, its `covers` naming the fixture that
+/// holds the engine's side, and `status --section divergence` counts it on
+/// a line of its own after the total, which is the parity rows' and what
+/// the day-30 target reads; a fixture's covered id names the crate `done`
+/// matches it to.
+#[test]
+fn a_php_ub_row_is_counted_apart_from_the_parity_total() {
+    let text = r#"
+[[divergence]]
+id = "trace:fixture-parity"
+kind = "trace"
+reason = "The fixture's parity reason (fixture)."
+status = "accepted"
+since = "2026-09-29"
+
+[[divergence]]
+id = "php-ub:fixture-freed-table"
+kind = "php-ub"
+reason = "The fixture's undefined behaviour (fixture)."
+status = "accepted"
+since = "2026-10-07"
+covers = ["php-ub:ext/standard/tests/walks.rs::fixture_walk_ends"]
+"#;
+    let registry = Registry::parse(text).unwrap();
+    let row = &registry.rows()[1];
+    assert_eq!(row.kind, Kind::PhpUb);
+    assert_eq!(
+        (Kind::PhpUb.as_str(), Kind::PhpUb.prefix()),
+        ("php-ub", "php-ub:")
+    );
+    assert!(!Kind::PhpUb.is_parity());
+    assert!(
+        Kind::ALL
+            .iter()
+            .filter(|k| **k != Kind::PhpUb)
+            .all(|k| k.is_parity())
+    );
+    assert_eq!(
+        Kind::ALL.last(),
+        Some(&Kind::PhpUb),
+        "after every parity kind"
+    );
+    assert_eq!(
+        registry
+            .accepted("php-ub:ext/standard/tests/walks.rs::fixture_walk_ends")
+            .map(|r| &r.id),
+        Some(&row.id)
+    );
+    let counts = registry.counts();
+    assert_eq!(
+        counts.parity(Status::Accepted),
+        1,
+        "the php-ub row is not parity"
+    );
+    assert_eq!(counts.by_status[&Status::Accepted], 2, "but it is a row");
+    let err = Registry::parse(&text.replace("php-ub:fixture-freed-table", "trace:freed"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("php-ub:"),
+        "the id carries the kind's prefix: {err}"
+    );
+
+    let root = scratch("php-ub");
+    std::fs::write(root.join(divergence::FILE), text).unwrap();
+    let (ok, md, err) = xtask(&root, &["status", "--section", "divergence"]);
+    assert!(ok, "{err}");
+    let lines: Vec<&str> = md.lines().collect();
+    let at = |prefix: &str| lines.iter().position(|l| l.starts_with(prefix)).unwrap();
+    assert_eq!(lines[at("| total |")], "| total | 0 | 1 | 0 | 1 |", "{md}");
+    assert_eq!(
+        lines[at("| php-ub |")],
+        "| php-ub | 0 | 1 | 0 | 1 |",
+        "{md}"
+    );
+    assert!(
+        at("| trace |") < at("| total |") && at("| total |") < at("| php-ub |"),
+        "{md}"
+    );
+    assert!(
+        md.contains("counted on its own line"),
+        "the counts say why: {md}"
+    );
+    let (ok, json, _) = xtask(
+        &root,
+        &["status", "--section", "divergence", "--format", "json"],
+    );
+    assert!(ok);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["counts"]["total"]["accepted"], 1);
+    assert_eq!(value["counts"]["php-ub"]["accepted"], 1);
+
+    // With no php-ub row, the counts carry no line about one: the tracked
+    // registry with its php-ub rows taken out.
+    let parity_only = scratch("parity-only");
+    let tracked = std::fs::read_to_string(parity_only.join(divergence::FILE)).unwrap();
+    let mut blocks = tracked.split("[[divergence]]");
+    let mut kept = blocks.next().unwrap_or_default().to_owned();
+    for block in blocks.filter(|b| !b.contains("kind = \"php-ub\"")) {
+        kept.push_str("[[divergence]]");
+        kept.push_str(block);
+    }
+    std::fs::write(parity_only.join(divergence::FILE), kept).unwrap();
+    let (ok, md, _) = xtask(&parity_only, &["status", "--section", "divergence"]);
+    assert!(ok);
+    assert!(!md.contains("counted on its own line"), "{md}");
 }
 
 #[test]

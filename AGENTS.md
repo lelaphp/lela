@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=099d194e0604570e6783952c5980d0cc84ab20cbe300e610365f8529aefe72df out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=680f0055a317af8d61d3fec846d3feaef0d8c09b359046c161b0088bd07b77bf out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -129,9 +129,9 @@ third-engine-design.md
 | sapi | sapi.lock | 43 |  | no reading |
 | tier | tier.lock | 67 |  | no reading |
 | layer | layer.lock | 36 |  | no reading |
-| harness | xtask.lock | 386 |  | no reading |
+| harness | xtask.lock | 388 |  | no reading |
 
-<!-- /computed in=04aad8e16feaa7d9156b824b7490001c6769ebd2e8a41ba707d22f38607b7b09 out=24ce6de56e74810822a062ff61146a1d8a917b0f60c1c578844c060a682c9067 -->
+<!-- /computed in=5a12cc3ca21ca8bdf41d7c0abd047208d57f2cce8ba05e40a7488fb1bed4b865 out=7c95340c9212ff51370e184dbd1e246510083f86cd8c890b468856d5721bb5c7 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -166,7 +166,7 @@ third-engine-design.md
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=bed7941bd291fb812c95ea4219d274bde66432dcc4b331b82aae32d0d11d25cf out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
+<!-- /computed in=3be435d6d4846dfc142b1018abe32febe77dedcfd4784151e56ed2454c896416 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
