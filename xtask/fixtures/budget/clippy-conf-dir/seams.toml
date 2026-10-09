@@ -1,0 +1,27 @@
+# A negative-control fixture (harness-design.md §4.1, #2475): a workspace
+# whose generated ext/clippy.toml is current and whose cargo configuration
+# sets CLIPPY_CONF_DIR, which points clippy past it for every crate, so
+# `budget` must fail. The pin is the real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[rule]]
+id = "ext.no-locks"
+scope = "ext/*"
+deny_types = ["std::sync::Mutex"]
+adr = "0005"
+text = "No lock in ext/* (fixture)."
+
+[[rule]]
+id = "generated.committed"
+generated = { "ext/clippy.toml" = "ext.no-locks" }
+text = "ext/clippy.toml is generated and committed; a stale copy fails budget (fixture)."

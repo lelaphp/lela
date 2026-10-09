@@ -284,6 +284,9 @@ impl Run {
             command.args(["-p", &krate.package()]);
         }
         without_git(&mut command);
+        // Set, it points clippy past every generated clippy.toml for every
+        // crate (`generated`'s module, #2475); rustc reads it not at all.
+        command.env_remove(crate::generated::CONF_DIR);
         let mut child = command
             .spawn()
             .with_context(|| format!("running cargo {}", args.join(" ")))?;

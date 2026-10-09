@@ -1159,7 +1159,9 @@ impl Manifest {
     /// - a lock: the seam's name maps to the directory the lock lives in,
     ///   the crate [`Manifest::lock_home`] names, and the whole tree for a
     ///   lock no row names.
-    /// - a generated file the manifest names (`ext/clippy.toml`): itself.
+    /// - a generated file the manifest names (`ext/clippy.toml`): its
+    ///   directory, since `budget` holds the file and every clippy
+    ///   configuration below it that would stand nearer to a crate (#2475).
     ///
     /// `None` for a name none of these know, or a suffix outside that
     /// grammar, which the reading's constructor refuses by name rather than
@@ -1191,7 +1193,8 @@ impl Manifest {
             .flat_map(|r| r.predicate.generated.iter().flatten())
             .any(|(file, _)| file == name);
         if generated {
-            return Some(PathBuf::from(name));
+            let dir = name.rsplit_once('/').map_or(".", |(dir, _)| dir);
+            return Some(PathBuf::from(dir));
         }
         if let Ok(corpus) = self.pin.source.tree()
             && corpus.join(name).is_dir()
