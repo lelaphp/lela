@@ -5,6 +5,10 @@
 //! local time the built-in server's log writes, and the `SIGINT` and the
 //! wait its loop serves between.
 //! Each `unsafe` block is one operation with its `SAFETY` comment.
+#![deny(
+    clippy::undocumented_unsafe_blocks,
+    clippy::multiple_unsafe_ops_per_block
+)]
 
 mod title;
 
