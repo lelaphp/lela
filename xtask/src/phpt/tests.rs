@@ -1755,19 +1755,26 @@ fn neighbours_that_make_one_relative_path_are_one_batch_and_never_meet() {
 /// #1091), so the second waits for the first, its batch's, and the third,
 /// in a batch of its own, is done before the first is past its limit; on
 /// a pool of one, the negative control, the third starts after it too.
-/// The limit runs from the spawn and the span from the program's first
-/// line, so the line between the two is drawn half a second early. The
-/// verdicts are the same either way: the first fails naming the limit.
+/// The verdicts are the same either way: the first fails naming the limit.
+///
+/// The limit runs from the spawn and the spans from each program's first
+/// line, so a php's start-up stands on both sides of the line between
+/// "done before the first is past its limit" and "after it", and it took
+/// more than 1.7 s at a load average of 50 to 108 (#2293). The line is
+/// drawn at half a limit of ten seconds past the first's first line, so
+/// the start-ups of two programs may differ by five seconds, and the
+/// third's 300 ms run may start that late, before load crosses it
+/// (#2315); a limit of three and a line half a second early left 0.5 s.
 #[test]
 fn a_test_past_the_limit_holds_up_only_its_batch_and_what_it_conflicts_with() {
-    const LIMIT: u64 = 3;
+    const LIMIT: u64 = 10;
     if oracle().is_none() {
         return;
     }
     let tests = ["a-never.phpt", "b-quick.phpt", "c-quick.phpt"];
     let (tree, subset) = fixture_subset("past-limit");
     #[allow(clippy::cast_precision_loss)]
-    let past = |span: &[(f64, f64)]| span[0].0 + LIMIT as f64 - 0.5;
+    let past = |span: &[(f64, f64)]| span[0].0 + LIMIT as f64 / 2.0;
     let pooled = run_on(&subset, 3, LIMIT);
     let span = spans(&tree, &tests);
     assert!(
@@ -1805,6 +1812,11 @@ fn stands(pid: i32) -> bool {
 /// program's process group, which the runner kills whole, so neither
 /// outlives its run. Each program writes the child's pid beside itself,
 /// which is how the test learns it; the child ran, which is the control.
+/// A program that exits pays none of its limit, so the first has thirty
+/// seconds of room; the second's limit is ten, past which its `sleep(60)`
+/// always runs and before which its php has started and written the pid
+/// under any load (#2315), where two seconds raced a start-up that took
+/// more than 1.7 s at a load average of 50 to 108 (#2293).
 #[test]
 fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
     if oracle().is_none() {
@@ -1818,12 +1830,12 @@ fn a_programs_children_go_with_it_whether_it_exits_or_passes_the_limit() {
              var_dump(posix_kill($pid, 0));\n{then}\n--EXPECT--\nbool(true)\n"
         )
     };
-    for (name, then, went) in [
-        ("exits", "", Judgement::Pass),
-        ("past-limit", "sleep(60);", Judgement::Fail),
+    for (name, then, limit, went) in [
+        ("exits", "", 30, Judgement::Pass),
+        ("past-limit", "sleep(60);", 10, Judgement::Fail),
     ] {
         let (root, subset) = rooted(name, &leaves(then));
-        let tally = run_on(&subset, 1, 2);
+        let tally = run_on(&subset, 1, limit);
         assert_eq!(only(&tally).0, went, "{name}: {tally:#?}");
         let pid: i32 = fs::read_to_string(root.join("ext/fixture/tests/child.pid"))
             .unwrap()
