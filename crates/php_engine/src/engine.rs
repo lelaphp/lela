@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use php_compile::multibyte::Multibyte;
 use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
 use php_heap::{Intern, Strings, Zval};
-use php_link::LinkedClass;
+use php_link::{Exact, Folded, Indexed, LinkedClass, Names};
 use php_unit::decl::{
     ClassDecl, ConstDecl, ConstExpr, FunctionDecl, HookKind, MethodDecl, Name, ParameterDefault,
 };
@@ -587,6 +587,8 @@ pub(crate) struct Shared {
     /// declarations alone, which the compiler reads as they stand on
     /// every compile ([`Declared`]).
     pub(crate) functions: Vec<FunctionDecl>,
+    /// `functions` by lowered name, `CG(function_table)`'s keys.
+    function_names: Names<Folded>,
     /// Each native's entry, one row per row of `functions`, the
     /// interception's where an extension intercepts it.
     pub(crate) entries: Vec<Entry>,
@@ -614,6 +616,9 @@ pub(crate) struct Shared {
     /// order, each with its methods on it: what a `ClassId` below the
     /// request's own declarations indexes.
     pub(crate) classes: Vec<ClassDecl>,
+    /// `classes` by lowered name, without the aliases `class_keys`
+    /// files: what the compiler finds a native class by.
+    class_names: Names<Folded>,
     /// Each native class's `ce->info.internal.module`, one row per row
     /// of `classes`: the extension that declared it, `Core` for Zend's.
     pub(crate) class_modules: Vec<ExtensionId>,
@@ -662,6 +667,8 @@ pub(crate) struct Shared {
     /// parents declare, which never changes.
     pub(crate) placed: Vec<crate::api::request::Placed>,
     constants: Vec<ConstDecl>,
+    /// `constants` by name, `EG(zend_constants)`'s keys.
+    constant_names: Names<Exact>,
     /// Each constant's `ZEND_CONSTANT_MODULE_NUMBER`, one row per row of
     /// `constants`: the extension that declared it, `Core` for Zend's.
     pub(crate) constant_modules: Vec<ExtensionId>,
@@ -670,12 +677,13 @@ pub(crate) struct Shared {
     /// The typed entries `ini`'s master values give, which each request
     /// starts with ([`TypedIni`]).
     pub(crate) typed_ini: TypedIni,
-    /// The constants' values, the string ones interned into the engine's
-    /// table as `REGISTER_STRING_CONSTANT` interns php's at `MINIT`, so
-    /// a request reading one allocates nothing and counts nothing;
-    /// beside each, its `CONST_DEPRECATED`, decoded once from the
-    /// declaration's attributes as `gen_stub.php` writes it.
-    constant_values: Vec<(Box<[u8]>, Zval, crate::attributes::Flags)>,
+    /// The constants' values, one row per row of `constants`, the string
+    /// ones interned into the engine's table as `REGISTER_STRING_CONSTANT`
+    /// interns php's at `MINIT`, so a request reading one allocates
+    /// nothing and counts nothing; beside each, its `CONST_DEPRECATED`,
+    /// decoded once from the declaration's attributes as `gen_stub.php`
+    /// writes it. None for a declaration whose value is no scalar.
+    constant_values: Vec<Option<(Zval, crate::attributes::Flags)>>,
     /// `PHP_SAPI`'s value under each host's name, interned at build with
     /// the other constants, so a request that reads the name its host
     /// gave it allocates nothing ([`crate::constants::HOSTS`]).
@@ -1279,9 +1287,10 @@ struct Origin<'a> {
 /// each a view of the engine's own table.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Declared<'a> {
-    pub(crate) constants: &'a [ConstDecl],
-    pub(crate) functions: &'a [FunctionDecl],
-    pub(crate) classes: &'a [ClassDecl],
+    pub(crate) constants: Indexed<'a, ConstDecl, Exact>,
+    pub(crate) functions: Indexed<'a, FunctionDecl, Folded>,
+    pub(crate) frameless: &'a [FramelessEntry],
+    pub(crate) classes: Indexed<'a, ClassDecl, Folded>,
     pub(crate) hooked: php_compile::Hooked,
     pub(crate) extended_info: bool,
 }
@@ -1300,9 +1309,10 @@ impl Shared {
     /// The tables the compiler reads, as [`Declared`].
     pub(crate) fn declared(&self) -> Declared<'_> {
         Declared {
-            constants: &self.constants,
-            functions: &self.functions,
-            classes: &self.classes,
+            constants: Indexed::new(&self.constants, &self.constant_names),
+            functions: Indexed::new(&self.functions, &self.function_names),
+            frameless: &self.frameless,
+            classes: Indexed::new(&self.classes, &self.class_names),
             hooked: self.hooked,
             extended_info: self.extended_info,
         }
@@ -1636,19 +1646,28 @@ impl Shared {
     }
 
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
-        self.constant_values
-            .iter()
-            .find(|(n, _, _)| n.as_ref() == name)
-            .map(|(_, z, _)| exec::value_of(*z))
+        self.constant_at(self.constant_names.find(&self.constants, name)?)
+    }
+
+    /// The value of the constant at `at` of the declared table, as
+    /// [`Shared::constant`] reads it.
+    pub(crate) fn constant_at(&self, at: usize) -> Option<Value> {
+        let (z, _) = self.constant_values.get(at)?.as_ref()?;
+        Some(exec::value_of(*z))
     }
 
     /// `CONST_DEPRECATED` of an extension's or the engine's constant,
     /// none for a name no extension declared.
     pub(crate) fn constant_deprecated(&self, name: &[u8]) -> Option<bool> {
-        self.constant_values
-            .iter()
-            .find(|(n, _, _)| n.as_ref() == name)
-            .map(|(_, _, flags)| flags.deprecated)
+        let at = self.constant_names.find(&self.constants, name)?;
+        let (_, flags) = self.constant_values.get(at)?.as_ref()?;
+        Some(flags.deprecated)
+    }
+
+    /// The native named `name` whatever its case, its place in
+    /// `functions`: `zend_hash_find(CG(function_table), lcname)`.
+    pub(crate) fn function_at(&self, name: &[u8]) -> Option<usize> {
+        self.function_names.find(&self.functions, name)
     }
 }
 
@@ -3054,6 +3073,7 @@ impl EngineBuilder {
             .map(|decl| crate::attributes::Flags::of(&decl.attributes))
             .collect();
         let frameless = frameless_table(functions.iter());
+        let function_names = Names::over(&functions);
         let LinkedClasses {
             classes,
             modules: class_modules,
@@ -3063,6 +3083,7 @@ impl EngineBuilder {
             trampolines,
         } = link_classes(&mut declarations);
         let class_keys = class_keys(&classes);
+        let class_names = Names::over(&classes);
         let records = native_records(&classes, &class_keys);
         let method_functions = method_functions(&classes, &methods, functions.len());
         let trampoline_tables =
@@ -3089,6 +3110,7 @@ impl EngineBuilder {
         let default_strings = default_strings(&functions, &classes);
         let mut strings = Strings::new();
         let constant_values = constant_values(&constants, &mut strings);
+        let constant_names = Names::over(&constants);
         let sapi_names = crate::constants::host_names(&mut strings);
         let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
         let arena = crate::arena::Epochs::of(crate::arena::Arena::past(
@@ -3101,12 +3123,14 @@ impl EngineBuilder {
             shared: Arc::new(Shared {
                 extensions,
                 functions,
+                function_names,
                 entries,
                 replaced,
                 function_modules,
                 function_flags,
                 frameless,
                 classes,
+                class_names,
                 class_modules,
                 handlers,
                 natives,
@@ -3119,6 +3143,7 @@ impl EngineBuilder {
                 parents,
                 placed,
                 constants,
+                constant_names,
                 constant_modules,
                 engine_states: States::new(),
                 typed_ini: TypedIni::of(|name| master_of(&ini, name)),
@@ -3348,24 +3373,21 @@ fn permanent_names(
 fn constant_values(
     constants: &[ConstDecl],
     strings: &mut Strings,
-) -> Vec<(Box<[u8]>, Zval, crate::attributes::Flags)> {
-    let mut values = Vec::new();
-    for decl in constants {
-        let value = match &decl.value {
-            ConstExpr::Null => Zval::null(),
-            ConstExpr::Bool(b) => Zval::bool(*b),
-            ConstExpr::Long { value: n, .. } => Zval::long(*n),
-            ConstExpr::Double(f) => Zval::double(*f),
-            ConstExpr::Str(s) => match strings.intern(s) {
-                Ok(interned) => Zval::string(interned),
-                Err(_) => continue,
-            },
-            _ => continue,
-        };
-        let flags = crate::attributes::Flags::of(&decl.attributes);
-        values.push((decl.name.0.clone(), value, flags));
-    }
-    values
+) -> Vec<Option<(Zval, crate::attributes::Flags)>> {
+    let value = |decl: &ConstDecl, strings: &mut Strings| match &decl.value {
+        ConstExpr::Null => Some(Zval::null()),
+        ConstExpr::Bool(b) => Some(Zval::bool(*b)),
+        ConstExpr::Long { value: n, .. } => Some(Zval::long(*n)),
+        ConstExpr::Double(f) => Some(Zval::double(*f)),
+        ConstExpr::Str(s) => strings.intern(s).ok().map(Zval::string),
+        _ => None,
+    };
+    (constants.iter())
+        .map(|decl| {
+            let flags = crate::attributes::Flags::of(&decl.attributes);
+            value(decl, strings).map(|z| (z, flags))
+        })
+        .collect()
 }
 
 /// `fpm_php_apply_defines_ex` for each of a host's entries
@@ -4933,6 +4955,7 @@ fn compile(
         shebang: ini.shebang,
         persistent: declared.constants,
         functions: declared.functions,
+        frameless: declared.frameless,
         classes: declared.classes,
         request_classes: origin.request_classes,
         stack,

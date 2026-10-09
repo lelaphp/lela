@@ -128,12 +128,11 @@ impl Request {
     /// a declared constant whose value the engine did not publish is no
     /// row.
     pub(crate) fn constant_table(&self) -> Vec<(Option<&str>, Vec<u8>, Value)> {
-        let decls = self.shared.declared().constants;
+        let decls = self.shared.declared().constants.rows();
         let modules = (self.shared.constant_modules.iter()).map(|&at| self.extension_name(at));
-        let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = decls
-            .iter()
+        let mut rows: Vec<(Option<&str>, Vec<u8>, Value)> = (decls.iter().enumerate())
             .zip(modules)
-            .flat_map(|(decl, module)| {
+            .flat_map(|((at, decl), module)| {
                 // `PHP_SAPI` stands where php registers it, before
                 // `PHP_BINARY`, and is the request's.
                 let sapi = (decl.name.0.as_ref() == b"PHP_BINARY").then(|| {
@@ -143,7 +142,7 @@ impl Request {
                         self.constants.sapi_constant,
                     )
                 });
-                let value = self.shared.constant(&decl.name.0);
+                let value = self.shared.constant_at(at);
                 sapi.into_iter()
                     .chain(value.map(|value| (module, decl.name.0.to_vec(), value)))
             })
@@ -488,9 +487,8 @@ impl Request {
         self.shared
             .declared()
             .constants
-            .iter()
-            .find(|decl| decl.name.0.as_ref() == name)
-            .map_or(&[], |decl| decl.attributes.as_slice())
+            .find(name)
+            .map_or(&[], |(_, decl)| decl.attributes.as_slice())
     }
 
     /// `ZEND_CONSTANT_FLAGS(c) & CONST_DEPRECATED` of the constant the

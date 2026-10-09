@@ -57,7 +57,7 @@ mod hooks;
 mod rows;
 mod traits;
 
-pub use rows::{Case, Exact, Folded, LinkedClass, Row, Rows};
+pub use rows::{Case, Exact, Folded, Indexed, LinkedClass, Named, Names, Row, Rows};
 
 pub use hooks::{
     Resolved, ResolvedHook, Variance, resolve_property, set_hook_refused, verify_hooked_property,
