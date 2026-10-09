@@ -939,6 +939,34 @@ enum FieldPacket {
 /// 0
 /// 40
 /// ```
+///
+/// A name a published unit interned costs nothing, as a string opcache
+/// shares does: the strings a constant array holds as well as the
+/// unit's own constant strings, where php -n interns only the latter
+/// (`trace:immutable-literal-arrays`):
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $m = memory_get_usage();
+/// foreach (["REPEAT('x', 100)", "REPEAT('x', 1000)", "REPEAT('x', 10000)", "REPEAT('x', 100)", "1 AS z"] as $column) {
+///     $r = mysqli_query($l, "SELECT $column");
+///     mysqli_free_result($r);
+///     echo memory_get_usage() - $m, "\n";
+/// }
+/// $name = 'zzqqxxyyww';
+/// $m = memory_get_usage();
+/// mysqli_free_result(mysqli_query($l, "SELECT 2 AS zzqqxxyyww"));
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql regime=immutable-literals
+/// 160
+/// 192
+/// 192
+/// 192
+/// 192
+/// 0
+/// ```
 fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
     let mut p = Body::new(body);
     if body.first() == Some(&ERROR_MARKER) {

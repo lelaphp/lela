@@ -1546,7 +1546,7 @@ impl Shared {
     /// `interned_strings_permanent`, or opcache's shared table, in
     /// `zend_string_init_existing_interned`; nothing is interned.
     pub(crate) fn existing_interned(&self, bytes: &[u8]) -> Option<php_heap::Str> {
-        if let Some(name) = self.names.find(bytes) {
+        if let Some(name) = self.permanent(bytes) {
             return Some(name);
         }
         let strings = match self.strings.lock() {
