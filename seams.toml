@@ -607,7 +607,7 @@ deny = true # design §4.2: keeps a later main/-style split possible
 [[edge]]
 from = "sapi/*"
 to = ["php_sapi", "php_proto", "php_bundle", "php_ext"]
-adr = "0008" # a host reaches the engine through php_sapi; php_ext only to declare natives of its own (#1348); never php_engine or ext/*
+adr = "0008" # a host reaches the engine through php_sapi; php_ext to declare natives of its own (#1348) and to read frames, op arrays and the linked tables as an extension does (#1911); never php_engine or ext/*
 
 # ---------------------------------------------------------------- rules
 # Each rule: an `id`, a `scope` or a `tool`, one predicate, an optional `adr`,
