@@ -56,7 +56,7 @@ use php_ext::attr::php_const;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, new_throwable, throw_error, throw_value};
 use php_ext::request::Request;
-use php_ext::values::{ClassId, Owner, PhpObject, PhpString, Value};
+use php_ext::values::{ClassId, Emalloc, Owner, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{CLIENT_INFO, Idle, Mysqlnd, ReverseApi};
 
 /// `MYSQLI_VERSION_ID`, what the deprecated `driver_version` reads.
@@ -456,6 +456,62 @@ impl On {
     }
 }
 
+/// `sizeof(MYSQLI_RESOURCE)`: `ptr`, `info` and `status`.
+const RESOURCE: usize = 24;
+
+/// `MYSQLI_RESOURCE`: what an object's `ptr` points at, in the allocation
+/// php `ecalloc`s to point at it, on the request's heap until
+/// `MYSQLI_CLEAR_RESOURCE` or the object's free gives it back; its
+/// `status` is the state the payload holding it is in.
+pub(crate) struct Resource<T> {
+    ptr: T,
+    held: Emalloc,
+}
+
+impl<T> Resource<T> {
+    /// `ecalloc(1, sizeof(MYSQLI_RESOURCE))` pointed at `ptr`; the `Err`
+    /// is the memory limit's fatal, which ends the request with `ptr`.
+    pub(crate) fn new(req: &mut Request, ptr: T) -> Result<Resource<T>, Thrown> {
+        Ok(Resource {
+            ptr,
+            held: Emalloc::new(req, RESOURCE)?,
+        })
+    }
+
+    /// `mysqli_resource->ptr = ptr`: the resource pointed at `ptr`, and
+    /// what it pointed at before given back.
+    pub(crate) fn repoint<U>(self, ptr: U) -> (Resource<U>, T) {
+        (
+            Resource {
+                ptr,
+                held: self.held,
+            },
+            self.ptr,
+        )
+    }
+
+    /// `efree(intern->ptr)`: the resource given back, what it pointed at
+    /// left to its owner.
+    pub(crate) fn free(self, req: &mut Request) -> T {
+        self.held.free(req);
+        self.ptr
+    }
+}
+
+impl<T> std::ops::Deref for Resource<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.ptr
+    }
+}
+
+impl<T> std::ops::DerefMut for Resource<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.ptr
+    }
+}
+
 /// The payload `T` of `object`, which each class lays down boxed, so
 /// `mysqli_object` keeps php's size.
 pub(crate) fn payload<T: Send + 'static>(req: &mut Request, object: PhpObject) -> Option<&mut T> {
@@ -609,6 +665,8 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Th
 /// `add_property_stringl` and `add_property_long` write it.
 pub(crate) enum Fact<'a> {
     Text(&'a [u8]),
+    /// A string shared, one more owner of it: `zend_string_copy`.
+    Str(PhpString),
     Int(i64),
 }
 
@@ -622,6 +680,7 @@ pub(crate) fn add_facts(
     for (name, fact) in facts {
         let value = match fact {
             Fact::Text(bytes) => string(req, bytes)?,
+            Fact::Str(s) => Owner::take(req, Value::string(*s)),
             Fact::Int(n) => Owner::take(req, Value::int(*n)),
         };
         php_ext::call::write_prop(req, &object, name.as_bytes(), value)?;

@@ -12,12 +12,14 @@
 use php_ext::coerce::{to_double, to_long, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Owner, Value, ValueRef};
+use php_ext::values::{Emalloc, Owner, Value, ValueRef};
 
+use crate::alloc::{BIND, PLUGIN_ROOM, STMT, STMT_DATA};
 use crate::client::{Mysqlnd, ResultSet};
 use crate::conn::ConnData;
 use crate::consts::{
-    Com, ConnState, CursorType, FieldType, QueryType, ResType, StmtState, cr, status,
+    Com, ConnState, CursorType, FieldType, NET_CMD_BUFFER_MIN_SIZE, QueryType, ResType, StmtState,
+    cr, status,
 };
 use crate::error::{ErrorInfo, OUT_OF_SYNC, Upsert};
 use crate::pool::Pool;
@@ -87,6 +89,44 @@ struct ResultBind {
     bound: bool,
 }
 
+/// `MYSQLND_PARAM_BIND *` or `MYSQLND_RESULT_BIND *`: a bind for each
+/// parameter or column, in the `mnd_ecalloc(n, sizeof(bind))` php keeps
+/// them in, on the request's heap until the binding is freed.
+#[derive(Debug)]
+struct Binds<T> {
+    list: Vec<T>,
+    held: Emalloc,
+}
+
+impl<T> Binds<T> {
+    /// The binds allocated; the `Err` is the memory limit's fatal.
+    fn new(req: &mut Request, list: Vec<T>) -> Result<Binds<T>, Thrown> {
+        let held = Emalloc::new(req, list.len() * BIND)?;
+        Ok(Binds { list, held })
+    }
+
+    /// `mnd_efree`: the allocation given back, the binds left to give
+    /// back their values.
+    fn free(self, req: &mut Request) -> Vec<T> {
+        self.held.free(req);
+        self.list
+    }
+}
+
+impl<T> std::ops::Deref for Binds<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        &self.list
+    }
+}
+
+impl<T> std::ops::DerefMut for Binds<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.list
+    }
+}
+
 /// `stmt->default_rset_handler`: what a `COM_STMT_EXECUTE`'s rows are read with
 /// when the first fetch asks for them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,8 +143,8 @@ struct StmtData {
     parameter_count: u32,
     field_count: u32,
     result: Option<Box<Res>>,
-    param_bind: Option<Vec<ParamBind>>,
-    result_bind: Option<Vec<ResultBind>>,
+    param_bind: Option<Binds<ParamBind>>,
+    result_bind: Option<Binds<ResultBind>>,
     send_types_to_server: bool,
     upsert: Upsert,
     error: ErrorInfo,
@@ -144,6 +184,37 @@ impl StmtData {
 pub struct Stmt {
     data: Box<StmtData>,
     conn: Mysqlnd,
+    held: Held,
+}
+
+/// What `get_prepared_statement` allocates on the request's heap, a
+/// persistent connection's statement too: `MYSQLND_STMT` with its
+/// `PLUGIN_ROOM`, `MYSQLND_STMT_DATA` and the `execute_cmd_buffer`;
+/// `dtor` frees them.
+#[derive(Debug)]
+struct Held {
+    stmt: Emalloc,
+    data: Emalloc,
+    execute_cmd_buffer: Emalloc,
+}
+
+impl Held {
+    /// The three allocated in php's order; the `Err` is the memory
+    /// limit's fatal.
+    fn new(req: &mut Request) -> Result<Held, Thrown> {
+        Ok(Held {
+            stmt: Emalloc::new(req, STMT + PLUGIN_ROOM)?,
+            data: Emalloc::new(req, STMT_DATA)?,
+            execute_cmd_buffer: Emalloc::new(req, NET_CMD_BUFFER_MIN_SIZE as usize)?,
+        })
+    }
+
+    /// `mysqlnd_stmt::dtor`'s frees, in its order.
+    fn free(self, req: &mut Request) {
+        self.execute_cmd_buffer.free(req);
+        self.data.free(req);
+        self.stmt.free(req);
+    }
 }
 
 /// Both error infos emptied, `SET_EMPTY_ERROR` on each.
@@ -154,12 +225,35 @@ fn empty_errors(stmt: &mut StmtData, conn: &mut ConnData) {
 
 impl Stmt {
     /// `mysqlnd_stmt_init`: a statement of `conn`, which it holds one
-    /// owner of.
-    pub fn init(req: &mut Request, conn: Mysqlnd) -> Stmt {
-        Stmt {
+    /// owner of; the `Err` is the memory limit's fatal. What
+    /// `memory_get_usage()` sees of a statement is its structures, its
+    /// `execute_cmd_buffer`, its columns' pool and the bound parameters'
+    /// binds (with mysqli's `MY_STMT` and resource), all of it but the
+    /// bound reference given back by the close:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $m = memory_get_usage();
+    /// $s = mysqli_prepare($l, "SELECT REPEAT('x', 100000) a, ? b");
+    /// echo memory_get_usage() - $m, "\n";
+    /// $v = 5;
+    /// mysqli_stmt_bind_param($s, "i", $v);
+    /// echo memory_get_usage() - $m, "\n";
+    /// mysqli_stmt_close($s);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect mysql
+    /// 21768
+    /// 21856
+    /// 288
+    /// ```
+    pub fn init(req: &mut Request, conn: Mysqlnd) -> Result<Stmt, Thrown> {
+        Ok(Stmt {
+            held: Held::new(req)?,
             data: Box::new(StmtData::new()),
             conn: conn.acquire(req),
-        }
+        })
     }
 
     /// The connection lent with the statement's data; `None` where the
@@ -181,11 +275,8 @@ impl Stmt {
     /// columns' read.
     pub fn prepare(&mut self, req: &mut Request, sql: &[u8]) -> Result<bool, Thrown> {
         if self.data.state > StmtState::Initted {
-            let old = std::mem::replace(&mut self.data, Box::new(StmtData::new()));
-            let old = Stmt {
-                data: old,
-                conn: self.conn.acquire(req),
-            };
+            let made = Stmt::init(req, self.conn)?;
+            let old = std::mem::replace(self, made);
             old.dtor(req, true)?;
         }
         Ok(self
@@ -206,34 +297,36 @@ impl Stmt {
     }
 
     /// `mysqlnd_stmt_bind_one_param`: `value`'s owner taken for parameter
-    /// `n`, sent as `ty`, the one bound before given back.
+    /// `n`, sent as `ty`, the one bound before given back; the binds
+    /// allocated where none were, the `Err` the memory limit's fatal.
     pub fn bind_parameter(
         &mut self,
         req: &mut Request,
         n: u32,
         value: Owner<Value>,
         ty: FieldType,
-    ) -> bool {
+    ) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
             stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
             value.give_up(req);
-            return false;
+            return Ok(false);
         }
         if n >= stmt.parameter_count {
             stmt.error
                 .client(cr::INVALID_PARAMETER_NO, "Invalid parameter number");
             value.give_up(req);
-            return false;
+            return Ok(false);
         }
         stmt.error.reset();
-        let count = stmt.parameter_count as usize;
-        let binds = stmt
-            .param_bind
-            .get_or_insert_with(|| (0..count).map(|_| ParamBind::default()).collect());
-        let Some(bind) = binds.get_mut(n as usize) else {
+        if stmt.param_bind.is_none() {
+            let count = stmt.parameter_count as usize;
+            let list = (0..count).map(|_| ParamBind::default()).collect();
+            stmt.param_bind = Some(Binds::new(req, list)?);
+        }
+        let Some(bind) = stmt.param_bind.as_mut().and_then(|b| b.get_mut(n as usize)) else {
             value.give_up(req);
-            return false;
+            return Ok(false);
         };
         if let Some(old) = bind.zv.replace(value) {
             old.give_up(req);
@@ -248,48 +341,49 @@ impl Stmt {
             Ok(())
         })
         .ok();
-        true
+        Ok(true)
     }
 
-    /// `mysqlnd_stmt_bind_param`: every parameter bound at once, each
-    /// value's owner taken, the ones bound before given back.
+    /// `mysqlnd_stmt_bind_param`: every parameter bound at once in the
+    /// binds `mysqlnd_stmt_alloc_param_bind` allocates, each value's owner
+    /// taken, the binds before freed with their values given back; the
+    /// `Err` is the memory limit's fatal.
     pub fn bind_parameters(
         &mut self,
         req: &mut Request,
         params: Vec<(Owner<Value>, FieldType)>,
-    ) -> bool {
+    ) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
             stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
             for (v, _) in params {
                 v.give_up(req);
             }
-            return false;
+            return Ok(false);
         }
         stmt.error.reset();
         if stmt.parameter_count == 0 {
             for (v, _) in params {
                 v.give_up(req);
             }
-            return true;
+            return Ok(true);
         }
-        if let Some(old) = stmt.param_bind.take() {
-            for v in old.into_iter().filter_map(|b| b.zv) {
+        let list = params
+            .into_iter()
+            .map(|(zv, ty)| ParamBind {
+                zv: Some(zv),
+                ty: Some(ty),
+                blob_used: false,
+            })
+            .collect();
+        let binds = Binds::new(req, list)?;
+        if let Some(old) = stmt.param_bind.replace(binds) {
+            for v in old.free(req).into_iter().filter_map(|b| b.zv) {
                 v.give_up(req);
             }
         }
-        stmt.param_bind = Some(
-            params
-                .into_iter()
-                .map(|(zv, ty)| ParamBind {
-                    zv: Some(zv),
-                    ty: Some(ty),
-                    blob_used: false,
-                })
-                .collect(),
-        );
         stmt.send_types_to_server = true;
-        true
+        Ok(true)
     }
 
     /// `mysqlnd_stmt_refresh_bind_param`: the types sent again with the
@@ -317,61 +411,73 @@ impl Stmt {
     }
 
     /// `mysqlnd_stmt_bind_one_result`: column `n` bound to a value of the
-    /// statement's own, which each fetch replaces.
-    pub fn bind_column(&mut self, req: &mut Request, n: u32) -> bool {
+    /// statement's own, which each fetch replaces; the binds allocated
+    /// where none were, the `Err` the memory limit's fatal.
+    pub fn bind_column(&mut self, req: &mut Request, n: u32) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
             stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
-            return false;
+            return Ok(false);
         }
         if n >= stmt.field_count {
             stmt.error
                 .client(cr::INVALID_PARAMETER_NO, "Invalid parameter number");
-            return false;
+            return Ok(false);
         }
         stmt.error.reset();
-        let count = stmt.field_count as usize;
-        let binds = stmt
+        if stmt.result_bind.is_none() {
+            let count = stmt.field_count as usize;
+            let list = (0..count).map(|_| ResultBind::default()).collect();
+            stmt.result_bind = Some(Binds::new(req, list)?);
+        }
+        if let Some(bind) = stmt
             .result_bind
-            .get_or_insert_with(|| (0..count).map(|_| ResultBind::default()).collect());
-        if let Some(bind) = binds.get_mut(n as usize) {
+            .as_mut()
+            .and_then(|b| b.get_mut(n as usize))
+        {
             if let Some(old) = bind.zv.replace(Owner::take(req, Value::null())) {
                 old.give_up(req);
             }
             bind.bound = true;
         }
-        true
+        Ok(true)
     }
 
-    /// `mysqlnd_stmt_bind_result`: every column bound to the values given,
-    /// a reference assigned through, each value's owner taken.
-    pub fn bind_columns(&mut self, req: &mut Request, values: Vec<Owner<Value>>) -> bool {
+    /// `mysqlnd_stmt_bind_result`: every column bound to the values given
+    /// in the binds `mysqlnd_stmt_alloc_result_bind` allocates, a reference
+    /// assigned through, each value's owner taken; the `Err` is the memory
+    /// limit's fatal.
+    pub fn bind_columns(
+        &mut self,
+        req: &mut Request,
+        values: Vec<Owner<Value>>,
+    ) -> Result<bool, Thrown> {
         let stmt = &mut self.data;
         if stmt.state < StmtState::Prepared {
             stmt.error.client(cr::NO_PREPARE_STMT, NOT_PREPARED);
             for v in values {
                 v.give_up(req);
             }
-            return false;
+            return Ok(false);
         }
         stmt.error.reset();
         if stmt.field_count == 0 {
             for v in values {
                 v.give_up(req);
             }
-            return true;
+            return Ok(true);
         }
+        let list = values
+            .into_iter()
+            .map(|zv| ResultBind {
+                zv: Some(zv),
+                bound: true,
+            })
+            .collect();
+        let binds = Binds::new(req, list)?;
         separate_result_bind(req, stmt);
-        stmt.result_bind = Some(
-            values
-                .into_iter()
-                .map(|zv| ResultBind {
-                    zv: Some(zv),
-                    bound: true,
-                })
-                .collect(),
-        );
-        true
+        stmt.result_bind = Some(binds);
+        Ok(true)
     }
 
     /// `mysqlnd_stmt_result_metadata`: a copy of the columns' descriptions,
@@ -592,6 +698,7 @@ impl Stmt {
         if let Some(result) = self.data.result.take() {
             result.release(req);
         }
+        self.held.free(req);
         self.conn.release(req);
         closed
     }
@@ -757,16 +864,18 @@ fn parse_execute_response(
         if let Some(result) = stmt.result.as_mut() {
             result.kind = ResType::PsBuffered;
         }
-        if let Some(binds) = stmt.result_bind.as_mut()
-            && conn.field_count != stmt.field_count
+        if conn.field_count != stmt.field_count
+            && let Some(Binds { mut list, held }) = stmt.result_bind.take()
         {
             let count = conn.field_count as usize;
-            for bind in binds.drain(count.min(binds.len())..) {
+            for bind in list.drain(count.min(list.len())..) {
                 if let Some(v) = bind.zv {
                     v.give_up(req);
                 }
             }
-            binds.resize_with(count, ResultBind::default);
+            list.resize_with(count, ResultBind::default);
+            let held = held.resize(req, count * BIND)?;
+            stmt.result_bind = Some(Binds { list, held });
         }
         stmt.field_count = conn.field_count;
         if let Some(result) = stmt.result.as_mut() {
@@ -1137,7 +1246,7 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
 /// column; the values of the unbound ones given back.
 fn assign_row(
     req: &mut Request,
-    binds: Option<&mut Vec<ResultBind>>,
+    binds: Option<&mut Binds<ResultBind>>,
     row: Row,
 ) -> Result<(), Thrown> {
     let Some(binds) = binds else {
@@ -1314,7 +1423,7 @@ fn send_long_data(
 /// back, the binding dropped.
 fn separate_result_bind(req: &mut Request, stmt: &mut StmtData) {
     if let Some(binds) = stmt.result_bind.take() {
-        for bind in binds {
+        for bind in binds.free(req) {
             if let Some(v) = bind.zv {
                 v.give_up(req);
             }
@@ -1342,7 +1451,7 @@ fn free_stmt_result(
 /// ([`free_stmt_result`]).
 fn free_stmt_content(req: &mut Request, stmt: &mut StmtData) {
     if let Some(binds) = stmt.param_bind.take() {
-        for v in binds.into_iter().filter_map(|b| b.zv) {
+        for v in binds.free(req).into_iter().filter_map(|b| b.zv) {
             v.give_up(req);
         }
     }

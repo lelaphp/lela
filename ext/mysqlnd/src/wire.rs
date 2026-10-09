@@ -600,7 +600,7 @@ impl ConnData {
             }
             return None;
         };
-        if self.net.cmd_buffer < size {
+        if self.net.cmd_buffer_len() < size {
             self.error.client(
                 cr::INVALID_BUFFER_USE,
                 "Packet buffer wasn't big enough; as a workaround consider increasing value of net_cmd_buffer_size",
@@ -628,7 +628,7 @@ impl ConnData {
         parse: impl FnOnce(&mut Request, &[u8], usize) -> Result<T, Short>,
     ) -> Option<T> {
         let body = self.read_packet(req, kind)?;
-        match parse(req, &body, self.net.cmd_buffer) {
+        match parse(req, &body, self.net.cmd_buffer_len()) {
             Ok(packet) => Some(packet),
             Err(Short(usize::MAX | 0)) => None,
             Err(Short(short)) => {

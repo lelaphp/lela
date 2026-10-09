@@ -12,6 +12,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
 
+use crate::alloc::PLUGIN_ROOM;
 use crate::conn::ConnData;
 use crate::consts::{
     ConnState, FieldType, MAX_PACKET_SIZE, NULL_LENGTH, PhpType, ResType, column, cr, status,
@@ -21,9 +22,6 @@ use crate::pool::{Chunk, Pool};
 use crate::stats::Stat;
 use crate::wire::{Body, EODATA_MARKER, ERROR_MARKER, PacketError, Prot};
 
-/// `mysqlnd_plugin_count()`: the plugins `php --ri mysqlnd` lists, each
-/// of which gives a set of rows' structures a pointer of room.
-const PLUGIN_ROOM: usize = 8 * listed(crate::auth::Plugin::LOADED);
 /// `sizeof(MYSQLND_RES)`.
 const RES: usize = 272;
 /// `sizeof(MYSQLND_RES_BUFFERED)`.
@@ -44,24 +42,13 @@ const ROW_BUFFER: usize = 16;
 /// allocates.
 const PACKET_ROW: usize = 680;
 
-/// How many names a comma-separated list holds.
-const fn listed(names: &str) -> usize {
-    let bytes = names.as_bytes();
-    let mut n = 1;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b',' {
-            n += 1;
-        }
-        i += 1;
-    }
-    n
-}
-
 /// `MYSQLND_FIELD`: one column as the server described it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
-    pub name: Vec<u8>,
+    /// `sname`: the name `zend_string_init_interned` interned, one of the
+    /// request's interned strings, which every row's key and every copy of
+    /// the column share.
+    pub name: PhpString,
     pub org_name: Vec<u8>,
     pub table: Vec<u8>,
     pub org_table: Vec<u8>,
@@ -95,7 +82,7 @@ impl Field {
             &self.db,
             &self.table,
             &self.org_table,
-            &self.name,
+            self.name.as_bytes(),
             &self.org_name,
         ]
         .iter()
@@ -443,7 +430,7 @@ impl Res {
                 self.fields.clear();
                 return Ok(false);
             };
-            match read_field(req, &body) {
+            match read_field(req, &body)? {
                 FieldPacket::Field(field) => {
                     self.pool.get_chunk(req, field.root_len())?;
                     if field.field_type().fetch().is_none() {
@@ -902,12 +889,36 @@ enum FieldPacket {
     Fail,
 }
 
-/// `php_mysqlnd_rset_field_read`'s parse.
-fn read_field(req: &mut Request, body: &[u8]) -> FieldPacket {
+/// `php_mysqlnd_rset_field_read`'s parse, the column's name interned in
+/// the request's table as `zend_string_init_interned` interns it: each
+/// name the request has not seen stays on its heap to the request's end,
+/// a name seen before and a name of one byte cost nothing:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $m = memory_get_usage();
+/// foreach ([100, 1000, 10000, 100] as $n) {
+///     $r = mysqli_query($l, "SELECT REPEAT('x', $n)");
+///     mysqli_free_result($r);
+///     echo memory_get_usage() - $m, "\n";
+/// }
+/// $r = mysqli_query($l, "SELECT 1 AS " . chr(122));
+/// mysqli_free_result($r);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 208
+/// 288
+/// 336
+/// 336
+/// 336
+/// ```
+fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
     let mut p = Body::new(body);
     if body.first() == Some(&ERROR_MARKER) {
         p.skip(1);
-        return FieldPacket::Error(PacketError::read_from(p.rest()));
+        return Ok(FieldPacket::Error(PacketError::read_from(p.rest())));
     }
     if body.first() == Some(&EODATA_MARKER) && body.len() < 8 {
         docref(
@@ -915,7 +926,7 @@ fn read_field(req: &mut Request, body: &[u8]) -> FieldPacket {
             Level::Warning,
             "Premature EOF in result field metadata",
         );
-        return FieldPacket::Fail;
+        return Ok(FieldPacket::Fail);
     }
     let mut parts: [Vec<u8>; 6] = Default::default();
     for part in &mut parts {
@@ -926,7 +937,7 @@ fn read_field(req: &mut Request, body: &[u8]) -> FieldPacket {
                 Level::Warning,
                 "Protocol error. Server sent NULL_LENGTH. The server is faulty",
             );
-            return FieldPacket::Fail;
+            return Ok(FieldPacket::Fail);
         }
         *part = p.take(usize::try_from(len).unwrap_or(usize::MAX)).to_vec();
     }
@@ -950,7 +961,7 @@ fn read_field(req: &mut Request, body: &[u8]) -> FieldPacket {
             Level::Warning,
             &format!("Result set field packet {short} bytes shorter than expected"),
         );
-        return FieldPacket::Fail;
+        return Ok(FieldPacket::Fail);
     }
     p.skip(1);
     let charsetnr = u32::from(p.u16());
@@ -974,11 +985,14 @@ fn read_field(req: &mut Request, body: &[u8]) -> FieldPacket {
                 Level::Warning,
                 "Protocol error. Server sent default for unsupported field list (mysqlnd_wireprotocol.c:1302)",
             );
-            return FieldPacket::Fail;
+            return Ok(FieldPacket::Fail);
         }
     }
     let num_key = numeric_key(&name);
-    FieldPacket::Field(Field {
+    // `meta->sname = zend_string_init_interned(meta->name, ...)`, the
+    // empty name `ZSTR_EMPTY_ALLOC()`.
+    let name = PhpString::interned(req, &name)?;
+    Ok(FieldPacket::Field(Field {
         name,
         org_name,
         table,
@@ -992,7 +1006,7 @@ fn read_field(req: &mut Request, body: &[u8]) -> FieldPacket {
         charsetnr,
         type_byte,
         num_key,
-    })
+    }))
 }
 
 /// The body cursor's position.

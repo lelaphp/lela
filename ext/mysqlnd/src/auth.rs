@@ -12,8 +12,9 @@ use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
 
+use crate::alloc::Pstr;
 use crate::charset;
-use crate::conn::ConnData;
+use crate::conn::{ConnData, ConnectAttr};
 use crate::consts::{
     ConnState, DEFAULT_AUTH_PROTOCOL, MAX_ALLOWED_DB_LEN, MAX_ALLOWED_USER_LEN, SCRAMBLE_LENGTH,
     client, cr,
@@ -173,7 +174,8 @@ impl ConnData {
                     return Ok(false);
                 }
             }
-            self.auth_plugin_data.clone_from(&data);
+            let kept = Pstr::copy(req, &data, self.persistent)?;
+            Pstr::put(req, &mut self.auth_plugin_data, Some(kept));
             let scrambled = match plugin {
                 Some(p) => self.auth_data(req, p, credentials.1, &data)?,
                 None => Vec::new(),
@@ -207,7 +209,8 @@ impl ConnData {
             };
             first_call = false;
             if ok {
-                self.options.auth_protocol = Some(requested);
+                let protocol = Pstr::dup(req, &requested, self.persistent)?;
+                Pstr::put(req, &mut self.options.auth_protocol, Some(protocol));
                 return Ok(true);
             }
             match switch {
@@ -492,11 +495,15 @@ impl ConnData {
             p.extend_from_slice(&name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())]);
             p.push(0);
         }
-        if self.server_capabilities & client::CONNECT_ATTRS != 0
-            && !self.options.connect_attr.is_empty()
-        {
+        let pairs = self
+            .options
+            .connect_attr
+            .as_ref()
+            .map(ConnectAttr::pairs)
+            .unwrap_or_default();
+        if self.server_capabilities & client::CONNECT_ATTRS != 0 && !pairs.is_empty() {
             let mut attrs = Vec::new();
-            for (key, value) in &self.options.connect_attr {
+            for (key, value) in &pairs {
                 store_length(&mut attrs, key.len() as u64);
                 attrs.extend_from_slice(key);
                 store_length(&mut attrs, value.len() as u64);

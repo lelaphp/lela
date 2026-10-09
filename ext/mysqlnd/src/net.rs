@@ -17,6 +17,7 @@ use php_ext::request::{
 };
 use php_ext::values::{Owner, PhpString, Value};
 
+use crate::alloc::Alloc;
 use crate::consts::{MAX_PACKET_SIZE, cr};
 use crate::error::{ErrorInfo, SERVER_GONE};
 use crate::stats::{Stat, Stats};
@@ -91,8 +92,9 @@ pub(crate) struct Net {
     /// `pfc->data->uncompressed_data`: what an envelope held that no read
     /// took yet.
     uncompressed: Vec<u8>,
-    /// `pfc->cmd_buffer.length`.
-    pub(crate) cmd_buffer: usize,
+    /// `pfc->cmd_buffer`, its length `pfc->cmd_buffer.length`; none
+    /// until the frame codec's `init` sets its size.
+    pub(crate) cmd_buffer: Option<Alloc>,
     /// `pfc->data->sha256_server_public_key`.
     pub(crate) sha256_server_public_key: Option<Vec<u8>>,
     /// The `persistent_id` a persistent connection's stream is opened
@@ -103,6 +105,27 @@ pub(crate) struct Net {
 }
 
 impl Net {
+    /// `pfc->cmd_buffer.length`.
+    pub(crate) fn cmd_buffer_len(&self) -> usize {
+        self.cmd_buffer.as_ref().map_or(0, Alloc::len)
+    }
+
+    /// `MYSQLND_OPT_NET_CMD_BUFFER_SIZE` on the frame codec: the buffer
+    /// allocated at `len`, or reallocated to it; the `Err` is the memory
+    /// limit's fatal.
+    pub(crate) fn set_cmd_buffer(
+        &mut self,
+        req: &mut Request,
+        len: usize,
+        persistent: bool,
+    ) -> Result<(), Thrown> {
+        self.cmd_buffer = Some(match self.cmd_buffer.take() {
+            Some(buffer) => buffer.resize(req, len)?,
+            None => Alloc::new(req, len, persistent)?,
+        });
+        Ok(())
+    }
+
     /// Whether a stream is open, `has_valid_stream`.
     pub(crate) fn open(&self) -> bool {
         self.stream.is_some()

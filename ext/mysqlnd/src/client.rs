@@ -171,9 +171,11 @@ impl Mysqlnd {
         self.0
     }
 
-    /// `mysqlnd_init`: a connection not yet connected.
-    pub fn init(req: &mut Request, persistent: bool) -> Mysqlnd {
-        Mysqlnd(Handle::alloc(req, persistent))
+    /// `mysqlnd_init`: a connection not yet connected, its structures on
+    /// the request's heap unless `persistent`; the `Err` is the memory
+    /// limit's fatal.
+    pub fn init(req: &mut Request, persistent: bool) -> Result<Mysqlnd, Thrown> {
+        Ok(Mysqlnd(Handle::alloc(req, persistent)?))
     }
 
     /// A persistent connection given back as the request that holds it
@@ -215,7 +217,14 @@ impl Mysqlnd {
             CloseType::Implicit => Close::Implicit,
             CloseType::Disconnected => Close::Disconnected,
         };
-        let closed = self.call(req, |req, conn| conn.close(req, kind))?;
+        let closed = self.call(req, |req, conn| {
+            let closed = conn.close(req, kind);
+            // `mnd_pefree(conn, ...)` of `mysqlnd_conn::dtor`.
+            if let Some(mysqlnd) = conn.mysqlnd.take() {
+                mysqlnd.free(req);
+            }
+            closed
+        })?;
         self.0.release(req);
         Ok(closed.unwrap_or(false))
     }
@@ -230,11 +239,12 @@ impl Mysqlnd {
         self.0.with(req, f).transpose()
     }
 
-    /// `mysqlnd_options`, `mysqlnd_options4` and `mysqlnd_ssl_set`.
-    pub fn option(self, req: &mut Request, option: ClientOption<'_>) -> bool {
-        self.0
-            .with(req, |req, conn| conn.set_option(req, option))
-            .unwrap_or(false)
+    /// `mysqlnd_options`, `mysqlnd_options4` and `mysqlnd_ssl_set`; the
+    /// `Err` is the memory limit's fatal.
+    pub fn option(self, req: &mut Request, option: ClientOption<'_>) -> Result<bool, Thrown> {
+        Ok(self
+            .call(req, |req, conn| conn.set_option(req, option))?
+            .unwrap_or(false))
     }
 
     /// `mysqlnd_connect` on this connection.
@@ -269,8 +279,8 @@ impl Mysqlnd {
                 field_count: conn.field_count,
                 thread_id: conn.thread_id,
                 server_version: conn.server_version(),
-                server_info: conn.server_version.clone(),
-                host_info: conn.host_info.clone(),
+                server_info: conn.server_version.as_ref().map(|s| s.bytes().to_vec()),
+                host_info: conn.host_info.as_ref().map(|s| s.bytes().to_vec()),
                 proto_info: conn.protocol_version,
                 charset: conn.charset.map(|c| CharsetInfo {
                     nr: c.nr,
@@ -668,19 +678,19 @@ impl ResultSet {
             value.give_up(req);
             return Err(thrown);
         }
-        let key = match field.and_then(|f| f.num_key) {
-            Some(n) => Owner::take(req, php_ext::values::Key::Int(n)),
-            None => match php_ext::values::PhpString::new(
-                req,
-                field.map(|f| f.name.as_slice()).unwrap_or_default(),
-            ) {
-                Ok(name) => name.into_key(),
-                Err(thrown) => {
-                    value.give_up(req);
-                    return Err(thrown);
-                }
-            },
+        // `zend_hash_update(row_ht, meta->fields[i].sname, data)`: the
+        // interned name itself, which costs the row nothing.
+        let key = match field {
+            Some(Field {
+                num_key: Some(n), ..
+            }) => php_ext::values::Key::Int(*n),
+            Some(f) => php_ext::values::Key::Str(f.name),
+            None => {
+                value.give_up(req);
+                return Ok(());
+            }
         };
+        let key = Owner::take(req, key);
         array.set(req, key, value)
     }
 

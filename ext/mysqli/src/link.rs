@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_mysqlnd::client::{
     CLIENT_INFO, CLIENT_VERSION, ClientOption, CloseType, Command, Connect, Mysqlnd, ServerOption,
 };
@@ -20,7 +20,7 @@ use crate::props::{self, Props};
 use crate::result::mysqli_result;
 use crate::stmt::mysqli_stmt;
 use crate::{
-    On, State, affected, closed, extras, ini_bool, ini_long, ini_string, long_or_string,
+    On, Resource, State, affected, closed, extras, ini_bool, ini_long, ini_string, long_or_string,
     not_initialized, report_conn, report_index, report_mode, sql_exception, string,
 };
 
@@ -35,6 +35,9 @@ pub(crate) const USE: i64 = 1;
 const ASYNC: i64 = 8;
 const COPY_DATA: i64 = 16;
 
+/// `sizeof(MY_MYSQL)`.
+const MY_MYSQL: usize = 56;
+
 /// The link: `intern->ptr` and its status. A link that never connected,
 /// was closed, or whose constructor failed to connect has no resource,
 /// which php's every check reads as "already closed".
@@ -44,12 +47,12 @@ pub(crate) enum Link {
     Closed,
     /// `MYSQLI_STATUS_INITIALIZED`: made by `mysqli_init`, or a
     /// `real_connect` that failed.
-    Made(Conn),
+    Made(Resource<Conn>),
     /// `MYSQLI_STATUS_VALID`: connected.
-    Open(Conn),
+    Open(Resource<Conn>),
 }
 
-/// `MY_MYSQL`.
+/// `MY_MYSQL`, in the allocation php `ecalloc`s for it.
 pub(crate) struct Conn {
     /// `mysql`, which a close leaves unset until the next connect.
     pub(crate) mysql: Option<Mysqlnd>,
@@ -59,16 +62,25 @@ pub(crate) struct Conn {
     multi_query: bool,
     /// `async_result_fetch_type`: how `reap_async_query` reads the rows.
     async_mode: i64,
+    held: Emalloc,
 }
 
 impl Conn {
-    fn new(mysql: Option<Mysqlnd>) -> Conn {
-        Conn {
-            mysql,
+    /// `ecalloc(1, sizeof(MY_MYSQL))`; the `Err` is the memory limit's
+    /// fatal.
+    fn new(req: &mut Request) -> Result<Conn, Thrown> {
+        Ok(Conn {
+            mysql: None,
             hash_key: None,
             multi_query: false,
             async_mode: STORE,
-        }
+            held: Emalloc::new(req, MY_MYSQL)?,
+        })
+    }
+
+    /// `efree(mysql)`.
+    fn free(self, req: &mut Request) {
+        self.held.free(req);
     }
 }
 
@@ -361,16 +373,17 @@ fn over_limit(req: &mut Request, persistent: bool) -> Option<String> {
 }
 
 /// The link's state before a connect: refused where a real connect finds
-/// no made link or the constructor runs twice, and otherwise the
-/// `MY_MYSQL` the link holds, taken off it, with whether it was open.
+/// no made link or the constructor runs twice, and otherwise the link as
+/// it stood, taken off its object; `Link::Closed` for no link or one with
+/// no resource.
 fn connect_from(
     req: &mut Request,
     object: Option<PhpObject>,
     real: bool,
     in_ctor: bool,
-) -> Result<Option<(Option<Conn>, bool)>, Thrown> {
+) -> Result<Option<Link>, Thrown> {
     let Some(object) = object else {
-        return Ok((!real).then_some((None, false)));
+        return Ok((!real).then_some(Link::Closed));
     };
     if real {
         conn(req, object, Need::Made)?;
@@ -382,12 +395,11 @@ fn connect_from(
     {
         return Err(throw_error(req, "Error", "Cannot call constructor twice"));
     }
-    let link = crate::payload::<Link>(req, object).map(std::mem::take);
-    Ok(Some(match link {
-        Some(Link::Open(c)) => (Some(c), true),
-        Some(Link::Made(c)) => (Some(c), false),
-        _ => (None, false),
-    }))
+    Ok(Some(
+        crate::payload::<Link>(req, object)
+            .map(std::mem::take)
+            .unwrap_or_default(),
+    ))
 }
 
 /// `mysqli_common_connect`: `object` is the link a method or the
@@ -401,16 +413,24 @@ pub(crate) fn common_connect(
     real: bool,
     in_ctor: bool,
 ) -> Result<Option<Owner<PhpObject>>, Thrown> {
-    let Some((existing, open)) = connect_from(req, object, real, in_ctor)? else {
-        return Ok(None);
+    let (existing, open) = match connect_from(req, object, real, in_ctor)? {
+        None => return Ok(None),
+        Some(Link::Open(resource)) => (Some(resource), true),
+        Some(Link::Made(resource)) => (Some(resource), false),
+        Some(Link::Closed) => (None, false),
     };
     let mut flags = u32::try_from(args.flags & 0xFFFF_FFFF).unwrap_or(0);
     if real {
         flags &= !MULTI_STATEMENTS;
     }
     flags |= MULTI_RESULTS;
-    let self_alloced = existing.is_none();
-    let mut mysql = existing.unwrap_or_else(|| Conn::new(None));
+    let (resource, mut mysql) = match existing {
+        Some(resource) => {
+            let (resource, mysql) = resource.repoint(());
+            (Some(resource), mysql)
+        }
+        None => (None, Conn::new(req)?),
+    };
     let target = Target::of(req, &args);
     if mysql.mysql.is_some() && open {
         close_conn(req, &mut mysql, CloseType::Implicit, true)?;
@@ -432,13 +452,13 @@ pub(crate) fn common_connect(
     if !reused {
         if let Some(refused) = over_limit(req, persistent) {
             docref(req, Level::Warning, &refused);
-            return Ok(give_back(req, object, mysql, real, self_alloced));
+            return Ok(give_back(req, object, mysql, resource));
         }
         let handle = if let Some(handle) = mysql.mysql {
             handle
         } else {
             new_connection = true;
-            let handle = Mysqlnd::init(req, persistent);
+            let handle = Mysqlnd::init(req, persistent)?;
             mysql.mysql = Some(handle);
             handle
         };
@@ -459,11 +479,11 @@ pub(crate) fn common_connect(
                 mysql.mysql = None;
                 handle.close(req, CloseType::Disconnected)?;
             }
-            give_back(req, object, mysql, real, self_alloced);
+            give_back(req, object, mysql, resource);
             thrown?;
             return Ok(None);
         }
-        connected(req, handle);
+        connected(req, handle)?;
         if let Some(key) = &mysql.hash_key
             && let Some(held) = plinks(req, key)
         {
@@ -477,6 +497,10 @@ pub(crate) fn common_connect(
     }
     state.num_links += 1;
     mysql.multi_query = false;
+    let resource = match resource {
+        Some(resource) => resource.repoint(mysql).0,
+        None => Resource::new(req, mysql)?,
+    };
     let object = if let Some(object) = object {
         Owner::take(req, object)
     } else {
@@ -484,7 +508,7 @@ pub(crate) fn common_connect(
         new_object(req, class)?
     };
     if let Some(link) = crate::payload::<Link>(req, *object) {
-        *link = Link::Open(mysql);
+        *link = Link::Open(resource);
     }
     Ok(Some(object))
 }
@@ -492,34 +516,37 @@ pub(crate) fn common_connect(
 /// What a connect that passed sets: the connect error cleared, LOCAL
 /// INFILE as `mysqli.allow_local_infile` allows it, and its directory
 /// where `open_basedir` lets it be.
-fn connected(req: &mut Request, handle: Mysqlnd) {
+fn connected(req: &mut Request, handle: Mysqlnd) -> Result<(), Thrown> {
     let status = handle.status(req);
     set_connect_error(req, status.errno, &status.error);
     let allow = ini_bool(req, b"mysqli.allow_local_infile");
-    handle.option(req, ClientOption::LocalInfile(allow));
+    handle.option(req, ClientOption::LocalInfile(allow))?;
     if let Some(dir) = ini_string(req, b"mysqli.local_infile_directory")
         && req.check_open_basedir(&dir, false).is_ok()
     {
-        handle.option(req, ClientOption::LoadDataLocalDir(Some(&dir)));
+        handle.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))?;
     }
+    Ok(())
 }
 
 /// `err:` of `mysqli_common_connect`: the persistent key dropped, and the
-/// `MY_MYSQL` put back on the link it came from unless the connect made
-/// it.
+/// `MY_MYSQL` put back behind the resource of the link it came from, or
+/// freed where the connect made it (a link with no resource).
 fn give_back(
     req: &mut Request,
     object: Option<PhpObject>,
     mut mysql: Conn,
-    real: bool,
-    self_alloced: bool,
+    resource: Option<Resource<()>>,
 ) -> Option<Owner<PhpObject>> {
     mysql.hash_key = None;
-    if (real || !self_alloced)
-        && let Some(object) = object
-        && let Some(link) = crate::payload::<Link>(req, object)
-    {
-        *link = Link::Made(mysql);
+    let link = object.and_then(|object| crate::payload::<Link>(req, object));
+    match (resource, link) {
+        (Some(resource), Some(link)) => *link = Link::Made(resource.repoint(mysql).0),
+        (Some(resource), None) => {
+            resource.free(req);
+            mysql.free(req);
+        }
+        (None, _) => mysql.free(req),
     }
     None
 }
@@ -564,7 +591,31 @@ fn close_conn(
 
 /// `php_mysqli_init`: a link made with a connection not yet connected,
 /// always persistent-capable as php makes it; on `object` for the method,
-/// on a new link otherwise.
+/// on a new link otherwise. The link's `MY_MYSQL` and resource are the
+/// request's, which `mysqli_close` gives back; the connection's are
+/// persistent, which no request counts:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $m = memory_get_usage();
+/// $l = mysqli_init();
+/// echo memory_get_usage() - $m, "\n";
+/// mysqli_close($l);
+/// echo memory_get_usage() - $m, "\n";
+/// unset($l);
+/// echo memory_get_usage() - $m, "\n";
+/// $l = new mysqli();
+/// echo memory_get_usage() - $m, "\n";
+/// $l->close();
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 464
+/// 416
+/// 32
+/// 496
+/// 416
+/// ```
 pub(crate) fn init(
     req: &mut Request,
     object: Option<PhpObject>,
@@ -583,9 +634,11 @@ pub(crate) fn init(
         let class = link_class(req)?;
         new_object(req, class)?
     };
-    let mysql = Mysqlnd::init(req, true);
+    let mut mysql = Conn::new(req)?;
+    mysql.mysql = Some(Mysqlnd::init(req, true)?);
+    let resource = Resource::new(req, mysql)?;
     if let Some(link) = crate::payload::<Link>(req, *object) {
-        *link = Link::Made(Conn::new(Some(mysql)));
+        *link = Link::Made(resource);
     }
     Ok(object)
 }
@@ -601,7 +654,10 @@ pub(crate) fn close(req: &mut Request, on: On) -> Result<True, Thrown> {
         Link::Made(c) => (c, false),
         Link::Closed => return Ok(True),
     };
-    close_conn(req, &mut mysql, CloseType::Explicit, open)?;
+    let closed = close_conn(req, &mut mysql, CloseType::Explicit, open);
+    // `MYSQLI_CLEAR_RESOURCE(mysql_link); efree(mysql)`.
+    mysql.free(req).free(req);
+    closed?;
     Ok(True)
 }
 
@@ -618,6 +674,10 @@ fn free_link(req: &mut Request, object: PhpObject) {
     if mysql.mysql.is_some() {
         close_conn(req, &mut mysql, CloseType::Explicit, open).ok();
     }
+    // `efree(mysql)`, then `mysqli_objects_free_storage`'s `efree(my_res)`.
+    let (resource, mysql) = mysql.repoint(());
+    mysql.free(req);
+    resource.free(req);
 }
 
 // ---- queries
@@ -998,7 +1058,7 @@ pub(crate) fn options(
         203 => ClientOption::NetReadBufferSize(as_long(req)),
         _ => return Ok(false),
     };
-    if !mysql.option(req, set) {
+    if !mysql.option(req, set)? {
         report_conn(req, mysql)?;
         return Ok(false);
     }
@@ -1014,11 +1074,11 @@ pub(crate) fn ssl_set(
     let mysql = conn(req, on.object, Need::Made)?;
     let parts = parts.map(|p| p.filter(|p| !p.is_empty()));
     let bytes = |at: usize| parts[at].as_ref().map(PhpString::as_bytes);
-    mysql.option(req, ClientOption::SslKey(bytes(0)));
-    mysql.option(req, ClientOption::SslCert(bytes(1)));
-    mysql.option(req, ClientOption::SslCa(bytes(2)));
-    mysql.option(req, ClientOption::SslCapath(bytes(3)));
-    mysql.option(req, ClientOption::SslCipher(bytes(4)));
+    mysql.option(req, ClientOption::SslKey(bytes(0)))?;
+    mysql.option(req, ClientOption::SslCert(bytes(1)))?;
+    mysql.option(req, ClientOption::SslCa(bytes(2)))?;
+    mysql.option(req, ClientOption::SslCapath(bytes(3)))?;
+    mysql.option(req, ClientOption::SslCipher(bytes(4)))?;
     Ok(True)
 }
 

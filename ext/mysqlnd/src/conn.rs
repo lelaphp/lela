@@ -4,7 +4,11 @@
 
 use php_ext::raising::{Level, Thrown, docref, raise};
 use php_ext::request::Request;
+use php_ext::values::{Key, Owner, PhpArray, PhpString};
 
+use crate::alloc::{
+    Alloc, CONN_DATA, MYSQLND, PAYLOAD_DECODER_FACTORY, PFC, PLUGIN_ROOM, Pstr, STATS, VIO,
+};
 use crate::charset::{self, Charset};
 use crate::consts::{
     ASSEMBLED_PACKET_MAX_SIZE, CloseType, Com, ConnState, NET_CMD_BUFFER_MIN_SIZE, QueryType,
@@ -53,14 +57,13 @@ pub enum ClientOption<'a> {
 }
 
 /// `MYSQLND_SESSION_OPTIONS`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Options {
     pub(crate) flags: u32,
     pub(crate) init_commands: Vec<Vec<u8>>,
-    pub(crate) auth_protocol: Option<Vec<u8>>,
-    /// `connect_attr`, in insertion order with an update kept in place,
-    /// as a `HashTable` keeps it.
-    pub(crate) connect_attr: Vec<(Vec<u8>, Vec<u8>)>,
+    pub(crate) auth_protocol: Option<Pstr>,
+    /// `connect_attr`, made by the first attribute added.
+    pub(crate) connect_attr: Option<ConnectAttr>,
     pub(crate) protocol: u32,
     pub(crate) charset_name: Option<Vec<u8>>,
     pub(crate) max_allowed_packet: u32,
@@ -68,9 +71,121 @@ pub(crate) struct Options {
     pub(crate) local_infile_directory: Option<Vec<u8>>,
 }
 
+/// `connect_attr`, the attributes in insertion order with an update kept
+/// in place, as a `HashTable` keeps them: a request's connection's in an
+/// array of the request's, which is the `mnd_pemalloc(sizeof(HashTable))`
+/// with its table and its `zend_string_init`'d keys and values as php
+/// counts them; a persistent connection's in pairs of its own.
+#[derive(Debug)]
+pub(crate) enum ConnectAttr {
+    Heap(Owner<PhpArray>),
+    Malloc(Vec<(Vec<u8>, Vec<u8>)>),
+}
+
+impl ConnectAttr {
+    /// `zend_hash_init(attrs, 0, ...)`; the `Err` is the memory limit's
+    /// fatal.
+    fn new(req: &mut Request, persistent: bool) -> Result<ConnectAttr, Thrown> {
+        Ok(if persistent {
+            ConnectAttr::Malloc(Vec::new())
+        } else {
+            ConnectAttr::Heap(PhpArray::new(req)?)
+        })
+    }
+
+    /// `zend_hash_update(attrs, key, value)`.
+    fn add(&mut self, req: &mut Request, key: &[u8], value: &[u8]) -> Result<(), Thrown> {
+        match self {
+            ConnectAttr::Heap(attrs) => {
+                let key = PhpString::new(req, key)?.into_key();
+                let value = PhpString::new(req, value)?.into_value();
+                attrs.set(req, key, value)
+            }
+            ConnectAttr::Malloc(attrs) => {
+                match attrs.iter_mut().find(|(k, _)| k == key) {
+                    Some((_, v)) => *v = value.to_vec(),
+                    None => attrs.push((key.to_vec(), value.to_vec())),
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// `zend_hash_str_del(attrs, key)`.
+    fn delete(&mut self, req: &mut Request, key: &[u8]) -> Result<(), Thrown> {
+        match self {
+            ConnectAttr::Heap(attrs) => {
+                let key = PhpString::new(req, key)?.into_key();
+                let deleted = attrs.unset(req, &key);
+                key.give_up(req);
+                deleted.map(drop)
+            }
+            ConnectAttr::Malloc(attrs) => {
+                attrs.retain(|(k, _)| k != key);
+                Ok(())
+            }
+        }
+    }
+
+    /// `zend_hash_clean(attrs)`: every attribute deleted, the table kept.
+    fn clean(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        match self {
+            ConnectAttr::Heap(attrs) => {
+                let keys: Vec<Key> = attrs.iter().map(|(key, _)| key).collect();
+                for key in keys {
+                    attrs.unset(req, &key)?;
+                }
+                Ok(())
+            }
+            ConnectAttr::Malloc(attrs) => {
+                attrs.clear();
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether no attribute is set, `zend_hash_num_elements(attrs) == 0`.
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            ConnectAttr::Heap(attrs) => attrs.is_empty(),
+            ConnectAttr::Malloc(attrs) => attrs.is_empty(),
+        }
+    }
+
+    /// The attributes in order, as the handshake sends them.
+    pub(crate) fn pairs(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        match self {
+            ConnectAttr::Heap(attrs) => attrs
+                .iter()
+                .map(|(key, value)| {
+                    let key = match key {
+                        Key::Str(s) => s.as_bytes().to_vec(),
+                        Key::Int(n) => n.to_string().into_bytes(),
+                    };
+                    let value = value.as_str_bytes().map(<[u8]>::to_vec);
+                    (key, value.unwrap_or_default())
+                })
+                .collect(),
+            ConnectAttr::Malloc(attrs) => attrs.clone(),
+        }
+    }
+
+    /// `zend_hash_destroy` and `mnd_pefree`.
+    fn free(self, req: &mut Request) {
+        if let ConnectAttr::Heap(attrs) = self {
+            attrs.give_up(req);
+        }
+    }
+}
+
 /// `MYSQLND_CONN_DATA`.
-#[derive(Default)]
 pub struct ConnData {
+    /// What `get_connection` allocates for the connection, freed by
+    /// [`ConnData::dtor`].
+    held: Option<Held>,
+    /// The `MYSQLND` its owner holds, which `mysqlnd_conn::close` frees
+    /// whatever statements or rows still hold the data.
+    pub(crate) mysqlnd: Option<Alloc>,
     pub(crate) net: Net,
     pub(crate) error: ErrorInfo,
     pub(crate) upsert: Upsert,
@@ -78,9 +193,9 @@ pub struct ConnData {
     pub(crate) stats: Stats,
     pub(crate) options: Options,
     pub(crate) persistent: bool,
-    pub(crate) scheme: Option<Vec<u8>>,
-    pub(crate) host_info: Option<Vec<u8>>,
-    pub(crate) server_version: Option<Vec<u8>>,
+    pub(crate) scheme: Option<Pstr>,
+    pub(crate) host_info: Option<Pstr>,
+    pub(crate) server_version: Option<Pstr>,
     pub(crate) thread_id: u64,
     pub(crate) protocol_version: u8,
     pub(crate) server_capabilities: u32,
@@ -94,15 +209,28 @@ pub struct ConnData {
     /// read, until `store_result` or `use_result` takes them.
     pub(crate) current_result: Option<Box<Res>>,
     /// `authentication_plugin_data`, kept for `change_user`.
-    pub(crate) auth_plugin_data: Vec<u8>,
+    pub(crate) auth_plugin_data: Option<Pstr>,
+}
+
+/// The structures `get_connection` allocates beside `MYSQLND`, each with
+/// its `PLUGIN_ROOM`: the data, the statistics, the frame codec, the
+/// `MYSQLND_VIO` and the payload decoder factory.
+struct Held {
+    data: Alloc,
+    stats: Alloc,
+    pfc: Alloc,
+    vio: Alloc,
+    payload_decoder_factory: Alloc,
 }
 
 impl ConnData {
     /// `mysqlnd_object_factory::get_connection` with `mysqlnd_vio::init`
-    /// and `mysqlnd_pfc::init`: the buffers and the read timeout from
-    /// the `mysqlnd.*` ini, the affected rows `~0`.
-    pub(crate) fn new(req: &Request, persistent: bool) -> ConnData {
-        let ini = |name: &[u8], default: u32| -> u32 {
+    /// and `mysqlnd_pfc::init`: the structures allocated in php's order,
+    /// on the request's heap unless `persistent`; the buffers and the read
+    /// timeout from the `mysqlnd.*` ini, the affected rows `~0`. The `Err`
+    /// is the memory limit's fatal.
+    pub(crate) fn new(req: &mut Request, persistent: bool) -> Result<ConnData, Thrown> {
+        let ini = |req: &Request, name: &[u8], default: u32| -> u32 {
             req.ini_get(name)
                 .and_then(|v| std::str::from_utf8(v).ok())
                 .and_then(|v| v.trim().parse::<i64>().ok())
@@ -110,20 +238,90 @@ impl ConnData {
                     u32::try_from(v & 0xFFFF_FFFF).unwrap_or(default)
                 })
         };
-        let mut conn = ConnData {
+        let alloc = |req: &mut Request, len: usize| Alloc::new(req, len, persistent);
+        let mysqlnd = alloc(req, MYSQLND + PLUGIN_ROOM)?;
+        let data = alloc(req, CONN_DATA + PLUGIN_ROOM)?;
+        let stats = alloc(req, STATS)?;
+        let pfc = alloc(req, PFC)?;
+        let mut net = Net::default();
+        let cmd_buffer = ini(req, b"mysqlnd.net_cmd_buffer_size", NET_CMD_BUFFER_MIN_SIZE);
+        net.set_cmd_buffer(req, cmd_buffer as usize, persistent)?;
+        let vio = alloc(req, VIO)?;
+        net.options.net_read_buffer_size = ini(req, b"mysqlnd.net_read_buffer_size", 32768);
+        net.options.timeout_read = ini(req, b"mysqlnd.net_read_timeout", 86400);
+        let payload_decoder_factory = alloc(req, PAYLOAD_DECODER_FACTORY + PLUGIN_ROOM)?;
+        let mut upsert = Upsert::default();
+        upsert.affected_rows_to_error();
+        Ok(ConnData {
+            held: Some(Held {
+                data,
+                stats,
+                pfc,
+                vio,
+                payload_decoder_factory,
+            }),
+            mysqlnd: Some(mysqlnd),
+            net,
+            error: ErrorInfo::default(),
+            upsert,
+            state: ConnState::default(),
+            stats: Stats::default(),
+            options: Options::default(),
             persistent,
-            ..ConnData::default()
-        };
-        conn.upsert.affected_rows_to_error();
-        conn.net.options.net_read_buffer_size = ini(b"mysqlnd.net_read_buffer_size", 32768);
-        conn.net.options.timeout_read = ini(b"mysqlnd.net_read_timeout", 86400);
-        conn.net.cmd_buffer = ini(b"mysqlnd.net_cmd_buffer_size", NET_CMD_BUFFER_MIN_SIZE) as usize;
-        conn
+            scheme: None,
+            host_info: None,
+            server_version: None,
+            thread_id: 0,
+            protocol_version: 0,
+            server_capabilities: 0,
+            port: 0,
+            charset: None,
+            greet_charset: None,
+            last_message: None,
+            field_count: 0,
+            last_query_type: QueryType::default(),
+            current_result: None,
+            auth_plugin_data: None,
+        })
+    }
+
+    /// `mysqlnd_conn_data::dtor`: the contents and the options freed, then
+    /// the frame codec's buffer and the structures `get_connection`
+    /// allocated.
+    pub(crate) fn dtor(mut self, req: &mut Request) {
+        self.free_contents(req);
+        self.free_options(req);
+        if let Some(buffer) = self.net.cmd_buffer.take() {
+            buffer.free(req);
+        }
+        if let Some(held) = self.held.take() {
+            held.payload_decoder_factory.free(req);
+            held.stats.free(req);
+            held.pfc.free(req);
+            held.vio.free(req);
+            held.data.free(req);
+        }
+        if let Some(mysqlnd) = self.mysqlnd.take() {
+            mysqlnd.free(req);
+        }
+    }
+
+    /// `mysqlnd_conn_data::free_options`: the strings and the attributes
+    /// the options hold.
+    fn free_options(&mut self, req: &mut Request) {
+        Pstr::put(req, &mut self.options.auth_protocol, None);
+        if let Some(attrs) = self.options.connect_attr.take() {
+            attrs.free(req);
+        }
     }
 
     /// `mysqlnd_conn_data::set_client_option`, and `set_client_option_2d`
     /// for the attribute added.
-    pub(crate) fn set_option(&mut self, req: &mut Request, option: ClientOption<'_>) -> bool {
+    pub(crate) fn set_option(
+        &mut self,
+        req: &mut Request,
+        option: ClientOption<'_>,
+    ) -> Result<bool, Thrown> {
         let owned = |v: Option<&[u8]>| v.map(<[u8]>::to_vec);
         let vio = &mut self.net.options;
         match option {
@@ -145,9 +343,9 @@ impl ConnData {
             }
             ClientOption::NetCmdBufferSize(n) => {
                 if n < NET_CMD_BUFFER_MIN_SIZE {
-                    return false;
+                    return Ok(false);
                 }
-                self.net.cmd_buffer = n as usize;
+                self.net.set_cmd_buffer(req, n as usize, self.persistent)?;
             }
             ClientOption::Compress => self.net.use_compression = true,
             ClientOption::ServerPublicKey(v) => self.net.sha256_server_public_key = owned(v),
@@ -171,7 +369,7 @@ impl ConnData {
                 if charset::by_name(name).is_none() {
                     self.error
                         .client(cr::CANT_FIND_CHARSET, "Unknown character set");
-                    return false;
+                    return Ok(false);
                 }
                 self.options.charset_name = Some(name.to_vec());
             }
@@ -186,7 +384,10 @@ impl ConnData {
                     self.options.max_allowed_packet = n;
                 }
             }
-            ClientOption::AuthProtocol(v) => self.options.auth_protocol = owned(v),
+            ClientOption::AuthProtocol(v) => {
+                let protocol = v.map(|v| Pstr::dup(req, v, self.persistent)).transpose()?;
+                Pstr::put(req, &mut self.options.auth_protocol, protocol);
+            }
             ClientOption::ExpiredPasswords(on) => {
                 if on {
                     self.options.flags |= client::CAN_HANDLE_EXPIRED_PASSWORDS;
@@ -194,22 +395,26 @@ impl ConnData {
                     self.options.flags &= !client::CAN_HANDLE_EXPIRED_PASSWORDS;
                 }
             }
-            ClientOption::ConnectAttrReset => self.options.connect_attr.clear(),
+            ClientOption::ConnectAttrReset => {
+                if let Some(attrs) = self.options.connect_attr.as_mut() {
+                    attrs.clean(req)?;
+                }
+            }
             ClientOption::ConnectAttrDelete(key) => {
-                self.options.connect_attr.retain(|(k, _)| k != key);
+                if let Some(attrs) = self.options.connect_attr.as_mut() {
+                    attrs.delete(req, key)?;
+                }
             }
             ClientOption::ConnectAttrAdd(key, value) => {
-                match self.options.connect_attr.iter_mut().find(|(k, _)| k == key) {
-                    Some((_, v)) => *v = value.to_vec(),
-                    None => self
-                        .options
-                        .connect_attr
-                        .push((key.to_vec(), value.to_vec())),
+                if self.options.connect_attr.is_none() {
+                    self.options.connect_attr = Some(ConnectAttr::new(req, self.persistent)?);
+                }
+                if let Some(attrs) = self.options.connect_attr.as_mut() {
+                    attrs.add(req, key, value)?;
                 }
             }
         }
-        let _ = req;
-        true
+        Ok(true)
     }
 
     // ---- commands
@@ -245,7 +450,7 @@ impl ConnData {
         let mut payload = Vec::with_capacity(arg.len() + 1);
         payload.push(command as u8);
         payload.extend_from_slice(arg);
-        if arg.len() + 1 + crate::net::HEADER_SIZE > self.net.cmd_buffer {
+        if arg.len() + 1 + crate::net::HEADER_SIZE > self.net.cmd_buffer_len() {
             self.stats.inc(Stat::CmdBufferTooSmall);
         }
         let sent = self
@@ -409,7 +614,12 @@ impl ConnData {
         if self.net.options.wants_ssl() {
             flags |= client::SSL;
         }
-        if !self.options.connect_attr.is_empty() {
+        if self
+            .options
+            .connect_attr
+            .as_ref()
+            .is_some_and(|attrs| !attrs.is_empty())
+        {
             flags |= client::CONNECT_ATTRS;
         }
         flags
@@ -432,9 +642,9 @@ impl ConnData {
         self.set_option(
             req,
             ClientOption::ConnectAttrAdd(b"_client_name", b"mysqlnd"),
-        );
+        )?;
         if let Some(host) = host.filter(|h| !h.is_empty()) {
-            self.set_option(req, ClientOption::ConnectAttrAdd(b"_server_host", host));
+            self.set_option(req, ClientOption::ConnectAttrAdd(b"_server_host", host))?;
         }
         self.connect_data(req, host, user, password, db, port, socket, flags)
     }
@@ -501,15 +711,18 @@ impl ConnData {
         }
         self.state = ConnState::Ready;
         self.net.compressed = flags & client::COMPRESS != 0;
-        self.scheme = Some(transport);
+        let scheme = Pstr::dup(req, &transport, self.persistent)?;
+        Pstr::put(req, &mut self.scheme, Some(scheme));
         self.port = port;
-        self.host_info = Some(if unix {
+        let info = if unix {
             b"Localhost via UNIX socket".to_vec()
         } else {
             let mut info = host.to_vec();
             info.extend_from_slice(b" via TCP/IP");
             info
-        });
+        };
+        let info = Pstr::dup(req, &info, self.persistent)?;
+        Pstr::put(req, &mut self.host_info, Some(info));
         self.error.reset();
         if !self.execute_init_commands(req)? {
             if self.error.errno == 0 {
@@ -573,7 +786,8 @@ impl ConnData {
         }
         self.thread_id = u64::from(greet.thread_id);
         self.protocol_version = greet.protocol_version;
-        self.server_version = Some(greet.server_version.clone());
+        let version = Pstr::dup(req, &greet.server_version, self.persistent)?;
+        Pstr::put(req, &mut self.server_version, Some(version));
         let mut charset_no = u32::from(greet.charset_no);
         self.greet_charset = charset::by_nr(charset_no);
         if self.greet_charset.is_none() {
@@ -1060,8 +1274,16 @@ impl ConnData {
         let password = password.unwrap_or_default();
         let db = db.unwrap_or_default();
         let db = &db[..db.iter().position(|b| *b == 0).unwrap_or(db.len())];
-        let data = self.auth_plugin_data.clone();
-        let protocol = self.options.auth_protocol.clone();
+        let data = self
+            .auth_plugin_data
+            .as_ref()
+            .map(|d| d.bytes().to_vec())
+            .unwrap_or_default();
+        let protocol = self
+            .options
+            .auth_protocol
+            .as_ref()
+            .map(|p| p.bytes().to_vec());
         self.run_authentication(
             req,
             (user, password, db),
@@ -1091,7 +1313,7 @@ impl ConnData {
     /// `mysqlnd_conn_data::get_server_version`: `major * 10000 + minor *
     /// 100 + patch`, read with `strtol` from the server's version.
     pub(crate) fn server_version(&self) -> u64 {
-        let Some(version) = &self.server_version else {
+        let Some(version) = self.server_version.as_ref().map(Pstr::bytes) else {
             return 0;
         };
         let mut parts = [0u64; 3];
@@ -1159,10 +1381,10 @@ impl ConnData {
             result.free(req, self, true).ok();
         }
         self.net.close(req);
-        self.scheme = None;
-        self.server_version = None;
-        self.host_info = None;
-        self.auth_plugin_data.clear();
+        Pstr::put(req, &mut self.scheme, None);
+        Pstr::put(req, &mut self.server_version, None);
+        Pstr::put(req, &mut self.host_info, None);
+        Pstr::put(req, &mut self.auth_plugin_data, None);
         self.last_message = None;
         self.charset = None;
         self.greet_charset = None;

@@ -22,54 +22,35 @@ use php_ext::raising::{
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{
-    ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value,
-};
+use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value};
 use php_ext_mysqlnd::client::{Field, ResultSet};
 
 use crate::link::{self, Need, mysqli};
 use crate::props::{self, Props};
-use crate::{On, class_name, closed, long_or_string, report, report_error, report_mode};
+use crate::{On, Resource, class_name, closed, long_or_string, report, report_error, report_mode};
 
 /// `MYSQLI_ASSOC`, `MYSQLI_NUM` and `MYSQLI_BOTH`.
 pub(crate) const ASSOC: i64 = 1;
 pub(crate) const NUM: i64 = 2;
 pub(crate) const BOTH: i64 = 3;
 
-/// `sizeof(MYSQLI_RESOURCE)`: `ptr`, `info` and `status`.
-const RESOURCE: usize = 24;
-
 /// The rows: held whole (`MYSQLI_STORE_RESULT`), read one at a time
-/// off the line (`MYSQLI_USE_RESULT`), or freed, php's null `ptr`.
+/// off the line (`MYSQLI_USE_RESULT`), or freed, php's null `ptr`; held
+/// rows are behind the `MYSQLI_RESOURCE` that points at them.
 #[derive(Default)]
 pub(crate) enum Rows {
     #[default]
     Freed,
-    Stored(Resource),
-    Used(Resource),
-}
-
-/// `MYSQLI_RESOURCE`: the rows, in the allocation php `ecalloc`s to point
-/// at them, on the request's heap until `MYSQLI_CLEAR_RESOURCE` or the
-/// object's free gives it back.
-pub(crate) struct Resource {
-    set: ResultSet,
-    held: Emalloc,
+    Stored(Resource<ResultSet>),
+    Used(Resource<ResultSet>),
 }
 
 impl Rows {
     /// `ecalloc(1, sizeof(MYSQLI_RESOURCE))` pointed at `set`; the `Err`
-    /// is the memory limit's fatal, the rows freed first.
+    /// is the memory limit's fatal.
     fn of(req: &mut Request, set: ResultSet) -> Result<Rows, Thrown> {
-        let held = match Emalloc::new(req, RESOURCE) {
-            Ok(held) => held,
-            Err(thrown) => {
-                set.free(req, false).ok();
-                return Err(thrown);
-            }
-        };
         let buffered = set.is_buffered();
-        let resource = Resource { set, held };
+        let resource = Resource::new(req, set)?;
         Ok(if buffered {
             Rows::Stored(resource)
         } else {
@@ -79,7 +60,7 @@ impl Rows {
 
     fn set(&mut self) -> Option<&mut ResultSet> {
         match self {
-            Rows::Stored(r) | Rows::Used(r) => Some(&mut r.set),
+            Rows::Stored(r) | Rows::Used(r) => Some(r),
             Rows::Freed => None,
         }
     }
@@ -90,9 +71,7 @@ impl Rows {
         let (Rows::Stored(r) | Rows::Used(r)) = self else {
             return None;
         };
-        let freed = r.set.free(req, false);
-        r.held.free(req);
-        Some(freed)
+        Some(r.free(req).free(req, false))
     }
 }
 
@@ -492,7 +471,7 @@ pub(crate) fn fetch_column(req: &mut Request, on: On, column: i64) -> Result<Col
 fn field_object(req: &mut Request, field: &Field) -> Result<Owner<PhpObject>, Thrown> {
     let object = crate::std_object(req)?;
     let facts = [
-        ("name", crate::Fact::Text(&field.name)),
+        ("name", crate::Fact::Str(field.name)),
         ("orgname", crate::Fact::Text(&field.org_name)),
         ("table", crate::Fact::Text(&field.table)),
         ("orgtable", crate::Fact::Text(&field.org_table)),
