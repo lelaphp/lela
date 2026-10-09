@@ -136,11 +136,11 @@ fn usage(argv0: &[u8]) -> String {
     )
 }
 
-/// What `main`'s line set that every engine of the process is built
-/// under, the master's and each child's: the php.ini files found, and
+/// What `main`'s line set that php-fpm's engine is built under, the one
+/// the master starts and each child keeps: the php.ini files found, and
 /// `-e`, `use_extended_info`, which compiles with extended info
 /// (`Z/sapi/fpm/fpm/fpm_main.c:1651`, `:1775`).
-pub(crate) struct Startup {
+struct Startup {
     files: IniFiles,
     extended_info: bool,
 }
@@ -218,9 +218,9 @@ fn log_message(entry: &[u8]) {
 }
 
 /// php-fpm's engine before its entries: its name, the php.ini files the
-/// master found, which a child reads as the master did, the bundle's
-/// enabled set, its tier, and its own `cgi-fcgi` after them ([`natives`]);
-/// with extended info where the line carried `-e`.
+/// master found, the bundle's enabled set, its tier, and its own
+/// `cgi-fcgi` after them ([`natives`]); with extended info where the line
+/// carried `-e`.
 fn builder(startup: &Startup) -> php_sapi::EngineBuilder {
     let extensions: Vec<_> = php_bundle::enabled().iter().map(|start| start()).collect();
     Engine::builder()
@@ -334,20 +334,10 @@ fn run(ini: &[Define], startup: &Startup, args: Args) -> u8 {
         );
         nix::unistd::write(&pipe, &1i32.to_ne_bytes()).ok();
     }
-    let started = engine.startup_errors().to_owned();
     fpm.engine = Some(engine);
     match fpm.run() {
         Err(Became::Child(pool, slot)) => {
-            // The master's engine, which the fork copied: a child serves
-            // on an engine of its own, built for its pool, and ends that
-            // one, so the copy is let go of without ending it, which
-            // would end the master's engine once more in every child.
-            #[expect(
-                clippy::mem_forget,
-                reason = "a child serves on an engine of its own, and ending the master's copy would end the master's engine once more in every child"
-            )]
-            std::mem::forget(fpm.engine.take());
-            let worker = worker::init(&mut fpm, pool, slot, (ini, startup), &started);
+            let worker = worker::init(&mut fpm, pool, slot);
             drop(fpm);
             worker.run()
         }

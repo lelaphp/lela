@@ -309,6 +309,18 @@ impl<C: Case> Names<C> {
         })?;
         usize::try_from(*found).ok()
     }
+
+    /// `zend_hash_str_del`: the name `name` no longer finds the row of
+    /// `rows` it found, which stays where it stands; that row's position,
+    /// where one was filed under the name.
+    pub fn remove<R: Named>(&mut self, rows: &[R], name: &[u8]) -> Option<usize> {
+        let found = self.index.find_entry(wide(hash::<C>(name)), |&at| {
+            let at = usize::try_from(at).unwrap_or(usize::MAX);
+            rows.get(at).is_some_and(|row| same::<C>(row.name(), name))
+        });
+        let (at, _) = found.ok()?.remove();
+        usize::try_from(at).ok()
+    }
 }
 
 /// A table's rows beside their [`Names`]: the view of one of the
@@ -448,6 +460,23 @@ mod tests {
         let folded: Names<Folded> = Names::over(&rows);
         assert_eq!(folded.find(&rows, b"B"), Some(1));
         assert_eq!(Indexed::<ConstDecl, Exact>::default().find(b"A"), None);
+    }
+
+    #[test]
+    fn a_removed_name_finds_nothing_and_its_row_stays() {
+        use super::Names;
+        use php_unit::decl::{ConstDecl, ConstExpr, Name};
+        let constant = |name: &str| ConstDecl {
+            name: Name(name.as_bytes().into()),
+            value: ConstExpr::long(0),
+            attributes: Vec::new(),
+        };
+        let rows = [constant("a"), constant("B")];
+        let mut names: Names<Folded> = Names::over(&rows);
+        assert_eq!(names.remove(&rows, b"b"), Some(1));
+        assert_eq!(names.find(&rows, b"B"), None);
+        assert_eq!(names.find(&rows, b"a"), Some(0));
+        assert_eq!(names.remove(&rows, b"b"), None);
     }
 
     #[test]

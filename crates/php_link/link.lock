@@ -20,6 +20,7 @@ Names
 Names::find
 Names::new
 Names::over
+Names::remove
 Obligation
 Raised
 Raised::level

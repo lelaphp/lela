@@ -1602,6 +1602,33 @@ impl Shared {
         master_of(&self.ini, name)
     }
 
+    /// `zend_disable_functions` over a started engine's table, as
+    /// php-fpm's child calls it for its pool's `disable_functions`
+    /// (`fpm_php_apply_defines_ex`): each native the list names, matched
+    /// as the table's lowered key ([`disabled_functions`]), leaves the
+    /// index its name finds it by, and its row stays where it stands, so
+    /// every place already numbered keeps its number and no lookup, the
+    /// compiler's among them, finds it
+    /// ([`Shared::in_function_table`]).
+    fn disable_functions(&mut self, list: &[u8]) {
+        for name in disabled_functions(list) {
+            let keyed = (self.function_names.find(&self.functions, name))
+                .and_then(|at| self.functions.get(at))
+                .is_some_and(|decl| decl.name.0.to_ascii_lowercase() == name);
+            if keyed {
+                self.function_names.remove(&self.functions, name);
+            }
+        }
+    }
+
+    /// Whether the native at `at` stands in `CG(function_table)`: its name
+    /// finds it, which a native `disable_functions` took out of a started
+    /// engine's table no longer does ([`Shared::disable_functions`]).
+    pub(crate) fn in_function_table(&self, at: usize) -> bool {
+        (self.functions.get(at))
+            .is_some_and(|decl| self.function_names.find(&self.functions, &decl.name.0) == Some(at))
+    }
+
     /// The master value of the entry `name` set to `value`, the entry
     /// moved last, and the typed entries with it.
     fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
@@ -2567,8 +2594,10 @@ fn disabled_functions(list: &[u8]) -> Vec<&[u8]> {
 /// The natives the engine declares for `standard` ([`crate::natives::standard`])
 /// are `standard`'s where the bundle has it, at their stub places among
 /// its own, and follow Core's under no extension where it does not.
-/// The one place the disabled set is decided: what it takes out is in no
-/// table the compiler or a request reads.
+/// The one place the startup's disabled set is decided: what it takes out
+/// is in no table the compiler or a request reads. A list a host lays over
+/// the started engine takes its natives out of the index instead, since
+/// the rows are numbered by then ([`Shared::disable_functions`]).
 fn function_table(
     extensions: &[ExtensionEntry],
     declarations: &mut [Declarations],
@@ -2709,7 +2738,6 @@ pub struct EngineBuilder {
     ends_into: Option<Box<dyn OutputSink + Send>>,
     additional_extension: Option<Extension>,
     additional_functions: Vec<(FunctionDecl, Entry)>,
-    host_ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     shebang: php_compile::Shebang,
     shebang_while: Option<&'static str>,
     cli_shell: bool,
@@ -2895,19 +2923,6 @@ impl EngineBuilder {
         self
     }
 
-    /// One entry as a host sets it after startup, php-fpm's pool
-    /// `php_value` and `php_admin_value` (`fpm_php_apply_defines_ex`):
-    /// the value as given, not read again by the INI grammar, through the
-    /// entry's `on_modify`, with [`IniOrigin`]'s reach; one php does not
-    /// know is left, so [`Engine::ini_get`] answers `None` for it. It is
-    /// the master value every request starts with, and never in the
-    /// startup ini an extension's engine start is handed.
-    #[must_use]
-    pub fn host_ini(mut self, name: &[u8], value: &[u8], mode: IniOrigin) -> EngineBuilder {
-        self.host_ini.push((name.to_vec(), value.to_vec(), mode));
-        self
-    }
-
     /// `CG(skip_shebang)` for every request: a file's `#!` first line is
     /// passed over, primary or included, as php's CLI, CGI and built-in
     /// server set it once a request has started
@@ -3049,7 +3064,7 @@ impl EngineBuilder {
         let mut held = Vec::new();
         for (name, value) in configuration.directives() {
             if on_modify(&extensions, &name).is_some() {
-                held.push((name, value, false));
+                held.push((name, value));
                 continue;
             }
             // A name no table declares is no entry: it stays in the
@@ -3066,11 +3081,6 @@ impl EngineBuilder {
             ini.retain(|(n, _)| *n != name);
             ini.push((name, Some(value)));
         }
-        // The startup ini an extension's engine start is handed: the
-        // entries as php's `MINIT` meets them in the master, before a
-        // host's values are laid over at `ZEND_INI_STAGE_ACTIVATE`.
-        let startup = ini.clone();
-        let locked = host_ini(self.host_ini, &extensions, &mut ini, &mut held);
         let on = |name: &str| {
             ini.iter()
                 .find(|(n, _)| n.as_slice() == name.as_bytes())
@@ -3192,7 +3202,7 @@ impl EngineBuilder {
                 sense_leaks: self.sense_leaks,
                 // No opcode is declared until the extensions have started.
                 loops: (self.bind_loops)(&crate::observer::ObservedOpcodes::default()),
-                locked,
+                locked: Vec::new(),
                 script_encodings: Vec::new(),
                 units,
                 arena,
@@ -3208,7 +3218,6 @@ impl EngineBuilder {
         };
         engine.register_ini(
             held,
-            startup,
             Registry {
                 loads: &configuration.loads,
                 unloaded,
@@ -3452,45 +3461,6 @@ fn constant_values(
         .collect()
 }
 
-/// `fpm_php_apply_defines_ex` for each of a host's entries
-/// ([`EngineBuilder::host_ini`]): one php knows, and whose value its
-/// check takes, laid into `ini`, or held for its `on_modify` where it has
-/// one; the names an admin value set, which the engine locks.
-fn host_ini(
-    entries: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
-    extensions: &[ExtensionEntry],
-    ini: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
-    held: &mut Vec<(Vec<u8>, Vec<u8>, bool)>,
-) -> Vec<Vec<u8>> {
-    let mut admin = Vec::new();
-    for (name, value, mode) in entries {
-        let per_dir = || {
-            extensions
-                .iter()
-                .flat_map(|e| e.ini.iter())
-                .find(|d| *d.name.0 == *name)
-                .map_or(Request::ini_modifiable(&name).1, |d| d.per_dir)
-        };
-        let refused = Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected;
-        if !ini.iter().any(|(n, _)| *n == name)
-            || (mode == IniOrigin::PerDir && !per_dir())
-            || refused
-        {
-            continue;
-        }
-        if mode == IniOrigin::Admin {
-            admin.push(name.clone());
-        }
-        if on_modify(extensions, &name).is_some() {
-            held.push((name, value, true));
-        } else {
-            ini.retain(|(n, _)| *n != name);
-            ini.push((name, Some(value)));
-        }
-    }
-    admin
-}
-
 /// `zend_sort_modules` (`Z/Zend/zend_API.c:2483-2515`), which
 /// `zend_startup_modules` runs over `module_registry` before the first
 /// `MINIT`: walking from the first, an extension that names a required
@@ -3628,8 +3598,7 @@ fn start_module(
 /// What the startup request meets as `zend_startup_modules` walks the
 /// bundle, before any engine start: each value the host set for an entry
 /// with an `on_modify` handed to it in `held`'s order, those it took
-/// added to `taken` at the startup stage and to `activated` at the
-/// activate stage, and each extension refused for a dependency raising as its
+/// added to `taken`, and each extension refused for a dependency raising as its
 /// turn comes ([`unload_unmet`]). The marks say where each extension's
 /// raising starts, by its place in `module_registry`: a refused start
 /// shows what php raised before it, which is nothing of a later
@@ -3637,10 +3606,9 @@ fn start_module(
 fn modules_startup(
     req: &mut Request,
     extensions: &[ExtensionEntry],
-    held: Vec<(Vec<u8>, Vec<u8>, bool)>,
+    held: Vec<(Vec<u8>, Vec<u8>)>,
     unloaded: Vec<Unloaded>,
     taken: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
-    activated: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
 ) -> Vec<(usize, usize)> {
     let mut marks = Vec::new();
     let mut unloaded = unloaded.into_iter().peekable();
@@ -3650,26 +3618,17 @@ fn modules_startup(
             crate::api::raising::raise(req, Level::CoreWarning, &refused.message);
         }
     };
-    for (name, value, activate) in held {
+    for (name, value) in held {
         let owner = (extensions.iter())
-            .position(|e| !activate && e.on_modify.iter().any(|(n, _)| *n == name))
+            .position(|e| e.on_modify.iter().any(|(n, _)| *n == name))
             .unwrap_or(usize::MAX);
         refuse_until(req, &mut marks, owner);
         marks.push((owner, req.startup_raised_len()));
-        req.set_ini_stage(if activate {
-            IniStage::Activate
-        } else {
-            IniStage::Startup
-        });
         let accepted = on_modify(extensions, &name)
             .is_some_and(|handler| matches!(handler(req, Some(&value)), Ok(true)));
         if accepted {
             req.take_startup_value(&name, &value);
-            if activate {
-                activated.push((name, Some(value)));
-            } else {
-                taken.push((name, Some(value)));
-            }
+            taken.push((name, Some(value)));
         }
     }
     refuse_until(req, &mut marks, usize::MAX);
@@ -3696,14 +3655,20 @@ pub struct Engine {
     end: Arc<EngineEnd>,
 }
 
+/// Why [`Engine::alter_master_ini`] laid nothing: another clone of the
+/// engine stands, and the master values a clone reads are the engine's
+/// for as long as it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotAlone;
+
 /// The engine end (ADR-0010): php's `php_module_shutdown` as far as an
 /// extension sees it, served once, from the drop of the engine's last
 /// clone, so no host can forget it and a forked child that drops its
 /// engine ends it too, as php's `php_module_shutdown` runs in each
-/// php-fpm child: there the engine the child serves on, which the host
-/// builds for its pool, while the master's copy the fork made is the
-/// master's to end. Armed once the engine has started; an engine whose
-/// start was refused is not ended.
+/// php-fpm child, on the engine its master started and the fork copied,
+/// which the child keeps with its pool's values laid over
+/// ([`Engine::alter_master_ini`]). Armed once the engine has started; an
+/// engine whose start was refused is not ended.
 #[derive(Default)]
 struct EngineEnd {
     shared: OnceLock<Arc<Shared>>,
@@ -3807,7 +3772,6 @@ impl Engine {
             sapi_name: "",
             additional_extension: None,
             additional_functions: Vec::new(),
-            host_ini: Vec::new(),
             shebang: php_compile::Shebang::Read,
             shebang_while: None,
             cli_shell: false,
@@ -3852,8 +3816,7 @@ impl Engine {
     /// phpt corpus reads.
     fn register_ini(
         &mut self,
-        mut held: Vec<(Vec<u8>, Vec<u8>, bool)>,
-        mut startup: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+        mut held: Vec<(Vec<u8>, Vec<u8>)>,
         registry: Registry<'_>,
         bind_loops: BindLoops,
     ) {
@@ -3873,9 +3836,7 @@ impl Engine {
                 .position(|entry| entry.name.0.as_ref() == name)
                 .unwrap_or(usize::MAX)
         };
-        // A host's own entries after, at `ZEND_INI_STAGE_ACTIVATE`, as
-        // php-fpm's child applies its pool's once php has started.
-        held.sort_by_key(|(name, _, activate)| (*activate, declared_at(name)));
+        held.sort_by_key(|(name, _)| declared_at(name));
         let sapi_name = self.shared.host;
         let description = RequestDescription {
             sapi_name: sapi_name.to_owned(),
@@ -3890,14 +3851,12 @@ impl Engine {
             suppliers,
         } = registry;
         let failed = register_extensions(&mut req, loads);
-        let mut activated = Vec::new();
         let marks = modules_startup(
             &mut req,
             &self.shared.extensions,
             held,
             unloaded,
             &mut taken,
-            &mut activated,
         );
         req.set_ini_stage(IniStage::Startup);
         let encoding_at = req.startup_raised_len();
@@ -3915,29 +3874,18 @@ impl Engine {
         let Some(shared) = Arc::get_mut(&mut self.shared) else {
             return;
         };
-        // `php_admin_value` locks what it set, where its `on_modify` took
-        // it; one without a handler always takes.
-        let extensions = &shared.extensions;
-        shared.locked.retain(|name| {
-            on_modify(extensions, name).is_none() || activated.iter().any(|(n, _)| n == name)
-        });
         // What the startup stage took is the master value and the startup
-        // ini alike; what the host's activate stage took is the master
-        // value alone, as php-fpm's child alters the master value of an
-        // engine whose `MINIT` has run (`fpm_php_zend_ini_alter_master`).
+        // ini alike.
         for (name, value) in taken {
-            startup.retain(|(n, _)| *n != name);
-            startup.push((name.clone(), value.clone()));
-            shared.set_ini_default(name, value);
-        }
-        for (name, value) in activated {
             shared.set_ini_default(name, value);
         }
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
         let mut start = Start {
-            ini: StartupIni { entries: startup },
+            ini: StartupIni {
+                entries: shared.ini.clone(),
+            },
             host: sapi_name,
             process: Vec::new(),
         };
@@ -4006,6 +3954,91 @@ impl Engine {
     #[must_use]
     pub fn startup_errors(&self) -> &[u8] {
         &self.shared.startup_errors
+    }
+
+    /// `fpm_php_apply_defines` (`Z/sapi/fpm/fpm/fpm_php.c:207-226`): a
+    /// host's entries laid over the started engine, in the order given,
+    /// as the master value every request starts with, as php-fpm's child
+    /// lays its pool's `php_value` and `php_admin_value` over the engine
+    /// its master started and the fork copied. Each is the value as
+    /// given, not read again by the INI grammar
+    /// (`fpm_php_zend_ini_alter_master`): one php knows, and whose value
+    /// its check takes, is handed to the entry's `on_modify` at
+    /// `ZEND_INI_STAGE_ACTIVATE` and set where that takes it, or set where
+    /// it has none, an admin value so set locked against every request
+    /// ([`IniOrigin::Admin`]); one php does not know is left, so
+    /// [`Engine::ini_get`] answers `None` for it; and `disable_functions`
+    /// takes the natives it names out of the function table as the
+    /// startup's does (`zend_disable_functions`). None of it reaches the
+    /// startup ini the extensions' engine starts read nor the
+    /// post-startup, which ran before it under the master's ini, as php's
+    /// did: a pool's `opcache.preload` preloads nothing.
+    ///
+    /// What the handlers wrote to `stderr`, for the host to write; what
+    /// they raised is shown nowhere, as php-fpm's child shows nothing of
+    /// what its pool's values raise. [`NotAlone`], with nothing laid,
+    /// where another clone of the engine stands, which could be serving.
+    pub fn alter_master_ini(
+        &mut self,
+        entries: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
+    ) -> Result<Vec<u8>, NotAlone> {
+        let shared = &self.shared;
+        let description = RequestDescription {
+            sapi_name: shared.host.to_owned(),
+            ..RequestDescription::default()
+        };
+        let mut req = Request::new(Arc::clone(shared), description);
+        req.begin_startup();
+        req.set_ini_stage(IniStage::Activate);
+        let (mut taken, mut locked) = (Vec::new(), Vec::new());
+        for (name, value, mode) in entries {
+            let per_dir = || {
+                (shared.extensions.iter())
+                    .flat_map(|e| e.ini.iter())
+                    .find(|d| *d.name.0 == *name)
+                    .map_or(Request::ini_modifiable(&name).1, |d| d.per_dir)
+            };
+            if shared.ini.iter().all(|(n, _)| *n != name)
+                || (mode == IniOrigin::PerDir && !per_dir())
+                || Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected
+            {
+                continue;
+            }
+            let took = on_modify(&shared.extensions, &name)
+                .is_none_or(|handler| matches!(handler(&mut req, Some(&value)), Ok(true)));
+            if !took {
+                continue;
+            }
+            req.take_startup_value(&name, &value);
+            if mode == IniOrigin::Admin {
+                locked.push(name.clone());
+            }
+            taken.push((name, value));
+        }
+        req.end_startup();
+        let written = req.startup_stderr();
+        drop(req);
+        let end = Arc::get_mut(&mut self.end).ok_or(NotAlone)?;
+        // The end's own hold on what every request shares, let go while
+        // the values are laid and taken again after.
+        let armed = end.shared.take().is_some();
+        let laid = match Arc::get_mut(&mut self.shared) {
+            Some(shared) => {
+                for (name, value) in taken {
+                    if name == b"disable_functions" {
+                        shared.disable_functions(&value);
+                    }
+                    shared.set_ini_default(name, Some(value));
+                }
+                shared.locked.extend(locked);
+                Ok(written)
+            }
+            None => Err(NotAlone),
+        };
+        if armed {
+            end.shared.set(Arc::clone(&self.shared)).ok();
+        }
+        laid
     }
 
     /// Whether `cli_shell_callbacks.cli_shell_run` is set: the host
@@ -5964,7 +5997,9 @@ mod tests {
     /// lowered key; an unknown one is passed over; `exit` and `die` stay,
     /// each with php's startup warning;
     /// and a user function may take a disabled native's name (Zend's
-    /// `bug79382.phpt`).
+    /// `bug79382.phpt`). A list a host lays over the started engine, as
+    /// php-fpm's child lays its pool's (`fpm_php_apply_defines_ex`), takes
+    /// the same natives out and raises nothing a request shows (#2273).
     #[test]
     fn disable_functions_takes_its_natives_out_of_the_function_table() {
         const PROBE: &str = r#"<?php
@@ -5981,6 +6016,13 @@ mod tests {
         let served_under = |list: &str| {
             let engine = Engine::cli_builder().ini("disable_functions", list).build();
             served(&engine, PROBE).0
+        };
+        let laid = |list: &str| {
+            let mut engine = Engine::cli_builder().build();
+            let entry = (b"disable_functions".to_vec(), list.as_bytes().to_vec());
+            let laid = engine.alter_master_ini(vec![(entry.0, entry.1, IniOrigin::Admin)]);
+            assert_eq!(laid, Ok(Vec::new()));
+            engine
         };
         let answers = |strlen: bool, defined: bool| {
             let mut expected =
@@ -6018,15 +6060,15 @@ mod tests {
             }
             let expected = kept + &answers(strlen, defined);
             assert_eq!(served_under(list), expected, "{list:?}");
+            let (out, _) = served(&laid(list), PROBE);
+            assert_eq!(out, answers(strlen, defined), "laid {list:?}");
         }
+        let taken = "<?php function strlen($x) { return 42; } var_dump(strlen('foobar'));";
         let engine = Engine::cli_builder()
             .ini("disable_functions", "strlen")
             .build();
-        let (out, _) = served(
-            &engine,
-            "<?php function strlen($x) { return 42; } var_dump(strlen('foobar'));",
-        );
-        assert_eq!(out, "int(42)\n");
+        assert_eq!(served(&engine, taken).0, "int(42)\n");
+        assert_eq!(served(&laid("strlen"), taken).0, "int(42)\n");
     }
 
     /// `fatal_error_backtraces` is `On` in php's table (`Z/Zend/zend.c:263`)

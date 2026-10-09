@@ -38,9 +38,9 @@ use php_engine::LeakSensor;
 pub use php_engine::{
     Aborted, Body, BuildDefs, CommandLine, Dispatched, EachLine, Engine, EngineBuilder,
     FileHandles, Forked, HostPage, HostServes, HostValue, IniEvent, IniFile, IniFiles, IniOrigin,
-    IniValue, Method, Observables, OutputSink, PHP_CONFIG_FILE_PATH, PHP_CONFIG_FILE_SCAN_DIR,
-    PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid, Primary, ProcessTitle,
-    RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork,
+    IniValue, Method, NotAlone, Observables, OutputSink, PHP_CONFIG_FILE_PATH,
+    PHP_CONFIG_FILE_SCAN_DIR, PHP_LOCALSTATEDIR, PHP_PREFIX, PHP_SYSCONFDIR, PHP_VERSION, Pid,
+    Primary, ProcessTitle, RequestDescription, ResponseHead, Routed, Uncaught, WebRequest, fork,
 };
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
@@ -149,11 +149,8 @@ impl OutputSink for Starting {
 /// [`start`]'s builder before it is built: the witness lane's trace, a
 /// debug build's request leak sensor, armed unless `PHP_SENSE_LEAKS` turns
 /// it off and traced where `PHP_SENSE_LEAKS_BACKTRACE` asks for a
-/// backtrace per allocation, and the line's `-d` entries; for a host that
-/// builds more than one engine and writes the startup errors once, as
-/// php-fpm's children build theirs after the master has started.
-#[must_use]
-pub fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuilder {
+/// backtrace per allocation, and the line's `-d` entries.
+fn prepare(builder: EngineBuilder, ini: &[(Vec<u8>, Vec<u8>)]) -> EngineBuilder {
     let mut builder = builder;
     if let Some(path) = std::env::var_os(TRACE) {
         builder = builder.trace_natives_to(path.into());
