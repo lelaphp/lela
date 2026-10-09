@@ -140,9 +140,28 @@ fn restriction(req: &Request) -> Restriction {
 /// `ZEND_FFI_VALIDATE_API_RESTRICTION`: `ffi.enable=1` anywhere, and
 /// under `preload` the CLI, whose scripts php lets use FFI after
 /// startup, a function `opcache.preload`'s file declared, in any host
-/// and any request, and the request that file is served in. The test
-/// `ffi_preloaded_caller` of `sapi/cgi` holds a preloaded function's
-/// call under php-cgi to the oracle.
+/// and any request, and the request that file is served in.
+///
+/// Under php-cgi, whose `ffi.enable` is `preload`, a function and a
+/// method `ext/ffi/tests/preload.php` declared call FFI in a request
+/// after the preload, and the request's own code is refused (#1614):
+///
+/// ```php
+/// var_dump(preloaded_abs(-7), PreloadedFfi::abs(-2));
+/// try { FFI::cdef("int abs(int j);"); } catch (FFI\Exception $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// ```
+/// ```expect regime=ffi-preload exit=0
+/// X-Powered-By: PHP/8.5.9
+/// Content-type: text/html; charset=UTF-8
+///
+/// int(7)
+/// int(2)
+/// FFI\Exception: FFI API is restricted by "ffi.enable" configuration directive
+/// ```
 pub(crate) fn validate_api_restriction(req: &mut Request) -> Result<(), Thrown> {
     match restriction(req) {
         Restriction::Enabled => Ok(()),
