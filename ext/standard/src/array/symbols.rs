@@ -14,7 +14,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
 };
 use php_ext::request::{Overwrite, Request};
-use php_ext::values::walk::{self, Hold};
+use php_ext::values::walk::{self, GiveUp, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use super::constants::{
@@ -242,8 +242,8 @@ fn extract(
     // (`Z/ext/standard/array.c:2649`): "The array might be stored in a
     // local variable that will be overwritten". The walk holds that
     // owner, so an element written over the variable leaves the rows
-    // after it standing.
-    walk::foreach(req, array, Hold::Owner, |req, row| {
+    // after it standing, given up as `zval_ptr_dtor(&array_copy)` (`:2673`).
+    walk::foreach(req, array, Hold::Owner(GiveUp::Dtor), |req, row| {
         if let Some(target) = target(req, kind, &prefix, row.key())? {
             assign(req, &target, *row.value())?;
             count += 1;

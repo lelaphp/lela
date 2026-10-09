@@ -36,6 +36,7 @@ use php_ext::coerce::{to_long, with_string};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::ffi::{Completion, Matches};
@@ -431,13 +432,21 @@ pub(crate) fn user_completion(req: &mut Request, text: &[u8], start: i64, end: i
         return Matches::None;
     };
     let mut candidates = Vec::new();
-    for (_, member) in array {
-        let found = with_string(req, &member, |member| {
+    // `ZEND_HASH_FOREACH_VAL` and `zval_get_string`, which may serve
+    // `__toString`; the callback's answer holds the array.
+    let walked = walk::foreach(req, *array, Hold::None, |req, row| -> walk::Step {
+        let found = with_string(req, row.value(), |member| {
             member.starts_with(text).then(|| member.to_vec())
         });
         if let Ok(Some(member)) = found {
             candidates.push(member);
         }
+        Ok(std::ops::ControlFlow::Continue(()))
+    });
+    // The body answers no throwable: a conversion's is left pending, as
+    // the completion's other conversions leave theirs.
+    match walked {
+        Ok(_) | Err(_) => {}
     }
     let empty = array.is_empty();
     answer.give_up(req);

@@ -15,7 +15,7 @@ use php_ext::call::{autoload, call, lookup_function};
 use php_ext::coerce::to_callable;
 use php_ext::raising::{Level, clear, uncaught_at, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpArray, PhpString, Value};
+use php_ext::values::{Key, PhpArray, PhpString, Value, walk};
 
 use crate::ffi::{self, Completion, Matches};
 
@@ -398,12 +398,12 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
     } else {
         let lowered = text.to_ascii_lowercase();
         if let Ok(functions) = req.defined_functions() {
-            for (_, group) in &*functions {
+            for (_, group) in walk::rows(req, *functions) {
                 let group = group.deref();
                 let Some(group) = group.as_array() else {
                     continue;
                 };
-                for name in names(*group) {
+                for name in names(req, *group) {
                     if name.starts_with(&lowered) {
                         // `func->common.function_name`, as declared.
                         let declared = lookup_function(req, &name)
@@ -454,8 +454,7 @@ fn constant_names(req: &mut Request) -> Vec<Vec<u8>> {
     };
     let held = all.deref();
     let names = held.as_array().map_or_else(Vec::new, |constants| {
-        constants
-            .iter()
+        walk::rows(req, *constants)
             .filter_map(|(key, _)| match key {
                 Key::Str(name) => Some(name.as_bytes().to_vec()),
                 Key::Int(_) => None,
@@ -467,8 +466,8 @@ fn constant_names(req: &mut Request) -> Vec<Vec<u8>> {
 }
 
 /// The strings of a list.
-fn names(list: PhpArray) -> Vec<Vec<u8>> {
-    list.iter()
+fn names(req: &Request, list: PhpArray) -> Vec<Vec<u8>> {
+    walk::rows(req, list)
         .filter_map(|(_, name)| name.deref().as_str_bytes().map(<[u8]>::to_vec))
         .collect()
 }

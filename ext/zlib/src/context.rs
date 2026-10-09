@@ -190,8 +190,10 @@ impl Options {
             ValueRef::Str(s) => Ok(Some(s.as_bytes().to_vec())),
             ValueRef::Array(array) => {
                 let mut out = Vec::new();
-                for (_, element) in array {
-                    let refused = with_string(req, &element, |bytes| {
+                // `ZEND_HASH_FOREACH_VAL`, holding nothing: a conversion
+                // may serve `__toString`.
+                let refused = walk::foreach(req, *array, walk::Hold::None, |req, row| {
+                    let refused = with_string(req, row.value(), |bytes| {
                         if bytes.is_empty() {
                             Some("not contain empty strings")
                         } else if bytes.contains(&0) {
@@ -202,9 +204,13 @@ impl Options {
                             None
                         }
                     })?;
-                    if let Some(refused) = refused {
-                        return Err(arg_value_error(req, 2, refused));
-                    }
+                    Ok(match refused {
+                        Some(refused) => std::ops::ControlFlow::Break(refused),
+                        None => std::ops::ControlFlow::Continue(()),
+                    })
+                })?;
+                if let Some(refused) = refused {
+                    return Err(arg_value_error(req, 2, refused));
                 }
                 Ok((!out.is_empty()).then_some(out))
             }

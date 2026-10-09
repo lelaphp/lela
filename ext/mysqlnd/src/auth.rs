@@ -14,7 +14,7 @@ use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
 
 use crate::alloc::Pstr;
 use crate::charset;
-use crate::conn::{ConnData, ConnectAttr};
+use crate::conn::ConnData;
 use crate::consts::{
     ConnState, DEFAULT_AUTH_PROTOCOL, MAX_ALLOWED_DB_LEN, MAX_ALLOWED_USER_LEN, SCRAMBLE_LENGTH,
     client, cr,
@@ -510,7 +510,7 @@ impl ConnData {
             .options
             .connect_attr
             .as_ref()
-            .map(ConnectAttr::pairs)
+            .map(|attrs| attrs.pairs(req))
             .unwrap_or_default();
         if self.server_capabilities & client::CONNECT_ATTRS != 0 && !pairs.is_empty() {
             let mut attrs = Vec::new();

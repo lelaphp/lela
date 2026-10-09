@@ -9,6 +9,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use std::cmp::Ordering;
+use std::ops::ControlFlow;
 
 use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
@@ -18,7 +19,7 @@ use crate::api::raising::{
     Level, Thrown, deprecated, none_pending, raise, throw, throw_error, warning,
 };
 use crate::api::request::Request;
-use crate::api::values::walk::Table;
+use crate::api::values::walk::{self, Table};
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
@@ -308,15 +309,19 @@ pub(crate) fn in_array(
         }
         _ => {}
     }
-    for (key, _) in &table {
-        let Key::Str(key) = key else {
-            continue;
+    // `ZEND_HASH_MAP_FOREACH_STR_KEY` (`Z/Zend/zend_vm_def.h`,
+    // `ZEND_IN_ARRAY`) over the literal table, which `compare` may serve
+    // `__toString` from: a foreach walk holding nothing, as php's.
+    let found = walk::foreach(req, table, walk::Hold::None, |req, row| -> walk::Step<()> {
+        let Key::Str(key) = row.key() else {
+            return Ok(ControlFlow::Continue(()));
         };
-        if compare(req, &needle, &Value::string(key))? == Ordering::Equal {
-            return Ok(true);
+        if compare(req, &needle, &Value::string(*key))? == Ordering::Equal {
+            return Ok(ControlFlow::Break(()));
         }
-    }
-    Ok(false)
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(found.is_some())
 }
 
 /// The target a table holds under a key, or the default where none.
@@ -2850,12 +2855,22 @@ pub(crate) fn concat_assign(
 ///   thrown in %s on line 4
 /// ```
 pub(crate) fn compare(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
-    let (left, right) = (&left.deref(), &right.deref());
+    let (left, right) = (left.deref(), right.deref());
+    if let (Some(a), Some(b)) = (left.as_array(), right.as_array()) {
+        return compare_arrays(req, *a, *b);
+    }
+    compare_values(req, &left, &right)
+}
+
+/// [`compare`] past `TYPE_PAIR(IS_ARRAY, IS_ARRAY)`, which it never
+/// sees: a call of its own, so that what the other pairs take is off
+/// the stack while two nested arrays are compared level by level (#2221).
+#[inline(never)]
+fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Ordering, Thrown> {
     if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
         return Ok(php_heap::compare(a, b, req.precision()));
     }
     Ok(match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Array(a), ValueRef::Array(b)) => compare_arrays(req, *a, *b)?,
         (ValueRef::Object(a), ValueRef::Object(b)) if a == b => Ordering::Equal,
         // `TYPE_PAIR(IS_OBJECT, IS_NULL)` and its mirror: an object is
         // greater than a null whatever its truth.
@@ -3077,16 +3092,26 @@ pub(crate) fn spaceship(req: &mut Request, left: &Value, right: &Value) -> Resul
 /// bool(false)
 /// ```
 pub(crate) fn identical(req: &mut Request, left: &Value, right: &Value) -> Result<bool, Thrown> {
-    let (left, right) = (&left.deref(), &right.deref());
-    if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
-        return Ok(php_heap::identical(a, b));
+    let (left, right) = (left.deref(), right.deref());
+    if let (Some(a), Some(b)) = (left.as_array(), right.as_array()) {
+        return identical_arrays(req, *a, *b);
     }
-    Ok(match (left.as_ref(), right.as_ref()) {
-        (ValueRef::Array(a), ValueRef::Array(b)) => identical_arrays(req, *a, *b)?,
+    Ok(identical_values(&left, &right))
+}
+
+/// [`identical`] past two arrays, which it never sees: a call of its
+/// own, as [`compare_values`] is, so that what the other pairs take is
+/// off the stack while two nested arrays are walked level by level.
+#[inline(never)]
+fn identical_values(left: &Value, right: &Value) -> bool {
+    if let (Some(a), Some(b)) = (scalar(left), scalar(right)) {
+        return php_heap::identical(a, b);
+    }
+    match (left.as_ref(), right.as_ref()) {
         (ValueRef::Object(a), ValueRef::Object(b)) => a == b,
         (ValueRef::Resource(a), ValueRef::Resource(b)) => a == b,
         _ => false,
-    })
+    }
 }
 
 /// `zend_hash_compare` with `hash_zval_identical_function` and
@@ -3113,12 +3138,20 @@ fn identical_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Resul
 /// The ordered walk of `zend_hash_compare_impl` under the protection
 /// [`identical_arrays`] takes.
 fn identical_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<bool, Thrown> {
-    for ((k, v), (l, w)) in left.iter().zip(right.iter()) {
-        if k != l || !identical(req, &v, &w)? {
-            return Ok(false);
+    // `zend_hash_compare_impl`'s ordered loop: `ht1`'s rows walked, each
+    // beside the next live bucket of `ht2`.
+    let mut at = 0;
+    let differs = walk::foreach(req, left, walk::Hold::None, |req, row| -> walk::Step<()> {
+        let Some((found, key, value)) = right.live_from(at) else {
+            return Ok(ControlFlow::Break(()));
+        };
+        at = found.saturating_add(1);
+        if *row.key() != key || !identical(req, row.value(), &value)? {
+            return Ok(ControlFlow::Break(()));
         }
-    }
-    Ok(true)
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(differs.is_none())
 }
 
 /// `is_identical_function` (`Z/Zend/zend_operators.c:2508`):

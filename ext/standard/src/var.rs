@@ -19,7 +19,7 @@ use php_ext::coerce::{Exponent, float_format, with_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::walk::{self, Guarded, Hold, Unwritten};
+use php_ext::values::walk::{self, GiveUp, Guarded, Hold, Unwritten};
 use php_ext::values::{Key, Owner, PhpString, RecursionGuard, Value};
 
 pub(crate) mod debug;
@@ -1121,6 +1121,25 @@ fn var_export(
 /// walk with `NULL` and the warning, which is what keeps the source it
 /// writes evaluable.
 ///
+/// The array arm gives up the owner it held for its walk with
+/// `GC_DELREF(myht)`, which leaves no possible root of the cycle
+/// collector, where `var_dump`'s `GC_DTOR_NO_REF` leaves one:
+///
+/// ```php
+/// foreach (['var_dump', 'debug_zval_dump', 'var_export'] as $f) {
+///     $a = [range(1, 2), range(3, 4)]; $b = [$a];
+///     gc_collect_cycles(); $r = gc_status()['roots'];
+///     ob_start(); $f($b); ob_end_clean();
+///     echo $f, ' ', gc_status()['roots'] - $r, "\n";
+///     unset($a, $b); gc_collect_cycles();
+/// }
+/// ```
+/// ```expect
+/// var_dump 4
+/// debug_zval_dump 4
+/// var_export 0
+/// ```
+///
 /// # Errors
 ///
 /// What a property read or a lazy object's initializer threw.
@@ -1158,7 +1177,8 @@ pub fn export(
         // (`Z/ext/standard/var.c:560`): a foreach walk holding the array and
         // guarding its recursion, so a user error handler the circular
         // warning or an object's export reaches that assigns over the
-        // array's holder leaves it standing until the walk is done. The
+        // array's holder leaves it standing until the walk is done, its
+        // owner given up as `GC_DELREF(myht)` (`:587`), no root. The
         // text is laid down before the walk and taken back where the walk
         // found the array marked, since php writes `NULL` in its place.
         let opened = out.len();
@@ -1167,7 +1187,8 @@ pub fn export(
             out.extend(std::iter::repeat_n(b' ', level - 1));
         }
         out.extend_from_slice(b"array (\n");
-        let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
+        let held = Hold::Owner(GiveUp::DtorNogc);
+        let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
             out.extend(std::iter::repeat_n(b' ', level + 1));
             match row.key() {
                 Key::Int(n) => out.extend_from_slice(n.to_string().as_bytes()),

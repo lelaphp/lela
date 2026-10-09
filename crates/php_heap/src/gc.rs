@@ -50,9 +50,10 @@ pub(crate) struct Refcounted {
     type_info: Cell<u32>,
 }
 
-/// A walk's pin over a block other than an object, whose pins are
-/// counted ([`crate::Obj::pin`]) (design §4.4, #2197, #2230): the top bit of the
-/// count's word, which no count reaches, since two to the thirty-one
+/// The first of the walks' pins over a block other than an object, whose
+/// pins are counted ([`crate::Obj::pin`]) (design §4.4, #2197, #2230,
+/// #2291), the pins past the first counted beside it ([`Nested`]): the
+/// top bit of the count's word, which no count reaches, since two to the thirty-one
 /// owners would be thirty-two gigabytes of zvals naming one block. php's
 /// header has no bit to spare beside it: each of the six bits
 /// `GC_FLAGS_MASK` spans is taken by some kind (`IS_STR_VALID_UTF8`,
@@ -353,11 +354,11 @@ impl Counted {
         }
     }
 
-    /// The pin set; whether it was not set already. A block pinned
-    /// already is kept by the pin that set it, which is let go after
-    /// this one, as a walk's steps nest. A debug build's freed-use guard
+    /// The pin set; whether it was set already, a pin the heap then
+    /// counts beside it ([`Nested`]). A debug build's freed-use guard
     /// refuses a pin of a block the heap has freed, as it refuses an
-    /// addref, and sets nothing.
+    /// addref, sets nothing and answers not pinned, so nothing is
+    /// counted beside it either.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn pin(self) -> bool {
         #[cfg(debug_assertions)]
@@ -366,13 +367,14 @@ impl Counted {
         }
         let word = self.refcount.get();
         self.refcount.set(word | PINNED);
-        word & PINNED == 0
+        word & PINNED != 0
     }
 
-    /// The pin let go; the count beneath it, which is zero where the
-    /// block's last owner went while it stood. A debug build's freed-use
-    /// guard refuses it over a block the heap has freed, as it refuses a
-    /// release, and answers one owner left, so nothing is freed twice.
+    /// The last pin let go, the bit cleared; the count beneath it, which
+    /// is zero where the block's last owner went while it stood. A debug
+    /// build's freed-use guard refuses it over a block the heap has
+    /// freed, as it refuses a release, and answers one owner left, so
+    /// nothing is freed twice.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn unpin(self) -> u32 {
         #[cfg(debug_assertions)]
@@ -392,6 +394,58 @@ impl Counted {
     #[track_caller]
     fn refuses(self, op: crate::sensed::Use) -> bool {
         refuses_freed(self.block(), op, std::panic::Location::caller())
+    }
+}
+
+/// The walks' pins over blocks other than objects past the first, which
+/// the header's bit stands for ([`PINNED`]): for each block pinned more
+/// than once, its address and how many pins past the first stand over
+/// it (#2291). The pins over one block are let go in any order, which a
+/// call stack's walks do not need and a fiber's do: a walk's step in one
+/// execution and a walk's step in a fiber suspended inside it pin one
+/// row, and whichever is let go first, the other keeps the row's bytes.
+/// So the bit is cleared, and a block destroyed under it freed, by the
+/// last pin let go, never by the first. The header has no room for the
+/// count, where an object's `extra_flags` has ([`crate::Obj::pin`]); a
+/// block is pinned more than once only where walks nest over one row,
+/// so the list is short, and empty for every pin and let-go that does
+/// not nest, which then reads its length alone. An address is a key,
+/// never read through: a block stands while a pin does.
+#[derive(Debug, Default)]
+pub(crate) struct Nested(Vec<(usize, std::num::NonZeroU32)>);
+
+impl Nested {
+    /// One more pin over the block at `block`, pinned already.
+    pub(crate) fn add(&mut self, block: std::ptr::NonNull<u8>) {
+        let at = block.as_ptr().addr();
+        match self.0.iter_mut().find(|(pinned, _)| *pinned == at) {
+            Some((_, pins)) => *pins = pins.saturating_add(1),
+            None => self.0.push((at, std::num::NonZeroU32::MIN)),
+        }
+    }
+
+    /// One pin past the first over the block at `block` let go; whether
+    /// there was one, where the bit's own pin is the last left.
+    pub(crate) fn let_go(&mut self, block: std::ptr::NonNull<u8>) -> bool {
+        if self.0.is_empty() {
+            return false;
+        }
+        let at = block.as_ptr().addr();
+        let found = self
+            .0
+            .iter_mut()
+            .enumerate()
+            .find(|(_, (pinned, _))| *pinned == at);
+        let Some((index, (_, pins))) = found else {
+            return false;
+        };
+        match std::num::NonZeroU32::new(pins.get() - 1) {
+            Some(left) => *pins = left,
+            None => {
+                self.0.swap_remove(index);
+            }
+        }
+        true
     }
 }
 

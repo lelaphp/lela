@@ -14,7 +14,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{self, to_long, value_name, with_string};
 use php_ext::raising::{Thrown, argument_error, arity, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use crate::calendar::{self, IntlCalendar};
 use crate::common_date::{
@@ -800,8 +800,9 @@ fn format_styles(
                 error::set(req, Code::ILLEGAL_ARGUMENT, message)?;
                 return Ok(None);
             }
-            let styles: Vec<Option<i32>> =
-                array.iter().map(|(_, v)| valid_style(&v.deref())).collect();
+            let styles: Vec<Option<i32>> = walk::rows(req, *array)
+                .map(|(_, v)| valid_style(&v.deref()))
+                .collect();
             match (
                 styles.first().copied().flatten(),
                 styles.get(1).copied().flatten(),

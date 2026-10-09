@@ -11,7 +11,7 @@ use php_ext::raising::{Thrown, call_stack_end};
 use php_ext::request::Request;
 use std::ops::ControlFlow;
 
-use php_ext::values::walk::{self, Guarded, Hold, Row, Unwritten};
+use php_ext::values::walk::{self, GiveUp, Guarded, Hold, Row, Unwritten};
 use php_ext::values::{Key, Laziness, PhpArray, PhpObject, RecursionGuard, Value, ValueRef};
 
 /// `debug_zval_dump(mixed $value, mixed ...$values): void`, php's
@@ -331,8 +331,10 @@ fn dump_array(
     } else {
         req.write(format!("array({}) {packed}interned {{\n", array.len()).as_bytes());
     }
-    // `zval_array_element_dump`.
-    let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
+    // `zval_array_element_dump`, under `GC_ADDREF(myht)` given up as
+    // `GC_DTOR_NO_REF(myht)` (`Z/ext/standard/var.c:347`, `:363`).
+    let held = Hold::Owner(GiveUp::Dtor);
+    let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
         match row.key() {
             Key::Int(n) => indented(req, level + 1, format!("[{n}]=>\n").as_bytes()),
             Key::Str(s) => {

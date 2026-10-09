@@ -471,7 +471,8 @@ fn nested(
     in_rcn_array: bool,
     incomplete: bool,
 ) -> Result<(), Thrown> {
-    let count = table.len() - usize::from(incomplete && table.iter().any(|(k, _)| is_magic(&k)));
+    let magic = incomplete && walk::rows(req, table).any(|(k, _)| is_magic(&k));
+    let count = table.len() - usize::from(magic);
     out.extend_from_slice(count.to_string().as_bytes());
     out.extend_from_slice(b":{");
     let mut skip_magic = incomplete;

@@ -14,6 +14,7 @@ use php_ext::raising::{
     throw_error, throwing_warnings,
 };
 use php_ext::request::{Opening, OwnedStream as _, Request, Streams as _};
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::ffi::{self, Base, OptType, Status};
@@ -255,12 +256,16 @@ fn apply_config(req: &mut Request, id: DocId, config: Config, arg: u32) -> Resul
                 return Err(arg_type_error(req, arg, keyed));
             }
             let mut failed = false;
-            for (key, value) in options.iter().collect::<Vec<_>>() {
-                let Key::Str(name) = key else {
+            // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht_options, opt_name, opt_val)`,
+            // whose conversions may serve `__toString`; the argument holds
+            // the array.
+            walk::foreach(req, options, Hold::None, |req, row| -> walk::Step {
+                let Key::Str(name) = row.key() else {
                     return Err(arg_type_error(req, arg, keyed));
                 };
-                failed = failed || !set_opt(req, id, name.as_bytes(), value, arg)?;
-            }
+                failed = failed || !set_opt(req, id, name.as_bytes(), *row.value(), arg)?;
+                Ok(std::ops::ControlFlow::Continue(()))
+            })?;
             Ok(!failed)
         }
     }

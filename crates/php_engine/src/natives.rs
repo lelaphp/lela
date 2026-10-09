@@ -38,7 +38,7 @@ use crate::api::raising::{
     Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
 };
 use crate::api::request::Request;
-use crate::api::values::walk::{self, Hold, Unwritten};
+use crate::api::values::walk::{self, GiveUp, Hold, Unwritten};
 use crate::api::values::{
     Key, Laziness, Owner, PhpArray, PhpObject, PhpString, RecursionGuard, Value, ValueRef,
 };
@@ -1534,7 +1534,8 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         return;
     }
     req.write(format!("{common}array({}) {{\n", array.len()).as_bytes());
-    let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
+    let held = Hold::Owner(GiveUp::Dtor);
+    let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
         if too_deep(req, level, req.stack_limit().exhausted()) {
             return Ok(ControlFlow::Continue(()));
         }

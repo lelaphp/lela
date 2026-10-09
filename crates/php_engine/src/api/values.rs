@@ -805,15 +805,6 @@ impl PhpArray {
         Ok(Owner::adopt(req, made))
     }
 
-    /// An iterator over the elements in order.
-    #[must_use]
-    pub fn iter(&self) -> ArrayIter {
-        ArrayIter {
-            inner: self.0.iter(),
-            at: None,
-        }
-    }
-
     /// The first live element at or past the bucket `position`, with
     /// the bucket it stands at: what a hash iterator's `pos` reads
     /// (`zend_hash_get_current_data_ex` after
@@ -991,44 +982,21 @@ impl PhpArray {
 /// reads once both sides are arrays (`zend_hash_compare` ordered).
 impl PartialEq for PhpArray {
     fn eq(&self, other: &PhpArray) -> bool {
-        self.len() == other.len() && self.iter().eq(other.iter())
+        self.len() == other.len() && self.0.iter().map(view).eq(other.0.iter().map(view))
     }
+}
+
+/// One of a table's rows as `php_heap` reads it, as the views a reader
+/// is lent: what the rows walk ([`walk::rows`]), `==` between two
+/// arrays and the debug rendering read, none of which runs code of the
+/// program.
+fn view((key, value): (php_heap::Key, php_heap::Zval)) -> (Key, Value) {
+    (Key::of(key), Value::of_zval(value))
 }
 
 impl std::fmt::Debug for PhpArray {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
-    }
-}
-
-/// A position in a [`PhpArray`]: before the first element until
-/// [`ArrayIter::advance`] is called.
-#[derive(Debug)]
-pub struct ArrayIter {
-    inner: php_heap::ArrIter,
-    at: Option<(Key, Value)>,
-}
-
-impl ArrayIter {
-    /// Advance one element; `false` past the end.
-    pub fn advance(&mut self) -> bool {
-        self.at = self
-            .inner
-            .next()
-            .map(|(k, z)| (Key::of(k), Value::of_zval(z)));
-        self.at.is_some()
-    }
-
-    /// The key at the position.
-    #[must_use]
-    pub fn key(&self) -> Option<Key> {
-        self.at.as_ref().map(|(k, _)| k.clone())
-    }
-
-    /// The value at the position.
-    #[must_use]
-    pub fn value(&self) -> Option<&Value> {
-        self.at.as_ref().map(|(_, v)| v)
+        f.debug_map().entries(self.0.iter().map(view)).finish()
     }
 }
 
@@ -1167,26 +1135,6 @@ impl PhpArray {
     /// `foreach` by reference over the array goes on in `rebuilt`.
     pub fn iterators_carry(&self, req: &mut Request, rebuilt: &PhpArray) {
         req.heap_mut().iterators_carry(self.0, rebuilt.0);
-    }
-}
-
-impl IntoIterator for &PhpArray {
-    type Item = (Key, Value);
-    type IntoIter = ArrayIter;
-
-    fn into_iter(self) -> ArrayIter {
-        self.iter()
-    }
-}
-
-impl Iterator for ArrayIter {
-    type Item = (Key, Value);
-
-    fn next(&mut self) -> Option<(Key, Value)> {
-        if !self.advance() {
-            return None;
-        }
-        self.at.take()
     }
 }
 
@@ -3004,9 +2952,8 @@ mod tests {
         assert_eq!(a.cursor_key(), Some(Key::Int(5)));
         a.cursor_next();
         assert_eq!(a.cursor_current(), Some(Value::int(2)));
-        let mut it = a.iter();
-        assert!(it.advance());
-        assert_eq!(it.key(), Some(Key::Int(5)));
+        let first = walk::rows(&req, *a).next().map(|(key, _)| key);
+        assert_eq!(first, Some(Key::Int(5)));
         assert_eq!(a.unset(&mut req, &Key::Int(5)), Ok(true));
         assert_eq!(a.len(), 2);
         assert_eq!(a.cursor_current(), Some(Value::int(2)));

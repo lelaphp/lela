@@ -12,7 +12,7 @@ use php_ext::raising::{
     Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{C14nOut, C14nSelect, C14nTarget, Kind, Node, Ns, Object, Save, XPath};
 
@@ -621,7 +621,7 @@ fn c14n_query(
         .and_then(|v| v.deref().as_array().copied())
         && !table.is_list()
     {
-        for (k, v) in &table {
+        for (k, v) in walk::rows(req, table) {
             if let (Key::Str(prefix), Some(uri)) = (k, v.deref().as_str_bytes()) {
                 namespaces.push((prefix.as_bytes().to_vec(), uri.to_vec()));
             }
@@ -819,8 +819,7 @@ fn canonicalization(
     let mut inclusive: Option<Vec<Vec<u8>>> = None;
     if let Some(prefixes) = prefixes {
         if exclusive {
-            let list: Vec<Vec<u8>> = prefixes
-                .iter()
+            let list: Vec<Vec<u8>> = walk::rows(req, prefixes)
                 .filter_map(|(_, v)| v.deref().as_str_bytes().map(<[u8]>::to_vec))
                 .collect();
             inclusive = Some(list);

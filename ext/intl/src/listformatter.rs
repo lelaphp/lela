@@ -5,6 +5,9 @@ use php_ext::attr::php_class;
 use php_ext::coerce::with_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
+use std::ops::ControlFlow;
+
+use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString};
 
 use crate::error::{self, Carrier, IntlError};
@@ -100,15 +103,21 @@ fn format(
         return PhpString::new(req, b"").map(Some);
     }
     let mut items = Vec::with_capacity(strings.len());
-    for (_, value) in &strings {
-        match with_string(req, &value, ffi::to_utf16)? {
+    // `ZEND_HASH_FOREACH_VAL(ht, val)` over the argument, which holds the
+    // array while a conversion serves `__toString`.
+    let failed = walk::foreach(req, strings, Hold::None, |req, row| -> walk::Step {
+        match with_string(req, row.value(), ffi::to_utf16)? {
             Ok(units) => items.push(units),
             Err(code) => {
                 let message = "Failed to convert string to UTF-16";
                 error::errors_set::<ListFormatterObject>(req, object, code, message)?;
-                return Ok(None);
+                return Ok(ControlFlow::Break(()));
             }
         }
+        Ok(ControlFlow::Continue(()))
+    })?;
+    if failed.is_some() {
+        return Ok(None);
     }
     let taken = object
         .native_mut::<ListFormatterObject>(req)

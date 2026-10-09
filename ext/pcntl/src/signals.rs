@@ -16,7 +16,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal, leave_pending,
 };
 use php_ext::request::{Receiving, Request, Siginfo, take_signals};
-use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef, walk};
 
 use crate::ffi::{self, Disposition};
 use crate::{State, failed};
@@ -495,7 +495,10 @@ fn signal_set(
         return Err(arg_value_error(req, position, "not be empty"));
     }
     let mut set = SigSet::empty();
-    for (_, value) in &signals {
+    // Read first under the rows walk; what is refused after takes the
+    // request mutably.
+    let values: Vec<Value> = walk::rows(req, signals).map(|(_, v)| v).collect();
+    for value in values {
         let Some(number) = try_long(&value.deref()) else {
             let given = value_name(req, &value);
             return Err(argument_error(

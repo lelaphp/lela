@@ -573,14 +573,16 @@ fn extreme(
         // `zend_hash_minmax`: the first element, replaced by a later one
         // only where it is strictly beyond.
         let mut best: Option<Value> = None;
-        for (_, value) in array {
-            let value = value.deref();
+        // Holding nothing: a comparison may serve `__toString`.
+        walk::foreach(req, *array, walk::Hold::None, |req, row| -> walk::Step {
+            let value = row.value().deref();
             best = Some(match best {
                 None => value,
                 Some(held) if compare(req, &value, &held)? == wanted => value,
                 Some(held) => held,
             });
-        }
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
         let Some(best) = best else {
             return Err(arg_value_error(req, 1, "contain at least one element"));
         };

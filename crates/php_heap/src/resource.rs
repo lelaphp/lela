@@ -938,7 +938,7 @@ mod tests {
         let z = Zval::resource(kept);
         rec.heap.addref(z);
         // A pin over it let go while it lives keeps its bytes.
-        assert!(Heap::pin_block(z));
+        rec.heap.pin_block(z);
         rec.heap.unpin_block(z);
         assert_eq!(
             rec.heap.resource_native::<Observed>(kept).map(|_| ()),
@@ -966,7 +966,7 @@ mod tests {
         };
         rec.heap.resource_unlist(pinned);
         let z = Zval::resource(pinned);
-        assert!(Heap::pin_block(z));
+        rec.heap.pin_block(z);
         Heap::release(&mut rec, z);
         assert_eq!(rec.freed[2..], [(4, 6, true)]);
         assert!(rec.heap.mm.is_retired(pinned.address()));
