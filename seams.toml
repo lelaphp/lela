@@ -439,6 +439,7 @@ name = "ext/zend_test"
 budget = 4000
 feature = "zend_test"                      # off by default, as php's --enable-zend-test (#1782)
 oracle = "zend-test"                       # the oracle variant that loads it (#1782)
+porting = true                              # the rest of php's test extension is mid-port: #2379 (fiber class) and #2380-#2388; deleted when they land (ruled 2026-10-09)
 # ---------------------------------------------------------------- sapi/
 # One crate per SAPI, package `php_sapi_<name>` at `sapi/<name>`, each its
 # binary, reaching the engine through php_sapi alone (ADR-0008). Budgets by
