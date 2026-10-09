@@ -356,11 +356,14 @@ impl EasyId {
             let raw = NonNull::new(unsafe { sys::curl_easy_duphandle(handle.raw()) })?;
             let tag = handle.tag_mut();
             tag.copied = true;
-            let stderr = tag.stderr.as_ref().and_then(CFile::reopen);
+            let stderr = tag.stderr.as_ref().map(CFile::reopen);
             Some((raw, tag.session.clone(), stderr))
         })?;
         let mut copy = Handle::make(raw, session, object, true);
-        if stderr.is_some() {
+        // The copy points at the original's file, which it does not
+        // keep: at one of its own, or at the process's `stderr` where
+        // the file would not open again.
+        if let Some(stderr) = stderr {
             copy.set_stderr(stderr);
         }
         Some(Easy(req.adopt(copy)))
