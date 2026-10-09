@@ -808,7 +808,7 @@ pub fn main() -> ExitCode {
         // `main` starts php before its second pass answers the usage
         // (`Z/sapi/cgi/cgi_main.c:1879`, `:2260-2269`).
         Ask::Usage { stderr, exit_code } => {
-            let _ = engine(&options.ini, Origin::Shell, false);
+            drop(engine(&options.ini, Origin::Shell, false));
             std::io::stderr().lock().write_all(stderr.as_bytes()).ok();
             std::io::stdout()
                 .lock()

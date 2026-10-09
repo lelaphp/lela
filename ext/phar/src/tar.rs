@@ -363,7 +363,11 @@ pub(crate) fn parse(
                 e.link = Some(linkname);
             }
             e.set_inode(b"", 1, false);
-            let _ = phar.manifest.update(&filename, e);
+            // `zend_hash_update_mem`: an entry of the same name is
+            // replaced, and the manifest's destructor frees it.
+            if let (_, Some(replaced)) = phar.manifest.update(&filename, e) {
+                replaced.free(req);
+            }
             if filename.starts_with(b".phar/.metadata") {
                 let at = cur.at;
                 let contents = cur.read(size as usize).to_vec();

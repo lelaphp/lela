@@ -101,7 +101,7 @@ fn unregister(req: &mut Request, object: PhpObject, holder: Holder, unref: bool)
     if let Some(holders) = req.weakrefs.row(id) {
         holders.retain(|held| *held != holder);
         if holders.is_empty() {
-            let _ = req.weakrefs.take(id);
+            drop(req.weakrefs.take(id));
             object.heap().set_weakly_referenced(false);
         }
     }

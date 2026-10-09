@@ -517,7 +517,8 @@ pub(crate) fn register(req: &mut Request, path: &[u8]) -> Option<Scope> {
     let name = loaded.scope_name.unwrap_or_else(|| b"C".to_vec());
     let held = (types(req).clone(), loaded.scope.clone());
     if let Some(preloads) = req.engine::<Preloads>() {
-        let _ = preloads.registered.get_or_build(name, |_| Some(held));
+        // Registered for the process; the entry it answers is not read here.
+        drop(preloads.registered.get_or_build(name, |_| Some(held)));
     }
     Some(loaded.scope)
 }

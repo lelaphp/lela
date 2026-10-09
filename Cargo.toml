@@ -80,6 +80,13 @@ must_use_candidate = "allow"        # the harness's constructors are not misused
 let_underscore_must_use = "warn"
 mem_forget = "warn"
 
+# The same rule for a value with a `Drop`: `_ = x` lowers to `let _ = x`,
+# and an `Owner` has a `Drop` under debug assertions, so an owner discarded
+# by either spelling fails `xtask clippy`, after a brace, a semicolon or a
+# closure's bars as well as at a line's start (#2201).
+[workspace.lints.rust]
+let_underscore_drop = "warn"
+
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

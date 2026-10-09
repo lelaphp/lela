@@ -608,5 +608,5 @@ pub(crate) fn rshutdown(req: &mut Request) {
         }
         req.release(handler);
     }
-    let _ = take_signals(|number| numbers.contains(&number));
+    drop(take_signals(|number| numbers.contains(&number)));
 }
