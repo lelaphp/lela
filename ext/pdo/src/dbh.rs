@@ -1182,7 +1182,7 @@ fn instantiate(
     dbh: PhpObject,
     class: Option<ClassId>,
     with_args: bool,
-    sql: &[u8],
+    query: PhpString,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let class = match class {
         Some(class) => class,
@@ -1206,33 +1206,30 @@ fn instantiate(
     let stmt = new_object(req, class)?;
     let fetch = dbh_ref(req, dbh, |d| d.default_fetch).unwrap_or(4);
     req.addref(&dbh.as_value());
+    let query = Owner::take(req, query);
     if let Some(s) = stmt.native_mut::<Stmt>(req) {
-        s.query = sql.to_vec();
+        s.query = Some(query);
         s.default_fetch = i64::from(fetch);
         s.dbh = DbLink::Owned(dbh);
     } else {
         req.release(dbh.as_value());
+        query.give_up(req);
     }
     Ok(stmt)
 }
 
 /// `pdo_stmt_construct`: `queryString` written past the class's own
-/// write handler, and the class's constructor served with the arguments
-/// as `zend_call_known_function` serves them.
+/// write handler, one more owner of the query's string, and the class's
+/// constructor served with the arguments as `zend_call_known_function`
+/// serves them.
 fn construct_statement(
     req: &mut Request,
     stmt: PhpObject,
-    sql: &[u8],
+    query: PhpString,
     args: Option<PhpArray>,
 ) -> Result<(), Thrown> {
     let name = PhpString::new(req, b"queryString")?;
-    let query = match PhpString::new(req, sql) {
-        Ok(query) => query,
-        Err(thrown) => {
-            name.give_up(req);
-            return Err(thrown);
-        }
-    };
+    let query = Owner::take(req, query);
     Std.write_property(req, stmt, name, query.into_value())?;
     if constructor_visibility(req, stmt.class()).is_none() {
         return Ok(());
@@ -1912,7 +1909,7 @@ impl PDO {
             }
             None => dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None)),
         };
-        let owner = instantiate(req, this, class, args.is_some(), &sql)?;
+        let owner = instantiate(req, this, class, args.is_some(), query)?;
         let stmt = *owner;
         let prepared = with_connection(req, this, |req, conn| Ok(conn.prepare(req, &sql, options)));
         let prepared = match prepared {
@@ -1925,7 +1922,7 @@ impl PDO {
         match prepared {
             Ok(prepared) => {
                 crate::stmt::attach(req, stmt, prepared);
-                if let Err(thrown) = construct_statement(req, stmt, &sql, args) {
+                if let Err(thrown) = construct_statement(req, stmt, query, args) {
                     owner.give_up(req);
                     return Err(thrown);
                 }
@@ -1982,7 +1979,7 @@ impl PDO {
         clear_error(req, this);
         let (class, args) =
             dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None));
-        let owner = instantiate(req, this, class, args.is_some(), &sql)?;
+        let owner = instantiate(req, this, class, args.is_some(), query)?;
         let stmt = *owner;
         if let Some(s) = stmt.native_mut::<Stmt>(req) {
             s.active = crate::stmt::Active::Same;
@@ -2015,7 +2012,7 @@ impl PDO {
         };
         match ran {
             Ok(()) => {
-                if let Err(thrown) = construct_statement(req, stmt, &sql, args) {
+                if let Err(thrown) = construct_statement(req, stmt, query, args) {
                     owner.give_up(req);
                     return Err(thrown);
                 }

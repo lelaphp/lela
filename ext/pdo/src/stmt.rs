@@ -16,7 +16,7 @@ use php_ext::coerce::to_string;
 use php_ext::raising::{Thrown, argument_error, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::connector::{
     BindEvent, BindKind, BindType, Binding, Cause, Failure, Placeholders, Prepared, SqlState,
@@ -103,6 +103,41 @@ pub(crate) struct ColumnInfo {
     pub(crate) precision: u64,
 }
 
+/// `sizeof(struct pdo_column_data)`.
+const COLUMN_DATA: usize = 24;
+
+/// `stmt->columns`: the columns described, in the
+/// `ecalloc(column_count, sizeof(struct pdo_column_data))` php keeps them
+/// in, on the request's heap until `pdo_stmt_reset_columns`.
+pub(crate) struct Columns {
+    list: Vec<ColumnInfo>,
+    held: Emalloc,
+}
+
+impl Columns {
+    /// The allocation for `count` columns, none described yet; the `Err`
+    /// is the memory limit's fatal.
+    fn new(req: &mut Request, count: usize) -> Result<Columns, Thrown> {
+        Ok(Columns {
+            list: Vec::with_capacity(count),
+            held: Emalloc::new(req, count * COLUMN_DATA)?,
+        })
+    }
+
+    /// `pdo_stmt_reset_columns`: the allocation given back.
+    fn free(self, req: &mut Request) {
+        self.held.free(req);
+    }
+}
+
+impl std::ops::Deref for Columns {
+    type Target = [ColumnInfo];
+
+    fn deref(&self) -> &[ColumnInfo] {
+        &self.list
+    }
+}
+
 /// Where the connector's statement is: none before a prepare, the
 /// connector's while no call holds it, lent while one does.
 #[derive(Default)]
@@ -118,8 +153,9 @@ enum Slot {
 pub(crate) struct StmtState {
     slot: Slot,
     pub(crate) dbh: DbLink,
-    /// `stmt->query_string`.
-    pub(crate) query: Vec<u8>,
+    /// `stmt->query_string`: one owner of the string `prepare()` or
+    /// `query()` was handed, which `queryString` shares.
+    pub(crate) query: Option<Owner<PhpString>>,
     pub(crate) active: Active,
     /// `stmt->executed`.
     pub(crate) executed: bool,
@@ -137,7 +173,7 @@ pub(crate) struct StmtState {
     /// `stmt->bound_columns`.
     pub(crate) columns_bound: Vec<Bound>,
     /// `stmt->columns`, `None` until described.
-    pub(crate) columns: Option<Vec<ColumnInfo>>,
+    pub(crate) columns: Option<Columns>,
     /// `stmt->column_count`.
     pub(crate) column_count: usize,
     /// `stmt->default_fetch_type`, as set, read as a style where a fetch
@@ -154,6 +190,11 @@ pub(crate) struct StmtState {
 }
 
 impl StmtState {
+    /// The query's bytes, `ZSTR_VAL(stmt->query_string)`.
+    pub(crate) fn query(&self) -> &[u8] {
+        self.query.as_ref().map_or(&[], |q| q.as_bytes())
+    }
+
     /// `stmt->bound_columns` or `stmt->bound_params`.
     fn list(&mut self, columns: bool) -> &mut Vec<Bound> {
         if columns {
@@ -195,6 +236,8 @@ impl ObjectHandlers for Handlers {
         };
         let params = std::mem::take(&mut stmt.params);
         let columns = std::mem::take(&mut stmt.columns_bound);
+        let described = stmt.columns.take();
+        let query = stmt.query.take();
         let slot = std::mem::take(&mut stmt.slot);
         let target = std::mem::take(&mut stmt.target);
         let dbh = std::mem::take(&mut stmt.dbh);
@@ -209,6 +252,12 @@ impl ObjectHandlers for Handlers {
             driver.close(req);
         }
         target.release(req);
+        if let Some(described) = described {
+            described.free(req);
+        }
+        if let Some(query) = query {
+            query.give_up(req);
+        }
         if let DbLink::Owned(dbh) = dbh {
             req.release(dbh.as_value());
         }
@@ -540,12 +589,18 @@ pub(super) fn attach(req: &mut Request, object: PhpObject, prepared: Prepared) {
 /// `php_pdo_stmt_set_column_count`: the described columns kept while
 /// the count stands, dropped where it changed.
 pub(super) fn set_column_count(req: &mut Request, object: PhpObject, count: usize) {
-    write(req, object, |s| {
-        if s.columns.is_some() && s.column_count != count {
-            s.columns = None;
-        }
+    let reset = write(req, object, |s| {
+        let reset = if s.column_count == count {
+            None
+        } else {
+            s.columns.take()
+        };
         s.column_count = count;
+        reset
     });
+    if let Some(columns) = reset.flatten() {
+        columns.free(req);
+    }
 }
 
 /// `pdo_stmt_describe_columns`: each column described by the connector,
@@ -556,7 +611,10 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
     let case = dbh_of(req, object)
         .and_then(|dbh| crate::dbh::state(req, dbh).map(|d| d.case))
         .unwrap_or_default();
-    write(req, object, |s| s.columns = Some(Vec::with_capacity(count)));
+    let columns = Columns::new(req, count)?;
+    if let Some(old) = write(req, object, |s| s.columns.replace(columns)).flatten() {
+        old.free(req);
+    }
     for column in 0..count {
         let described = with_driver(req, object, |req, driver| driver.describe(req, column))?;
         let mut info = match described {
@@ -580,7 +638,7 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
                 bound.position = i64::try_from(column).unwrap_or(-1);
             }
             if let Some(columns) = s.columns.as_mut() {
-                columns.push(ColumnInfo {
+                columns.list.push(ColumnInfo {
                     name: info.name,
                     max_len: info.max_len,
                     precision: info.precision,
@@ -655,7 +713,7 @@ pub(super) fn run(req: &mut Request, object: PhpObject) -> Result<(), Option<Thr
     let (executed, query) = read(req, object, |s| {
         let query = match &s.active {
             Active::Sent(sent) => sent.clone(),
-            Active::None | Active::Same => s.query.clone(),
+            Active::None | Active::Same => s.query().to_vec(),
         };
         (s.executed, query)
     })
@@ -707,7 +765,8 @@ pub(super) fn register(
     }
     if !bound.is_parameter
         && let Some(name) = bound.name.clone()
-        && let Some(columns) = read(req, object, |s| s.columns.clone()).flatten()
+        && let Some(columns) =
+            read(req, object, |s| s.columns.as_ref().map(|c| c.to_vec())).flatten()
     {
         if let Some(at) = columns.iter().position(|c| c.name == name) {
             bound.position = i64::try_from(at).unwrap_or(-1);
@@ -1329,10 +1388,10 @@ impl PDOStatement {
         })
         .unwrap_or(false);
         if emulated {
-            let query = read(req, stmt, |s| s.query.clone()).unwrap_or_default();
+            let query = read(req, stmt, |s| s.query().to_vec()).unwrap_or_default();
             match crate::parser::parse_params(req, stmt, dbh, &query)? {
                 crate::parser::Parsed::Unchanged => {
-                    write(req, stmt, |s| s.active = Active::Sent(s.query.clone()));
+                    write(req, stmt, |s| s.active = Active::Sent(s.query().to_vec()));
                 }
                 crate::parser::Parsed::Rewritten(sent) => {
                     write(req, stmt, |s| s.active = Active::Sent(sent));
@@ -1669,10 +1728,13 @@ impl PDOStatement {
     #[php(tentative)]
     fn nextRowset(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (stmt, dbh) = this_stmt(req, this.object())?;
-        write(req, stmt, |s| {
-            s.columns = None;
+        let reset = write(req, stmt, |s| {
             s.column_count = 0;
+            s.columns.take()
         });
+        if let Some(columns) = reset.flatten() {
+            columns.free(req);
+        }
         clear_error(req, stmt);
         match on_driver(req, stmt, |req, driver| driver.next_rowset(req))? {
             Ok(Some(done)) => {
@@ -1821,8 +1883,8 @@ impl PDOStatement {
 /// `debugDumpParams`'s text: the query, the query sent, and each bound
 /// parameter.
 fn dump_params(s: &Stmt) -> Vec<u8> {
-    let mut out = format!("SQL: [{}] ", s.query.len()).into_bytes();
-    out.extend_from_slice(&s.query);
+    let mut out = format!("SQL: [{}] ", s.query().len()).into_bytes();
+    out.extend_from_slice(s.query());
     out.push(b'\n');
     if let Active::Sent(sent) = &s.active {
         out.extend_from_slice(format!("Sent SQL: [{}] ", sent.len()).as_bytes());
