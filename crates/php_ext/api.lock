@@ -528,6 +528,7 @@ request::EngineWrapper
 request::Execution
 request::ExtensionId
 request::FdStream
+request::FilterChain
 request::FilterFactory
 request::FilterFlags
 request::FilterStatus
@@ -878,6 +879,7 @@ request::StartHandler
 request::Stream
 request::Stream::accept
 request::Stream::add_filter
+request::Stream::append_filter
 request::Stream::as_value
 request::Stream::can_cast
 request::Stream::cast
@@ -957,7 +959,10 @@ request::StreamOption
 request::StreamWrapper
 request::Streams
 request::Streams::clear_stat_cache
+request::Streams::fd_stream
 request::Streams::forget_relative_stats
+request::Streams::input_stream
+request::Streams::memory_stream
 request::Streams::new_stream
 request::Streams::open_dir
 request::Streams::open_stream
@@ -969,12 +974,14 @@ request::Streams::register_filter
 request::Streams::register_wrapper
 request::Streams::remove_filter
 request::Streams::set_opened_path
+request::Streams::standard_stream
 request::Streams::stdin
 request::Streams::stream_ctx
 request::Streams::stream_filters
 request::Streams::stream_from_fd
 request::Streams::stream_lend
 request::Streams::stream_wrappers
+request::Streams::temp_stream
 request::Streams::temporary_name
 request::Streams::tmpfile
 request::Streams::transports
