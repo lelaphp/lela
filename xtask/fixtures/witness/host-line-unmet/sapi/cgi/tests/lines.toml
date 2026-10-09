@@ -1,0 +1,6 @@
+# The one line of the negative control: a program the pinned php-cgi runs,
+# which the host standing in for the engine's answers otherwise.
+[[line]]
+name = "echoes-one"
+args = ["-n", "{dir}/t.php"]
+files = { "t.php" = "<?php echo 1;" }

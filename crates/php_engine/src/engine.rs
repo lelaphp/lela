@@ -86,6 +86,9 @@ pub struct RequestDescription {
     pub ini: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     /// How the program is served.
     pub primary: Primary,
+    /// How the host hands a wrapped program's file over, which decides
+    /// whether the request holds it open, and until when.
+    pub program_file: ProgramFile,
     /// php's `EG(exit_status)` as the request starts: zero, as
     /// `init_executor` writes it, but where a host serves one request of
     /// php's as several of the engine's and hands each the status the
@@ -112,6 +115,35 @@ pub enum Primary {
     /// to render in [`Observables::uncaught`], as `phpdbg_handle_exception`
     /// renders it.
     Bare,
+}
+
+/// The `zend_file_handle` a host hands `php_execute_script` for the
+/// program it names, as the request holds it: open, and inherited by a
+/// process the request execs, while the program is served, since php
+/// opens it with no `O_CLOEXEC` (#2458). A program the host has in hand,
+/// `-r` or stdin, has no file, and a bare one is closed before it is
+/// served, as `phpdbg_compile` closes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProgramFile {
+    /// The file's name, which `zend_stream_open` opens unless opcache
+    /// holds the file, `persistent_stream_open_function` answering it
+    /// without opening it: the `zend_file_handle` of
+    /// `php_fopen_primary_script` (`Z/main/fopen_wrappers.c:468-473`), or
+    /// of `zend_stream_init_filename` and the scanner, which the host
+    /// destroys once the program has been served.
+    #[default]
+    Named,
+    /// php's CLI, `cli_seek_file_begin`'s `fopen` before the request
+    /// starts (`Z/sapi/cli/php_cli.c:566`), open whatever opcache holds,
+    /// and destroyed once the program has been served, before
+    /// `php_request_shutdown` (`:1165-1170`).
+    Opened,
+    /// php-fpm's: as [`ProgramFile::Named`], but a file opened is
+    /// closed only as the request ends, since `fpm_main` destroys no
+    /// `zend_file_handle` the scanner has listed
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:1905`), and `shutdown_executor` closes
+    /// the list after the shutdown functions and destructors.
+    Listed,
 }
 
 /// A throwable the program left uncaught, for a host that renders it:
@@ -4626,12 +4658,25 @@ impl Engine {
     /// `php_execute_script` (`Z/main/main.c:2568-2648`) over the
     /// request's program: `auto_prepend_file` required first, then the
     /// program, then `auto_append_file`, each while the one before ran
-    /// to its end; whether the program did.
+    /// to its end, with the program's file held open around the three
+    /// as the host's `zend_file_handle` holds it ([`ProgramFile`]);
+    /// whether the program did.
     pub(crate) fn execute_script(&self, req: &mut Request, source: Option<&[u8]>) -> bool {
         let script = req.primary() == Primary::Wrapped;
         if script {
             req.expand_primary_file(source.is_some());
         }
+        if script && source.is_none() {
+            req.open_primary_file();
+        }
+        let ran = self.execute_wrapped(req, source, script);
+        req.close_primary_file();
+        ran
+    }
+
+    /// [`Engine::execute_script`] with the primary file open:
+    /// `auto_prepend_file`, the program and `auto_append_file`.
+    fn execute_wrapped(&self, req: &mut Request, source: Option<&[u8]>, script: bool) -> bool {
         if script && !auto_file(req, b"auto_prepend_file", self.shared.loops.entry) {
             return false;
         }

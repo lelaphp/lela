@@ -166,3 +166,22 @@ per-arm latency percentiles are descriptive and never signed. Each returns
 here when the engine has the thing it measures, and a geomean over
 workloads, which inherits the floor — one `NOISE-SWAMPED` constituent and
 the aggregate is published unsigned — returns with the corpus.
+
+## 11. Where a workload lives
+
+A bench workload a ticket names is committed under `docs/perf/workloads/`,
+beside this document, and a ticket that asks for a reading against a named
+workload cites its committed path (#2491). A bar file stays on the machine
+that ran it, since its arms name that machine's binaries. A workload kept
+out of the repository is lost: #1808's `calls.php` was.
+
+Each workload is byte-identical to the copy its first reading ran over, so
+a header comment the file did not carry then is not added now. The table
+says which ticket first read each.
+
+| workload | first read by | what it is |
+|---|---|---|
+| `bench_quiet.php` | #1808 | php-src's `Zend/bench.php` with `end_test` and `total` printing names only, so its bytes are deterministic |
+| `calls.php` | #2011 | #1808's `calls.php` rebuilt from #1808's comment, not #1809's file, so its medians are not comparable to #1809's rows |
+| `natives.php` | #2209 | a loop of native calls, each return kind #2209 names |
+| `ucall.php` | #1901 | micro.php's `ucall` kernel with nothing timed in the bytes |

@@ -72,25 +72,41 @@ impl Binary {
         }
     }
 
-    /// The binaries of the workspace at `root`, with `fpm` standing in for
-    /// its `php-fpm`, so a test serves a `request fpm` fence by a
-    /// host whose failure it chooses.
+    /// The binaries of the workspace at `root`, with `path` standing in
+    /// for `host`'s, so a test serves a fence or a host's line by a host
+    /// whose bytes or failure it chooses.
     #[cfg(test)]
-    pub(crate) fn with_fpm(root: &Path, fpm: PathBuf) -> Binary {
+    pub(crate) fn standing(root: &Path, host: EngineHost, path: PathBuf) -> Binary {
         let binary = Binary::of(root);
-        binary.fpm.set(Ok(fpm)).ok();
+        if let Ok(slot) = binary.slot(host) {
+            slot.set(Ok(path)).ok();
+        }
         binary
     }
 
     /// Where the CLI's binary is, built from the tree now if this run has
     /// not built it yet; what `crosscheck` starts as the built-in server.
     pub(crate) fn cli(&self) -> Result<&Path> {
-        built(&self.cli, &self.root, CLI)
+        self.host(CLI)
     }
 
-    /// Where the CGI's binary is, as [`Binary::cli`].
-    fn cgi_path(&self) -> Result<&Path> {
-        built(&self.cgi, &self.root, CGI)
+    /// Where `host`'s binary is, as [`Binary::cli`]: what a fence with a
+    /// request is served by, and what a host's own line runs (#1975).
+    pub(super) fn host(&self, host: EngineHost) -> Result<&Path> {
+        built(self.slot(host)?, &self.root, host)
+    }
+
+    /// Where `host`'s binary is kept once built.
+    fn slot(&self, host: EngineHost) -> Result<&OnceLock<Result<PathBuf, String>>> {
+        [
+            (CLI, &self.cli),
+            (CGI, &self.cgi),
+            (FPM, &self.fpm),
+            (PHPDBG, &self.phpdbg),
+        ]
+        .into_iter()
+        .find_map(|(kind, slot)| (kind == host).then_some(slot))
+        .ok_or_else(|| anyhow!("{} is no host the witness lane builds", host.krate))
     }
 
     /// `snippet` served by the binary under the recipe, and `regime`'s
@@ -131,7 +147,7 @@ impl Binary {
         request: &str,
         regime: Option<&str>,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = self.cgi_path()?;
+        let binary = self.host(CGI)?;
         let hosts = Tree::new("witness-cgi")?;
         let host = cgi::linked(binary, hosts.path())?;
         let traces = Tree::new("witness-trace")?;
@@ -151,7 +167,7 @@ impl Binary {
         snippet: &str,
         request: &str,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = built(&self.fpm, &self.root, FPM)?;
+        let binary = self.host(FPM)?;
         let traces = Tree::new("witness-trace")?;
         let trace = traces.join("entered");
         let env = [(TRACE.to_owned(), trace.clone().into_os_string())];
@@ -169,7 +185,7 @@ impl Binary {
         snippet: &str,
         commands: &str,
     ) -> Result<(Observation, Vec<Entry>)> {
-        let binary = built(&self.phpdbg, &self.root, PHPDBG)?;
+        let binary = self.host(PHPDBG)?;
         let traces = Tree::new("witness-trace")?;
         let trace = traces.join("entered");
         let env = [(TRACE.to_owned(), trace.clone().into_os_string())];

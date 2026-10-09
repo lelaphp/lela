@@ -9,6 +9,7 @@ connect_fd
 dup_fd
 fd_table_size
 fork
+inherit_fd
 listen_fd
 new_socket
 peek_fd

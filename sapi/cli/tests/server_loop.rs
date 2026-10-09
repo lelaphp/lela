@@ -1,16 +1,17 @@
 //! `php -S` is php's event loop (`Z/sapi/cli/php_cli_server.c:2770`,
 //! #1884 as #1779 ruled): one thread waits on every connection at once,
 //! reads each request as its bytes arrive, and serves the requests one
-//! after another on that thread. Each expectation is what the oracle at
-//! 8.5.9 did with the same files under `php -n -S` when the test was
-//! written; nothing here runs it.
+//! after another on that thread. What these hold is the order and the
+//! time the loop serves in, which no comparison of bytes carries; what
+//! the oracle's `php -S` writes for a request is held beside it by
+//! `xtask witness`, from `tests/lines.toml` (#1975).
 
 mod server;
 
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use server::{Server, body, sized_within};
+use server::{Server, body};
 
 const SLOW: &str = "<?php usleep(800000); echo 'slow';";
 const FAST: &str = "<?php echo 'fast';";
@@ -70,38 +71,5 @@ fn a_fork_with_another_request_waiting_goes_ahead() {
     let mut waiting = server.send("/slow.php");
     assert_eq!(body(&mut forking), "forked");
     assert_eq!(body(&mut waiting), "slow");
-    assert_eq!(server.stop(), Some(0));
-}
-
-/// A child `pcntl_fork` makes from a request serves on in the loop it
-/// was forked from, as php's child does, and ends its engine once that
-/// loop stops: a `dba_popen` `cdb_make` file the child opened is finished
-/// at its engine end, 2,082 bytes, before the parent's `pcntl_waitpid`
-/// returns (#1952).
-#[test]
-fn a_child_forked_from_a_request_ends_its_engine() {
-    let fork = r"<?php
-$f = __DIR__ . '/end.cdb';
-$pid = pcntl_fork();
-if ($pid === 0) {
-    $d = dba_popen($f, 'n', 'cdb_make');
-    dba_insert('key0', 'value0', $d);
-    posix_kill(getmypid(), SIGINT);
-    echo 'child';
-    return;
-}
-pcntl_waitpid($pid, $status);
-clearstatcache();
-file_put_contents(__DIR__ . '/end.log', 'after the child: ' . filesize($f) . ' ' . pcntl_wexitstatus($status));
-";
-    let server = Server::start("fork-end", &[("fork.php", fork), ("fast.php", FAST)], &[]);
-    assert_eq!(server.get("/fork.php"), "child");
-    let log = server.file("end.log");
-    assert!(sized_within(&log, 23, Duration::from_secs(10)));
-    assert_eq!(
-        std::fs::read_to_string(&log).ok().as_deref(),
-        Some("after the child: 2082 0")
-    );
-    assert_eq!(server.get("/fast.php"), "fast");
     assert_eq!(server.stop(), Some(0));
 }

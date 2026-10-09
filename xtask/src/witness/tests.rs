@@ -545,7 +545,7 @@ fn held_over(
         &registry(&rows),
         witness,
         witness.exit,
-        [(Run::Oracle, &oracle), (Run::Engine, &engine)],
+        &[(Run::Oracle, &oracle), (Run::Engine, &engine)],
     );
     (judged.judgement, judged.note)
 }
@@ -606,6 +606,96 @@ fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(note.contains("not what the oracle ran"), "{note}");
+}
+
+/// A `trace:` row's `covers` may name a fence (harness §4.3, §8; #1650):
+/// the fixture's first fence, which the row covers, is held to its pinned
+/// `expect` against the engine alone and comes to `covered`, the oracle's
+/// signal recorded in the note and not judged; its second, which nothing
+/// covers, is a bork on the same signal.
+#[test]
+fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_borks() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = workspace().join("xtask/fixtures/witness/oracle-signal");
+    let fixture = Manifest::load(&root).unwrap();
+    let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
+    let rows = Registry::load(&root).unwrap();
+    let tally = judge(
+        &fixture.pin.oracle(),
+        &binary(),
+        &rows,
+        &Ask::default(),
+        &found,
+        None,
+    )
+    .unwrap();
+    let [covered, bare] = &tally.witnesses.judged[..] else {
+        panic!("{tally:#?}")
+    };
+    assert_eq!(covered.judgement, Judgement::Covered, "{covered:#?}");
+    assert!(
+        covered.note.contains("under trace:fixture-oracle-signal")
+            && covered.note.contains("not judged: signal 9"),
+        "{}",
+        covered.note
+    );
+    assert_eq!(bare.judgement, Judgement::Bork, "{bare:#?}");
+    assert!(bare.note.contains("ended on a signal"), "{}", bare.note);
+
+    let without = judge(
+        &fixture.pin.oracle(),
+        &binary(),
+        &registry(""),
+        &Ask::default(),
+        &found,
+        None,
+    )
+    .unwrap();
+    assert!(
+        without
+            .witnesses
+            .judged
+            .iter()
+            .all(|j| j.judgement == Judgement::Bork),
+        "without the row both bork: {without:#?}"
+    );
+}
+
+/// A fence a `trace:` row covers is held to the engine alone: the row
+/// accepts no difference for it, so the engine's miss is a failure and
+/// not `diverged`, and an `open` row pins nothing (#1650). A `witness:`
+/// id is admitted under a `trace:` row's `covers` alone.
+#[test]
+fn a_trace_row_pins_the_fences_it_covers_and_accepts_no_difference_for_them() {
+    let text = "[[divergence]]\nid = \"trace:x\"\nkind = \"trace\"\nreason = \"A row a person wrote.\"\nstatus = \"accepted\"\nsince = \"2026-10-09\"\ncovers = [\"witness:abc\", \"trace:y\"]\n";
+    let rows = registry(text);
+    assert_eq!(
+        rows.pinning("witness:abc").map(|r| r.id.as_str()),
+        Some("trace:x")
+    );
+    assert!(rows.accepted("witness:abc").is_none());
+    assert_eq!(
+        rows.accepted("trace:y").map(|r| r.id.as_str()),
+        Some("trace:x")
+    );
+    assert!(rows.pinning("trace:y").is_none());
+
+    let open = registry(&text.replace("\"accepted\"", "\"open\""));
+    assert!(open.pinning("witness:abc").is_none());
+
+    let phpt = Registry::parse(
+        &text
+            .replace("kind = \"trace\"", "kind = \"phpt\"")
+            .replace("trace:", "phpt:"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        phpt.contains("witness:abc") && phpt.contains("kind phpt"),
+        "{phpt}"
+    );
 }
 
 /// The capture's refusal, by the fixture `witness --accept --streams` must
@@ -999,7 +1089,7 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
         .find(|krate| krate.name == "ext/pcre")
         .unwrap();
     let found = super::extract(&root, krate, rule, Target::built()).unwrap();
-    let binary = Binary::with_fpm(&root, root.join("php-fpm"));
+    let binary = Binary::standing(&root, crate::oracle::hosts::FPM, root.join("php-fpm"));
     let tally = judge(
         &manifest.pin.oracle(),
         &binary,
@@ -1231,4 +1321,52 @@ fn a_crate_outside_ext_with_no_native_counts_its_kernels_alone() {
         subjects("ext/lexbor"),
         ["ext/lexbor/src/lib.rs:5 pub fn parse"]
     );
+}
+
+/// The negative control of a host's own lines (#1975, as #2468 ruled):
+/// the fixture's `sapi/cgi` carries one line and no fence. Run under the
+/// pinned php-cgi and a host standing in for the engine's that answers it
+/// otherwise, the crate's reading fails on that line; under a pin whose
+/// php-cgi is not at its path it fails too, and is never a skip.
+#[test]
+fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use crate::reading::Status;
+    let root = workspace().join("xtask/fixtures/witness/host-line-unmet");
+    let mut fixture = Manifest::load(&root).unwrap();
+    let hosts = Tree::new("host-line-unmet").unwrap();
+    let engine = hosts.write("php-cgi", "#!/bin/sh\necho 2\n").unwrap();
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+    let binary = Binary::standing(&root, crate::oracle::hosts::CGI, engine);
+    let ask = Ask {
+        crates: vec!["sapi/cgi".to_owned()],
+        staged: false,
+        ..Ask::default()
+    };
+    let read = |fixture: &Manifest| {
+        let readings = super::run_in(&root, fixture, &registry(""), &ask, None, &binary).unwrap();
+        let [reading] = &readings[..] else {
+            panic!("{readings:#?}")
+        };
+        assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+        assert!(
+            reading.message.contains("lines.toml#echoes-one"),
+            "{}",
+            reading.message
+        );
+    };
+    if fixture
+        .pin
+        .sapi
+        .cgi
+        .as_ref()
+        .is_some_and(|cgi| cgi.path.is_file())
+    {
+        read(&fixture);
+    }
+    if let Some(cgi) = fixture.pin.sapi.cgi.as_mut() {
+        cgi.path = hosts.join("absent");
+    }
+    read(&fixture);
 }

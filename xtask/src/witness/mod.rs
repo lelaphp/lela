@@ -41,6 +41,12 @@
 //! judged, `run == 0`, is the run the pinned oracle was absent for, and is
 //! a skip that says so.
 //!
+//! **A host's own lines** ([`host`], #1975). A host crate's
+//! `tests/lines.toml` holds the command lines no fence can carry, each run
+//! under the pinned host of its kind and then the engine's, and held
+//! equal; they are judged among the crate's witnesses, and one whose
+//! pinned host is absent or drifted fails rather than skips.
+//!
 //! **Which process serves it.** Not the one the command line started:
 //! that one starts this binary again over the crates the run is for and
 //! watches it, so a run that dies on a signal still leaves a failing
@@ -117,6 +123,7 @@
 mod anchor;
 pub(crate) mod fence;
 mod fpm;
+mod host;
 mod judge;
 mod process;
 pub(crate) mod row;
@@ -160,6 +167,8 @@ pub(crate) mod numbers {
     pub(crate) const FAILED: &str = "failed";
     /// Witnesses that differ under an accepted registry row.
     pub(crate) const DIVERGED: &str = "diverged";
+    /// Witnesses a `trace:` row covers, held to the engine alone (#1650).
+    pub(crate) const COVERED: &str = "covered";
     /// Witnesses with no verdict pinned yet.
     pub(crate) const UNPINNED: &str = "unpinned";
     /// Witnesses the lane skipped.
@@ -189,6 +198,11 @@ pub(crate) enum Judgement {
     Pass,
     /// The bytes differ and an accepted registry row says so.
     Diverged,
+    /// A fence an accepted `trace:` row covers, which the engine met: it
+    /// is held to its pinned `expect` against the engine alone, and the
+    /// note records how the oracle's run ended, not judged (harness §4.3,
+    /// §8; #1650).
+    Covered,
     /// The bytes differ and nothing accepts it.
     Fail,
     /// A bare `exit`: the run has no status to hold the snippet to until
@@ -209,6 +223,7 @@ impl tally::Judgement for Judgement {
         match self {
             Judgement::Pass => "pass",
             Judgement::Diverged => "diverged",
+            Judgement::Covered => "covered",
             Judgement::Fail => "fail",
             Judgement::Unpinned => "unpinned",
             Judgement::Bork => "bork",
@@ -225,7 +240,10 @@ impl tally::Judgement for Judgement {
     }
 
     fn met(self) -> bool {
-        matches!(self, Judgement::Pass | Judgement::Diverged)
+        matches!(
+            self,
+            Judgement::Pass | Judgement::Diverged | Judgement::Covered
+        )
     }
 }
 
@@ -309,34 +327,7 @@ pub(crate) fn reading(
         // the reading is a pass or a fail on what the engine wrote.
         run.outcome(&Runner::Linked)
     };
-    // What did not run for want of the oracle, and what the engine did
-    // not serve for its trace there, as a message's tail.
-    let unrun = match (&tally.oracle_absent, run.not_run()) {
-        (Some(why), n) if n > 0 => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("; {n} witness{s} did not run, {why}")
-        }
-        _ => String::new(),
-    };
-    let unrun = match tally.unserved.len() {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "s" };
-            format!(
-                "{unrun}; {n} fence{s} the engine did not serve: {}",
-                tally.unserved.join("; ")
-            )
-        }
-    };
-    // What a `locale=<name>` the host lacks kept from running, as a
-    // message's tail (#1678).
-    let unrun = match run.count(Judgement::Skipped) {
-        0 => unrun,
-        n => {
-            let s = if n == 1 { "" } else { "es" };
-            format!("{unrun}; {n} witness{s} skipped for a locale this host lacks")
-        }
-    };
+    let unrun = tail(tally);
     let message = match &outcome {
         Outcome::Failed => {
             let uncovered = if tally.missing.is_empty() {
@@ -403,6 +394,7 @@ pub(crate) fn reading(
     reading.count(numbers::PASSED, run.count(Judgement::Pass))?;
     reading.count(numbers::FAILED, run.against().len() as u64)?;
     reading.count(numbers::DIVERGED, run.count(Judgement::Diverged))?;
+    reading.count(numbers::COVERED, run.count(Judgement::Covered))?;
     reading.count(numbers::UNPINNED, run.count(Judgement::Unpinned))?;
     reading.count(numbers::SKIPPED, run.count(Judgement::Skipped))?;
     reading.count(numbers::SUBJECTS, tally.subjects as u64)?;
@@ -413,6 +405,60 @@ pub(crate) fn reading(
     reading.count(numbers::UNSERVED, tally.unserved.len() as u64)?;
     reading.count(numbers::WALL_MS, declared_ms(tally.wall))?;
     Ok(reading)
+}
+
+/// What the reading's message says after its verdict: the witnesses that
+/// did not run for want of the oracle, the fences the engine did not
+/// serve, those skipped for a locale the host lacks, and what the oracle
+/// did on each fence a `trace:` row holds to the engine alone.
+fn tail(tally: &Tally) -> String {
+    let run = &tally.witnesses;
+    // What did not run for want of the oracle, and what the engine did
+    // not serve for its trace there, as a message's tail.
+    let unrun = match (&tally.oracle_absent, run.not_run()) {
+        (Some(why), n) if n > 0 => {
+            let s = if n == 1 { "" } else { "es" };
+            format!("; {n} witness{s} did not run, {why}")
+        }
+        _ => String::new(),
+    };
+    let unrun = match tally.unserved.len() {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "s" };
+            format!(
+                "{unrun}; {n} fence{s} the engine did not serve: {}",
+                tally.unserved.join("; ")
+            )
+        }
+    };
+    // What a `locale=<name>` the host lacks kept from running, as a
+    // message's tail (#1678).
+    let unrun = match run.count(Judgement::Skipped) {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "es" };
+            format!("{unrun}; {n} witness{s} skipped for a locale this host lacks")
+        }
+    };
+    // What the oracle did on each fence a `trace:` row holds to the engine
+    // alone, recorded and not judged (harness §4.3, §8; #1650).
+    let covered: Vec<String> = run
+        .judged
+        .iter()
+        .filter(|j| j.judgement == Judgement::Covered)
+        .map(|j| format!("{}: {}", j.id, j.note))
+        .collect();
+    match covered.len() {
+        0 => unrun,
+        n => {
+            let s = if n == 1 { "" } else { "s" };
+            format!(
+                "{unrun}; {n} fence{s} held to the engine alone: {}",
+                covered.join("; ")
+            )
+        }
+    }
 }
 
 /// The reading under the coverage rule, when the manifest has one: the
@@ -568,7 +614,7 @@ pub fn run(
     registry: &Registry,
     ask: &Ask,
 ) -> Result<Vec<Reading>> {
-    run_in(root, manifest, registry, ask, None)
+    run_in(root, manifest, registry, ask, None, &Binary::of(root))
 }
 
 /// The crates `ask` names, every crate where it names none, or with
@@ -595,13 +641,16 @@ fn asked(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Option<Vec<Strin
 }
 
 /// [`run`], each snippet's start and end and each crate's reading
-/// appended to `journal` where there is one ([`watch`]).
+/// appended to `journal` where there is one ([`watch`]), and every host
+/// served by `binary`, each built at the first fence or line that asks
+/// for it.
 fn run_in(
     root: &Path,
     manifest: &Manifest,
     registry: &Registry,
     ask: &Ask,
     journal: Option<&Journal>,
+    binary: &Binary,
 ) -> Result<Vec<Reading>> {
     let Some(crates) = asked(root, manifest, ask)? else {
         return Ok(Vec::new());
@@ -613,8 +662,6 @@ fn run_in(
     // variant is read under it (#1782).
     let variants = manifest.variants();
     let oracles = Oracles::new(&manifest.pin, &variants);
-    // One binary for the fences marked `process`, built at the first.
-    let binary = Binary::of(root);
     // Each crate is read in three steps (#2212): found and prepared in the
     // manifest's order, its fences served on one pool with every other
     // crate's, so no crate's last fences leave a thread idle while the
@@ -624,7 +671,7 @@ fn run_in(
     // crate the pool serves, so none was measured, and each one's reading
     // is a skip naming the volume rather than a bork or a refusal.
     let (mut finished, full): (Vec<Option<Tally>>, Option<anyhow::Error>) =
-        match serve_all(&ready, &binary, registry, ask) {
+        match serve_all(&ready, binary, registry, ask) {
             Ok(tallies) => (tallies.into_iter().map(Some).collect(), None),
             Err(why) if Full::of(&why).is_some() => {
                 (ready.iter().map(|_| None).collect(), Some(why))
@@ -662,7 +709,8 @@ fn run_in(
         }
         readings.push(reading);
     }
-    if ask.scope != Scope::Crate && served == 0 {
+    if ask.scope != Scope::Crate && served == 0 && readings.iter().all(|r| r.status != Status::Fail)
+    {
         bail!(
             "witness: no fence stands {} in the crates asked for",
             ask.scope
@@ -723,15 +771,25 @@ fn find<'a>(
                 continue;
             }
         };
+        // A host's own lines, read before anything runs, as its fences are:
+        // a file that cannot be read fails the crate as a source would.
+        let held = match host::Held::of(root, krate) {
+            Ok(held) => held.map(|held| held.narrowed(&ask.scope)),
+            Err(unread) => {
+                slots.push(Slot::Unrun(krate, format!("{unread:#}"), true));
+                continue;
+            }
+        };
         for problem in &found.problems {
             println!("bork {}", problem.at_line());
         }
-        served += found.witnesses.len();
+        served += found.witnesses.len() + held.as_ref().map_or(0, |held| held.lines.len());
         slots.push(Slot::Ready(ready.len()));
         ready.push(Ready {
             krate,
             oracle,
             found,
+            held,
             watch: journal.map(|j| j.over(&krate.name)),
         });
     }
@@ -789,6 +847,24 @@ fn serve_all(
         };
         finished.push(finish(&one.found, crate_, witnesses, gathered, unserved));
     }
+    // A host's own lines beside its fences (#1975): each judged among the
+    // crate's witnesses, whether or not the pinned php is here, since a
+    // line whose pinned host is absent fails and is never a skip.
+    let lines: Vec<(usize, &host::Held, &host::Line)> = ready
+        .iter()
+        .enumerate()
+        .filter_map(|(at, one)| one.held.as_ref().map(|held| (at, held)))
+        .flat_map(|(at, held)| held.lines.iter().map(move |line| (at, held, line)))
+        .collect();
+    let judged = tally::Tally::judge_beside(&lines, |(at, held, line)| {
+        Ok(held.judge(ready[*at].oracle, binary.host(held.host()), registry, line))
+    })?;
+    for ((at, _, _), judged) in lines.iter().zip(judged.judged) {
+        if let Some(tally) = finished.get_mut(*at) {
+            tally.witnesses.judged.push(judged);
+            tally.witnesses.found += 1;
+        }
+    }
     Ok(finished)
 }
 
@@ -797,6 +873,7 @@ struct Ready<'a> {
     krate: &'a Crate,
     oracle: &'a Oracle<'a>,
     found: Extracted,
+    held: Option<host::Held>,
     watch: Option<Watch<'a>>,
 }
 
@@ -1269,5 +1346,13 @@ pub(crate) fn command(
     };
     let registry = Registry::load(root)?;
     let journal = Journal::open(&journal)?;
-    run_in(root, manifest, &registry, &ask, Some(&journal)).map(|_| ())
+    run_in(
+        root,
+        manifest,
+        &registry,
+        &ask,
+        Some(&journal),
+        &Binary::of(root),
+    )
+    .map(|_| ())
 }

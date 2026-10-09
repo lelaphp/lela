@@ -244,6 +244,10 @@ struct Inner {
     authorizer: Option<Handler>,
     /// What the callbacks do in PHP.
     callbacks: &'static dyn Callbacks,
+    /// `H->einfo`, what `pdo_sqlite`'s error function last recorded, kept
+    /// with the connection because php's statements write the
+    /// connection's through `stmt->dbh`; `ext/sqlite3` leaves it empty.
+    einfo: crate::sqlite::Einfo,
 }
 
 /// `sqlite3 *`, one owner of it.
@@ -317,6 +321,7 @@ impl Db {
             pending: None,
             authorizer: None,
             callbacks,
+            einfo: crate::sqlite::Einfo::default(),
         }));
         // SAFETY: `into_raw` never answers null.
         let db = Db(unsafe { NonNull::new_unchecked(inner) });
@@ -346,6 +351,14 @@ impl Db {
     pub fn extended_errcode(&self) -> i32 {
         // SAFETY: a live connection.
         unsafe { sys::sqlite3_extended_errcode(self.inner_raw()) }
+    }
+
+    /// The connection's `H->einfo` replaced by `einfo`, the one it held
+    /// handed back, as `Cell::replace` hands it.
+    pub(crate) fn replace_einfo(&self, einfo: crate::sqlite::Einfo) -> crate::sqlite::Einfo {
+        // SAFETY: an owner's allocation; the swap is the only access, and
+        // no reference to the field is ever handed out.
+        unsafe { std::mem::replace(&mut (*self.0.as_ptr()).einfo, einfo) }
     }
 
     /// The callbacks served from here on: `SQLite3::enableExceptions`

@@ -103,9 +103,6 @@ pub(crate) struct DbhState {
     /// `dbh->error_code`: `None` before anything cleared it, php's
     /// zeroed array, which `errorCode()` answers `null` for.
     pub(crate) error_code: Option<SqlState>,
-    /// The connection's `einfo`, what `fetch_err` appends: the native
-    /// code and text of its last error, `None` for none.
-    pub(crate) native_error: Option<(i64, Vec<u8>)>,
     /// `dbh->desired_case`.
     pub(crate) case: Case,
     /// `dbh->oracle_nulls`.
@@ -491,15 +488,31 @@ struct Given {
 
 /// `php_pdo_internal_construct_driver`: the constructor's body for
 /// `current`, or `connect()`'s for a new object of the class it makes,
-/// which comes back.
+/// which comes back. The DSN and the credentials end at their first NUL,
+/// as php holds each as a `char *` and hands the factory
+/// `strlen(colon + 1)` bytes of the DSN, so a connector never reads past
+/// it:
+///
+/// ```php
+/// foreach (["mysql:host=-\0;dbname=test;host=127.0.0.1", "mysql:host=127.0.0.1;dbname=test\0;dbname=nope"] as $dsn) {
+///     try { $p = new PDO($dsn, "root\0x", ''); echo $p->query('SELECT DATABASE()')->fetchColumn(), "\n"; }
+///     catch (PDOException $e) { echo strstr($e->getMessage(), ' failed', true), "\n"; }
+/// }
+/// try { new PDO("nope\0:x"); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect mysql
+/// SQLSTATE[HY000] [2002] php_network_getaddresses: getaddrinfo for -
+/// test
+/// PDO::__construct(): Argument #1 ($dsn) must be a valid data source name
+/// ```
 fn construct_driver(
     req: &mut Request,
     current: Option<PhpObject>,
     called: ClassId,
     given: Given,
 ) -> Result<Option<Owner<PhpObject>>, Thrown> {
-    let source = given.dsn.as_bytes().to_vec();
-    let bytes = |s: PhpString| s.as_bytes().to_vec();
+    let source = c_str(given.dsn.as_bytes()).to_vec();
+    let bytes = |s: PhpString| c_str(s.as_bytes()).to_vec();
     let (username, password) = (given.username.map(bytes), given.password.map(bytes));
     let options = given.options;
     let source = resolve_dsn(req, source)?;
@@ -585,7 +598,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
             "Looking up the DSN from a URI is deprecated due to possible security concerns with DSNs coming from remote URIs",
         );
         pending(req)?;
-        let Some(line) = dsn_from_uri(req, &uri)? else {
+        let Some(mut line) = dsn_from_uri(req, &uri)? else {
             return Err(argument_error(
                 req,
                 "PDOException",
@@ -593,6 +606,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
                 "must be a valid data source URI",
             ));
         };
+        line.truncate(c_str(&line).len());
         if !line.contains(&b':') {
             return Err(argument_error(
                 req,
@@ -712,24 +726,31 @@ fn apply_options(
 }
 
 /// The persistent list's key, `PDO:DBH:DSN=<dsn>:<user>:<password>`, and
-/// the attribute's string after one more colon where it is one, each as
-/// `%s` reads it, to its first NUL.
+/// the attribute's string after one more colon where it is one, as `%s`
+/// reads it, to its first NUL; the DSN and the credentials are cut there
+/// already.
 fn persistent_key(
     source: &[u8],
     username: Option<&[u8]>,
     password: Option<&[u8]>,
     named: Option<&[u8]>,
 ) -> Vec<u8> {
-    let c = |s: &[u8]| s[..s.iter().position(|b| *b == 0).unwrap_or(s.len())].to_vec();
-    let mut key = [b"PDO:DBH:DSN=".as_slice(), &c(source), b":"].concat();
-    key.extend(c(username.unwrap_or_default()));
+    let mut key = [b"PDO:DBH:DSN=".as_slice(), source, b":"].concat();
+    key.extend(username.unwrap_or_default());
     key.push(b':');
-    key.extend(c(password.unwrap_or_default()));
+    key.extend(password.unwrap_or_default());
     if let Some(named) = named {
         key.push(b':');
-        key.extend(c(named));
+        key.extend(c_str(named));
     }
     key
+}
+
+/// The bytes of `s` to its first NUL: what php reads of a string it holds
+/// as a `char *`, by `strchr`, `strlen`, `pestrdup` and `%s`, as
+/// `php_pdo_internal_construct_driver` holds the DSN and the credentials.
+fn c_str(s: &[u8]) -> &[u8] {
+    s.split(|b| *b == 0).next().unwrap_or(s)
 }
 
 /// The persistent connection under `key` lent to the request: the one it

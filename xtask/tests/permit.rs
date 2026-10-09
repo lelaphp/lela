@@ -2475,6 +2475,24 @@ fn a_write_that_adds_an_exit_is_denied_and_one_that_adds_none_is_permitted() {
     assert_eq!(denial(&root, &manifest, &around), None);
 }
 
+/// A `deny_pattern` over a write is asked of the file the write leaves and
+/// not of the fragment it types (#2413): an edit whose `new_string` holds
+/// no hit of its own can still finish one, a digit changed after `exit=`,
+/// and that is a status authored. A pattern over a block, which the
+/// fragment of an edit inside the block never holds whole, rests on the
+/// same reading.
+#[test]
+fn an_edit_that_finishes_a_hit_outside_its_own_text_is_denied() {
+    let root = scratch("unless-fragment");
+    let manifest = Manifest::load(&root).unwrap();
+    lay_down(&root, &block("exit=3"));
+    let finished = edit_call(FILE, "t=3\n", "t=4\n");
+    let denied = denial(&root, &manifest, &finished).expect("exit=4 is authored");
+    assert!(denied.contains(EXIT_AUTHORED), "{denied}");
+    let prose = edit_call(FILE, "pub fn native", "pub fn other");
+    assert_eq!(denial(&root, &manifest, &prose), None);
+}
+
 /// The evidence this cannot read is no evidence: a crate the manifest does
 /// not name has no reading to stand on, so a write that adds the line to a
 /// file there is denied however the tree looks.

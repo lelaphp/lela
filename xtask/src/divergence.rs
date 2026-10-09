@@ -4,7 +4,11 @@
 //! or a site where php's own behaviour is undefined. A row whose one reason
 //! holds for many ids of its kind names them in `covers`, and
 //! [`Registry::row`] answers each of them with the row as it answers the
-//! row's own id; the row counts once (revision 62). A person
+//! row's own id; the row counts once (revision 62). A `trace:` row's
+//! `covers` may also name `witness:` ids, the fences that pin the engine's
+//! side of the row: such a fence is held to its pinned `expect` against
+//! the engine alone, so the row accepts no difference for it
+//! ([`Registry::pinning`]; harness §4.3, #1650). A person
 //! writes a row and its reason; `compare`'s caller or the fuzzer may propose
 //! one with status `open` and an empty reason; the `divergence-reason`
 //! instrument fails an accepted row without a reason. The TOML is the truth;
@@ -53,6 +57,16 @@ impl Id {
         Ok(Id(text.to_owned()))
     }
 
+    /// `text` as an id a row of `kind` covers: one of the kind's own, as
+    /// [`Id::of`] holds it, or under a `trace:` row a `witness:` id, a
+    /// fence that pins the engine's side of the row (harness §4.3, #1650).
+    fn covered(kind: Kind, text: &str) -> Result<Id> {
+        if kind == Kind::Trace && text.starts_with(Kind::Witness.prefix()) {
+            return Ok(Id(text.to_owned()));
+        }
+        Id::of(kind, text)
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -95,6 +109,13 @@ impl Divergence {
     pub fn ids(&self) -> impl Iterator<Item = &Id> {
         std::iter::once(&self.id).chain(&self.covers)
     }
+
+    /// Whether `id`, an id the row holds, is a fence pinning the engine's
+    /// side of the row rather than a difference the row accepts: a
+    /// `witness:` id a `trace:` row covers (#1650).
+    fn pins(&self, id: &str) -> bool {
+        self.kind == Kind::Trace && id.starts_with(Kind::Witness.prefix())
+    }
 }
 
 /// One row as the file spells it, before its ids are decoded.
@@ -118,7 +139,7 @@ impl TryFrom<Row> for Divergence {
         let mut covers = BTreeSet::new();
         for text in &row.covers {
             let covered =
-                Id::of(row.kind, text).map_err(|e| anyhow!("{e}, in the covers of {id}"))?;
+                Id::covered(row.kind, text).map_err(|e| anyhow!("{e}, in the covers of {id}"))?;
             if covered == id || !covers.insert(covered) {
                 bail!("the id {text:?} is named twice in the row {id}");
             }
@@ -312,9 +333,22 @@ impl Registry {
         self.held.get(id).and_then(|&n| self.rows.get(n))
     }
 
-    /// The row that accepts a difference for `id`, if one does.
+    /// The row that accepts a difference for `id`, if one does. A fence
+    /// an accepted `trace:` row covers has none: the row is what it pins,
+    /// and [`Registry::pinning`] answers for it.
     pub fn accepted(&self, id: &str) -> Option<&Divergence> {
-        self.row(id).filter(|r| r.status == Status::Accepted)
+        self.row(id)
+            .filter(|r| r.status == Status::Accepted && !r.pins(id))
+    }
+
+    /// The accepted `trace:` row that covers `id`, a `witness:` id: the
+    /// fence pins the engine's side of the row, so it is held to its
+    /// pinned `expect` against the engine alone, and the oracle's run is
+    /// recorded and not judged (harness §4.3, §8; #1650). An `open` row
+    /// pins nothing, as it accepts nothing.
+    pub(crate) fn pinning(&self, id: &str) -> Option<&Divergence> {
+        self.row(id)
+            .filter(|r| r.status == Status::Accepted && r.pins(id))
     }
 
     /// Propose a row: status `open`, empty reason, dated today, appended to

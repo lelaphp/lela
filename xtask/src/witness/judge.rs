@@ -21,6 +21,12 @@
 //! (harness §8, ledger 55). The name is resolved against the pin before
 //! anything runs, so the two runs are handed one regime and never two.
 //!
+//! A fence an accepted `trace:` row covers pins the engine's side of the
+//! row ([`alone`]; harness §4.3, §8; #1650): it is held to its pinned
+//! `expect` against the engine alone, and the oracle still runs, its
+//! signal, status and bytes recorded in the verdict's note and not judged.
+//! A fence no such row covers whose oracle ends on a signal is a bork.
+//!
 //! A fence naming a `locale=<name>` is asked first whether the host knows
 //! it, as a `.phpt`'s `--SKIPIF--` asks `setlocale` (#1678): the oracle
 //! and the linked engine each run [`probe`], and where neither can move
@@ -33,7 +39,7 @@ use super::anchor::{Entry, Record};
 use super::fence::{Exit, Served, Witness};
 use super::process::{self, Binary};
 use super::{Accept, Ask, Captured, Judged, Judgement, fence};
-use crate::divergence::Registry;
+use crate::divergence::{Divergence, Registry};
 use crate::oracle::expect::Expectation;
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
 use crate::scratch::Full;
@@ -61,8 +67,9 @@ pub(super) struct Kept {
     pub(super) entered: Record,
 }
 
-/// One witness, end to end: the oracle's run, the status `--accept` may
-/// capture from it, the run of record, and the verdict. `regime` is the
+/// One witness, end to end: the oracle's run, then the fence held to it
+/// and to the engine's ([`both`]), or, where an accepted `trace:` row
+/// covers the fence, to the engine's alone ([`alone`]). `regime` is the
 /// block the fence's own `regime=<name>` names, resolved against the pin
 /// by the caller once for both runs, so the oracle is passed the name and
 /// the linked engine the ini it carries and neither is passed another's.
@@ -107,6 +114,30 @@ pub(super) fn one(
             return borked(witness, trouble.context("the oracle did not run it"));
         }
     };
+    let on = On {
+        oracle,
+        registry,
+        ask,
+        regime,
+        binary,
+    };
+    match registry.pinning(&witness.id()) {
+        Some(row) => alone(&on, witness, row, &oracle_out, kept),
+        None => both(&on, witness, &oracle_out, kept),
+    }
+}
+
+/// A fence no accepted `trace:` row covers, held to the oracle's run and
+/// the engine's by one rule ([`held`]): the status `--accept` may capture
+/// from the oracle, the streams a `capture` writes from it, the run of
+/// record, and the verdict. An oracle that ends on a signal leaves no
+/// status to pin, and the fence borks.
+fn both(
+    on: &On<'_>,
+    witness: &Witness,
+    oracle_out: &Observation,
+    kept: &mut Kept,
+) -> Result<Judged> {
     let Some(status) = oracle_out.exit.code() else {
         kept.entered = Record::Unserved;
         return Ok(judged(
@@ -122,7 +153,7 @@ pub(super) fn one(
     // (design §8, the paragraph on witnesses in rustdoc).
     let mut exit = witness.exit;
     let mut head = witness.fences[0].clone();
-    if ask.accept != Accept::Nothing && exit == Exit::Bare {
+    if on.ask.accept != Accept::Nothing && exit == Exit::Bare {
         head = fence::pinned(&head, status);
         exit = Exit::Pinned(status);
     }
@@ -130,8 +161,8 @@ pub(super) fn one(
     // where a second run from a scratch tree apart prints them again
     // (#801); one it refuses is written nothing, and names the line.
     let mut captured = witness.clone();
-    let (was, now) = if ask.accept == Accept::Streams && witness.capture {
-        let streams = again(oracle, witness, &oracle_out).and_then(|(stdout, stderr)| {
+    let (was, now) = if on.ask.accept == Accept::Streams && witness.capture {
+        let streams = again(on.oracle, witness, oracle_out).and_then(|(stdout, stderr)| {
             fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
         });
         let (stdout, stderr, lines) = match streams {
@@ -172,23 +203,147 @@ pub(super) fn one(
         ));
     }
 
-    let ran = match serve(oracle, binary, witness, regime) {
+    let ran = match of_record(on, witness, kept) {
+        Ok(ran) => ran,
+        Err(verdict) => return verdict,
+    };
+    Ok(held(
+        on.oracle.pin(),
+        on.registry,
+        witness,
+        exit,
+        &[(Run::Oracle, oracle_out), (Run::Engine, &ran)],
+    ))
+}
+
+/// The run of record, with what it entered kept, or the bork where it did
+/// not run.
+fn of_record(
+    on: &On<'_>,
+    witness: &Witness,
+    kept: &mut Kept,
+) -> Result<Observation, Result<Judged>> {
+    match serve(on.oracle, on.binary, witness, on.regime) {
         Ok((out, natives)) => {
             kept.entered = Record::Entered(natives);
-            out
+            Ok(out)
         }
         Err(trouble) => {
             kept.entered = Record::Unserved;
-            return borked(witness, trouble);
+            Err(borked(witness, trouble))
         }
+    }
+}
+
+/// What a witness is judged on beside the fence itself: the oracle, the
+/// registry, what the run was asked for, the regime resolved for both runs
+/// and the binary a `process` fence is served by.
+struct On<'a> {
+    oracle: &'a Oracle<'a>,
+    registry: &'a Registry,
+    ask: &'a Ask,
+    regime: Option<&'a Regime>,
+    binary: &'a Binary,
+}
+
+/// A fence `row`, an accepted `trace:` row, covers: held to its pinned
+/// `expect` against the engine alone (harness §4.3, §8; #1650). The oracle
+/// has run, and how it ended and what it printed is recorded in the note,
+/// not judged. The engine's run is the one the fence is held to, so it is
+/// the one `--accept` captures a bare `exit` from; a fence marked
+/// `capture` is written nothing, since what a capture writes is the
+/// oracle's streams.
+fn alone(
+    on: &On<'_>,
+    witness: &Witness,
+    row: &Divergence,
+    oracle_out: &Observation,
+    kept: &mut Kept,
+) -> Result<Judged> {
+    let recorded = format!(
+        "held to the engine alone under {}; the oracle's run, not judged: {}",
+        row.id,
+        ended(oracle_out)
+    );
+    if on.ask.accept == Accept::Streams && witness.capture {
+        kept.entered = Record::Unserved;
+        return Ok(judged(
+            witness,
+            Judgement::Unpinned,
+            format!(
+                "`capture` writes the oracle's streams, and this fence is {recorded}; write the fence by hand and drop `capture`"
+            ),
+        ));
+    }
+    let ran = match of_record(on, witness, kept) {
+        Ok(ran) => ran,
+        Err(verdict) => return verdict,
     };
-    Ok(held(
-        oracle.pin(),
-        registry,
+    let mut exit = witness.exit;
+    if on.ask.accept != Accept::Nothing && exit == Exit::Bare {
+        let Some(status) = ran.exit.code() else {
+            return Ok(judged(
+                witness,
+                Judgement::Bork,
+                format!(
+                    "{} ended on a signal, so there is no status to pin; {recorded}",
+                    Run::Engine
+                ),
+            ));
+        };
+        let head = witness.fences[0].clone();
+        kept.captured.push(Captured {
+            file: witness.file.clone(),
+            line: witness.fence,
+            now: vec![fence::pinned(&head, status)],
+            was: vec![head],
+        });
+        exit = Exit::Pinned(status);
+    }
+    if exit == Exit::Bare {
+        return Ok(judged(
+            witness,
+            Judgement::Unpinned,
+            format!(
+                "the fence's `exit` is bare and {} exits {}; `xtask witness --accept` writes it, and nothing else does; {recorded}",
+                Run::Engine,
+                ran.exit
+            ),
+        ));
+    }
+    let mut verdict = held(
+        on.oracle.pin(),
+        on.registry,
         witness,
         exit,
-        [(Run::Oracle, &oracle_out), (Run::Engine, &ran)],
-    ))
+        &[(Run::Engine, &ran)],
+    );
+    if verdict.judgement == Judgement::Pass {
+        return Ok(judged(witness, Judgement::Covered, recorded));
+    }
+    verdict.note = format!("{recorded}\n{}", verdict.note);
+    Ok(verdict)
+}
+
+/// How a run ended and what it printed, as a covered fence's note records
+/// the oracle's: the status or the signal, and each stream's length and
+/// blob id, so a reading over another oracle run says whether the bytes
+/// moved.
+fn ended(ran: &Observation) -> String {
+    let stream = |bytes: &[u8]| {
+        let id = crate::git::blob_id(bytes);
+        format!(
+            "{} bytes, blob {}",
+            bytes.len(),
+            id.get(..12).unwrap_or(&id)
+        )
+    };
+    format!(
+        "{}, stdout {}, stderr {}",
+        ran.exit,
+        stream(&ran.stdout),
+        stream(&ran.stderr)
+    )
 }
 
 /// The oracle's run of a witness: the snippet under the recipe and the
@@ -401,7 +556,7 @@ pub(super) fn held(
     registry: &Registry,
     witness: &Witness,
     exit: Exit,
-    runs: [(Run, &Observation); 2],
+    runs: &[(Run, &Observation)],
 ) -> Judged {
     let id = witness.id();
     let expected = shown(
@@ -410,7 +565,7 @@ pub(super) fn held(
         exit.asserted(),
     );
     let mut missed = Vec::new();
-    for (run, observed) in runs {
+    for &(run, observed) in runs {
         let met = match met(pin, witness, exit, observed) {
             Ok(met) => met,
             Err(trouble) => {

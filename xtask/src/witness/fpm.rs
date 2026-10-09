@@ -270,13 +270,12 @@ fn tail(log: &Path) -> String {
 /// own variables for `uri` ahead of `given`, and what php-fpm writes back
 /// on `FCGI_STDOUT` and `FCGI_STDERR` until `FCGI_END_REQUEST`.
 fn exchange(
-    mut stream: UnixStream,
+    stream: UnixStream,
     uri: &str,
     given: &[(String, OsString)],
     stdin: Option<&[u8]>,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut params = Vec::new();
-    for (name, value) in [
+    let server = [
         ("GATEWAY_INTERFACE", "FastCGI/1.0"),
         ("SCRIPT_NAME", uri),
         ("REQUEST_URI", uri),
@@ -285,11 +284,30 @@ fn exchange(
         ("REMOTE_ADDR", "127.0.0.1"),
         ("SERVER_NAME", "localhost"),
         ("SERVER_PROTOCOL", "HTTP/1.1"),
-    ] {
-        pair(&mut params, name.as_bytes(), value.as_bytes());
-    }
-    for (name, value) in given {
-        pair(&mut params, name.as_bytes(), value.as_encoded_bytes());
+    ];
+    let pairs = server
+        .iter()
+        .map(|(name, value)| (name.as_bytes(), value.as_bytes()))
+        .chain(
+            given
+                .iter()
+                .map(|(name, value)| (name.as_bytes(), value.as_encoded_bytes())),
+        );
+    round(stream, pairs, stdin)
+}
+
+/// Request 1 written to `stream` with `pairs` as its `FCGI_PARAMS` and
+/// `stdin` as its `FCGI_STDIN`, and what php-fpm writes back on
+/// `FCGI_STDOUT` and `FCGI_STDERR` until `FCGI_END_REQUEST`: a fence's
+/// request and a host line's (`super::host`, #1975).
+pub(super) fn round<'a>(
+    mut stream: UnixStream,
+    pairs: impl IntoIterator<Item = (&'a [u8], &'a [u8])>,
+    stdin: Option<&[u8]>,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut params = Vec::new();
+    for (name, value) in pairs {
+        pair(&mut params, name, value);
     }
     let mut out = record(BEGIN_REQUEST, &[0, 1, 0, 0, 0, 0, 0, 0]);
     out.extend(record(PARAMS, &params));

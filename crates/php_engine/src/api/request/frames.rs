@@ -202,6 +202,7 @@ impl Request {
         self.switch_stack(other);
         self.swap_error_reporting(&mut other.error_reporting);
         self.swap_stack_limit(&mut other.stack_limit);
+        std::mem::swap(&mut self.fibers.active, &mut other.active);
     }
 
     /// The stack the request runs on and `other`'s change places, the
@@ -863,7 +864,9 @@ impl Request {
     }
 
     /// `EG(current_execute_data)`: whether a frame or a native's call
-    /// stands, which is every release inside a serving and none of the
+    /// stands, or the bottom frame of a coroutine's stack, a
+    /// `Fiber`'s or an extension's, which is every release inside a
+    /// serving and none of the
     /// releases `php_request_shutdown` makes after the main frame popped.
     /// A frame being popped is not one: `zend_leave_helper` has made its
     /// caller current before it frees the CVs (`Z/Zend/zend_vm_def.h:2970`),
@@ -890,7 +893,7 @@ impl Request {
     ///   thrown in %s on line 6
     /// ```
     pub fn executing(&self) -> bool {
-        self.fibers.active().is_some()
+        self.fibers.on_context_stack()
             || self.vm.frames().iter().any(|frame| !frame.leaving)
             || self.vm.serving_call().is_some()
     }

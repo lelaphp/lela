@@ -219,21 +219,15 @@ fn evaluate(
         // change to a file, so the pattern is asked of what the change
         // adds and not of what the file already carries (#510): a write
         // that leaves every hit where it stood adds none and fires on
-        // nothing.
+        // nothing. It is asked of the file the write leaves, never of the
+        // text the call types alone, since an edit can finish a hit its
+        // own text does not hold, and a pattern over a block is never
+        // whole in an edit inside it (#2413).
         match line {
             Some(line) => unexcused(line.text()) && !excused(line.text()),
-            // Text the call writes with no hit in it adds none whatever
-            // the file holds, so the file is read only where there is a
-            // hit to place.
-            None => match call.written().filter(|text| regex.is_match(text)) {
-                Some(_) => match call.rewrite(root, path) {
-                    Some((before, after)) => {
-                        adds(&regex, &after, &before) && unexcused(&after) && !excused(&after)
-                    }
-                    None => false,
-                },
-                None => false,
-            },
+            None => call.rewrite(root, path).is_some_and(|(before, after)| {
+                adds(&regex, &after, &before) && unexcused(&after) && !excused(&after)
+            }),
         }
     } else if p.deny == Some(true) {
         true
