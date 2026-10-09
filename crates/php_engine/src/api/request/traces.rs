@@ -351,15 +351,15 @@ impl Request {
             let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
             if let Some((file, line)) = site {
                 // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
-                // name, one more owner of the interned string.
-                let file = Value::string(self.interned(&file)?);
+                // name, one more owner of its string.
+                let file = Value::string(self.op_array_string(&file)?);
                 self.set_string_key(&mut row, b"file", Owner::adopt(self, file))?;
                 self.set_string_key(&mut row, b"line", Owner::adopt(self, Value::int(line)))?;
             }
             match traced {
                 Traced::Function(function) => {
                     let name = self.declared_name(function);
-                    let name = Value::string(self.interned(name.as_bytes())?);
+                    let name = Value::string(self.op_array_string(name.as_bytes())?);
                     self.set_string_key(&mut row, b"function", Owner::adopt(self, name))?;
                     // `ce->name` whole: an anonymous class's with its NUL
                     // and site; a receiver's class name for a function of
@@ -370,7 +370,7 @@ impl Request {
                         (None, None) => None,
                     };
                     if let Some(class) = class {
-                        let class = Value::string(self.interned(&class)?);
+                        let class = Value::string(self.op_array_string(&class)?);
                         self.set_string_key(&mut row, b"class", Owner::adopt(self, class))?;
                         if provide_object && let Some(this) = this {
                             let this = Owner::take(self, this.as_value());

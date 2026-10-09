@@ -3370,6 +3370,8 @@ fn included(
         let value = exec::constant(main, ConstIdx(only.op1));
         req.addref(&value);
         copy.free(req);
+        // `destroy_op_array`: its names go with it.
+        req.release_unit_names(Some(&unit));
         return answered(req, frame, returns_to, value);
     }
     let callee = req.push_code_frame(unit, frame, returns_to)?;
