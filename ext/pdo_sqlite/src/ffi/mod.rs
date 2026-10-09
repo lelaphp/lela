@@ -50,27 +50,8 @@ pub use sys::{
     SQLITE_TOOBIG,
 };
 
-/// A callable kept past the call it was given to, `zend_fcc_dup`: the
-/// resolved callee and the value it came from, one owner of the value.
-#[derive(Clone)]
-pub struct Handler {
-    pub callable: Callable,
-    pub value: Value,
-}
-
-impl Handler {
-    /// The callable and one more owner of `value`.
-    pub fn keep(req: &Request, callable: Callable, value: Value) -> Handler {
-        let value = value.deref();
-        req.addref(&value);
-        Handler { callable, value }
-    }
-
-    /// `zend_fcc_dtor`.
-    pub fn release(self, req: &mut Request) {
-        req.release(self.value);
-    }
-}
+/// A callable kept past the call it was given to, `zend_fcc_dup`.
+pub type Handler = Owner<Callable>;
 
 /// What a registered function serves.
 pub enum Function {
@@ -79,11 +60,15 @@ pub enum Function {
 }
 
 impl Function {
-    /// The handlers it holds.
-    pub fn handlers(&self) -> Vec<Handler> {
+    /// What its handlers count, for the cycle collector
+    /// (`zend_get_gc_buffer_add_fcc`).
+    pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
         match self {
-            Function::Scalar(handler) => vec![handler.clone()],
-            Function::Aggregate { step, finalize } => vec![step.clone(), finalize.clone()],
+            Function::Scalar(handler) => handler.visit(visit),
+            Function::Aggregate { step, finalize } => {
+                step.visit(visit);
+                finalize.visit(visit);
+            }
         }
     }
 
@@ -95,13 +80,13 @@ impl Function {
         }
     }
 
-    /// Its handlers given up.
+    /// Its handlers given up, `zend_fcc_dtor`.
     pub fn release(self, req: &mut Request) {
         match self {
-            Function::Scalar(handler) => handler.release(req),
+            Function::Scalar(handler) => handler.give_up(req),
             Function::Aggregate { step, finalize } => {
-                step.release(req);
-                finalize.release(req);
+                step.give_up(req);
+                finalize.give_up(req);
             }
         }
     }
@@ -132,7 +117,7 @@ pub trait Callbacks: Sync {
     fn scalar(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         call: &mut Invocation<'_>,
     ) -> Result<(), Thrown>;
 
@@ -140,7 +125,7 @@ pub trait Callbacks: Sync {
     fn step(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         state: &mut Option<Box<Aggregate>>,
         args: Vec<Argument>,
     ) -> Result<(), Thrown>;
@@ -150,7 +135,7 @@ pub trait Callbacks: Sync {
     fn finalize(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         state: Option<Box<Aggregate>>,
         call: &mut Invocation<'_>,
     ) -> Result<(), Thrown>;
@@ -160,7 +145,7 @@ pub trait Callbacks: Sync {
     fn collate(
         &self,
         req: &mut Request,
-        handler: &Handler,
+        handler: &Callable,
         left: &[u8],
         right: &[u8],
     ) -> (i32, Option<Thrown>);
@@ -171,7 +156,7 @@ pub trait Callbacks: Sync {
     fn authorize(
         &self,
         req: &mut Request,
-        handler: Option<&Handler>,
+        handler: Option<&Callable>,
         action: i32,
         names: [Option<Vec<u8>>; 4],
         pending: bool,
@@ -652,10 +637,14 @@ impl Db {
         unsafe { std::mem::replace(&mut (*self.0.as_ptr()).authorizer, handler) }
     }
 
-    /// Every handler the connection holds, for the cycle collector.
-    pub fn authorizer(&self) -> Option<Handler> {
-        // SAFETY: an owner's allocation; the field is copied out.
-        unsafe { (*self.0.as_ptr()).authorizer.clone() }
+    /// What the authorizer set counts, for the cycle collector
+    /// (`zend_get_gc_buffer_add_fcc`).
+    pub fn visit_authorizer(&self, visit: &mut dyn FnMut(Value)) {
+        // SAFETY: an owner's allocation; the field is read and nothing
+        // runs while it is.
+        if let Some(handler) = unsafe { &(*self.0.as_ptr()).authorizer } {
+            handler.visit(visit);
+        }
     }
 
     /// `sqlite3_load_extension` with the C API's loading enabled for the
@@ -839,18 +828,18 @@ impl Registration {
         }
     }
 
-    /// The handlers it holds, for the cycle collector.
-    pub fn handlers(&self) -> Vec<Handler> {
+    /// What its handlers count, for the cycle collector.
+    pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
         match self.kind {
             Kind::Function(registered) => {
                 // SAFETY: a registration's box, live until `unregister`.
                 let registered = unsafe { &*registered };
-                registered.function.handlers()
+                registered.function.visit(visit);
             }
             Kind::Collation(registered) => {
                 // SAFETY: as above.
                 let registered = unsafe { &*registered };
-                vec![registered.handler.clone()]
+                registered.handler.visit(visit);
             }
         }
     }
@@ -1150,8 +1139,8 @@ unsafe extern "C" fn authorize(
         return SQLITE_OK;
     };
     // SAFETY: the connection's shared state, live while it calls back;
-    // the handler is copied out.
-    let handler = unsafe { (*inner.as_ptr()).authorizer.clone() };
+    // a view of the handler is copied out.
+    let handler = unsafe { (*inner.as_ptr()).authorizer.as_deref().cloned() };
     let Some(req) = request(inner) else {
         return SQLITE_OK;
     };

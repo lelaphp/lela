@@ -78,8 +78,9 @@ pub(crate) struct DualItState {
     cache: Option<Owner<PhpArray>>,
     children: Option<Owner<PhpObject>>,
     string: Option<Owner<Value>>,
-    callback: Option<Callable>,
-    callback_value: Option<Owner<Value>>,
+    /// `u.callback_filter`, the callable kept as `zend_fcc_addref` keeps
+    /// it.
+    callback: Option<Owner<Callable>>,
     appended: Option<Owner<PhpObject>>,
     regex: Option<RegexIt>,
 }
@@ -1055,7 +1056,7 @@ impl CallbackFilterIterator {
                 it.data.as_deref().copied(),
                 it.key.as_deref().copied(),
                 it.inner.as_deref().copied(),
-                it.callback.clone(),
+                it.callback.as_deref().cloned(),
             )
         })?;
         let (Some(data), Some(key), Some(callback)) = (data, key, callback) else {
@@ -1109,8 +1110,8 @@ impl RecursiveCallbackFilterIterator {
     fn hasChildren(this: This<Self>) -> bool;
 
     /// `RecursiveCallbackFilterIterator::getChildren()`: the children in a
-    /// new object of this class with the same callback; the witness is the
-    /// constructor's.
+    /// new object of this class with the callback made again from what it
+    /// resolved to ([`Callable::made_again`], which holds the witness).
     #[php(tentative)]
     fn getChildren(
         req: &mut Request,
@@ -1120,7 +1121,7 @@ impl RecursiveCallbackFilterIterator {
         let (Some(inner), Some(callback)) = dual(req, this, |it| {
             (
                 it.inner.as_deref().copied(),
-                it.callback_value.as_deref().copied(),
+                it.callback.as_deref().cloned(),
             )
         })?
         else {
@@ -1130,7 +1131,15 @@ impl RecursiveCallbackFilterIterator {
             ));
         };
         let children = crate::method(req, inner, b"getChildren")?;
-        let made = instantiate(req, this.class(), &[*children, callback]);
+        let callback = match callback.made_again(req) {
+            Ok(callback) => callback,
+            Err(thrown) => {
+                children.give_up(req);
+                return Err(thrown);
+            }
+        };
+        let made = instantiate(req, this.class(), &[*children, *callback]);
+        callback.give_up(req);
         children.give_up(req);
         Ok(made?.into_instance())
     }
@@ -2691,7 +2700,26 @@ fn construct_inner<C: Class>(
 }
 
 /// `spl_dual_it_construct`'s `DIT_CallbackFilterIterator` arm, `Of`: the
-/// callable kept, and the value it came from beside it for `getChildren`.
+/// callable kept with the owners `zend_fcc_addref` takes, so a
+/// `Class::method` string resolved with `$this` in scope keeps the object
+/// it was resolved to, as php's does:
+///
+/// ```php
+/// class A { public $n = 'kept'; function __destruct(){ echo "dtor\n"; } function f($x){ echo $this->n, "\n"; return true; }
+///   function make(){ return new CallbackFilterIterator(new ArrayIterator([1]), 'A::f'); } }
+/// $it = (new A)->make();
+/// echo "made\n";
+/// foreach ($it as $v) echo $v, "\n";
+/// unset($it);
+/// echo "end\n";
+/// ```
+/// ```expect
+/// made
+/// kept
+/// 1
+/// dtor
+/// end
+/// ```
 fn construct_callback<C: Class>(
     req: &mut Request,
     this: PhpObject,
@@ -2703,14 +2731,10 @@ fn construct_callback<C: Class>(
     unconstructed(req, this, base)?;
     arity(req, 2, Some(2))?;
     let inner = iterator.hold(req)?.object();
-    let given = callback.value();
     let callback = callback.hold(req)?;
     dual_set(req, this, kind, inner)?;
-    let given = Owner::take(req, given);
-    let old = dual(req, this, |it| {
-        it.callback = Some(callback);
-        it.callback_value.replace(given)
-    })?;
+    let callback = Owner::take(req, callback);
+    let old = dual(req, this, |it| it.callback.replace(callback))?;
     crate::give_up(req, old);
     Ok(())
 }
@@ -2797,12 +2821,7 @@ impl ObjectHandlers for DualHandlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         let held = object.native_mut::<DualIt>(req).map(|it| {
             (
-                [
-                    it.data.take(),
-                    it.key.take(),
-                    it.string.take(),
-                    it.callback_value.take(),
-                ],
+                [it.data.take(), it.key.take(), it.string.take()],
                 [it.inner.take(), it.children.take(), it.appended.take()],
                 it.cache.take(),
                 it.callback.take(),
@@ -2820,9 +2839,7 @@ impl ObjectHandlers for DualHandlers {
                 object.give_up(req);
             }
             crate::give_up(req, cache);
-            // A view: the owner of its value is `callback_value`'s, given
-            // up above.
-            drop(callback);
+            crate::give_up(req, callback);
         }
     }
 
@@ -2843,11 +2860,11 @@ impl ObjectHandlers for DualHandlers {
     /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(it) = object.native::<DualIt>(req) {
-            for value in [&it.data, &it.key, &it.string, &it.callback_value]
-                .into_iter()
-                .flatten()
-            {
+            for value in [&it.data, &it.key, &it.string].into_iter().flatten() {
                 visit(**value);
+            }
+            if let Some(callback) = &it.callback {
+                callback.visit(visit);
             }
             for object in [&it.inner, &it.children, &it.appended]
                 .into_iter()

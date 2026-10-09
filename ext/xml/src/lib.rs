@@ -187,12 +187,12 @@ impl Registered {
     }
 }
 
-/// One callable a handler slot holds: `zend_fcall_info_cache` and the
-/// owner it keeps, and for one `xml_set_object`'s object resolved by
-/// name, the name, which a later `xml_set_object` resolves again.
+/// One callable a handler slot holds: `zend_fcall_info_cache` kept as
+/// `zend_fcc_dup` keeps it, and for one `xml_set_object`'s object
+/// resolved by name, the name, which a later `xml_set_object` resolves
+/// again.
 pub(crate) struct Handler {
-    pub(crate) callable: Callable,
-    owned: Value,
+    pub(crate) callable: Owner<Callable>,
     by_name: Option<Vec<u8>>,
 }
 
@@ -352,7 +352,7 @@ impl ObjectHandlers for Handlers {
             visit(o.as_value());
         }
         for h in p.handlers.0.iter().flatten() {
-            visit(h.owned);
+            h.callable.visit(visit);
         }
         if let Some(into) = p.into {
             visit(into.data.as_value());
@@ -370,7 +370,7 @@ impl ObjectHandlers for Handlers {
                 into.release(req);
             }
             for h in p.handlers.0.into_iter().flatten() {
-                req.release(h.owned);
+                h.callable.give_up(req);
             }
             if let Some(o) = p.object {
                 req.release(o.as_value());
@@ -451,7 +451,7 @@ fn parse(req: &mut Request, object: PhpObject, data: &[u8], last: bool) -> Resul
 /// tries it quietly: a callable or `null` (`F!`), a string (`S`, under the
 /// caller's `strict_types`), or neither.
 enum Given {
-    Callable(Callable, Value),
+    Callable(Callable),
     Null,
     Name(Vec<u8>),
     Neither,
@@ -463,7 +463,7 @@ impl Given {
             return Ok(Given::Null);
         }
         if let Ok(callable) = callable_checked(req, value) {
-            return Ok(Given::Callable(callable, *value));
+            return Ok(Given::Callable(callable));
         }
         match coerce_param(req, value, &DeclType::String, position) {
             // The slot holds the string the coercion made; no owner is
@@ -506,14 +506,10 @@ fn by_name(
     };
     let class = object.class();
     match known_method(req, class, &Name(name.into()), Some(object)) {
-        Some(callable) => {
-            req.addref(&object.as_value());
-            Ok(Some(Handler {
-                callable,
-                owned: object.as_value(),
-                by_name: Some(name.to_vec()),
-            }))
-        }
+        Some(callable) => Ok(Some(Handler {
+            callable: Owner::take(req, callable),
+            by_name: Some(name.to_vec()),
+        })),
         None if position == 0 => Err(None),
         None => {
             let class_name = req
@@ -544,14 +540,10 @@ fn handler_of(
 ) -> Result<Option<Handler>, Thrown> {
     match given {
         Given::Null => Ok(None),
-        Given::Callable(callable, value) => {
-            req.addref(&value);
-            Ok(Some(Handler {
-                callable,
-                owned: value,
-                by_name: None,
-            }))
-        }
+        Given::Callable(callable) => Ok(Some(Handler {
+            callable: Owner::take(req, callable),
+            by_name: None,
+        })),
         Given::Name(name) => by_name(req, parser, &name, position).map_err(|e| {
             e.unwrap_or_else(|| {
                 php_ext::raising::fatal(req, "InternalError: unreachable handler check")
@@ -582,13 +574,13 @@ fn install(req: &mut Request, parser: PhpObject, slots: Vec<(Hook, Option<Handle
     if let Some(p) = parser_mut(req, parser) {
         for (hook, handler) in slots {
             if let Some(old) = std::mem::replace(p.handlers.slot(hook), handler) {
-                released.push(old.owned);
+                released.push(old.callable);
             }
             p.registered.set(hook);
         }
     }
-    for v in released {
-        req.release(v);
+    for old in released {
+        old.give_up(req);
     }
 }
 
@@ -640,7 +632,7 @@ fn set_element_handler(
         Ok(end) => end,
         Err(thrown) => {
             if let Some(h) = start {
-                req.release(h.owned);
+                h.callable.give_up(req);
             }
             return Err(thrown);
         }
@@ -666,7 +658,7 @@ fn set_object(req: &mut Request, parser: PhpObject, new: PhpObject) -> Result<()
             };
             let old = parser_mut(req, parser).and_then(|p| p.handlers.slot(hook).take());
             if let Some(old) = old {
-                req.release(old.owned);
+                old.callable.give_up(req);
             }
             let swapped = {
                 let held = parser_mut(req, parser).and_then(|p| p.object.replace(new));

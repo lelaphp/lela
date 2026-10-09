@@ -1244,7 +1244,7 @@ fn session_status(req: &mut Request) -> i64 {
 #[php_function]
 fn session_register_shutdown(req: &mut Request) -> Result<(), Thrown> {
     let callable = named(req, b"session_write_close")?;
-    req.register_shutdown_function(callable, Vec::new())
+    req.register_shutdown_function(Owner::take(req, callable), Vec::new())
 }
 
 /// The callable a native's name is: the name the bundle declared,
@@ -1464,6 +1464,7 @@ fn session_set_save_handler(
         // replacing an earlier one, or `remove_user_shutdown_function`.
         if register {
             let callable = named(req, b"session_register_shutdown")?;
+            let callable = Owner::take(req, callable);
             req.set_shutdown_function(b"session_shutdown", Some((callable, Vec::new())))?;
         } else {
             req.set_shutdown_function(b"session_shutdown", None)?;

@@ -90,7 +90,7 @@ impl Loader {
         members: &Context,
     ) -> Resolved {
         let loader = req.state::<State>().entity_loader.as_ref();
-        let Some((callable, value)) = loader.map(|(callable, value)| (callable.clone(), **value))
+        let Some((callable, value)) = loader.map(|loader| ((**loader).clone(), loader.value()))
         else {
             return Resolved::Nothing;
         };

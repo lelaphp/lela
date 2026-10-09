@@ -33,7 +33,9 @@ abi::Cache
 abi::Cache::get_or_build
 abi::Cache::new
 abi::Callable
+abi::Callable::made_again
 abi::Callable::required
+abi::Callable::value
 abi::Callable::with_called_scope
 abi::Cases
 abi::Cases::CASES
@@ -1192,6 +1194,7 @@ values::Owner::take
 values::Owner::try_append
 values::Owner::unset
 values::Owner::unset_in_place
+values::Owner::visit
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::clean

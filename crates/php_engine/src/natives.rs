@@ -2360,7 +2360,7 @@ fn register_shutdown_function(
     callback: Callable,
     args: Variadic<Value>,
 ) -> Result<(), Thrown> {
-    callback.addref(req);
+    let callback = Owner::take(req, callback);
     for value in &args.0 {
         req.addref(value);
     }

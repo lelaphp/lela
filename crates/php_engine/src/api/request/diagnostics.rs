@@ -1340,7 +1340,7 @@ impl Request {
         // header block was never sent.
         self.free_tick_functions();
         if let Some(callback) = self.take_header_callback() {
-            callback.release(self);
+            callback.give_up(self);
         }
     }
 

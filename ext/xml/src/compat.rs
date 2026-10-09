@@ -120,7 +120,7 @@ impl Compat {
         let callable: Option<Callable> = self
             .parser(req)
             .and_then(|p| p.handlers.get(hook))
-            .map(|h| h.callable.clone());
+            .map(|h| (*h.callable).clone());
         let Some(callable) = callable.filter(|_| !at.pending()) else {
             release_all(req, arguments);
             return Ok(None);
