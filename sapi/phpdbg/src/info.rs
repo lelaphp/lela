@@ -387,16 +387,31 @@ fn short(value: &Shown) -> String {
     }
 }
 
-/// `phpdbg_dump_prototype`.
-fn prototype(row: &TraceRow) -> String {
-    let mut text = match &row.class {
-        Some((class, join)) => format!("{}{}{}(", lossy(class), lossy(join), lossy(&row.function)),
-        None => format!("{}(", lossy(&row.function)),
+/// `phpdbg_dump_prototype` (`Z/sapi/phpdbg/phpdbg_frame.c:170-243`): the
+/// row's function, with its class, and its arguments, each the function
+/// declares named by its parameter ([`read::declared_parameters`]).
+fn prototype(req: &mut Request, row: &TraceRow) -> String {
+    let class = row.class.as_ref().map(|(class, _)| class.as_slice());
+    let names = read::declared_parameters(req, class, &row.function);
+    let function = match &row.class {
+        Some((class, join)) => format!("{}{}{}", lossy(class), lossy(join), lossy(&row.function)),
+        None => lossy(&row.function),
     };
-    let args: Vec<String> = row.args.iter().map(short).collect();
-    text.push_str(&args.join(", "));
-    text.push(')');
-    text
+    format!("{function}({})", named(&names, &row.args))
+}
+
+/// The arguments as `phpdbg_short_zval_print` writes them, joined by
+/// `, `, each `name=` before it where `names` has one at its place.
+fn named(names: &[Vec<u8>], args: &[Shown]) -> String {
+    let args: Vec<String> = args
+        .iter()
+        .enumerate()
+        .map(|(at, arg)| match names.get(at) {
+            Some(name) => format!("{}={}", lossy(name), short(arg)),
+            None => short(arg),
+        })
+        .collect();
+    args.join(", ")
 }
 
 /// `zend_fetch_debug_backtrace` from the frame `above` frames below the
@@ -439,21 +454,13 @@ pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<Stri
         .map(|row| row.args)
         .unwrap_or_default();
     let names = read::parameter_names(req, frame);
-    let args: Vec<String> = args
-        .iter()
-        .enumerate()
-        .map(|(at, arg)| match names.get(at) {
-            Some(name) => format!("{}={}", lossy(name), short(arg)),
-            None => short(arg),
-        })
-        .collect();
     let function = match class {
         Some(class) => format!("{}::{}", lossy(&class), lossy(&name)),
         None => lossy(&name),
     };
     Some(format!(
         "{function}({}) at {}:{}",
-        args.join(", "),
+        named(&names, &args),
         lossy(&position.file),
         position.line
     ))
@@ -461,7 +468,74 @@ pub fn stackframe(req: &mut Request, frame: FrameRef, above: u32) -> Option<Stri
 
 /// `phpdbg_dump_backtrace` from the frame `frame`, `above` frames below
 /// the innermost: a row per frame, each at the site the row before
-/// named, the first at `frame`'s, and `{main}` last.
+/// named, the first at `frame`'s, and `{main}` last. Each row's
+/// arguments are named as the function it calls declares them, a
+/// native's by its arginfo; a closure's, which no table holds by its
+/// name, are not, and a variadic parameter's are written bare, as
+/// `num_args` counts no variadic one.
+///
+/// ```php
+/// function g($x) { return $x; }
+/// array_map(function ($v) { return g($v); }, [3]);
+/// ```
+/// ```request phpdbg
+/// b g
+/// r
+/// back
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at g]
+/// prompt> [Breakpoint #0 in g() at %SCRATCH%/witness.php:2, hits: 1]
+/// >00002: function g($x) { return $x; }
+///  00003: array_map(function ($v) { return g($v); }, [3]);
+/// prompt> frame #0: g(x=3) at %SCRATCH%/witness.php:2
+/// frame #1: {closure:%SCRATCH%/witness.php:3}(3) at %SCRATCH%/witness.php:3
+///  => array_map(callback=Closure, array=array(1)) (internal function)
+/// frame #2: {main} at %SCRATCH%/witness.php:3
+/// prompt>
+/// ```
+///
+/// A method's arguments are named by its class's function table, and a
+/// variadic function's past its last fixed parameter, a native's as a
+/// user function's:
+///
+/// ```php
+/// function g($x) {
+///     return $x;
+/// }
+/// function v($a, ...$rest) {
+///     return g($a);
+/// }
+/// class C {
+///     function m($p, $q = 2) {
+///         return v($p, 4, 5);
+///     }
+/// }
+/// array_map(function ($v, $w) { return (new C)->m($v); }, [3], [6]);
+/// ```
+/// ```request phpdbg
+/// b g
+/// r
+/// back
+/// q
+/// ```
+/// ```expect
+/// [Successful compilation of %SCRATCH%/witness.php]
+/// prompt> [Breakpoint #0 added at g]
+/// prompt> [Breakpoint #0 in g() at %SCRATCH%/witness.php:3, hits: 1]
+/// >00003:     return $x;
+///  00004: }
+///  00005: function v($a, ...$rest) {
+/// prompt> frame #0: g(x=3) at %SCRATCH%/witness.php:3
+/// frame #1: v(a=3, 4, 5) at %SCRATCH%/witness.php:6
+/// frame #2: C->m(p=3) at %SCRATCH%/witness.php:10
+/// frame #3: {closure:%SCRATCH%/witness.php:13}(3, 6) at %SCRATCH%/witness.php:13
+///  => array_map(callback=Closure, array=array(1), array(1)) (internal function)
+/// frame #4: {main} at %SCRATCH%/witness.php:13
+/// prompt>
+/// ```
 pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
     let rows = trace_from(req, above, limit);
     let position = read::position(req, frame);
@@ -475,14 +549,16 @@ pub fn backtrace(req: &mut Request, frame: FrameRef, above: u32, limit: usize) {
                 out::out(
                     format!(
                         "frame #{at}: {} at {}:{line}\n",
-                        prototype(row),
+                        prototype(req, row),
                         lossy(file)
                     )
                     .as_bytes(),
                 );
                 at += 1;
             }
-            None => out::out(format!(" => {} (internal function)\n", prototype(row)).as_bytes()),
+            None => {
+                out::out(format!(" => {} (internal function)\n", prototype(req, row)).as_bytes());
+            }
         }
         file.clone_from(&row.file);
         if let Some(row_line) = row.line {
