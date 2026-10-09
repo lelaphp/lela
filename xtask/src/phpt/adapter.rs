@@ -268,7 +268,7 @@ impl<'a> Adapter<'a> {
             Err(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
         };
         ini.extend(self.lane.map(Lane::ini));
-        let env = self.environment(phpt, test, &ini, &subset.root);
+        let env = self.environment(phpt, test, &ini, &subset.root)?;
         let mut expected_to_fail = phpt.text("XFAIL").map(|why| why.trim().to_owned());
         if let Some(body) = phpt.filled("SKIPIF") {
             let out = self.run_section(subset, test, &env, ("skip", body), phpt.has("PHPDBG"))?;
@@ -464,16 +464,23 @@ impl<'a> Adapter<'a> {
     /// (run-tests.php:2115). The recipe's `TEST_PHP_EXECUTABLE` names the
     /// pinned php, which is right for a witness and wrong here: what a test
     /// spawns is the binary being measured.
-    fn environment(&self, phpt: &Phpt, test: &Test, ini: &[String], root: &Path) -> Environment {
+    fn environment(
+        &self,
+        phpt: &Phpt,
+        test: &Test,
+        ini: &[String],
+        root: &Path,
+    ) -> Result<Environment> {
         let recipe = &self.oracle.pin().recipe;
         let redirected = test.via.as_ref().map_or(&[][..], |via| &via.env[..]);
         let hosts = (self.hosts.cgi.as_deref(), self.hosts.phpdbg.as_deref());
-        Environment::of_runner(self.binary, hosts, root).of_test(
+        let runner = Environment::of_runner(self.binary, hosts, root, &recipe.environment()?);
+        Ok(runner.of_test(
             redirected,
             phpt,
             &test.file,
             extra_args(&recipe.args, recipe.ini.iter().chain(ini)),
-        )
+        ))
     }
 }
 
