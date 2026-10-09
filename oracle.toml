@@ -97,6 +97,9 @@ PHPRC = "/dev/null"
 # mysqlnd reads localhost as the unix socket, which the container does not expose.
 MYSQL_TEST_HOST = "127.0.0.1"
 PDO_MYSQL_TEST_DSN = "mysql:host=127.0.0.1;dbname=test"
+# config.inc defaults PDO_MYSQL_TEST_HOST to localhost, which mysqlnd reads as the unix socket the
+# container does not expose; upstream's CI names the host beside a TCP DSN (#1928)
+PDO_MYSQL_TEST_HOST = "127.0.0.1"
 # ext/pdo_mysql/tests/common.phpt hands the redirected ext/pdo tests PDO_MYSQL_TEST_USER once the
 # DSN is set, and config.inc defaults pdo_mysql's own tests to root; the redirect is given the
 # same user, or ext/pdo's shared tests connect as the empty one and skip (#1392).
