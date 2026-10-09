@@ -262,6 +262,7 @@ impl Request {
                         .then_some(call.called_scope)
                         .flatten(),
                 ),
+                Link::Fake(_) => continue,
                 Link::Site(_) => return None,
             };
             let scope = self

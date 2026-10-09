@@ -12,7 +12,7 @@
 //! each call of `read()` writes what the kept frame reads as, between
 //! the bytes the program echoes.
 
-use crate::api::abi::{Extension, ExtensionBuilder, Observed, ObserverHandlers};
+use crate::api::abi::{Beneath, Extension, ExtensionBuilder, Observed, ObserverHandlers, chain};
 use crate::api::request::{ChainFrame, FrameId, FrameView, Request};
 use crate::engine::Engine;
 use crate::test::Capture;
@@ -264,6 +264,48 @@ fn a_handler_reads_the_opcode_its_frame_stands_on() {
     );
 }
 
+/// A frame an uncaught throwable or an `exit` leaves stands at
+/// `ZEND_HANDLE_EXCEPTION` for its end handler, php's `EG(exception_op)`,
+/// as the oracle's `zend_test.observer.show_opcode` prints it at `b`'s,
+/// `d`'s and the main file's ends of this program. `a`'s end comes from
+/// the `FAST_RET` that takes the unwind up again past its `finally`,
+/// which this engine reads as `ZEND_FAST_RET` and php as the stale
+/// `ZEND_ECHO` its last saving handler left.
+#[test]
+fn an_end_handler_an_uncaught_throwable_calls_reads_the_exception_op() {
+    fn init(_: &mut Observed<'_>) -> ObserverHandlers {
+        ObserverHandlers {
+            begin: None,
+            end: Some(end),
+        }
+    }
+    fn end(observed: &mut Observed<'_>, _: Option<&crate::api::values::Value>) {
+        let req: &Request = observed;
+        let Some(view) = observed.frame() else {
+            return;
+        };
+        let line = format!("<end {} {}>", name(req, &view), view.opcode());
+        observed.write(line.as_bytes());
+    }
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default().observer(init).build("showing")])
+        .build();
+    let dir = super::observer::scratch("opcode_unwound");
+    let served = super::observer::serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction b() { throw new Exception(\"x\"); }\n\
+         function a() { try { b(); } finally { echo \"f\\n\"; } }\n\
+         function c() { try { a(); } catch (Exception $e) { echo \"c\\n\"; } return 1; }\n\
+         c();\nfunction d() { exit(0); }\nd();\n",
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "<end b ZEND_HANDLE_EXCEPTION>f\n<end a ZEND_FAST_RET>c\n<end c ZEND_RETURN>\
+         <end d ZEND_HANDLE_EXCEPTION><end main.php ZEND_HANDLE_EXCEPTION>"
+    );
+}
+
 /// One frame of a walk as `observer_show_init_backtrace` writes it:
 /// `C::m`, `f`, or `{main}` and the file's base name, `[no active file]`
 /// where it has none; then, for a user frame standing on a stack, the
@@ -392,5 +434,52 @@ fn a_walk_meets_a_fibers_bottom_frame_and_its_resumer() {
     assert_eq!(
         out,
         "[walk:2 < {closure:Standard input code:3}:3 < {main} [no active file] < Fiber::start < {main} Standard input code:4]"
+    );
+}
+
+thread_local! {
+    /// The trace the `thrown` link below read at the first throw.
+    static TRACED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A `thrown` link that reads the trace where it is told, as xdebug's
+/// develop setting prints one from `zend_throw_exception_hook`.
+fn traced_at_throw(req: &mut Request, beneath: Beneath<'_, chain::Throw>) {
+    if TRACED.with_borrow(Option::is_none)
+        && let Ok(trace) = req.backtrace_here(0, 0)
+    {
+        let rendered = req.trace_to_string(*trace, true);
+        trace.give_up(req);
+        TRACED.with_borrow_mut(|traced| *traced = Some(rendered));
+    }
+    beneath.serve(req);
+}
+
+/// `Generator::throw()` tells the links with the generator's frame
+/// current and the caller's below it, as php switches
+/// `EG(current_execute_data)` before `zend_throw_exception_object`: the
+/// trace a link reads has the generator on top, under no file since the
+/// frame below it is the native's, as the oracle's trace of a
+/// destructor served at the same place reads (`Generator::throw`'s witness).
+#[test]
+fn a_thrown_link_at_a_generator_throw_reads_the_generators_frame_on_top() {
+    TRACED.with_borrow_mut(|traced| *traced = None);
+    let engine = Engine::cli_builder()
+        .extensions(&[ExtensionBuilder::default()
+            .thrown(traced_at_throw)
+            .build("tracer")])
+        .build();
+    let served = engine.serve_capture(
+        "<?php\nfunction g() { try { yield 1; } catch (Exception $e) { echo \"caught\\n\"; } }\n\
+         $g = g();\n$g->current();\n$g->throw(new Exception(\"e\"));\n",
+        Capture::default(),
+    );
+    assert_eq!(String::from_utf8_lossy(&served.stdout), "caught\n");
+    assert_eq!(
+        TRACED.with_borrow_mut(Option::take).as_deref(),
+        Some(
+            "#0 [internal function]: g()\n\
+             #1 Standard input code(5): Generator->throw(Object(Exception))\n#2 {main}"
+        )
     );
 }

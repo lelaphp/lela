@@ -348,6 +348,7 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
     if refused_at_entry(req) {
         // php's `execute_ex` hands the refusal to `ZEND_HANDLE_EXCEPTION`,
         // whose uncaught arm ends what the frame's push began.
+        req.vm_mut().stand_at_exception_op(entry, true);
         crate::observer::returned(req, entry, None);
         return Ok(());
     }

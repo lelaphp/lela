@@ -673,6 +673,31 @@ fn in_context<R>(
     Some(out)
 }
 
+/// `f` with the suspended frame of `generator` on top of the running
+/// stack, where a resumption stands it, and its place there; suspended
+/// again after. None where the generator is not suspended or its frame
+/// is not the one `identity` names, so a frame kept past the
+/// generator's end is refused and never read as another's. The
+/// generator is running meanwhile, so what `f` serves cannot resume it.
+pub(crate) fn with_kept_frame<R>(
+    req: &mut Request,
+    generator: PhpObject,
+    identity: crate::api::request::Identity,
+    f: impl FnOnce(&mut Request, FrameRef) -> R,
+) -> Option<R> {
+    let kept = read(req, generator, |g| match &g.execution {
+        Execution::Suspended(kept) => kept.state.identity.get() == Some(identity),
+        Execution::Running | Execution::Closed => false,
+    })?;
+    if !kept {
+        return None;
+    }
+    let frame = push(req, generator)?;
+    let out = f(req, frame);
+    suspend(req, generator).ok()?;
+    Some(out)
+}
+
 /// `f` with the frames of a suspended `generator` and of the generators
 /// it delegates to on the stack, the root's on top, as a resumption
 /// stands them ([`resume`]), and the stack's height below them; each is
@@ -1935,10 +1960,19 @@ impl Generator {
                 "Cannot resume an already running generator",
             ));
         }
-        // Told from the caller's frame, where php switches to the
-        // generator's before it throws (`Z/Zend/zend_generators.c:524-531`),
-        // so a link reading the trace sees the caller on top, not the generator.
-        let thrown = crate::api::raising::throw_object(req, throwable.hand_on());
+        // Told with the generator's frame current, its
+        // `prev_execute_data` the caller's, as php switches to it before
+        // it throws (`Z/Zend/zend_generators.c:524-531`), so a link
+        // reading the trace sees the generator on top at its `yield`.
+        let thrown = in_context(req, root, |req| {
+            crate::api::raising::throw_object(req, throwable.hand_on())
+        });
+        let Some(thrown) = thrown else {
+            return Err(crate::api::raising::fatal(
+                req,
+                "InternalError: a generator's frame not suspended again after Generator::throw() told its links",
+            ));
+        };
         req.leave_pending(&thrown);
         resumed(req, this)?;
         Ok(yielded_now(req, this, |g| g.value))

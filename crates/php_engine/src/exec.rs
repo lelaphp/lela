@@ -469,6 +469,13 @@ pub(crate) struct FrameState {
     /// serves is called from the caller's activation, and this one is
     /// on no chain a backtrace reads.
     pub(crate) leaving: bool,
+    /// `EX(opline) == EG(exception_op)`: the unwinder is answering a
+    /// throwable in the frame (`ZEND_HANDLE_EXCEPTION`), from the throw
+    /// until it lands at a `catch` or a `finally`, or ends the frame at
+    /// its uncaught arm. `opline` keeps the opline that raised, php's
+    /// `EG(opline_before_exception)`, which a trace reads; this is what
+    /// an observer that reads the opcode reads.
+    pub(crate) at_exception_op: bool,
     /// The `Generator` whose frame this is, php's `EX(return_value)`
     /// under `ZEND_CALL_GENERATOR` (`zend_get_running_generator`): set
     /// by `GENERATOR_CREATE` when it moves the frame into the object,
@@ -813,6 +820,9 @@ pub(crate) struct Vm {
     placeholders: Vec<Placeholder>,
     /// The sites standing, `zend_get_attribute_object`'s dummy frames.
     sites: Vec<Site>,
+    /// The switches standing, `EG(current_execute_data)` moved below the
+    /// innermost frame.
+    switches: Vec<Switch>,
     /// How many times a kernel has looked a name up among the linked
     /// functions, the linked classes or a receiver's methods, which is
     /// what a primed cache slot spares: the tests count it across two
@@ -880,7 +890,64 @@ pub(crate) struct Site {
     pub(crate) strict: bool,
 }
 
+/// `EG(current_execute_data)` moved to `to`, a frame below the
+/// innermost, as a debugger moves it to the frame it evaluates code in
+/// (xdebug's `xdebug_do_eval` around `zend_eval_stringl`, phpdbg's
+/// `frame` before `ev`): from where the switch stands, `frame` and
+/// `calls`, php's `prev_execute_data` chain runs on at `to`, and the
+/// frames and the calls between `to` and the switch are on no chain
+/// while it stands. What is pushed above it, the evaluated code's frame
+/// first, links to `to` through it, as that frame's
+/// `EX(prev_execute_data)` names `to`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Switch {
+    pub(crate) frame: usize,
+    pub(crate) calls: usize,
+    pub(crate) to: FrameRef,
+}
+
 impl Vm {
+    /// The switches standing, the innermost last.
+    pub(crate) fn switches(&self) -> &[Switch] {
+        &self.switches
+    }
+
+    /// A switch to `to` above everything standing, until
+    /// [`Vm::pop_switch`].
+    pub(crate) fn push_switch(&mut self, to: FrameRef) {
+        self.switches.push(Switch {
+            frame: self.frames.len(),
+            calls: self.calls.len(),
+            to,
+        });
+    }
+
+    pub(crate) fn pop_switch(&mut self) {
+        self.switches.pop();
+    }
+
+    /// The place of the frame `prev_execute_data` names below the place
+    /// `above`, `frames().len()` asking for the innermost: the frame
+    /// under it on the stack, or the one a switch standing there moved
+    /// `EG(current_execute_data)` to, which stands below it. None below
+    /// the first.
+    pub(crate) fn below(&self, above: usize) -> Option<usize> {
+        self.switches
+            .iter()
+            .rev()
+            .find(|switch| switch.frame == above)
+            .map(|switch| switch.to.0 as usize)
+            .filter(|&to| to < above)
+            .or_else(|| above.checked_sub(1))
+    }
+
+    /// The places of the frames on the chain, innermost first, each
+    /// [`Vm::below`] the one before.
+    pub(crate) fn chained(&self) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(self.below(self.frames.len()), |&at| self.below(at))
+            .take_while(|&at| at < self.frames.len())
+    }
+
     /// The sites standing, the innermost last.
     pub(crate) fn sites(&self) -> &[Site] {
         &self.sites
@@ -975,6 +1042,7 @@ impl Vm {
             extra_named: ExtraNamed::default(),
             calls_below,
             leaving: false,
+            at_exception_op: false,
             generator: None,
             fast_calls: Vec::new(),
             op_array: None,
@@ -1033,9 +1101,20 @@ impl Vm {
         self.frames.pop()
     }
 
-    /// The innermost frame's state, the one the loop is executing.
+    /// The innermost frame's state, `EG(current_execute_data)`: the one
+    /// the loop is executing, or the one a switch standing on top moved
+    /// it to ([`Switch`]).
     pub(crate) fn innermost(&self) -> Option<&FrameState> {
-        self.frames.last()
+        self.below(self.frames.len())
+            .and_then(|at| self.frames.get(at))
+    }
+
+    /// `EX(opline) = EG(exception_op)` on `frame`, or the frame back at
+    /// an opline of its own ([`FrameState::at_exception_op`]).
+    pub(crate) fn stand_at_exception_op(&mut self, frame: FrameRef, at: bool) {
+        if let Some(state) = self.at_mut(frame) {
+            state.at_exception_op = at;
+        }
     }
 
     /// Every frame's state, the entry frame first.

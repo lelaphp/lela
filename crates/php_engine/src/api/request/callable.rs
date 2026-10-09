@@ -537,6 +537,7 @@ impl Request {
                     continue;
                 }
                 super::Link::Frame(_, state) => state,
+                super::Link::Fake(_) => continue,
                 // `zend_get_attribute_object`'s dummy frame: user code
                 // with no scope and no `$this`.
                 super::Link::Site(_) => {

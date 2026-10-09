@@ -691,6 +691,32 @@ impl Request {
     /// #1 %s(4): FFI->raise(%d)
     /// FFI
     /// ```
+    ///
+    /// A destructor a delegated generator's close serves is called from
+    /// php's `execute_fake`, the placeholder its delegating generators'
+    /// frames are expanded from: its row's site is the fake's
+    /// `prev_execute_data`, the resumer's line, and the generators'
+    /// rows follow it, each sited at the one below.
+    ///
+    /// ```php
+    /// class Foo { function __destruct() { debug_print_backtrace(); } }
+    /// function bar() {
+    ///     yield from foo();
+    /// }
+    /// function foo() { $foo = new Foo(); yield; }
+    /// $gen = bar();
+    /// foreach ($gen as $dummy);
+    /// function outer() { yield from middle(); }
+    /// function middle() { yield from foo(); }
+    /// foreach (outer() as $dummy);
+    /// ```
+    /// ```expect
+    /// #0 %s(8): Foo->__destruct()
+    /// #1 %s(8): bar()
+    /// #0 %s(11): Foo->__destruct()
+    /// #1 %s(9): middle()
+    /// #2 %s(11): outer()
+    /// ```
     pub(super) fn trace_rows(&self, chain: &[Link<'_>]) -> Vec<TraceRow> {
         // The include the link below `at` stands at, where it is a user
         // frame at an `INCLUDE_OR_EVAL`.
@@ -699,7 +725,7 @@ impl Request {
                 .get(at.saturating_add(1))
                 .and_then(|below| match below {
                     Link::Frame(_, below) => Some(below),
-                    Link::Call(_) | Link::Site(_) => None,
+                    Link::Call(_) | Link::Site(_) | Link::Fake(_) => None,
                 })
                 .and_then(|below| {
                     let code = exec::body_of(&below.unit, below.body)?;
@@ -709,23 +735,8 @@ impl Request {
                 .and_then(|op| IncludeKind::of(op.extended_value))
         };
         let mut rows = Vec::new();
-        // The site of the link at `below`: a native's is none, but where
-        // it is a trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`) the walk
-        // goes on to the user code that called it.
-        let site_of = |mut below: usize| loop {
-            break match chain.get(below) {
-                Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
-                    .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
-                Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
-                Some(Link::Call(call)) if self.via_trampoline(call.function) => {
-                    below = below.saturating_add(1);
-                    continue;
-                }
-                Some(Link::Call(_)) | None => None,
-            };
-        };
         for (at, link) in chain.iter().enumerate() {
-            let site = site_of(at.saturating_add(1));
+            let site = self.row_site(chain, at.saturating_add(1));
             match link {
                 Link::Frame(slots, state) => {
                     let Some(function) = state.function else {
@@ -796,8 +807,10 @@ impl Request {
                         ));
                     }
                 }
-                // `ZEND_ACC_CALL_VIA_TRAMPOLINE`: no row of its own.
-                Link::Site(_) => {}
+                // `ZEND_ACC_CALL_VIA_TRAMPOLINE`: no row of its own, nor
+                // has the fake, which the walk meets as the generators'
+                // rows after it.
+                Link::Site(_) | Link::Fake(_) => {}
                 Link::Call(call) => {
                     rows.push((
                         Traced::Function(call.function),
@@ -811,6 +824,33 @@ impl Request {
             }
         }
         rows
+    }
+
+    /// The site a row reads off the link at `below` in `chain`: a user
+    /// frame's file and line and a site's; a native's is none, but where
+    /// it is a trampoline (`ZEND_ACC_CALL_VIA_TRAMPOLINE`) the walk goes
+    /// on to the user code that called it, and where it is php's
+    /// `execute_fake`, which has no function, it goes on past the
+    /// generators the fake stands for to its `prev_execute_data`, the
+    /// resumer, as `zend_fetch_debug_backtrace`'s walk from a `prev`
+    /// that is no user code goes on.
+    fn row_site(&self, chain: &[Link<'_>], mut below: usize) -> Option<(Vec<u8>, i64)> {
+        loop {
+            break match chain.get(below) {
+                Some(Link::Frame(_, below)) => exec::body_of(&below.unit, below.body)
+                    .map(|code| (code.filename.0.to_vec(), i64::from(exec::line_of(below)))),
+                Some(Link::Site(below)) => Some((below.file.to_vec(), i64::from(below.line))),
+                Some(Link::Call(call)) if self.via_trampoline(call.function) => {
+                    below = below.saturating_add(1);
+                    continue;
+                }
+                Some(Link::Fake(generators)) => {
+                    below = below.saturating_add(1).saturating_add(*generators);
+                    continue;
+                }
+                Some(Link::Call(_)) | None => None,
+            };
+        }
     }
 
     /// `zend_trace_to_string` (`Z/Zend/zend_exceptions.c:668`):
