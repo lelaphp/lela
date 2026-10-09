@@ -12,12 +12,13 @@ use regex_lite::Regex;
 use serde_json::{Value, json};
 
 use super::approval::{Admission, LIFTED};
-use super::argv::Line;
+use super::argv::{Argv, Line};
 use super::call::Call;
 use super::label;
+use super::operation;
 use super::region::region_body;
 use super::unless;
-use crate::manifest::{Manifest, Rule, scope_matches};
+use crate::manifest::{Manifest, Rule, Where, scope_matches};
 use crate::rust;
 
 /// The hook event the shipped adapter wires (§6).
@@ -184,10 +185,8 @@ fn evaluate(
     let source = path.is_some_and(is_rust_source);
     let fired = if !p.describes_a_call() {
         return Ok(None);
-    } else if let Some(denied) = &p.deny_argv {
-        line.is_some_and(|l| l.commands().iter().any(|a| a.denies(denied, &p.with)))
-    } else if let Some(separator) = &p.require_argv {
-        line.is_some_and(|l| l.commands().iter().any(|a| a.unbounded(separator, &p.with)))
+    } else if p.deny_argv.is_some() || p.require_argv.is_some() {
+        line.is_some_and(|l| l.commands().iter().any(|a| fires(rule, a)))
     } else if let Some(pattern) = &p.deny_pattern {
         let regex = Regex::new(pattern)
             .with_context(|| format!("rule \"{}\": deny_pattern is not a regex", rule.id))?;
@@ -259,9 +258,25 @@ fn evaluate(
         return Ok(None);
     }
     // A rule scoped by `where` judges a call only in the checkout it
-    // names: the call's, moved by a leading `cd` ([`runs_in`]).
-    if fired && !rule.within.holds_in(&runs_in(root, line)) {
-        return Ok(None);
+    // names: the call's, moved by a leading `cd` ([`runs_in`]), whose
+    // branch records a ticket, or where an operation stands that the
+    // calling session did not start, which the denial names (#2476).
+    let mut foreign = None;
+    if fired {
+        match rule.within {
+            Where::Anywhere => {}
+            Where::Ticketed => {
+                if matches!(crate::track::head_ticket(&runs_in(root, line)), Ok(None)) {
+                    return Ok(None);
+                }
+            }
+            Where::Operating => {
+                foreign = operation::foreign(root, line, call, |argv| fires(rule, argv));
+                if foreign.is_none() {
+                    return Ok(None);
+                }
+            }
+        }
     }
     // A denial of the agent's hand on a harness file is lifted from the
     // one change the person approved in the session ([`super::approval`]).
@@ -271,7 +286,25 @@ fn evaluate(
     {
         return Ok(Some(Finding::admitted(rule, admission)));
     }
-    Ok(fired.then(|| Finding::of(Kind::of(rule), rule)))
+    Ok(fired.then(|| {
+        let mut finding = Finding::of(Kind::of(rule), rule);
+        if let Some(foreign) = foreign {
+            finding.text = format!("{} {foreign}", rule.text);
+        }
+        finding
+    }))
+}
+
+/// Whether one command of a shell line is one the rule's argv predicate,
+/// `deny_argv` or `require_argv` under its `with`, fires on; a rule
+/// judging by another predicate fires on the line whole.
+fn fires(rule: &Rule, argv: &Argv) -> bool {
+    let p = &rule.predicate;
+    match (&p.deny_argv, &p.require_argv) {
+        (Some(denied), _) => argv.denies(denied, &p.with),
+        (None, Some(separator)) => argv.unbounded(separator, &p.with),
+        (None, None) => true,
+    }
 }
 
 /// The person's approval of what the call would leave: for an `Edit` or a
@@ -319,7 +352,7 @@ fn command_around(text: &str, hit: std::ops::Range<usize>) -> &str {
 /// The directory a call runs in: its workspace, or the directory a shell
 /// line's leading `cd` moves to, which is how a session whose shell stands
 /// in one checkout runs a command in another.
-fn runs_in(root: &Path, line: Option<&Line>) -> std::path::PathBuf {
+pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> std::path::PathBuf {
     let first = line.and_then(|line| line.commands().first());
     match first.map(super::argv::Argv::words) {
         Some([cd, dir]) if cd == "cd" => root.join(dir),

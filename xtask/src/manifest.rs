@@ -556,16 +556,10 @@ pub enum Where {
     /// A checkout whose branch records a ticket, read through
     /// [`crate::track`]'s record; a record that is not a number is one.
     Ticketed,
-}
-
-impl Where {
-    /// Whether a call run in `dir` stands where the rule judges.
-    pub(crate) fn holds_in(self, dir: &Path) -> bool {
-        match self {
-            Where::Anywhere => true,
-            Where::Ticketed => !matches!(crate::track::head_ticket(dir), Ok(None)),
-        }
-    }
+    /// A checkout where a merge, cherry-pick, revert or rebase stands
+    /// that the calling session did not start (#2476), read in
+    /// `permit::operation`.
+    Operating,
 }
 
 /// The predicates of harness-design.md §4.1, which cites [`Self::NAMES`]
