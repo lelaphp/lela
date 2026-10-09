@@ -81,7 +81,8 @@
 //! native there without a witness raises `missing`, and `done` prints it
 //! per crate. What counts as one is the attribute that declares it, in a
 //! crate whose natives stand on the attributes ([`anchor`]), and
-//! [`fence::Subject`]'s sentence in a crate whose natives do not yet.
+//! [`fence::Subject`]'s sentence in an extension whose natives do not yet;
+//! a crate outside `ext/` with no native is counted by its kernels alone.
 //!
 //! **What is the tally's.** The verdicts, the print loop, the runner
 //! ladder and the reading's status are [`tally`]'s, shared with `phpt`;
@@ -875,7 +876,9 @@ pub(crate) fn coverage_rule(manifest: &Manifest) -> Option<&Rule> {
 /// coverage rule's scope covers there: the natives the attributes declare
 /// where the crate's covered sources carry one, less those `target`'s
 /// `#[cfg]` compiles out ([`anchor`]), beside the crate's kernels; and
-/// [`fence::Subject`]'s count where they carry none.
+/// [`fence::Subject`]'s count where they carry none, in an extension; a
+/// crate outside `ext/` that declares no native is counted by its
+/// kernels alone, since nothing else of it is a kernel or a native.
 ///
 /// **A kernel is a function of the crate's `ops` module** (design §8,
 /// `php_engine::ops`): [`fence::Subject`]'s count over `src/ops.rs` and
@@ -911,13 +914,16 @@ pub(crate) fn extract(
     }
     anchored.settle();
     // A crate whose natives stand on the attributes is counted by them,
-    // once the fences have run, and by its kernels.
-    if anchored.declares() {
+    // once the fences have run, and by its kernels; so is a crate outside
+    // `ext/` that declares none, whose other functions are neither (#1917).
+    if anchored.declares() || !krate.path().starts_with("ext") {
         let ops = krate.path().join("src/ops");
         out.subjects.retain(|subject| {
             (subject.file.starts_with(&ops) || subject.file == ops.with_extension("rs"))
                 && !anchored.declares_at(&subject.file, subject.line)
         });
+    }
+    if anchored.declares() {
         out.anchored = Some(anchor::Coverage {
             package: krate.package(),
             anchored,

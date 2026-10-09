@@ -1,0 +1,32 @@
+# A negative control (harness-design.md §4.1, §12 item 4): a workspace that
+# must fail the instrument named by the directory above it. The coverage
+# rule reaches a crate outside ext/ that declares no native (#1917): only
+# its kernel, in ops, is a subject, and missing; its other functions are
+# none. The extension beside it, whose natives do not stand on the
+# attributes, keeps the textual count, and its function is missing. The
+# pin is the real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "php_streams"
+budget = 1000
+
+[[crate]]
+name = "ext/lexbor"
+budget = 1000
+
+[[rule]]
+id = "witness.coverage"
+scope = ["crates/php_streams/src/**", "ext/*/src/**"]
+check = "witness-coverage"
+text = "A kernel or a native without a witness fails CI (fixture)."
