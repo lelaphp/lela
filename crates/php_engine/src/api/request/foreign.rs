@@ -14,8 +14,9 @@ use super::Request;
 
 /// The one owner of an object the request keeps ([`Request::adopt`]):
 /// what a payload stores. Neither `Copy` nor `Clone`, so the object is
-/// given up in one place, [`Request::disown`]; one dropped without that
-/// leaves the object to the request's end.
+/// given up in one place, [`Request::disown`], which hands it back to be
+/// closed; one dropped without that leaves the object to the request's
+/// end.
 #[must_use = "an adopted object is given up with Request::disown, or stays until the request ends"]
 #[derive(Debug)]
 pub struct Foreign<T> {
@@ -166,28 +167,32 @@ impl Table {
         }
     }
 
-    fn disown<T: 'static>(&mut self, id: ForeignId<T>) {
-        let Some(row) = self.row(id) else {
-            return;
-        };
+    /// `id` given up by its owner: its object handed back where no hold
+    /// stands, kept for the last hold to drop otherwise.
+    fn disown<T: 'static>(&mut self, id: ForeignId<T>) -> Option<T> {
+        let row = self.row(id)?;
         if row.holds > 0 {
             row.disowned = true;
-        } else {
-            self.free(id.at);
+            return None;
         }
+        let value = self.vacate(id.at)?;
+        value.downcast::<T>().ok().map(|value| *value)
     }
 
-    /// The row's object dropped and the row reused under its next
-    /// generation; the drop runs once the table is consistent again.
+    /// The row's object dropped, once the table is consistent again.
     fn free(&mut self, at: u32) {
-        let Some(row) = self.rows.get_mut(at as usize) else {
-            return;
-        };
+        drop(self.vacate(at));
+    }
+
+    /// The row's object taken out and the row reused under its next
+    /// generation.
+    fn vacate(&mut self, at: u32) -> Option<Box<dyn Any + Send>> {
+        let row = self.rows.get_mut(at as usize)?;
         let value = row.value.take();
         row.generation = row.generation.wrapping_add(1);
         row.disowned = false;
         self.free.push(at);
-        drop(value);
+        value
     }
 }
 
@@ -229,11 +234,15 @@ impl Request {
         Some(answer)
     }
 
-    /// The object given up by its owner: dropped now, or as the last call
-    /// that holds it ends.
+    /// The object given up by its owner: handed back where no call holds
+    /// it, for the owner to close with the request at hand, as a library
+    /// whose close calls back into PHP code or answers a code is closed
+    /// (`curl_easy_cleanup` serving a file part's `free_cb`,
+    /// `sqlite3_close` answering `SQLITE_BUSY`); `None` where a call holds
+    /// it, which drops it as the last such call ends.
     #[allow(clippy::needless_pass_by_value)] // the owner is taken, so the object is given up once
-    pub fn disown<T: Send + 'static>(&mut self, foreign: Foreign<T>) {
-        self.foreign.disown(foreign.id);
+    pub fn disown<T: Send + 'static>(&mut self, foreign: Foreign<T>) -> Option<T> {
+        self.foreign.disown(foreign.id)
     }
 }
 
@@ -259,15 +268,18 @@ mod tests {
     }
 
     #[test]
-    fn an_object_given_up_with_no_hold_is_dropped_at_once() {
+    fn an_object_given_up_with_no_hold_is_handed_back_at_once() {
         let mut table = Table::default();
         let (value, drops) = counted();
         let id = table.adopt(value);
         assert!(table.reach(id, false).is_some());
-        table.disown(id);
-        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        let back = table.disown(id);
+        assert!(back.is_some(), "its owner closes it");
         assert!(table.reach(id, false).is_none());
         assert!(table.reach(id, true).is_none());
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(back);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -277,7 +289,10 @@ mod tests {
         let id = table.adopt(value);
         assert!(table.hold(id));
         assert!(table.hold(id));
-        table.disown(id);
+        assert!(
+            table.disown(id).is_none(),
+            "a hold stands, so the last hold drops it"
+        );
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         assert!(table.reach(id, false).is_none(), "its owner gave it up");
         assert!(table.reach(id, true).is_some(), "a hold still reaches it");
@@ -292,12 +307,12 @@ mod tests {
     fn a_reused_row_answers_nothing_to_the_name_it_had() {
         let mut table = Table::default();
         let old = table.adopt(1u8);
-        table.disown(old);
+        assert_eq!(table.disown(old), Some(1));
         let new = table.adopt(2u8);
         assert_eq!((old.at, old.generation + 1), (new.at, new.generation));
         assert!(table.reach(old, true).is_none());
         assert!(!table.hold(old));
-        table.disown(old);
+        assert_eq!(table.disown(old), None);
         assert_eq!(table.reach(new, false).copied(), Some(2));
     }
 
