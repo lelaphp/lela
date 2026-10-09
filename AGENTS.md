@@ -129,9 +129,9 @@ third-engine-design.md
 | sapi | sapi.lock | 43 |  | no reading |
 | tier | tier.lock | 67 |  | no reading |
 | layer | layer.lock | 36 |  | no reading |
-| harness | xtask.lock | 385 |  | no reading |
+| harness | xtask.lock | 386 |  | no reading |
 
-<!-- /computed in=be94e0dcaf831dda9bf6c723832975afa574da2d9960f6c6c54ffd1d25a74493 out=d694adf25c5f261553ea3b7c57122f4c3a5f5f5155a3286c0b05a855755f3065 -->
+<!-- /computed in=b39eb84a60a586424e1c7a55d5b75c2df1519295405236718ba18682a0db64ed out=f06e0e513bb64fe3e5840e62a719fc5061d29769c6f6797f32d2831946182b97 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -205,7 +205,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=13c03aac6d6e1ed94e44d1d9dd351ec5506cd6e2470a7cd25ea509b042e8f92b out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
+<!-- /computed in=970b627c97536471cf55b1da7ea6de0182bb8d383f612bc91fa3a651368d3c2c out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

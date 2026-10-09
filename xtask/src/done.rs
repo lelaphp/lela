@@ -14,7 +14,8 @@
 //!    whose tests do not run is not done (#191), less `witness`
 //!    for the harness, less `phpt` for a crate the per-commit lane writes
 //!    no reading for, one that owns no subset or whose row's `feature =`
-//!    the binary under test does not turn on (#133, revision 63), and less
+//!    the binary under test does not turn on and names no oracle variant
+//!    (#133, revision 63, #2029), and less
 //!    `port-map` for every crate but the one `api.lock` lives with, which
 //!    is the only scope that instrument writes a reading at (#148), and
 //!    with `crosscheck` for an `ext/*` crate the binary carries, the
@@ -167,10 +168,11 @@ pub(crate) const HARNESS: &str = "xtask";
 /// by the runner's error. The lane runs the subsets of every crate the
 /// binary under test carries, `carried`, read from the binary's own
 /// declaration: a crate the row marks `feature =` is asked where the
-/// binary turns the feature on, and one it does not turn on is the nightly
-/// lane's, which `done`, running per commit, does not ask for a reading
-/// only a run by name could write (harness §4.1, §4.5 condition 1, §7,
-/// revision 63). `port-map` writes exactly one reading, at
+/// binary turns the feature on or the row names an oracle variant, whose
+/// subset the lane runs on the engine built with the feature (#2029), and
+/// any other is the nightly lane's, which `done`, running per commit, does
+/// not ask for a reading only a run by name could write (harness §4.1,
+/// §4.5 condition 1, §7, revision 63). `port-map` writes exactly one reading, at
 /// the crate the lock lives with, so every other crate would be held to a
 /// reading nothing ever writes; that crate is the one asked because the
 /// lock is in its tree, and a change to the lock is what makes a row of
@@ -200,10 +202,12 @@ pub(crate) fn instruments_of(
 }
 
 /// Whether the per-commit lane runs a subset of `krate`: it owns one, and
-/// the binary under test carries it. The one rule `phpt --base` takes the
-/// touched crates' runs by, as condition 1 asks them for a reading.
+/// the binary under test carries it or its row names an oracle variant,
+/// whose subset the lane runs on the engine built with the row's feature
+/// (#2029). The one rule the lane is composed by and `phpt --base` takes
+/// the touched crates' runs by, as condition 1 asks them for a reading.
 pub(crate) fn measured_by_the_lane(krate: &Crate, carried: &Carried) -> bool {
-    !krate.subsets().is_empty() && carried.carries(krate)
+    !krate.subsets().is_empty() && (carried.carries(krate) || krate.oracle.is_some())
 }
 
 /// The name of the crate `api.lock` lives with, the one crate condition 1
@@ -1039,9 +1043,26 @@ mod tests {
     /// reading no lane run writes (#133); its corpus is the nightly
     /// lane's. The same row without the feature is asked, and so is one
     /// behind a feature the binary turns on, since the lane runs every
-    /// extension the binary carries (revision 63, #1252).
+    /// extension the binary carries (revision 63, #1252), and so is one
+    /// whose row names an oracle variant beside its feature, which the
+    /// lane runs on the engine built with it (#2029): `ext/zend_test` in
+    /// the shipped manifest, `phpt` and not `crosscheck`.
     #[test]
     fn an_optional_crate_is_not_asked_for_a_phpt_reading_the_lane_never_writes() {
+        let varied = Crate::named("ext/mbstring")
+            .with_feature("mbstring")
+            .with_oracle("zend-test");
+        assert_eq!(asked_of(&varied, HOME), ASKED_OF_EVERY_OTHER_CRATE);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let manifest = crate::manifest::Manifest::load(root).unwrap();
+        let zend_test = manifest.crate_named("ext/zend_test").unwrap();
+        let carried = Carried::binary(root).unwrap();
+        assert!(!carried.carries(zend_test), "{carried:?}");
+        let asked: Vec<_> = instruments_of(zend_test, HOME, &carried).collect();
+        assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
+
         let row = Crate::named("ext/mbstring").with_feature("mbstring");
         let asked = asked_of(&row, HOME);
         assert_eq!(

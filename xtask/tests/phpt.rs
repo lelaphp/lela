@@ -147,7 +147,7 @@ impl Scratch {
     fn run_among(&self, registry: &Registry, engine: &Path, locks: &Path) -> Reading {
         let ask = Ask {
             subset: Some("ext/fixture".to_owned()),
-            engine: Some(engine.to_path_buf()),
+            engine: phpt::Engine::Named(engine.to_path_buf()),
             locks: Some(locks.to_path_buf()),
             ..Ask::default()
         };
@@ -221,7 +221,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
     let scratch = Scratch::new("unkept", &[("a.phpt", &test("a"))]);
     let ask = |engine: &Path| Ask {
         subset: Some("ext/fixture".to_owned()),
-        engine: Some(engine.to_path_buf()),
+        engine: phpt::Engine::Named(engine.to_path_buf()),
         locks: Some(scratch.locks.path().to_path_buf()),
         unkept: true,
         ..Ask::default()
@@ -1432,7 +1432,7 @@ fn a_test_met_at_the_merge_base_and_failing_here_fails_the_comparison() {
     let run = |engine: &Path, against: Option<&str>| {
         let ask = Ask {
             subset: Some("ext/fixture".to_owned()),
-            engine: Some(engine.to_path_buf()),
+            engine: phpt::Engine::Named(engine.to_path_buf()),
             against: against.map(str::to_owned),
             ..Ask::default()
         };
@@ -1540,7 +1540,7 @@ fn a_pooled_run_writes_the_reading_and_keeps_the_run_a_run_of_one_does() {
     let kept = |jobs: usize| {
         let ask = Ask {
             subset: Some("ext/fixture".to_owned()),
-            engine: Some(scratch.engine.clone()),
+            engine: phpt::Engine::Named(scratch.engine.clone()),
             jobs: std::num::NonZeroUsize::new(jobs),
             ..Ask::default()
         };

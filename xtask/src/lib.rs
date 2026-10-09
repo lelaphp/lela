@@ -360,7 +360,7 @@ fn phpt_command(root: &Path, manifest: &Manifest, store: &Store, ask: cli::Phpt)
         subset: ask.subset,
         full: ask.full,
         lane: ask.jit,
-        engine: ask.engine,
+        engine: ask.binary.engine(),
         census: ask.census,
         against: ask.against,
         jobs: ask.jobs,
