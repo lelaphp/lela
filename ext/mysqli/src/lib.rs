@@ -100,6 +100,11 @@ pub(crate) struct State {
     /// it left no text.
     pub(crate) connect_errno: i64,
     pub(crate) connect_error: Option<Vec<u8>>,
+    /// `num_links` and `num_active_persistent`, per request where php
+    /// keeps them per process and never resets them, so php's active
+    /// count drifts across a php-fpm worker's requests and this one starts
+    /// at zero: the divergence row
+    /// `trace:mysqli-persistent-counts-per-request`, ruled on #1676.
     pub(crate) num_links: i64,
     pub(crate) num_active_persistent: i64,
     /// The free links of [`State::plinks`], the request's share of
