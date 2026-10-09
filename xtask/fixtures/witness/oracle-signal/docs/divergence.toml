@@ -1,0 +1,11 @@
+# The fixture's registry (harness-design.md §4.3; #1650): one accepted
+# `trace:` row whose `covers` names the first fence of ext/pcre/src/lib.rs,
+# which pins the engine's side of the row where the oracle ends on a signal.
+
+[[divergence]]
+id = "trace:fixture-oracle-signal"
+kind = "trace"
+reason = "The oracle ends on SIGKILL where zend_test is not loaded; the engine's side is the fence (fixture)."
+status = "accepted"
+since = "2026-10-09"
+covers = ["witness:bfb53c11a2e9922523376c8a02f3f67e5996dca0"]
