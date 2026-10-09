@@ -4951,7 +4951,7 @@ fn operands<T>(
 /// A non-numeric value encountered
 /// int(77)
 /// ```
-fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
+pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
     if let Some(n) = value.as_int() {
         return Ok(Some(n));
     }

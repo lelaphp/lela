@@ -147,6 +147,19 @@ pub fn to_long(req: &mut Request, value: &Value) -> Result<i64, Thrown> {
     Ok(crate::ops::get_long(req, value))
 }
 
+/// `zval_try_get_long`, the kernel [`crate::ops::to_long`]
+/// (`zendi_try_get_long`) through the face, what a native reads an
+/// argument it takes as `mixed` and holds to `int` with: the long, or
+/// `None` where php sets `failed`, an array, a resource, an object whose
+/// `cast_object` answers no int, and a string that opens with no
+/// number, for which the native raises its own `TypeError`. A string
+/// with more after its number is php's `A non-numeric value
+/// encountered` warning, a float or a float-string that loses precision
+/// its deprecation, and what a handler threw from either is the `Err`.
+pub fn try_long(req: &mut Request, value: &Value) -> Result<Option<i64>, Thrown> {
+    crate::ops::to_long(req, &value.deref())
+}
+
 /// `zval_get_double`, the kernel [`crate::ops::get_double`] through the
 /// face, what `SORT_NUMERIC` reads each element with: `zend_strtod`
 /// over a string, so `"9a"` is nine, and an object php's warning and

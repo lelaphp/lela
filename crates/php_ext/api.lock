@@ -391,6 +391,7 @@ coerce::to_number
 coerce::to_object
 coerce::to_string
 coerce::truthy
+coerce::try_long
 coerce::type_name
 coerce::value_name
 coerce::with_string
