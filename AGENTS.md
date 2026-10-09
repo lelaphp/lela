@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=1c64d8558468c66fa353fd5df656f6ff7e530fda2fe45dd72226cebf332690c2 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=5ca52120cebbb6dc5d48379d89667ab9be0076c0a88c4bbfdaf91cf0ffad4ef8 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -125,12 +125,13 @@ third-engine-design.md
 | unit | unit.lock | 95 |  | no reading |
 | link | link.lock | 37 |  | no reading |
 | ops | ops.lock | 209 |  | no reading |
-| api | api.lock | 1364 | 1500 | no reading |
+| api | api.lock | 1328 | 1500 | no reading |
 | sapi | sapi.lock | 43 |  | no reading |
 | tier | tier.lock | 67 |  | no reading |
+| layer | layer.lock | 36 |  | no reading |
 | harness | xtask.lock | 380 |  | no reading |
 
-<!-- /computed in=45521c6f1a808ce2cdf6c0f3dc33d7455041490f116b6074f9788a5cc0445530 out=e5e5fc861821da42057cab568d34560ae17f622911ba35a0bcc42c4a2bf7fd20 -->
+<!-- /computed in=bcd6fa5c91c52ab2816c8789b9ebe6375a639d813b95577f267f89ae5c827392 out=6a961982d715b8d53beb8d2f6fa29373a3421fafe217f680df1a7d2c8057a3cc -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -165,7 +166,7 @@ third-engine-design.md
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=8699f82a4df0bab75898ff3e7d8c49fdd82092db989fcd48ccb5e0d299c83ee6 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
+<!-- /computed in=1a1f2d5683de8968e9d23055c057b87d4f5a988557f3bae2bfe629d974a6b676 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

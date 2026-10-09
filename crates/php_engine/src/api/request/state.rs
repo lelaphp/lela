@@ -74,7 +74,7 @@ impl Request {
     /// request held shared: what [`Request::state`] answers once built,
     /// and `None` before a type no extension declared is first touched.
     #[must_use]
-    pub fn state_ref<T: Send + 'static>(&self) -> Option<&T> {
+    pub(crate) fn state_ref<T: Send + 'static>(&self) -> Option<&T> {
         let wanted = TypeId::of::<T>();
         self.state
             .states

@@ -4,10 +4,10 @@
 //! with `ExtensionBuilder::stream_hooks`, and the CLI's standard handles
 //! `do_cli` registers and reads.
 
-use crate::api::abi::{IncludeSource, StreamHooks};
+use crate::api::layer::{Face as _, IncludeSource, StreamHooks, scheme_length};
 
 use crate::api::raising::Thrown;
-use crate::api::request::{Request, ScannerFile, Streams, Unresolved, UrlStat, scheme_length};
+use crate::api::request::{Request, ScannerFile, Streams, Unresolved, UrlStat};
 use crate::api::values::{Resource, Value};
 use crate::state::Layer;
 use crate::streams::{Located, OpenOptions, StreamLayer};
@@ -21,6 +21,8 @@ pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     spend,
     standard_handles: crate::streams::standard_handles,
     get_line,
+    state: crate::state::engine_state,
+    engine_end: crate::state::engine_end,
 };
 
 /// `php_stream_open_for_zend_ex` and `zend_stream_fixup` for an include

@@ -966,3 +966,55 @@ fn each_section_is_held_against_the_consumers_that_read_it() {
         tier.message
     );
 }
+
+/// The tracked manifest with a seam that is one module of `php_engine`,
+/// `layer`, read by `php_streams` alone (#1959).
+fn with_the_layer_seam() -> Manifest {
+    let mut manifest = Manifest::load(workspace()).unwrap();
+    manifest.seams.retain(|s| s.name != "layer");
+    let mut layer = Seam::named("layer", "php_engine");
+    layer.consumers = vec!["php_streams".to_owned()];
+    layer.module = Some("layer".to_owned());
+    manifest.seams.push(layer);
+    manifest
+}
+
+/// A seam that is one module of its producer is an item lock of that
+/// module alone, living with the producer (#1959). The `layer-face`
+/// fixture's `php_engine::layer` defines a sealed trait with one method and
+/// a free function, its lock lists the trait and the method and not the
+/// function, and `php_ext`, which is not the seam's consumer, re-exports the
+/// function: the reading fails naming both, and leaves `api::Request` out.
+#[test]
+fn a_module_seam_holds_the_module_alone_and_refuses_a_stranger_using_it() {
+    let manifest = with_the_layer_seam();
+    assert_eq!(
+        manifest.lock_home("layer.lock").as_deref(),
+        Some("php_engine"),
+        "a module seam's lock lives with its producer"
+    );
+    let readings = api_check::hold(&manifest, &fixture("layer-face"), false).unwrap();
+    let layer = of(&readings, "layer");
+    assert_eq!(layer.status, Status::Fail, "{}", layer.message);
+    assert_eq!(layer.numbers["items"], 3.into(), "{}", layer.message);
+    assert!(
+        layer.message.contains(
+            "1 public items of php_engine have no line in crates/php_engine/layer.lock: layer::poll_fd"
+        ),
+        "{}",
+        layer.message
+    );
+    assert!(
+        layer.message.contains(
+            "crates/php_ext/src/lib.rs uses php_engine::layer::poll_fd; php_engine::layer is php_streams's alone"
+        ),
+        "{}",
+        layer.message
+    );
+    assert!(!layer.message.contains("Request"), "{}", layer.message);
+    assert!(
+        !layer.message.contains("crates/php_streams"),
+        "the consumer's use is the seam's: {}",
+        layer.message
+    );
+}

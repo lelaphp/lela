@@ -20,7 +20,7 @@ use php_unit::decl::{
 use crate::api::call::{Function, Target};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::{Request, Unresolved};
+use crate::api::request::Request;
 use crate::api::values::{
     ClassId, ClosureInfo, Owner, PhpArray, PhpObject, PhpRef, PhpString, Place, TypeTag, Value,
     walk,
@@ -324,8 +324,8 @@ struct Idle<K, V> {
 impl<K: Hash + Eq, V> Pool<K, V> {
     /// A pool keeping at most `capacity` idle entries; one given back past
     /// the bound is answered to the caller to close ([`give_back`]). The
-    /// engine's own for its streams, and an extension's as a field of its
-    /// engine state, as persistent PDO's is; what a request took out it
+    /// stream layer's in its engine state, and an extension's as a field of
+    /// its engine state, as persistent PDO's is; what a request took out it
     /// holds in a [`Lent`] of its request state.
     ///
     /// [`give_back`]: Pool::give_back
@@ -391,8 +391,9 @@ impl<K: Hash + Eq, V> Pool<K, V> {
     /// `zend_hash_graceful_reverse_destroy` destroys `EG(persistent_list)`
     /// last entry first; from here every entry given back is answered to
     /// its caller ([`give_back`](Pool::give_back)). What an extension's
-    /// engine-end function does with its pools (ADR-0010), and the engine
-    /// with its own before any engine-end function, as `zend_shutdown`
+    /// engine-end function does with its pools (ADR-0010), and the stream
+    /// layer with its own before any engine-end function
+    /// ([`StreamHooks::engine_end`](crate::layer::StreamHooks::engine_end)), as `zend_shutdown`
     /// destroys `EG(persistent_list)` before `zend_destroy_modules`
     /// (`Z/Zend/zend.c:1166-1170`).
     #[must_use]
@@ -418,11 +419,6 @@ impl<K: Hash + Eq, V> Pool<K, V> {
             .collect()
     }
 }
-
-/// php's `EG(persistent_list)`, the engine's [`Pool`] the stream layer
-/// lends its persistent entries from, each a value of the layer's own
-/// type under php's key ([`Request::persistent_list`]).
-pub type PersistentList = Pool<Vec<u8>, Box<dyn Any + Send>>;
 
 /// The entries of a [`Pool`] one request holds, each under php's key from
 /// the ask that took it out or opened it to the request's end: a second
@@ -601,57 +597,6 @@ pub enum PostStartup {
 /// The path resolver, php's `zend_resolve_path` as an extension overrides
 /// it: [`ExtensionBuilder::resolve_path`].
 pub(crate) type ResolvePathHook = fn(&mut Request, &[u8]) -> Result<Option<Vec<u8>>, Thrown>;
-
-/// What the engine asks of the stream layer above it, `php_streams`
-/// (design §4.3 seam 5), handed with [`ExtensionBuilder::stream_hooks`]:
-/// php's `zend_stream_open_function` and `zend_resolve_path` as
-/// `php_module_startup` points them at main's streams, opcache's open of
-/// a file it holds, and the standard streams `do_cli` registers and reads
-/// stdin through. With none the engine is Zend alone: an include opens a
-/// plain file and nothing else, a path resolves by `realpath(3)`
-/// (`zend_resolve_path_func`), and no standard stream is registered.
-#[derive(Debug, Clone, Copy)]
-pub struct StreamHooks {
-    /// `php_stream_open_for_zend_ex(USE_PATH | REPORT_ERRORS |
-    /// STREAM_OPEN_FOR_INCLUDE)` and the whole read after it: the file a
-    /// path names read through its wrapper, with the `*opened_path` its
-    /// opener set; `None` for the open or the read that failed, which
-    /// warned. The `Err` is what the open threw.
-    pub open: StreamOpenHook,
-    /// `php_resolve_path_for_zend`: `zend_resolve_path` past every
-    /// extension's own ([`ExtensionBuilder::resolve_path`]).
-    pub resolve_path: fn(&mut Request, &[u8]) -> Result<Vec<u8>, Unresolved>,
-    /// The stream opcache's `zend_stream_open` of a file it holds makes
-    /// and frees: its resource's number spent.
-    pub spend: fn(&mut Request),
-    /// `cli_register_file_handles`: the streams over the host's three
-    /// standard handles, `STDIN`, `STDOUT` and `STDERR` in that order, or
-    /// `None` where one of them could not be opened; with `true` once the
-    /// host's stdin was replaced under them, as phpdbg's `run <file`
-    /// replaces it.
-    pub standard_handles: StandardHandlesHook,
-    /// `php_stream_get_line` on the stream `value` names, as `do_cli`
-    /// reads `STDIN` a line at a time for `-R`, `-F` and `-B`; `None` at
-    /// its end, or where it names no stream.
-    pub get_line: fn(&mut Request, &Value) -> Option<Vec<u8>>,
-}
-
-/// [`StreamHooks::open`].
-pub type StreamOpenHook = fn(&mut Request, &[u8]) -> Result<Option<IncludeSource>, Thrown>;
-
-/// What [`StreamHooks::open`] read for an include: the file's bytes, and
-/// the `*opened_path` the wrapper's opener set, which the file is
-/// compiled under where it set one.
-#[derive(Debug)]
-pub struct IncludeSource {
-    pub source: Vec<u8>,
-    pub opened_path: Option<Vec<u8>>,
-}
-
-/// [`StreamHooks::standard_handles`].
-/// Each stream's one owner the caller's, which the constant it registers
-/// holds.
-pub type StandardHandlesHook = fn(&mut Request, bool) -> Result<Option<[Owner<Value>; 3]>, Thrown>;
 
 /// What [`ExtensionBuilder::encodings`] takes: the encoding functions
 /// bound to one request.
@@ -1629,12 +1574,12 @@ impl ExtensionBuilder {
         self
     }
 
-    /// The stream layer's hooks ([`StreamHooks`]), which `ext/standard`
+    /// The stream layer's hooks ([`crate::layer::StreamHooks`]), which `ext/standard`
     /// hands as php's `basic_functions` registers the plain files wrapper
     /// in its `MINIT`. The last supplier's are the ones asked, as
     /// `php_module_startup` writes `zend_stream_open_function` once.
     #[must_use]
-    pub fn stream_hooks(mut self, hooks: StreamHooks) -> ExtensionBuilder {
+    pub fn stream_hooks(mut self, hooks: crate::layer::StreamHooks) -> ExtensionBuilder {
         self.supplies.stream_hooks = Some(hooks);
         self
     }

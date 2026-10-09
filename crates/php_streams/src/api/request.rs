@@ -13,6 +13,7 @@ use std::os::fd::OwnedFd;
 use crate::api::decl::Type;
 
 use crate::api::abi::FromArgument;
+use crate::api::layer::{Face as _, TemporaryGuard};
 use crate::api::raising::{Thrown, arg_type_error, fatal};
 use crate::api::values::{ClassId, Owner, PhpArray, PhpString, Resource, ResourceView, Value};
 

@@ -185,7 +185,7 @@ impl Request {
     /// the `include_path` and the including file's directory that resolve
     /// it; none for an empty path or one a stream wrapper opens.
     fn written_key(&self, written: &[u8]) -> Option<UnitKey> {
-        if written.is_empty() || super::scheme_length(written).is_some() {
+        if written.is_empty() || super::paths::scheme_length(written).is_some() {
             return None;
         }
         if written.starts_with(b"/") {

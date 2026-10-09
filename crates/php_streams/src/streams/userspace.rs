@@ -21,6 +21,7 @@
 
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf};
 use crate::api::decl::ClassKind;
+use crate::api::layer::Face as _;
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::request::Streams;
 use crate::api::request::{Cast, OptionAnswer, Request, Stream, StreamOption, Whence, WrapperOp};

@@ -99,9 +99,9 @@ mod observing;
 mod op_arrays;
 pub(crate) use observing::ObservedChain;
 pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
-mod paths;
+pub(crate) mod paths;
+pub use paths::RealpathEntry;
 pub(crate) use paths::is_wrapper_url;
-pub use paths::{RealpathEntry, scheme_length};
 mod pending;
 pub use pending::Raised;
 mod post;
@@ -131,8 +131,7 @@ pub use symbol_tables::Overwrite;
 mod table;
 #[cfg(debug_assertions)]
 mod teardown;
-mod temporary;
-pub use temporary::TemporaryGuard;
+pub(crate) mod temporary;
 mod ticks;
 mod traces;
 mod unit_cache;
@@ -802,13 +801,6 @@ impl Request {
     /// and before which no more such code is served.
     pub fn stream_thrown(&mut self) -> &mut Option<Thrown> {
         &mut self.stream_thrown
-    }
-
-    /// php's `EG(persistent_list)`, the engine's pool of what the stream
-    /// layer keeps between requests ([`crate::api::abi::PersistentList`]).
-    #[must_use]
-    pub fn persistent_list(&self) -> Arc<crate::api::abi::PersistentList> {
-        Arc::clone(&self.shared.persistent)
     }
 }
 

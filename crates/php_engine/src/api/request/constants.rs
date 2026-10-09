@@ -374,7 +374,7 @@ impl Request {
     /// ([`crate::engine::ProcessTitle`]), then
     /// `cli_register_file_handles` (`Z/sapi/cli/php_cli.c:519`):
     /// `php://stdin` opened `rb`, `php://stdout` and `php://stderr` `wb`
-    /// by the stream layer ([`crate::api::abi::StreamHooks::standard_handles`]),
+    /// by the stream layer ([`crate::layer::StreamHooks::standard_handles`]),
     /// and the three constants on them, each holding its stream's one
     /// owner. Where one of the three does not open, php closes the others
     /// and registers none, which no host here reaches. A no-op for a host
@@ -540,14 +540,14 @@ impl Request {
     /// The fd the host handed under one of its standard streams
     /// ([`crate::engine::FileHandles`]), `None` where it handed none.
     #[must_use]
-    pub fn host_fd(&self, standard: Standard) -> Option<std::os::fd::BorrowedFd<'_>> {
+    pub(crate) fn host_fd(&self, standard: Standard) -> Option<std::os::fd::BorrowedFd<'_>> {
         self.description.file_handles.as_ref()?.fd(standard)
     }
 
     /// Whether the host's standard fds are the process's own, as php's
     /// CLI registers them ([`crate::engine::FileHandles::process`]).
     #[must_use]
-    pub fn host_fds_are_process(&self) -> bool {
+    pub(crate) fn host_fds_are_process(&self) -> bool {
         self.description
             .file_handles
             .as_ref()
@@ -557,7 +557,7 @@ impl Request {
     /// `fclose()` reaching the stream a standard stream's constant holds:
     /// the host's fd under it closed, where this request is the only one
     /// holding it ([`crate::engine::FileHandles`]).
-    pub fn close_host_fd(&mut self, standard: Standard) {
+    pub(crate) fn close_host_fd(&mut self, standard: Standard) {
         if let Some(handles) = &mut self.description.file_handles {
             handles.close(standard as usize);
         }

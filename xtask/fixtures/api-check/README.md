@@ -22,6 +22,7 @@ built; the instrument reads manifests and sources.
 | `harness-lock` | a public item of the harness with no line in `xtask.lock`, under the rows #55 proposes | fail |
 | `ops-lock`  | a hand-edited line of `ops.lock`, the lock rendered from `ops.toml` | fail |
 | `tier-face` | a sectioned lock (#1369): php_sapi importing a `tier::*` item `tier.lock`'s `[face]` does not list, which `sapi.lock` does not hold either | fail |
+| `layer-face` | a seam that is one module of its producer (#1959), under a `layer` seam the test adds to the tracked manifest: `php_engine::layer`'s free function with no line in `layer.lock`, and `php_ext`, outside the seam's consumers, re-exporting it beside `php_streams`' own use | fail |
 | `same-name` | two `pub` types of one name in two modules, each listing its own methods alone (#79); read by the unit test beside `Inventory::assoc`, not by `hold` | pass |
 | `lints`     | a crate whose `Cargo.toml` lacks `[lints] workspace = true`, so the root manifest's `[workspace.lints]` do not reach it (#2111), beside one that carries it; every other fixture's crates carry the line | fail |
 | `surface-edge` | an `ext/*` crate's library dependency on another that no row of the fixture's design §4.10 names with both crates (#2020, #2251): ext/zip linking ext/pcre beside ext/spl's link on the `pcre` → `spl` row, and a dev-dependency on no row, which links nothing and is not held | fail |

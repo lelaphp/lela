@@ -377,6 +377,12 @@ pub struct Seam {
     pub allowlist: bool,
     #[serde(default)]
     pub sections: Vec<Section>,
+    /// The one module of the producer the seam is (#1959): `layer`, the
+    /// face `php_engine` keeps for the stream layer alone. Its lock lives
+    /// with the producer and lists that module's public items as an item
+    /// lock lists a crate's, and a crate outside `consumers` that `use`s
+    /// the module fails the seam's reading.
+    pub module: Option<String>,
 }
 
 /// One section of a sectioned lock (#1369): a name, which the seam's
@@ -422,6 +428,7 @@ impl Seam {
             generated: false,
             allowlist: false,
             sections: Vec::new(),
+            module: None,
         }
     }
 }
@@ -1070,7 +1077,8 @@ impl Manifest {
     /// generated from another (`api.lock` on `php_engine`'s row, from
     /// `php_ext`), else the crate `[lock_home]` names for a lock whose
     /// seam has no producing crate at all (`ops.lock`, rendered from
-    /// `ops.toml`). `None` for a lock nothing names.
+    /// `ops.toml`), else the producer of a seam that is one module of it
+    /// (`layer.lock`, #1959). `None` for a lock nothing names.
     pub fn lock_home(&self, lock: &str) -> Option<String> {
         self.crates
             .iter()
@@ -1082,6 +1090,12 @@ impl Manifest {
                     .unwrap_or_else(|| c.name.clone())
             })
             .or_else(|| self.lock_homes.get(lock).cloned())
+            .or_else(|| {
+                self.seams
+                    .iter()
+                    .find(|s| s.lock == lock && s.module.is_some())
+                    .map(|s| s.producer.clone())
+            })
     }
 
     /// The `on = "pub"` rule named for `lock`, `<lock>-line`: the note at

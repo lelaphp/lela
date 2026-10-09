@@ -135,7 +135,7 @@ impl Request {
     /// The path under `STREAM_DISABLE_OPEN_BASEDIR`, what `mail.log` is
     /// opened by: the one open php makes past the guard, let through here
     /// so that it stands beside it.
-    pub fn unguarded_host_path(&self, path: &[u8]) -> HostPath {
+    pub(crate) fn unguarded_host_path(&self, path: &[u8]) -> HostPath {
         self.host_path(path)
     }
 

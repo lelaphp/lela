@@ -19,7 +19,7 @@ impl Request {
     /// `check` names before each is tried ([`TemporaryGuard`]). The file
     /// is open for reading and writing, and `None` is the one that could
     /// not be made anywhere or was refused.
-    pub fn open_temporary_fd(
+    pub(crate) fn open_temporary_fd(
         &mut self,
         dir: Option<&[u8]>,
         prefix: &[u8],

@@ -9,7 +9,7 @@
 //! tests. `api.lock` lists every public item here.
 #![forbid(unsafe_code)]
 
-pub use php_engine::api::{abi, call, coerce, decl, net, process, raising, syntax, values};
+pub use php_engine::api::{abi, call, coerce, decl, process, raising, syntax, values};
 
 /// The request group: the engine's, and the streams facet `php_streams`
 /// adds to it (design §4.3 seam 5), one face counted in `api.lock`.

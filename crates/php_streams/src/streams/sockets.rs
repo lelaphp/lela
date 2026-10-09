@@ -24,7 +24,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
-use crate::api::net::{Readiness, SockOpt};
+use crate::api::layer::{Readiness, SockOpt};
 use crate::api::values::{Emalloc, Owner};
 
 use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
@@ -475,7 +475,7 @@ impl Ops for Socket {
             if !dont_wait {
                 self.timeout_event = false;
                 loop {
-                    match crate::api::net::poll_fd(sock.fd(), Readiness::Readable, self.timeout) {
+                    match crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, self.timeout) {
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Ok(true) | Err(_) => break,
                         Ok(false) => {
@@ -613,7 +613,7 @@ impl Ops for Socket {
             StreamOption::Liveness if self.crypto_active() => {
                 let readable = self.sock.as_ref().is_some_and(|sock| {
                     matches!(
-                        crate::api::net::poll_fd(
+                        crate::api::layer::poll_fd(
                             sock.fd(),
                             Readiness::Readable,
                             Some(Duration::ZERO)
@@ -735,7 +735,7 @@ impl Socket {
         };
         if matches!(self.role, Role::Server { .. })
             && !matches!(
-                crate::api::net::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
+                crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, Some(Duration::ZERO)),
                 Ok(true)
             )
         {
@@ -746,11 +746,11 @@ impl Socket {
             // `MSG_DONTWAIT` on a socket that blocks: made non-blocking
             // for the one call, as [`Socket::read_now`] makes it.
             sock.set_blocking(false).ok();
-            let peeked = crate::api::net::peek_fd(sock.fd(), &mut byte);
+            let peeked = crate::api::layer::peek_fd(sock.fd(), &mut byte);
             sock.set_blocking(true).ok();
             peeked
         } else {
-            crate::api::net::peek_fd(sock.fd(), &mut byte)
+            crate::api::layer::peek_fd(sock.fd(), &mut byte)
         };
         match peeked {
             Ok(n) => n > 0,
@@ -772,7 +772,7 @@ impl Socket {
         want_peer: bool,
     ) -> Result<(Socket, Option<Vec<u8>>), String> {
         let sock = self.sock.as_ref().ok_or_else(String::new)?;
-        match crate::api::net::poll_fd(sock.fd(), Readiness::Readable, timeout) {
+        match crate::api::layer::poll_fd(sock.fd(), Readiness::Readable, timeout) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(socket_error(&std::io::Error::from_raw_os_error(ETIMEDOUT)).1);
@@ -858,7 +858,7 @@ fn recv(
             let (n, from) = s.peek_from(buf).ok()?;
             return Some((n, want_addr.then(|| inet_text(&from))));
         }
-        let n = crate::api::net::peek_fd(sock.fd(), buf).ok()?;
+        let n = crate::api::layer::peek_fd(sock.fd(), buf).ok()?;
         return Some((n, want_addr.then(Vec::new)));
     }
     match sock {
@@ -1013,20 +1013,20 @@ fn connect_inet(
                 bindto = None;
             }
         }
-        let Ok(fd) = crate::api::net::new_socket(&addr, udp) else {
+        let Ok(fd) = crate::api::layer::new_socket(&addr, udp) else {
             continue;
         };
         if let Some((local, local_port)) = &bindto {
             bind_local(req, fd.as_fd(), &addr, local, *local_port);
         }
         if udp && options.so_broadcast {
-            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true).ok();
+            crate::api::layer::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true).ok();
         }
         if !udp && options.tcp_nodelay {
-            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::TcpNodelay, true).ok();
+            crate::api::layer::set_sockopt(fd.as_fd(), SockOpt::TcpNodelay, true).ok();
         }
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-        match crate::api::net::connect_fd(
+        match crate::api::layer::connect_fd(
             fd.as_fd(),
             &addr,
             left.map(|t| t.max(Duration::from_micros(1))),
@@ -1067,7 +1067,7 @@ fn bind_local(req: &mut Request, fd: BorrowedFd<'_>, to: &SocketAddr, local: &st
         warning(req, &text);
         return;
     };
-    if let Err(error) = crate::api::net::bind_fd(fd, &SocketAddr::new(ip, port)) {
+    if let Err(error) = crate::api::layer::bind_fd(fd, &SocketAddr::new(ip, port)) {
         let text = format!(
             "{}(): Failed to bind to '{local}:{port}', system said: {}",
             req.active_function_name(),
@@ -1099,26 +1099,26 @@ fn bind_inet(
         text: String::new(),
     };
     for addr in addrs {
-        let fd = match crate::api::net::new_socket(&addr, udp) {
+        let fd = match crate::api::layer::new_socket(&addr, udp) {
             Ok(fd) => fd,
             Err(error) => {
                 last = failure(&error);
                 continue;
             }
         };
-        crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseaddr, true).ok();
+        crate::api::layer::set_sockopt(fd.as_fd(), SockOpt::SoReuseaddr, true).ok();
         if addr.is_ipv6()
             && let Some(only) = options.ipv6_v6only
         {
-            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::Ipv6V6only, only).ok();
+            crate::api::layer::set_sockopt(fd.as_fd(), SockOpt::Ipv6V6only, only).ok();
         }
         if options.so_reuseport {
-            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoReuseport, true).ok();
+            crate::api::layer::set_sockopt(fd.as_fd(), SockOpt::SoReuseport, true).ok();
         }
         if udp && options.so_broadcast {
-            crate::api::net::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true).ok();
+            crate::api::layer::set_sockopt(fd.as_fd(), SockOpt::SoBroadcast, true).ok();
         }
-        if let Err(error) = crate::api::net::bind_fd(fd.as_fd(), &addr) {
+        if let Err(error) = crate::api::layer::bind_fd(fd.as_fd(), &addr) {
             last = failure(&error);
             continue;
         }
@@ -1129,7 +1129,7 @@ fn bind_inet(
             let backlog = options.listen_queue.unwrap_or(32);
             let backlog =
                 i32::try_from(backlog).unwrap_or(if backlog < 0 { i32::MIN } else { i32::MAX });
-            crate::api::net::listen_fd(fd.as_fd(), backlog).map_err(|error| failure(&error))?;
+            crate::api::layer::listen_fd(fd.as_fd(), backlog).map_err(|error| failure(&error))?;
         }
         return Ok(Sock::TcpServer(TcpListener::from(fd)));
     }

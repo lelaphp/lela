@@ -5,4 +5,5 @@
 
 pub mod request;
 
-pub(crate) use php_engine::api::{abi, call, coerce, decl, net, raising, values};
+pub(crate) use php_engine::api::{abi, call, coerce, decl, raising, values};
+pub(crate) use php_engine::layer;

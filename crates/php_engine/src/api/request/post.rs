@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use super::Request;
 use super::variables::BodyLimits;
 use crate::api::raising::{Level, Thrown, docref, throw_error};
-use crate::api::request::TemporaryGuard;
+use crate::api::request::temporary::TemporaryGuard;
 use crate::api::values::{Owner, PhpArray, adopted};
 use crate::engine::{Body, Method};
 
@@ -295,7 +295,7 @@ impl Request {
     /// is asked for more only while what it has handed out falls short of
     /// the chunk wanted, so a body the form reader stopped reading part way
     /// is read no further.
-    pub fn input_bytes(&mut self) -> Vec<u8> {
+    pub(crate) fn input_bytes(&mut self) -> Vec<u8> {
         const CHUNK: usize = 8192;
         let mut body = self.post.request_body.take().unwrap_or_default();
         let mut out = Vec::new();

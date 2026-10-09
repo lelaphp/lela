@@ -147,7 +147,6 @@ abi::GcBeneath::collect
 abi::Header
 abi::Header::header
 abi::Header::register
-abi::IncludeSource
 abi::IniStage
 abi::IniVerdict
 abi::Instance
@@ -244,7 +243,6 @@ abi::OpcodesDeclared
 abi::OrFalse
 abi::Passed
 abi::Path
-abi::PersistentList
 abi::Pool
 abi::Pool::drain
 abi::Pool::give_back
@@ -279,7 +277,6 @@ abi::Refusals::comparison
 abi::Refusals::construction
 abi::Removed
 abi::Shell
-abi::StandardHandlesHook
 abi::Start
 abi::Start::host
 abi::Start::ini
@@ -291,8 +288,6 @@ abi::Statement::suspend_time_limit
 abi::StatementHandler
 abi::Static
 abi::Std
-abi::StreamHooks
-abi::StreamOpenHook
 abi::StringBeneath
 abi::StringBeneath::compile
 abi::StringBeneath::name
@@ -439,20 +434,6 @@ decl::Type::mask
 decl::Visibility
 decl::class_attribute_refusal
 decl::hook_attribute_refusal
-net::BUFSIZ
-net::Readiness
-net::SockOpt
-net::bind_fd
-net::connect_fd
-net::dup_fd
-net::fd_table_size
-net::listen_fd
-net::new_socket
-net::peek_fd
-net::poll_fd
-net::set_fd_blocking
-net::set_sockopt
-net::sync_fd
 process::gid
 process::groups
 process::uid
@@ -684,7 +665,6 @@ request::Request::class_has_create_object
 request::Request::class_name
 request::Request::class_own_iterator
 request::Request::clear_last_error
-request::Request::close_host_fd
 request::Request::closure_refuses_receiver
 request::Request::connection_status
 request::Request::constant_attributes
@@ -749,10 +729,7 @@ request::Request::header_remove
 request::Request::header_remove_prefix
 request::Request::headers_list
 request::Request::headers_sent
-request::Request::heap_memory_limit
 request::Request::holding
-request::Request::host_fd
-request::Request::host_fds_are_process
 request::Request::host_status
 request::Request::included_files
 request::Request::info_ini_entries
@@ -771,13 +748,10 @@ request::Request::ini_set
 request::Request::ini_set_string
 request::Request::ini_stage
 request::Request::ini_value
-request::Request::input_bytes
 request::Request::input_variables
 request::Request::instance_of
-request::Request::instantiable
 request::Request::interfaces
 request::Request::interrupt
-request::Request::is_pending
 request::Request::is_uploaded_file
 request::Request::last_error
 request::Request::loaded_env
@@ -795,7 +769,6 @@ request::Request::native_static_trampoline
 request::Request::native_trampoline
 request::Request::observe_allocations
 request::Request::op_array
-request::Request::open_temporary_fd
 request::Request::os_error_text
 request::Request::output_buffer_op
 request::Request::output_started_at
@@ -803,14 +776,12 @@ request::Request::parse_body
 request::Request::parse_encoding_list
 request::Request::parse_query
 request::Request::periods_elapsed
-request::Request::persistent_list
 request::Request::phpinfo_as_text
 request::Request::preloading
 request::Request::raised
 request::Request::realpath
 request::Request::realpath_cache
 request::Request::realpath_cache_clear
-request::Request::realpath_file
 request::Request::register_constant
 request::Request::register_shutdown_function
 request::Request::register_tick_function
@@ -839,7 +810,6 @@ request::Request::sapi_name
 request::Request::scope
 request::Request::script_name
 request::Request::serialize_precision
-request::Request::serve_method
 request::Request::serve_string
 request::Request::set_caller_var
 request::Request::set_ctype_locale
@@ -860,7 +830,6 @@ request::Request::set_umask
 request::Request::stack_overflowed
 request::Request::start_periodic
 request::Request::state
-request::Request::state_ref
 request::Request::status_line
 request::Request::stop_periodic
 request::Request::stream_thrown
@@ -871,10 +840,8 @@ request::Request::take_uploaded_file
 request::Request::temp_dir
 request::Request::this
 request::Request::this_object
-request::Request::thrown_without_frame
 request::Request::trampoline
 request::Request::umask
-request::Request::unguarded_host_path
 request::Request::unit_cache
 request::Request::unobserve_allocations
 request::Request::unregister_tick_function
@@ -884,7 +851,6 @@ request::Request::virtual_file_ex
 request::Request::with_fake_scope
 request::Request::with_fiber_switch_blocked
 request::Request::within_basedir
-request::Request::wrapper_warning
 request::Request::write
 request::Request::write_stderr
 request::Request::write_stdout
@@ -1018,7 +984,6 @@ request::Streams::wrapper_unregister
 request::Streams::wrapper_url_stat
 request::Streams::xport_create
 request::Syslog
-request::TemporaryGuard
 request::TimeLimitSuspended
 request::UnitCache
 request::UnitCache::bound
@@ -1042,7 +1007,6 @@ request::Zone::date
 request::Zone::midnight
 request::Zone::of
 request::Zone::offset
-request::scheme_length
 request::select
 request::take_signals
 request::url_decode

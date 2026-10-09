@@ -1,19 +1,23 @@
-//! The stream layer's request state (design §4.3 seam 5, ADR-0005): what
-//! php keeps for streams in `FG()` and `BG()`, the wrapper and filter
-//! tables, the stat cache and the persistent entries a request holds,
-//! reached as `req.state::<State>()`, built on the request's first touch
-//! and dropped with it.
+//! The stream layer's state (design §4.3 seam 5, ADR-0005, ADR-0010).
+//! Its request state: what php keeps for streams in `FG()` and `BG()`,
+//! the wrapper and filter tables, the stat cache and the persistent
+//! entries a request holds, reached as `req.state::<State>()`, built on
+//! the request's first touch and dropped with it. Its engine state: php's
+//! `EG(persistent_list)`, built by the engine as it starts
+//! ([`engine_state`]) and closed first as it ends ([`engine_end`]).
 
+use std::any::Any;
 use std::sync::Arc;
 
-use crate::api::abi::PersistentList;
+use crate::api::abi::Pool;
+use crate::api::layer::Face as _;
 use php_engine::api::values::ResourceType;
 
 use crate::api::request::{
     EngineWrapper, FilterFactory, Request, Standard, StreamCtx, StreamWrapper, context_dtor,
 };
 use crate::api::values::{Owner, Resource};
-use crate::streams::persistent::Held;
+use crate::streams::persistent::{Entry, Held};
 use crate::streams::{FilterCall, Registered};
 use crate::wrapper::StatCache;
 
@@ -82,9 +86,46 @@ pub(crate) struct State {
     /// lent from the engine's pool or opened here, until it ends
     /// ([`crate::streams::persistent`]).
     pub(crate) persistent: Vec<Held>,
-    /// The engine's pool, once the request took or held an entry: what
-    /// the entries still held go back to as the request is dropped.
-    pub(crate) pool: Option<Arc<PersistentList>>,
+    /// The layer's engine state, once the request took or held an
+    /// entry: the pool the entries still held go back to as the request
+    /// is dropped.
+    pub(crate) engine: Option<Arc<EngineState>>,
+}
+
+/// The idle entries the persistent pool keeps (design §4.10). php's list
+/// has no bound of its own, being one per worker process, whose count
+/// bounds it; one pool shared by every request thread keeps at most this
+/// many, and one given back past it is closed, so a burst of concurrent
+/// requests does not leave every connection it opened held open.
+const PERSISTENT_ENTRIES: usize = 1024;
+
+/// The layer's engine state (#1962): what it keeps across the engine's
+/// requests, built as the engine starts and reached through any of them
+/// ([`crate::api::layer::Face::layer_state`]).
+pub(crate) struct EngineState {
+    /// php's `EG(persistent_list)` as far as streams reach it: the
+    /// sockets `pfsockopen` and `STREAM_CLIENT_PERSISTENT` open, idle
+    /// under php's key, each lent to one request at a time
+    /// ([`crate::streams::persistent`]).
+    pub(crate) persistent: Pool<Vec<u8>, Entry>,
+}
+
+/// [`StreamHooks::state`](crate::api::layer::StreamHooks::state): the
+/// layer's engine state, its pool empty.
+pub(crate) fn engine_state() -> Arc<dyn Any + Send + Sync> {
+    Arc::new(EngineState {
+        persistent: Pool::new(PERSISTENT_ENTRIES),
+    })
+}
+
+/// [`StreamHooks::engine_end`](crate::api::layer::StreamHooks::engine_end):
+/// `zend_destroy_rsrc_list(&EG(persistent_list))`, every idle socket
+/// closed, the one given back last first, before any extension's engine
+/// end.
+pub(crate) fn engine_end(req: &mut Request) {
+    if let Some(engine) = req.layer_state::<EngineState>() {
+        drop(engine.persistent.drain());
+    }
 }
 
 /// The four resource types `PHP_MINIT(streams)`, `PHP_MINIT(file)` and
@@ -119,7 +160,7 @@ impl Default for State {
             filtering: None,
             stat_cache: StatCache::default(),
             persistent: Vec::new(),
-            pool: None,
+            engine: None,
         }
     }
 }
@@ -129,8 +170,9 @@ impl Drop for State {
     /// entry the request still holds idle given back to the engine's
     /// pool, after the resources that held them closed.
     fn drop(&mut self) {
-        if let Some(pool) = self.pool.take() {
-            crate::streams::persistent::give_back(&pool, std::mem::take(&mut self.persistent));
+        let held = std::mem::take(&mut self.persistent);
+        if let Some(engine) = self.engine.take() {
+            crate::streams::persistent::give_back(&engine.persistent, held);
         }
     }
 }
