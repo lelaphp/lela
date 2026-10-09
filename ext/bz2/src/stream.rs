@@ -410,7 +410,24 @@ fn from_file(
 /// held to the `open_basedir` guard, which warns, and opened directly as `bzopen_or_bzdopen` reads `mode`, `rb` or `wb`, and
 /// where that fails opened as a php stream in `mode` and cast to its fd,
 /// as php's `BZ2_bzdopen` needs one; a `BZip2` stream over the one that
-/// opened.
+/// opened. The file is named, where the caller asks, by the path as
+/// written when it opened directly, and by the name the inner open sets
+/// otherwise, so an include through the wrapper is named as the file it
+/// read.
+///
+/// ```php
+/// $d = sys_get_temp_dir() . '/bz2-include-' . getmypid();
+/// mkdir($d);
+/// file_put_contents("$d/a.php", bzcompress('<?php return __FILE__;'));
+/// echo str_replace($d, 'D', include "compress.bzip2://$d/./a.php"), "\n";
+/// echo str_replace($d, 'D', get_included_files()[1]), "\n";
+/// unlink("$d/a.php");
+/// rmdir($d);
+/// ```
+/// ```expect
+/// D/./a.php
+/// D/./a.php
+/// ```
 fn open(
     req: &mut Request,
     path: &[u8],
@@ -431,6 +448,11 @@ fn open(
     };
     let parsed = Mode::parse(mode);
     let handle = if let Some(file) = parsed.open(&host) {
+        // `*opened_path = zend_string_init(path_copy, ...)`: the path as
+        // written, where the caller holds one, as an include does.
+        if opening.for_zend_stream {
+            req.set_opened_path(path);
+        }
         Handle::File { file, eof: false }
     } else {
         let Some(inner) = req.open_stream_with(path, mode, opening)? else {

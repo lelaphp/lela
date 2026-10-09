@@ -188,7 +188,28 @@ mod libc_seek {
 /// duplicate, with the `zlib` `level` of its `php_stream_context` set on it; a stream of
 /// the `ZLIB` kind, unbuffered. Its own warnings are made under
 /// `REPORT_ERRORS` alone, which the wrapper is never handed. The
-/// wrapper's opener, `gzip_stream_wops.stream_opener`.
+/// wrapper's opener, `gzip_stream_wops.stream_opener`. The inner open is
+/// handed the caller's `opened_path` with the options, so an include
+/// through the wrapper is named as the file it read, its real path; and
+/// `STREAM_OPEN_FOR_INCLUDE` among them, so `allow_url_include` holds a
+/// URL wrapper inside it to the include.
+///
+/// ```php
+/// $d = sys_get_temp_dir() . '/gz-include-' . getmypid();
+/// mkdir($d);
+/// file_put_contents("$d/a.php", gzencode('<?php return __FILE__;'));
+/// $r = realpath($d);
+/// echo str_replace($r, 'R', include "compress.zlib://$d/./a.php"), "\n";
+/// echo str_replace($r, 'R', get_included_files()[1]), "\n";
+/// unlink("$d/a.php");
+/// rmdir($d);
+/// var_dump(@include 'compress.zlib://data:text/plain,<?php return 7;');
+/// ```
+/// ```expect
+/// R/a.php
+/// R/a.php
+/// bool(false)
+/// ```
 fn open(
     req: &mut Request,
     path: &[u8],

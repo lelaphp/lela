@@ -975,9 +975,14 @@ pub enum DirListing {
 /// `STREAM_WILL_CAST`, the caller about to cast the stream to a fd, which
 /// makes that copy a temporary file rather than a `php://temp`;
 /// `STREAM_DISABLE_OPEN_BASEDIR`, the plain files wrapper opening without
-/// the guard, as `mail.log` is opened; and `STREAM_ONLY_GET_HEADERS`, the
+/// the guard, as `mail.log` is opened; `STREAM_ONLY_GET_HEADERS`, the
 /// open `get_headers` makes, for which the http wrapper reads the head
-/// alone and fails on no status. The
+/// alone and fails on no status; and `STREAM_OPEN_FOR_ZEND_STREAM`, the
+/// open an include makes for the scanner, whose caller holds the
+/// `*opened_path` the opener sets: an opener that hands it on to its own
+/// open hands on that `opened_path`, so the name the inner open sets is
+/// the opener's, as `php_stream_gzopen` names an included file by the
+/// file it read. The
 /// engine clears `warn` before it asks an opener, as php does, so what
 /// fails inside one is what the opener logged
 /// ([`Request::wrapper_log_error`]), or the generic `operation failed`.
@@ -991,6 +996,7 @@ pub struct Opening {
     pub will_cast: bool,
     pub disable_open_basedir: bool,
     pub only_get_headers: bool,
+    pub for_zend_stream: bool,
 }
 
 /// A wrapper whose kinds the engine keeps, which the extension that

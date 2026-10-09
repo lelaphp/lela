@@ -25,3 +25,8 @@ libbz2-rs-sys = { workspace = true }
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }
+# ext/standard for the files the leak sensor's requests write, and what it
+# requires, transitively (#1925).
+php_ext_standard = { path = "../standard" }
+php_ext_lexbor = { path = "../lexbor" }
+php_ext_uri = { path = "../uri" }

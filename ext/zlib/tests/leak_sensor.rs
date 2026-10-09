@@ -34,3 +34,21 @@ echo implode('|', gzfile($f)); unlink($f);
     );
     assert_eq!(stdout, "one\n|two\n");
 }
+
+/// An include through `compress.zlib://` keeps nothing of the open, the
+/// name its inner open set among it, whether the file opens or not, and
+/// the included file is named by its real path, as php names it (#2119).
+#[test]
+fn an_include_through_the_wrapper_gives_up_the_path_it_opened() {
+    let stdout = armed(
+        r#"<?php
+$f = sys_get_temp_dir() . '/leak-sensor-include-' . getmypid() . '.php';
+file_put_contents($f, gzencode('<?php echo __FILE__ === realpath($GLOBALS["f"]) ? "file" : __FILE__, "\n";'));
+include 'compress.zlib://' . $f;
+var_dump(@include 'compress.zlib://' . $f . '.missing');
+echo in_array(realpath($f), get_included_files(), true) ? 'named' : implode(',', get_included_files()), "\n";
+unlink($f);
+"#,
+    );
+    assert_eq!(stdout, "file\nbool(false)\nnamed\n");
+}

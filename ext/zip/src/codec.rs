@@ -18,13 +18,60 @@ pub(crate) struct Compressed {
     pub(crate) version_needed: u16,
 }
 
+/// `TORRENTZIP_COMPRESSION_FLAGS`, the level a torrentzip entry is
+/// written at ([`crate::write`]'s `zip_dirent_torrentzip_normalize`):
+/// `Z_BEST_COMPRESSION` at `TORRENTZIP_MEM_LEVEL`.
+pub(crate) const TORRENTZIP_COMPRESSION_FLAGS: u32 = 0xffff;
+
 /// `BUFSIZE`: the input a default method stores rather than inflate,
 /// read in one go (`compress_read`'s `can_store`).
 const BUFSIZE: usize = 8192;
 
 /// `zip_source_compress` with `method` at `level`: `can_store` is
 /// `ZIP_CM_IS_DEFAULT`, under which data of one buffer that does not
-/// shrink is stored.
+/// shrink is stored. Deflate is the platform zlib's ([`crate::ffi`]) at
+/// libzip's memLevel, 9 or torrentzip's 8, so an entry carries php's
+/// bytes at every level, and a stream cut short inflates as far as
+/// php's does (#1651).
+///
+/// ```php
+/// $d = ''; for ($i = 0; $i < 3000; $i++) { $d .= hash('sha256', "row $i") . "\n"; }
+/// $f = sys_get_temp_dir() . '/zip-deflate-' . getmypid() . '.zip';
+/// $z = new ZipArchive; $z->open($f, ZipArchive::CREATE|ZipArchive::OVERWRITE); $z->addFromString('a', $d); $z->setCompressionName('a', ZipArchive::CM_DEFLATE); $z->close();
+/// $b = file_get_contents($f);
+/// $ctx = inflate_init(ZLIB_ENCODING_RAW); echo strlen(inflate_add($ctx, substr($b, 31, 4065), ZLIB_SYNC_FLUSH)), "\n";
+/// $z->open($f); $s = $z->getStream('a'); $h = fopen($f, 'r+'); ftruncate($h, 3000); fclose($h);
+/// $t = 0; while (!feof($s)) { $r = fread($s, 8192); if ($r === false) break; $t += strlen($r); } echo $t, "\n"; unlink($f);
+/// ```
+/// ```expect
+/// 6548
+/// 6548
+/// ```
+///
+/// ```php
+/// $d = ''; for ($i = 0; $i < 3000; $i++) { $d .= hash('sha256', "row $i") . "\n"; }
+/// $f = sys_get_temp_dir() . '/zip-levels-' . getmypid() . '.zip';
+/// $entry = function ($f) {
+///     $b = file_get_contents($f);
+///     $u = unpack('vmethod/x8/Vsize/x4/vn/vm', $b, 8);
+///     return $u['method'] . ' ' . $u['size'] . ' ' . md5(substr($b, 30 + $u['n'] + $u['m'], $u['size']));
+/// };
+/// foreach ([1, 9, 0] as $level) {
+///     $z = new ZipArchive; $z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+///     $z->addFromString('a', $d); $z->setCompressionName('a', ZipArchive::CM_DEFLATE, $level); $z->close();
+///     echo $level, ': ', $entry($f), "\n";
+/// }
+/// $z = new ZipArchive; $z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+/// $z->addFromString('a', $d); $z->setArchiveFlag(ZipArchive::AFL_WANT_TORRENTZIP, 1); $z->close();
+/// echo 'torrentzip: ', $entry($f), ' ', md5_file($f), "\n";
+/// unlink($f);
+/// ```
+/// ```expect
+/// 1: 8 115812 e4ba8163dd2f2d2d09772c6a1c77ab54
+/// 9: 8 113050 5e1c764722165253289fc65c3deec994
+/// 0: 8 113050 5e1c764722165253289fc65c3deec994
+/// torrentzip: 8 112965 09f84361e4aad9b4169caff78195b5b0 fcd9d6e6501fb44f54b639fc1278d21d
+/// ```
 pub(crate) fn compress(
     data: &[u8],
     method: u16,
@@ -34,10 +81,15 @@ pub(crate) fn compress(
     let fail = |_| Status::of(Er::Internal, 0);
     let (out, bitflags, version_needed) = match method {
         8 => {
+            // `zip_algorithm_deflate.c`'s `allocate`: level 0 or past 9
+            // is `Z_BEST_COMPRESSION`, and torrentzip's flags ask for
+            // `TORRENTZIP_MEM_LEVEL`, every other level `MAX_MEM_LEVEL`.
+            let mem_level = if level == TORRENTZIP_COMPRESSION_FLAGS {
+                8
+            } else {
+                9
+            };
             let level = if (1..=9).contains(&level) { level } else { 9 };
-            let mut e =
-                flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(level));
-            e.write_all(data).map_err(fail)?;
             let bits = if level < 3 {
                 4
             } else if level > 7 {
@@ -45,7 +97,10 @@ pub(crate) fn compress(
             } else {
                 0
             };
-            (e.finish().map_err(fail)?, bits, 20)
+            let Some(out) = crate::ffi::deflate(data, level.cast_signed(), mem_level) else {
+                return Err(Status::of(Er::Zlib, 0));
+            };
+            (out, bits, 20)
         }
         12 => {
             let level = if (1..=9).contains(&level) { level } else { 9 };

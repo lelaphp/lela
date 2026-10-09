@@ -788,7 +788,9 @@ version = "0.0.0"
 dependencies = [
  "libbz2-rs-sys",
  "php_ext",
+ "php_ext_lexbor",
  "php_ext_standard",
+ "php_ext_uri",
 ]
 
 [[package]]
@@ -1356,6 +1358,8 @@ dependencies = [
  "flate2",
  "getrandom",
  "hmac",
+ "libc",
+ "libz-sys",
  "lzma-rust2",
  "pbkdf2",
  "php_ext",

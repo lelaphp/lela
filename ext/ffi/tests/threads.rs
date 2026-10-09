@@ -118,3 +118,46 @@ echo "not reached\n";
     );
     assert_eq!(returned.as_deref(), Some("0"));
 }
+
+/// The variable that runs a test's body in the child process its parent
+/// starts, rather than starting one.
+const CHILD: &str = "PHP_EXT_FFI_THREADS_CHILD";
+
+/// The thread calls back after the request ended on a fatal, before the
+/// thread posted the call: the request's end freed the callback's code,
+/// since a callback lives only as long as the request that made it, and
+/// C calls code that is gone. The call is made in a child process, which
+/// this test holds to the fault that follows; libffi unmaps a freed
+/// closure's code only where it lays closures out in trampoline tables,
+/// as Apple's does, so elsewhere the fault is not certain.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_callback_called_after_its_request_ended_faults_as_in_php() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let name = "a_callback_called_after_its_request_ended_faults_as_in_php";
+    if std::env::var_os(CHILD).is_some() {
+        let (stdout, returned) = served(
+            later_ending,
+            "after-end",
+            r#"$later(function ($x) { echo "called $x\n"; return $x * 2; });
+undefined_function();
+"#,
+        );
+        panic!("the call after the end returned {returned:?}; the request printed {stdout}");
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        panic!("the test binary's path");
+    };
+    let status = std::process::Command::new(exe)
+        .args(["--exact", name, "--test-threads=1"])
+        .env(CHILD, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let signal = status.ok().and_then(|status| status.signal());
+    assert!(
+        signal == Some(libc::SIGSEGV) || signal == Some(libc::SIGBUS),
+        "the child ended {signal:?}"
+    );
+}
