@@ -25,6 +25,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod alloc;
 mod auth;
 mod charset;
 pub mod client;
@@ -215,10 +216,10 @@ pub(crate) struct Handle {
 
 impl Handle {
     /// `mysqlnd_init`: a connection made and held in the table, one owner
-    /// counted.
-    pub(crate) fn alloc(req: &mut Request, persistent: bool) -> Handle {
-        let conn = Box::new(ConnData::new(req, persistent));
-        Handle::hold(req, conn)
+    /// counted; the `Err` is the memory limit's fatal.
+    pub(crate) fn alloc(req: &mut Request, persistent: bool) -> Result<Handle, Thrown> {
+        let conn = Box::new(ConnData::new(req, persistent)?);
+        Ok(Handle::hold(req, conn))
     }
 
     /// `conn` held in the table, one owner counted.
@@ -291,7 +292,7 @@ impl Handle {
         if let Some(mut conn) = taken {
             conn.send_close(req).ok();
             flush(req, &mut conn);
-            conn.free_contents(req);
+            conn.dtor(req);
         }
     }
 }

@@ -12,6 +12,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpString, Value};
 
+use crate::alloc::PLUGIN_ROOM;
 use crate::conn::ConnData;
 use crate::consts::{
     ConnState, FieldType, MAX_PACKET_SIZE, NULL_LENGTH, PhpType, ResType, column, cr, status,
@@ -21,9 +22,6 @@ use crate::pool::{Chunk, Pool};
 use crate::stats::Stat;
 use crate::wire::{Body, EODATA_MARKER, ERROR_MARKER, PacketError, Prot};
 
-/// `mysqlnd_plugin_count()`: the plugins `php --ri mysqlnd` lists, each
-/// of which gives a set of rows' structures a pointer of room.
-const PLUGIN_ROOM: usize = 8 * listed(crate::auth::Plugin::LOADED);
 /// `sizeof(MYSQLND_RES)`.
 const RES: usize = 272;
 /// `sizeof(MYSQLND_RES_BUFFERED)`.
@@ -43,20 +41,6 @@ const ROW_BUFFER: usize = 16;
 /// `sizeof(struct st_mysqlnd_packet_row)`, the packet `use_result`
 /// allocates.
 const PACKET_ROW: usize = 680;
-
-/// How many names a comma-separated list holds.
-const fn listed(names: &str) -> usize {
-    let bytes = names.as_bytes();
-    let mut n = 1;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b',' {
-            n += 1;
-        }
-        i += 1;
-    }
-    n
-}
 
 /// `MYSQLND_FIELD`: one column as the server described it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -458,7 +458,7 @@ pub(crate) fn common_connect(
             handle
         } else {
             new_connection = true;
-            let handle = Mysqlnd::init(req, persistent);
+            let handle = Mysqlnd::init(req, persistent)?;
             mysql.mysql = Some(handle);
             handle
         };
@@ -483,7 +483,7 @@ pub(crate) fn common_connect(
             thrown?;
             return Ok(None);
         }
-        connected(req, handle);
+        connected(req, handle)?;
         if let Some(key) = &mysql.hash_key
             && let Some(held) = plinks(req, key)
         {
@@ -516,16 +516,17 @@ pub(crate) fn common_connect(
 /// What a connect that passed sets: the connect error cleared, LOCAL
 /// INFILE as `mysqli.allow_local_infile` allows it, and its directory
 /// where `open_basedir` lets it be.
-fn connected(req: &mut Request, handle: Mysqlnd) {
+fn connected(req: &mut Request, handle: Mysqlnd) -> Result<(), Thrown> {
     let status = handle.status(req);
     set_connect_error(req, status.errno, &status.error);
     let allow = ini_bool(req, b"mysqli.allow_local_infile");
-    handle.option(req, ClientOption::LocalInfile(allow));
+    handle.option(req, ClientOption::LocalInfile(allow))?;
     if let Some(dir) = ini_string(req, b"mysqli.local_infile_directory")
         && req.check_open_basedir(&dir, false).is_ok()
     {
-        handle.option(req, ClientOption::LoadDataLocalDir(Some(&dir)));
+        handle.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))?;
     }
+    Ok(())
 }
 
 /// `err:` of `mysqli_common_connect`: the persistent key dropped, and the
@@ -634,7 +635,7 @@ pub(crate) fn init(
         new_object(req, class)?
     };
     let mut mysql = Conn::new(req)?;
-    mysql.mysql = Some(Mysqlnd::init(req, true));
+    mysql.mysql = Some(Mysqlnd::init(req, true)?);
     let resource = Resource::new(req, mysql)?;
     if let Some(link) = crate::payload::<Link>(req, *object) {
         *link = Link::Made(resource);
@@ -1057,7 +1058,7 @@ pub(crate) fn options(
         203 => ClientOption::NetReadBufferSize(as_long(req)),
         _ => return Ok(false),
     };
-    if !mysql.option(req, set) {
+    if !mysql.option(req, set)? {
         report_conn(req, mysql)?;
         return Ok(false);
     }
@@ -1073,11 +1074,11 @@ pub(crate) fn ssl_set(
     let mysql = conn(req, on.object, Need::Made)?;
     let parts = parts.map(|p| p.filter(|p| !p.is_empty()));
     let bytes = |at: usize| parts[at].as_ref().map(PhpString::as_bytes);
-    mysql.option(req, ClientOption::SslKey(bytes(0)));
-    mysql.option(req, ClientOption::SslCert(bytes(1)));
-    mysql.option(req, ClientOption::SslCa(bytes(2)));
-    mysql.option(req, ClientOption::SslCapath(bytes(3)));
-    mysql.option(req, ClientOption::SslCipher(bytes(4)));
+    mysql.option(req, ClientOption::SslKey(bytes(0)))?;
+    mysql.option(req, ClientOption::SslCert(bytes(1)))?;
+    mysql.option(req, ClientOption::SslCa(bytes(2)))?;
+    mysql.option(req, ClientOption::SslCapath(bytes(3)))?;
+    mysql.option(req, ClientOption::SslCipher(bytes(4)))?;
     Ok(True)
 }
 

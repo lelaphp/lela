@@ -50,7 +50,7 @@ impl MyStmt {
     fn init(req: &mut Request, conn: Mysqlnd) -> Result<MyStmt, Thrown> {
         let held = Emalloc::new(req, MY_STMT)?;
         Ok(MyStmt {
-            stmt: Stmt::init(req, conn),
+            stmt: Stmt::init(req, conn)?,
             query: None,
             held,
         })
@@ -148,7 +148,32 @@ fn wrap(
     Ok(object.into_instance())
 }
 
-/// `mysqli_stmt_init`.
+/// `mysqli_stmt_init`. A statement's `MY_STMT` and resource are the
+/// request's from its construction to its close:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $m = memory_get_usage();
+/// $s = $l->stmt_init();
+/// echo memory_get_usage() - $m, "\n";
+/// $s->prepare("SELECT ? AS a");
+/// echo memory_get_usage() - $m, "\n";
+/// $s->close();
+/// echo memory_get_usage() - $m, "\n";
+/// unset($s);
+/// $s = new mysqli_stmt($l, "SELECT ? AS a");
+/// echo memory_get_usage() - $m, "\n";
+/// unset($s);
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql
+/// 5384
+/// 21800
+/// 256
+/// 21800
+/// 32
+/// ```
 pub(crate) fn stmt_init(
     req: &mut Request,
     on: On,
@@ -262,7 +287,7 @@ pub(crate) fn bind_param(
             };
             params.push((held(req, var), ty));
         }
-        let bound = s.stmt.bind_parameters(req, params);
+        let bound = s.stmt.bind_parameters(req, params)?;
         report_stmt(req, &s.stmt)?;
         Ok(bound)
     })
@@ -279,7 +304,7 @@ pub(crate) fn bind_result(req: &mut Request, on: On, vars: &[Ref<Value>]) -> Res
             ));
         }
         let values = vars.iter().map(|var| held(req, var)).collect();
-        Ok(s.stmt.bind_columns(req, values))
+        s.stmt.bind_columns(req, values)
     })
 }
 
@@ -308,7 +333,7 @@ fn bind_list(
     let values: Vec<(Owner<Value>, FieldType)> = walk::rows(req, params)
         .map(|(_, value)| (Owner::take(req, value.deref()), FieldType::VarString))
         .collect();
-    Ok(Some(stmt.bind_parameters(req, values)))
+    Ok(Some(stmt.bind_parameters(req, values)?))
 }
 
 /// `mysqli_stmt_execute`.
@@ -344,7 +369,7 @@ pub(crate) fn execute_query(
     params: Option<PhpArray>,
 ) -> Result<Union<Owner<Instance<mysqli_result>>, bool>, Thrown> {
     let conn = link::conn(req, on.object, Need::Open)?;
-    let mut stmt = Stmt::init(req, conn);
+    let mut stmt = Stmt::init(req, conn)?;
     if !stmt.prepare(req, query.as_bytes())? {
         let reported = report_stmt(req, &stmt);
         stmt.close_into_connection(req)?;

@@ -176,7 +176,7 @@ impl Connector for Driver {
         if options.is_none() || option_long(req, options, Mysql::ATTR_MULTI_STATEMENTS, 1)? != 0 {
             connect_opts |= flag::MULTI_STATEMENTS;
         }
-        let server = Mysqlnd::init(req, source.persistent);
+        let server = Mysqlnd::init(req, source.persistent)?;
         if source.persistent {
             server.restart_psession(req);
         }
@@ -200,17 +200,17 @@ impl Connector for Driver {
         if options.is_some() && !driver_options(req, options, &mut h, &mut connect_opts)? {
             return failed(req, server);
         }
-        if !server.option(req, ClientOption::LocalInfile(h.local_infile)) {
+        if !server.option(req, ClientOption::LocalInfile(h.local_infile))? {
             return failed(req, server);
         }
         let native = option_long(req, options, attr::STRINGIFY_FETCHES, 0)? == 0;
-        if !server.option(req, ClientOption::IntAndFloatNative(native)) {
+        if !server.option(req, ClientOption::IntAndFloatNative(native))? {
             return failed(req, server);
         }
         let [charset, dbname, host, port, unix_socket, user, password] =
             <[Option<Vec<u8>>; 7]>::try_from(vars).unwrap_or_default();
         if let Some(charset) = &charset
-            && !server.option(req, ClientOption::SetCharsetName(charset))
+            && !server.option(req, ClientOption::SetCharsetName(charset))?
         {
             return failed(req, server);
         }
@@ -270,7 +270,7 @@ fn driver_options(
     if option_long(req, options, Mysql::ATTR_IGNORE_SPACE, 0)? != 0 {
         *connect_opts |= flag::IGNORE_SPACE;
     }
-    if !server.option(req, ClientOption::ConnectTimeout(low32(timeout))) {
+    if !server.option(req, ClientOption::ConnectTimeout(low32(timeout)))? {
         return Ok(false);
     }
     if option_long(req, options, Mysql::ATTR_LOCAL_INFILE, 0)? != 0 {
@@ -278,17 +278,17 @@ fn driver_options(
     }
     if let Some(dir) = option_string(req, options, Mysql::ATTR_LOCAL_INFILE_DIRECTORY)?
         && req.check_open_basedir(&dir, true).is_ok()
-        && !server.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))
+        && !server.option(req, ClientOption::LoadDataLocalDir(Some(&dir)))?
     {
         return Ok(false);
     }
     if let Some(command) = option_string(req, options, Mysql::ATTR_INIT_COMMAND)?
-        && !server.option(req, ClientOption::InitCommand(&command))
+        && !server.option(req, ClientOption::InitCommand(&command))?
     {
         return Ok(false);
     }
     if option_long(req, options, Mysql::ATTR_COMPRESS, 0)? != 0
-        && !server.option(req, ClientOption::Compress)
+        && !server.option(req, ClientOption::Compress)?
     {
         return Ok(false);
     }
@@ -298,14 +298,14 @@ fn driver_options(
     let capath = option_string(req, options, Mysql::ATTR_SSL_CAPATH)?;
     let cipher = option_string(req, options, Mysql::ATTR_SSL_CIPHER)?;
     if key.is_some() || cert.is_some() || ca.is_some() || capath.is_some() || cipher.is_some() {
-        server.option(req, ClientOption::SslKey(key.as_deref()));
-        server.option(req, ClientOption::SslCert(cert.as_deref()));
-        server.option(req, ClientOption::SslCa(ca.as_deref()));
-        server.option(req, ClientOption::SslCapath(capath.as_deref()));
-        server.option(req, ClientOption::SslCipher(cipher.as_deref()));
+        server.option(req, ClientOption::SslKey(key.as_deref()))?;
+        server.option(req, ClientOption::SslCert(cert.as_deref()))?;
+        server.option(req, ClientOption::SslCa(ca.as_deref()))?;
+        server.option(req, ClientOption::SslCapath(capath.as_deref()))?;
+        server.option(req, ClientOption::SslCipher(cipher.as_deref()))?;
     }
     if let Some(key) = option_string(req, options, Mysql::ATTR_SERVER_PUBLIC_KEY)?
-        && !server.option(req, ClientOption::ServerPublicKey(Some(&key)))
+        && !server.option(req, ClientOption::ServerPublicKey(Some(&key)))?
     {
         return Ok(false);
     }
@@ -416,7 +416,7 @@ impl Connection for Db {
             ),
             None => (sql, None),
         };
-        let mut ps = Ps::init(req, h.server);
+        let mut ps = Ps::init(req, h.server)?;
         if !ps.prepare(req, sent)? {
             if h.server.status(req).errno == 1295 {
                 ps.close(req, true)?;
@@ -587,7 +587,7 @@ impl Connection for Db {
             attr::STRINGIFY_FETCHES => {
                 let on = bool_attribute(req, value)?;
                 let h = self.h(req)?;
-                if !h.server.option(req, ClientOption::IntAndFloatNative(!on)) {
+                if !h.server.option(req, ClientOption::IntAndFloatNative(!on))? {
                     return Err(error_of(req, h.server, None));
                 }
             }

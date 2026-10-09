@@ -125,7 +125,7 @@ impl Stmt {
         };
         let columns = ps.field_count();
         for i in 0..columns {
-            ps.bind_column(req, i);
+            ps.bind_column(req, i)?;
         }
         if let Some(fields) = ps.fields() {
             self.fields = fields;
@@ -345,7 +345,7 @@ impl Statement for Stmt {
                 let value = param.value.deref();
                 if param.ty.kind() == BindKind::Null || matches!(value.as_ref(), ValueRef::Null) {
                     let null = Owner::take(req, Value::null());
-                    ps.bind_parameter(req, n, null, FieldType::Null);
+                    ps.bind_parameter(req, n, null, FieldType::Null)?;
                     return Ok(());
                 }
                 match param.ty.kind() {
@@ -371,7 +371,7 @@ impl Statement for Stmt {
                     _ => return Err(Failure::silent()),
                 };
                 let value = Owner::take(req, value);
-                ps.bind_parameter(req, n, value, ty);
+                ps.bind_parameter(req, n, value, ty)?;
                 Ok(())
             }
             _ => Ok(()),
