@@ -702,6 +702,13 @@ exempt = ["xtask/src/witness/**", "xtask/tests/witness.rs"] # the parser of the 
 text = "exit= in a witness is captured by `xtask witness --accept`, never authored."
 
 [[rule]]
+id = "witness.capture-authored"
+scope = "**/*.rs"
+deny_pattern = '(?m)^[ \t]*//[/!][ \t]*```expect\b[^\n]*\bcapture\b[^\n]*\n(?:[ \t]*//[/!][^\n]*\n)*?[ \t]*//[/!][ \t]*```[ \t]*$(?:\n[ \t]*//[/!][ \t]*```stderr\b[^\n]*\n(?:[ \t]*//[/!][^\n]*\n)*?[ \t]*//[/!][ \t]*```[ \t]*$)?'   # a fence marked `capture`, from its `expect` line to its close, and the `stderr` fence after it; a block dropping the word is no hit (#2413)
+unless = "xtask witness --accept"
+text = "A fence marked `capture` holds the oracle's streams as `xtask witness --accept --streams` wrote them, never authored; drop `capture` to write the fence by hand."
+
+[[rule]]
 id = "witness.coverage"
 scope = ["crates/php_engine/src/**", "crates/php_streams/src/**", "ext/*/src/**"]
 check = "witness-coverage"
