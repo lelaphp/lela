@@ -56,8 +56,10 @@ pub(crate) enum Link {
 pub(crate) struct Conn {
     /// `mysql`, which a close leaves unset until the next connect.
     pub(crate) mysql: Option<Mysqlnd>,
-    /// `hash_key` of a persistent link, `mysql->persistent` where set.
-    hash_key: Option<Vec<u8>>,
+    /// `hash_key` of a persistent link, `mysql->persistent` where set:
+    /// the request's string `strpprintf` makes, released by
+    /// `php_clear_mysql`.
+    hash_key: Option<Owner<PhpString>>,
     /// `multi_query`: whether multi statements are on.
     multi_query: bool,
     /// `async_result_fetch_type`: how `reap_async_query` reads the rows.
@@ -78,8 +80,36 @@ impl Conn {
         })
     }
 
-    /// `efree(mysql)`.
-    fn free(self, req: &mut Request) {
+    /// `php_clear_mysql`'s `hash_key` released, which a close of a
+    /// persistent link gives back with its connection:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $m = memory_get_usage();
+    /// $l = mysqli_connect('p:127.0.0.1', 'root', '', 'test');
+    /// echo memory_get_usage() - $m, "\n";
+    /// mysqli_close($l);
+    /// echo memory_get_usage() - $m, "\n";
+    /// $l = mysqli_connect('p:127.0.0.1', 'root', '', 'test');
+    /// echo memory_get_usage() - $m, "\n";
+    /// $l = null;
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect mysql
+    /// 544
+    /// 416
+    /// 576
+    /// 32
+    /// ```
+    fn clear(&mut self, req: &mut Request) {
+        if let Some(key) = self.hash_key.take() {
+            key.give_up(req);
+        }
+    }
+
+    /// `efree(mysql)`, `php_clear_mysql` having released what it holds.
+    fn free(mut self, req: &mut Request) {
+        self.clear(req);
         self.held.free(req);
     }
 }
@@ -441,7 +471,9 @@ pub(crate) fn common_connect(
         if ini_bool(req, b"mysqli.allow_persistent") {
             persistent = true;
             let key = target.key();
-            mysql.hash_key = Some(key.clone());
+            let held = PhpString::new(req, &key)?;
+            mysql.clear(req);
+            mysql.hash_key = Some(held);
             reused = reuse(req, &mut mysql, &target, &key)?;
         } else {
             let text = "Persistent connections are disabled. Downgrading to normal";
@@ -484,8 +516,8 @@ pub(crate) fn common_connect(
             return Ok(None);
         }
         connected(req, handle)?;
-        if let Some(key) = &mysql.hash_key
-            && let Some(held) = plinks(req, key)
+        if let Some(key) = mysql.hash_key.as_ref().map(|k| k.as_bytes().to_vec())
+            && let Some(held) = plinks(req, &key)
         {
             held.open.push(handle);
         }
@@ -538,7 +570,7 @@ fn give_back(
     mut mysql: Conn,
     resource: Option<Resource<()>>,
 ) -> Option<Owner<PhpObject>> {
-    mysql.hash_key = None;
+    mysql.clear(req);
     let link = object.and_then(|object| crate::payload::<Link>(req, object));
     match (resource, link) {
         (Some(resource), Some(link)) => *link = Link::Made(resource.repoint(mysql).0),
@@ -563,10 +595,14 @@ fn close_conn(
         req.state::<State>().num_links -= 1;
     }
     let Some(handle) = mysql.mysql.take() else {
-        mysql.hash_key = None;
+        mysql.clear(req);
         return Ok(());
     };
-    match mysql.hash_key.take() {
+    let key = mysql.hash_key.as_ref().map(|k| k.as_bytes().to_vec());
+    // `php_clear_mysql`, which php calls last: nothing reads the string
+    // after its bytes are copied.
+    mysql.clear(req);
+    match key {
         None => {
             handle.close(req, kind)?;
         }

@@ -17,7 +17,7 @@ use php_ext::request::{
 };
 use php_ext::values::{Owner, PhpString, Value};
 
-use crate::alloc::Alloc;
+use crate::alloc::{Alloc, Pstr};
 use crate::consts::{MAX_PACKET_SIZE, cr};
 use crate::error::{ErrorInfo, SERVER_GONE};
 use crate::stats::{Stat, Stats};
@@ -38,18 +38,20 @@ pub(crate) enum SslPeer {
     DontVerify,
 }
 
-/// `MYSQLND_VIO_DATA`'s options.
-#[derive(Debug, Clone, Default)]
+/// `MYSQLND_VIO_DATA`'s options, the TLS paths and cipher each
+/// `mnd_pestrdup`'d as the connection is persistent or not. php's
+/// `ssl_passphrase` is not among them: `mysqlnd_conn_data::set_client_option`
+/// refuses `MYSQLND_OPT_SSL_PASSPHRASE`, so nothing ever sets it.
+#[derive(Debug, Default)]
 pub(crate) struct VioOptions {
     pub(crate) timeout_connect: u32,
     pub(crate) timeout_read: u32,
     pub(crate) net_read_buffer_size: u32,
-    pub(crate) ssl_key: Option<Vec<u8>>,
-    pub(crate) ssl_cert: Option<Vec<u8>>,
-    pub(crate) ssl_ca: Option<Vec<u8>>,
-    pub(crate) ssl_capath: Option<Vec<u8>>,
-    pub(crate) ssl_cipher: Option<Vec<u8>>,
-    pub(crate) ssl_passphrase: Option<Vec<u8>>,
+    pub(crate) ssl_key: Option<Pstr>,
+    pub(crate) ssl_cert: Option<Pstr>,
+    pub(crate) ssl_ca: Option<Pstr>,
+    pub(crate) ssl_capath: Option<Pstr>,
+    pub(crate) ssl_cipher: Option<Pstr>,
     pub(crate) ssl_verify_peer: SslPeer,
 }
 
@@ -96,7 +98,7 @@ pub(crate) struct Net {
     /// until the frame codec's `init` sets its size.
     pub(crate) cmd_buffer: Option<Alloc>,
     /// `pfc->data->sha256_server_public_key`.
-    pub(crate) sha256_server_public_key: Option<Vec<u8>>,
+    pub(crate) sha256_server_public_key: Option<Pstr>,
     /// The `persistent_id` a persistent connection's stream is opened
     /// under, php's `"%p"` of the `MYSQLND_VIO`, which makes the stream a
     /// persistent one; the stream leaves the persistent list as it opens,
@@ -268,6 +270,22 @@ impl Net {
         // that fails is the connection's error in mysqlnd's words, not
         // the socket's notice.
         stream.set_option(req, StreamOption::SuppressErrors(true));
+    }
+
+    /// `mysqlnd_pfc::free_contents` and `mysqlnd_vio::free_contents`:
+    /// the public key's file name and the TLS options `mnd_pefree`'d.
+    pub(crate) fn free_contents(&mut self, req: &mut Request) {
+        Pstr::put(req, &mut self.sha256_server_public_key, None);
+        let o = &mut self.options;
+        for field in [
+            &mut o.ssl_key,
+            &mut o.ssl_cert,
+            &mut o.ssl_ca,
+            &mut o.ssl_capath,
+            &mut o.ssl_cipher,
+        ] {
+            Pstr::put(req, field, None);
+        }
     }
 
     /// `mysqlnd_vio::close_stream`.
@@ -528,9 +546,8 @@ impl Net {
         let Some(stream) = self.stream() else {
             return Ok(false);
         };
-        let o = self.options.clone();
         let context = StreamCtx::alloc(req)?;
-        let set = ssl_options(req, *context, &o);
+        let set = ssl_options(req, *context, &self.options);
         let peer = match set {
             Ok(peer) => peer,
             Err(thrown) => {
@@ -561,18 +578,16 @@ impl Net {
 
 /// The `ssl` options `mysqlnd_vio::enable_ssl` sets on the `context` it
 /// allocates, in its order: the key, the certificate (and it as the key
-/// where none is given), the CA file and path, the passphrase and the
-/// ciphers, then `verify_peer` and `verify_peer_name` as the peer check
+/// where none is given), the CA file and path and the ciphers, then `verify_peer` and `verify_peer_name` as the peer check
 /// it settles on, which it answers, and `allow_self_signed` where it
 /// checks none.
 fn ssl_options(req: &mut Request, context: StreamCtx, o: &VioOptions) -> Result<SslPeer, Thrown> {
     let mut any = false;
-    let string_options: [(&[u8], &Option<Vec<u8>>); 6] = [
+    let string_options: [(&[u8], &Option<Pstr>); 5] = [
         (b"local_pk", &o.ssl_key),
         (b"local_cert", &o.ssl_cert),
         (b"cafile", &o.ssl_ca),
         (b"capath", &o.ssl_capath),
-        (b"passphrase", &o.ssl_passphrase),
         (b"ciphers", &o.ssl_cipher),
     ];
     let put = |req: &mut Request, name: &[u8], value: &[u8]| {
@@ -582,7 +597,7 @@ fn ssl_options(req: &mut Request, context: StreamCtx, o: &VioOptions) -> Result<
         set
     };
     for (name, value) in string_options {
-        if let Some(value) = value {
+        if let Some(value) = value.as_ref().map(Pstr::bytes) {
             any = true;
             put(req, name, value)?;
             if name == b"local_cert" && o.ssl_key.is_none() {

@@ -95,10 +95,10 @@ impl Bound {
     }
 }
 
-/// `struct pdo_column_data`.
-#[derive(Clone)]
+/// `struct pdo_column_data`: the name one owner of the string the
+/// connector described it with, folded to the connection's case.
 pub(crate) struct ColumnInfo {
-    pub(crate) name: Vec<u8>,
+    pub(crate) name: Owner<PhpString>,
     pub(crate) max_len: u64,
     pub(crate) precision: u64,
 }
@@ -124,9 +124,24 @@ impl Columns {
         })
     }
 
-    /// `pdo_stmt_reset_columns`: the allocation given back.
+    /// `pdo_stmt_reset_columns`: each name released, then the
+    /// allocation given back.
     fn free(self, req: &mut Request) {
+        for column in self.list {
+            column.name.give_up(req);
+        }
         self.held.free(req);
+    }
+
+    /// The name of column `at`, a view the caller takes an owner of
+    /// before any PHP code can reset the columns.
+    pub(crate) fn name(&self, at: usize) -> Option<PhpString> {
+        self.list.get(at).map(|c| *c.name)
+    }
+
+    /// The position of the first column so named.
+    pub(crate) fn position(&self, name: &[u8]) -> Option<usize> {
+        self.list.iter().position(|c| c.name.as_bytes() == name)
     }
 }
 
@@ -603,6 +618,34 @@ pub(super) fn set_column_count(req: &mut Request, object: PhpObject, count: usiz
     }
 }
 
+/// `zend_string_tolower` or `zend_string_toupper` of a column's name
+/// where the connection's case asks for one: the same string where no
+/// byte changes, else a new one and the old released.
+fn folded(
+    req: &mut Request,
+    name: Owner<PhpString>,
+    case: dbh::Case,
+) -> Result<Owner<PhpString>, Thrown> {
+    let bytes = name.as_bytes();
+    let lower = match case {
+        dbh::Case::Natural => return Ok(name),
+        dbh::Case::Lower if !bytes.iter().any(u8::is_ascii_uppercase) => return Ok(name),
+        dbh::Case::Upper if !bytes.iter().any(u8::is_ascii_lowercase) => return Ok(name),
+        dbh::Case::Lower => true,
+        dbh::Case::Upper => false,
+    };
+    let made = PhpString::filled(req, bytes.len(), |to| {
+        to.copy_from_slice(bytes);
+        if lower {
+            to.make_ascii_lowercase();
+        } else {
+            to.make_ascii_uppercase();
+        }
+    });
+    name.give_up(req);
+    made
+}
+
 /// `pdo_stmt_describe_columns`: each column described by the connector,
 /// its name folded to the connection's case, and a column bound by name
 /// placed at its position; `false` where the connector failed.
@@ -617,34 +660,39 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
     }
     for column in 0..count {
         let described = with_driver(req, object, |req, driver| driver.describe(req, column))?;
-        let mut info = match described {
+        let info = match described {
             Ok(info) => info,
             Err(failure) => {
                 record(req, object, failure)?;
                 return Ok(false);
             }
         };
-        match case {
-            dbh::Case::Lower => info.name.make_ascii_lowercase(),
-            dbh::Case::Upper => info.name.make_ascii_uppercase(),
-            dbh::Case::Natural => {}
-        }
+        let name = folded(req, info.name, case)?;
+        let info = ColumnInfo {
+            name,
+            max_len: info.max_len,
+            precision: info.precision,
+        };
+        let mut info = Some(info);
         write(req, object, |s| {
+            let Some(name) = info.as_ref().map(|i| i.name.as_bytes()) else {
+                return;
+            };
             if let Some(bound) = s
                 .columns_bound
                 .iter_mut()
-                .find(|b| b.key == BoundKey::Name(info.name.clone()))
+                .find(|b| matches!(&b.key, BoundKey::Name(n) if n.as_slice() == name))
             {
                 bound.position = i64::try_from(column).unwrap_or(-1);
             }
             if let Some(columns) = s.columns.as_mut() {
-                columns.list.push(ColumnInfo {
-                    name: info.name,
-                    max_len: info.max_len,
-                    precision: info.precision,
-                });
+                columns.list.extend(info.take());
             }
         });
+        // A statement with no columns to hold it gives the name back.
+        if let Some(unheld) = info {
+            unheld.name.give_up(req);
+        }
     }
     Ok(true)
 }
@@ -765,10 +813,12 @@ pub(super) fn register(
     }
     if !bound.is_parameter
         && let Some(name) = bound.name.clone()
-        && let Some(columns) =
-            read(req, object, |s| s.columns.as_ref().map(|c| c.to_vec())).flatten()
+        && let Some(found) = read(req, object, |s| {
+            s.columns.as_ref().map(|c| c.position(&name))
+        })
+        .flatten()
     {
-        if let Some(at) = columns.iter().position(|c| c.name == name) {
+        if let Some(at) = found {
             bound.position = i64::try_from(at).unwrap_or(-1);
         }
         if bound.position == -1
@@ -1693,24 +1743,21 @@ impl PDOStatement {
             }
         };
         let info = read(req, stmt, |s| {
-            s.columns.as_ref().and_then(|c| c.get(at).cloned())
+            let c = s.columns.as_ref()?.get(at)?;
+            Some((*c.name, c.max_len, c.precision))
         })
         .flatten();
-        if let Some(info) = info {
+        if let Some((name, max_len, precision)) = info {
+            // `add_assoc_str(..., zend_string_copy(col->name))`.
             let key = PhpString::new(req, b"name")?.into_key();
-            let made = crate::string(req, &info.name)?;
-            meta.set(req, key, made)?;
+            meta.set(req, key, Owner::take(req, name).into_value())?;
             let key = PhpString::new(req, b"len")?.into_key();
             // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(req, key, Owner::take(req, Value::int(info.max_len as i64)))?;
+            meta.set(req, key, Owner::take(req, Value::int(max_len as i64)))?;
             let key = PhpString::new(req, b"precision")?.into_key();
             #[allow(clippy::cast_possible_wrap)]
-            meta.set(
-                req,
-                key,
-                Owner::take(req, Value::int(info.precision as i64)),
-            )?;
+            meta.set(req, key, Owner::take(req, Value::int(precision as i64)))?;
         }
         Ok(OrFalse::Value(meta))
     }

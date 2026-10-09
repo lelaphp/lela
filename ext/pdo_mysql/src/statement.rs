@@ -338,8 +338,21 @@ impl Statement for Stmt {
         }
     }
 
-    /// `pdo_mysql_stmt_describe`: a column's name, or `table.name` under
-    /// `ATTR_FETCH_TABLE_NAMES`; its decimals and width.
+    /// `pdo_mysql_stmt_describe`: a column's name, the interned string
+    /// mysqlnd read it as, or `table.name` under `ATTR_FETCH_TABLE_NAMES`;
+    /// its decimals and width. A row fetched by name is keyed by the
+    /// name, no string made for it:
+    ///
+    /// ```php
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// $st = $p->query("SELECT 1 AS firstcol, 2 AS secondcol UNION SELECT 3, 4 UNION SELECT 5, 6");
+    /// $m = memory_get_usage();
+    /// $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect mysql
+    /// 1376
+    /// ```
     fn describe(&mut self, req: &mut Request, column: usize) -> Result<Column, Failure> {
         if !self.has_result() {
             return Err(Failure::silent());
@@ -349,12 +362,14 @@ impl Statement for Stmt {
             return Err(Failure::silent());
         };
         let name = if h.fetch_table_names {
+            // `strpprintf(0, "%s.%s", table, name)`.
             let mut name = field.table.clone();
             name.push(b'.');
             name.extend_from_slice(field.name.as_bytes());
-            name
+            PhpString::filled(req, name.len(), |to| to.copy_from_slice(&name))?
         } else {
-            field.name.as_bytes().to_vec()
+            // `zend_string_copy(S->fields[i].sname)`, the interned name.
+            Owner::take(req, field.name)
         };
         Ok(Column {
             name,

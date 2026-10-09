@@ -25,7 +25,7 @@ use std::any::Any;
 use php_ext::coerce::{to_long, value_name, with_string};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 /// `pdo_driver_t`: a connector's name, the class `PDO::connect()` makes
 /// for it, and its factory.
@@ -392,10 +392,14 @@ pub struct Executed {
     pub rows: Option<i64>,
 }
 
-/// `struct pdo_column_data`: what `describer` fills for one column.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `struct pdo_column_data`: what `describer` fills for one column. Its
+/// name is one owner of the string the connector holds or made for it,
+/// `pdo_mysql`'s interned `sname` or `pdo_sqlite`'s `zend_string_init`, which
+/// the statement keeps until `pdo_stmt_reset_columns` and every fetched
+/// row is keyed by.
+#[derive(Debug)]
 pub struct Column {
-    pub name: Vec<u8>,
+    pub name: Owner<PhpString>,
     pub max_len: u64,
     pub precision: u64,
 }

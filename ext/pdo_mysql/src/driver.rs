@@ -11,7 +11,7 @@
 //! does.
 
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpString, Value};
+use php_ext::values::{Emalloc, Owner, PhpString, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
     BindType, Connection, Connector, Failure, OnError, Placeholders, Prepared, Scanner, Source,
@@ -77,21 +77,58 @@ pub(crate) struct H {
     pub(crate) own_columns: bool,
 }
 
+/// `sizeof(pdo_mysql_db_handle)`.
+const PDO_MYSQL_DB_HANDLE: usize = 40;
+
 /// The request's handles, numbered by the connection that opened each.
 #[derive(Default)]
 pub(crate) struct State {
-    handles: Vec<Option<H>>,
+    handles: Vec<Option<Row>>,
+}
+
+/// One `pdo_mysql_db_handle` of the request's table, with the allocation php holds it
+/// in: `pecalloc`'d on the request's heap for a connection that is not
+/// persistent, none for a persistent one, whose `malloc` no request
+/// counts.
+struct Row {
+    h: H,
+    held: Option<Emalloc>,
+}
+
+impl State {
+    /// The `pdo_mysql_db_handle` held at a new number.
+    fn hold(&mut self, h: H, held: Option<Emalloc>) -> usize {
+        self.handles.push(Some(Row { h, held }));
+        self.handles.len() - 1
+    }
 }
 
 /// The `pdo_mysql_db_handle` numbered `id`.
 pub(crate) fn handle(req: &mut Request, id: usize) -> Option<H> {
-    req.state::<State>().handles.get(id).copied().flatten()
+    let row = req.state::<State>().handles.get(id)?.as_ref()?;
+    Some(row.h)
 }
 
 /// The `pdo_mysql_db_handle` numbered `id` changed by `f`.
 fn update(req: &mut Request, id: usize, f: impl FnOnce(&mut H)) {
-    if let Some(Some(h)) = req.state::<State>().handles.get_mut(id) {
-        f(h);
+    if let Some(Some(row)) = req.state::<State>().handles.get_mut(id) {
+        f(&mut row.h);
+    }
+}
+
+/// The `pdo_mysql_db_handle` numbered `id` out of the request's table, its allocation
+/// freed, `mysql_handle_closer`'s `pefree(H, dbh->is_persistent)`.
+fn unhold(req: &mut Request, id: usize) {
+    let row = req
+        .state::<State>()
+        .handles
+        .get_mut(id)
+        .and_then(Option::take);
+    if let Some(Row {
+        held: Some(held), ..
+    }) = row
+    {
+        held.free(req);
     }
 }
 
@@ -153,7 +190,25 @@ impl Connector for Driver {
         true
     }
 
-    /// `pdo_mysql_handle_factory`.
+    /// `pdo_mysql_handle_factory`. The `pdo_mysql_db_handle` it
+    /// `pecalloc`s is the request's for a connection that is not
+    /// persistent, until `mysql_handle_closer` frees it, and `malloc`'s
+    /// for a persistent one:
+    ///
+    /// ```php
+    /// $m = memory_get_usage();
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// echo memory_get_usage() - $m, "\n";
+    /// $p = null;
+    /// echo memory_get_usage() - $m, "\n";
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_PERSISTENT => true]);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect mysql
+    /// 42056
+    /// 32
+    /// 136
+    /// ```
     fn open(&self, req: &mut Request, source: &Source<'_>) -> Result<Box<dyn Connection>, Failure> {
         let socket = req
             .ini_get(b"pdo_mysql.default_socket")
@@ -176,6 +231,12 @@ impl Connector for Driver {
         if options.is_none() || option_long(req, options, Mysql::ATTR_MULTI_STATEMENTS, 1)? != 0 {
             connect_opts |= flag::MULTI_STATEMENTS;
         }
+        // `pecalloc(1, sizeof(pdo_mysql_db_handle), dbh->is_persistent)`.
+        let held = if source.persistent {
+            None
+        } else {
+            Some(Emalloc::new(req, PDO_MYSQL_DB_HANDLE)?)
+        };
         let server = Mysqlnd::init(req, source.persistent)?;
         if source.persistent {
             server.restart_psession(req);
@@ -190,29 +251,34 @@ impl Connector for Driver {
             auto_commit: option_long(req, options, attr::AUTOCOMMIT, 1)? != 0,
             own_columns: false,
         };
-        let failed = |req: &mut Request, server: Mysqlnd| {
+        // PDO's free of a handle its factory failed, which runs
+        // `mysql_handle_closer`.
+        let failed = |req: &mut Request, server: Mysqlnd, held: Option<Emalloc>| {
             let failure = error_of(req, server, None);
             server
                 .close(req, php_ext_mysqlnd::client::CloseType::Explicit)
                 .ok();
+            if let Some(held) = held {
+                held.free(req);
+            }
             Err(failure)
         };
         if options.is_some() && !driver_options(req, options, &mut h, &mut connect_opts)? {
-            return failed(req, server);
+            return failed(req, server, held);
         }
         if !server.option(req, ClientOption::LocalInfile(h.local_infile))? {
-            return failed(req, server);
+            return failed(req, server, held);
         }
         let native = option_long(req, options, attr::STRINGIFY_FETCHES, 0)? == 0;
         if !server.option(req, ClientOption::IntAndFloatNative(native))? {
-            return failed(req, server);
+            return failed(req, server, held);
         }
         let [charset, dbname, host, port, unix_socket, user, password] =
             <[Option<Vec<u8>>; 7]>::try_from(vars).unwrap_or_default();
         if let Some(charset) = &charset
             && !server.option(req, ClientOption::SetCharsetName(charset))?
         {
-            return failed(req, server);
+            return failed(req, server, held);
         }
         let port = port.map_or(3306, |p| atoi(&p));
         let unix_socket = if host.as_deref() == Some(b"localhost".as_slice()) {
@@ -235,14 +301,12 @@ impl Connector for Driver {
             },
         )?;
         if !connected {
-            return failed(req, server);
+            return failed(req, server, held);
         }
         if !h.auto_commit {
             let _ = server.command(req, Command::Autocommit(false))?;
         }
-        let state = req.state::<State>();
-        let id = state.handles.len();
-        state.handles.push(Some(h));
+        let id = req.state::<State>().hold(h, held);
         Ok(Box::new(Db {
             place: Place::Held(id),
         }))
@@ -738,9 +802,7 @@ impl Connection for Db {
             return;
         };
         let kept = h.server.give_back(req);
-        if let Some(slot) = req.state::<State>().handles.get_mut(id) {
-            *slot = None;
-        }
+        unhold(req, id);
         self.place = match kept {
             Some(kept) => Place::Idle(h, kept),
             None => Place::Gone,
@@ -759,9 +821,7 @@ impl Connection for Db {
                 .close(req, php_ext_mysqlnd::client::CloseType::Explicit)
                 .ok();
         }
-        if let Some(slot) = req.state::<State>().handles.get_mut(id) {
-            *slot = None;
-        }
+        unhold(req, id);
         self.place = Place::Gone;
     }
 }
@@ -781,9 +841,7 @@ impl Db {
             return;
         };
         h.server = server;
-        let state = req.state::<State>();
-        self.place = Place::Held(state.handles.len());
-        state.handles.push(Some(h));
+        self.place = Place::Held(req.state::<State>().hold(h, None));
     }
 
     /// `mysql_handle_autocommit` after the attribute changed.
