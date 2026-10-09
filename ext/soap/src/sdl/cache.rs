@@ -937,8 +937,10 @@ fn deserialize_parameters(r: &Refs, input: &mut In<'_>) -> Option<Option<Table<P
 
 /// What a cache file held.
 enum Cached {
-    /// The file is not one to read: no such file, or a body cut short.
-    Missing,
+    /// The header is whole and the body not one to read, cut short or
+    /// naming a type or an encoder it does not hold: read as none, and
+    /// the WSDL read again replaces the file (#2395).
+    Unreadable,
     /// The file is stale or not this URI's, and is removed.
     Stale,
     /// The description, and when it was read.
@@ -971,7 +973,7 @@ fn sdl_deserialize(buf: &[u8], uri: &[u8], t: i64) -> Cached {
     }
     match read_body(&mut input) {
         Some(sdl) => Cached::Read(Box::new(sdl), old_t),
-        None => Cached::Missing,
+        None => Cached::Unreadable,
     }
 }
 
@@ -1150,8 +1152,9 @@ fn read_body(input: &mut In<'_>) -> Option<Sdl> {
 /// `get_sdl_from_cache`: the description in the file at `path` where it
 /// is this version's, no older than `t` and of `uri`; a file that is not
 /// removed, so the WSDL is read again and written in its place. A file
-/// whose header is whole and whose body is cut short reads as none, and
-/// the WSDL read again replaces it.
+/// whose header is whole and whose body is cut short or names what it
+/// does not hold reads as none, and the WSDL read again replaces it, as
+/// does a file cut inside its header.
 ///
 /// ```php
 /// $d = sys_get_temp_dir() . '/soap-cache-' . getmypid(); @mkdir($d); ini_set('soap.wsdl_cache_dir', $d); $w = "$d/t.wsdl";
@@ -1179,7 +1182,7 @@ fn get_sdl_from_cache(path: &std::path::Path, uri: &[u8], t: i64) -> Option<(Sdl
             std::fs::remove_file(path).ok();
             None
         }
-        Cached::Missing => None,
+        Cached::Unreadable => None,
     }
 }
 
