@@ -914,6 +914,59 @@ enum FieldPacket {
 /// 336
 /// 336
 /// ```
+///
+/// A name php interned at startup costs nothing either: the lowercased
+/// name a method or a class is keyed by, a constant's name, an ini
+/// entry's name and an extension's lowercased name, where a name nobody
+/// declared stays:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// mysqli_free_result(mysqli_query($l, "SELECT 1 AS a"));
+/// foreach (["SELECT 2 AS columnname", "SELECT 2 AS arrayobject", "SELECT 2 AS getiterator", "SELECT 2 AS PHP_VERSION", "SELECT 2 AS `date.timezone`", "SELECT 2 AS pcre", "SELECT 2 AS zzqqxxyyww"] as $q) {
+///     $m = memory_get_usage();
+///     mysqli_free_result(mysqli_query($l, $q));
+///     echo memory_get_usage() - $m, "\n";
+/// }
+/// ```
+/// ```expect mysql
+/// 0
+/// 0
+/// 0
+/// 0
+/// 0
+/// 0
+/// 40
+/// ```
+///
+/// A name a published unit interned costs nothing, as a string opcache
+/// shares does: the strings a constant array holds as well as the
+/// unit's own constant strings, where php -n interns only the latter
+/// (`trace:immutable-literal-arrays`):
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $m = memory_get_usage();
+/// foreach (["REPEAT('x', 100)", "REPEAT('x', 1000)", "REPEAT('x', 10000)", "REPEAT('x', 100)", "1 AS z"] as $column) {
+///     $r = mysqli_query($l, "SELECT $column");
+///     mysqli_free_result($r);
+///     echo memory_get_usage() - $m, "\n";
+/// }
+/// $name = 'zzqqxxyyww';
+/// $m = memory_get_usage();
+/// mysqli_free_result(mysqli_query($l, "SELECT 2 AS zzqqxxyyww"));
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql regime=immutable-literals
+/// 160
+/// 192
+/// 192
+/// 192
+/// 192
+/// 0
+/// ```
 fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
     let mut p = Body::new(body);
     if body.first() == Some(&ERROR_MARKER) {
