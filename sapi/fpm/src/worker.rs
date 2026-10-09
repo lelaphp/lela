@@ -1167,7 +1167,7 @@ fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
             }
         }
         body.truncate(read);
-        return Body::Read(body);
+        return Body::from(body);
     }
     let mut guard = wire
         .lock()
@@ -1188,5 +1188,5 @@ fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
         }
     }
     body.truncate(read);
-    Body::Read(body)
+    Body::from(body)
 }

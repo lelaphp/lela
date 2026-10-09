@@ -17,6 +17,7 @@
 use crate::api;
 
 mod allocations;
+mod body;
 mod frame_writes;
 mod frames;
 #[cfg(debug_assertions)]

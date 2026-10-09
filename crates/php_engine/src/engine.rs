@@ -50,7 +50,7 @@ use crate::unit_cache::UnitCache;
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct RequestDescription {
     pub argv: Vec<Vec<u8>>,
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
@@ -207,7 +207,7 @@ pub enum ProcessTitle {
 /// registration reads for `$_GET`, `$_POST`, `$_COOKIE` and `$_FILES`
 /// (`Z/main/php_variables.c`) and `sapi_activate` for the body
 /// (`Z/main/SAPI.c:430`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct WebRequest {
     /// `request_method`; `None` where the host was given none, as php-cgi
     /// started from a shell is.
@@ -239,11 +239,20 @@ pub struct WebRequest {
     pub head_ini: &'static [&'static [u8]],
 }
 
-/// What a host's `sapi_module.read_post` hands out over one request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a host's `sapi_module.read_post` hands out over one request
+/// (`Z/main/SAPI.c:232`, `sapi_read_post_block`): the engine pulls it as
+/// the request asks, when the content type's reader takes the form at
+/// request start, when `php://input` is read, when `request_parse_body()`
+/// runs, and never where none of them does, so a body declared over
+/// `post_max_size` is never read (`Z/main/SAPI.c:258`).
 pub enum Body {
-    /// The bytes the host read, no more than `content_length`.
-    Read(Vec<u8>),
+    /// The bytes the host reads, no more than `content_length`, from a
+    /// reader the request pulls blocks from as php's `read_post` pulls
+    /// them: a read that answers fewer than it was asked for ends the
+    /// body, as php's `SG(post_read)`, and so does one that fails. A body
+    /// the host read before the request started is a reader over those
+    /// bytes, [`Body::from`].
+    Stream(Box<dyn std::io::Read + Send>),
     /// Nothing, and the `E_WARNING` the host's read raises each time it
     /// is asked, as php-fpm's `sapi_cgi_read_post` raises
     /// `REQUEST_BODY_FILE: open('%s') failed: %s (%d)` where the file the
@@ -251,9 +260,26 @@ pub enum Body {
     Refused(String),
 }
 
+impl From<Vec<u8>> for Body {
+    /// A body the host read whole before the request started.
+    fn from(bytes: Vec<u8>) -> Body {
+        Body::Stream(Box::new(std::io::Cursor::new(bytes)))
+    }
+}
+
 impl Default for Body {
+    /// No body.
     fn default() -> Body {
-        Body::Read(Vec::new())
+        Body::Stream(Box::new(std::io::empty()))
+    }
+}
+
+impl std::fmt::Debug for Body {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Body::Stream(_) => f.write_str("Stream"),
+            Body::Refused(warning) => f.debug_tuple("Refused").field(warning).finish(),
+        }
     }
 }
 

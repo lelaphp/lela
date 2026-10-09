@@ -5,11 +5,13 @@
 //! (`sapi_read_standard_form_data`), and when `$_POST` is made its handler
 //! registers what the body holds (`sapi_handle_post`): a form through
 //! `php_std_post_handler`, multipart through `rfc1867_post_handler`
-//! ([`crate::rfc1867`]). What the host read is the description's
-//! [`WebRequest::body`](crate::engine::WebRequest), handed out as php's
-//! `sapi_module.read_post` hands out stdin, so `php://input` reads what no
-//! reader took, as php's does.
+//! ([`crate::rfc1867`]). The body is the description's
+//! [`WebRequest::body`](crate::engine::WebRequest), a reader the request
+//! pulls from as php's `sapi_module.read_post` reads stdin, block by
+//! block as it is asked, so `php://input` reads what no reader took, as
+//! php's does, and a body nothing asks for is never read.
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use super::Request;
@@ -243,24 +245,35 @@ impl Request {
         block
     }
 
-    /// `sapi_module.read_post`: up to `max` bytes of the body the host
-    /// read, past what it has handed out, `SG(read_post_bytes)` moved on;
-    /// nothing, and the host's warning raised, where it could not read
-    /// the body.
+    /// `sapi_module.read_post`: up to `max` bytes of the body, pulled from
+    /// the host's reader until `max` came or the reader ended, as php's
+    /// hosts fill the buffer they are handed (`sapi_cgi_read_post`,
+    /// `Z/sapi/cgi/cgi_main.c:477`), `SG(read_post_bytes)` moved on; a
+    /// read that fails ends the body there, as their `read` answering
+    /// `-1` does. Nothing, and the host's warning raised, where it could
+    /// not read the body.
     pub(crate) fn read_post(&mut self, max: usize) -> Vec<u8> {
-        let body = match self.description.web.as_ref().map(|web| &web.body) {
-            Some(Body::Read(body)) => body.as_slice(),
+        let reader = match self.description.web.as_mut().map(|web| &mut web.body) {
+            Some(Body::Stream(reader)) => reader,
             Some(Body::Refused(warning)) => {
                 let warning = warning.clone();
                 crate::api::raising::warning(self, &warning);
                 return Vec::new();
             }
-            None => &[][..],
+            None => return Vec::new(),
         };
-        let from = self.post.read.min(body.len());
-        let to = from.saturating_add(max).min(body.len());
-        let block = body[from..to].to_vec();
-        self.post.read = to;
+        let mut block = vec![0; max];
+        let mut filled = 0;
+        while filled < max {
+            match reader.read(&mut block[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        block.truncate(filled);
+        self.post.read = self.post.read.saturating_add(filled);
         block
     }
 
