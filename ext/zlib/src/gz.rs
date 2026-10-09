@@ -243,15 +243,13 @@ fn open(
         return Ok(None);
     };
     let Some(fd) = inner.cast(req, Cast::Fd, true) else {
-        inner.close(req);
-        inner.give_up(req);
+        inner.free(req);
         return Ok(None);
     };
     let file = match gzdopen(req, fd, mode) {
         Ok(file) => file,
         Err(thrown) => {
-            inner.close(req);
-            inner.give_up(req);
+            inner.free(req);
             return Err(thrown);
         }
     };
@@ -259,8 +257,7 @@ fn open(
         if opening.warn {
             docref(req, Level::Warning, "gzopen failed");
         }
-        inner.close(req);
-        inner.give_up(req);
+        inner.free(req);
         return Ok(None);
     };
     let kind = GzStream {
@@ -490,8 +487,7 @@ fn gzfile(
         return Ok(OrFalse::False);
     };
     let lines = read_lines(req, *stream);
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     Ok(OrFalse::Value(lines?))
 }
 
@@ -541,8 +537,7 @@ fn readgzfile(
         return Ok(OrFalse::False);
     };
     let size = php_ext_standard::fpassthru(req, *stream);
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     Ok(OrFalse::Value(size?))
 }
 

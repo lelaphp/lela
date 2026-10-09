@@ -23,8 +23,8 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, callable_name, to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref, raise, throw_error};
 use php_ext::request::{
-    Crypto, CryptoSocket, Handshake, Readiness, Request, Stream, StreamCtx, Streams as _,
-    XportFactory,
+    Crypto, CryptoSocket, Handshake, OwnedStream as _, Readiness, Request, Stream, StreamCtx,
+    Streams as _, XportFactory,
 };
 use php_ext::values::walk::Hold;
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, walk};
@@ -1603,8 +1603,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
         found.unwrap_or(false)
     });
     if remote {
-        stream.close(req);
-        stream.give_up(req);
+        stream.free(req);
         raise(
             req,
             Level::Warning,
@@ -1643,8 +1642,7 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
             }
         }
     }
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     if added == 0 {
         raise(
             req,

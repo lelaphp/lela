@@ -17,8 +17,9 @@ use php_ext::coerce::{to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{
-    Handshake, Notification, NotifyCode, Opening, OptionAnswer, Request, SocketOptions, Stream,
-    StreamCtx, StreamOption, StreamWrapper, Streams as _, Xport, XportFailure,
+    Handshake, Notification, NotifyCode, Opening, OptionAnswer, OwnedStream as _, Request,
+    SocketOptions, Stream, StreamCtx, StreamOption, StreamWrapper, Streams as _, Xport,
+    XportFailure,
 };
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef, walk};
 use php_ext_uri::UriStruct;
@@ -116,7 +117,7 @@ macro_rules! held {
         match $result {
             Ok(answer) => answer,
             Err(thrown) => {
-                closed($req, $stream);
+                $stream.free($req);
                 return Err(thrown);
             }
         }
@@ -193,7 +194,7 @@ pub(crate) fn url_wrap_http(
             None => return Ok(stream),
             Some(thrown) => {
                 if let Some(stream) = stream {
-                    closed(req, stream);
+                    stream.free(req);
                 }
                 thrown
             }
@@ -674,7 +675,7 @@ fn tunnel(
         if unsetting.is_ok() {
             log(req, "Cannot connect to HTTPS server through proxy");
         }
-        closed(req, stream);
+        stream.free(req);
         return unsetting.map(|()| None);
     }
     while let Some(line) = held!(
@@ -695,23 +696,16 @@ fn tunnel(
         Some(stream)
     } else {
         log(req, "Cannot connect to HTTPS server through proxy");
-        closed(req, stream);
+        stream.free(req);
         None
     };
     if let Err(thrown) = unset(req) {
         if let Some(stream) = stream {
-            closed(req, stream);
+            stream.free(req);
         }
         return Err(thrown);
     }
     Ok(stream)
-}
-
-/// `php_stream_close` over the stream an opener holds: closed, and its
-/// owner given up.
-pub(crate) fn closed(req: &mut Request, stream: Owner<Stream>) {
-    stream.close(req);
-    stream.give_up(req);
 }
 
 /// `php_stream_wrapper_log_error` from the opener, which the open shows
@@ -876,7 +870,7 @@ fn wrap_http_ex(
     held!(req, stream, chain.headers(req));
     let status = held!(req, stream, read_status(req, chain, *stream));
     let Some(status) = status else {
-        closed(req, stream);
+        stream.free(req);
         log(req, "HTTP request failed!");
         return out(req, chain, None, hop, &info, chunk_size);
     };
@@ -888,7 +882,7 @@ fn wrap_http_ex(
         let last_line = match line.first() {
             Some(b'\r') => {
                 if line.get(1) != Some(&b'\n') {
-                    closed(req, stream);
+                    stream.free(req);
                     log(
                         req,
                         "HTTP invalid header name (cannot start with CR character)!",
@@ -912,7 +906,7 @@ fn wrap_http_ex(
             );
             match held!(req, stream, parsed) {
                 None if info.error => {
-                    closed(req, stream);
+                    stream.free(req);
                     return out(req, chain, None, hop, &info, chunk_size);
                 }
                 None => {}
@@ -923,7 +917,7 @@ fn wrap_http_ex(
             }
         } else if !last_line {
             if matches!(line.first(), Some(b' ' | b'\t')) {
-                closed(req, stream);
+                stream.free(req);
                 log(
                     req,
                     "HTTP invalid response format (folding header at the start)!",
@@ -949,7 +943,7 @@ fn wrap_http_ex(
         if let Some(location) = info.location.clone() {
             chain.notify_info(req, NotifyCode::Redirected, Some(&location), 0);
         }
-        closed(req, stream);
+        stream.free(req);
         info.chunked = false;
         let Some(location) = info.location.take() else {
             log_bytes(req, "HTTP request failed! ", &status.line);

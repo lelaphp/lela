@@ -4,7 +4,9 @@
 //! `stream_context_create()` gives under `zip` the archive's.
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence};
+use php_ext::request::{
+    Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
+};
 use php_ext::values::Owner;
 
 use crate::archive::{Archive, CREATE};
@@ -205,8 +207,7 @@ pub(crate) fn open_entry(
     if let Some((name, _)) = orig
         && let Err(thrown) = stream.set_orig_path(req, name)
     {
-        stream.close(req);
-        stream.give_up(req);
+        stream.free(req);
         return Err(thrown);
     }
     Ok(Some(stream))

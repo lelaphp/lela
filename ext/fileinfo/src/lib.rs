@@ -34,7 +34,9 @@ use php_ext::coerce::value_name;
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, docref_parameter, pending, throw,
 };
-use php_ext::request::{Cast, Opening, Request, Resolve, Stream, StreamCtx, Streams as _, Whence};
+use php_ext::request::{
+    Cast, Opening, OwnedStream as _, Request, Resolve, Stream, StreamCtx, Streams as _, Whence,
+};
 use php_ext::values::{Owner, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::ffi::{Magic, Read};
@@ -460,8 +462,7 @@ fn from_path(
         Some(_) => identify_stream(req, magic, *stream),
         None => None,
     };
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     Ok(answer)
 }
 

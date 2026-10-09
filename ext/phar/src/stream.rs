@@ -5,7 +5,8 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    DirListing, Opening, Request, Stream, StreamOps, StreamWrapper, Streams as _, Whence,
+    DirListing, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper, Streams as _,
+    Whence,
 };
 use php_ext::values::{Owner, PhpArray, PhpString};
 
@@ -610,15 +611,13 @@ fn list_dir(req: &mut Request, path: &[u8]) -> Result<Option<Vec<Vec<u8>>>, Thro
             Ok(Some(name)) => name,
             Ok(None) => break,
             Err(thrown) => {
-                dir.close(req);
-                dir.give_up(req);
+                dir.free(req);
                 return Err(thrown);
             }
         };
         out.push(name);
     }
-    dir.close(req);
-    dir.give_up(req);
+    dir.free(req);
     Ok(Some(out))
 }
 

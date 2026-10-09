@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{Opening, Request, Streams as _};
+use php_ext::request::{Opening, OwnedStream as _, Request, Streams as _};
 
 use crate::archive::{
     self, API_VERSION_NODIR, API_VERSION_NUM, ArchiveId, Content, ENT_COMPRESSED_GZ,
@@ -443,16 +443,14 @@ pub(crate) fn write_out(
     let written = match compressed(req) {
         Ok(Some(written)) => written,
         Ok(None) => {
-            out.close(req);
-            out.give_up(req);
+            out.free(req);
             return Ok(Some(format!(
                 "unable to compress all contents of phar \"{}\" using zlib, PHP versions older than 5.2.6 have a buggy zlib",
                 lossy(&fname)
             )));
         }
         Err(thrown) => {
-            out.close(req);
-            out.give_up(req);
+            out.free(req);
             return Err(thrown);
         }
     };
@@ -464,8 +462,7 @@ pub(crate) fn write_out(
             _ => break,
         }
     }
-    out.close(req);
-    out.give_up(req);
+    out.free(req);
     Ok(None)
 }
 

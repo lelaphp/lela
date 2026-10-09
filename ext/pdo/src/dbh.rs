@@ -15,7 +15,7 @@ use php_ext::decl::Name;
 use php_ext::raising::{
     Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
 };
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
     ClassId, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef,
@@ -838,8 +838,7 @@ fn dsn_from_uri(req: &mut Request, uri: &[u8]) -> Result<Option<Vec<u8>>, Thrown
         return Ok(None);
     };
     let line = stream.get_line(req, Some(512));
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     line
 }
 

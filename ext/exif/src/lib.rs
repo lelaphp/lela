@@ -34,7 +34,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
-use php_ext::request::{Opening, Request, Stream, Streams as _, Whence};
+use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use image::{EncodingNames, Found, Image, Number, Section, Stored, TAG_NONE, c_int};
@@ -631,8 +631,7 @@ fn exif_imagetype(req: &mut Request, filename: Path) -> Result<OrFalse<i64>, Thr
         return Ok(OrFalse::False);
     };
     let bytes = stream.copy_to_mem(req, None);
-    stream.close(req);
-    stream.give_up(req);
+    stream.free(req);
     let bytes = bytes?;
     let itype = php_ext_standard::php_getimagetype(req, bytes.as_bytes(), filename.as_bytes());
     bytes.give_up(req);

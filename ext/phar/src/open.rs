@@ -8,7 +8,7 @@
 
 use php_ext::abi::{Beneath, chain};
 use php_ext::raising::Thrown;
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, Value};
 
 use crate::archive::{
@@ -762,8 +762,7 @@ fn archive_source(req: &mut Request, path: &[u8]) -> Result<Option<Vec<u8>>, Thr
             return Ok(None);
         };
         let source = archive::copy_all(req, *stream);
-        stream.close(req);
-        stream.give_up(req);
+        stream.free(req);
         return Ok(Some(source?));
     }
     if a.flags & FILE_COMPRESSION_MASK != 0 {

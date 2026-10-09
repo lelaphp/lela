@@ -459,8 +459,7 @@ fn open(
             return Ok(None);
         };
         if inner.cast(req, Cast::Fd, true).is_none() {
-            inner.close(req);
-            inner.give_up(req);
+            inner.free(req);
             return Ok(None);
         }
         Handle::Stream(inner)

@@ -6,7 +6,7 @@
 use php_ext::abi::OrFalse;
 use php_ext::coerce::{to_long, value_name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
-use php_ext::request::{Request, Streams as _};
+use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::object::{Intern, basedir_refuses};
@@ -198,15 +198,13 @@ fn pcre(req: &mut Request, regexp: &[u8], path: &[u8]) -> Result<Found, Thrown> 
             Ok(Some(name)) => name,
             Ok(None) => break,
             Err(thrown) => {
-                dir.close(req);
-                dir.give_up(req);
+                dir.free(req);
                 return Err(thrown);
             }
         };
         names.push(name);
     }
-    dir.close(req);
-    dir.give_up(req);
+    dir.free(req);
     names.sort();
     if names.is_empty() {
         return Ok(Some(Vec::new()));
