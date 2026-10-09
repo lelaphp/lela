@@ -46,7 +46,7 @@ pub mod syntax {
     };
 }
 
-use php_heap::Intern;
+use php_heap::{Fatal, Intern};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::Parsed;
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Name};
@@ -520,7 +520,26 @@ fn compile_scanned<'p>(
         Ok(mut unit) => {
             raised.append(&mut unit.diagnostics);
             unit.diagnostics = raised;
-            Ok(unit)
+            let interned = match options.kind {
+                SourceKind::File => intern_names(&unit, strings),
+                SourceKind::Eval(_) => Ok(()),
+            };
+            match interned {
+                Ok(()) => Ok(unit),
+                // `zend_mm`'s limit, raised as `E_ERROR` where the
+                // compile asked for the memory.
+                Err(fatal) => Err(CompileError {
+                    level: Level::Error,
+                    message: match fatal {
+                        Fatal::Error(message) => message,
+                        Fatal::OutOfMemory(_) => String::from("Out of memory"),
+                    },
+                    line: unit.main.line_end,
+                    raised: unit.diagnostics,
+                    thrown: false,
+                    stage: Stage::Compiling,
+                }),
+            }
         }
         Err(mut refused) => {
             raised.append(&mut refused.raised);
@@ -528,6 +547,60 @@ fn compile_scanned<'p>(
             Err(refused)
         }
     }
+}
+
+/// The names a file's op arrays carry interned into `strings`, the home
+/// its constant strings went to: its file's, `op_array->filename`, and
+/// each function's, method's, hook's and closure's, `function_name`,
+/// and each class's, `ce->name`. php's compile makes each before the
+/// file's first line runs and holds it as long as the op array, and
+/// opcache's persist interns each beside the op array's literals
+/// (`Z/ext/opcache/zend_persist.c:417`, `:632`, `:943`), so a trace row
+/// that copies one (`ZVAL_STR_COPY`) costs the request nothing, a
+/// throwable a native throws inside a closure among them:
+///
+/// ```php
+/// $a = function () { try { intdiv(1, 0); } catch (DivisionByZeroError $e) { return 1; } };
+/// $c = function () { try { json_decode('{', flags: JSON_THROW_ON_ERROR); } catch (JsonException $e) { return 1; } };
+/// foreach ([$a, $c, $a] as $f) { $m = memory_get_usage(); $f(); echo memory_get_usage() - $m, "\n"; }
+/// ```
+/// ```expect
+/// 0
+/// 0
+/// 0
+/// ```
+///
+/// An `eval`'s unit, `-r`'s among them (`compile_string`), interns
+/// none of them: php makes its file's name and its closures' for the
+/// one execution and frees them with its op array, where a home that
+/// holds a string to the request's end would keep each. The file
+/// cache's unit is read back with its names interned again, as its
+/// constants are.
+pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
+    let functions = unit
+        .functions
+        .iter()
+        .chain(&unit.dynamic)
+        .map(|(decl, _)| decl);
+    let methods = unit.classes.iter().flat_map(|class| {
+        let hooks = class
+            .properties
+            .iter()
+            .filter_map(|property| property.hooks.as_deref())
+            .flat_map(|hooks| hooks.get.iter().chain(&hooks.set));
+        class
+            .methods
+            .iter()
+            .chain(hooks)
+            .map(|method| &method.function)
+    });
+    let names = std::iter::once(&unit.main.filename)
+        .chain(functions.chain(methods).map(|decl| &decl.name))
+        .chain(unit.classes.iter().map(|class| &class.name));
+    for name in names {
+        strings.intern(&name.0)?;
+    }
+    Ok(())
 }
 
 /// php's level for what the scanner or the parser raised: the same
