@@ -214,7 +214,7 @@ pub(crate) fn served_as_cgi(
     env: &[(String, std::ffi::OsString)],
 ) -> Result<Observation> {
     let recipe = &oracle.pin().recipe;
-    let own = Tree::new("witness-request")?;
+    let own = oracle.tree("witness-request")?;
     let program = own.write(&recipe.script_name, format!("{}{snippet}", recipe.preamble))?;
     let test = format!("--TEST--\nwitness\n{request}\n--FILE--\n\n--EXPECT--\n\n");
     let path = own.join("witness.phpt");

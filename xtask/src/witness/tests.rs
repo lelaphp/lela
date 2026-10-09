@@ -16,7 +16,7 @@ use std::time::Duration;
 use super::fence;
 use super::judge::{Run, held};
 use super::process::Binary;
-use super::{Ask, Judgement, Tally, capture, judge};
+use super::{Accept, Ask, Judgement, Tally, capture, judge};
 use crate::cfg::Target;
 use crate::divergence::Registry;
 use crate::manifest::Manifest;
@@ -63,14 +63,19 @@ fn registry(text: &str) -> Registry {
 
 /// The witnesses of one text, judged as the lane judges them.
 fn judge_text(text: &str, registry: &Registry) -> Tally {
-    judged(Path::new("ext/fixture/src/lib.rs"), text, registry, false)
+    judged(
+        Path::new("ext/fixture/src/lib.rs"),
+        text,
+        registry,
+        Accept::Nothing,
+    )
 }
 
 /// Judging decides and writes nothing; `--accept` is the caller's write, as
 /// it is in the instrument. The run of record is the engine linked into the
 /// harness, the lane's one adapter. The root is the workspace, which leaves
 /// a file named by an absolute path where it stands.
-fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
+fn judged(file: &Path, text: &str, registry: &Registry, accept: Accept) -> Tally {
     let found = fence::extract(file, text);
     let ask = Ask {
         crates: Vec::new(),
@@ -88,7 +93,7 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: bool) -> Tally {
         None,
     )
     .unwrap();
-    if accept {
+    if accept != Accept::Nothing {
         capture(&workspace(), &tally.captured).unwrap();
     }
     tally
@@ -549,6 +554,42 @@ fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
     assert!(note.contains("not what the oracle ran"), "{note}");
 }
 
+/// The capture's refusal, by the fixture `witness --accept --streams` must
+/// fail (#801): the oracle's two runs, from scratch directories of two
+/// lengths, print two `string(N)`, so nothing is captured and the note
+/// names the line and each run's text of it.
+#[test]
+fn a_capture_whose_two_runs_differ_names_the_line_and_captures_nothing() {
+    if oracle().is_none() {
+        return;
+    }
+    let root = workspace().join("xtask/fixtures/witness/capture-moves");
+    let fixture = Manifest::load(&root).unwrap();
+    let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
+    let ask = Ask {
+        accept: Accept::Streams,
+        ..Ask::default()
+    };
+    let tally = judge(
+        &fixture.pin.oracle(),
+        &binary(),
+        &registry(""),
+        &ask,
+        &found,
+        None,
+    )
+    .unwrap();
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Unpinned, "{note}");
+    assert!(tally.captured.is_empty(), "{tally:#?}");
+    assert!(
+        note.contains("stdout line 1 is `string(")
+            && note.contains("%SCRATCH%/witness.php\"` from another")
+            && note.contains("drop `capture`"),
+        "{note}"
+    );
+}
+
 /// An accepted row names one side of a difference, the oracle's or the
 /// engine's, so it accepts a fence one run misses and never one both miss.
 #[test]
@@ -582,14 +623,14 @@ fn the_second_stream_is_handed_over_and_a_fence_is_held_apart_to_it() {
         "/// ```expect\n/// to the first\n/// ```\n/// ```stderr\n/// Warning: Undefined variable $u in %s on line 3\n/// ```\n"
     );
     let file = Path::new("ext/fixture/src/lib.rs");
-    let tally = judged(file, &text, &registry(""), false);
+    let tally = judged(file, &text, &registry(""), Accept::Nothing);
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Pass, "{note}");
     let without = text.replace(
         "/// ```stderr\n/// Warning: Undefined variable $u in %s on line 3\n/// ```\n",
         "",
     );
-    let tally = judged(file, &without, &registry(""), false);
+    let tally = judged(file, &without, &registry(""), Accept::Nothing);
     let (judgement, note) = only(&tally);
     assert_eq!(judgement, Judgement::Fail, "{note}");
     assert!(note.contains("Undefined variable $u"), "{note}");
@@ -608,7 +649,7 @@ fn a_bare_exit_is_unpinned_until_accept_captures_the_status() {
     let text = text.as_str();
     let (_tree, file) = source("accept", text);
 
-    let (judgement, note) = only(&judged(&file, text, &registry(""), false));
+    let (judgement, note) = only(&judged(&file, text, &registry(""), Accept::Nothing));
     assert_eq!(judgement, Judgement::Unpinned, "{note}");
     assert!(note.contains("--accept"), "{note}");
     assert_eq!(
@@ -617,7 +658,7 @@ fn a_bare_exit_is_unpinned_until_accept_captures_the_status() {
         "a run that does not accept writes nothing"
     );
 
-    let tally = judged(&file, text, &registry(""), true);
+    let tally = judged(&file, text, &registry(""), Accept::Status);
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
     assert_eq!(tally.captured.len(), 1, "{tally:#?}");
     let written = fs::read_to_string(&file).unwrap();
@@ -627,7 +668,7 @@ fn a_bare_exit_is_unpinned_until_accept_captures_the_status() {
     );
 
     // The witness now pins the status, so a second run accepts nothing.
-    let again = judged(&file, &written, &registry(""), true);
+    let again = judged(&file, &written, &registry(""), Accept::Status);
     assert!(again.captured.is_empty(), "{again:#?}");
     assert_eq!(only(&again).0, Judgement::Pass);
 }

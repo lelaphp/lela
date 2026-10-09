@@ -32,7 +32,7 @@ use std::fmt;
 use super::anchor::{Entry, Record};
 use super::fence::{Exit, Served, Witness};
 use super::process::{self, Binary};
-use super::{Ask, Captured, Judged, Judgement, fence};
+use super::{Accept, Ask, Captured, Judged, Judgement, fence};
 use crate::divergence::Registry;
 use crate::oracle::expect::Expectation;
 use crate::oracle::{self, Observation, Oracle, Pin, Program, Regime, Verdict as Compared, linked};
@@ -100,31 +100,7 @@ pub(super) fn one(
             return borked(witness, trouble);
         }
     }
-    let oracle_run = match &witness.request {
-        Some(commands) if witness.served == Served::Phpdbg => oracle.asserted().and_then(|()| {
-            let Some(phpdbg) = &oracle.pin().sapi.phpdbg else {
-                anyhow::bail!("oracle.toml's [sapi] names no phpdbg to serve the program");
-            };
-            process::served_as_phpdbg(oracle, &phpdbg.path, &witness.snippet, commands, &[])
-        }),
-        Some(request) if witness.served == Served::Fpm => oracle.asserted().and_then(|()| {
-            let Some(fpm) = &oracle.pin().sapi.fpm else {
-                anyhow::bail!("oracle.toml's [sapi] names no php-fpm to serve the request");
-            };
-            super::fpm::served_as_fpm(oracle, &fpm.path, &witness.snippet, request, &[])
-        }),
-        Some(request) => oracle.asserted().and_then(|()| {
-            let Some(cgi) = &oracle.pin().sapi.cgi else {
-                anyhow::bail!("oracle.toml's [sapi] names no php-cgi to serve the request");
-            };
-            process::served_as_cgi(oracle, &cgi.path, &witness.snippet, request, &[])
-        }),
-        None => oracle.run(
-            Program::Snippet(&witness.snippet),
-            witness.regime.as_deref(),
-        ),
-    };
-    let oracle_out = match oracle_run {
+    let oracle_out = match ran_by_oracle(oracle, witness) {
         Ok(out) => out,
         Err(trouble) => {
             kept.entered = Record::Unserved;
@@ -140,20 +116,52 @@ pub(super) fn one(
         ));
     };
 
-    // The bare `exit` is the opt-in, and the only thing `--accept` writes:
+    // The bare `exit` is the opt-in, and the only status `--accept` writes:
     // a status the fence already pins and the oracle no longer gives is a
     // difference for the registry or for a fix, never one to repin over
     // (design §8, the paragraph on witnesses in rustdoc).
     let mut exit = witness.exit;
-    if ask.accept && exit == Exit::Bare {
+    let mut head = witness.fences[0].clone();
+    if ask.accept != Accept::Nothing && exit == Exit::Bare {
+        head = fence::pinned(&head, status);
+        exit = Exit::Pinned(status);
+    }
+    // A fence marked `capture` is written whole from the oracle's streams,
+    // where a second run from a scratch tree apart prints them again
+    // (#801); one it refuses is written nothing, and names the line.
+    let mut captured = witness.clone();
+    let (was, now) = if ask.accept == Accept::Streams && witness.capture {
+        let streams = again(oracle, witness, &oracle_out).and_then(|(stdout, stderr)| {
+            fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
+        });
+        let (stdout, stderr, lines) = match streams {
+            Ok(written) => written,
+            Err(refused) => {
+                kept.entered = Record::Unserved;
+                return Ok(judged(
+                    witness,
+                    Judgement::Unpinned,
+                    format!(
+                        "`capture` wrote nothing: {refused}; write the fence by hand, a wildcard where the line moves, and drop `capture`"
+                    ),
+                ));
+            }
+        };
+        captured.stdout = stdout;
+        captured.stderr = (!stderr.is_empty()).then_some(stderr);
+        (&witness.fences[..], lines)
+    } else {
+        (&witness.fences[..1], vec![head])
+    };
+    if now != was {
         kept.captured.push(Captured {
             file: witness.file.clone(),
             line: witness.fence,
-            was: witness.fence_line.clone(),
-            now: fence::pinned(&witness.fence_line, status),
+            was: was.to_vec(),
+            now,
         });
-        exit = Exit::Pinned(status);
     }
+    let witness = &captured;
     if exit == Exit::Bare {
         return Ok(judged(
             witness,
@@ -181,6 +189,93 @@ pub(super) fn one(
         exit,
         [(Run::Oracle, &oracle_out), (Run::Engine, &ran)],
     ))
+}
+
+/// The oracle's run of a witness: the snippet under the recipe and the
+/// fence's regime, or, for a `request` fence, the request served by the
+/// host the pin's `[sapi]` names.
+fn ran_by_oracle(oracle: &Oracle<'_>, witness: &Witness) -> Result<Observation> {
+    match &witness.request {
+        Some(commands) if witness.served == Served::Phpdbg => oracle.asserted().and_then(|()| {
+            let Some(phpdbg) = &oracle.pin().sapi.phpdbg else {
+                anyhow::bail!("oracle.toml's [sapi] names no phpdbg to serve the program");
+            };
+            process::served_as_phpdbg(oracle, &phpdbg.path, &witness.snippet, commands, &[])
+        }),
+        Some(request) if witness.served == Served::Fpm => oracle.asserted().and_then(|()| {
+            let Some(fpm) = &oracle.pin().sapi.fpm else {
+                anyhow::bail!("oracle.toml's [sapi] names no php-fpm to serve the request");
+            };
+            super::fpm::served_as_fpm(oracle, &fpm.path, &witness.snippet, request, &[])
+        }),
+        Some(request) => oracle.asserted().and_then(|()| {
+            let Some(cgi) = &oracle.pin().sapi.cgi else {
+                anyhow::bail!("oracle.toml's [sapi] names no php-cgi to serve the request");
+            };
+            process::served_as_cgi(oracle, &cgi.path, &witness.snippet, request, &[])
+        }),
+        None => oracle.run(
+            Program::Snippet(&witness.snippet),
+            witness.regime.as_deref(),
+        ),
+    }
+}
+
+/// The two streams a capture writes: the oracle's `first` run, held to a
+/// second from a scratch tree apart ([`oracle::Place::Apart`]), each
+/// already under the recipe's normalisation. `Err` names what the two runs
+/// did not agree on, the status or each line that differs, since a line
+/// that moves with the directory, the process or the clock is the
+/// author's to write with a wildcard (harness §8, #801).
+fn again(
+    oracle: &Oracle<'_>,
+    witness: &Witness,
+    first: &Observation,
+) -> Result<(String, String), String> {
+    let second = ran_by_oracle(&oracle.apart(), witness)
+        .map_err(|trouble| format!("the oracle's second run did not run: {trouble:#}"))?;
+    if first.exit != second.exit {
+        let status = |ran: &Observation| {
+            ran.exit
+                .code()
+                .map_or_else(|| "on a signal".to_owned(), |code| format!("{code}"))
+        };
+        return Err(format!(
+            "the oracle exits {} from one scratch directory and {} from another",
+            status(first),
+            status(&second)
+        ));
+    }
+    let mut moved = Vec::new();
+    let mut texts = [String::new(), String::new()];
+    let pairs = [
+        ("stdout", &first.stdout, &second.stdout),
+        ("stderr", &first.stderr, &second.stderr),
+    ];
+    for (text, (name, one, two)) in texts.iter_mut().zip(pairs) {
+        let (Ok(one), Ok(two)) = (std::str::from_utf8(one), std::str::from_utf8(two)) else {
+            moved.push(format!("{name} is not UTF-8, which a fence cannot hold"));
+            continue;
+        };
+        let (mut a, mut b) = (one.split('\n'), two.split('\n'));
+        for at in 1.. {
+            match (a.next(), b.next()) {
+                (None, None) => break,
+                (x, y) if x == y => {}
+                (x, y) => moved.push(format!(
+                    "{name} line {at} is `{}` from one scratch directory and `{}` from another",
+                    x.unwrap_or_default(),
+                    y.unwrap_or_default()
+                )),
+            }
+        }
+        one.clone_into(text);
+    }
+    if !moved.is_empty() {
+        return Err(moved.join("; "));
+    }
+    let [stdout, stderr] = texts;
+    Ok((stdout, stderr))
 }
 
 /// A witness borked on `trouble`, or the `Err` [`one`] returns where the

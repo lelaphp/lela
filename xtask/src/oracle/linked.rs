@@ -74,7 +74,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use super::{Ended, Linked, Observation, Program, Recipe, Regime, Scratch};
+use super::{Ended, Linked, Observation, Place, Program, Recipe, Regime, Scratch};
 use crate::scratch::Tree;
 
 /// The host whose binary serves the snippets, its package and binary.
@@ -126,7 +126,7 @@ fn run(
     regime: Option<&Regime>,
     snippet: &str,
 ) -> Result<(Observation, String)> {
-    let scratch = Scratch::for_program(recipe, Program::Snippet(snippet))?;
+    let scratch = Scratch::for_program(recipe, Program::Snippet(snippet), Place::Named)?;
     // The engine has no command line here, so a regime's arguments other
     // than `-e` are refused rather than dropped from this side of the
     // comparison alone. The witness lane reads this before anything runs,

@@ -9,7 +9,7 @@ use xtask::oracle::Promise;
 use xtask::permit::{Call, Kind, judge, judged_at_the_call};
 use xtask::reading::{Reading, Status, Store};
 use xtask::scratch::Tree;
-use xtask::witness::{self, Ask};
+use xtask::witness::{self, Accept, Ask};
 
 mod common;
 use common::scratch_workspace;
@@ -2564,7 +2564,7 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
         &Registry::load(&root).unwrap(),
         &Ask {
             crates: vec![CRATE.to_owned()],
-            accept: true,
+            accept: Accept::Status,
             ..Ask::default()
         },
     )

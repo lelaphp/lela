@@ -434,10 +434,8 @@ pub(crate) struct Witness {
     /// the staged crates (#1312).
     #[arg(long, conflicts_with_all = ["crates", "staged"])]
     pub unmeasured: bool,
-    /// Write the oracle's status onto each `expect` fence line that
-    /// does not already pin it; the only thing that writes an `exit`.
-    #[arg(long)]
-    pub accept: bool,
+    #[command(flatten)]
+    pub accepting: Accepting,
     /// Only the fences in rustdoc under this source file, from the
     /// workspace root or any tail of it; prints and writes no reading.
     #[arg(
@@ -456,6 +454,20 @@ pub(crate) struct Witness {
     /// `witness` starts itself, never typed.
     #[arg(long, value_name = "PATH", hide = true)]
     pub journal: Option<PathBuf>,
+}
+
+/// What a `witness` run writes onto the fences (`witness::Accept`).
+#[derive(Debug, Args)]
+pub(crate) struct Accepting {
+    /// Write the oracle's status onto each `expect` fence line that
+    /// does not already pin it; the only thing that writes an `exit`.
+    #[arg(long)]
+    pub accept: bool,
+    /// With `--accept`, also write the oracle's two streams, normalised,
+    /// into each fence marked `capture`, refusing a line that differs
+    /// between two runs from two scratch directories (#801).
+    #[arg(long, requires = "accept")]
+    pub streams: bool,
 }
 
 /// What one `phpt` run is asked for, flattened onto the command so the

@@ -270,9 +270,7 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     for name in &crates {
         served.arg("--crate").arg(name);
     }
-    if ask.accept {
-        served.arg("--accept");
-    }
+    served.args(ask.accept.args());
     served.args(ask.scope.args());
     served.arg("--journal").arg(&journal);
     let status = served

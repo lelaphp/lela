@@ -373,6 +373,7 @@ usage::record
 usage::scope_of
 vocab::hold
 vocab::run
+witness::Accept
 witness::Ask
 witness::Scope
 witness::run
