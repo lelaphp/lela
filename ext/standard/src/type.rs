@@ -434,7 +434,7 @@ fn is_space(c: u8) -> bool {
 /// a sign, a `0x` prefix for base 16 or 0 and a leading `0` for base 0,
 /// the longest stretch of digits the base has, and the long's bound where it
 /// overflows; zero for a base outside 2 to 36.
-fn strtol(bytes: &[u8], base: i64) -> i64 {
+pub(crate) fn strtol(bytes: &[u8], base: i64) -> i64 {
     let mut at = bytes
         .iter()
         .position(|b| !is_space(*b))

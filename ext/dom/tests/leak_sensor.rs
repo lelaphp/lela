@@ -71,9 +71,10 @@ fn an_xpath_callback_s_answer_is_given_up() {
 }
 
 /// A callback answer whose conversion throws is given up all the same,
-/// as php's `zval_ptr_dtor(&callback_retval)` follows every arm, and the
-/// callbacks a `registerPhpFunctions` array names before a refused one
-/// are given up with the refusal (#2094).
+/// as php's `zval_ptr_dtor(&callback_retval)` follows every arm (#2094),
+/// and the callbacks a `registerPhpFunctions` array names before a
+/// refused one stay in the table and are given up with the evaluator
+/// (#2128).
 #[test]
 fn an_xpath_callback_given_up_where_its_conversion_or_registration_fails() {
     served(
@@ -89,10 +90,11 @@ fn an_xpath_callback_given_up_where_its_conversion_or_registration_fails() {
     );
 }
 
-/// `registerPhpFunctions()` with no argument after a set lets go of the
-/// callbacks the set held (`ext/dom/tests/DOMXPath_callables.phpt`).
+/// `registerPhpFunctions()` with no argument after a set keeps the
+/// callbacks the set held, which the evaluator gives up when it goes
+/// (`ext/dom/tests/DOMXPath_callables.phpt`, #2128).
 #[test]
-fn registering_every_function_lets_go_of_the_set() {
+fn registering_every_function_keeps_the_set() {
     served(
         r#"<?php
 $doc = new DOMDocument(); $doc->loadXML('<a href="x">hello</a>');

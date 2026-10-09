@@ -73,6 +73,7 @@ mod output;
 mod pack;
 mod pageinfo;
 mod password;
+mod php_fopen_wrapper;
 mod proc_open;
 pub mod quot_print;
 mod scanf;
@@ -815,8 +816,8 @@ fn ini_handlers() -> [(&'static [u8], OnModify); 8] {
 /// request's wrapper and filter tables (`filters::register`). The
 /// wrappers go in as `PHP_MINIT(basic)` registers them
 /// (`Z/ext/standard/basic_functions.c:341-346`): `php`, `file`, `glob`,
-/// `data`, `http`, `ftp`, the engine keeping the kinds of the first four
-/// but `glob`. The `assert.*` entries' startup deprecations are their
+/// `data`, `http`, `ftp`, the stream layer keeping the kinds of `file`
+/// and `data`. The `assert.*` entries' startup deprecations are their
 /// on-modify rules, which the engine serves over the host's values as
 /// it starts.
 ///
@@ -828,7 +829,7 @@ fn ini_handlers() -> [(&'static [u8], OnModify); 8] {
 /// ```
 #[allow(clippy::unnecessary_wraps)] // `ExtensionBuilder::rinit`'s signature
 fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    req.register_engine_wrapper(EngineWrapper::Php);
+    req.register_wrapper(php_fopen_wrapper::wrapper());
     req.register_engine_wrapper(EngineWrapper::Plain);
     req.register_wrapper(dir::glob_wrapper());
     req.register_engine_wrapper(EngineWrapper::Data);

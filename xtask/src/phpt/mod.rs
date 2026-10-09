@@ -42,11 +42,12 @@
 //! kept run carries them; `--census` groups every miss of the run by that
 //! signature, the widest first (#1185).
 //!
-//! **Held to the target.** The runner's control keeps the oracle's
-//! verdict on every test of a subset under the pin, and every engine's
-//! reading of the subset carries met-of-target, `target`, `met` and
-//! `outside`, with the tests outside the target named with the oracle's
-//! reason (#2033), the target's misses named and `missed_skipped` counting
+//! **Held to the target.** The runner's control, `--control`, runs each
+//! subset under its own oracle's pinned php, a variant's included (#1970),
+//! and keeps that php's verdict on every test of it under its pin; every
+//! engine's reading of the subset carries met-of-target, `target`, `met`
+//! and `outside`, with the tests outside the target named with the
+//! oracle's reason (#2033), the target's misses named and `missed_skipped` counting
 //! those the engine skipped (#1834), and `predated` where the target was
 //! kept over another corpus than the subset holds now, with the command
 //! that keeps it again (#1644); the `target` module says what is in it
@@ -107,8 +108,10 @@
 //! crate that owns none is asked for no phpt reading. A bare call is the
 //! per-commit lane, which is every subset of every crate the binary under
 //! test carries, in manifest order (harness §7, revision 63;
-//! [`Carried`]); `--subset` is one crate's subsets or one directory of
-//! the pinned tree.
+//! [`Carried`]), and of every crate whose row names an oracle variant,
+//! run on the engine built with the row's feature in a target directory
+//! of its own where none is named (#2029); `--subset` is one crate's
+//! subsets or one directory of the pinned tree.
 //!
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under `lanes.nightly-flags` in the
@@ -166,12 +169,12 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::carried::{BINARY, Carried};
+use crate::carried::{BINARY, BUNDLE, Carried};
 use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::hosts::{CGI, EngineHost, FPM, PHPDBG};
-use crate::oracle::{Oracle, Oracles, Pin, Runner, Source};
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
+use crate::oracle::{ENGINE, Oracle, Oracles, Pin, Runner, Source, profile};
 use crate::reading::{Reading, listed, plural};
 use crate::scratch::{self, Full, Tree};
 use crate::sources;
@@ -429,17 +432,18 @@ impl Subset {
     }
 
     /// The per-commit lane (harness §7, revision 63): every subset of
-    /// every crate the binary under test carries, in manifest order, under
-    /// the pinned tree at `source`. The row is the statement of which
-    /// subsets a crate owns and `carried` of which crates the binary has,
-    /// each read in one place, so the lane is never a second copy of the
-    /// design's table; a crate behind a feature the binary does not turn
-    /// on is outside the lane and in the nightly one.
+    /// every crate the binary under test carries or whose row names an
+    /// oracle variant (#2029), in manifest order, under the pinned tree at
+    /// `source`. The row is the statement of which subsets a crate owns
+    /// and `carried` of which crates the binary has, each read in one
+    /// place, so the lane is never a second copy of the design's table;
+    /// any other crate behind a feature the binary does not turn on is
+    /// outside the lane and in the nightly one.
     pub(crate) fn lane(manifest: &Manifest, carried: &Carried, source: &Path) -> Vec<Subset> {
         manifest
             .crates
             .iter()
-            .filter(|krate| carried.carries(krate))
+            .filter(|krate| crate::done::measured_by_the_lane(krate, carried))
             .filter_map(|krate| Subset::of(source, krate))
             .collect()
     }
@@ -693,11 +697,12 @@ pub(crate) fn reading(
     } else if uncreated {
         Outcome::Absent(sources::NOT_YET_CREATED)
     } else if let Some(why) = oracle_absent
-        && matches!(runner, Runner::Engine(_))
+        && matches!(runner, Runner::Engine(_) | Runner::Control(_))
     {
         // A binary is built and the pinned php is not here: the engine
         // could run, and the recipe it would run under is the pin's,
-        // whose digest cannot be asserted. Nothing ran, and this is why;
+        // whose digest cannot be asserted; or the control was asked for
+        // and its php is not here (#1970). Nothing ran, and this is why;
         // `done` excuses the absent engine and not this.
         Outcome::OracleAbsent(why)
     } else {
@@ -786,10 +791,7 @@ fn held_to(
     (runner, pin): (&Runner, &Pin),
 ) -> Result<()> {
     let key = target::key(pin);
-    let keeps = format!(
-        "`xtask phpt --subset {scope} --engine {}` keeps it again",
-        pin.oracle.path.display()
-    );
+    let keeps = format!("`xtask phpt --subset {scope} --control` keeps it again");
     let words = match (runner, target) {
         (Runner::Control(_), _) if kept => format!("kept as the subset's target under {key}"),
         (Runner::Engine(_) | Runner::Linked, Some(target)) if !tally.judged.is_empty() => {
@@ -800,8 +802,7 @@ fn held_to(
             measure.words(target::Kept { target: &at, run }, &keeps)
         }
         (Runner::Engine(_) | Runner::Linked, None) if !tally.judged.is_empty() => format!(
-            "no target is kept under {key}; `xtask phpt --subset <scope> --engine {}` keeps one",
-            pin.oracle.path.display()
+            "no target is kept under {key}; `xtask phpt --subset {scope} --control` keeps one"
         ),
         _ => return Ok(()),
     };
@@ -924,9 +925,8 @@ pub struct Ask {
     /// The whole corpus: the nightly lane, denied at the call.
     pub full: bool,
     pub lane: Option<Lane>,
-    /// The binary the process adapter runs; without it, the engine's own
-    /// where cargo puts it.
-    pub engine: Option<PathBuf>,
+    /// The binary the process adapter runs.
+    pub engine: Engine,
     /// Render the census beside the run: every miss grouped by the
     /// signature it kept (#1185), and the unread constructs among them,
     /// whose groups each reading carries (#617). The lane, the verdicts
@@ -951,6 +951,24 @@ pub struct Ask {
     pub unkept: bool,
 }
 
+/// The binary under test a run asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Engine {
+    /// The engine's own: the build cargo puts where `Runner::resolve`
+    /// looks, or for a subset whose row names an oracle variant the build
+    /// with the row's feature (#2029).
+    #[default]
+    Built,
+    /// The binary at this path: a pinned php's is the runner's control of
+    /// the subsets under its pin.
+    Named(PathBuf),
+    /// The runner's control: each subset under its own oracle's pinned
+    /// php, the main one or the variant its row names, so a variant's
+    /// subset keeps its target under the variant's pin with no php named
+    /// (#1970).
+    Control,
+}
+
 /// Run what was asked for: one reading per subset, each written by the
 /// caller through `record`; a subset refused is its own failing reading,
 /// and the rest of the lane runs (#1612).
@@ -968,19 +986,15 @@ pub fn run(
     // runs under it (#1782); each digest asserted once a run (harness §4.3).
     let variants = manifest.variants();
     let oracles = Oracles::new(&manifest.pin, &variants);
-    let runners = Runners::resolve(root, &manifest.pin, &variants, ask.engine.as_deref())?;
+    let runners = Runners::resolve(root, manifest, &variants, ask, &subsets)?;
     let runner = &runners.main;
-    // Nothing to run, or a binary the tree has moved past: either way the
-    // lane says so before the subsets rather than at the reading alone.
-    if let Runner::Absent(why) | Runner::Stale(why) = runner {
-        println!("phpt: {why}");
-    }
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     let sides: Vec<Result<Side>> = subsets
         .iter()
         .map(|subset| runners.side(manifest, &oracles, subset))
         .collect();
-    let todo = to_run(ask, (manifest, &runs), &subsets, &sides)?;
+    unrunnable(&sides);
+    let todo = to_run(ask, &runs, &subsets, &sides)?;
     if let Some(why) = oracles.main().pin().oracle.absent()
         && matches!(runner, Runner::Engine(_))
         && !sides.iter().flatten().any(Side::runs)
@@ -1083,6 +1097,22 @@ pub fn run(
     Ok(readings)
 }
 
+/// Nothing to run, or a binary the tree has moved past, under a subset of
+/// the run: either way the lane says so once before the subsets rather
+/// than at each reading alone, and not of a binary no subset runs on, the
+/// default build beside a featured one (#2029).
+fn unrunnable(sides: &[Result<Side>]) {
+    let mut said = Vec::new();
+    for side in sides.iter().flatten() {
+        if let Runner::Absent(why) | Runner::Stale(why) = side.runner
+            && !said.contains(&why)
+        {
+            println!("phpt: {why}");
+            said.push(why);
+        }
+    }
+}
+
 /// One subset's census under `--census`: printed under `scope`, and the
 /// rows its compiler did not read grouped on `reading`.
 fn counted(tally: &Tally, scope: &str, reading: &mut Reading) -> Result<()> {
@@ -1115,16 +1145,16 @@ fn copied(
 
 /// The subsets a run under `ask` runs, each beside its side: all of them,
 /// or under `--unkept` all but each whose kept target stands under its own
-/// oracle's pin, as
-/// its [`Side`] resolves it (#1830, #1782), and each the named binary is no
-/// control of, a variant's subset under the main php; each said, and set
+/// oracle's pin, as its [`Side`] resolves it (#1830, #1782), and each the
+/// named binary is no control of, a variant's subset under the main php,
+/// which `--control` never leaves (#1970); each said, and set
 /// aside before anything is copied, so a lane whose every target stands
 /// copies no tree and runs nothing. Only the control keeps a target, and
 /// only outside a tier's lane (`Runs::target_of`), so `--unkept` is
 /// refused where the binary is no subset's control or a lane is named.
 fn to_run<'a, 'r, 'o>(
     ask: &Ask,
-    (manifest, runs): (&Manifest, &against::Runs),
+    runs: &against::Runs,
     subsets: &'a [Subset],
     sides: &'a [Result<Side<'r, 'o>>],
 ) -> Result<Vec<(&'a Subset, &'a Result<Side<'r, 'o>>)>> {
@@ -1135,9 +1165,8 @@ fn to_run<'a, 'r, 'o>(
     let control = |side: &Side| matches!(side.runner, Runner::Control(_));
     if ask.lane.is_some() || !sides.iter().flatten().any(control) {
         bail!(
-            "--unkept keeps the targets of the runner's control: name the pinned php, {}, or a \
-             variant's, with --engine, and no --jit",
-            manifest.pin.oracle.path.display()
+            "--unkept keeps the targets of the runner's control: ask for it with --control, or \
+             name a pinned php with --engine, and no --jit"
         );
     }
     Ok(pairs
@@ -1234,26 +1263,45 @@ impl Side<'_, '_> {
 
 /// The binary under test as each oracle of the run resolves it: a binary
 /// named for the run is the control under the oracle whose digest it has,
-/// so each variant resolves it under its own pin (#1782).
+/// so each variant resolves it under its own pin (#1782). Where none is
+/// named, a subset whose row names a variant and a feature the binary
+/// under test does not turn on runs on the engine built with that feature
+/// (#2029), the build's failure refusing it.
 struct Runners<'v> {
     main: Runner,
     variants: BTreeMap<&'v str, Runner>,
+    featured: BTreeMap<String, Result<Runner, String>>,
 }
 
 impl<'v> Runners<'v> {
     fn resolve(
         root: &Path,
-        main: &Pin,
+        manifest: &Manifest,
         variants: &'v BTreeMap<String, Pin>,
-        engine: Option<&Path>,
+        ask: &Ask,
+        subsets: &[Subset],
     ) -> Result<Runners<'v>> {
+        // The control is each oracle's own php, standing for the engine
+        // under its own pin (#1970).
+        let resolve = |pin: &Pin| match &ask.engine {
+            Engine::Built => Runner::resolve(root, pin, None),
+            Engine::Named(path) => Runner::resolve(root, pin, Some(path)),
+            Engine::Control => Ok(Runner::Control(pin.oracle.path.clone())),
+        };
         let mut resolved = BTreeMap::new();
         for (name, pin) in variants {
-            resolved.insert(name.as_str(), Runner::resolve(root, pin, engine)?);
+            resolved.insert(name.as_str(), resolve(pin)?);
         }
+        // `--unkept` is the control's, refused on the engine's own build
+        // before anything is built for it.
+        let featured = match ask.engine {
+            Engine::Built if !ask.unkept => featured(root, manifest, variants, subsets)?,
+            Engine::Built | Engine::Named(_) | Engine::Control => BTreeMap::new(),
+        };
         Ok(Runners {
-            main: Runner::resolve(root, main, engine)?,
+            main: resolve(&manifest.pin)?,
             variants: resolved,
+            featured,
         })
     }
 
@@ -1270,14 +1318,76 @@ impl<'v> Runners<'v> {
     ) -> Result<Side<'r, 'o>> {
         let variant = manifest.variant_of(&subset.scope);
         let oracle = oracles.of(variant)?;
-        Ok(Side {
-            oracle,
-            runner: variant
+        let feature = manifest
+            .crate_named(&subset.scope)
+            .filter(|_| variant.is_some())
+            .and_then(|krate| krate.feature.as_ref());
+        let runner = match feature.and_then(|feature| self.featured.get(feature)) {
+            Some(built) => built.as_ref().map_err(|why| anyhow::anyhow!("{why}"))?,
+            None => variant
                 .and_then(|v| self.variants.get(v))
                 .unwrap_or(&self.main),
+        };
+        Ok(Side {
+            oracle,
+            runner,
             absent: oracle.pin().oracle.absent(),
         })
     }
+}
+
+/// The engines `subsets` run on that the binary under test is not, by
+/// feature: one built with each feature a row of theirs turns on beside an
+/// oracle variant whose php is on this machine, where the binary under
+/// test does not turn it on, into a target directory of its own
+/// ([`profile::featured`]), so the default build stands (#2029). The
+/// variant is the statement that php loads what the feature builds, so a
+/// row with a feature and no variant is the nightly lane's, and a variant
+/// whose php is not here runs nothing, so nothing is built for it. Built
+/// by cargo now, the engine is the tree's, and it is not held to the
+/// tree by when it was written as a binary found standing is.
+///
+/// [`profile::featured`]: crate::oracle::profile::featured
+fn featured(
+    root: &Path,
+    manifest: &Manifest,
+    variants: &BTreeMap<String, Pin>,
+    subsets: &[Subset],
+) -> Result<BTreeMap<String, Result<Runner, String>>> {
+    let carried = Carried::binary(root)?;
+    let mut built = BTreeMap::new();
+    for krate in subsets
+        .iter()
+        .filter_map(|s| manifest.crate_named(&s.scope))
+    {
+        let (Some(variant), Some(feature)) = (&krate.oracle, &krate.feature) else {
+            continue;
+        };
+        let here = variants
+            .get(variant)
+            .is_some_and(|pin| pin.oracle.absent().is_none());
+        if carried.carries(krate) || !here || built.contains_key(feature) {
+            continue;
+        }
+        let into = profile::featured(root, feature);
+        let features = format!("{BUNDLE}/{feature}");
+        println!(
+            "phpt: {} runs on the engine built with {features}, in {}",
+            krate.name,
+            into.display()
+        );
+        let started = std::time::Instant::now();
+        let engine = profile::build(root, &CLI.package(), ENGINE, Some(&features), Some(&into));
+        println!(
+            "phpt: the engine with {features} took {:.1}s to build",
+            started.elapsed().as_secs_f64()
+        );
+        let engine = engine
+            .map(Runner::Engine)
+            .map_err(|why| format!("the engine with {features} is not built: {why:#}"));
+        built.insert(feature.clone(), engine);
+    }
+    Ok(built)
 }
 
 /// The subsets `ask` names: one crate's or directory's, the whole corpus,

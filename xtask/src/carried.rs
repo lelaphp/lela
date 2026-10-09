@@ -11,9 +11,10 @@
 //!
 //! Two builds are read. The binary under test, [`BINARY`]'s crate, is the
 //! one the per-commit phpt lane runs: the lane runs the subsets of every
-//! row it carries, `done` asks a touched crate it carries for a `phpt`
-//! reading, and `crosscheck` renders every extension it carries (§4.5
-//! condition 1). `php-linked`, the engine the lanes serve a snippet
+//! row it carries, and of every row naming an oracle variant on the engine
+//! built with the row's feature (#2029), `done` asks a touched crate of
+//! either for a `phpt` reading, and `crosscheck` renders every extension
+//! it carries (§4.5 condition 1). `php-linked`, the engine the lanes serve a snippet
 //! through, is the other: [`BINARY`]'s crate with the bundle's `linked` set
 //! on top (revision 84; #2166). `crosscheck` serves an extension through
 //! it where it carries the extension and through the binary where it does
@@ -35,7 +36,7 @@ use crate::manifest::Crate;
 pub const BINARY: &str = "sapi/cli";
 
 /// The package every build turns its extension features on through.
-const BUNDLE: &str = "php_bundle";
+pub(crate) const BUNDLE: &str = "php_bundle";
 
 /// The bundle's feature `php-linked` is built with on top of [`BINARY`]'s.
 const LINKED: &str = "linked";

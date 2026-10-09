@@ -550,11 +550,18 @@ covers = ["php-ub:ext/standard/tests/walks.rs::fixture_walk_ends"]
     assert_eq!(value["counts"]["total"]["accepted"], 1);
     assert_eq!(value["counts"]["php-ub"]["accepted"], 1);
 
-    // With no php-ub row, the counts carry no line about one.
-    let (ok, md, _) = xtask(
-        &scratch("parity-only"),
-        &["status", "--section", "divergence"],
-    );
+    // With no php-ub row, the counts carry no line about one: the tracked
+    // registry with its php-ub rows taken out.
+    let parity_only = scratch("parity-only");
+    let tracked = std::fs::read_to_string(parity_only.join(divergence::FILE)).unwrap();
+    let mut blocks = tracked.split("[[divergence]]");
+    let mut kept = blocks.next().unwrap_or_default().to_owned();
+    for block in blocks.filter(|b| !b.contains("kind = \"php-ub\"")) {
+        kept.push_str("[[divergence]]");
+        kept.push_str(block);
+    }
+    std::fs::write(parity_only.join(divergence::FILE), kept).unwrap();
+    let (ok, md, _) = xtask(&parity_only, &["status", "--section", "divergence"]);
     assert!(ok);
     assert!(!md.contains("counted on its own line"), "{md}");
 }

@@ -23,7 +23,8 @@ use std::collections::VecDeque;
 use super::PhpStream;
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::{
-    Brigade, FilterFactory, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Whence,
+    Brigade, FilterChain as Chain, FilterFactory, FilterFlags, FilterStatus, Request, Stream,
+    StreamFilter, Whence,
 };
 use crate::api::values::{Owner, Resource, Value};
 use crate::state::Layer;
@@ -39,13 +40,6 @@ const FILTER_WRITE: i64 = 2;
 pub(crate) struct Attached {
     ops: Box<dyn StreamFilter>,
     res: Option<Resource>,
-}
-
-/// Which of a stream's two chains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Chain {
-    Read,
-    Write,
 }
 
 /// The payload of a `stream filter` resource: the stream the filter is
@@ -520,7 +514,7 @@ fn release_filter(req: &mut Request, filter: Attached) {
     }
 }
 
-pub(crate) trait FilterChain {
+pub(crate) trait FilterLayer {
     fn filter_create(
         &mut self,
         name: &[u8],
@@ -529,7 +523,7 @@ pub(crate) trait FilterChain {
     fn remove_filter(&mut self, res: Resource) -> Result<Option<bool>, Thrown>;
 }
 
-impl FilterChain for Request {
+impl FilterLayer for Request {
     /// `php_stream_filter_create` (`Z/main/streams/filter.c:212`): the
     /// factory registered under `name`, else under the name with its
     /// last segment and then each shorter one made `*`, asked for a
@@ -634,38 +628,29 @@ impl FilterChain for Request {
 }
 
 impl Stream {
-    /// `php_stream_apply_filter_list`'s one name
+    /// `php_stream_filter_create(name, NULL, persistent)` and
+    /// `php_stream_filter_append` on `chain`, what
+    /// `php_stream_apply_filter_list` makes of one name
     /// (`Z/ext/standard/php_fopen_wrapper.c:153`): a filter made by the
-    /// factory `name` finds, with no parameters, appended to the read
-    /// chain and to the write chain as `(read, write)` asks, each with no
-    /// resource of its own; php's `Unable to create filter (%s)` after
-    /// the filter layer's warning for each that cannot be made.
-    pub(crate) fn apply_filter(
+    /// factory `name` finds, with no parameters, at the tail of the chain
+    /// with no resource of its own. `false` is a filter that could not be
+    /// made, after the filter layer's warning; the `Err` is what a filter
+    /// threw over the bytes already read.
+    pub fn append_filter(
         self,
         req: &mut Request,
         name: &[u8],
-        (read, write): (bool, bool),
-    ) -> Result<(), Thrown> {
-        for (wanted, chain) in [(read, Chain::Read), (write, Chain::Write)] {
-            if !wanted {
-                continue;
-            }
-            let Some(ops) = req.filter_create(name, None) else {
-                let text = format!(
-                    "{}(): Unable to create filter ({})",
-                    req.active_function_name(),
-                    String::from_utf8_lossy(name)
-                );
-                warning(req, &text);
-                continue;
-            };
-            req.stream_op(self, |req, s| {
-                s.attach(req, chain, Attached { ops, res: None }, true)
-            });
-        }
+        chain: Chain,
+    ) -> Result<bool, Thrown> {
+        let Some(ops) = req.filter_create(name, None) else {
+            return Ok(false);
+        };
+        req.stream_op(self, |req, s| {
+            s.attach(req, chain, Attached { ops, res: None }, true)
+        });
         match req.stream_thrown().take() {
             Some(thrown) => Err(thrown),
-            None => Ok(()),
+            None => Ok(true),
         }
     }
 

@@ -125,13 +125,13 @@ third-engine-design.md
 | unit | unit.lock | 95 |  | no reading |
 | link | link.lock | 37 |  | no reading |
 | ops | ops.lock | 209 |  | no reading |
-| api | api.lock | 1334 | 1500 | no reading |
+| api | api.lock | 1342 | 1500 | no reading |
 | sapi | sapi.lock | 43 |  | no reading |
 | tier | tier.lock | 67 |  | no reading |
 | layer | layer.lock | 36 |  | no reading |
-| harness | xtask.lock | 387 |  | no reading |
+| harness | xtask.lock | 388 |  | no reading |
 
-<!-- /computed in=3605c6a475107262350d011fd02d3f4b1b487a000c73b61dea8a519d5a174f99 out=3271cc90bad82a3f0fb7e556a9fd73602e6b826e7baf9e4626d61a0da707e16c -->
+<!-- /computed in=301cf78effd6b1c2933d3839bff3029fc704fe0722af3d90217baf26f99f5aea out=7c8ad6c49b30072992d899fa0aa662fa123f1857674eb79059926621a0e20c41 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -205,7 +205,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=13c03aac6d6e1ed94e44d1d9dd351ec5506cd6e2470a7cd25ea509b042e8f92b out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
+<!-- /computed in=970b627c97536471cf55b1da7ea6de0182bb8d383f612bc91fa3a651368d3c2c out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

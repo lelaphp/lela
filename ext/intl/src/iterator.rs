@@ -52,11 +52,15 @@ pub(crate) trait Walk: Send {
     }
 }
 
-/// The position over a [`Walk`]: `zoi_with_current`'s `current` and the
-/// iterator's `index`.
+/// The position over a [`Walk`]: `zoi_with_current`'s `current` and
+/// `wrapping_obj`, and the iterator's `index`. `wrapping` is one owner of
+/// the object that holds the cursor, as php's `wrapping_obj` is, so an
+/// object nothing else owns is a cycle the collector finds through
+/// [`Handlers::get_gc`] and counts.
 pub(crate) struct Cursor {
     walk: Box<dyn Walk>,
     current: Option<Owner<Value>>,
+    wrapping: Owner<PhpObject>,
     index: i64,
 }
 
@@ -199,7 +203,7 @@ fn with_cursor<T>(
     let answer = f(req, &mut cursor);
     match object.native_mut::<IteratorObject>(req) {
         Some(o) => o.cursor = Some(cursor),
-        None => release(req, &mut cursor),
+        None => release(req, *cursor),
     }
     answer
 }
@@ -224,12 +228,30 @@ fn rewind(req: &mut Request, object: PhpObject, cursor: &mut Cursor) -> Result<(
     Ok(())
 }
 
-/// `zoi_with_current_dtor` with `destroy_it`.
-fn release(req: &mut Request, cursor: &mut Cursor) {
-    if let Some(old) = cursor.current.take() {
+/// `IntlIterator_objects_dtor`: `destroy_it`, then the iterator freed,
+/// its element and `zoi_with_current_dtor`'s wrapping object given up.
+fn release(req: &mut Request, cursor: Cursor) {
+    let Cursor {
+        mut walk,
+        current,
+        wrapping,
+        ..
+    } = cursor;
+    walk.release(req);
+    if let Some(old) = current {
         old.give_up(req);
     }
-    cursor.walk.release(req);
+    wrapping.give_up(req);
+}
+
+/// The object's cursor taken and released, `ii->iterator = NULL`.
+fn take_released(req: &mut Request, object: PhpObject) {
+    let taken = object
+        .native_mut::<IteratorObject>(req)
+        .and_then(|o| o.cursor.take());
+    if let Some(cursor) = taken {
+        release(req, *cursor);
+    }
 }
 
 /// A new object of `class` (`IntlIterator` or `IntlPartsIterator`)
@@ -243,12 +265,15 @@ pub(crate) fn made(
         return Err(fatal(req, "InternalError: IntlIterator is not linked"));
     };
     let object = new_object(req, id)?;
-    if let Some(o) = object.native_mut::<IteratorObject>(req) {
-        o.cursor = Some(Box::new(Cursor {
-            walk,
-            current: None,
-            index: 0,
-        }));
+    let cursor = Box::new(Cursor {
+        walk,
+        current: None,
+        wrapping: Owner::take(req, *object),
+        index: 0,
+    });
+    match object.native_mut::<IteratorObject>(req) {
+        Some(o) => o.cursor = Some(cursor),
+        None => release(req, *cursor),
     }
     Ok(object)
 }
@@ -316,25 +341,56 @@ impl ObjectHandlers for Handlers {
         REFUSALS
     }
 
-    /// `IntlIterator_objects_dtor`, `destroy_it` on the cursor.
-    fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let taken = object
-            .native_mut::<IteratorObject>(req)
-            .and_then(|o| o.cursor.take());
-        if let Some(mut cursor) = taken {
-            release(req, &mut cursor);
-        }
+    /// `IntlIterator_objects_dtor`: the cursor released, which gives up
+    /// the object's owner of itself, and no `__destruct` served, as php's
+    /// slot serves none, so the request's end frees an object only its
+    /// cursor owns.
+    ///
+    /// ```php
+    /// class Sub extends IntlIterator { function __destruct() { echo "destruct\n"; } }
+    /// $sub = new Sub;
+    /// unset($sub);
+    /// var_dump(get_class(IntlCalendar::getKeywordValuesForLocale('calendar', 'fa_IR', true)));
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// string(12) "IntlIterator"
+    /// end
+    /// ```
+    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
+        take_released(req, object);
     }
 
-    /// `IntlIterator_object_get_gc`: the walk's object and the element.
+    /// `IntlIterator_objects_free`: what a collection left of the
+    /// cursor, which it frees with no destructor served, released.
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        take_released(req, object);
+    }
+
+    /// `IntlIterator_object_get_gc` through `zoi_with_current_get_gc`:
+    /// the wrapping object alone, which is the object itself, so one
+    /// nothing else owns is garbage, counted once as php counts it.
+    ///
+    /// ```php
+    /// function cycle() {
+    ///     $it = IntlCalendar::getKeywordValuesForLocale('calendar', 'fa_IR', true);
+    ///     unset($it);
+    ///     var_dump(gc_collect_cycles());
+    /// }
+    /// cycle();
+    /// cycle();
+    /// $parts = IntlBreakIterator::createWordInstance('en')->getPartsIterator();
+    /// unset($parts);
+    /// var_dump(gc_collect_cycles());
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(1)
+    /// int(1)
+    /// ```
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(cursor) = cursor(req, object) {
-            cursor
-                .walk
-                .data()
-                .into_iter()
-                .chain(cursor.current.as_deref().copied())
-                .for_each(visit);
+            visit(cursor.wrapping.as_value());
         }
     }
 

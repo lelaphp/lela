@@ -548,7 +548,7 @@ fn phpt_run(root: &Path, manifest: &Manifest, engine: &Path) -> Reading {
     let locks = Tree::new("variant-phpt-locks").unwrap();
     let ask = phpt::Ask {
         subset: Some("ext/fixture".to_owned()),
-        engine: Some(engine.to_path_buf()),
+        engine: phpt::Engine::Named(engine.to_path_buf()),
         locks: Some(locks.path().to_path_buf()),
         ..phpt::Ask::default()
     };
@@ -613,7 +613,7 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
     let run = |engine: &Path| {
         let ask = phpt::Ask {
             subset: Some("ext/fixture".to_owned()),
-            engine: Some(engine.to_path_buf()),
+            engine: phpt::Engine::Named(engine.to_path_buf()),
             locks: Some(locks.path().to_path_buf()),
             unkept: true,
             ..phpt::Ask::default()
@@ -651,6 +651,81 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
     assert!(format!("{refused:#}").contains("--unkept"), "{refused:#}");
 }
 
+/// The runner's control with no php named (#1970): `--control --unkept`
+/// runs a variant's subset under the variant's own php and keeps its target
+/// under the variant's pin, which then stands; a subset of the main oracle,
+/// whose php is not here, runs nothing and says why.
+#[test]
+fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
+    let Some((root, manifest, _)) = phpt_scratch("phpt-control", None, true) else {
+        return;
+    };
+    let locks = Tree::new("variant-control-locks").unwrap();
+    let ask = phpt::Ask {
+        subset: Some("ext/fixture".to_owned()),
+        engine: phpt::Engine::Control,
+        unkept: true,
+        locks: Some(locks.path().to_path_buf()),
+        ..phpt::Ask::default()
+    };
+    let run = |manifest: &Manifest| phpt::run(&root, manifest, &Registry::default(), &ask);
+    let readings = run(&manifest).unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
+    assert_eq!(count(reading, "passed"), 1, "{reading:#?}");
+    let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
+    let kept = root.join(format!(
+        "target/phpt-runs/pin-{}-{md5}/ext/fixture.json",
+        manifest.pin.source.tag
+    ));
+    assert!(kept.is_file(), "{}", kept.display());
+    let readings = run(&manifest).unwrap();
+    assert!(readings.is_empty(), "the target stands: {readings:#?}");
+
+    let mut main = manifest.clone();
+    main.crates[0].oracle = None;
+    let readings = run(&main).unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(
+        reading.message.contains("no-php-here"),
+        "{}",
+        reading.message
+    );
+}
+
+/// The oracle job runs the control with `--control`, so dashboard.yml
+/// names no php for it and no variant: each subset's own pinned php is the
+/// harness's to find (#1970).
+#[test]
+fn the_oracle_jobs_control_names_no_php_and_no_variant() {
+    let text = fs::read_to_string(workspace().join(".github/workflows/dashboard.yml")).unwrap();
+    let commands: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with('#'))
+        .collect();
+    assert!(
+        commands.contains(&"set -- --control"),
+        "the control step asks for the control"
+    );
+    for line in commands {
+        assert!(
+            !line.contains("--engine") && !line.contains(".binary.path"),
+            "{line}"
+        );
+    }
+    let pin = Pin::parse(&tracked_text()).unwrap();
+    for name in pin.variant.keys() {
+        assert!(!text.contains(name.as_str()), "dashboard.yml names {name}");
+    }
+}
+
 /// `phpt`'s half of the binary's negative control: the subset of a crate
 /// read under a variant whose binary is not its md5 is refused, a failing
 /// reading naming the drift, as the main oracle's is.
@@ -685,6 +760,95 @@ fn phpt_refuses_a_subset_whose_row_names_a_variant_the_pin_lacks() {
         reading.message.contains(
             "no oracle variant \"no-such-variant\" in the pin; the variants are stand-in"
         ),
+        "{}",
+        reading.message
+    );
+}
+
+/// `xtask phpt --subset ext/fixture` with no `--engine`, in a workspace
+/// whose row names the stand-in variant and the feature `fixture`, which
+/// no binary under test turns on there (#2029): cargo is the shell file
+/// `build` writes, and `target/release-da/php`, the default build, is a
+/// decoy that misses the test's expectation. The subset's reading.
+fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
+    let root = scratch(name, "");
+    let tests = root.join("corpus/ext/fixture/tests");
+    fs::create_dir_all(&tests).unwrap();
+    fs::write(
+        tests.join("variant.phpt"),
+        "--TEST--\nOn the engine with the feature\n--FILE--\n<?php echo 'variant';\n--EXPECT--\nvariant\n",
+    )
+    .unwrap();
+    let platform = Platform::this()?;
+    let php = root.join("variant/php");
+    let md5 = shell(&php, "printf variant");
+    let pin = root.join("oracle.toml");
+    let text = fs::read_to_string(&pin).unwrap();
+    fs::write(
+        &pin,
+        text + &variant_table("stand-in", platform.key(), &php, &md5),
+    )
+    .unwrap();
+    let seams = root.join("seams.toml");
+    let text = fs::read_to_string(&seams).unwrap();
+    let row = "\n[[crate]]\nname = \"ext/fixture\"\nbudget = 100\nfeature = \"fixture\"\noracle = \"stand-in\"\n";
+    fs::write(&seams, text + row).unwrap();
+    shell(&root.join("target/release-da/php"), "printf default");
+    let cargo = root.join("bin/cargo");
+    shell(&cargo, build);
+    let temp = root.join("tmp");
+    fs::create_dir_all(&temp).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["--root", &root.display().to_string()])
+        .args(["phpt", "--subset", "ext/fixture", "--jobs", "1"])
+        .env("CARGO", &cargo)
+        .env("TMPDIR", &temp)
+        .env("TEST_PHP_SRCDIR", root.join("corpus"))
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    let reading = Store::of_workspace(&root)
+        .read("phpt", "ext/fixture")
+        .unwrap()
+        .unwrap_or_else(|| panic!("no reading: {said}{}", String::from_utf8_lossy(&out.stderr)));
+    Some((root, reading))
+}
+
+/// The engine the harness builds with the row's feature, into a target
+/// directory of its own, is the one the subset runs on, and the default
+/// build is left where it stands.
+#[test]
+fn phpt_runs_a_variants_subset_on_the_engine_built_with_its_rows_feature() {
+    let build = "while [ $# -gt 0 ]; do\n  case \"$1\" in\n    --target-dir) dir=$2; shift ;;\n    --features) features=$2; shift ;;\n  esac\n  shift\ndone\n[ \"$features\" = php_bundle/fixture ] || exit 3\nmkdir -p \"$dir/release-da\" && printf '#!/bin/sh\\nprintf variant\\n' > \"$dir/release-da/php\" && chmod +x \"$dir/release-da/php\"";
+    let Some((root, reading)) = phpt_featured("phpt-featured", build) else {
+        return;
+    };
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 1, "{reading:#?}");
+    let engine = root.join("target/featured/fixture/release-da/php");
+    assert!(
+        reading
+            .message
+            .contains(&format!("run by {}", engine.display())),
+        "{}",
+        reading.message
+    );
+}
+
+/// The negative control: where the feature build is missing, cargo
+/// failing it, the subset is refused naming the build, and neither runs
+/// on the default build nor skips as an engine not yet built would.
+#[test]
+fn phpt_refuses_a_variants_subset_whose_feature_build_is_missing() {
+    let Some((_root, reading)) = phpt_featured("phpt-featured-missing", "exit 101") else {
+        return;
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(&reading, "refused"), 1, "{reading:#?}");
+    assert!(
+        reading
+            .message
+            .contains("the engine with php_bundle/fixture is not built"),
         "{}",
         reading.message
     );
