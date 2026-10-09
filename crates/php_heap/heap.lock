@@ -61,6 +61,7 @@ Frame::len
 Frame::set
 Frame::slot
 Frame::slot_ptr
+Frame::slots_mut
 FrameRef
 FramesAside
 FreshStr
@@ -218,6 +219,7 @@ MapTable::get
 MapTable::map
 MapTable::new
 Number
+Number::compare
 Number::double
 Obj
 Obj::addref

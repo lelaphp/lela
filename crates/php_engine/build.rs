@@ -9,6 +9,15 @@
 //! The handler for `ZEND_INIT_FCALL` is `fn init_fcall`, php's name in
 //! snake case, in a raw identifier where Rust needs one.
 //!
+//! A handler of an opcode `ops.toml` marks `specialise` may be generic
+//! over the kinds of its operands, one `Operand` parameter for `op1` or
+//! two for `op1` and `op2` after the tier's: the arm is then a `match`
+//! over the opline's kind bytes with one arm per kind the spec lists,
+//! each naming the handler at those kinds (`crate::operand`), as
+//! `zend_vm_gen.php` emits one handler per `SPEC` pair (design §5.8). A
+//! handler generic over kinds the spec does not specialise is a build
+//! error.
+//!
 //! Written to `OUT_DIR/dispatch.rs` and included, never committed (design
 //! §10).
 //!
@@ -144,18 +153,15 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     let handlers = handlers(bodies)?;
     undispatched(bodies, &opcodes, &handlers)?;
     let mut arms = String::new();
-    for (name, handler) in &handlers {
-        let Some(variant) = opcodes.get(name) else {
+    for handler in &handlers {
+        let Some(spec) = opcodes.get(&handler.name) else {
             return Err(format!(
-                "{}: `fn {handler}` is no opcode of ops.toml; a handler is one opcode's, named as php names it",
-                bodies.display()
+                "{}: `fn {}` is no opcode of ops.toml; a handler is one opcode's, named as php names it",
+                bodies.display(),
+                handler.ident
             ));
         };
-        writeln!(
-            arms,
-            "        Opcode::{variant} => crate::handlers::{handler}::<T>(req, frame, code, op),"
-        )
-        .ok();
+        arms.push_str(&arm(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?);
     }
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
@@ -167,7 +173,10 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          // number of handlers and says nothing about the code, so the line\n\
          // count is no bound on it. Every crate lints under `-D warnings`\n\
          // (harness §4.2), which reaches generated code too.\n\
-         #[allow(clippy::too_many_lines)]\n\
+         // Inlined into the loop, so that an opline costs one indirect\n\
+         // jump to its handler and no call of its own (design §5.8).\n\
+         #[allow(clippy::too_many_lines, clippy::match_same_arms, clippy::inline_always, clippy::match_wildcard_for_single_variants)]\n\
+         #[inline(always)]\n\
          pub(crate) fn dispatch<T: Tier>(\n\
          \x20   req: &mut Request,\n\
          \x20   frame: FrameRef,\n\
@@ -185,14 +194,118 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     ))
 }
 
+/// One opcode's arm: the handler at the tier, or, for a handler generic
+/// over its operands' kinds, a `match` over the opline's kind bytes with
+/// one arm per kind the spec lists, and the internal-error fatal for a
+/// kind it does not, which no unit the compiler wrote has.
+fn arm(handler: &Handler, spec: &Spec) -> Result<String, String> {
+    let call = |kinds: &[&str]| {
+        let mut params = String::new();
+        for kind in kinds {
+            write!(
+                params,
+                ", crate::operand::{}",
+                kind_type(kind).unwrap_or_default()
+            )
+            .ok();
+        }
+        format!(
+            "crate::handlers::{}::<T{params}>(req, frame, code, op)",
+            handler.ident
+        )
+    };
+    let variant = &spec.variant;
+    if handler.operands == 0 {
+        return Ok(format!("        Opcode::{variant} => {},\n", call(&[])));
+    }
+    if !spec.specialise {
+        return Err(format!(
+            "`fn {}` is generic over its operands' kinds and ops.toml does not mark the opcode `specialise`",
+            handler.ident
+        ));
+    }
+    let mut read = spec
+        .op1
+        .iter()
+        .chain(spec.op2.iter().filter(|_| handler.operands > 1));
+    if let Some(kind) = read.find(|kind| kind_type(kind).is_none()) {
+        return Err(format!(
+            "`fn {}` is generic over its operands' kinds and ops.toml lists `{kind}` among them, which crate::operand has no type for",
+            handler.ident
+        ));
+    }
+    let mut out = String::new();
+    match handler.operands {
+        1 => {
+            writeln!(out, "        Opcode::{variant} => match op.op1_type {{").ok();
+            for a in &spec.op1 {
+                writeln!(
+                    out,
+                    "            php_unit::OperandKind::{} => {},",
+                    kind_type(a).unwrap_or_default(),
+                    call(&[a])
+                )
+                .ok();
+            }
+        }
+        2 => {
+            writeln!(
+                out,
+                "        Opcode::{variant} => match (op.op1_type, op.op2_type) {{"
+            )
+            .ok();
+            for a in &spec.op1 {
+                for b in &spec.op2 {
+                    writeln!(
+                        out,
+                        "            (php_unit::OperandKind::{}, php_unit::OperandKind::{}) => {},",
+                        kind_type(a).unwrap_or_default(),
+                        kind_type(b).unwrap_or_default(),
+                        call(&[a, b])
+                    )
+                    .ok();
+                }
+            }
+        }
+        n => {
+            return Err(format!(
+                "`fn {}` is generic over {n} operands; an opline has two",
+                handler.ident
+            ));
+        }
+    }
+    writeln!(
+        out,
+        "            _ => Err(Fatal::Error(format!(\n\
+         \x20               \"InternalError: {{}} over operand kinds ops.toml does not list\",\n\
+         \x20               op.opcode.name()\n\
+         \x20           ))),\n\
+         \x20       }},"
+    )
+    .ok();
+    Ok(out)
+}
+
+/// The operand kind's type in `crate::operand`, as `ops.toml` names it;
+/// none for `UNUSED`, which no inline path reads.
+fn kind_type(kind: &str) -> Option<&'static str> {
+    match kind {
+        "CONST" => Some("Const"),
+        "TMP" => Some("Tmp"),
+        "VAR" => Some("Var"),
+        "CV" => Some("Cv"),
+        _ => None,
+    }
+}
+
 /// A body named after an opcode that the dispatch does not reach: a
 /// handler indented into another item, or one whose visibility keeps the
 /// generated `match` from naming it. Either way it is a body nothing
 /// dispatches to, which is what this build exists to refuse.
 fn undispatched(
     bodies: &Path,
-    opcodes: &BTreeMap<String, String>,
-    handlers: &[(String, String)],
+    opcodes: &BTreeMap<String, Spec>,
+    handlers: &[Handler],
 ) -> Result<(), String> {
     let text =
         fs::read_to_string(bodies).map_err(|e| format!("reading {}: {e}", bodies.display()))?;
@@ -209,7 +322,7 @@ fn undispatched(
         if !opcodes.contains_key(name) {
             continue;
         }
-        if handlers.iter().any(|(dispatched, _)| dispatched == name) {
+        if handlers.iter().any(|dispatched| dispatched.name == name) {
             continue;
         }
         return Err(format!(
@@ -220,8 +333,18 @@ fn undispatched(
     Ok(())
 }
 
-/// php's opcode names against the enum variant `php_unit` generates.
-fn opcodes(path: &Path) -> Result<BTreeMap<String, String>, String> {
+/// What the dispatch reads of one `[[op]]` row: the enum variant
+/// `php_unit` generates, whether the design's hot list names the opcode
+/// (`specialise`), and the kinds each operand may be.
+struct Spec {
+    variant: String,
+    specialise: bool,
+    op1: Vec<String>,
+    op2: Vec<String>,
+}
+
+/// php's opcode names against what the dispatch reads of their rows.
+fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let table: toml::Table = toml::from_str(&text).map_err(|e| e.to_string())?;
     let rows = table
@@ -234,29 +357,67 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, String>, String> {
             .get("name")
             .and_then(toml::Value::as_str)
             .ok_or("an [[op]] row without a name")?;
-        out.insert(snake(name), camel(name));
+        let kinds = |field: &str| -> Vec<String> {
+            row.get(field)
+                .and_then(toml::Value::as_array)
+                .map(|kinds| {
+                    kinds
+                        .iter()
+                        .filter_map(toml::Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        out.insert(
+            snake(name),
+            Spec {
+                variant: camel(name),
+                specialise: row
+                    .get("specialise")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false),
+                op1: kinds("op1"),
+                op2: kinds("op2"),
+            },
+        );
     }
     Ok(out)
 }
 
-/// The handlers `src/handlers.rs` declares: php's name in snake case
-/// against the identifier to call, which is the same with the `r#` of a
-/// raw identifier kept.
-fn handlers(path: &Path) -> Result<Vec<(String, String)>, String> {
+/// One handler `src/handlers.rs` declares: php's name in snake case, the
+/// identifier to call, which is the same with the `r#` of a raw
+/// identifier kept, and how many of its generic parameters are operand
+/// kinds.
+struct Handler {
+    name: String,
+    ident: String,
+    operands: usize,
+}
+
+/// The handlers `src/handlers.rs` declares, each read off the line that
+/// opens it, whose generic parameters stand on it.
+fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let mut out = Vec::new();
     for line in text.lines() {
         let Some(rest) = line.strip_prefix("pub(crate) fn ") else {
             continue;
         };
-        let handler = rest.split(['<', '(']).next().unwrap_or_default().trim();
-        if handler.is_empty() {
+        let ident = rest.split(['<', '(']).next().unwrap_or_default().trim();
+        if ident.is_empty() {
             continue;
         }
-        out.push((
-            handler.trim_start_matches("r#").to_owned(),
-            handler.to_owned(),
-        ));
+        let generics = rest
+            .strip_prefix(ident)
+            .and_then(|rest| rest.strip_prefix('<'))
+            .and_then(|rest| rest.split_once(">("))
+            .map_or("", |(generics, _)| generics);
+        out.push(Handler {
+            name: ident.trim_start_matches("r#").to_owned(),
+            ident: ident.to_owned(),
+            operands: generics.matches(": Operand").count(),
+        });
     }
     Ok(out)
 }

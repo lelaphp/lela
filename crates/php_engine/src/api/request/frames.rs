@@ -714,6 +714,18 @@ impl Request {
             .map_or(Value::undef(), |f| Value::of_zval(f.slot(Slot(at))))
     }
 
+    /// Every slot of `frame` in place ([`php_heap::Frame::slots_mut`]),
+    /// the CVs and then the temporaries: what a handler's inline path
+    /// addresses its operands and its temporary through, one lookup of
+    /// the frame for all of them (design §5.8). Empty for a frame that
+    /// is not live, where every operand reads as `UNDEF` and the inline
+    /// path stands aside for the kernel.
+    pub(crate) fn slots_mut(&mut self, frame: FrameRef) -> &mut [Zval] {
+        self.stack
+            .frame_mut(frame)
+            .map_or(&mut [], php_heap::Frame::slots_mut)
+    }
+
     /// The value out of a slot, the slot left `UNDEF`: what the slot
     /// owned is the caller's now, which is how a temporary is consumed.
     pub(crate) fn take_slot(&mut self, frame: FrameRef, at: u32) -> Value {

@@ -1,7 +1,8 @@
 //! The kernels (design §5.8): one semantic in one function, called by the
 //! handlers, by `api` and, when the compiled tier lands, by the kernel
 //! list `tier.lock` names. A handler above them does operand addressing
-//! and nothing else, so every caller of a semantic gets the same one.
+//! and the inline pairs of [`inline`], whose arithmetic the kernels take
+//! too, and nothing else, so every caller of a semantic gets the same one.
 //!
 //! Each kernel carries a witness, which is the manifest's
 //! `witness.coverage` rule over this directory.
@@ -10,6 +11,10 @@
 
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
+
+pub(crate) mod inline;
+
+use inline::Arith;
 
 use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_prefix};
 
@@ -1829,10 +1834,7 @@ pub(crate) fn add(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         return Ok(value);
     }
     let (a, b) = numbers(req, "+", left, right)?;
-    Ok(match (a, b) {
-        (Number::Long(a), Number::Long(b)) => promoted(a.checked_add(b), wide(a) + wide(b)),
-        (a, b) => Value::float(a.double() + b.double()),
-    })
+    Ok(inline::arith_numbers(Arith::Add, a, b))
 }
 
 /// `sub_function` (`Zend/zend_operators.c:1259`): the same type pairs as
@@ -1850,10 +1852,7 @@ pub(crate) fn sub(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         return Ok(value);
     }
     let (a, b) = numbers(req, "-", left, right)?;
-    Ok(match (a, b) {
-        (Number::Long(a), Number::Long(b)) => promoted(a.checked_sub(b), wide(a) - wide(b)),
-        (a, b) => Value::float(a.double() - b.double()),
-    })
+    Ok(inline::arith_numbers(Arith::Sub, a, b))
 }
 
 /// `mul_function` (`Zend/zend_operators.c:1322`), whose long pair is
@@ -1871,10 +1870,7 @@ pub(crate) fn mul(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         return Ok(value);
     }
     let (a, b) = numbers(req, "*", left, right)?;
-    Ok(match (a, b) {
-        (Number::Long(a), Number::Long(b)) => promoted(a.checked_mul(b), wide(a) * wide(b)),
-        (a, b) => Value::float(a.double() * b.double()),
-    })
+    Ok(inline::arith_numbers(Arith::Mul, a, b))
 }
 
 /// `div_function` and `div_function_base`
@@ -3414,11 +3410,16 @@ fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result
 pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     let value = &value.deref();
     match value.as_ref() {
-        ValueRef::Int(n) => Ok(match n.checked_add(1) {
-            Some(more) => Value::int(more),
-            None => Value::float(wide(i64::MAX) + 1.0),
-        }),
-        ValueRef::Float(f) => Ok(Value::float(f + 1.0)),
+        ValueRef::Int(n) => Ok(inline::arith_numbers(
+            Arith::Add,
+            Number::Long(n),
+            Number::Long(1),
+        )),
+        ValueRef::Float(f) => Ok(inline::arith_numbers(
+            Arith::Add,
+            Number::Double(f),
+            Number::Long(1),
+        )),
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
         ValueRef::Undef | ValueRef::Null => Ok(Value::int(1)),
         ValueRef::Str(s) => {
@@ -3426,9 +3427,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             // `allow_errors` off: a string with anything past its number
             // is not a number here.
             match numeric_prefix(s.as_bytes()) {
-                Some((Number::Long(i64::MAX), false)) => Ok(Value::float(wide(i64::MAX) + 1.0)),
-                Some((Number::Long(n), false)) => Ok(Value::int(n + 1)),
-                Some((Number::Double(d), false)) => Ok(Value::float(d + 1.0)),
+                Some((n, false)) => Ok(inline::arith_numbers(Arith::Add, n, Number::Long(1))),
                 _ => Ok(Value::string(increment_string(req, s.as_bytes())?)),
             }
         }
@@ -3516,11 +3515,16 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
 pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     let value = &value.deref();
     match value.as_ref() {
-        ValueRef::Int(n) => Ok(match n.checked_sub(1) {
-            Some(less) => Value::int(less),
-            None => Value::float(wide(i64::MIN) - 1.0),
-        }),
-        ValueRef::Float(f) => Ok(Value::float(f - 1.0)),
+        ValueRef::Int(n) => Ok(inline::arith_numbers(
+            Arith::Sub,
+            Number::Long(n),
+            Number::Long(1),
+        )),
+        ValueRef::Float(f) => Ok(inline::arith_numbers(
+            Arith::Sub,
+            Number::Double(f),
+            Number::Long(1),
+        )),
         ValueRef::Str(s) if s.as_bytes().is_empty() => {
             deprecated(
                 req,
@@ -3529,23 +3533,21 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
             none_pending(req)?;
             Ok(Value::int(-1))
         }
-        ValueRef::Str(s) => match numeric_prefix(s.as_bytes()) {
-            Some((Number::Long(i64::MIN), false)) => Ok(Value::float(wide(i64::MIN) - 1.0)),
-            Some((Number::Long(n), false)) => Ok(Value::int(n - 1)),
-            Some((Number::Double(d), false)) => Ok(Value::float(d - 1.0)),
-            _ => {
-                deprecated(
-                    req,
-                    "Decrement on non-numeric string has no effect and is deprecated",
-                );
-                none_pending(req)?;
-                // As [`increment`]'s bool arm: nothing is stepped, and
-                // the value handed back is a second owner of the string
-                // the variable holds.
-                req.addref(value);
-                Ok(*value)
+        ValueRef::Str(s) => {
+            if let Some((n, false)) = numeric_prefix(s.as_bytes()) {
+                return Ok(inline::arith_numbers(Arith::Sub, n, Number::Long(1)));
             }
-        },
+            deprecated(
+                req,
+                "Decrement on non-numeric string has no effect and is deprecated",
+            );
+            none_pending(req)?;
+            // As [`increment`]'s bool arm: nothing is stepped, and the
+            // value handed back is a second owner of the string the
+            // variable holds.
+            req.addref(value);
+            Ok(*value)
+        }
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
         ValueRef::Undef | ValueRef::Null => {
             warning(
@@ -4825,13 +4827,6 @@ const ZSTR_MAX_LEN: usize = usize::MAX - 32;
 )]
 fn wide(n: i64) -> f64 {
     n as f64
-}
-
-/// What `fast_long_add_function` and its kin leave: the long where the
-/// operation stayed in range, and the double php computed again where it
-/// did not.
-fn promoted(stayed: Option<i64>, overflowed: f64) -> Value {
-    stayed.map_or_else(|| Value::float(overflowed), Value::int)
 }
 
 /// `add_function_array`: a copy of the left array (`zend_array_dup`)
