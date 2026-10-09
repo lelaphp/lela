@@ -253,5 +253,5 @@ fn built<'a>(
 /// entered where `PHP_WITNESS_TRACE` names a file, with no build of its
 /// own for the lane (#2168).
 fn build(root: &Path, host: EngineHost) -> Result<PathBuf> {
-    profile::build(root, &host.package(), host.binary, None)
+    profile::build(root, &host.package(), host.binary, None, None)
 }

@@ -690,6 +690,95 @@ fn phpt_refuses_a_subset_whose_row_names_a_variant_the_pin_lacks() {
     );
 }
 
+/// `xtask phpt --subset ext/fixture` with no `--engine`, in a workspace
+/// whose row names the stand-in variant and the feature `fixture`, which
+/// no binary under test turns on there (#2029): cargo is the shell file
+/// `build` writes, and `target/release-da/php`, the default build, is a
+/// decoy that misses the test's expectation. The subset's reading.
+fn phpt_featured(name: &str, build: &str) -> Option<(Tree, Reading)> {
+    let root = scratch(name, "");
+    let tests = root.join("corpus/ext/fixture/tests");
+    fs::create_dir_all(&tests).unwrap();
+    fs::write(
+        tests.join("variant.phpt"),
+        "--TEST--\nOn the engine with the feature\n--FILE--\n<?php echo 'variant';\n--EXPECT--\nvariant\n",
+    )
+    .unwrap();
+    let platform = Platform::this()?;
+    let php = root.join("variant/php");
+    let md5 = shell(&php, "printf variant");
+    let pin = root.join("oracle.toml");
+    let text = fs::read_to_string(&pin).unwrap();
+    fs::write(
+        &pin,
+        text + &variant_table("stand-in", platform.key(), &php, &md5),
+    )
+    .unwrap();
+    let seams = root.join("seams.toml");
+    let text = fs::read_to_string(&seams).unwrap();
+    let row = "\n[[crate]]\nname = \"ext/fixture\"\nbudget = 100\nfeature = \"fixture\"\noracle = \"stand-in\"\n";
+    fs::write(&seams, text + row).unwrap();
+    shell(&root.join("target/release-da/php"), "printf default");
+    let cargo = root.join("bin/cargo");
+    shell(&cargo, build);
+    let temp = root.join("tmp");
+    fs::create_dir_all(&temp).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["--root", &root.display().to_string()])
+        .args(["phpt", "--subset", "ext/fixture", "--jobs", "1"])
+        .env("CARGO", &cargo)
+        .env("TMPDIR", &temp)
+        .env("TEST_PHP_SRCDIR", root.join("corpus"))
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    let reading = Store::of_workspace(&root)
+        .read("phpt", "ext/fixture")
+        .unwrap()
+        .unwrap_or_else(|| panic!("no reading: {said}{}", String::from_utf8_lossy(&out.stderr)));
+    Some((root, reading))
+}
+
+/// The engine the harness builds with the row's feature, into a target
+/// directory of its own, is the one the subset runs on, and the default
+/// build is left where it stands.
+#[test]
+fn phpt_runs_a_variants_subset_on_the_engine_built_with_its_rows_feature() {
+    let build = "while [ $# -gt 0 ]; do\n  case \"$1\" in\n    --target-dir) dir=$2; shift ;;\n    --features) features=$2; shift ;;\n  esac\n  shift\ndone\n[ \"$features\" = php_bundle/fixture ] || exit 3\nmkdir -p \"$dir/release-da\" && printf '#!/bin/sh\\nprintf variant\\n' > \"$dir/release-da/php\" && chmod +x \"$dir/release-da/php\"";
+    let Some((root, reading)) = phpt_featured("phpt-featured", build) else {
+        return;
+    };
+    assert_eq!(reading.status, Status::Pass, "{reading:#?}");
+    assert_eq!(count(&reading, "passed"), 1, "{reading:#?}");
+    let engine = root.join("target/featured/fixture/release-da/php");
+    assert!(
+        reading
+            .message
+            .contains(&format!("run by {}", engine.display())),
+        "{}",
+        reading.message
+    );
+}
+
+/// The negative control: where the feature build is missing, cargo
+/// failing it, the subset is refused naming the build, and neither runs
+/// on the default build nor skips as an engine not yet built would.
+#[test]
+fn phpt_refuses_a_variants_subset_whose_feature_build_is_missing() {
+    let Some((_root, reading)) = phpt_featured("phpt-featured-missing", "exit 101") else {
+        return;
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert_eq!(count(&reading, "refused"), 1, "{reading:#?}");
+    assert!(
+        reading
+            .message
+            .contains("the engine with php_bundle/fixture is not built"),
+        "{}",
+        reading.message
+    );
+}
+
 /// The key of a pinned platform other than this machine's, none on a
 /// machine of no pinned platform.
 fn other_platform() -> Option<(Platform, &'static str)> {

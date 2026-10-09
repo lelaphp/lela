@@ -298,7 +298,7 @@ fn binary() -> Result<PathBuf> {
     static BUILT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     BUILT
         .get_or_init(|| {
-            super::profile::build(&crate::built_root(), PACKAGE, BINARY, Some("linked"))
+            super::profile::build(&crate::built_root(), PACKAGE, BINARY, Some("linked"), None)
                 .map_err(|e| format!("{e:#}"))
         })
         .clone()

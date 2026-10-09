@@ -1042,6 +1042,9 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
             Crate::named("ext/pcre"),
             Crate::named("ext/openssl").with_feature("openssl"),
             Crate::named("ext/curl").with_feature("curl"),
+            Crate::named("ext/zend_test")
+                .with_feature("zend_test")
+                .with_oracle("zend-test"),
         ],
         &tree,
     );
@@ -1052,9 +1055,19 @@ fn the_per_commit_lane_is_composed_from_the_crate_rows() {
     // §7's per-commit row: Zend/tests and tests/ with php_engine, sapi/cli
     // with its host, and the extensions the binary carries: the default
     // set's and the one behind a feature it turns on (revision 63). One
-    // behind a feature it does not turn on is the nightly lane's, and a
-    // crate with no subset owns none.
-    assert_eq!(lane, ["php_engine", "sapi/cli", "ext/pcre", "ext/openssl"]);
+    // behind a feature it does not turn on is the nightly lane's unless
+    // its row names an oracle variant, which the lane runs on the engine
+    // built with the feature (#2029), and a crate with no subset owns none.
+    assert_eq!(
+        lane,
+        [
+            "php_engine",
+            "sapi/cli",
+            "ext/pcre",
+            "ext/openssl",
+            "ext/zend_test"
+        ]
+    );
 }
 
 /// The lane over the tracked manifest and the binary's own declaration:
@@ -1096,7 +1109,7 @@ fn the_lane_runs_every_feature_row_the_binary_turns_on() {
     let left_out = manifest
         .crates
         .iter()
-        .filter(|krate| !carried.carries(krate))
+        .filter(|krate| !carried.carries(krate) && krate.oracle.is_none())
         .find(|krate| lane.contains(&krate.name));
     assert_eq!(left_out, None, "{lane:?}");
 }

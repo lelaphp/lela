@@ -107,8 +107,10 @@
 //! crate that owns none is asked for no phpt reading. A bare call is the
 //! per-commit lane, which is every subset of every crate the binary under
 //! test carries, in manifest order (harness §7, revision 63;
-//! [`Carried`]); `--subset` is one crate's subsets or one directory of
-//! the pinned tree.
+//! [`Carried`]), and of every crate whose row names an oracle variant,
+//! run on the engine built with the row's feature in a target directory
+//! of its own where none is named (#2029); `--subset` is one crate's
+//! subsets or one directory of the pinned tree.
 //!
 //! **What is not run here.** The full corpus, the nightly verdict control
 //! and the tier's lanes are CI's, under `lanes.nightly-flags` in the
@@ -166,12 +168,12 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::carried::{BINARY, Carried};
+use crate::carried::{BINARY, BUNDLE, Carried};
 use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::oracle::hosts::{CGI, EngineHost, FPM, PHPDBG};
-use crate::oracle::{Oracle, Oracles, Pin, Runner, Source};
+use crate::oracle::hosts::{CGI, CLI, EngineHost, FPM, PHPDBG};
+use crate::oracle::{ENGINE, Oracle, Oracles, Pin, Runner, Source, profile};
 use crate::reading::{Reading, listed, plural};
 use crate::scratch::{self, Full, Tree};
 use crate::sources;
@@ -429,17 +431,18 @@ impl Subset {
     }
 
     /// The per-commit lane (harness §7, revision 63): every subset of
-    /// every crate the binary under test carries, in manifest order, under
-    /// the pinned tree at `source`. The row is the statement of which
-    /// subsets a crate owns and `carried` of which crates the binary has,
-    /// each read in one place, so the lane is never a second copy of the
-    /// design's table; a crate behind a feature the binary does not turn
-    /// on is outside the lane and in the nightly one.
+    /// every crate the binary under test carries or whose row names an
+    /// oracle variant (#2029), in manifest order, under the pinned tree at
+    /// `source`. The row is the statement of which subsets a crate owns
+    /// and `carried` of which crates the binary has, each read in one
+    /// place, so the lane is never a second copy of the design's table;
+    /// any other crate behind a feature the binary does not turn on is
+    /// outside the lane and in the nightly one.
     pub(crate) fn lane(manifest: &Manifest, carried: &Carried, source: &Path) -> Vec<Subset> {
         manifest
             .crates
             .iter()
-            .filter(|krate| carried.carries(krate))
+            .filter(|krate| crate::done::measured_by_the_lane(krate, carried))
             .filter_map(|krate| Subset::of(source, krate))
             .collect()
     }
@@ -968,18 +971,14 @@ pub fn run(
     // runs under it (#1782); each digest asserted once a run (harness §4.3).
     let variants = manifest.variants();
     let oracles = Oracles::new(&manifest.pin, &variants);
-    let runners = Runners::resolve(root, &manifest.pin, &variants, ask.engine.as_deref())?;
+    let runners = Runners::resolve(root, manifest, &variants, ask.engine.as_deref(), &subsets)?;
     let runner = &runners.main;
-    // Nothing to run, or a binary the tree has moved past: either way the
-    // lane says so before the subsets rather than at the reading alone.
-    if let Runner::Absent(why) | Runner::Stale(why) = runner {
-        println!("phpt: {why}");
-    }
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
     let sides: Vec<Result<Side>> = subsets
         .iter()
         .map(|subset| runners.side(manifest, &oracles, subset))
         .collect();
+    unrunnable(&sides);
     let todo = to_run(ask, (manifest, &runs), &subsets, &sides)?;
     if let Some(why) = oracles.main().pin().oracle.absent()
         && matches!(runner, Runner::Engine(_))
@@ -1081,6 +1080,22 @@ pub fn run(
         lane.print("the lane");
     }
     Ok(readings)
+}
+
+/// Nothing to run, or a binary the tree has moved past, under a subset of
+/// the run: either way the lane says so once before the subsets rather
+/// than at each reading alone, and not of a binary no subset runs on, the
+/// default build beside a featured one (#2029).
+fn unrunnable(sides: &[Result<Side>]) {
+    let mut said = Vec::new();
+    for side in sides.iter().flatten() {
+        if let Runner::Absent(why) | Runner::Stale(why) = side.runner
+            && !said.contains(&why)
+        {
+            println!("phpt: {why}");
+            said.push(why);
+        }
+    }
 }
 
 /// One subset's census under `--census`: printed under `scope`, and the
@@ -1234,26 +1249,36 @@ impl Side<'_, '_> {
 
 /// The binary under test as each oracle of the run resolves it: a binary
 /// named for the run is the control under the oracle whose digest it has,
-/// so each variant resolves it under its own pin (#1782).
+/// so each variant resolves it under its own pin (#1782). Where none is
+/// named, a subset whose row names a variant and a feature the binary
+/// under test does not turn on runs on the engine built with that feature
+/// (#2029), the build's failure refusing it.
 struct Runners<'v> {
     main: Runner,
     variants: BTreeMap<&'v str, Runner>,
+    featured: BTreeMap<String, Result<Runner, String>>,
 }
 
 impl<'v> Runners<'v> {
     fn resolve(
         root: &Path,
-        main: &Pin,
+        manifest: &Manifest,
         variants: &'v BTreeMap<String, Pin>,
         engine: Option<&Path>,
+        subsets: &[Subset],
     ) -> Result<Runners<'v>> {
         let mut resolved = BTreeMap::new();
         for (name, pin) in variants {
             resolved.insert(name.as_str(), Runner::resolve(root, pin, engine)?);
         }
+        let featured = match engine {
+            Some(_) => BTreeMap::new(),
+            None => featured(root, manifest, variants, subsets)?,
+        };
         Ok(Runners {
-            main: Runner::resolve(root, main, engine)?,
+            main: Runner::resolve(root, &manifest.pin, engine)?,
             variants: resolved,
+            featured,
         })
     }
 
@@ -1270,14 +1295,76 @@ impl<'v> Runners<'v> {
     ) -> Result<Side<'r, 'o>> {
         let variant = manifest.variant_of(&subset.scope);
         let oracle = oracles.of(variant)?;
-        Ok(Side {
-            oracle,
-            runner: variant
+        let feature = manifest
+            .crate_named(&subset.scope)
+            .filter(|_| variant.is_some())
+            .and_then(|krate| krate.feature.as_ref());
+        let runner = match feature.and_then(|feature| self.featured.get(feature)) {
+            Some(built) => built.as_ref().map_err(|why| anyhow::anyhow!("{why}"))?,
+            None => variant
                 .and_then(|v| self.variants.get(v))
                 .unwrap_or(&self.main),
+        };
+        Ok(Side {
+            oracle,
+            runner,
             absent: oracle.pin().oracle.absent(),
         })
     }
+}
+
+/// The engines `subsets` run on that the binary under test is not, by
+/// feature: one built with each feature a row of theirs turns on beside an
+/// oracle variant whose php is on this machine, where the binary under
+/// test does not turn it on, into a target directory of its own
+/// ([`profile::featured`]), so the default build stands (#2029). The
+/// variant is the statement that php loads what the feature builds, so a
+/// row with a feature and no variant is the nightly lane's, and a variant
+/// whose php is not here runs nothing, so nothing is built for it. Built
+/// by cargo now, the engine is the tree's, and it is not held to the
+/// tree by when it was written as a binary found standing is.
+///
+/// [`profile::featured`]: crate::oracle::profile::featured
+fn featured(
+    root: &Path,
+    manifest: &Manifest,
+    variants: &BTreeMap<String, Pin>,
+    subsets: &[Subset],
+) -> Result<BTreeMap<String, Result<Runner, String>>> {
+    let carried = Carried::binary(root)?;
+    let mut built = BTreeMap::new();
+    for krate in subsets
+        .iter()
+        .filter_map(|s| manifest.crate_named(&s.scope))
+    {
+        let (Some(variant), Some(feature)) = (&krate.oracle, &krate.feature) else {
+            continue;
+        };
+        let here = variants
+            .get(variant)
+            .is_some_and(|pin| pin.oracle.absent().is_none());
+        if carried.carries(krate) || !here || built.contains_key(feature) {
+            continue;
+        }
+        let into = profile::featured(root, feature);
+        let features = format!("{BUNDLE}/{feature}");
+        println!(
+            "phpt: {} runs on the engine built with {features}, in {}",
+            krate.name,
+            into.display()
+        );
+        let started = std::time::Instant::now();
+        let engine = profile::build(root, &CLI.package(), ENGINE, Some(&features), Some(&into));
+        println!(
+            "phpt: the engine with {features} took {:.1}s to build",
+            started.elapsed().as_secs_f64()
+        );
+        let engine = engine
+            .map(Runner::Engine)
+            .map_err(|why| format!("the engine with {features} is not built: {why:#}"));
+        built.insert(feature.clone(), engine);
+    }
+    Ok(built)
 }
 
 /// The subsets `ask` names: one crate's or directory's, the whole corpus,

@@ -63,18 +63,20 @@ impl Profile {
 
 /// `cargo build --profile <the lanes'> -p <package> --bin <binary>`,
 /// with `--features <features>` where there are any, in `root`, and where
-/// cargo put the binary: the target directory cargo was told of, or
-/// `root`'s own. Every binary the harness builds, `php-linked` and the
-/// hosts' own, is built in the lanes' profile, whatever profile the
-/// harness itself was built in (harness revision 92, #2217): a reading's
-/// key covers the source and not the profile, so one key is read off one
-/// build, and the `php` the witness lane builds is the one the phpt lane
-/// looks for first.
+/// cargo put the binary: under `into` where it is named, a target
+/// directory of the build's own ([`featured`]), else the target directory
+/// cargo was told of, or `root`'s own. Every binary the harness builds,
+/// `php-linked` and the hosts' own, is built in the lanes' profile,
+/// whatever profile the harness itself was built in (harness revision 92,
+/// #2217): a reading's key covers the source and not the profile, so one
+/// key is read off one build, and the `php` the witness lane builds is the
+/// one the phpt lane looks for first.
 pub(crate) fn build(
     root: &Path,
     package: &str,
     binary: &str,
     features: Option<&str>,
+    into: Option<&Path>,
 ) -> Result<PathBuf> {
     let profile = LANE;
     let status = Command::new(cargo())
@@ -89,6 +91,10 @@ pub(crate) fn build(
             binary,
         ])
         .args(features.into_iter().flat_map(|names| ["--features", names]))
+        .args(
+            into.into_iter()
+                .flat_map(|dir| ["--target-dir".as_ref(), dir.as_os_str()]),
+        )
         .current_dir(root)
         .status()
         .with_context(|| format!("running cargo to build {binary}"))?;
@@ -97,13 +103,25 @@ pub(crate) fn build(
             "cargo could not build {binary} ({status}); its errors are on the harness's second stream"
         );
     }
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| root.join("target"), |dir| root.join(dir));
+    let target = into.map_or_else(
+        || {
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map_or_else(|| root.join("target"), |dir| root.join(dir))
+        },
+        Path::to_path_buf,
+    );
     let built = profile.binary(&target, binary);
     if !built.is_file() {
         bail!("cargo built {binary} and it is not at {}", built.display());
     }
     Ok(built)
+}
+
+/// Where the engine turning the bundle's `feature` on is built: a target
+/// directory of its own under `root`'s, so `target/<profile>/php` stays
+/// the binary under test's default build (#2029).
+pub(crate) fn featured(root: &Path, feature: &str) -> PathBuf {
+    root.join("target").join("featured").join(feature)
 }
 
 /// The cargo the harness builds with: the one `CARGO` names, which
@@ -253,7 +271,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
-        let built = build(&root, "probe", "probe", None).unwrap();
+        let built = build(&root, "probe", "probe", None, None).unwrap();
         assert!(built.is_file(), "{}", built.display());
         assert_eq!(
             built.parent().and_then(Path::file_name),
