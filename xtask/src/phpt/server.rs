@@ -124,7 +124,7 @@ impl<'a> Database<'a> {
             ),
         )
         .map_err(|why| anyhow::anyhow!("{scope}: listing the runs' databases on the server: {why}"))?;
-        let left = left(&listed, super::sysv::alive);
+        let left = left(&listed, crate::sysv::alive);
         let mut statements: Vec<String> = left
             .iter()
             .map(|gone| format!("DROP DATABASE IF EXISTS `{gone}`"))

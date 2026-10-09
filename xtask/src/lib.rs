@@ -61,6 +61,7 @@ pub mod scratch;
 mod sources;
 pub mod status;
 pub mod steer;
+mod sysv;
 mod tally;
 pub mod test;
 pub mod ticket;
