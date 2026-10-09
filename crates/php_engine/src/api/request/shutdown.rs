@@ -60,7 +60,7 @@ pub(super) struct ShutdownFunctions {
 /// One `php_shutdown_function_entry`: its callback and arguments, which
 /// it owns, the block the entry is, and the arguments' `params` block.
 struct ShutdownEntry {
-    callback: Callable,
+    callback: Owner<Callable>,
     arguments: Vec<Value>,
     record: php_heap::Block,
     params: Option<php_heap::Block>,
@@ -97,7 +97,7 @@ impl Request {
     /// that fatal.
     pub fn register_shutdown_function(
         &mut self,
-        callback: Callable,
+        callback: Owner<Callable>,
         arguments: Vec<Value>,
     ) -> Result<(), Thrown> {
         let (entry, mut table) = self.shutdown_entry(callback, arguments)?;
@@ -121,10 +121,18 @@ impl Request {
     pub fn set_shutdown_function(
         &mut self,
         name: &[u8],
-        entry: Option<(Callable, Vec<Value>)>,
+        entry: Option<(Owner<Callable>, Vec<Value>)>,
     ) -> Result<(), Thrown> {
         // `zend_hash_str_update_mem` keys by the bytes, never numerically.
-        let key = PhpString::new(self, name)?.into_key();
+        let key = match PhpString::new(self, name) {
+            Ok(name) => name.into_key(),
+            Err(thrown) => {
+                if let Some((callback, arguments)) = entry {
+                    self.drop_callback(callback, arguments);
+                }
+                return Err(thrown);
+            }
+        };
         let standing = self
             .shutdown_functions
             .table
@@ -152,7 +160,7 @@ impl Request {
     fn set_named_shutdown_entry(
         &mut self,
         key: Owner<Key>,
-        callback: Callable,
+        callback: Owner<Callable>,
         arguments: Vec<Value>,
     ) -> Result<(), Thrown> {
         let (entry, mut table) = match self.shutdown_entry(callback, arguments) {
@@ -180,7 +188,7 @@ impl Request {
         loop {
             let (position, _, index) = self.shutdown_functions.table?.live_from(at)?;
             if let Some(entry) = self.shutdown_functions.entry(&index) {
-                return Some((position, entry.callback.clone(), entry.arguments.clone()));
+                return Some((position, (*entry.callback).clone(), entry.arguments.clone()));
             }
             at = position + 1;
         }
@@ -216,7 +224,7 @@ impl Request {
     /// callback and the arguments.
     fn shutdown_entry(
         &mut self,
-        callback: Callable,
+        callback: Owner<Callable>,
         arguments: Vec<Value>,
     ) -> Result<(ShutdownEntry, PhpArray), Thrown> {
         let params = if arguments.is_empty() {
@@ -252,12 +260,18 @@ impl Request {
                 table,
             )),
             Err(thrown) => {
-                callback.release(self);
-                for value in arguments {
-                    self.release(value);
-                }
+                self.drop_callback(callback, arguments);
                 Err(thrown)
             }
+        }
+    }
+
+    /// A callback and its arguments given up where no entry was made of
+    /// them.
+    fn drop_callback(&mut self, callback: Owner<Callable>, arguments: Vec<Value>) {
+        callback.give_up(self);
+        for value in arguments {
+            self.release(value);
         }
     }
 
@@ -284,7 +298,7 @@ impl Request {
         if let Some(params) = entry.params {
             self.heap.free_block(params);
         }
-        entry.callback.release(self);
+        entry.callback.give_up(self);
         self.heap.free_block(entry.record);
     }
 }

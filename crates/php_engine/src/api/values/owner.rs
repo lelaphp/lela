@@ -5,15 +5,17 @@ use std::cmp::Ordering;
 
 use php_unit::decl::Type;
 
-use crate::api::abi::{Class, FromArgument, Instance, IntoReturn, Raw, Static};
+use crate::api::abi::{Callable, Class, FromArgument, Instance, IntoReturn, Raw, Static};
+use crate::api::call::Target;
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
 use crate::api::values::{Key, PhpArray, PhpObject, PhpRef, PhpString, Resource, Value};
 
 /// A view an [`Owner`] can own: [`Value`], the five refcounted kinds, a
 /// [`Key`], the two object returns, [`Instance`] and [`Static`], a
-/// [`Raw`] return, and a typed view of one resource ([`ResourceView`]).
-/// Sealed but for that last door: the face lists them.
+/// [`Raw`] return, a [`Callable`], and a typed view of one resource
+/// ([`ResourceView`]). Sealed but for that last door: the face lists
+/// them.
 pub trait View: sealed::Counted + Clone {}
 
 /// A typed view of one [`Resource`]: the streams facet's `Stream` and
@@ -40,15 +42,28 @@ impl<T: ResourceView> sealed::Counted for T {
     }
 }
 impl<T: ResourceView> View for T {}
+impl<T: ResourceView> sealed::One for T {}
 
 mod sealed {
-    use crate::api::values::Value;
+    use crate::api::values::{PhpObject, Value};
 
     /// What the owner's count is taken on and given up from.
     pub trait Counted {
         /// The value the view names, no owner taken.
         fn counted(&self) -> Value;
+
+        /// The object a callable resolved to where its value does not
+        /// name it, which an owner of the callable counts beside the
+        /// value ([`super::Callable`]); no other view has one.
+        fn receiver(&self) -> Option<PhpObject> {
+            None
+        }
     }
+
+    /// A view whose owner is the one count on [`Counted::counted`], so
+    /// it is recast to an owner of another view of that value. Every
+    /// view but [`super::Callable`].
+    pub trait One: Counted {}
 }
 
 macro_rules! view {
@@ -59,6 +74,7 @@ macro_rules! view {
             }
         }
         impl View for $t {}
+        impl sealed::One for $t {}
     };
 }
 view!(Value, |v: Value| v);
@@ -79,6 +95,7 @@ impl<C: Class> sealed::Counted for Instance<C> {
     }
 }
 impl<C: Class> View for Instance<C> {}
+impl<C: Class> sealed::One for Instance<C> {}
 
 impl<T: FromArgument> sealed::Counted for Raw<T> {
     fn counted(&self) -> Value {
@@ -86,6 +103,32 @@ impl<T: FromArgument> sealed::Counted for Raw<T> {
     }
 }
 impl<T: FromArgument> View for Raw<T> {}
+impl<T: FromArgument> sealed::One for Raw<T> {}
+
+/// A callable kept past the frame it was read off, `zend_fcc_dup`: an
+/// owner of it is the claim `zend_fcc_addref` (`Z/Zend/zend_API.h:773`)
+/// makes, counted on its value and, `GC_ADDREF(fcc->object)`, on the
+/// receiver it resolved to where that is not the value. A
+/// `Class::method` string taken with `$this` in scope names an object
+/// the string does not own, so the owner owns it; a closure's count is
+/// its value's, since `fcc->closure` is the value. [`Owner::give_up`]
+/// is `zend_fcc_dtor`, the receiver given up first. The owner is never
+/// recast to an owner of one value: it is two counts.
+impl sealed::Counted for Callable {
+    fn counted(&self) -> Value {
+        self.value()
+    }
+
+    fn receiver(&self) -> Option<PhpObject> {
+        match self.target() {
+            Target::Method {
+                this: Some(this), ..
+            } => Some(this),
+            Target::Function(_) | Target::Method { this: None, .. } | Target::Closure(_) => None,
+        }
+    }
+}
+impl View for Callable {}
 
 /// One owner of the value a view names: one counted claim on it, the
 /// glossary's **Owner**, where the view itself carries none. Neither
@@ -198,6 +241,9 @@ impl<T: View> Owner<T> {
     pub fn take(req: &Request, view: T) -> Owner<T> {
         let counted = view.counted();
         req.addref(&counted);
+        if let Some(receiver) = view.receiver() {
+            req.addref(&receiver.as_value());
+        }
         Owner::of(req, view, counted)
     }
 
@@ -236,6 +282,9 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn give_up(mut self, req: &mut Request) {
         self.consume();
+        if let Some(receiver) = self.view.receiver() {
+            req.release(receiver.as_value());
+        }
         req.release(self.counted);
     }
 
@@ -250,27 +299,10 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn give_up_nogc(mut self, req: &mut Request) {
         self.consume();
-        req.release_nogc(self.counted);
-    }
-
-    /// The owner given up as `GC_DELREF` gives one up, and what is left
-    /// of the value: at the last owner the value is destroyed,
-    /// `zend_array_destroy`, `zend_string_efree` or
-    /// `zend_objects_store_del` with its destructor served, and where
-    /// owners are left nothing else happens, no possible root of the
-    /// cycle collector (design §5.12). What php's handlers do after a
-    /// diagnostic, and the test they make after it: whether the call the
-    /// owner was held across freed the value or took an owner of its own.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn let_go(mut self, req: &mut Request) -> Left {
-        self.consume();
-        let value = self.counted;
-        if !value.is_refcounted() {
-            return Left::Uncounted;
+        if let Some(receiver) = self.view.receiver() {
+            req.release_nogc(receiver.as_value());
         }
-        let owners = value.refcount().saturating_sub(1);
-        req.release_nogc(value);
-        Left::Owners(owners)
+        req.release_nogc(self.counted);
     }
 
     /// The owner left to the request's end, as php's fatal leaves every
@@ -291,6 +323,41 @@ impl<T: View> Owner<T> {
         self.view.clone()
     }
 
+    /// The owner consumed, so a debug build's `Drop` records nothing.
+    // A release build's owner has nothing to mark.
+    #[allow(clippy::unused_self)]
+    fn consume(&mut self) {
+        #[cfg(debug_assertions)]
+        {
+            self.made = None;
+        }
+    }
+}
+
+/// What an owner of one count does with it: the count let go as a
+/// handler lets one go, and the owner recast to another view of the
+/// value. An owner of a [`Callable`] is two counts and does neither.
+impl<T: View + sealed::One> Owner<T> {
+    /// The owner given up as `GC_DELREF` gives one up, and what is left
+    /// of the value: at the last owner the value is destroyed,
+    /// `zend_array_destroy`, `zend_string_efree` or
+    /// `zend_objects_store_del` with its destructor served, and where
+    /// owners are left nothing else happens, no possible root of the
+    /// cycle collector (design §5.12). What php's handlers do after a
+    /// diagnostic, and the test they make after it: whether the call the
+    /// owner was held across freed the value or took an owner of its own.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn let_go(mut self, req: &mut Request) -> Left {
+        self.consume();
+        let value = self.counted;
+        if !value.is_refcounted() {
+            return Left::Uncounted;
+        }
+        let owners = value.refcount().saturating_sub(1);
+        req.release_nogc(value);
+        Left::Owners(owners)
+    }
+
     /// The owner of the value as a [`Value`], the same count: what a
     /// native returns as `mixed` or hands to a sink that takes a value.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
@@ -302,7 +369,7 @@ impl<T: View> Owner<T> {
     /// The same owner over another view of its value; a debug build's
     /// record of where it was made moves to it, and this one is
     /// consumed.
-    fn recast<U: View>(self, view: U) -> Owner<U> {
+    fn recast<U: View + sealed::One>(self, view: U) -> Owner<U> {
         let counted = self.counted;
         #[cfg(debug_assertions)]
         let made = {
@@ -314,16 +381,6 @@ impl<T: View> Owner<T> {
             counted,
             #[cfg(debug_assertions)]
             made,
-        }
-    }
-
-    /// The owner consumed, so a debug build's `Drop` records nothing.
-    // A release build's owner has nothing to mark.
-    #[allow(clippy::unused_self)]
-    fn consume(&mut self) {
-        #[cfg(debug_assertions)]
-        {
-            self.made = None;
         }
     }
 }
@@ -414,6 +471,19 @@ impl Owner<Value> {
         match self.view.as_php_ref().copied() {
             Some(cell) => cell.convert(req, value),
             None => std::mem::replace(self, value).give_up(req),
+        }
+    }
+}
+
+impl Owner<Callable> {
+    /// `zend_get_gc_buffer_add_fcc`: each value the owner counts, the
+    /// callable's value and the receiver it resolved to, handed to a
+    /// `get_gc`'s `visit`, so the cycle collector reads the owner's
+    /// counts as the edges they are.
+    pub fn visit(&self, visit: &mut dyn FnMut(Value)) {
+        visit(self.counted);
+        if let Some(receiver) = sealed::Counted::receiver(&self.view) {
+            visit(receiver.as_value());
         }
     }
 }
@@ -627,7 +697,7 @@ impl<T: View> Drop for Owner<T> {
 /// temporary holds it, and nothing more is taken. The value is the one
 /// the count stands on, and not `T::into_return`'s, which is a view's
 /// return.
-impl<T: View + IntoReturn> IntoReturn for Owner<T> {
+impl<T: View + sealed::One + IntoReturn> IntoReturn for Owner<T> {
     const UNDECLARED: bool = T::UNDECLARED;
     const MASK: u32 = T::MASK;
     fn declared() -> Option<Type> {

@@ -8,17 +8,17 @@ use std::sync::Arc;
 
 use crate::api::abi::Callable;
 use crate::api::raising::Thrown;
-use crate::api::values::Value;
+use crate::api::values::{Owner, Value};
 
 use super::Request;
 
 /// One entry of `BG(user_tick_functions)`, php's
 /// `user_tick_function_entry`: the callable and the arguments it is
-/// served with, each held by one owner, and whether a round is serving
+/// served with, each held by its owners, and whether a round is serving
 /// it now (`calling`), which keeps a `ZEND_TICKS` inside it from serving
 /// it again and `unregister_tick_function()` from dropping it.
 struct TickFunction {
-    callback: Callable,
+    callback: Owner<Callable>,
     arguments: Vec<Value>,
     calling: bool,
 }
@@ -45,7 +45,7 @@ impl Request {
             ..
         } in std::mem::take(&mut self.ticks.tick_functions)
         {
-            callback.release(self);
+            callback.give_up(self);
             for value in arguments {
                 self.release(value);
             }
@@ -56,7 +56,7 @@ impl Request {
     /// with the owners `zend_fcc_addref` and `ZVAL_COPY` take, in
     /// `BG(user_tick_functions)`.
     pub fn register_tick_function(&mut self, callback: Callable, arguments: Vec<Value>) -> bool {
-        callback.addref(self);
+        let callback = Owner::take(self, callback);
         for value in &arguments {
             self.addref(value);
         }
@@ -77,7 +77,7 @@ impl Request {
             .ticks
             .tick_functions
             .iter()
-            .position(|entry| entry.callback == *callback)
+            .position(|entry| *entry.callback == *callback)
         else {
             return Ok(false);
         };
@@ -93,7 +93,7 @@ impl Request {
             arguments,
             ..
         } = self.ticks.tick_functions.remove(at);
-        held.release(self);
+        held.give_up(self);
         for value in arguments {
             self.release(value);
         }
@@ -131,13 +131,13 @@ impl Request {
                 continue;
             }
             entry.calling = true;
-            let (callback, arguments) = (entry.callback.clone(), entry.arguments.clone());
+            let (callback, arguments) = ((*entry.callback).clone(), entry.arguments.clone());
             let called = crate::api::call::call_made(self, &callback, &arguments);
             if let Some(entry) = self
                 .ticks
                 .tick_functions
                 .iter_mut()
-                .find(|entry| entry.calling && entry.callback == callback)
+                .find(|entry| entry.calling && *entry.callback == callback)
             {
                 entry.calling = false;
             }

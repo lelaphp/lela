@@ -1191,6 +1191,7 @@ values::Owner::take
 values::Owner::try_append
 values::Owner::unset
 values::Owner::unset_in_place
+values::Owner::visit
 values::PhpArray
 values::PhpArray::append
 values::PhpArray::clean
