@@ -777,10 +777,10 @@ pub(crate) struct Shared {
     /// read by every request thread with nothing taken.
     strings: Mutex<Strings>,
     /// php's `interned_strings_permanent` as `zend_interned_strings_switch_storage`
-    /// leaves it after `MINIT`: `zend_known_strings`, and the name of
-    /// every class, method, property, class constant and function the
-    /// engine and the bundle declare, interned at startup and frozen, so
-    /// a request asking for one finds it here and allocates nothing
+    /// leaves it after `MINIT`: `zend_known_strings`, and every name and
+    /// string the engine's and the bundle's registrations intern
+    /// ([`permanent_names`]), interned at startup and frozen, so a request
+    /// asking for one finds it here and allocates nothing
     /// ([`Shared::permanent`]).
     names: Strings,
     /// The string a native's parameter defaults to where its stub writes
@@ -3042,10 +3042,10 @@ impl EngineBuilder {
             .iter()
             .flat_map(|e| e.constants.iter().cloned())
             .collect();
-        let names = permanent_names(&functions, &classes, &constants);
+        let mut names = permanent_names(&extensions, &functions, &classes, &constants, &ini);
+        let constant_values = constant_values(&constants, &mut names);
         let default_strings = default_strings(&functions, &classes);
         let mut strings = Strings::new();
-        let constant_values = constant_values(&constants, &mut strings);
         let sapi_names = crate::constants::host_names(&mut strings);
         let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
         let arena = crate::arena::Epochs::of(crate::arena::Arena::past(
@@ -3223,12 +3223,6 @@ const KNOWN_STRINGS: [&str; 88] = [
     "8.5",
 ];
 
-/// The names `MINIT` interns permanently as the engine and the bundle
-/// register their declarations (`zend_register_functions`,
-/// `zend_register_internal_class_ex`, `zend_declare_typed_property`,
-/// `zend_declare_class_constant_ex`): every function's, class's,
-/// method's, property's and class constant's name as declared. A name
-/// the table refuses is left to the request that asks for it.
 /// The strings the bundle's natives default a parameter to,
 /// made once for [`Shared::default_string`].
 fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings {
@@ -3248,14 +3242,35 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     strings
 }
 
+/// `interned_strings_permanent` as `MINIT` leaves it: what php interns
+/// permanently as the engine and the bundle register their declarations.
+/// `zend_register_module_ex` interns each extension's lowercased name;
+/// `zend_register_functions` a function's and a method's name as
+/// declared and lowercased, the function table's key;
+/// `zend_register_internal_class_ex` a class's name and its lowercased
+/// key, and `zend_register_class_alias_ex` an alias's key;
+/// `zend_declare_typed_property` a property's name and
+/// `zend_declare_typed_class_constant` a class constant's name and string
+/// value, an enum case's among them; `zend_register_constant` a
+/// constant's name and string value; and `zend_register_ini_entries_ex`
+/// each entry's name and the value it starts with. A name the table
+/// refuses is left to the request that asks for it.
+///
+/// The bundle's constants' values are interned here, and their zvals,
+/// built over this table, are the second half of what this answers.
 fn permanent_names(
+    extensions: &[Extension],
     functions: &[FunctionDecl],
     classes: &[ClassDecl],
     constants: &[ConstDecl],
+    ini: &[(Vec<u8>, Option<Vec<u8>>)],
 ) -> Strings {
     let mut names = Strings::new();
     for known in KNOWN_STRINGS {
         names.intern(known.as_bytes()).ok();
+    }
+    for extension in extensions {
+        names.intern(&lowered(extension.name.as_bytes())).ok();
     }
     let declared = functions
         .iter()
@@ -3265,9 +3280,34 @@ fn permanent_names(
                 .chain(decl.methods.iter().map(|method| &method.function.name))
                 .chain(decl.properties.iter().map(|property| &property.name))
                 .chain(decl.constants.iter().map(|constant| &constant.name))
-        }));
+        }))
+        .chain(constants.iter().map(|decl| &decl.name));
     for name in declared {
         names.intern(&name.0).ok();
+    }
+    let keyed = functions
+        .iter()
+        .map(|decl| &decl.name)
+        .chain(classes.iter().flat_map(|decl| {
+            std::iter::once(&decl.name)
+                .chain(&decl.aliases)
+                .chain(decl.methods.iter().map(|method| &method.function.name))
+        }));
+    for name in keyed {
+        names.intern(&lowered(&name.0)).ok();
+    }
+    for decl in classes {
+        for constant in &decl.constants {
+            if let ConstExpr::Str(value) = &constant.value {
+                names.intern(value).ok();
+            }
+        }
+    }
+    for (name, value) in ini {
+        names.intern(name).ok();
+        if let Some(value) = value {
+            names.intern(value).ok();
+        }
     }
     // `gen_stub.php`'s attribute arguments, `zend_string_init_interned`
     // of each string a native's `#[\Deprecated]` is written with, so a
@@ -3296,7 +3336,7 @@ fn permanent_names(
 }
 
 /// `zend_register_constant` at `MINIT`: each constant's value, a string
-/// constant's interned into the engine's table once, before any request,
+/// constant's interned into the permanent table once, before any request,
 /// so reading it later is a pointer and no allocation. A constant whose
 /// value is an expression, or a string the table refuses, has none.
 fn constant_values(
@@ -6466,30 +6506,41 @@ mod tests {
         }
     }
 
-    /// `Engine::cli_builder().build()` interns a string constant's value into
-    /// its table at build, as php's `MINIT` does, and no request grows
-    /// the table for reading one: every value of Core's longer than one
-    /// byte, each once however many constants share it, and the hosts'
-    /// names `PHP_SAPI` is read from, `PHP_EOL` being the frozen one-byte
-    /// string.
+    /// `Engine::cli_builder().build()` interns a string constant's name and
+    /// value into its permanent table at build, as php's `MINIT` does,
+    /// and no request grows the published table for reading one: that
+    /// table holds the hosts' names `PHP_SAPI` is read from and nothing
+    /// else, and each value of Core's longer than one byte is the
+    /// permanent string, `PHP_EOL` being the frozen one-byte string.
     #[test]
     fn a_string_constant_is_interned_into_the_engine_at_build() {
         let engine = Engine::cli_builder().build();
-        let distinct: std::collections::BTreeSet<&[u8]> = engine
-            .shared
-            .constants
+        let hosts: std::collections::BTreeSet<&[u8]> = crate::constants::HOSTS
             .iter()
-            .filter_map(|decl| match &decl.value {
-                ConstExpr::Str(s) if s.len() > 1 => Some(&**s),
-                _ => None,
-            })
-            .chain(crate::constants::HOSTS.iter().map(|name| name.as_bytes()))
+            .map(|name| name.as_bytes())
             .collect();
         assert_eq!(
             strings_of(&engine),
-            distinct.len(),
-            "Core's strings and the hosts' names, each once"
+            hosts.len(),
+            "the hosts' names, each once"
         );
+        for decl in &engine.shared.constants {
+            assert!(engine.shared.permanent(&decl.name.0).is_some());
+        }
+        for (name, value, _) in &engine.shared.constant_values {
+            if let Some(value) = value.as_str()
+                && value.len() > 1
+            {
+                assert!(
+                    engine
+                        .shared
+                        .permanent(value.bytes())
+                        .is_some_and(|permanent| permanent.is_same(value)),
+                    "{} is its permanent string",
+                    String::from_utf8_lossy(name)
+                );
+            }
+        }
         let version = engine.shared.constant(b"PHP_VERSION");
         assert_eq!(
             version.as_ref().and_then(Value::as_str_bytes),
