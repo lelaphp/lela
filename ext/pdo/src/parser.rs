@@ -14,11 +14,12 @@
 use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, PhpObject, Value, ValueRef};
+use php_ext::values::{Key, PhpObject, PhpString, Value, ValueRef};
 
+use crate::bound::{Bound, BoundKey, BoundTable};
 use crate::connector::{BindKind, BindType, Failure, OnError, Rewritten, Scanner, SqlState, Token};
 use crate::error::{self, On};
-use crate::stmt::{self, Bound, BoundKey};
+use crate::stmt;
 
 /// `default_scanner`: the token at `at` and where it ends; `None` at the
 /// end of the query or at a NUL, re2c's `PDO_PARSER_EOI`.
@@ -149,7 +150,8 @@ pub(super) fn parse_params(
     let params: Vec<Seen> = stmt::read(req, object, |s| {
         s.params
             .iter()
-            .map(|b| (b.key.clone(), b.ty, *b.value))
+            .flat_map(BoundTable::iter)
+            .map(|b| (b.key(), b.ty, *b.value))
             .collect()
     })
     .unwrap_or_default();
@@ -292,10 +294,14 @@ pub(super) fn name_to_position(
         )?;
         Ok(false)
     };
-    let Some(name) = bound.name.clone() else {
+    let Some(name) = bound.name_bytes().map(<[u8]>::to_vec) else {
         return match map.iter().find(|(key, _)| *key == Key::Int(bound.position)) {
             Some((_, name)) => {
-                bound.name = Some(name.clone());
+                // php's `zend_string_copy` of the map's string, which the
+                // map has not charged (#2483): the entry's
+                // own allocation carries it.
+                let made = PhpString::filled(req, name.len(), |to| to.copy_from_slice(name))?;
+                bound.name = Some(made);
                 Ok(true)
             }
             None => undefined(req),

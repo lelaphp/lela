@@ -18,6 +18,7 @@ use php_ext::values::{
     ClassId, Key, Owner, PhpArray, PhpObject, PhpString, PropertyScope, Value, ValueRef,
 };
 
+use crate::bound::BoundTable;
 use crate::connector::{BindEvent, BindKind, Orientation, SqlState};
 use crate::dbh::Nulls;
 use crate::error::{self, On};
@@ -409,6 +410,7 @@ fn common(
     let bound: Vec<(i64, Value, BindKind)> = stmt::read(req, object, |s| {
         s.columns_bound
             .iter()
+            .flat_map(BoundTable::iter)
             .filter(|b| b.position >= 0)
             .map(|b| (b.position, *b.value, b.ty.kind()))
             .collect()
