@@ -51,7 +51,6 @@ pub enum ClientOption<'a> {
     SslCa(Option<&'a [u8]>),
     SslCapath(Option<&'a [u8]>),
     SslCipher(Option<&'a [u8]>),
-    SslPassphrase(Option<&'a [u8]>),
     MaxAllowedPacket(u32),
     AuthProtocol(Option<&'a [u8]>),
 }
@@ -60,15 +59,53 @@ pub enum ClientOption<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct Options {
     pub(crate) flags: u32,
-    pub(crate) init_commands: Vec<Vec<u8>>,
+    pub(crate) init_commands: InitCommands,
     pub(crate) auth_protocol: Option<Pstr>,
     /// `connect_attr`, made by the first attribute added.
     pub(crate) connect_attr: Option<ConnectAttr>,
     pub(crate) protocol: u32,
-    pub(crate) charset_name: Option<Vec<u8>>,
+    pub(crate) charset_name: Option<Pstr>,
     pub(crate) max_allowed_packet: u32,
     pub(crate) int_and_float_native: bool,
-    pub(crate) local_infile_directory: Option<Vec<u8>>,
+    pub(crate) local_infile_directory: Option<Pstr>,
+}
+
+/// `init_commands` and `num_commands`: the `mnd_perealloc`'d array of a
+/// pointer per command, grown by one for each, and each command
+/// `mnd_pestrdup`'d.
+#[derive(Debug, Default)]
+pub(crate) struct InitCommands {
+    table: Option<Alloc>,
+    commands: Vec<Pstr>,
+}
+
+impl InitCommands {
+    /// `MYSQL_INIT_COMMAND`: the array one pointer longer, the command
+    /// copied into it; the `Err` is the memory limit's fatal.
+    fn push(&mut self, req: &mut Request, command: &[u8], persistent: bool) -> Result<(), Thrown> {
+        let len = 8 * (self.commands.len() + 1);
+        self.table = Some(match self.table.take() {
+            Some(table) => table.resize(req, len)?,
+            None => Alloc::new(req, len, persistent)?,
+        });
+        self.commands.push(Pstr::dup(req, command, persistent)?);
+        Ok(())
+    }
+
+    /// The commands in the order they were set.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.commands.iter().map(Pstr::bytes)
+    }
+
+    /// `free_options`' loop: each command, then the array.
+    fn free(&mut self, req: &mut Request) {
+        for command in self.commands.drain(..) {
+            command.free(req);
+        }
+        if let Some(table) = self.table.take() {
+            table.free(req);
+        }
+    }
 }
 
 /// `connect_attr`, the attributes in insertion order with an update kept
@@ -202,7 +239,9 @@ pub struct ConnData {
     pub(crate) port: u32,
     pub(crate) charset: Option<&'static Charset>,
     pub(crate) greet_charset: Option<&'static Charset>,
-    pub(crate) last_message: Option<Vec<u8>>,
+    /// `last_message`, `mysqlnd_set_string`'s: always the request's,
+    /// a persistent connection's too, which `end_psession` frees.
+    pub(crate) last_message: Option<Pstr>,
     pub(crate) field_count: u32,
     pub(crate) last_query_type: QueryType,
     /// `current_result`: the rows whose column definitions the last query
@@ -307,33 +346,104 @@ impl ConnData {
     }
 
     /// `mysqlnd_conn_data::free_options`: the strings and the attributes
-    /// the options hold.
+    /// the options hold, in its order.
     fn free_options(&mut self, req: &mut Request) {
+        Pstr::put(req, &mut self.options.charset_name, None);
         Pstr::put(req, &mut self.options.auth_protocol, None);
+        self.options.init_commands.free(req);
         if let Some(attrs) = self.options.connect_attr.take() {
             attrs.free(req);
         }
+        Pstr::put(req, &mut self.options.local_infile_directory, None);
+    }
+
+    /// `mysqlnd_set_string(&conn->last_message, ...)`: the old message
+    /// `mnd_efree`'d, the new one `mnd_pestrndup`'d on the request's heap
+    /// whatever the connection's persistence; the `Err` is the memory
+    /// limit's fatal. An OK with an info string keeps it, and the next
+    /// OK without one frees it:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $m = memory_get_usage();
+    /// mysqli_query($l, "UPDATE mysql.user SET plugin = plugin WHERE 1 = 0");
+    /// echo memory_get_usage() - $m, "\n";
+    /// mysqli_query($l, "DO 1");
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect mysql
+    /// 48
+    /// 32
+    /// ```
+    pub(crate) fn set_last_message(
+        &mut self,
+        req: &mut Request,
+        message: Option<&[u8]>,
+    ) -> Result<(), Thrown> {
+        Pstr::put(req, &mut self.last_message, None);
+        if let Some(message) = message {
+            self.last_message = Some(Pstr::dup(req, message, false)?);
+        }
+        Ok(())
     }
 
     /// `mysqlnd_conn_data::set_client_option`, and `set_client_option_2d`
-    /// for the attribute added.
+    /// for the attribute added. Each string option is `mnd_pestrdup`'d,
+    /// the one it replaces freed, and the init commands' array grown a
+    /// pointer per command; the close frees them all:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $m = memory_get_usage();
+    /// $at = fn() => print(memory_get_usage() - $m . "\n");
+    /// mysqli_options($l, MYSQLI_OPT_CONNECT_TIMEOUT, 5); $at();
+    /// mysqli_options($l, MYSQLI_INIT_COMMAND, 'SET @a = 1'); $at();
+    /// mysqli_options($l, MYSQLI_INIT_COMMAND, 'SET @b = 1'); $at();
+    /// mysqli_options($l, MYSQLI_SET_CHARSET_NAME, 'utf8mb4'); $at();
+    /// mysqli_options($l, MYSQLI_SET_CHARSET_NAME, 'latin1'); $at();
+    /// mysqli_options($l, MYSQLI_OPT_LOAD_DATA_LOCAL_DIR, '/tmp'); $at();
+    /// mysqli_options($l, MYSQLI_SERVER_PUBLIC_KEY, '/tmp/x.pem'); $at();
+    /// mysqli_ssl_set($l, 'k', 'c', 'ca', null, 'cipher'); $at();
+    /// $n = memory_get_usage();
+    /// mysqli_close($l);
+    /// echo $n - memory_get_usage(), "\n";
+    /// ```
+    /// ```expect mysql
+    /// 760
+    /// 824
+    /// 840
+    /// 856
+    /// 856
+    /// 872
+    /// 888
+    /// 952
+    /// 41928
+    /// ```
     pub(crate) fn set_option(
         &mut self,
         req: &mut Request,
         option: ClientOption<'_>,
     ) -> Result<bool, Thrown> {
-        let owned = |v: Option<&[u8]>| v.map(<[u8]>::to_vec);
+        let persistent = self.persistent;
+        // `value ? mnd_pestrdup(value, pers) : NULL`, put where the old
+        // one is `mnd_pefree`'d.
+        let set = |req: &mut Request, field: &mut Option<Pstr>, v: Option<&[u8]>| {
+            let v = v.map(|v| Pstr::dup(req, v, persistent)).transpose()?;
+            Pstr::put(req, field, v);
+            Ok::<(), Thrown>(())
+        };
         let vio = &mut self.net.options;
         match option {
             ClientOption::ReadTimeout(s) => vio.timeout_read = s,
             ClientOption::ConnectTimeout(s) => vio.timeout_connect = s,
             ClientOption::NetReadBufferSize(n) => vio.net_read_buffer_size = n,
-            ClientOption::SslKey(v) => vio.ssl_key = owned(v),
-            ClientOption::SslCert(v) => vio.ssl_cert = owned(v),
-            ClientOption::SslCa(v) => vio.ssl_ca = owned(v),
-            ClientOption::SslCapath(v) => vio.ssl_capath = owned(v),
-            ClientOption::SslCipher(v) => vio.ssl_cipher = owned(v),
-            ClientOption::SslPassphrase(v) => vio.ssl_passphrase = owned(v),
+            ClientOption::SslKey(v) => set(req, &mut vio.ssl_key, v)?,
+            ClientOption::SslCert(v) => set(req, &mut vio.ssl_cert, v)?,
+            ClientOption::SslCa(v) => set(req, &mut vio.ssl_ca, v)?,
+            ClientOption::SslCapath(v) => set(req, &mut vio.ssl_capath, v)?,
+            ClientOption::SslCipher(v) => set(req, &mut vio.ssl_cipher, v)?,
             ClientOption::SslVerifyServerCert(v) => {
                 vio.ssl_verify_peer = match v {
                     Some(true) => SslPeer::Verify,
@@ -348,7 +458,9 @@ impl ConnData {
                 self.net.set_cmd_buffer(req, n as usize, self.persistent)?;
             }
             ClientOption::Compress => self.net.use_compression = true,
-            ClientOption::ServerPublicKey(v) => self.net.sha256_server_public_key = owned(v),
+            ClientOption::ServerPublicKey(v) => {
+                set(req, &mut self.net.sha256_server_public_key, v)?;
+            }
             ClientOption::IntAndFloatNative(on) => self.options.int_and_float_native = on,
             ClientOption::LocalInfile(on) => {
                 if on {
@@ -358,10 +470,12 @@ impl ConnData {
                 }
             }
             ClientOption::LoadDataLocalDir(dir) => {
-                self.options.local_infile_directory =
-                    dir.filter(|d| !d.is_empty()).map(<[u8]>::to_vec);
+                let dir = dir.filter(|d| !d.is_empty());
+                set(req, &mut self.options.local_infile_directory, dir)?;
             }
-            ClientOption::InitCommand(command) => self.options.init_commands.push(command.to_vec()),
+            ClientOption::InitCommand(command) => {
+                self.options.init_commands.push(req, command, persistent)?;
+            }
             ClientOption::WriteTimeout(_)
             | ClientOption::ReadDefaultFile
             | ClientOption::ReadDefaultGroup => {}
@@ -371,7 +485,7 @@ impl ConnData {
                         .client(cr::CANT_FIND_CHARSET, "Unknown character set");
                     return Ok(false);
                 }
-                self.options.charset_name = Some(name.to_vec());
+                set(req, &mut self.options.charset_name, Some(name))?;
             }
             ClientOption::NamedPipe => self.options.protocol = 3,
             ClientOption::Protocol(p) => {
@@ -384,10 +498,7 @@ impl ConnData {
                     self.options.max_allowed_packet = n;
                 }
             }
-            ClientOption::AuthProtocol(v) => {
-                let protocol = v.map(|v| Pstr::dup(req, v, self.persistent)).transpose()?;
-                Pstr::put(req, &mut self.options.auth_protocol, protocol);
-            }
+            ClientOption::AuthProtocol(v) => set(req, &mut self.options.auth_protocol, v)?,
             ClientOption::ExpiredPasswords(on) => {
                 if on {
                     self.options.flags |= client::CAN_HANDLE_EXPIRED_PASSWORDS;
@@ -477,20 +588,24 @@ impl ConnData {
     }
 
     /// `send_command_handle_OK`.
-    pub(crate) fn handle_ok(&mut self, req: &mut Request, ignore_upsert: bool) -> bool {
+    pub(crate) fn handle_ok(
+        &mut self,
+        req: &mut Request,
+        ignore_upsert: bool,
+    ) -> Result<bool, Thrown> {
         let Some(ok) = self.read_ok(req) else {
             if self.error.errno != cr::SERVER_GONE_ERROR {
                 self.error.client(cr::MALFORMED_PACKET, "Malformed packet");
             }
-            return false;
+            return Ok(false);
         };
         if let Some(e) = ok.error {
             e.set_on(&mut self.error);
             self.upsert.server_status &= !status::MORE_RESULTS_EXISTS;
             self.upsert.affected_rows_to_error();
-            return false;
+            return Ok(false);
         }
-        self.last_message = ok.message;
+        self.set_last_message(req, ok.message.as_deref())?;
         if !ignore_upsert {
             self.upsert.reset();
             self.upsert.warning_count = ok.warning_count;
@@ -498,7 +613,7 @@ impl ConnData {
             self.upsert.affected_rows = ok.affected_rows;
             self.upsert.last_insert_id = ok.last_insert_id;
         }
-        true
+        Ok(true)
     }
 
     /// `send_command_handle_EOF`.
@@ -533,11 +648,11 @@ impl ConnData {
         silent: bool,
         command: Com,
         ignore_upsert: bool,
-    ) -> bool {
+    ) -> Result<bool, Thrown> {
         let ok = if eof {
             self.handle_eof(req)
         } else {
-            self.handle_ok(req, ignore_upsert)
+            self.handle_ok(req, ignore_upsert)?
         };
         if !silent && self.error.errno == cr::MALFORMED_PACKET {
             docref(
@@ -550,7 +665,7 @@ impl ConnData {
                 ),
             );
         }
-        ok
+        Ok(ok)
     }
 
     /// A command and its OK, `mysqlnd_command`'s common shape.
@@ -562,7 +677,7 @@ impl ConnData {
         silent: bool,
     ) -> Result<bool, Thrown> {
         Ok(self.send_command(req, command, arg, silent)?
-            && self.handle_response(req, false, silent, command, true))
+            && self.handle_response(req, false, silent, command, true)?)
     }
 
     // ---- connecting
@@ -818,7 +933,13 @@ impl ConnData {
 
     /// `mysqlnd_conn_data::execute_init_commands`.
     fn execute_init_commands(&mut self, req: &mut Request) -> Result<bool, Thrown> {
-        for command in self.options.init_commands.clone() {
+        let commands: Vec<Vec<u8>> = self
+            .options
+            .init_commands
+            .iter()
+            .map(<[u8]>::to_vec)
+            .collect();
+        for command in commands {
             self.stats.inc(Stat::InitCommandExecutedCount);
             if !self.query(req, &command)? {
                 self.stats.inc(Stat::InitCommandFailedCount);
@@ -928,7 +1049,7 @@ impl ConnData {
                 self.upsert.server_status = server_status;
                 self.upsert.affected_rows = affected_rows;
                 self.upsert.last_insert_id = last_insert_id;
-                self.last_message = info;
+                self.set_last_message(req, info.as_deref())?;
                 self.state = if server_status & status::MORE_RESULTS_EXISTS != 0 {
                     ConnState::NextResultPending
                 } else {
@@ -951,7 +1072,7 @@ impl ConnData {
         mut stmt: Option<&mut Option<Box<Res>>>,
     ) -> Result<bool, Thrown> {
         self.error.errno = 0;
-        self.last_message = None;
+        self.set_last_message(req, None)?;
         self.stats.inc(Stat::RsetQuery);
         self.upsert.reset();
         self.upsert.affected_rows_to_error();
@@ -1077,7 +1198,7 @@ impl ConnData {
     /// `mysqlnd_command::init_db`.
     pub(crate) fn select_db(&mut self, req: &mut Request, db: &[u8]) -> Result<bool, Thrown> {
         let ok = self.send_command(req, Com::InitDb, db, false)?
-            && self.handle_response(req, false, false, Com::InitDb, true);
+            && self.handle_response(req, false, false, Com::InitDb, true)?;
         self.upsert.affected_rows_to_error();
         Ok(ok)
     }
@@ -1085,7 +1206,7 @@ impl ConnData {
     /// `mysqlnd_command::ping`.
     pub(crate) fn ping(&mut self, req: &mut Request) -> Result<bool, Thrown> {
         let ok = self.send_command(req, Com::Ping, &[], true)?
-            && self.handle_response(req, false, true, Com::Ping, true);
+            && self.handle_response(req, false, true, Com::Ping, true)?;
         self.upsert.affected_rows_to_error();
         Ok(ok)
     }
@@ -1104,7 +1225,8 @@ impl ConnData {
         let read_response = u64::from(pid) != self.thread_id;
         let sent = self.send_command(req, Com::ProcessKill, &pid.to_le_bytes(), false)?;
         let ok = sent
-            && (!read_response || self.handle_response(req, false, false, Com::ProcessKill, true));
+            && (!read_response
+                || self.handle_response(req, false, false, Com::ProcessKill, true)?);
         if read_response {
             self.upsert.affected_rows_to_error();
         } else if sent {
@@ -1138,13 +1260,13 @@ impl ConnData {
     ) -> Result<bool, Thrown> {
         let arg = (option as u16).to_le_bytes();
         Ok(self.send_command(req, Com::SetOption, &arg, false)?
-            && self.handle_response(req, true, false, Com::SetOption, true))
+            && self.handle_response(req, true, false, Com::SetOption, true)?)
     }
 
     /// `mysqlnd_command::debug`: `COM_DEBUG`, answered by an EOF.
     pub(crate) fn debug(&mut self, req: &mut Request) -> Result<bool, Thrown> {
         Ok(self.send_command(req, Com::Debug, &[], false)?
-            && self.handle_response(req, true, false, Com::Debug, true))
+            && self.handle_response(req, true, false, Com::Debug, true)?)
     }
 
     /// `mysqlnd_command::refresh`.
@@ -1380,12 +1502,13 @@ impl ConnData {
         if let Some(result) = self.current_result.take() {
             result.free(req, self, true).ok();
         }
+        self.net.free_contents(req);
         self.net.close(req);
         Pstr::put(req, &mut self.scheme, None);
         Pstr::put(req, &mut self.server_version, None);
         Pstr::put(req, &mut self.host_info, None);
         Pstr::put(req, &mut self.auth_plugin_data, None);
-        self.last_message = None;
+        Pstr::put(req, &mut self.last_message, None);
         self.charset = None;
         self.greet_charset = None;
     }

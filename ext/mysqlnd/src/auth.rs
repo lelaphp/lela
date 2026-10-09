@@ -92,7 +92,8 @@ impl ConnData {
         if let Some(found) = self
             .options
             .charset_name
-            .as_deref()
+            .as_ref()
+            .map(Pstr::bytes)
             .and_then(charset::by_name)
         {
             charset_no = found.nr;
@@ -316,7 +317,8 @@ impl ConnData {
             let charset_no = match self
                 .options
                 .charset_name
-                .as_deref()
+                .as_ref()
+                .map(Pstr::bytes)
                 .and_then(charset::by_name)
             {
                 Some(found) => found.nr,
@@ -373,7 +375,7 @@ impl ConnData {
             }
             return Ok((false, None));
         }
-        self.last_message = response.message;
+        self.set_last_message(req, response.message.as_deref())?;
         Ok((true, None))
     }
 
@@ -441,7 +443,7 @@ impl ConnData {
             }
         }
         if ok {
-            self.last_message = None;
+            self.set_last_message(req, None)?;
             self.upsert.reset();
             if self.server_version() < 50123
                 && let Some(old) = old_charset
@@ -578,7 +580,8 @@ impl ConnData {
         let file = self
             .net
             .sha256_server_public_key
-            .clone()
+            .as_ref()
+            .map(|f| f.bytes().to_vec())
             .filter(|f| !f.is_empty())
             .or_else(|| {
                 req.ini_get(b"mysqlnd.sha256_server_public_key")

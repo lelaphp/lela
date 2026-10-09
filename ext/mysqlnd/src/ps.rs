@@ -1365,7 +1365,7 @@ fn reset(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
     let mut ok = true;
     if conn.state == ConnState::Ready {
         ok = conn.send_command(req, Com::StmtReset, &stmt.stmt_id.to_le_bytes(), false)?
-            && conn.handle_response(req, false, false, Com::StmtReset, true);
+            && conn.handle_response(req, false, false, Com::StmtReset, true)?;
         if !ok {
             stmt.error.copy_from(&conn.error);
         }

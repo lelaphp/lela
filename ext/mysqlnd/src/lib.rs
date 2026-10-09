@@ -315,6 +315,8 @@ impl Handle {
         if let Some(result) = conn.current_result.take() {
             result.release(req);
         }
+        // Nor does a last message, the request's whatever the connection.
+        crate::alloc::Pstr::put(req, &mut conn.last_message, None);
         conn.net.give_back(req);
         Some(conn)
     }

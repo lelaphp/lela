@@ -52,7 +52,11 @@ pub(crate) fn handle(
     filename: &[u8],
 ) -> Result<(bool, bool), Thrown> {
     let enabled = conn.options.flags & client::LOCAL_FILES != 0;
-    let directory = conn.options.local_infile_directory.clone();
+    let directory = conn
+        .options
+        .local_infile_directory
+        .as_ref()
+        .map(|d| d.bytes().to_vec());
     let mut ok = true;
     if !enabled && directory.is_none() {
         conn.error.client(
@@ -86,11 +90,11 @@ pub(crate) fn handle(
     }
     if !ok {
         conn.net.send(req, &[], &mut conn.stats, &mut conn.error);
-        conn.handle_response(req, false, false, Com::Query, false);
+        conn.handle_response(req, false, false, Com::Query, false)?;
         return Ok((false, true));
     }
     let (passed, warning) = send_file(req, conn, filename)?;
-    let answered = conn.handle_response(req, false, false, Com::Query, false);
+    let answered = conn.handle_response(req, false, false, Com::Query, false)?;
     Ok((passed && answered, warning))
 }
 

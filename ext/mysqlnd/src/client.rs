@@ -290,7 +290,7 @@ impl Mysqlnd {
                     max_length: c.char_maxlen,
                     comment: c.comment,
                 }),
-                info: conn.last_message.clone(),
+                info: conn.last_message.as_ref().map(|m| m.bytes().to_vec()),
                 more_results: conn.upsert.server_status & status::MORE_RESULTS_EXISTS != 0,
                 ready: conn.state == crate::consts::ConnState::Ready,
                 unix_socket: conn.net.unix,
@@ -413,7 +413,10 @@ impl Mysqlnd {
     /// `conn->options->local_infile_directory`.
     pub fn local_infile_directory(self, req: &mut Request) -> Option<Vec<u8>> {
         self.0
-            .with(req, |_, conn| conn.options.local_infile_directory.clone())
+            .with(req, |_, conn| {
+                let dir = conn.options.local_infile_directory.as_ref();
+                dir.map(|d| d.bytes().to_vec())
+            })
             .flatten()
     }
 
@@ -436,6 +439,9 @@ impl Mysqlnd {
     pub fn restart_psession(self, req: &mut Request) {
         let _ = self.0.with(req, |_, conn| {
             conn.stats.inc(crate::stats::Stat::ConnectReused);
+            // `conn->last_message.s = NULL`: a message the last request
+            // left was its heap's and went with it, so it is forgotten,
+            // not freed; `end_psession` and `give_back` leave none.
             conn.last_message = None;
         });
     }
@@ -448,8 +454,7 @@ impl Mysqlnd {
             if let Some(result) = conn.current_result.take() {
                 result.free(req, conn, true)?;
             }
-            conn.last_message = None;
-            Ok(())
+            conn.set_last_message(req, None)
         })
         .map(|_| ())
     }
