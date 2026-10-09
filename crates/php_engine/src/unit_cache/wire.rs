@@ -5,9 +5,11 @@
 //! at a fixed width, a sequence as its length and then its items, an
 //! absent value as a zero byte and a present one as a one and the value.
 //! A string in an op array's constant table is written as its bytes and interned into the
-//! engine's table again as it is read, and a constant array as its
-//! entries, laid down again by the table ([`Intern::constant_array`]), so
-//! what is read back is published as a compiled unit is. Which build
+//! engine's table again as it is read, a constant array as its
+//! entries, laid down again by the table ([`Intern::constant_array`]),
+//! and the names its op arrays carry interned again once it is whole
+//! ([`php_compile::intern_names`]), so what is read back is published
+//! as a compiled unit is. Which build
 //! wrote the bytes is the file's header's to say; this is only the body.
 
 use php_heap::{Intern, Key, Zval, ZvalType};
@@ -30,8 +32,8 @@ pub(crate) fn encode(unit: &Unit) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The unit `bytes` encode, its strings and constant arrays laid down
-/// in `strings`; none where the bytes are not one whole unit.
+/// The unit `bytes` encode, its strings, constant arrays and names laid
+/// down in `strings`; none where the bytes are not one whole unit.
 pub(crate) fn decode(bytes: &[u8], strings: &mut dyn Intern) -> Option<Unit> {
     let mut reader = Reader {
         bytes,
@@ -39,7 +41,11 @@ pub(crate) fn decode(bytes: &[u8], strings: &mut dyn Intern) -> Option<Unit> {
         cell: UnitCell::default(),
     };
     let unit = Unit::take(&mut reader)?;
-    reader.bytes.is_empty().then_some(unit)
+    if !reader.bytes.is_empty() {
+        return None;
+    }
+    php_compile::intern_names(&unit, reader.strings).ok()?;
+    Some(unit)
 }
 
 /// What is being read: the bytes left, the table the strings go into,
