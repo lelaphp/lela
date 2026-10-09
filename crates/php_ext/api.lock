@@ -1217,7 +1217,6 @@ values::PhpObject::class
 values::PhpObject::clone_with
 values::PhpObject::closure
 values::PhpObject::closure_bound
-values::PhpObject::debug_info
 values::PhpObject::declared_rows
 values::PhpObject::extend_properties
 values::PhpObject::free_beside

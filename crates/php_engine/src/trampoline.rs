@@ -378,28 +378,55 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thro
         .filter_map(|position| req.argument(position))
         .collect();
     let named = req.named_arguments();
-    let name = Value::string(req.string(&name.0)?);
-    let mut packed = if passed.is_empty() && named.is_empty() {
-        PhpArray::empty()
-    } else {
-        req.array()?
+    let name = req.string(&name.0)?;
+    let name = Owner::adopt(req, Value::string(name));
+    let packed = match packed_arguments(req, passed, named) {
+        Ok(packed) => packed,
+        Err(thrown) => {
+            name.give_up(req);
+            return Err(thrown);
+        }
     };
-    for argument in passed {
-        packed.append(req, Owner::take(req, argument))?;
-    }
-    for (key, value) in named {
-        let key = Owner::take(req, Key::lookup(key));
-        packed.set(req, key, Owner::take(req, value))?;
-    }
-    let packed = Value::array(packed);
-    let arguments = [name, packed];
+    let arguments = [*name, Value::array(*packed)];
     let called = this.map(|this| this.class()).or(called);
     let served = match called {
         Some(called) => req.serve_method_made(magic, this, called, &arguments, &[]),
         None => req.serve_function(magic, &arguments, &[]),
     };
-    for argument in arguments {
-        req.release(argument);
-    }
+    name.give_up(req);
+    packed.give_up(req);
     adopted(req, served)
+}
+
+/// The array `zend_closure_call_magic` hands the magic method as its
+/// second argument: the call's arguments in order, then its named ones
+/// under their names, php's one immutable empty array where there are
+/// none. The array is the caller's owner, given up here where the memory
+/// limit refuses a row.
+fn packed_arguments(
+    req: &mut Request,
+    passed: Vec<Value>,
+    named: Vec<(crate::api::values::PhpString, Value)>,
+) -> Result<Owner<PhpArray>, Thrown> {
+    if passed.is_empty() && named.is_empty() {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    }
+    let mut packed = PhpArray::new(req)?;
+    let fill = || -> Result<(), Thrown> {
+        for argument in passed {
+            packed.append(req, Owner::take(req, argument))?;
+        }
+        for (key, value) in named {
+            let key = Owner::take(req, Key::lookup(key));
+            packed.set(req, key, Owner::take(req, value))?;
+        }
+        Ok(())
+    };
+    match fill() {
+        Ok(()) => Ok(packed),
+        Err(thrown) => {
+            packed.give_up(req);
+            Err(thrown)
+        }
+    }
 }

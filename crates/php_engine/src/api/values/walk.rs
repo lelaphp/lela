@@ -415,10 +415,12 @@ pub fn foreach_guarded<B>(
 /// of it. A typed property nothing has written is no row, or under
 /// [`Unwritten::Shown`] a row whose [`Row::uninitialized`] names its
 /// type, as `unwritten` says. The walk gives the properties back never:
-/// the reader clears its recursion guard and then releases them
-/// ([`HeldProperties::release`]), as php's `zend_release_properties`
-/// comes after its `ZEND_GUARD_OR_GC_UNPROTECT_RECURSION`, so a
-/// destructor the release serves finds the object unmarked. The answer
+/// the reader releases them ([`HeldProperties::release`]) where php's
+/// reader calls `zend_release_properties`, which is its own order
+/// beside its recursion guard: the json encoder clears the guard first,
+/// so a destructor the release serves finds the object unmarked, and
+/// `php_var_dump` and `php_debug_zval_dump` release before the closing
+/// brace and clear it after. The answer
 /// is what `body` broke with, `None` past the last row.
 ///
 /// ```php

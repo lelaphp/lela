@@ -1959,7 +1959,10 @@ pub(crate) mod freed {
 
     /// Whether the refcounted block at `at` is one the heap has freed and
     /// not handed out since. Every refcounted value is at least 24 bytes,
-    /// so the two words are inside it.
+    /// so the two words are inside it, and no header leaves padding in
+    /// them, so a live block's are initialised. `at` is the block's own
+    /// pointer, never one derived from a reference to its header, whose
+    /// provenance ends at the header's eight bytes (#2414).
     pub(crate) fn is_freed(at: NonNull<u8>) -> bool {
         let mark = mark_at(at);
         // SAFETY: `at` names a refcounted value whose count is about to

@@ -12,7 +12,7 @@ use php_ext::request::Request;
 use std::ops::ControlFlow;
 
 use php_ext::values::walk::{self, Guarded, Hold, Row, Unwritten};
-use php_ext::values::{Key, Laziness, RecursionGuard, Value, ValueRef};
+use php_ext::values::{Key, Laziness, PhpArray, PhpObject, RecursionGuard, Value, ValueRef};
 
 /// `debug_zval_dump(mixed $value, mixed ...$values): void`, php's
 /// `PHP_FUNCTION(debug_zval_dump)` (`Z/ext/standard/var.c:434`): each
@@ -172,39 +172,70 @@ use php_ext::values::{Key, Laziness, RecursionGuard, Value, ValueRef};
 /// ```
 #[php_function]
 fn debug_zval_dump(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<(), Thrown> {
-    let values = std::iter::once(value).chain(values.0);
-    let mut out = Vec::new();
-    for value in values {
-        dump(req, &mut out, &value, 1)?;
+    for value in std::iter::once(value).chain(values.0) {
+        dump(req, &value, 1)?;
     }
-    req.write(&out);
     Ok(())
+}
+
+/// php's `php_printf("%*c", width, ' ')`, `width` blanks as one piece,
+/// ahead of `rest` where php's one call writes both.
+fn indented(req: &mut Request, width: usize, rest: &[u8]) {
+    let mut piece = vec![b' '; width];
+    piece.extend_from_slice(rest);
+    if !piece.is_empty() {
+        req.write(&piece);
+    }
 }
 
 /// `zval_object_property_dump`'s value: the row's value dumped, its
 /// count read as php reads it, or for a typed property nothing has
 /// written `uninitialized(T)` at the indent the value would take.
-fn dump_row(req: &mut Request, out: &mut Vec<u8>, row: &Row, level: usize) -> Result<(), Thrown> {
+fn dump_row(req: &mut Request, row: &Row, level: usize) -> Result<(), Thrown> {
     match row.uninitialized() {
-        None => dump(req, out, row.value(), level),
+        None => dump(req, row.value(), level),
         Some(ty) => {
-            pad(out, level);
-            out.extend_from_slice(format!("uninitialized({ty})\n").as_bytes());
+            indented(req, level - 1, format!("uninitialized({ty})\n").as_bytes());
             Ok(())
         }
     }
 }
 
-fn pad(out: &mut Vec<u8>, level: usize) {
-    if level > 1 {
-        out.extend(std::iter::repeat_n(b' ', level - 1));
-    }
-}
-
 /// `php_debug_zval_dump` (`Z/ext/standard/var.c:301`), one arm per
-/// type as php's switch has them, each count read as php reads it. An array is held while its rows are walked, so an
-/// element's `__debugInfo` that frees it through another name
-/// (GH-19801) leaves it standing until the walk is done:
+/// type as php's switch has them, each count read as php reads it, and
+/// each piece written to the request as php's `php_printf`, `PHPWRITE`
+/// and `PUTS` write it, one write per call of php's, so what code the
+/// dump runs writes lands where php's lands, and an `ob_start` callback
+/// with a chunk size of one is handed php's pieces:
+///
+/// ```php
+/// class N { function __debugInfo() { echo "inside\n"; return []; } }
+/// debug_zval_dump([new N, 1]);
+/// ob_start(function ($chunk) { return $chunk === '' ? '' : "<$chunk>"; }, 1);
+/// debug_zval_dump([1, str_repeat("a", 1)]);
+/// ob_end_flush();
+/// ```
+/// ```expect
+/// array(2) packed refcount(1){
+///   [0]=>
+///   inside
+/// object(N)#1 (0) refcount(1){
+///   }
+///   [1]=>
+///   int(1)
+/// }
+/// <array(2) packed refcount(1){
+/// ><  [0]=>
+/// ><  ><int(1)
+/// ><  [1]=>
+/// ><  ><string(1) "><a><" refcount(1)
+/// ><}
+/// >
+/// ```
+///
+/// An array is held while its rows are walked, so an element's
+/// `__debugInfo` that frees it through another name (GH-19801) leaves
+/// it standing until the walk is done:
 ///
 /// ```php
 /// $a = [new class { function __debugInfo() { global $b; $b->a = null; gc_collect_cycles(); return []; } }];
@@ -223,170 +254,37 @@ fn pad(out: &mut Vec<u8>, level: usize) {
 ///   }
 /// }
 /// ```
-#[allow(clippy::too_many_lines)]
-fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Result<(), Thrown> {
+fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
     call_stack_end(req)?;
-    pad(out, level);
+    indented(req, level - 1, b"");
     match value.as_ref() {
-        ValueRef::Bool(false) => out.extend_from_slice(b"bool(false)\n"),
-        ValueRef::Bool(true) => out.extend_from_slice(b"bool(true)\n"),
-        ValueRef::Null | ValueRef::Undef => out.extend_from_slice(b"NULL\n"),
-        ValueRef::Int(n) => out.extend_from_slice(format!("int({n})\n").as_bytes()),
+        ValueRef::Bool(false) => req.write(b"bool(false)\n"),
+        ValueRef::Bool(true) => req.write(b"bool(true)\n"),
+        ValueRef::Null | ValueRef::Undef => req.write(b"NULL\n"),
+        ValueRef::Int(n) => req.write(format!("int({n})\n").as_bytes()),
         ValueRef::Float(f) => {
             let text = float_format(f, req.serialize_precision(), Exponent::Upper);
-            out.extend_from_slice(format!("float({text})\n").as_bytes());
+            req.write(format!("float({text})\n").as_bytes());
         }
         ValueRef::Str(s) => {
-            out.extend_from_slice(format!("string({}) \"", s.len()).as_bytes());
-            out.extend_from_slice(s.as_bytes());
+            req.write(format!("string({}) \"", s.len()).as_bytes());
+            req.write(s.as_bytes());
             if value.is_refcounted() {
                 let count = value.refcount();
-                out.extend_from_slice(format!("\" refcount({count})\n").as_bytes());
+                req.write(format!("\" refcount({count})\n").as_bytes());
             } else {
-                out.extend_from_slice(b"\" interned\n");
+                req.write(b"\" interned\n");
             }
         }
-        ValueRef::Array(array) => {
-            // `GC_IS_RECURSIVE`, then `GC_ADDREF(myht)` (`Z/ext/standard/var.c:347`) beside
-            // `GC_PROTECT_RECURSION(myht)` (GH-19801) and
-            // `ZEND_HASH_FOREACH_KEY_VAL`: a foreach walk holding the array
-            // and guarding its recursion, so an element's `__debugInfo`
-            // that gives up the array's last other owner leaves it
-            // standing until the walk is done; the walk's owner is given
-            // up as `GC_DTOR_NO_REF(myht)` frees the array where it was the
-            // last. An immutable array is held and marked by neither. The
-            // count printed is the one before the walk's owner, php's
-            // `Z_REFCOUNT_P(struc) - 1`. The header is laid down before the
-            // walk and taken back where the walk found the array marked,
-            // since php prints `*RECURSION*` in its place.
-            let opened = out.len();
-            let count = value.refcount();
-            let packed = if array.is_packed() { "packed " } else { "" };
-            if value.is_refcounted() {
-                out.extend_from_slice(
-                    format!("array({}) {packed}refcount({count}){{\n", array.len()).as_bytes(),
-                );
-            } else {
-                out.extend_from_slice(
-                    format!("array({}) {packed}interned {{\n", array.len()).as_bytes(),
-                );
-            }
-            let walked =
-                walk::foreach_guarded(req, *array, Hold::Owner, |req, row| -> walk::Step {
-                    out.extend(std::iter::repeat_n(b' ', level + 1));
-                    match row.key() {
-                        Key::Int(n) => out.extend_from_slice(format!("[{n}]=>\n").as_bytes()),
-                        Key::Str(s) => {
-                            out.extend_from_slice(b"[\"");
-                            out.extend_from_slice(s.as_bytes());
-                            out.extend_from_slice(b"\"]=>\n");
-                        }
-                    }
-                    dump(req, out, row.value(), level + 2)?;
-                    Ok(ControlFlow::Continue(()))
-                })?;
-            if let Guarded::Recursive = walked {
-                out.truncate(opened);
-                out.extend_from_slice(b"*RECURSION*\n");
-                return Ok(());
-            }
-            pad(out, level);
-            out.extend_from_slice(b"}\n");
-        }
-        ValueRef::Object(object) => {
-            if object.is_recursive_in(req, RecursionGuard::Debug) {
-                out.extend_from_slice(b"*RECURSION*\n");
-                return Ok(());
-            }
-            object.protect_in(req, RecursionGuard::Debug);
-            // Held from here to the closing brace, as php holds the
-            // table from `zend_get_properties_for` to
-            // `zend_release_properties`, so the refcount printed counts
-            // the owners a class's own table takes.
-            let held = match object.properties_for(req, PropertyPurpose::Debug) {
-                Ok(held) => held,
-                Err(thrown) => {
-                    object.unprotect_in(req, RecursionGuard::Debug);
-                    return Err(thrown);
-                }
-            };
-            // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an
-            // anonymous class's name.
-            let full = object.handlers(req).get_class_name(req, *object);
-            let name = String::from_utf8_lossy(full.split(|b| *b == 0).next().unwrap_or_default())
-                .into_owned();
-            // `php_var_dump_object_prefix`: what a lazy object is.
-            let prefix = match object.laziness() {
-                Laziness::Eager => "",
-                Laziness::Ghost => "lazy ghost ",
-                Laziness::Proxy | Laziness::Forwarding => "lazy proxy ",
-            };
-            out.extend_from_slice(
-                format!(
-                    "{prefix}object({name})#{} ({}) refcount({}){{\n",
-                    object.index(),
-                    held.count(),
-                    value.refcount()
-                )
-                .as_bytes(),
-            );
-            let dumped = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
-                out.extend(std::iter::repeat_n(b' ', level + 1));
-                // An element a class shows among its properties is an
-                // integer key, `[%ld]=>`.
-                let prop = match row.key() {
-                    Key::Int(n) => {
-                        out.extend_from_slice(format!("[{n}]=>\n").as_bytes());
-                        dump_row(req, out, row, level + 2)?;
-                        return Ok(ControlFlow::Continue(()));
-                    }
-                    Key::Str(prop) => *prop,
-                };
-                let bytes = prop.as_bytes();
-                out.push(b'[');
-                match super::unmangle(bytes) {
-                    (Some(b"*"), name) => {
-                        out.push(b'"');
-                        out.extend_from_slice(name);
-                        out.extend_from_slice(b"\":protected");
-                    }
-                    (Some(class), name) => {
-                        out.push(b'"');
-                        out.extend_from_slice(name);
-                        out.extend_from_slice(b"\":\"");
-                        out.extend_from_slice(class.split(|b| *b == 0).next().unwrap_or_default());
-                        out.extend_from_slice(b"\":private");
-                    }
-                    (None, _) => {
-                        out.push(b'"');
-                        out.extend_from_slice(bytes);
-                        out.push(b'"');
-                    }
-                }
-                out.extend_from_slice(b"]=>\n");
-                dump_row(req, out, row, level + 2)?;
-                Ok(ControlFlow::Continue(()))
-            })
-            .map(|_| ());
-            // What the class's debug table left pending was raised
-            // before any row's, so a row's is chained onto it.
-            let left = held.release(req);
-            object.unprotect_in(req, RecursionGuard::Debug);
-            match (left, dumped) {
-                (Err(earlier), Err(later)) => return Err(earlier.chain(req, later)),
-                (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => return Err(thrown),
-                (Ok(()), Ok(())) => {}
-            }
-            pad(out, level);
-            out.extend_from_slice(b"}\n");
-        }
+        ValueRef::Array(array) => dump_array(req, value, *array, level)?,
+        ValueRef::Object(object) => dump_object(req, value, *object, level)?,
         ValueRef::Resource(resource) => {
             let kind = resource.type_name(req).map_or_else(
                 || String::from("Unknown"),
                 |k| String::from_utf8_lossy(k).into_owned(),
             );
-            out.extend_from_slice(
+            req.write(
                 format!(
                     "resource({}) of type ({kind}) refcount({})\n",
                     resource.id(),
@@ -397,11 +295,155 @@ fn dump(req: &mut Request, out: &mut Vec<u8>, value: &Value, level: usize) -> Re
         }
         ValueRef::Reference(cell) => {
             let count = value.refcount();
-            out.extend_from_slice(format!("reference refcount({count}) {{\n").as_bytes());
-            dump(req, out, &cell.get(), level + 2)?;
-            pad(out, level);
-            out.extend_from_slice(b"}\n");
+            req.write(format!("reference refcount({count}) {{\n").as_bytes());
+            dump(req, &cell.get(), level + 2)?;
+            indented(req, level - 1, b"}\n");
         }
     }
     Ok(())
+}
+
+/// `php_debug_zval_dump`'s `IS_ARRAY` arm: `GC_IS_RECURSIVE`, then
+/// `GC_ADDREF(myht)` (`Z/ext/standard/var.c:347`) beside
+/// `GC_PROTECT_RECURSION(myht)` (GH-19801) and
+/// `ZEND_HASH_FOREACH_KEY_VAL`: a foreach walk holding the array and
+/// guarding its recursion, so an element's `__debugInfo` that gives up
+/// the array's last other owner leaves it standing until the walk is
+/// done; the walk's owner is given up as `GC_DTOR_NO_REF(myht)` frees the
+/// array where it was the last. An immutable array is held and marked by
+/// neither. The mark is asked before the header is written, as php asks
+/// it, and the count printed is the one before the walk's owner, php's
+/// `Z_REFCOUNT_P(struc) - 1`.
+fn dump_array(
+    req: &mut Request,
+    value: &Value,
+    array: PhpArray,
+    level: usize,
+) -> Result<(), Thrown> {
+    if array.is_recursive() {
+        req.write(b"*RECURSION*\n");
+        return Ok(());
+    }
+    let packed = if array.is_packed() { "packed " } else { "" };
+    if value.is_refcounted() {
+        let count = value.refcount();
+        req.write(format!("array({}) {packed}refcount({count}){{\n", array.len()).as_bytes());
+    } else {
+        req.write(format!("array({}) {packed}interned {{\n", array.len()).as_bytes());
+    }
+    // `zval_array_element_dump`.
+    let walked = walk::foreach_guarded(req, array, Hold::Owner, |req, row| -> walk::Step {
+        match row.key() {
+            Key::Int(n) => indented(req, level + 1, format!("[{n}]=>\n").as_bytes()),
+            Key::Str(s) => {
+                indented(req, level + 1, b"[\"");
+                req.write(s.as_bytes());
+                req.write(b"\"]=>\n");
+            }
+        }
+        dump(req, row.value(), level + 2)?;
+        Ok(ControlFlow::Continue(()))
+    })?;
+    match walked {
+        // Asked above, before anything was written.
+        Guarded::Recursive | Guarded::Walked(_) => {}
+    }
+    indented(req, level - 1, b"}\n");
+    Ok(())
+}
+
+/// `php_debug_zval_dump`'s `IS_OBJECT` arm over the table
+/// `zend_get_properties_for(struc, ZEND_PROP_PURPOSE_DEBUG)` holds, each
+/// row as `zval_object_property_dump` prints it, then
+/// `zend_release_properties`, the closing brace and the unprotect, in
+/// php's order.
+fn dump_object(
+    req: &mut Request,
+    value: &Value,
+    object: PhpObject,
+    level: usize,
+) -> Result<(), Thrown> {
+    if object.is_recursive_in(req, RecursionGuard::Debug) {
+        req.write(b"*RECURSION*\n");
+        return Ok(());
+    }
+    object.protect_in(req, RecursionGuard::Debug);
+    // Held from here to the closing brace, as php holds the table from
+    // `zend_get_properties_for` to `zend_release_properties`, so the
+    // refcount printed counts the owners a class's own table takes.
+    let held = match object.properties_for(req, PropertyPurpose::Debug) {
+        Ok(held) => held,
+        Err(thrown) => {
+            object.unprotect_in(req, RecursionGuard::Debug);
+            return Err(thrown);
+        }
+    };
+    // `ZSTR_VAL(class_name)` under `%s`: up to the NUL of an anonymous
+    // class's name.
+    let full = object.handlers(req).get_class_name(req, object);
+    let name = full.split(|b| *b == 0).next().unwrap_or_default();
+    // `php_var_dump_object_prefix`: what a lazy object is.
+    let prefix = match object.laziness() {
+        Laziness::Eager => "",
+        Laziness::Ghost => "lazy ghost ",
+        Laziness::Proxy | Laziness::Forwarding => "lazy proxy ",
+    };
+    let mut header = format!("{prefix}object(").into_bytes();
+    header.extend_from_slice(name);
+    header.extend_from_slice(
+        format!(
+            ")#{} ({}) refcount({}){{\n",
+            object.index(),
+            held.count(),
+            value.refcount()
+        )
+        .as_bytes(),
+    );
+    req.write(&header);
+    let dumped = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
+        // An element a class shows among its properties is an integer
+        // key, `[%ld]=>`.
+        let prop = match row.key() {
+            Key::Int(n) => {
+                indented(req, level + 1, format!("[{n}]=>\n").as_bytes());
+                dump_row(req, row, level + 2)?;
+                return Ok(ControlFlow::Continue(()));
+            }
+            Key::Str(prop) => *prop,
+        };
+        let bytes = prop.as_bytes();
+        indented(req, level + 1, b"[");
+        let mut shown = b"\"".to_vec();
+        match super::unmangle(bytes) {
+            (Some(b"*"), name) => {
+                shown.extend_from_slice(name);
+                shown.extend_from_slice(b"\":protected");
+            }
+            (Some(class), name) => {
+                shown.extend_from_slice(name);
+                shown.extend_from_slice(b"\":\"");
+                shown.extend_from_slice(class.split(|b| *b == 0).next().unwrap_or_default());
+                shown.extend_from_slice(b"\":private");
+            }
+            (None, _) => {
+                shown.extend_from_slice(bytes);
+                shown.push(b'"');
+            }
+        }
+        req.write(&shown);
+        req.write(b"]=>\n");
+        dump_row(req, row, level + 2)?;
+        Ok(ControlFlow::Continue(()))
+    })
+    .map(|_| ());
+    // What the class's debug table left pending was raised before any
+    // row's, so a row's is chained onto it.
+    let left = held.release(req);
+    indented(req, level - 1, b"}\n");
+    object.unprotect_in(req, RecursionGuard::Debug);
+    match (left, dumped) {
+        (Err(earlier), Err(later)) => Err(earlier.chain(req, later)),
+        (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }

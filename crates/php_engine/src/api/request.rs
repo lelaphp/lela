@@ -48,6 +48,7 @@ pub(crate) use build_defs::build_date;
 mod callable;
 mod caller;
 pub(crate) use caller::NativeCaller;
+pub(crate) use hooks::HookedRow;
 pub(crate) use objects::placed_of;
 mod calls;
 mod class_constants;

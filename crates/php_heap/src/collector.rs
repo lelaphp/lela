@@ -38,7 +38,7 @@
 use std::time::{Duration, Instant};
 
 use crate::array::Arr;
-use crate::gc::{self, Colour, Refcounted};
+use crate::gc::{self, Colour, Counted};
 use crate::hooks::HeapHooks;
 use crate::object::Obj;
 use crate::reference::Ref;
@@ -93,7 +93,7 @@ impl Node {
         }
     }
 
-    fn gc(&self) -> &Refcounted {
+    fn gc(self) -> Counted {
         match self {
             Node::Arr(a) => a.gc(),
             Node::Obj(o) => o.gc(),

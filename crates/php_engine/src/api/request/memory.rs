@@ -516,14 +516,16 @@ impl Request {
         Heap::gc_call_destructor(&mut Hooks(self), idx).map(PhpObject::of)
     }
 
-    /// `gc_check_possible_root` over an object: offered to the collector
-    /// as a possible root where it is not one already, as a release that
-    /// leaves it owners does. An extension calls it where php's does, on
-    /// a cycle a temporary's release would otherwise leave unseen, since
-    /// php's `zval_ptr_dtor_nogc` offers nothing (ext/dom's `children`).
-    pub fn gc_possible_root(&mut self, object: PhpObject) {
-        let zval = object.as_value().to_zval();
-        Heap::gc_check_possible_root(&mut Hooks(self), zval);
+    /// `gc_check_possible_root`: an array or an object, or the one a
+    /// reference holds, offered to the collector as a possible root where
+    /// it is not one already, as a release that leaves it owners does;
+    /// any other value is never a root and is left as it is. An
+    /// extension calls it where php's does, on a cycle a temporary's
+    /// release would otherwise leave unseen, since php's
+    /// `zval_ptr_dtor_nogc` offers nothing (ext/dom's `children`,
+    /// `unserialize`'s answer).
+    pub fn gc_possible_root(&mut self, value: &Value) {
+        Heap::gc_check_possible_root(&mut Hooks(self), value.to_zval());
     }
 
     /// `gc_enable()` and `gc_disable()`: `zend.enable_gc` altered, whose

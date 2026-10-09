@@ -43,7 +43,7 @@ use std::cell::Cell;
 use std::ptr::NonNull;
 
 use crate::array::{Arr, DeclaredRows};
-use crate::gc::{self, Refcounted};
+use crate::gc::{self, Counted, Refcounted};
 use crate::hooks::{Fatal, HeapHooks};
 use crate::mm::Mm;
 use crate::payload::{Payload, payload_of};
@@ -258,13 +258,13 @@ impl Obj {
     /// `GC_ADDREF`.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn addref(&self) {
-        self.header().gc.addref();
+        self.gc().addref();
     }
 
     /// `GC_DELREF`, and what is left.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn delref(self) -> u32 {
-        self.header().gc.delref()
+        self.gc().delref()
     }
 
     /// Whether two names name one object, php's pointer equality, which
@@ -416,8 +416,10 @@ impl Obj {
     }
 
     /// `zend_refcounted_h gc`: the header the cycle collector colours.
-    pub(crate) fn gc(&self) -> &Refcounted {
-        &self.header().gc
+    pub(crate) fn gc(self) -> Counted {
+        // SAFETY: the block starts with its header, and stands while
+        // its owner holds the handle, as `header` reads it.
+        unsafe { Counted::new(self.address()) }
     }
 
     fn slot_ptr(self, i: u32) -> *mut Zval {

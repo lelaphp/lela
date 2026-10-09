@@ -547,7 +547,7 @@ impl Request {
         // left, as a walk that served it leaves it. A collection the
         // destructor ran may have found it reachable and taken it out of
         // the buffer, and the shutdown collection finds it here.
-        self.gc_possible_root(object);
+        self.gc_possible_root(&object.as_value());
     }
 
     /// `zend_call_function`'s tail (`Z/Zend/zend_execute_API.c:1069-1076`)

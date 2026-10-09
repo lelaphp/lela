@@ -728,6 +728,26 @@ impl<'a> State<'a> {
 /// Warning: unserialize(): Error at offset 14 of 14 bytes in %s on line 3
 /// bool(false)
 /// ```
+///
+/// What it answers is offered to the cycle collector as a possible root,
+/// an array or an object (never a scalar or the immutable empty array),
+/// so a cycle handed straight to a native, which frees its argument
+/// with no root offered, is still the collector's to find:
+///
+/// ```php
+/// $r0 = gc_status()["roots"];
+/// $a = unserialize('a:1:{i:0;a:0:{}}');
+/// $i = unserialize('i:1;');
+/// $e = unserialize('a:0:{}');
+/// echo gc_status()["roots"] - $r0, "\n";
+/// var_dump(is_object(unserialize('O:8:"stdClass":1:{s:1:"b";r:1;}')));
+/// echo gc_status()["roots"] - $r0, "\n";
+/// ```
+/// ```expect
+/// 1
+/// bool(true)
+/// 2
+/// ```
 #[php_function]
 fn unserialize(
     req: &mut Request,
@@ -808,7 +828,16 @@ pub fn php_unserialize_with_options(
             let root = state.hand_on(req, tmp);
             Some(Owner::take(req, root))
         }
-        (Ok(true), None) => Some(state.take_root(req)),
+        // Outside, the answer is offered to the cycle collector,
+        // `gc_check_possible_root(Z_COUNTED_P(return_value))`
+        // (`Z/ext/standard/var.c:1481-1484`), so a cycle the caller frees
+        // with no root offered, as a native's argument is freed, is still
+        // the collector's to find (#2444).
+        (Ok(true), None) => {
+            let root = state.take_root(req);
+            req.gc_possible_root(&root);
+            Some(root)
+        }
         _ => {
             if state.holder != Holder::Joined {
                 state.take_root(req).give_up(req);
