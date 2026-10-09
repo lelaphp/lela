@@ -312,7 +312,7 @@ fn torrentzip_normalize(de: &mut Dirent) {
     de.version_needed = 20;
     de.bitflags = 2;
     de.comp_method = CM_DEFLATE;
-    de.compression_level = 9;
+    de.compression_level = crate::codec::TORRENTZIP_COMPRESSION_FLAGS;
     de.disk_number = 0;
     de.int_attrib = 0;
     de.ext_attrib = 0;

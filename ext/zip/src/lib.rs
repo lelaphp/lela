@@ -7,10 +7,11 @@
 //! ([`strings`]) and DOS times ([`dostime`]); the central directory
 //! found by the pure-Rust zip crate, every entry read as its stream is
 //! read through libzip's layers over the crate's codecs and ciphers
-//! ([`read`]), and written through them ([`codec`]). No `src/ffi/`, no
-//! `unsafe`. The phpt
+//! ([`read`]), and written through them ([`codec`]), deflate alone
+//! through the platform's zlib at libzip's memLevel ([`ffi`], the
+//! crate's one binding and its one home of `unsafe`; #1657). The phpt
 //! subset is `php-src/ext/zip/tests`, through `xtask phpt --subset`.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,
@@ -28,6 +29,7 @@ mod codec;
 mod dostime;
 mod error;
 mod extract;
+mod ffi;
 mod object;
 mod pattern;
 mod procedural;

@@ -1358,6 +1358,8 @@ dependencies = [
  "flate2",
  "getrandom",
  "hmac",
+ "libc",
+ "libz-sys",
  "lzma-rust2",
  "pbkdf2",
  "php_ext",
