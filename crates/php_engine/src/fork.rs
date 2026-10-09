@@ -282,9 +282,14 @@ mod tests {
     #[test]
     fn a_host_thread_is_inside_while_it_stands() {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let Ok(thread) = host_thread("php-host", 3 << 20, move || {
+        let started = host_thread("php-host", 3 << 20, move || {
             rx.recv().ok();
-        }) else {
+        });
+        assert!(
+            started.is_ok(),
+            "the system refused the thread: {started:?}"
+        );
+        let Ok(thread) = started else {
             return;
         };
         assert!(INSIDE.load(Ordering::Relaxed) & !FORKING >= 1);
