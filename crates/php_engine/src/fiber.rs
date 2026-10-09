@@ -106,9 +106,10 @@ pub(crate) struct Execution {
     pub(crate) stack_limit: StackLimit,
 }
 
-/// One fiber that is running: the fiber, php's `EG(active_fiber)` while
-/// it is the last, and the execution state of the stack that resumed
-/// it, which its `stack_bottom->prev_execute_data` names.
+/// One fiber that is running: the fiber, php's
+/// `EG(current_fiber_context)` while it is the last, and the execution
+/// state of the stack that resumed it, which its
+/// `stack_bottom->prev_execute_data` names.
 struct Running {
     fiber: PhpObject,
     below: Execution,
@@ -130,12 +131,18 @@ enum Resumer {
 }
 
 /// The request's fibers: the running ones, innermost last, and their
-/// suspend points; and `EG(fiber_stack_size)` once `ini_set()` has
-/// moved it.
+/// suspend points; `EG(active_fiber)`; and `EG(fiber_stack_size)` once
+/// `ini_set()` has moved it.
 #[derive(Default)]
 pub(crate) struct Fibers {
     suspensions: Suspensions<Request>,
     running: Vec<Running>,
+    /// `EG(active_fiber)`, which a resume sets to the fiber before the
+    /// switch's notice and gives back to the one it was only once the
+    /// switch back has returned (`zend_fiber_resume_internal`,
+    /// `Z/Zend/zend_fibers.c:680-696`), so both notices of a resume read
+    /// the fiber.
+    active: Option<PhpObject>,
     stack_size: Option<usize>,
     gc: GcFiber,
     /// `zend_fiber_switch_blocking`: how many of php's
@@ -143,20 +150,11 @@ pub(crate) struct Fibers {
     /// switch would break (a `ZEND_TICKS` round, a signal dispatch),
     /// while which no fiber starts, suspends or resumes.
     switch_blocking: u32,
-    /// The fibers set aside while the request runs on a resumer's stack
-    /// to serve a frame there ([`Fibers::set_aside_above`]), the last
-    /// set aside last.
-    aside: Vec<Aside>,
-}
-
-/// The running fibers above a resumer's stack, set aside while the
-/// request runs on that stack: the first one's `below` holds the
-/// execution the request ran on, and `base` is how many fibers ran
-/// below them, so one started on the resumer's stack meanwhile is told
-/// apart.
-struct Aside {
-    running: Vec<Running>,
-    base: usize,
+    /// The running fibers above a resumer's stack, set aside while the
+    /// request runs on that stack to serve a frame there
+    /// ([`Fibers::set_aside_above`]), the last set aside last: the first
+    /// one's `below` holds the execution the request ran on.
+    aside: Vec<Vec<Running>>,
 }
 
 /// `GC_G(dtor_fiber)` and the walk it serves (`Z/Zend/zend_gc.c:1859-1990`,
@@ -189,17 +187,12 @@ impl Fibers {
         self.switch_blocking > 0
     }
 
-    /// `EG(active_fiber)`: the innermost fiber running, none on the
+    /// `EG(active_fiber)`: the fiber a resume is running, none on the
     /// request's own stack. Running on a resumer's stack to serve a
-    /// frame there leaves it the fiber that was innermost, as php moves
-    /// no `EG(active_fiber)` for a debugger's evaluation.
+    /// frame there leaves it as it stands, as php moves no
+    /// `EG(active_fiber)` for a debugger's evaluation.
     pub(crate) fn active(&self) -> Option<PhpObject> {
-        let aside = self
-            .aside
-            .last()
-            .filter(|aside| aside.base == self.running.len())
-            .and_then(|aside| aside.running.last());
-        aside.or(self.running.last()).map(|running| running.fiber)
+        self.active
     }
 
     /// The running fibers above the `stack`-th stack down the chain
@@ -213,11 +206,8 @@ impl Fibers {
         }
         let base = self.running.len().checked_sub(stack)?;
         let running = self.running.split_off(base);
-        self.aside.push(Aside { running, base });
-        self.aside
-            .last_mut()
-            .and_then(|aside| aside.running.first_mut())
-            .map(|first| &mut first.below)
+        self.aside.push(running);
+        self.set_aside_execution()
     }
 
     /// The execution [`Fibers::set_aside_above`] handed out, to be
@@ -225,7 +215,7 @@ impl Fibers {
     pub(crate) fn set_aside_execution(&mut self) -> Option<&mut Execution> {
         self.aside
             .last_mut()
-            .and_then(|aside| aside.running.first_mut())
+            .and_then(|aside| aside.first_mut())
             .map(|first| &mut first.below)
     }
 
@@ -233,7 +223,7 @@ impl Fibers {
     /// above the ones running below them.
     pub(crate) fn put_back(&mut self) {
         if let Some(aside) = self.aside.pop() {
-            self.running.extend(aside.running);
+            self.running.extend(aside);
         }
     }
 
@@ -1238,10 +1228,13 @@ fn switch_into(
     // `EG(current_fiber_context)`: the fiber served now, or the
     // request's own stack, which the switch leaves and comes back to.
     // The handlers are called before the fiber is marked running, as
-    // php's notice comes before `to->status = ZEND_FIBER_STATUS_RUNNING`.
+    // php's notice comes before `to->status = ZEND_FIBER_STATUS_RUNNING`,
+    // and with the fiber `EG(active_fiber)` already, as
+    // `zend_fiber_resume_internal` sets it before the switch.
     let resumer = req.fibers().active();
     let left = observed(req, resumer, FiberStatus::Running);
     let entering = observed(req, Some(object), entered);
+    req.fibers_mut().active = Some(object);
     crate::observer::fiber_switched(req, left, entering);
     payload(req, object)?.status = Status::Running;
     let mut execution = *execution;
@@ -1267,6 +1260,7 @@ fn switch_into(
         None => Execution::default(),
     };
     req.switch_execution(&mut execution);
+    req.fibers_mut().active = resumer;
     if left == FiberStatus::Dead {
         crate::observer::fiber_destroyed(req, leaving);
     }
