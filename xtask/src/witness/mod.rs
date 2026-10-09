@@ -1088,10 +1088,12 @@ fn finish(
 /// have, the line a person reads, at the fence and beside the regimes the
 /// pin does have. A regime that carries `args` reaches a binary's command
 /// line (#1780): a fence marked `process` hands them to the engine's
-/// binary as the oracle's run hands them to php; the linked engine takes
-/// `-e` as a host builds it and no other ([`Linked`], #1822); and the
-/// request hosts take none. A fence served where its regime's arguments
-/// cannot reach is the same kind of line, naming the mark that serves it.
+/// binary as the oracle's run hands them to php, and the linked engine
+/// takes `-e` as a host builds it and no other ([`Linked`], #1822). A
+/// request host is handed no regime, its ini or its arguments, in the
+/// oracle's run or the engine's, so a `request` fence under one would run
+/// under the recipe alone (#1932). A fence served where its regime cannot
+/// reach is the same kind of line, naming why.
 fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime>, String> {
     let Some(name) = witness.regime.as_deref() else {
         return Ok(None);
@@ -1101,23 +1103,18 @@ fn under<'a>(pin: &'a Pin, witness: &fence::Witness) -> Result<Option<&'a Regime
         .map_err(|why| format!("{}: {why:#}", witness.at()))?;
     let refused = match witness.served {
         fence::Served::Binary => None,
-        fence::Served::Linked => Linked::of([regime]).err().map(|why| format!("{why:#}")),
-        fence::Served::Cgi | fence::Served::Fpm | fence::Served::Phpdbg => {
-            (!regime.args.is_empty()).then(|| {
-                format!(
-                    "carries the arguments {:?}, which reach a binary's command line and no request host",
-                    regime.args
-                )
-            })
-        }
+        fence::Served::Linked => Linked::of([regime]).err().map(|why| {
+            format!("{why:#}; only a fence marked `process` stands under it")
+        }),
+        fence::Served::Cgi | fence::Served::Fpm | fence::Served::Phpdbg => Some(
+            "reaches no request host, in the oracle's run or the engine's, so a `request` fence cannot stand under it"
+                .to_owned(),
+        ),
     };
-    if let Some(why) = refused {
-        return Err(format!(
-            "{}: `[regime.{name}]` {why}; only a fence marked `process` stands under it",
-            witness.at()
-        ));
+    match refused {
+        Some(why) => Err(format!("{}: `[regime.{name}]` {why}", witness.at())),
+        None => Ok(Some(regime)),
     }
-    Ok(Some(regime))
 }
 
 /// Write the fence lines a run captured: each file under `root` read, the

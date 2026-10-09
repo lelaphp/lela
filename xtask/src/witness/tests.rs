@@ -384,12 +384,14 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
 
 /// A regime that carries `args` reaches a binary's command line (#1780,
 /// #1887): the linked engine takes `-e` as a host builds it (#1822) and
-/// no other, and a request host takes none, so a fence naming a regime
-/// whose arguments cannot reach what serves it is a block the lane
-/// cannot run unless it is marked `process`, read off the pin before
-/// anything runs: the line names the regime, its arguments and the mark
-/// that serves it. Marked `process`, the fence stands under the regime,
-/// whose arguments the binary's run and the oracle's are both handed.
+/// no other, so a fence naming a regime whose arguments cannot reach what
+/// serves it is a block the lane cannot run unless it is marked
+/// `process`, read off the pin before anything runs: the line names the
+/// regime, its arguments and the mark that serves it. Marked `process`,
+/// the fence stands under the regime, whose arguments the binary's run
+/// and the oracle's are both handed. A request host is handed no regime
+/// on either side, of ini or of arguments, so a `request` fence naming
+/// one is such a line too, never a run under the recipe alone (#1932).
 #[test]
 fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
     let mut pin = manifest().pin;
@@ -416,20 +418,24 @@ fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
     let regime = super::under(&pin, &linked).unwrap().unwrap();
     assert_eq!(regime.args, ["-e"]);
     let hidden = witness("/// ```expect regime=hide-args\n/// 1\n/// ```\n");
-    let request = witness(
-        "/// ```request\n/// --GET--\n/// q=1\n/// ```\n/// ```expect regime=extended-info\n/// 1\n/// ```\n",
+    let refused = super::under(&pin, &hidden).unwrap_err();
+    assert!(
+        refused.contains("ext/fixture/src/lib.rs:1")
+            && refused.contains("[regime.hide-args]")
+            && refused.contains("\"-H\"")
+            && refused.contains("`process`"),
+        "{refused}"
     );
-    assert_eq!(request.served, fence::Served::Cgi);
-    for (unmarked, name, arg) in [
-        (&hidden, "hide-args", "\"-H\""),
-        (&request, "extended-info", "\"-e\""),
-    ] {
-        let refused = super::under(&pin, unmarked).unwrap_err();
+    for name in ["extended-info", "short-tags"] {
+        let request = witness(&format!(
+            "/// ```request\n/// --GET--\n/// q=1\n/// ```\n/// ```expect regime={name}\n/// 1\n/// ```\n"
+        ));
+        assert_eq!(request.served, fence::Served::Cgi);
+        let refused = super::under(&pin, &request).unwrap_err();
         assert!(
             refused.contains("ext/fixture/src/lib.rs:1")
                 && refused.contains(&format!("[regime.{name}]"))
-                && refused.contains(arg)
-                && refused.contains("`process`"),
+                && refused.contains("no request host"),
             "{refused}"
         );
     }
