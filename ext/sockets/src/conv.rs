@@ -30,6 +30,10 @@ pub(crate) const DEFAULT_BUFF_SIZE: usize = 8192;
 /// `sizeof(struct in6_pktinfo)`: the address and the interface index.
 const IN6_PKTINFO: usize = 16 + 4;
 
+/// `sizeof(struct ucred)`: the pid, the uid and the gid.
+#[cfg(target_os = "linux")]
+const UCRED: usize = 4 + 4 + 4;
+
 /// One `ancillary_reg_entry`: a `(level, type)` pair the platform has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Ancillary {
@@ -39,6 +43,9 @@ pub(crate) enum Ancillary {
     Int,
     /// `SCM_RIGHTS`, a sequence of fds.
     Rights,
+    /// `SCM_CREDENTIALS`, a `struct ucred`, where `SO_PASSCRED` is.
+    #[cfg(target_os = "linux")]
+    Credentials,
 }
 
 impl Ancillary {
@@ -48,6 +55,8 @@ impl Ancillary {
             (libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => Some(Ancillary::PktInfo),
             (libc::IPPROTO_IPV6, libc::IPV6_HOPLIMIT | libc::IPV6_TCLASS) => Some(Ancillary::Int),
             (libc::SOL_SOCKET, libc::SCM_RIGHTS) => Some(Ancillary::Rights),
+            #[cfg(target_os = "linux")]
+            (libc::SOL_SOCKET, libc::SCM_CREDENTIALS) => Some(Ancillary::Credentials),
             _ => None,
         }
     }
@@ -58,6 +67,8 @@ impl Ancillary {
             Ancillary::PktInfo => IN6_PKTINFO,
             Ancillary::Int => 4,
             Ancillary::Rights => 0,
+            #[cfg(target_os = "linux")]
+            Ancillary::Credentials => UCRED,
         }
     }
 
@@ -444,6 +455,43 @@ impl Conv {
         Ok(out)
     }
 
+    /// `from_zval_write_ucred`: a `struct ucred`, each of its three
+    /// fields required, the pid a non-negative `pid_t` and the ids
+    /// `uid_t`s.
+    #[cfg(target_os = "linux")]
+    fn ucred(&mut self, req: &mut Request, container: &Value) -> Result<Vec<u8>, Thrown> {
+        let mut out = vec![0u8; UCRED];
+        let Some(array) = self.table(container) else {
+            return Ok(out);
+        };
+        let fields = [("pid", true), ("uid", true), ("gid", true)];
+        self.fields(req, array, &fields, |c, req, name, value| {
+            let n = c.integer(req, value)?;
+            if c.failed() {
+                return Ok(());
+            }
+            let (at, word) = if name == "pid" {
+                match i32::try_from(n) {
+                    Ok(pid) if pid >= 0 => (0, pid.to_ne_bytes()),
+                    _ => {
+                        c.fail("given PHP integer is out of bounds for a pid_t value");
+                        return Ok(());
+                    }
+                }
+            } else {
+                let at = if name == "uid" { 4 } else { 8 };
+                let Ok(id) = u32::try_from(n) else {
+                    c.fail("given PHP integer is out of bounds for a uid_t value");
+                    return Ok(());
+                };
+                (at, id.to_ne_bytes())
+            };
+            out[at..at + 4].copy_from_slice(&word);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
     /// `calculate_scm_rights_space` and `from_zval_write_fd_array`.
     fn fd_array(&mut self, req: &mut Request, value: &Value) -> Vec<u8> {
         let Some(array) = self.table(value) else {
@@ -585,6 +633,8 @@ impl Conv {
                 Ancillary::PktInfo => c.in6_pktinfo(req, v)?,
                 Ancillary::Int => c.int(req, v)?.to_ne_bytes().to_vec(),
                 Ancillary::Rights => c.fd_array(req, v),
+                #[cfg(target_os = "linux")]
+                Ancillary::Credentials => c.ucred(req, v)?,
             };
             let n = bytes.len().min(data.len());
             data[..n].copy_from_slice(&bytes[..n]);
@@ -785,6 +835,20 @@ impl Conv {
         Ok(out)
     }
 
+    /// `to_zval_read_ucred`: the pid, the uid and the gid.
+    #[cfg(target_os = "linux")]
+    fn ucred_value(req: &mut Request, data: &[u8]) -> Result<Owner<PhpArray>, Thrown> {
+        let word = |at: usize| [data[at], data[at + 1], data[at + 2], data[at + 3]];
+        let mut out = PhpArray::new(req)?;
+        let pid = i64::from(i32::from_ne_bytes(word(0)));
+        put(req, &mut out, "pid", Owner::take(req, Value::int(pid)))?;
+        let uid = i64::from(u32::from_ne_bytes(word(4)));
+        put(req, &mut out, "uid", Owner::take(req, Value::int(uid)))?;
+        let gid = i64::from(u32::from_ne_bytes(word(8)));
+        put(req, &mut out, "gid", Owner::take(req, Value::int(gid)))?;
+        Ok(out)
+    }
+
     /// `to_zval_read_fd_array`: each fd received, a `Socket` for
     /// a socket and a stream for anything else.
     fn fd_array_value(&mut self, req: &mut Request, data: &[u8]) -> Result<Owner<Value>, Thrown> {
@@ -864,6 +928,8 @@ impl Conv {
                     Ok(Owner::take(req, Value::int(i64::from(i32::from_ne_bytes(b)))))
                 }
                 Ancillary::Rights => c.fd_array_value(req, body),
+                #[cfg(target_os = "linux")]
+                Ancillary::Credentials => Conv::ucred_value(req, body).map(Owner::into_value),
             }
         })?;
         put(req, &mut out, "data", data)?;
@@ -973,11 +1039,8 @@ pub(crate) fn import_descriptor(
     let raw = fd.as_raw_fd();
     let made = new_socket(req, Sock::owning(fd, libc::AF_UNSPEC))?;
     let object = made.object();
-    let family = match ffi::name(raw, false) {
-        Ok(Addr::V4(_)) => libc::AF_INET,
-        Ok(Addr::V6(_)) => libc::AF_INET6,
-        Ok(Addr::Unix(_)) => libc::AF_UNIX,
-        Ok(Addr::Other(family)) => family,
+    let family = match ffi::family(raw) {
+        Ok(family) => family,
         Err(errno) => {
             socket_error(req, object, "Unable to obtain socket family", errno as i32);
             made.give_up(req);

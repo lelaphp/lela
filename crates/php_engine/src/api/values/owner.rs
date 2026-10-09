@@ -35,8 +35,12 @@ impl ResourceView for Resource {
 }
 
 impl<T: ResourceView> sealed::Counted for T {
-    fn counted(&self) -> Value {
-        Value::resource(self.resource())
+    type Kept = Resource;
+    fn kept(&self) -> Resource {
+        self.resource()
+    }
+    fn counted_on(&self, kept: Resource) -> Value {
+        Value::resource(kept)
     }
 }
 impl<T: ResourceView> View for T {}
@@ -46,15 +50,29 @@ mod sealed {
 
     /// What the owner's count is taken on and given up from.
     pub trait Counted {
+        /// What an owner keeps beside its view to name the value its
+        /// count stands on: nothing for a sealed view, which is that
+        /// value, and the resource for a typed view of one, the open door,
+        /// which could answer another resource later (#2209).
+        type Kept: Copy + std::fmt::Debug;
+        /// What an owner made of the view keeps.
+        fn kept(&self) -> Self::Kept;
+        /// The value an owner's count stands on, read from the view and
+        /// what the owner kept.
+        fn counted_on(&self, kept: Self::Kept) -> Value;
         /// The value the view names, no owner taken.
-        fn counted(&self) -> Value;
+        fn counted(&self) -> Value {
+            self.counted_on(self.kept())
+        }
     }
 }
 
 macro_rules! view {
     ($t:ty, $make:expr) => {
         impl sealed::Counted for $t {
-            fn counted(&self) -> Value {
+            type Kept = ();
+            fn kept(&self) {}
+            fn counted_on(&self, (): ()) -> Value {
                 ($make)(self.clone())
             }
         }
@@ -74,14 +92,18 @@ view!(Key, |k: Key| match k {
 view!(Static, |s: Static| Value::object(s.0));
 
 impl<C: Class> sealed::Counted for Instance<C> {
-    fn counted(&self) -> Value {
+    type Kept = ();
+    fn kept(&self) {}
+    fn counted_on(&self, (): ()) -> Value {
         Value::object(self.object())
     }
 }
 impl<C: Class> View for Instance<C> {}
 
 impl<T: FromArgument> sealed::Counted for Raw<T> {
-    fn counted(&self) -> Value {
+    type Kept = ();
+    fn kept(&self) {}
+    fn counted_on(&self, (): ()) -> Value {
         self.value()
     }
 }
@@ -170,8 +192,10 @@ impl<T: FromArgument> View for Raw<T> {}
 #[derive(Debug)]
 pub struct Owner<T: View> {
     view: T,
-    /// The value the count stands on, read where the owner was made.
-    counted: Value,
+    /// What names the value the count stands on beside the view, read
+    /// where the owner was made: nothing for a sealed view, so an owner of
+    /// one is the view alone in a release build.
+    kept: T::Kept,
     /// A debug build's record of where the owner was made, until it is
     /// consumed.
     #[cfg(debug_assertions)]
@@ -196,27 +220,27 @@ impl<T: View> Owner<T> {
     /// takes its own owner of it, `RETURN_COPY` ([`IntoReturn`]).
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn take(req: &Request, view: T) -> Owner<T> {
-        let counted = view.counted();
-        req.addref(&counted);
-        Owner::of(req, view, counted)
+        let kept = view.kept();
+        req.addref(&view.counted_on(kept));
+        Owner::of(req, view, kept)
     }
 
     /// The owner `view` already is: the count a value is made with,
     /// which only the engine hands out.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn adopt(req: &Request, view: T) -> Owner<T> {
-        let counted = view.counted();
-        Owner::of(req, view, counted)
+        let kept = view.kept();
+        Owner::of(req, view, kept)
     }
 
-    /// The owner of `counted`, presented as `view`.
+    /// The owner of what `view` and `kept` name.
     #[cfg_attr(debug_assertions, track_caller)]
-    fn of(req: &Request, view: T, counted: Value) -> Owner<T> {
+    fn of(req: &Request, view: T, kept: T::Kept) -> Owner<T> {
         #[cfg(not(debug_assertions))]
         let _ = req;
         Owner {
             view,
-            counted,
+            kept,
             #[cfg(debug_assertions)]
             made: Some(Made {
                 site: std::panic::Location::caller(),
@@ -236,7 +260,7 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn give_up(mut self, req: &mut Request) {
         self.consume();
-        req.release(self.counted);
+        req.release(self.stands_on());
     }
 
     /// The owner given up as `zval_ptr_dtor_nogc` gives one up: the value
@@ -250,7 +274,7 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn give_up_nogc(mut self, req: &mut Request) {
         self.consume();
-        req.release_nogc(self.counted);
+        req.release_nogc(self.stands_on());
     }
 
     /// The owner given up as `GC_DELREF` gives one up, and what is left
@@ -264,7 +288,7 @@ impl<T: View> Owner<T> {
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn let_go(mut self, req: &mut Request) -> Left {
         self.consume();
-        let value = self.counted;
+        let value = self.stands_on();
         if !value.is_refcounted() {
             return Left::Uncounted;
         }
@@ -295,15 +319,19 @@ impl<T: View> Owner<T> {
     /// native returns as `mixed` or hands to a sink that takes a value.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_value(self) -> Owner<Value> {
-        let value = self.counted;
-        self.recast(value)
+        let value = self.stands_on();
+        self.recast(value, ())
     }
 
-    /// The same owner over another view of its value; a debug build's
-    /// record of where it was made moves to it, and this one is
-    /// consumed.
-    fn recast<U: View>(self, view: U) -> Owner<U> {
-        let counted = self.counted;
+    /// The value the count stands on.
+    fn stands_on(&self) -> Value {
+        self.view.counted_on(self.kept)
+    }
+
+    /// The same owner over another view of its value, `kept` naming the
+    /// same value; a debug build's record of where it was made moves to
+    /// it, and this one is consumed.
+    fn recast<U: View>(self, view: U, kept: U::Kept) -> Owner<U> {
         #[cfg(debug_assertions)]
         let made = {
             let mut recast = self;
@@ -311,7 +339,7 @@ impl<T: View> Owner<T> {
         };
         Owner {
             view,
-            counted,
+            kept,
             #[cfg(debug_assertions)]
             made,
         }
@@ -334,7 +362,8 @@ impl<T: ResourceView> Owner<T> {
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_resource(self) -> Owner<Resource> {
         let resource = self.view.resource();
-        self.recast(resource)
+        let kept = self.kept;
+        self.recast(resource, kept)
     }
 }
 
@@ -345,7 +374,7 @@ impl Owner<PhpString> {
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_key(self) -> Owner<Key> {
         let key = Key::Str(self.view);
-        self.recast(key)
+        self.recast(key, ())
     }
 }
 
@@ -363,7 +392,8 @@ impl Owner<Resource> {
             view.resource() == self.view,
             "a typed view of another resource"
         );
-        self.recast(view)
+        let kept = self.kept;
+        self.recast(view, kept)
     }
 }
 
@@ -373,7 +403,7 @@ impl Owner<Value> {
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_raw<T: FromArgument>(self) -> Owner<Raw<T>> {
         let raw = Raw::returned(self.view);
-        self.recast(raw)
+        self.recast(raw, ())
     }
 
     /// `ZVAL_DEREF` and then `convert_to_*` (`Z/Zend/zend_operators.c`):
@@ -424,14 +454,14 @@ impl Owner<PhpObject> {
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_instance<C: Class>(self) -> Owner<Instance<C>> {
         let instance = Instance::of(self.view);
-        self.recast(instance)
+        self.recast(instance, ())
     }
 
     /// The owner of the object as `static`, the same count, to return.
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_static(self) -> Owner<Static> {
         let object = Static(self.view);
-        self.recast(object)
+        self.recast(object, ())
     }
 }
 
@@ -440,12 +470,11 @@ impl Owner<PhpObject> {
 /// name, and the owner lends no `&mut PhpArray`, through which a view
 /// could be put where the owner stands.
 impl Owner<PhpArray> {
-    /// A write through the owner's array, its count moved with the name
-    /// where the write separated the array.
+    /// A write through the owner's array. The count stands on the array
+    /// the owner names, so where the write separated it the count moved
+    /// with the name.
     pub(super) fn written<R>(&mut self, write: impl FnOnce(&mut PhpArray) -> R) -> R {
-        let answer = write(&mut self.view);
-        self.counted = Value::array(self.view);
-        answer
+        write(&mut self.view)
     }
 
     /// Remove `key` from this very table, whatever its other owners,
@@ -470,6 +499,17 @@ impl Owner<PhpArray> {
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
         self.written(|view| view.set(req, key, value))
+    }
+
+    /// [`PhpArray::set_str`].
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_str(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        self.written(|view| view.set_str(req, name, value))
     }
 
     /// [`PhpArray::add_new`].
@@ -603,6 +643,16 @@ impl Left {
         matches!(self, Left::Owners(owners) if owners != 1)
     }
 }
+
+// An owner of a value is the value (#2209): what it keeps beside a sealed
+// view is nothing, and only a debug build's record of where it was made
+// adds to it. Held at every build, so no lane can skip it.
+const _: () = {
+    #[cfg(not(debug_assertions))]
+    assert!(size_of::<Owner<Value>>() == size_of::<Value>());
+    #[cfg(debug_assertions)]
+    assert!(size_of::<Owner<Value>>() == size_of::<Value>() + size_of::<Option<Made>>());
+};
 
 impl<T: View> std::ops::Deref for Owner<T> {
     type Target = T;

@@ -49,6 +49,8 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+#[cfg(all(test, target_os = "linux"))]
+mod linux_values;
 mod process;
 mod signals;
 
@@ -111,6 +113,10 @@ pub fn extension() -> Extension {
             signals::pcntl_signal_get_handler::declared(),
             signals::pcntl_signal_dispatch::declared(),
             signals::pcntl_sigprocmask::declared(),
+            #[cfg(target_os = "linux")]
+            signals::pcntl_sigwaitinfo::declared(),
+            #[cfg(target_os = "linux")]
+            signals::pcntl_sigtimedwait::declared(),
             process::pcntl_wifexited::declared(),
             process::pcntl_wifstopped::declared(),
             process::pcntl_wifcontinued::declared(),
@@ -126,6 +132,14 @@ pub fn extension() -> Extension {
             process::pcntl_setpriority::declared(),
             process::pcntl_strerror::declared(),
             signals::pcntl_async_signals::declared(),
+            #[cfg(target_os = "linux")]
+            process::pcntl_unshare::declared(),
+            #[cfg(target_os = "linux")]
+            process::pcntl_getcpuaffinity::declared(),
+            #[cfg(target_os = "linux")]
+            process::pcntl_setcpuaffinity::declared(),
+            #[cfg(target_os = "linux")]
+            process::pcntl_getcpu::declared(),
             #[cfg(target_vendor = "apple")]
             process::pcntl_getqos_class::declared(),
             #[cfg(target_vendor = "apple")]
@@ -172,6 +186,8 @@ mod constants {
     pub(crate) const P_ALL: i64 = libc::P_ALL as i64;
     pub(crate) const P_PID: i64 = libc::P_PID as i64;
     pub(crate) const P_PGID: i64 = libc::P_PGID as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const P_PIDFD: i64 = libc::P_PIDFD as i64;
     pub(crate) const SIG_IGN: i64 = 1;
     pub(crate) const SIG_DFL: i64 = 0;
     pub(crate) const SIG_ERR: i64 = -1;
@@ -216,6 +232,18 @@ mod constants {
     pub(crate) const SIGINFO: i64 = libc::SIGINFO as i64;
     pub(crate) const SIGSYS: i64 = libc::SIGSYS as i64;
     pub(crate) const SIGBABY: i64 = libc::SIGSYS as i64;
+    /// glibc's `SIGRTMIN`, a call: the first real-time signal past the
+    /// ones the C library keeps for itself.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn SIGRTMIN() -> i64 {
+        i64::from(libc::SIGRTMIN())
+    }
+    /// glibc's `SIGRTMAX`, a call: the first real-time signal past the
+    /// ones the C library keeps for itself.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn SIGRTMAX() -> i64 {
+        i64::from(libc::SIGRTMAX())
+    }
     pub(crate) const PRIO_PGRP: i64 = libc::PRIO_PGRP as i64;
     pub(crate) const PRIO_USER: i64 = libc::PRIO_USER as i64;
     pub(crate) const PRIO_PROCESS: i64 = libc::PRIO_PROCESS as i64;
@@ -226,6 +254,108 @@ mod constants {
     pub(crate) const SIG_BLOCK: i64 = libc::SIG_BLOCK as i64;
     pub(crate) const SIG_UNBLOCK: i64 = libc::SIG_UNBLOCK as i64;
     pub(crate) const SIG_SETMASK: i64 = libc::SIG_SETMASK as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_USER: i64 = libc::SI_USER as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_KERNEL: i64 = libc::SI_KERNEL as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_QUEUE: i64 = libc::SI_QUEUE as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_TIMER: i64 = libc::SI_TIMER as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_MESGQ: i64 = libc::SI_MESGQ as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_ASYNCIO: i64 = libc::SI_ASYNCIO as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_SIGIO: i64 = libc::SI_SIGIO as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SI_TKILL: i64 = libc::SI_TKILL as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLD_EXITED: i64 = libc::CLD_EXITED as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLD_KILLED: i64 = libc::CLD_KILLED as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLD_DUMPED: i64 = libc::CLD_DUMPED as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLD_TRAPPED: i64 = libc::CLD_TRAPPED as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLD_STOPPED: i64 = libc::CLD_STOPPED as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLD_CONTINUED: i64 = libc::CLD_CONTINUED as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const TRAP_BRKPT: i64 = libc::TRAP_BRKPT as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const TRAP_TRACE: i64 = libc::TRAP_TRACE as i64;
+    /// `<asm-generic/siginfo.h>`'s `si_code`s, which the `libc` crate does
+    /// not carry, here to `SEGV_ACCERR`.
+    #[cfg(target_os = "linux")]
+    pub(crate) const POLL_IN: i64 = 1;
+    #[cfg(target_os = "linux")]
+    pub(crate) const POLL_OUT: i64 = 2;
+    #[cfg(target_os = "linux")]
+    pub(crate) const POLL_MSG: i64 = 3;
+    #[cfg(target_os = "linux")]
+    pub(crate) const POLL_ERR: i64 = 4;
+    #[cfg(target_os = "linux")]
+    pub(crate) const POLL_PRI: i64 = 5;
+    #[cfg(target_os = "linux")]
+    pub(crate) const POLL_HUP: i64 = 6;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_ILLOPC: i64 = 1;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_ILLOPN: i64 = 2;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_ILLADR: i64 = 3;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_ILLTRP: i64 = 4;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_PRVOPC: i64 = 5;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_PRVREG: i64 = 6;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_COPROC: i64 = 7;
+    #[cfg(target_os = "linux")]
+    pub(crate) const ILL_BADSTK: i64 = 8;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_INTDIV: i64 = 1;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_INTOVF: i64 = 2;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_FLTDIV: i64 = 3;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_FLTOVF: i64 = 4;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_FLTUND: i64 = 5;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_FLTRES: i64 = 6;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_FLTINV: i64 = 7;
+    #[cfg(target_os = "linux")]
+    pub(crate) const FPE_FLTSUB: i64 = 8;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SEGV_MAPERR: i64 = 1;
+    #[cfg(target_os = "linux")]
+    pub(crate) const SEGV_ACCERR: i64 = 2;
+    #[cfg(target_os = "linux")]
+    pub(crate) const BUS_ADRALN: i64 = libc::BUS_ADRALN as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const BUS_ADRERR: i64 = libc::BUS_ADRERR as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const BUS_OBJERR: i64 = libc::BUS_OBJERR as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLONE_NEWNS: i64 = libc::CLONE_NEWNS as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLONE_NEWIPC: i64 = libc::CLONE_NEWIPC as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLONE_NEWUTS: i64 = libc::CLONE_NEWUTS as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLONE_NEWNET: i64 = libc::CLONE_NEWNET as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLONE_NEWPID: i64 = libc::CLONE_NEWPID as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLONE_NEWUSER: i64 = libc::CLONE_NEWUSER as i64;
+    #[cfg(target_os = "linux")]
+    pub(crate) const CLONE_NEWCGROUP: i64 = libc::CLONE_NEWCGROUP as i64;
     pub(crate) const PCNTL_EINTR: i64 = libc::EINTR as i64;
     pub(crate) const PCNTL_ECHILD: i64 = libc::ECHILD as i64;
     pub(crate) const PCNTL_EINVAL: i64 = libc::EINVAL as i64;

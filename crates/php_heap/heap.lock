@@ -86,6 +86,7 @@ Heap::array_next_entry
 Heap::array_packed
 Heap::array_sized
 Heap::array_sort
+Heap::array_str_update
 Heap::array_update
 Heap::block
 Heap::block_resize

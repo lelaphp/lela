@@ -399,14 +399,7 @@ pub(super) fn set_str(
     key: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, key) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, key, value)
 }
 
 /// `add_assoc_string`.
@@ -489,14 +482,7 @@ pub(super) fn rows_array(
     }
     let mut fields = fields.into_iter();
     while let Some((name, value)) = fields.next() {
-        let set = match PhpString::new(req, name) {
-            Ok(key) => array.set(req, key.into_key(), value),
-            Err(thrown) => {
-                value.give_up(req);
-                Err(thrown)
-            }
-        };
-        if let Err(thrown) = set {
+        if let Err(thrown) = array.set_str(req, name, value) {
             give_up_fields(req, fields.collect());
             array.give_up(req);
             return Err(thrown);

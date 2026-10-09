@@ -419,10 +419,11 @@ impl Key {
 /// `try_append` take an [`Owner`] of the value they write, and `set` one
 /// of the key: the value is the array's from that moment, as
 /// `ZVAL_COPY_VALUE` into the bucket makes it php's, and so is a string
-/// key. A native builds a string with [`PhpString::new`], hands its
-/// owner to `set`, and never names it again, which is `add_assoc_*`'s
-/// shape; a value it was handed, a view, it hands on with
-/// [`Owner::take`], `Z_TRY_ADDREF` first as php's natives do. A view
+/// key. A native adds a row under a name it has as bytes with
+/// [`PhpArray::set_str`], which is `add_assoc_*`'s shape and makes the
+/// key where php's does; a key that is a string already it hands to
+/// `set` and never names again. A value it was handed, a view, it hands
+/// on with [`Owner::take`], `Z_TRY_ADDREF` first as php's natives do. A view
 /// handed as it stands does not compile:
 ///
 /// ```compile_fail,E0308
@@ -660,6 +661,32 @@ impl PhpArray {
             req.release(Value::string(s));
         }
         written
+    }
+
+    /// Write `value` under the string key of these bytes,
+    /// `zend_hash_str_update` after `SEPARATE_ARRAY`: the bytes are the
+    /// key as written, an option's or a field's name, no integer read out
+    /// of them, as [`PhpArray::find`] reads them. A present key keeps its
+    /// string and its place, its old value released; an absent one is
+    /// made only after the table has room for it, so a write that
+    /// doubles the table never holds the new key beside the old data and
+    /// the new, as php's never does. That is `add_assoc_*`'s write, which
+    /// `memory_get_peak_usage()` reads, and why a native adds a row under
+    /// a name it has as bytes here, never through a [`PhpString`] key
+    /// made first and handed to [`PhpArray::set`]. The value is the
+    /// array's from here.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_str(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        if let Err(thrown) = self.separate(req) {
+            value.give_up(req);
+            return Err(thrown);
+        }
+        req.array_str_update(self.0, name, value.hand_on())
     }
 
     /// Lay `value` down at `key` as `zend_hash_add_new` and

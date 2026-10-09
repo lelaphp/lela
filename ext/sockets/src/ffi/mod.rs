@@ -31,6 +31,11 @@ use std::ptr;
 
 use nix::errno::Errno;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{PacketBind, accept4, attach_cbpf, bind_packet, mcast_group, packet_index};
+
 /// A socket address as php reads one out of and writes one into a
 /// `sockaddr`: the three families the extension speaks, and the family
 /// number of any other, `0` for none at all.
@@ -211,7 +216,9 @@ pub(crate) fn socketpair(domain: i32, ty: i32, protocol: i32) -> Result<[OwnedFd
     Ok([first, second])
 }
 
-/// `accept(fd, &la, &la_len)`: the new fd and `la->sa_family`.
+/// `accept(fd, &la, &la_len)`: the new fd and `la->sa_family`, where
+/// there is no `accept4(2)`.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn accept(fd: RawFd) -> Result<(OwnedFd, i32), Errno> {
     let mut ss = storage();
     let mut len = len_of::<libc::sockaddr_storage>();
@@ -329,6 +336,25 @@ pub(crate) fn name(fd: RawFd, peer: bool) -> Result<Addr, Errno> {
     Ok(decode(&ss))
 }
 
+/// `socket_import_file_descriptor`'s family: `SO_DOMAIN` where the
+/// platform has it, and otherwise, or where it fails, the family
+/// `getsockname(2)` reports.
+pub(crate) fn family(fd: RawFd) -> Result<i32, Errno> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut domain = [0u8; 4];
+        if getsockopt(fd, libc::SOL_SOCKET, libc::SO_DOMAIN, &mut domain).is_ok() {
+            return Ok(i32::from_ne_bytes(domain));
+        }
+    }
+    Ok(match name(fd, false)? {
+        Addr::V4(_) => libc::AF_INET,
+        Addr::V6(_) => libc::AF_INET6,
+        Addr::Unix(_) => libc::AF_UNIX,
+        Addr::Other(family) => family,
+    })
+}
+
 /// `getsockopt(fd, level, name, buf, &len)`: how many bytes of `buf` the
 /// option filled.
 pub(crate) fn getsockopt(fd: RawFd, level: i32, name: i32, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -371,6 +397,7 @@ pub(crate) fn set_blocking(fd: RawFd, block: bool) -> Result<(), Errno> {
 
 /// `FD_CLOEXEC` set on an fd `accept` gave, where `accept4` is
 /// not, as `php_accept_connect` sets it.
+#[cfg(not(target_os = "linux"))]
 pub(crate) fn set_cloexec(fd: RawFd) -> Result<(), Errno> {
     // SAFETY: `F_GETFD` reads nothing through its arguments.
     let mode = result(unsafe { libc::fcntl(fd, libc::F_GETFD) })?;
