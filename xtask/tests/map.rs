@@ -623,11 +623,14 @@ fn the_map_and_the_local_facts_are_each_under_the_engines_cap_with_room() {
         )
         .ok();
     }
-    // What `session()` appends after the local file: the rules this
-    // session fired, each with its count, and the unreadable-log note,
-    // one line. Every rule of the permits section with its count across
-    // sessions bounds the block: a session fires no rule the section
-    // does not list, and no rule more often than the log does.
+    // What `session()` appends after the local file: the week's ticket
+    // closes in one line, from this workspace's stores (#1157).
+    write!(facts, "\n## tickets\n\n{}", section("tickets")).ok();
+    // And the rules this session fired, each with its count, and the
+    // unreadable-log note, one line. Every rule of the permits section
+    // with its count across sessions bounds the block: a session fires
+    // no rule the section does not list, and no rule more often than the
+    // log does.
     let mut this_session = String::from("| rule | this session |\n|---|---|\n");
     for row in section("permits").lines().skip(2) {
         let cells: Vec<&str> = row.split(" | ").collect();

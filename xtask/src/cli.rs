@@ -771,6 +771,11 @@ pub enum Section {
     /// The ticket readings, one row per ticket: its criteria, what closed
     /// it and the session.
     Ticket,
+    /// The last 7 days of `ticket` readings in the main worktree's store
+    /// and this checkout's: the closes, the successors they opened, the
+    /// withdrawals among them and the successors opened per close, in
+    /// one line (#1157).
+    Tickets,
     /// The last run of `xtask track work`: one row per ticket it worked,
     /// with the outcome, what its session spent and the commit its branch
     /// is at, and the run's own row last with the usd total.
