@@ -1511,9 +1511,11 @@ fn git_section(root: &Path, format: Table) -> Result<String> {
 }
 
 /// The `oracle` section: the pin as this machine has it (#36), from the
-/// pin and the process's environment alone. Five rows: the tree's
+/// pin and the process's environment alone. Seven rows: the tree's
 /// variable by name, its value and whether it is set; the promise's
-/// likewise; the pin's path and whether it is a directory; where
+/// likewise; the pin's path and whether it is a directory; its tag and
+/// commit as `[source]` states them, which the corpus section clones at
+/// (#66); where
 /// [`crate::oracle::Source::tree`] found the tree, the variable's or the
 /// pin's, or the absence it named; and the pinned php, its version, keg
 /// path and md5. CI reads the two names
@@ -1549,6 +1551,8 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
             "pin": {
                 "path": pinned.display().to_string(),
                 "directory": pinned.is_dir(),
+                "tag": source.tag,
+                "commit": source.commit,
             },
             "found": {
                 "path": found.as_ref().ok().map(|p| p.display().to_string()),
@@ -1590,6 +1594,8 @@ fn oracle_section(pin: &Pin, format: Table) -> Result<String> {
                 }
             )
             .ok();
+            writeln!(out, "| tag |  | {} | the pin's |", cell(&source.tag)).ok();
+            writeln!(out, "| commit |  | {} | the pin's |", cell(&source.commit)).ok();
             let (path, state) = match &found {
                 Ok(tree) => (
                     tree.display().to_string(),

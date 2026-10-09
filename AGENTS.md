@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 8 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=1c64d8558468c66fa353fd5df656f6ff7e530fda2fe45dd72226cebf332690c2 out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
+<!-- /computed in=0a2f6246d7e22d928245e75445614a80cb8d5cd789bc29ae41d42269fef3d81d out=cb60d76ed08803b3b6a43fc90899014bf298cbbf7eb944bea8e23bd930ec47bd -->
 
 ## What makes the third engine special?
 
@@ -130,7 +130,7 @@ third-engine-design.md
 | tier | tier.lock | 67 |  | no reading |
 | harness | xtask.lock | 380 |  | no reading |
 
-<!-- /computed in=45521c6f1a808ce2cdf6c0f3dc33d7455041490f116b6074f9788a5cc0445530 out=e5e5fc861821da42057cab568d34560ae17f622911ba35a0bcc42c4a2bf7fd20 -->
+<!-- /computed in=cebd9446536e99d84455da72e1b39ce0d9c670bee205f885863d3534607303f7 out=e5e5fc861821da42057cab568d34560ae17f622911ba35a0bcc42c4a2bf7fd20 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |
@@ -165,7 +165,7 @@ third-engine-design.md
 | divergence.reason |  | check | no reading |
 | owner.no-assign-discard |  | deny_pattern | no reading |
 
-<!-- /computed in=8699f82a4df0bab75898ff3e7d8c49fdd82092db989fcd48ccb5e0d299c83ee6 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
+<!-- /computed in=bb817c551b79bb0c9fb1e1d207289b8adad7449ae7c2ba94513856ac3e59b711 out=67796c3eadd731998411e1c6824ca811daebf7bcb708ab637367f749763faf62 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -203,7 +203,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=61966b0ca262908a5bd08de01f7134513600cf26c7412f9ef46a3ab67f7a4ab4 out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
+<!-- /computed in=a98ea3cbfa660fbfc329268159f8105ca9162efbadda5d2fdcd735ccdb6db7df out=e664430ce96b37a74f9976fb01ecb603c92aea0cffab0212baffcd7705d0b565 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

@@ -801,8 +801,9 @@ pub enum Section {
     /// `locks` totals (#1795).
     Modules,
     /// The pin as this machine has it: the tree's variable and the
-    /// promise's, each by name and whether it is set, the pin's path, and
-    /// which of the two places the tree was found at. CI reads the names
+    /// promise's, each by name and whether it is set, the pin's path, tag
+    /// and commit (#66), which of the two places the tree was found at,
+    /// and the pinned binary. CI reads the names
     /// here and spells them nowhere (#36).
     Oracle,
     /// The corpus CI checks out at the pin: the tag, the commit, the

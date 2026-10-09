@@ -761,6 +761,28 @@ fn oracle_states_the_pinned_php_a_runner_pours() {
     );
 }
 
+/// The pin's tag and commit as `[source]` states them (#66), beside its
+/// path: the section names the pin whole, which the corpus section clones
+/// at, so no reader parses `oracle.toml` for either.
+#[test]
+fn oracle_states_the_pins_tag_and_commit() {
+    let root = scratch("oracle-source");
+    let source = Manifest::load(workspace()).unwrap().pin.source;
+    let json = oracle_json(&root, None, None);
+    assert_eq!(json["pin"]["tag"], source.tag.as_str());
+    assert_eq!(json["pin"]["commit"], source.commit.as_str());
+    let (ok, md, err) = status_with_pin(&root, &["--section", "oracle"], None, None);
+    assert!(ok, "{err}");
+    assert!(
+        md.contains(&format!("| tag |  | {} | the pin's |", source.tag)),
+        "{md}"
+    );
+    assert!(
+        md.contains(&format!("| commit |  | {} | the pin's |", source.commit)),
+        "{md}"
+    );
+}
+
 /// The corpus CI checks out (#1713): the pin's tag, commit and count of
 /// `.phpt` files, the sparse patterns of the corpus's roots, and a cache
 /// key of the commit and a digest of the patterns, the same on every call,
