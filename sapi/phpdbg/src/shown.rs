@@ -1,13 +1,18 @@
 //! What the debugger keeps of a value it reads between steps, and the
 //! rows its `info` and `back` commands print (#1799): each value the
-//! tier face hands out is a view of what the request holds, copied here
+//! native face hands out is a view of what the request holds, copied here
 //! into a [`Shown`] before the request runs code again, so the watch
 //! list can compare it from one step to the next and `info vars` can
 //! print its owners as php's `Z_REFCOUNT` counts them. php's phpdbg
 //! reads the zvals themselves; this copy is what stands in for holding
 //! one across a step.
 
-use php_sapi::tier::{self, FrameRef, Identity, Request, Thrown, TypeTag, Value, ValueKey, rows};
+use php_ext::request::Request;
+use php_ext::values::walk::rows;
+use php_ext::values::{Identity, Key as ValueKey, TypeTag, Value};
+use php_sapi::tier::{self, FrameRef};
+
+use crate::read::{self, Thrown};
 
 /// A key of an array, or a property's name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +143,7 @@ fn shown(req: &Request, value: Value, depth: u32) -> Shown {
             };
             Shown::Object {
                 id: Identity::of(value),
-                class: tier::class_of(req, value).unwrap_or_default(),
+                class: read::class_of(req, value).unwrap_or_default(),
                 handle: object.index(),
             }
         }
@@ -176,36 +181,81 @@ fn variable_rows(req: &mut Request, read: Vec<(Vec<u8>, Value)>, depth: u32) -> 
         .collect()
 }
 
-/// The variable `name` of `frame`, copied to `depth` ([`tier::variable`]).
+/// php's auto-globals, `CG(auto_globals)` in the order php registers
+/// them (`php_startup_auto_globals`, then ext/session's `_SESSION`):
+/// what `zend_is_auto_global` knows, and the seven phpdbg's `info
+/// globals` arms before it walks the global table.
+const AUTO_GLOBALS: [&[u8]; 8] = [
+    b"_GET",
+    b"_POST",
+    b"_COOKIE",
+    b"_SERVER",
+    b"_ENV",
+    b"_REQUEST",
+    b"_FILES",
+    b"_SESSION",
+];
+
+/// The frame a step handed out, as the native face keeps one.
+fn frame_id(req: &Request, frame: FrameRef) -> Option<php_ext::request::FrameId> {
+    tier::frame(req, frame).map(|view| view.id())
+}
+
+/// The variable `name` of `frame`, copied to `depth`: what its symbol
+/// table holds under the name, or the compiled variable of that name
+/// where it has no table, so no table is built for the read.
 pub fn variable(req: &mut Request, frame: FrameRef, name: &[u8], depth: u32) -> Option<Shown> {
-    let value = tier::variable(req, frame, name)?;
+    let id = frame_id(req, frame)?;
+    let value = req.frame_var(id, name)?;
     Some(shown(req, value, depth))
 }
 
-/// The variables of `frame` as phpdbg's `info vars` lists them, each one
-/// level deep ([`tier::variables`]).
+/// The variables of `frame` as phpdbg's `info vars` lists them,
+/// `zend_rebuild_symbol_table`'s rows without the auto-globals, each one
+/// level deep.
 pub fn variables(req: &mut Request, frame: FrameRef) -> Vec<Variable> {
-    let read = tier::variables(req, frame);
+    let read = frame_id(req, frame)
+        .and_then(|id| req.frame_vars(id))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(name, _)| !AUTO_GLOBALS.contains(&name.as_slice()))
+        .collect();
     variable_rows(req, read, 1)
 }
 
-/// The superglobals as phpdbg's `info globals` lists them, each one level
-/// deep ([`tier::superglobals`]).
+/// The superglobals as phpdbg's `info globals` lists them, each armed
+/// first and read in the global table's order, one level deep.
 pub fn superglobals(req: &mut Request) -> Vec<Variable> {
-    let read = tier::superglobals(req);
+    for name in &AUTO_GLOBALS[..7] {
+        req.superglobal(name);
+    }
+    let read = req
+        .global_names()
+        .into_iter()
+        .filter(|name| AUTO_GLOBALS.contains(&name.as_slice()))
+        .filter_map(|name| {
+            let value = req.global(&name)?;
+            Some((name, value))
+        })
+        .collect();
     variable_rows(req, read, 1)
 }
 
-/// The constants the program defined as phpdbg's `info constants` lists
-/// them ([`tier::user_constants`]).
+/// The constants the program defined, `PHP_USER_CONSTANT`, as phpdbg's
+/// `info constants` lists them in the table's order.
 pub fn user_constants(req: &mut Request) -> Vec<Variable> {
-    let read = tier::user_constants(req);
+    let read = req
+        .constant_table()
+        .into_iter()
+        .filter(|(extension, _, _)| extension.is_none())
+        .map(|(_, name, value)| (name, value))
+        .collect();
     variable_rows(req, read, 0)
 }
 
-/// What stands pending on the request, read off it ([`tier::pending`]).
+/// What stands pending on the request, read off it ([`read::pending`]).
 pub fn pending(req: &Request) -> Option<Pending> {
-    let object = match tier::pending(req)? {
+    let object = match read::pending(req)? {
         Thrown::GracefulExit => {
             return Some(Pending {
                 id: u32::MAX,
@@ -226,29 +276,36 @@ pub fn pending(req: &Request) -> Option<Pending> {
     };
     Some(Pending {
         id: throwable.index(),
-        class: tier::class_of(req, object).unwrap_or_default(),
+        class: read::class_of(req, object).unwrap_or_default(),
         file: bytes(b"file"),
         line: prop(b"line").and_then(|v| v.as_int()).unwrap_or(0),
         message: bytes(b"message"),
     })
 }
 
-/// The literals of the op array `frame` serves ([`tier::literals`]).
+/// The literals of the op array `frame` serves, `op_array->literals` in
+/// order.
 pub fn literals(req: &mut Request, frame: FrameRef) -> Vec<Shown> {
-    tier::literals(req, frame)
-        .into_iter()
+    let Some(code) = tier::frame(req, frame).and_then(|view| view.op_array()) else {
+        return Vec::new();
+    };
+    (0..)
+        .map_while(|at| code.constant(php_ext::request::ConstIdx(at)))
         .map(|value| shown(req, value, 0))
         .collect()
 }
 
 /// The rows of the chain from the innermost frame down, `limit` of them
-/// where it is not zero ([`tier::backtrace`]), each read back out of the
-/// array `zend_fetch_debug_backtrace` builds by its keys.
+/// where it is not zero, each read back out of the array
+/// `zend_fetch_debug_backtrace(&trace, 0, 0, limit)` builds by its keys,
+/// and the array given up after, as phpdbg's `back` builds and destroys
+/// it; none where building it met the memory limit.
 pub fn backtrace(req: &mut Request, limit: i64) -> Vec<TraceRow> {
-    tier::backtrace(req, limit, |req, trace| {
-        let Some(trace) = trace.as_array().copied() else {
-            return Vec::new();
-        };
+    let Ok(trace) = req.backtrace_here(0, limit) else {
+        return Vec::new();
+    };
+    let read = {
+        let trace = *trace;
         let req: &Request = req;
         let mut read = Vec::new();
         for (_, row) in rows(req, trace) {
@@ -280,6 +337,7 @@ pub fn backtrace(req: &mut Request, limit: i64) -> Vec<TraceRow> {
             });
         }
         read
-    })
-    .unwrap_or_default()
+    };
+    trace.give_up(req);
+    read
 }

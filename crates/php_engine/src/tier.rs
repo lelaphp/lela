@@ -13,12 +13,14 @@
 //! says.
 //!
 //! The debugging host is a `Tier` too (`jit-design.md` §2.4, revision 8;
-//! design §5.8, revision 51): its `safepoint` is where it stops the serving and [`step`]
-//! is its loop, as the recorder's, with [`unwind`] beside it for the
-//! frame a step left a throwable pending in, and the frame reads
-//! between the steps. A read hands out what the engine holds, a value
-//! as the [`Value`] the request holds and an op array as its [`Code`];
-//! how a debugger shows it is the host's (#1799). `php_sapi` re-exports
+//! design §5.8, revision 51): its `safepoint` is where it stops the
+//! serving and [`step`] is its loop, as the recorder's, with [`unwind`]
+//! beside it for the frame a step left a throwable pending in. This face
+//! is the mechanism and the writes: the frames a step hands out, the
+//! stack they stand on, and the code a tier has the engine serve on its
+//! own account. What a frame, an op array or a linked table holds, a
+//! tier reads through the native face, as an extension does ([`frame`]
+//! hands a frame a step named over to it; #1911). `php_sapi` re-exports
 //! this face, so a host that binds a tier names none of `php_engine`.
 
 use std::sync::atomic::AtomicU32;
@@ -28,27 +30,13 @@ use crate::observer::{Declared, ObservedOpcodes, Telling, Untold};
 use crate::{exec, interrupt};
 
 pub use crate::api::request::Request;
-pub use crate::api::values::walk::{Rows, rows};
-pub use crate::api::values::{Key as ValueKey, TypeTag, Value};
 pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
-pub use php_unit::Opcode;
 
-mod code;
 mod frames;
-mod values;
-pub use code::{
-    Class, Code, Named, Shape, class_named, frame_code, function_named, method_named, table_sizes,
-    user_classes, user_functions,
-};
 pub use frames::{
-    Argument, Aside, Called, Evaluated, Position, Serves, Thrown, Under, below, call, caller,
-    catches, entry, evaluate, evaluate_code, exit, exiting, function_exists, oplines, pending,
-    position, restore, serves, set_aside,
-};
-pub use values::{
-    Identity, backtrace, class_of, included_files, last_error, literals, set_argv, set_stdin,
-    superglobals, user_constants, variable, variables,
+    Argument, Aside, Called, Evaluated, Under, below, call, catches, entry, evaluate,
+    evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 
 /// The number of a safepoint within its op array; zero is the entry.

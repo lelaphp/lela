@@ -10,7 +10,7 @@ use php_heap::{FrameRef, Slot};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::exec;
 
 use super::{Deprecations, Link, Overwrite, Request, Slots, Symbol};
@@ -473,13 +473,6 @@ impl Request {
     /// outside.
     #[must_use]
     pub fn frame_args(&self, depth: u32) -> Option<Vec<Value>> {
-        let _ = depth;
-        None
-    }
-
-    /// The variables of the frame `depth` levels up, `get_defined_vars`.
-    #[must_use]
-    pub fn frame_vars(&self, depth: u32) -> Option<PhpArray> {
         let _ = depth;
         None
     }

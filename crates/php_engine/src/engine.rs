@@ -1296,6 +1296,20 @@ pub(crate) struct Declared<'a> {
 }
 
 impl Shared {
+    /// `zend_flf_functions` by name, in the frameless table's order
+    /// ([`Engine::frameless`]).
+    pub(crate) fn frameless_names(&self) -> Vec<Name> {
+        self.frameless
+            .iter()
+            .map(|entry| {
+                self.functions
+                    .get(entry.function as usize)
+                    .map(|decl| decl.name.clone())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
     /// The opcodes the bundle observes, asked of each extension once its
     /// engine start is over, and the loop bound to them: the one that
     /// tells their observers where any is declared and the one with no
@@ -3819,17 +3833,7 @@ impl Engine {
     /// carries indexes the name php's dump would print.
     #[must_use]
     pub fn frameless(&self) -> Vec<Name> {
-        self.shared
-            .frameless
-            .iter()
-            .map(|entry| {
-                self.shared
-                    .functions
-                    .get(entry.function as usize)
-                    .map(|decl| decl.name.clone())
-                    .unwrap_or_default()
-            })
-            .collect()
+        self.shared.frameless_names()
     }
 
     /// `zend_register_ini_entries_ex` at `ZEND_INI_STAGE_STARTUP`

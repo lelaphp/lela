@@ -81,11 +81,14 @@ pub(super) struct Classes {
 }
 
 impl Request {
-    /// `EG(class_table)` in its order, each row the class and, for an
-    /// alias's row, the lowered name it is keyed by: the engine's
+    /// `EG(class_table)`'s keys in their order, each row the class and,
+    /// for an alias's row, the lowered name it is keyed by: the engine's
     /// classes, each native alias after its class, then the request's
-    /// rows in their buckets.
-    pub(crate) fn class_table(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
+    /// rows in their buckets. A class is a user class where it has no
+    /// [`Request::class_extension`]; `get_declared_classes()` lists these
+    /// rows, and phpdbg's `clean` counts them.
+    #[must_use]
+    pub fn class_keys(&self) -> Vec<(ClassId, Option<Vec<u8>>)> {
         let mut rows: Vec<(ClassId, Option<Vec<u8>>)> = (0u32..)
             .zip(&self.shared.classes)
             .flat_map(|(at, decl)| {
@@ -1399,6 +1402,23 @@ impl Request {
             .map(|(function, _)| function)
     }
 
+    /// `EG(function_table)` in its order: every native function, then
+    /// each user function the request can find, in the order the table
+    /// took them, as `get_defined_functions()` lists them; a method is
+    /// none, being its class's, and a closure is none, since php never
+    /// adds one to the table. A function is a user function where it
+    /// has an op array ([`Request::op_array`]).
+    #[must_use]
+    pub fn functions(&self) -> Vec<Function> {
+        let natives = u32::try_from(self.shared.functions.len()).unwrap_or(u32::MAX);
+        let user = self.function_table().filter_map(|(function, user)| {
+            user_function_decl(user)
+                .filter(|decl| !decl.name.0.starts_with(b"{"))
+                .map(|_| function)
+        });
+        (0..natives).map(Function).chain(user).collect()
+    }
+
     /// The user functions the request's `EG(function_table)` can find,
     /// each with its number, in the order the table took them: the
     /// preload's, published, then the request's own rows, which hold its
@@ -1812,18 +1832,17 @@ impl Request {
 
     /// What [`defined_functions`](Self::defined_functions) makes, its one owner not yet named.
     pub(crate) fn defined_functions_made(&mut self) -> Result<PhpArray, Thrown> {
-        let internal: Vec<Vec<u8>> = self
-            .shared
-            .functions
-            .iter()
-            .map(|decl| decl.name.0.to_ascii_lowercase())
-            .collect();
-        let user: Vec<Vec<u8>> = self
-            .function_table()
-            .filter_map(|(_, user)| user_function_decl(user))
-            .map(|decl| decl.name.0.to_ascii_lowercase())
-            .filter(|name| !name.starts_with(b"{"))
-            .collect();
+        let (mut internal, mut user) = (Vec::new(), Vec::new());
+        for function in self.functions() {
+            let list = if self.user_function(function).is_some() {
+                &mut user
+            } else {
+                &mut internal
+            };
+            if let Some(decl) = self.function_decl(function) {
+                list.push(decl.name.0.to_ascii_lowercase());
+            }
+        }
         let mut array = self.array()?;
         for (list, names) in [(&b"internal"[..], internal), (b"user", user)] {
             let mut rows = self.array()?;

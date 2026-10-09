@@ -45,18 +45,15 @@ pub use php_engine::{
 
 /// The tier face (`jit-design.md` §2.4, revision 8; ADR-0006): what a host
 /// that binds a tier of its own, the debugging host, implements `Tier`
-/// with and reads between the steps it drives, re-exported as the host
-/// face is, so no host names `php_engine`.
+/// with, the stack it steps and what it writes between the steps,
+/// re-exported as the host face is, so no host names `php_engine`. What
+/// a frame, an op array or a linked table holds, the host reads through
+/// the native face, as an extension does ([`tier::frame`]; #1911).
 pub mod tier {
     pub use php_engine::tier::{
-        Argument, Aside, Called, Class, Code, Evaluated, Fatal, Flow, FrameRef, Hooked, Identity,
-        Named, Opcode, Position, Request, Rows, SafepointIdx, Serves, Shape, Site, Stepped, Thrown,
-        Tier, TypeTag, Under, Value, ValueKey, backtrace, below, call, caller, catches,
-        class_named, class_of, entry, evaluate, evaluate_code, exit, exiting, frame_code,
-        function_exists, function_named, included_files, last_error, literals, method_named,
-        oplines, pending, position, restore, rows, serves, set_argv, set_aside, set_stdin, step,
-        superglobals, table_sizes, unwind, user_classes, user_constants, user_functions, variable,
-        variables,
+        Argument, Aside, Called, Evaluated, Flow, FrameRef, Hooked, Request, SafepointIdx, Site,
+        Stepped, Tier, Under, below, call, catches, entry, evaluate, evaluate_code, exit, frame,
+        restore, set_argv, set_aside, set_stdin, step, unwind,
     };
 }
 

@@ -1181,7 +1181,7 @@ fn class_alias(
 /// is keyed by.
 fn declared(req: &mut Request, kinds: &[ClassKind]) -> Result<Owner<PhpArray>, Thrown> {
     let names: Vec<Vec<u8>> = req
-        .class_table()
+        .class_keys()
         .into_iter()
         .filter_map(|(class, alias)| {
             let decl = req.class_decl(class)?;

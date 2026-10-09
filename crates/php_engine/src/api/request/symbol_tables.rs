@@ -5,7 +5,7 @@
 //! `compact`, `extract` and `get_defined_vars` make through them, and
 //! their release. The tables and the cache of rebuilt tables' bytes stay
 //! on the request, since `hash_bytes` keeps the bytes beside them and
-//! the tier face reads them.
+//! the native face reads a frame's through them.
 
 use php_heap::{FrameRef, Slot, Zval, ZvalRef};
 
@@ -595,11 +595,17 @@ impl Request {
             .iter()
             .find(|(key, _)| key == name)
             .map(|(_, symbol)| *symbol)?;
-        Some(match symbol {
+        Some(self.symbol_read(table, symbol))
+    }
+
+    /// What one bucket of `table` holds, an `IS_INDIRECT` bucket followed
+    /// to the CV of the frame attached to it. A view: no owner taken.
+    pub(super) fn symbol_read(&mut self, table: TableId, symbol: Symbol) -> Value {
+        match symbol {
             Symbol::Value(value) => value,
             Symbol::Held(cell) => cell.get(),
             Symbol::Indirect(frame, at) => self.attached(table, frame, at),
-        })
+        }
     }
 
     /// php's `IS_INDIRECT` bucket of `table`, the CV slot an attached name

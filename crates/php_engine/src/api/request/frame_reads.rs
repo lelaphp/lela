@@ -42,10 +42,10 @@ use std::ops::Range;
 use php_heap::{FrameRef, VmStack};
 
 use crate::api::call::Function;
-use crate::api::values::ClassId;
+use crate::api::values::{ClassId, Value};
 use crate::exec::{self, FrameState, Site, Vm};
 
-use super::{Link, OpArrayView, Request, Slots, links_of};
+use super::{Link, OpArrayView, OplineIdx, Request, Slots, links_of};
 
 /// A frame kept past the borrow it was read in, php's `execute_data`
 /// as an extension stores it: read again through [`Request::frame_of`],
@@ -157,7 +157,7 @@ impl<'a> FrameView<'a> {
     #[must_use]
     pub fn op_array(&self) -> Option<OpArrayView<'a>> {
         let state = self.state()?;
-        exec::body_of(&state.unit, state.body).map(OpArrayView::of)
+        exec::body_of(&state.unit, state.body).map(|code| OpArrayView::of(&state.unit, code))
     }
 
     /// `EX(opline)->lineno`: the line the frame stands on, the call's
@@ -165,6 +165,14 @@ impl<'a> FrameView<'a> {
     #[must_use]
     pub fn line(&self) -> u32 {
         self.state().map_or(0, exec::line_of)
+    }
+
+    /// `EX(opline) - EX(func)->op_array.opcodes`: where in its op array
+    /// the frame stands, the opline the loop dispatches next for the
+    /// innermost frame and the call's for a frame below it.
+    #[must_use]
+    pub fn opline(&self) -> OplineIdx {
+        OplineIdx(self.state().map_or(0, |state| state.opline))
     }
 
     /// `zend_get_opcode_name(EX(opline)->opcode)`: the opcode of the
@@ -425,6 +433,46 @@ impl Request {
             vm,
             at,
         })
+    }
+
+    /// The variable `name` of the frame `id` names, a view, as php's
+    /// debuggers read one between two oplines: what the frame's symbol
+    /// table holds under the name where it has one, else the compiled
+    /// variable of that name, so no table is built for the read; `UNDEF`
+    /// where the name is one and holds nothing. `None` where the frame
+    /// knows no such name, or is not one this reaches: popped,
+    /// suspended, or below a fiber.
+    pub fn frame_var(&mut self, frame: FrameId, name: &[u8]) -> Option<Value> {
+        let at = self.running_frame_of(frame)?;
+        if let Some(table) = self.vm.at(at).and_then(|state| state.symbol_table) {
+            return self.symbol_value(table, name);
+        }
+        let cv = self
+            .frame_var_names(at)
+            .iter()
+            .position(|held| held.as_slice() == name)?;
+        Some(self.slot(at, u32::try_from(cv).ok()?))
+    }
+
+    /// `zend_rebuild_symbol_table()` over the frame `id` names, and each
+    /// name it holds with its value, a view, in the table's order: the
+    /// rows `get_defined_vars()` copies, `$_SERVER` and the other
+    /// auto-global variables among them in the main frame's, as phpdbg's
+    /// `info vars` walks them. `None`
+    /// where the frame is not one this reaches.
+    pub fn frame_vars(&mut self, frame: FrameId) -> Option<Vec<(Vec<u8>, Value)>> {
+        let at = self.running_frame_of(frame)?;
+        let table = self.rebuild_symbol_table(at);
+        let entries = self.table_mut(table).map(|rows| rows.clone())?;
+        Some(
+            entries
+                .into_iter()
+                .map(|(name, symbol)| {
+                    let value = self.symbol_read(table, symbol);
+                    (name, value)
+                })
+                .collect(),
+        )
     }
 
     /// Where the frame `id` names stands, where that is the running

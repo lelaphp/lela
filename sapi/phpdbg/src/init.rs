@@ -323,7 +323,7 @@ fn block(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Read {
             Read::BailedOut
         }
         // The compiler's fatal bails out before anything is served.
-        tier::Evaluated::NotCompiled if tier::pending(req).is_none() => Read::BailedOut,
+        tier::Evaluated::NotCompiled if crate::read::pending(req).is_none() => Read::BailedOut,
         _ => Read::Whole,
     }
 }

@@ -177,17 +177,6 @@ impl Request {
         self.diagnostics.display_errors_word = None;
     }
 
-    /// `PG(last_error_message)`, `last_error_file` and `last_error_lineno`.
-    pub(crate) fn last_error_row(&self) -> Option<(Vec<u8>, Vec<u8>, u32)> {
-        self.diagnostics.last_error.map(|last| {
-            (
-                last.message.as_bytes().to_vec(),
-                last.file.as_bytes().to_vec(),
-                last.line,
-            )
-        })
-    }
-
     /// `php_log_err_with_severity` (`Z/main/main.c:919-990`): one entry
     /// appended to the file `error_log` names, as it stands when the
     /// entry is written, opened `O_CREAT | O_APPEND` against the working

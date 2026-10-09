@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=7cb8d4e386452301d8e03e6808f93f4c55974d28dc6c3415550de96cb06e1457 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=1ae30344b170143b89e4b9d8bd2bb04d5251d26ad3b1a84cb8f1373e10945f9b out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -115,7 +115,7 @@ third-engine-design.md
 - ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 
-<!-- /computed in=be732ccd1dbc5db7915cd76ee094197e6b019cd74819350d09b5e51700caf1d0 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
+<!-- /computed in=eee6aaed6aed5b4236dca6224300a93d161d48f09c9a673365ddbc00b8a11e14 out=d44229ee3c88a9f854171d9e24e02cda6b7eee9bdeced479ad2aba0248645577 -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling | reading |
@@ -125,13 +125,13 @@ third-engine-design.md
 | unit | unit.lock | 95 |  | no reading |
 | link | link.lock | 47 |  | no reading |
 | ops | ops.lock | 209 |  | no reading |
-| api | api.lock | 1345 | 1500 | no reading |
+| api | api.lock | 1355 | 1500 | no reading |
 | sapi | sapi.lock | 43 |  | no reading |
-| tier | tier.lock | 67 |  | no reading |
+| tier | tier.lock | 31 |  | no reading |
 | layer | layer.lock | 36 |  | no reading |
 | harness | xtask.lock | 388 |  | no reading |
 
-<!-- /computed in=9b23248968bde82f97899360e54f44276af36e33decd6a7ae2a26be821e1b029 out=b73afd08af8b54c067d9148a6c9b482620435e132b1438c53b494a3b1d385584 -->
+<!-- /computed in=49d7ec0f60e32e8b5e38a21d5135f1f745e7bbf565a0fd37ab63d5f95e123795 out=6d8a07b2dc87d8b526e065ca302aea5953fbf3042f811d518533302947dfbc21 -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
 | rule | adr | predicate | reading |

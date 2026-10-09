@@ -16,7 +16,8 @@ use super::test_ext::observed_name;
 use crate::api::abi::{Extension, ExtensionBuilder, Observed, Opcodes, Start};
 use crate::engine::{Engine, EngineBuilder};
 use crate::observer::{Declared, Untold};
-use crate::tier::{Loop, Nop, Opcode, execute};
+use crate::tier::{Loop, Nop, execute};
+use php_unit::Opcode;
 
 /// An extension that observes the opcodes its own system ini entry,
 /// `t.opcodes_N`, names, separated by spaces or commas as `zend_test`

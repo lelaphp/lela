@@ -29,10 +29,11 @@ use php_heap::FrameRef;
 
 use super::observer::{observed, scratch, serve_main};
 use super::test_ext::{Event, Phase, Recording, TestExt};
-use crate::api::request::Request;
+use crate::api::request::{Raised, Request};
 use crate::engine::{Engine, EngineBuilder};
 use crate::probe::Probe;
-use crate::tier::{self, Flow, Opcode, Site, Stepped, Tier};
+use crate::tier::{self, Flow, Site, Stepped, Tier};
+use php_unit::Opcode;
 
 thread_local! {
     /// How many handlers a stepping tier dispatched through `step` or
@@ -60,20 +61,30 @@ fn stepped(req: &mut Request, frame: FrameRef, steps_leaving: bool) -> Flow {
     let mut at = frame;
     let mut unwinding = false;
     loop {
-        let Some(position) = tier::position(req, at) else {
+        let Some(opcode) = tier::frame(req, at).and_then(|view| {
+            let code = view.op_array()?;
+            code.opline(view.opline()).map(|op| op.opcode())
+        }) else {
             return Flow::Resume(at);
         };
-        if tier::exiting(req) {
+        // The unwind exit, or a fatal leaving: nothing a debugger stops at.
+        if matches!(req.raised(), Some(Raised::UnwindExit))
+            || (req.raised().is_none() && req.bailing_out())
+        {
             return Flow::Resume(at);
         }
         let entry = tier::entry(req);
         let stepped = if unwinding {
-            if at != entry || tier::catches(req, at) || tier::pending(req).is_none() {
+            let pending = matches!(
+                req.raised(),
+                Some(Raised::Throwable(_) | Raised::GracefulExit)
+            );
+            if at != entry || tier::catches(req, at) || !pending {
                 tier::unwind(req, at)
             } else {
                 return Flow::Resume(at);
             }
-        } else if at == entry && !steps_leaving && leaves(position.opcode) {
+        } else if at == entry && !steps_leaving && leaves(opcode) {
             return Flow::Resume(at);
         } else {
             tier::step(req, at)

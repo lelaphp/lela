@@ -15,12 +15,13 @@ use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, raise};
+use php_ext::request::Opcode;
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
-use php_sapi::tier::{self, Code, Opcode};
 
 use crate::bp::At;
 use crate::out::{self, Element};
+use crate::read::{self, Code};
 use crate::session::{self, Logged};
 
 /// The constants `register_phpdbg_symbols` registers: the version, and
@@ -99,13 +100,13 @@ fn phpdbg_break_next(req: &mut Request) {
     let Some(frame) = session::with(|s| s.standing).flatten() else {
         return;
     };
-    let Some(position) = tier::position(req, frame) else {
+    let Some(position) = read::position(req, frame) else {
         return;
     };
-    let serves = tier::serves(req, frame);
+    let serves = read::serves(req, frame);
     let (function, class) = match &serves {
-        tier::Serves::Code => (None, None),
-        tier::Serves::Function { name, class } => (Some(name.as_slice()), class.as_deref()),
+        read::Serves::Code => (None, None),
+        read::Serves::Function { name, class } => (Some(name.as_slice()), class.as_deref()),
     };
     let at = At {
         file: &position.file,
@@ -491,7 +492,7 @@ fn phpdbg_get_executable(
         // reaches a file's code, and the included files beside them, one
         // of which may hold no code the loop stops at.
         let mut files: Vec<Vec<u8>> = sources.iter().map(|source| source.file.clone()).collect();
-        for file in tier::included_files(req) {
+        for file in req.included_files() {
             if !files.contains(&file) {
                 files.push(file);
             }
@@ -506,11 +507,11 @@ fn phpdbg_get_executable(
         let at = rows.at(&code.file, name.filter(|_| by_function));
         executable(rows, at, &code.ops, code.params, by_opcode);
     };
-    for function in tier::user_functions(req) {
+    for function in read::user_functions(req) {
         let name = function.name.to_ascii_lowercase();
         code(&mut rows, &function, Some(name));
     }
-    for class in tier::user_classes(req) {
+    for class in read::user_classes(req) {
         if !files.contains(&class.file) {
             continue;
         }

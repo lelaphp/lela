@@ -549,6 +549,7 @@ request::FrameView::id
 request::FrameView::line
 request::FrameView::op_array
 request::FrameView::opcode
+request::FrameView::opline
 request::FrameView::walk
 request::HandlerCall
 request::HandlerOp
@@ -582,6 +583,7 @@ request::ObserveAllocations
 request::ObserveAllocations::observe
 request::OpArrayView
 request::OpArrayView::constant
+request::OpArrayView::dynamic_functions
 request::OpArrayView::filename
 request::OpArrayView::is_empty
 request::OpArrayView::len
@@ -649,6 +651,7 @@ request::Request::autoload_functions
 request::Request::autoload_register
 request::Request::autoload_unregister
 request::Request::backtrace
+request::Request::backtrace_here
 request::Request::bailing_out
 request::Request::blocking
 request::Request::buffer_handler
@@ -668,6 +671,7 @@ request::Request::class_extension
 request::Request::class_extension_name
 request::Request::class_flags
 request::Request::class_has_create_object
+request::Request::class_keys
 request::Request::class_name
 request::Request::class_own_iterator
 request::Request::clear_last_error
@@ -676,6 +680,7 @@ request::Request::connection_status
 request::Request::constant_attributes
 request::Request::constant_extension
 request::Request::constant_file
+request::Request::constant_table
 request::Request::constants
 request::Request::constants_in_order
 request::Request::content_type
@@ -689,6 +694,7 @@ request::Request::define_constant
 request::Request::defined_functions
 request::Request::disown
 request::Request::dl
+request::Request::dump_op_array
 request::Request::encodings
 request::Request::engine
 request::Request::env
@@ -720,10 +726,12 @@ request::Request::foreign
 request::Request::fork
 request::Request::frame_args
 request::Request::frame_of
+request::Request::frame_var
 request::Request::frame_vars
 request::Request::frameless
 request::Request::function_decl
 request::Request::function_extension
+request::Request::functions
 request::Request::gc_collect
 request::Request::gc_enable
 request::Request::gc_enabled
@@ -1139,6 +1147,8 @@ values::HeldProperties
 values::HeldProperties::count
 values::HeldProperties::release
 values::HeldProperties::table
+values::Identity
+values::Identity::of
 values::Key
 values::Key::from_string
 values::Key::lookup
