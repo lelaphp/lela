@@ -36,6 +36,11 @@ pub(crate) struct Conn {
     pub(crate) exceptions: bool,
     /// The next statement's id.
     next: u64,
+    /// The callables the functions, aggregates, collations and authorizer
+    /// of a connection since closed held: php's `funcs`, `collations` and
+    /// `authorizer_fcc`, which `SQLite3::close` leaves on the object and
+    /// only `php_sqlite3_object_free_storage` gives up.
+    closed_handlers: Vec<Handler>,
 }
 
 /// `initialised` and `db` as one state.
@@ -282,20 +287,20 @@ impl ObjectHandlers for Handlers {
         let Some(conn) = object.native_mut::<Conn>(req) else {
             return;
         };
-        let Link::Open(open) = std::mem::take(&mut conn.link) else {
-            return;
-        };
-        let Open {
-            db,
-            stmts,
-            registrations,
-        } = *open;
-        drop(stmts);
-        let mut handlers: Vec<Handler> = db.set_authorizer(None).into_iter().collect();
-        for registration in registrations {
-            handlers.extend(registration.unregister());
+        let mut handlers = std::mem::take(&mut conn.closed_handlers);
+        if let Link::Open(open) = std::mem::take(&mut conn.link) {
+            let Open {
+                db,
+                stmts,
+                registrations,
+            } = *open;
+            drop(stmts);
+            handlers.extend(db.set_authorizer(None));
+            for registration in registrations {
+                handlers.extend(registration.unregister());
+            }
+            drop(db);
         }
-        drop(db);
         for handler in handlers {
             handler.give_up(req);
         }
@@ -304,12 +309,17 @@ impl ObjectHandlers for Handlers {
     /// `php_sqlite3_get_gc`: the authorizer, the functions and the
     /// collations.
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
-        let Some(Link::Open(open)) = object.native::<Conn>(req).map(|conn| &conn.link) else {
+        let Some(conn) = object.native::<Conn>(req) else {
             return;
         };
-        open.db.visit_authorizer(visit);
-        for registration in &open.registrations {
-            registration.visit(visit);
+        for handler in &conn.closed_handlers {
+            handler.visit(visit);
+        }
+        if let Link::Open(open) = &conn.link {
+            open.db.visit_authorizer(visit);
+            for registration in &open.registrations {
+                registration.visit(visit);
+            }
         }
     }
 }
@@ -667,7 +677,27 @@ impl SQLite3 {
     }
 
     /// `SQLite3::close()`: the statements finalized, then the connection
-    /// closed; `true` for one already closed.
+    /// closed; `true` for one already closed. The callables its
+    /// functions, aggregates, collations and authorizer held stay on the
+    /// object until it is freed, as php's `free_storage` alone gives them
+    /// up:
+    ///
+    /// ```php
+    /// class A { function __destruct() { echo "dtor\n"; } }
+    /// $db = new SQLite3(':memory:');
+    /// $a = new A;
+    /// $db->createFunction('f', function () use ($a) { return 1; });
+    /// unset($a);
+    /// $db->close();
+    /// echo "closed\n";
+    /// unset($db);
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// closed
+    /// dtor
+    /// end
+    /// ```
     ///
     /// ```php
     /// $db = new SQLite3(':memory:');
@@ -704,9 +734,8 @@ impl SQLite3 {
         let authorizer = db.set_authorizer(None);
         match db.close(registrations) {
             Ok(handlers) => {
-                for handler in handlers.into_iter().chain(authorizer) {
-                    handler.give_up(req);
-                }
+                conn.closed_handlers.extend(authorizer);
+                conn.closed_handlers.extend(handlers);
                 Ok(true)
             }
             Err(unclosed) => {
@@ -718,10 +747,7 @@ impl SQLite3 {
                     message,
                 } = *unclosed;
                 db.set_authorizer(authorizer);
-                conn_reopen(req, object, db, registrations)?;
-                for handler in released {
-                    handler.give_up(req);
-                }
+                conn_reopen(req, object, db, registrations, released)?;
                 let message = format!("Unable to close database: {}", text(&message));
                 fail(req, exceptions, None, i64::from(code), &message)?;
                 Ok(false)
@@ -1351,14 +1377,19 @@ impl SQLite3 {
     }
 }
 
-/// The connection put back after a close the library refused.
+/// The connection put back after a close the library refused, and the
+/// callables of what the close had already taken off it kept on the
+/// object, as php's lists keep them.
 fn conn_reopen(
     req: &mut Request,
     object: PhpObject,
     db: Db,
     registrations: Vec<Registration>,
+    released: Vec<Handler>,
 ) -> Result<(), Thrown> {
-    conn(req, object)?.link = Link::Open(Box::new(Open {
+    let conn = conn(req, object)?;
+    conn.closed_handlers.extend(released);
+    conn.link = Link::Open(Box::new(Open {
         db,
         stmts: BTreeMap::new(),
         registrations,
