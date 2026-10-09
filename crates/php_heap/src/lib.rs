@@ -121,6 +121,9 @@ pub struct Heap {
     /// php's `zend_gc_globals`, the cycle collector's root buffer and
     /// numbers, the request's own (design §5.12).
     gc: collector::Collector,
+    /// The walks' pins past the first over blocks other than objects
+    /// ([`Heap::pin_block`]).
+    nested: gc::Nested,
     /// The constant arrays of the units this request alone serves, out of
     /// this heap and immutable, so no release frees them: kept in a
     /// debug build for its teardown to free by name before the request
@@ -152,6 +155,7 @@ impl Heap {
             interned: string::Table::new(),
             iterators: iterators::Iterators::default(),
             gc,
+            nested: gc::Nested::default(),
             #[cfg(debug_assertions)]
             constant_arrays: Vec::new(),
         }
@@ -655,12 +659,14 @@ impl Heap {
     /// `memory_get_usage()`, and only the bytes wait for
     /// [`Heap::unpin_block`], so what names the block reads it destroyed
     /// and never freed. The count is untouched, so every count php reads
-    /// and every separation it makes stand as php's. An object's pins
-    /// are counted, the pin a frame takes of its receiver among them
-    /// ([`Obj::pin`]), so this always sets one; any other block has one
-    /// pin, and a block pinned already is kept by the pin that set it,
-    /// which is let go after this one, as a walk's steps nest. Whether
-    /// this call set it: not for a value that carries no count.
+    /// and every separation it makes stand as php's. The pins are
+    /// counted, an object's in its header ([`Obj::pin`]), the pin a frame
+    /// takes of its receiver among them, and any other block's by the
+    /// header's bit and the heap's count of the pins past the first, so
+    /// the pins over one block are let go in any order, as a walk's step
+    /// suspended in a fiber and a walk's step outside it let go theirs
+    /// (#2291), and the last let go gives the bytes back. A value that
+    /// carries no count takes no pin.
     ///
     /// A row the program frees while a walk reads it is destroyed at the
     /// `unset`, as php destroys it, whether it is an object or a table,
@@ -703,27 +709,31 @@ impl Heap {
     /// id 1 freed-mem 16
     /// a:1:{i:0;a:2:{i:0;O:1:"X":1:{s:1:"c";O:1:"C":0:{}}i:1;i:1;}}
     /// ```
-    #[must_use = "a pin that was set is let go with Heap::unpin_block"]
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn pin_block(z: Zval) -> bool {
+    pub fn pin_block(&mut self, z: Zval) {
         if let Some(o) = z.as_obj() {
             o.pin();
-            return true;
+        } else if let Some(header) = counted_header(z)
+            && header.pin()
+        {
+            self.nested.add(header.block());
         }
-        counted_header(z).is_some_and(Counted::pin)
     }
 
-    /// The pin [`Heap::pin_block`] set over `z` let go: where the block
-    /// was destroyed while it stood and no owner was taken of it since,
-    /// its bytes go back now, nothing else, since its destruction was
-    /// served at php's moment.
+    /// One pin [`Heap::pin_block`] took over `z` let go: where it was the
+    /// last, the block was destroyed while the pins stood, and no owner
+    /// was taken of it since, its bytes go back now, nothing else, since
+    /// its destruction was served at php's moment.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn unpin_block(&mut self, z: Zval) {
         if let Some(o) = z.as_obj() {
             self.unpin(o);
             return;
         }
-        if counted_header(z).map(Counted::unpin) != Some(0) {
+        let Some(header) = counted_header(z) else {
+            return;
+        };
+        if self.nested.let_go(header.block()) || header.unpin() != 0 {
             return;
         }
         if let Some(s) = z.as_str()
@@ -734,11 +744,11 @@ impl Heap {
             // A resource its owners took off the list has its bytes
             // retired while it lives ([`Heap::resource_unlist`]): they go
             // back with its last owner, not with a pin.
-        } else if let Some(at) = counted_header(z).map(Counted::block) {
+        } else {
             // SAFETY: where it is retired, the block's last owner went
-            // while the pin stood, its destruction is done, and the pin
-            // was the last thing naming it.
-            unsafe { self.mm.free_retired(at) };
+            // while the pins stood, its destruction is done, and the last
+            // pin was the last thing naming it.
+            unsafe { self.mm.free_retired(header.block()) };
         }
     }
 }

@@ -515,3 +515,30 @@ fn a_pinned_row_appended_to_is_copied_not_moved() {
     assert_eq!(served.fatal, None);
     assert_eq!(served.exit_code, 0);
 }
+
+/// A row pinned by a walk outside a fiber and by a walk inside it that
+/// suspends in its step is kept by whichever pin is let go last (#2291):
+/// the walk outside ends its step first, the program then gives up the
+/// row's last owner and allocates strings of its size, and the fiber's
+/// walk, resumed, takes an owner of the row it was lent, the string as
+/// it stood, destroyed and its bytes kept for the fiber's pin. With the
+/// pin one bit, cleared by the first pin let go, the string was freed at
+/// the program's write and the fiber's owner taken of freed memory, the
+/// debug build's freed-use guard firing at it.
+#[test]
+fn a_row_pinned_across_a_fiber_suspend_stands_until_its_last_pin_goes() {
+    let served = armed().serve_capture(
+        "<?php function s($c) { return $c . PHP_INT_MAX; }\n\
+         $a = ['k' => s('v')]; $fiber = null;\n\
+         foreach_takes($a, function ($k) { global $fiber; if ($fiber === null) { $fiber = new Fiber(function () { global $a; foreach_takes($a, function ($k) { Fiber::suspend(); }); }); $fiber->start(); echo 'suspended '; } });\n\
+         $a['k'] = 'other'; $GLOBALS['y'] = s('z'); $GLOBALS['z'] = s('q');\n\
+         $fiber->resume(); echo \"\\n\";\n",
+        Capture::default(),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        "suspended read v9223372036854775807 read v9223372036854775807 \n"
+    );
+    assert_eq!(served.fatal, None);
+    assert_eq!(served.exit_code, 0);
+}

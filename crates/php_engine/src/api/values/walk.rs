@@ -764,7 +764,7 @@ fn foreach_steps<B>(
 /// says; `None` past the last.
 #[inline(never)]
 fn next_lent(
-    req: &Request,
+    req: &mut Request,
     table: &Table,
     (pos, end): (u32, u32),
     watch: Watch,
@@ -834,25 +834,22 @@ impl Lent {
 #[derive(Debug)]
 struct Pin<T: View> {
     view: T,
-    /// Whether this pin set the block's, which a pin taken over a block
-    /// pinned already did not: the pin that set it, let go after this
-    /// one, keeps the block.
-    set: bool,
 }
 
 impl<T: View> Pin<T> {
-    /// A pin over what `view` names.
-    fn take(view: T) -> Pin<T> {
-        let set = php_heap::Heap::pin_block(view.counted().to_zval());
-        Pin { view, set }
+    /// A pin over what `view` names, one of its pins however many stand,
+    /// so a walk's pin and a walk's pin in a fiber suspended inside it
+    /// are let go in either order (#2291).
+    fn take(req: &mut Request, view: T) -> Pin<T> {
+        req.heap_mut().pin_block(view.counted().to_zval());
+        Pin { view }
     }
 
     /// The pin let go: the bytes of what the view names given back
-    /// where it was destroyed while the pin stood.
+    /// where it was destroyed while the pins stood and this one was the
+    /// last.
     fn let_go(self, req: &mut Request) {
-        if self.set {
-            req.heap_mut().unpin_block(self.view.counted().to_zval());
-        }
+        req.heap_mut().unpin_block(self.view.counted().to_zval());
     }
 }
 
@@ -866,10 +863,10 @@ enum Keep<T: View> {
 
 impl<T: View> Keep<T> {
     /// `view` kept as `lent` says.
-    fn lent(req: &Request, view: T, lent: Lent) -> Keep<T> {
+    fn lent(req: &mut Request, view: T, lent: Lent) -> Keep<T> {
         match lent {
             Lent::Owned => Keep::Owned(Owner::take(req, view)),
-            Lent::Pinned => Keep::Pinned(Pin::take(view)),
+            Lent::Pinned => Keep::Pinned(Pin::take(req, view)),
             Lent::Viewed => Keep::Viewed(view),
         }
     }
