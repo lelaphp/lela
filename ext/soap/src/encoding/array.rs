@@ -339,7 +339,8 @@ fn add_xml_array_elements(
 fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Owner<PhpArray>> {
     let mut copy = PhpArray::new(req)?;
     let fill = |req: &mut Request, copy: &mut Owner<PhpArray>| -> Res<()> {
-        let it = iterate(req, &o)?;
+        let held = iterate(req, &o)?;
+        let it = *held;
         let walk = |req: &mut Request, copy: &mut Owner<PhpArray>| -> Res<()> {
             it.rewind(req)?;
             while it.valid(req)? {
@@ -365,7 +366,7 @@ fn traversable_copy(req: &mut Request, o: php_ext::values::PhpObject) -> Res<Own
             Ok(())
         };
         let r = walk(req, copy);
-        req.release(it.as_value());
+        held.give_up(req);
         r
     };
     match fill(req, &mut copy) {
@@ -865,11 +866,7 @@ fn fill_array(
                 }
             }
         }
-        ar.set(
-            req,
-            Owner::take(req, Key::Int(i64::from(pos[dimension - 1]))),
-            tmp,
-        )?;
+        ar.set(req, Owner::index(i64::from(pos[dimension - 1])), tmp)?;
         let mut i = dimension;
         while i > 0 {
             i -= 1;
@@ -990,7 +987,7 @@ fn fill_map(req: &mut Request, cx: &mut Cx, mut ret: PhpArray, data: Node) -> Re
                 let s = PhpString::new(req, s.as_bytes())?;
                 Some(Key::from_string(req, s))
             }
-            ValueRef::Int(n) => Some(Owner::take(req, Key::Int(n))),
+            ValueRef::Int(n) => Some(Owner::index(n)),
             _ => None,
         };
         key.give_up(req);

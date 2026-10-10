@@ -30,7 +30,7 @@ use php_ext::raising::{
     Thrown, arg_null_deprecated, argument_error, deprecated, pending, throw_error,
 };
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use ffi::{Mpz, RandState, Round};
 use object::{GMP, made};
@@ -341,8 +341,8 @@ fn pair(req: &mut Request, a: Mpz, b: Mpz) -> Result<Owner<PhpArray>, Thrown> {
     let a = made(req, a)?;
     let b = made(req, b)?;
     let mut array = PhpArray::new(req)?;
-    array.set(req, Owner::take(req, Key::Int(0)), a.into_value())?;
-    array.set(req, Owner::take(req, Key::Int(1)), b.into_value())?;
+    array.set(req, Owner::index(0), a.into_value())?;
+    array.set(req, Owner::index(1), b.into_value())?;
     Ok(array)
 }
 

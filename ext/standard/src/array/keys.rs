@@ -449,7 +449,7 @@ fn array_count_values(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArr
 /// string, a canonical decimal read back as an int.
 fn symtable_key(req: &mut Request, value: &Value) -> Result<Owner<Key>, Thrown> {
     if let Some(n) = value.as_int() {
-        return Ok(Owner::take(req, Key::Int(n)));
+        return Ok(Owner::index(n));
     }
     if let Some(s) = value.as_php_string() {
         return Ok(Owner::take(req, Key::lookup(*s)));
@@ -542,7 +542,7 @@ fn array_change_key_case(
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let key = match key {
-            Key::Int(n) => Owner::take(req, Key::Int(n)),
+            Key::Int(n) => Owner::index(n),
             Key::Str(s) => {
                 let folded: Vec<u8> = s
                     .as_bytes()
@@ -640,11 +640,7 @@ fn array_fill(
     };
     let mut out = PhpArray::sized(req, u32::try_from(size).unwrap_or(u32::MAX), layout)?;
     for at in 0..count {
-        out.set(
-            req,
-            Owner::take(req, Key::Int(start + at)),
-            Owner::take(req, value),
-        )?;
+        out.set(req, Owner::index(start + at), Owner::take(req, value))?;
     }
     Ok(out)
 }

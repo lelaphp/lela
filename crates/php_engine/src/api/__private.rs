@@ -175,7 +175,7 @@ pub fn case_value<E: Cases>(req: &mut Request, variant: E) -> Result<Owner<Value
         return Err(fatal(req, "InternalError: a variant that is no case"));
     };
     let case = req.enum_case(class, name)?;
-    Ok(Owner::adopt(req, case.as_value()))
+    Ok(Owner::adopt(case.as_value()))
 }
 
 /// The Rust variant a case object of `E` is, read off its `name` as

@@ -6,74 +6,11 @@
 //! changes are every file the working tree differs in from it, committed
 //! since or not, plus the untracked files.
 //!
-//! The conditions, one sentence each, are §4.5's seven:
-//!
-//! 1. Every crate with a changed file has a fresh passing reading from each
-//!    instrument [`instruments_of`] asks it for: [`FRESH`], `test` among
-//!    them and asked of every crate, since every crate has tests and one
-//!    whose tests do not run is not done (#191), less `witness`
-//!    for the harness, less `phpt` for a crate the per-commit lane writes
-//!    no reading for, one that owns no subset or whose row's `feature =`
-//!    the binary under test does not turn on and names no oracle variant
-//!    (#133, revision 63, #2029), and less
-//!    `port-map` for every crate but the one `api.lock` lives with, which
-//!    is the only scope that instrument writes a reading at (#148), and
-//!    with `crosscheck` for an `ext/*` crate the binary carries, the
-//!    rendering diff the per-commit lane writes per extension (#269). Fresh
-//!    means the reading's `key` is the crate's key now, the hash over its
-//!    sources and its declared dependency closure's (§4.2, §13 D.18), the
-//!    one every instrument stamps; an
-//!    instrument that does not exist yet has written no reading, so its
-//!    condition is unmet and the list is honest from day one. Two `phpt`
-//!    skips are met without passing, each held to its cause and nothing
-//!    else: the one the missing engine binary causes, [`no_binary_yet`]
-//!    (#132), and the one the compiler causes when it refuses every test
-//!    of the subset with its own parse error, [`compiler_unread`] (#319);
-//!    a `witness` reading is held to its status, the linked engine having
-//!    served it (#119). A third rung is the manifest's, not a lane's:
-//!    a crate whose `[[crate]]` row carries `porting = true` has its
-//!    `crosscheck` and its `phpt` readings read as the port's meter,
-//!    [`porting_meter`], fresh and printed but met whatever they say,
-//!    while the port is partial (#383).
-//! 2. Every kernel or native added has a witness: the `witness` reading's
-//!    `missing` is zero for the crate.
-//! 3. A lock that differs from its regenerated form is in the diff, read
-//!    from the `api-check` seam readings and the diff's paths.
-//! 4. No `open` divergence row touches a changed scope: a touched crate's
-//!    name or a changed path in the row's id, or a row this diff proposes.
-//! 5. `permit` over the diff denies nothing: every changed file, judged as
-//!    the `Write` that would put its content in place.
-//! 6. The manifest, the pin and the registry (`seams.toml`, `oracle.toml`,
-//!    `docs/divergence.toml`, and the plugin's own files: what the
-//!    manifest's `deny = true` rule covers) are unchanged, or changed by a
-//!    person; the hook cannot tell, so such a change is a note, never an
-//!    unmet condition, and pre-push, run by the person, passes on it. The
-//!    one change it can tell is unattributed is the backstop (#1931): a
-//!    file `permit --after` kept, having moved under a call whose line
-//!    cannot write it, is unmet until a person commits it or restores it
-//!    to `HEAD`, read from the sensor's record ([`permit::kept_changes`]),
-//!    which a change the person approved in the session never has.
-//! 7. The ticket the branch records (`Track::of`'s `ticket`, #30) has no
-//!    unticked acceptance box: the `ticket` reading over its number, the
-//!    one `xtask ticket read` writes (#28), is fresh and passes, and its
-//!    message names the boxes when it does not; a ticket with no box at
-//!    all and not withdrawn is held the same way, since it cannot be
-//!    shown done, and a close the tracker refused with every box ticked
-//!    is met here, the boxes being the condition and not the close. A
-//!    withdrawal that went through is met whatever its boxes say, the
-//!    instrument having settled the ticket, and one refused is held
-//!    (#221). A branch that records
-//!    no ticket, and a detached `HEAD`, are not asked and nothing here
-//!    says the word, the way `xtask` is not asked for a witness (#31).
-//!    In practice this is the Stop hook's and pre-push's condition: the
-//!    record is the clone's own configuration, which a push does not
-//!    carry, and a pull request's checkout is detached, so CI's `done`
-//!    is not asked and has no store to answer from if it were. Beside
-//!    it, a ticket a merge since the base names and left open for want
-//!    of a ready record, `main`'s own merge at `HEAD` where the base is
-//!    `HEAD`, is unmet until a close replaces that reading (#2358); one
-//!    with a box unticked that an open ticket blocks is a partial landing
-//!    and is not (#2394).
+//! The conditions are [`Condition`]'s variants, in the order the list
+//! names what is unmet. Each variant's first paragraph is its sentence, and
+//! §4.5 renders those sentences as its list (`status --section
+//! conditions`, #2309), so the definition is read from this code and
+//! cannot fall behind it. [`judge`] has one arm for each variant.
 //!
 //! **What makes a `ticket` reading fresh** (#31). A ticket has no tree of
 //! its own, so the reading is stamped over the workspace, and it is fresh
@@ -122,6 +59,7 @@ use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::key::{self, Snapshot};
 use crate::manifest::{Crate, Manifest};
+use crate::miri;
 use crate::permit;
 use crate::port_map;
 use crate::reading::{Number, Outcome, Reading, Status, Store, plural};
@@ -140,10 +78,11 @@ pub(crate) const WORKSPACE: &str = "workspace";
 /// name, `witness` is no crate's without a kernel or a native, and
 /// `port-map` is the one crate `api.lock` lives with alone, and
 /// `crosscheck` is an extension's the binary carries, the ones the
-/// per-commit lane renders (#269). `test` is narrowed for nobody: the
-/// harness has tests as every crate has, and it is asked the way `clippy`
-/// is (#191).
-pub const FRESH: [&str; 9] = [
+/// per-commit lane renders (#269), and `miri` is the memory model's,
+/// the crates [`miri::CRATES`] names (#2416). `test` is narrowed for
+/// nobody: the harness has tests as every crate has, and it is asked the
+/// way `clippy` is (#191).
+pub const FRESH: [&str; 10] = [
     "clippy",
     "test",
     "witness",
@@ -153,6 +92,7 @@ pub const FRESH: [&str; 9] = [
     "phpt",
     "port-map",
     "crosscheck",
+    "miri",
 ];
 
 /// The harness crate; it has no kernel and no native.
@@ -181,7 +121,11 @@ pub(crate) const HARNESS: &str = "xtask";
 /// renders those per commit and every other feature nightly (harness §7),
 /// the same line `phpt` stands on, and the reading is the port's progress
 /// meter, so an extension whose rendering is not the oracle's is not done
-/// (design §7.1, #269).
+/// (design §7.1, #269). `miri` is asked of the crates the Miri lane runs,
+/// [`miri::CRATES`], `php_heap`, the engine's main `unsafe` home, when the
+/// change moves its key (#2416). `php_heap` depends on no workspace crate,
+/// so its dependency closure is itself and a change that moves its key is
+/// a change to it, one that touches it.
 pub(crate) fn instruments_of(
     krate: &Crate,
     lock_home: Option<&str>,
@@ -197,6 +141,7 @@ pub(crate) fn instruments_of(
         "phpt" => measured_by_the_lane,
         "port-map" => home_of_the_lock,
         "crosscheck" => carried_extension,
+        "miri" => miri::CRATES.contains(&krate.name.as_str()),
         _ => true,
     })
 }
@@ -354,6 +299,133 @@ fn names(id: &str, part: &str) -> bool {
     id.contains(&format!("/{}/", part.trim_matches('/')))
 }
 
+/// The conditions of done (harness-design.md §4.5), in the order the
+/// verdict lists what is unmet. A variant's first paragraph is its
+/// sentence, the line §4.5's region renders for it (`status --section
+/// conditions`); what follows it is this code's account and is not
+/// rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Condition {
+    /// For every crate with a changed file, a fresh passing reading exists
+    /// for `clippy`, `test`, `witness`, `api-check`, `budget` and
+    /// `unsafe-audit`, for `phpt` on that crate's subset where the crate is
+    /// one the binary under test carries, or one whose row names an oracle
+    /// variant, whose subsets the per-commit lane runs (revision 63,
+    /// #2029), for `port-map` where the crate is the one `api.lock` lives
+    /// with, and for `crosscheck` in both of its columns where the crate is
+    /// an extension the binary carries; `witness` is not asked of the
+    /// harness, and fresh means the reading's `key` is the crate's key now
+    /// and, under the oracle's recipe, its `recipe` the pin's digest now.
+    /// For a change whose dependency closure includes `php_heap`, `done`
+    /// reads a fresh `miri` reading of `php_heap` and holds `undefined` to
+    /// zero (`unsupported` is reported, not held, under the permissive
+    /// provenance #2415 ruled).
+    ///
+    /// Which instruments one crate is asked for is [`instruments_of`],
+    /// over [`FRESH`], `test` among them and asked of every crate, since
+    /// every crate has tests and one whose tests do not run is not done
+    /// (#191); `port-map` is the only scope that instrument writes a
+    /// reading at (#148), and `crosscheck` is the rendering diff the
+    /// per-commit lane writes per extension (#269). The key is the hash
+    /// over the crate's sources and its declared dependency closure's (§4.2,
+    /// §13 D.18), the one every instrument stamps; an instrument that does
+    /// not exist yet has written no reading, so its condition is unmet and
+    /// the list is honest from day one. Two `phpt` skips are met without
+    /// passing, each held to its cause and nothing else: the one the
+    /// missing engine binary causes, [`no_binary_yet`] (#132), and the one
+    /// the compiler causes when it refuses every test of the subset with
+    /// its own parse error, [`compiler_unread`] (#319); a `witness` reading
+    /// is held to its status, the linked engine having served it (#119). A
+    /// third rung is the manifest's, not a lane's: a crate whose
+    /// `[[crate]]` row carries `porting = true` has its `crosscheck` and
+    /// its `phpt` readings read as the port's meter, [`porting_meter`],
+    /// fresh and printed but met whatever they say, while the port is
+    /// partial (#383). `miri` is asked of the crates [`miri::CRATES`]
+    /// names, `php_heap`, when a change touches it, `php_heap` depending
+    /// on no workspace crate; a fail made only of unsupported operations is
+    /// met, [`miri_unsupported`], and every other is held (#2416).
+    Fresh,
+    /// Every kernel or native added in the diff has a witness: the
+    /// `witness` reading's `missing` is zero for the crate.
+    ///
+    /// Judged with [`Condition::Fresh`], over the same `witness` reading.
+    Witnessed,
+    /// If a `.lock` differs from its regenerated form, the lock file is in
+    /// the diff, read from the `api-check` seam readings and the diff's
+    /// paths.
+    LockInDiff,
+    /// No `open` divergence touches a changed scope: a touched crate's name
+    /// or a changed path in an id the row names or covers, or a row the
+    /// diff proposes.
+    NoOpenRow,
+    /// `permit` over the diff denies nothing: every changed file is judged
+    /// as the `Write` that would put its content in place.
+    PermitOverTheDiff,
+    /// `seams.toml`, `oracle.toml`, `docs/divergence.toml` and the plugin's
+    /// own files, what the manifest's `deny = true` rule covers, are
+    /// unchanged in the diff, or the diff is by a person (the hook cannot
+    /// tell, so the Stop hook reports it as a note, and pre-push, run by
+    /// the person, passes).
+    ///
+    /// Judged with [`Condition::PermitOverTheDiff`]: a denial under a
+    /// `deny = true` rule is this note, never unmet.
+    APersonsFiles,
+    /// The ticket the branch records (`branch.<name>.ticket`, the record
+    /// `xtask worktree add --ticket` writes) has no unticked acceptance
+    /// box, or was withdrawn, read from the `ticket` reading over its
+    /// number and never from the tracker (#31, #221); a branch that
+    /// records no ticket, and a detached `HEAD`, are not asked.
+    ///
+    /// The reading is the one `xtask ticket read` writes (#28), fresh and
+    /// passing, and its message names the boxes when it does not; a ticket
+    /// with no box at all and not withdrawn is held the same way, since it
+    /// cannot be shown done, and a close the tracker refused with every
+    /// box ticked is met here, the boxes being the condition and not the
+    /// close. A withdrawal that went through is met whatever its boxes
+    /// say, the instrument having settled the ticket, and one refused is
+    /// held (#221). Nothing here says the word for a branch with no
+    /// record, the way `xtask` is not asked for a witness (#31). In
+    /// practice this is the Stop hook's and pre-push's condition: the
+    /// record is the clone's own configuration, which a push does not
+    /// carry, and a pull request's checkout is detached, so CI's `done` is
+    /// not asked and has no store to answer from if it were.
+    TicketBoxes,
+    /// A change `permit --after` kept, one no call's line could write, is
+    /// unmet until a person commits it or restores it to `HEAD`, read from
+    /// the sensor's record in the store and not from the diff (§4.4,
+    /// #1931).
+    ///
+    /// The record is [`permit::kept_changes`]'s, which a change the person
+    /// approved in the session never has.
+    KeptChange,
+    /// A ticket a merge since the base names, and that `xtask ticket
+    /// merged` left open for want of a ready record, is unmet until a
+    /// close replaces that reading, the merge at `HEAD` being read where
+    /// the base is `HEAD`, as on `main` (#2358); a merge that lands part of
+    /// a ticket, one with no ready record, a box unticked and an open
+    /// ticket blocking it, is a partial landing and is not named (#2394).
+    ///
+    /// [`ticket::stranded`] reads the `ticket` readings `merged` wrote:
+    /// a refusal for want of a ready record is `unready` and named here,
+    /// and a partial landing is a `skip` counting `partial`, which is not.
+    Stranded,
+}
+
+impl Condition {
+    /// Every condition, in the order of the list.
+    pub(crate) const ALL: [Condition; 9] = [
+        Condition::Fresh,
+        Condition::Witnessed,
+        Condition::LockInDiff,
+        Condition::NoOpenRow,
+        Condition::PermitOverTheDiff,
+        Condition::APersonsFiles,
+        Condition::TicketBoxes,
+        Condition::KeptChange,
+        Condition::Stranded,
+    ];
+}
+
 /// Judge the changes since the merge base with `base`, `main`
 /// ([`Base::of`]) when none is given, each key held to the one `snapshot`
 /// gives: the tree is read once, before anything is judged.
@@ -375,36 +447,47 @@ pub fn judge(
 
     let lock_home = lock_home(manifest);
     let carried = Carried::binary(root)?;
-    for krate in &crates {
-        fresh_readings(
-            store,
-            krate,
-            &KeyNow::of(snapshot, krate, &crates)?,
-            lock_home.as_deref(),
-            &carried,
-            manifest.pin.digest(),
-            &mut unmet,
-        )?;
+    for condition in Condition::ALL {
+        match condition {
+            Condition::Fresh => {
+                for krate in &crates {
+                    fresh_readings(
+                        store,
+                        krate,
+                        &KeyNow::of(snapshot, krate, &crates)?,
+                        lock_home.as_deref(),
+                        &carried,
+                        manifest.pin.digest(),
+                        &mut unmet,
+                    )?;
+                }
+            }
+            Condition::Witnessed | Condition::APersonsFiles => {}
+            Condition::LockInDiff => locks(snapshot, manifest, store, &changed, &mut unmet)?,
+            Condition::NoOpenRow => {
+                open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
+            }
+            Condition::PermitOverTheDiff => over_the_diff(
+                root,
+                manifest,
+                &base.commit,
+                &changed,
+                &mut unmet,
+                &mut notes,
+            )?,
+            Condition::KeptChange => unmet.extend(
+                permit::kept_changes(store, root)?
+                    .iter()
+                    .map(ToString::to_string),
+            ),
+            Condition::TicketBoxes => {
+                if let Some(ticket) = ticket {
+                    boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
+                }
+            }
+            Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
+        }
     }
-    locks(snapshot, manifest, store, &changed, &mut unmet)?;
-    open_rows(root, &base.commit, registry, &crates, &changed, &mut unmet)?;
-    over_the_diff(
-        root,
-        manifest,
-        &base.commit,
-        &changed,
-        &mut unmet,
-        &mut notes,
-    )?;
-    unmet.extend(
-        permit::kept_changes(store, root)?
-            .iter()
-            .map(ToString::to_string),
-    );
-    if let Some(ticket) = ticket {
-        boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
-    }
-    unmet.extend(ticket::stranded(root, store, &base.commit)?);
 
     Ok(Verdict {
         base,
@@ -570,12 +653,39 @@ fn porting_meter(krate: &Crate, instrument: &str) -> bool {
     krate.porting && matches!(instrument, "crosscheck" | "phpt")
 }
 
-/// Condition 1's three rungs for a reading that is not a pass: the causes a
+/// Whether a `miri` fail is met all the same because every test that
+/// failed ended in an unsupported operation (#2416).
+///
+/// A person ruled what `done` holds of the Miri lane: `undefined` at
+/// zero, and `unsupported` reported, not held, since under permissive
+/// provenance (#2415) an unsupported operation is a call Miri cannot
+/// run, a foreign function it has no shim for, and says nothing of the
+/// heap's soundness. So a fail whose `failed` is all `unsupported` is met,
+/// its message printed with the reading. Everything else a fail can carry
+/// is held: undefined behaviour, a test libtest failed, a run Miri ended
+/// some other way, and a fail with nothing failed, which is what the
+/// instrument writes where the tests did not build or Miri spoke after
+/// the last of them (`miri::Suite::after`). A skip, the nightly not
+/// installed, is held too: it measured nothing.
+fn miri_unsupported(instrument: &str, reading: &Reading) -> bool {
+    if instrument != "miri" || reading.status != Status::Fail {
+        return false;
+    }
+    let count = |key: &str| match reading.numbers.get(key) {
+        Some(Number::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let failed = count("failed");
+    failed.is_some_and(|n| n > 0) && failed == count("unsupported") && count("undefined") == Some(0)
+}
+
+/// Condition 1's four rungs for a reading that is not a pass: the causes a
 /// person excused, and no other.
 fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bool {
     no_binary_yet(instrument, reading)
         || compiler_unread(instrument, reading)
         || porting_meter(krate, instrument)
+        || miri_unsupported(instrument, reading)
 }
 
 /// A touched crate's key now ([`Snapshot::key`], its tree and its dependency
@@ -941,7 +1051,8 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        FRESH, compiler_unread, instruments_of, met_without_passing, no_binary_yet, porting_meter,
+        FRESH, compiler_unread, instruments_of, met_without_passing, miri_unsupported,
+        no_binary_yet, porting_meter,
     };
     use crate::carried::Carried;
     use crate::manifest::Crate;
@@ -958,10 +1069,10 @@ mod tests {
         instruments_of(krate, lock_home, &Carried::turning_on(&["openssl"])).collect()
     }
 
-    /// [`FRESH`] less `port-map` and `crosscheck`: what an engine crate
-    /// that is not the lock's home is asked, before the two narrowings of
-    /// its own. That it is [`FRESH`] less the two rows is asserted below
-    /// and not trusted here.
+    /// [`FRESH`] less `port-map`, `crosscheck` and `miri`: what an engine
+    /// crate that is not the lock's home nor the Miri lane's is asked,
+    /// before the two narrowings of its own. That it is [`FRESH`] less the
+    /// three rows is asserted below and not trusted here.
     const ASKED_OF_EVERY_OTHER_CRATE: [&str; 7] = [
         "clippy",
         "test",
@@ -1021,7 +1132,7 @@ mod tests {
     /// one is asked.
     #[test]
     fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
-        let asked = asked_of(&Crate::named("php_heap"), HOME);
+        let asked = asked_of(&Crate::named("php_engine"), HOME);
         assert_eq!(
             asked,
             [
@@ -1033,9 +1144,61 @@ mod tests {
                 "unsafe-audit"
             ]
         );
-        let row = Crate::named("php_heap").with_phpt(&["Zend/tests"]);
+        let row = Crate::named("php_engine").with_phpt(&["Zend/tests"]);
         let asked = asked_of(&row, HOME);
         assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
+    }
+
+    /// `miri` is asked of the crates the Miri lane runs, `php_heap`, and
+    /// of no other crate (#2416).
+    #[test]
+    fn the_memory_model_is_the_one_crate_asked_for_a_miri_reading() {
+        let asked = asked_of(&Crate::named("php_heap"), HOME);
+        assert_eq!(
+            asked,
+            [
+                "clippy",
+                "test",
+                "witness",
+                "api-check",
+                "budget",
+                "unsafe-audit",
+                "miri"
+            ]
+        );
+        for other in ["php_engine", "php_ext", "ext/pcre", "xtask"] {
+            let asked = asked_of(&Crate::named(other), HOME);
+            assert!(!asked.contains(&"miri"), "{other}: {asked:?}");
+        }
+    }
+
+    /// A `miri` fail is met where every test that failed ended in an
+    /// unsupported operation, and held where one is undefined behaviour,
+    /// a test libtest failed, or nothing failed at all, which is a build
+    /// that did not finish or Miri speaking after the last test (#2416).
+    /// A skip is held: it measured nothing.
+    #[test]
+    fn a_miri_reading_is_held_to_its_undefined_behaviour_and_not_to_what_miri_cannot_run() {
+        let reading = |status: Status, failed: u64, undefined: u64, unsupported: u64| {
+            let mut reading = Reading::new("miri", "php_heap");
+            reading.status = status;
+            reading.count("failed", failed).unwrap();
+            reading.count("undefined", undefined).unwrap();
+            reading.count("unsupported", unsupported).unwrap();
+            reading
+        };
+        let heap = Crate::named("php_heap");
+        let met = |r: &Reading| met_without_passing(&heap, "miri", r);
+        assert!(met(&reading(Status::Fail, 2, 0, 2)));
+        assert!(!met(&reading(Status::Fail, 2, 1, 1)), "undefined behaviour");
+        assert!(!met(&reading(Status::Fail, 3, 0, 2)), "a test that failed");
+        assert!(
+            !met(&reading(Status::Fail, 0, 0, 0)),
+            "nothing ran to its end"
+        );
+        assert!(!met(&reading(Status::Skip, 0, 0, 0)), "nothing measured");
+        // The rung reads the miri reading's numbers and no other's.
+        assert!(!miri_unsupported("test", &reading(Status::Fail, 2, 0, 2)));
     }
 
     /// A crate behind a feature the binary under test does not turn on is
@@ -1091,7 +1254,7 @@ mod tests {
     fn the_crate_the_lock_lives_with_is_the_one_asked_for_a_port_map_reading() {
         let rest: Vec<&str> = FRESH
             .into_iter()
-            .filter(|i| *i != "port-map" && *i != "crosscheck")
+            .filter(|i| !matches!(*i, "port-map" | "crosscheck" | "miri"))
             .collect();
         assert_eq!(rest, ASKED_OF_EVERY_OTHER_CRATE);
         let asked = asked_of(&Crate::named("php_ext"), HOME);

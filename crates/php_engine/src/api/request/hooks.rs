@@ -940,7 +940,7 @@ fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
     let value = req.argument(1).unwrap_or_else(Value::null).deref();
     let key = req.string(&name)?;
-    let key = Owner::adopt(req, key);
+    let key = Owner::adopt(key);
     // The return's owner, and the write's.
     let returned = Owner::take(req, value);
     let written = Owner::take(req, value);
@@ -1225,7 +1225,7 @@ impl Request {
                     continue;
                 }
                 let value = match self.read_hooked(object, &name, hooked, PropertyRead::Silent) {
-                    Ok(value) => Owner::adopt(self, value),
+                    Ok(value) => Owner::adopt(value),
                     Err(thrown) => {
                         HookedRow::give_up_all(self, rows);
                         return Err(thrown);

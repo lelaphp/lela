@@ -476,7 +476,7 @@ impl Request {
                 ),
         };
         let trace = self.debug_backtrace()?;
-        let trace = Owner::adopt(self, trace);
+        let trace = Owner::adopt(trace);
         let file = match PhpString::new(self, &file) {
             Ok(file) => file,
             Err(thrown) => {
@@ -662,7 +662,7 @@ impl Request {
                 at = next;
                 continue;
             }
-            let previous = Owner::adopt(self, previous.as_value());
+            let previous = Owner::adopt(previous.as_value());
             // `write_prop` gives the owner up where it fails.
             write_prop(self, &at, b"previous", previous).ok();
             return;
@@ -711,7 +711,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn take_pending(&mut self) -> Option<Owner<PhpObject>> {
         let object = self.take_pending_view()?;
-        Some(Owner::adopt(self, object))
+        Some(Owner::adopt(object))
     }
 
     /// What [`take_pending`](Self::take_pending) takes, its one owner not

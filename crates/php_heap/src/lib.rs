@@ -45,6 +45,8 @@ mod mm;
 mod numeric;
 mod object;
 mod observe;
+#[cfg(debug_assertions)]
+pub mod owners;
 mod payload;
 mod property_table;
 mod reference;
@@ -75,7 +77,7 @@ pub use property_table::{Direction, PropertyTable, TableRow};
 pub use reference::Ref;
 pub use resource::{Res, ResourceType};
 #[cfg(debug_assertions)]
-pub use sensed::{Origin, Sensor};
+pub use sensed::Origin;
 pub use sort::zend_sort;
 pub use stack::{EntryGuard, Frame, FrameRef, FramesAside, Slot, VmStack};
 pub use string::{FreshStr, Intern, Str, Strings};
@@ -457,22 +459,11 @@ impl Heap {
         }
     }
 
-    /// A debug build's way to this heap's sensed record, for a value
-    /// that reaches it through no chunk: what the engine's owner type
-    /// carries from where it is made, so an owner dropped unconsumed is
-    /// recorded here and raised where [`Heap::take_sensed`] is next
-    /// asked ([`Sensor`]).
-    #[cfg(debug_assertions)]
-    #[must_use]
-    pub fn sensor(&self) -> Sensor {
-        self.mm.sensor()
-    }
-
     /// Whether a fatal is leaving the request: the engine says so where
     /// `zend_bailout` begins and again where its `zend_try` catches it.
     /// While one is, an owner dropped unconsumed is not recorded, as
     /// php's jump leaves a native's locals for the heap to discard; a
-    /// refused refcount change still is ([`Sensor::unconsumed`]).
+    /// refused refcount change still is ([`owners::dropped`]).
     #[cfg(debug_assertions)]
     pub fn fatal_leaving(&self, leaving: bool) {
         self.mm.fatal_leaving(leaving);
@@ -869,10 +860,6 @@ mod tests {
     /// and every size lands in the bin, `run` or huge block php's
     /// arithmetic puts it in.
     #[test]
-    #[cfg_attr(
-        all(miri, target_os = "macos"),
-        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
-    )]
     fn what_a_request_allocates_and_frees_reads_back_where_it_started() {
         let _alone = alone();
         let mut heap = Heap::new();
@@ -1037,20 +1024,18 @@ mod tests {
     /// nothing. The peak is the node and then the block, so it reads the
     /// same sum, and freeing the block gives the node back with it.
     #[test]
-    #[cfg_attr(
-        all(miri, target_os = "macos"),
-        ignore = "the pinned nightly's Miri has no `getpagesize` on macOS, which the allocator asks the page size of"
-    )]
     fn a_huge_block_rounds_to_the_page_the_machine_reports() {
         let _alone = alone();
         let page = mm::real_page_size();
         // The same page through a second door, so that what this crate
         // asks the machine is held to what the machine says and not to
         // itself: `getconf PAGESIZE` is POSIX's own reader of
-        // `_SC_PAGESIZE`, which is the number php reads.
-        if let Ok(said) = std::process::Command::new("getconf")
-            .arg("PAGESIZE")
-            .output()
+        // `_SC_PAGESIZE`, which is the number php reads. Miri starts no
+        // process, and the page it answers is its own.
+        if !cfg!(miri)
+            && let Ok(said) = std::process::Command::new("getconf")
+                .arg("PAGESIZE")
+                .output()
         {
             let said = String::from_utf8_lossy(&said.stdout)
                 .trim()
@@ -1292,36 +1277,51 @@ mod tests {
         assert_eq!(mm::MAPPINGS.load(Relaxed), before);
     }
 
-    /// An owner dropped unconsumed is recorded through the sensor the
-    /// heap handed out, whatever the owner names, and raised once where
-    /// the heap is next asked, naming the line that made it, from the
-    /// thread the owner was dropped on as from the heap's own; a sensor
-    /// that outlives its heap records into a record nobody takes.
+    /// An owner dropped unconsumed is recorded through its block's chunk,
+    /// with the line that made it, and raised once where the heap is next
+    /// asked; where another owner of the block stands, its line is named
+    /// beside it. An owner consumed leaves nothing in the table, and one
+    /// of what no count owns is recorded nowhere (#2246).
     #[cfg(debug_assertions)]
     #[test]
-    fn a_sensor_records_an_owner_dropped_unconsumed_into_its_heap() {
+    fn an_owner_dropped_unconsumed_is_recorded_with_the_line_that_made_it() {
         let _alone = alone();
         let mut heap = Heap::new();
-        let sensor = heap.sensor();
-        let site = std::panic::Location::caller();
-        sensor.unconsumed(site);
-        sensor.unconsumed(std::panic::Location::caller());
+        let made = heap.string(b"a string of its own block");
+        assert!(made.is_ok(), "the heap would not allocate");
+        let Ok(s) = made else {
+            return;
+        };
+        let z = Zval::string(s);
+        let at = s.gc().block();
+        let first = std::panic::Location::caller();
+        let second = std::panic::Location::caller();
+        owners::made(z, first);
+        owners::made(z, second);
+        assert_eq!(owners::standing(at), 2);
+        assert_eq!(owners::consumed(z), Some(second), "the latest is taken off");
+        owners::made(z, second);
+        owners::dropped(z);
         assert_eq!(
             heap.take_sensed(),
             Some(Fatal::Error(format!(
-                "InternalError: the owner made at {site} was dropped without being handed to a sink or given up"
+                "InternalError: the owner made at {second} was dropped without being handed to a sink or given up, or one of the other owners of its block, made at {first}"
             )))
         );
         assert_eq!(heap.take_sensed(), None, "it is reported once");
-        let moved = heap.sensor();
-        let joined = std::thread::spawn(move || moved.unconsumed(site)).join();
-        assert!(joined.is_ok());
-        assert!(
-            heap.take_sensed().is_some(),
-            "a sensor dropped off the thread records"
+        assert_eq!(owners::consumed(z), Some(first));
+        assert_eq!(owners::standing(at), 0, "a consumed owner leaves nothing");
+        owners::made(z, first);
+        owners::dropped(z);
+        assert_eq!(
+            heap.take_sensed(),
+            Some(Fatal::Error(format!(
+                "InternalError: the owner made at {first} was dropped without being handed to a sink or given up"
+            )))
         );
-        drop(heap);
-        sensor.unconsumed(site);
+        owners::made(Zval::long(7), first);
+        owners::dropped(Zval::long(7));
+        assert_eq!(heap.take_sensed(), None, "an integer leaks nothing");
     }
 
     /// While a fatal leaves the request, an owner dropped unconsumed is
@@ -1332,10 +1332,16 @@ mod tests {
     fn an_owner_dropped_while_a_fatal_leaves_is_not_recorded() {
         let _alone = alone();
         let mut hooks = Recorder { heap: Heap::new() };
-        let sensor = hooks.heap.sensor();
         let site = std::panic::Location::caller();
+        let held = hooks.heap.string(b"a string an owner holds");
+        assert!(held.is_ok(), "the heap would not allocate");
+        let Ok(held) = held else {
+            return;
+        };
+        let owned = Zval::string(held);
         hooks.heap.fatal_leaving(true);
-        sensor.unconsumed(site);
+        owners::made(owned, site);
+        owners::dropped(owned);
         assert_eq!(hooks.heap.take_sensed(), None);
         let made = hooks.heap.string(b"a string of its own block");
         assert!(made.is_ok(), "the heap would not allocate");
@@ -1350,7 +1356,8 @@ mod tests {
             Some(Fatal::Error(message)) if message.starts_with("InternalError: a release of the block at ")
         ));
         hooks.heap.fatal_leaving(false);
-        sensor.unconsumed(site);
+        owners::made(owned, site);
+        owners::dropped(owned);
         assert!(hooks.heap.take_sensed().is_some());
     }
 

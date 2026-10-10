@@ -1424,10 +1424,20 @@ impl NodeObject {
         data.downcast_mut::<T>()
     }
 
-    /// `document->private_data = data`, what was there dropped.
-    pub fn set_private_data(&mut self, data: Box<dyn PrivateData>) {
-        if let Some(d) = self.doc_ref_mut() {
-            d.private = Some(data);
+    /// `document->private_data = data`: what was there given up with the
+    /// request at hand, the header's `dtor` served before the drop, as
+    /// `php_libxml_decrement_doc_ref` serves it. On an object with no
+    /// document, which php's makers never lay private data on (they set
+    /// it on `intern->document`, which `php_libxml_increment_doc_ref`
+    /// laid down first), `data` itself is given up the same way, so no
+    /// private data is ever dropped with no request at hand.
+    pub fn set_private_data(&mut self, req: &mut Request, data: Box<dyn PrivateData>) {
+        let left = match self.doc_ref_mut() {
+            Some(d) => d.private.replace(data),
+            None => Some(data),
+        };
+        if let Some(mut left) = left {
+            left.destroy(req);
         }
     }
 

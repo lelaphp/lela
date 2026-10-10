@@ -95,8 +95,9 @@ fn rules_prints_each_rule_with_its_adr_and_the_failure_text_under_uncut() {
 
 /// `--tracked` renders a section against the tree alone, as a tracked
 /// region carries it (harness-design.md §5, revision 6; #630): a reading
-/// the store holds is `no reading` there and still the plain section's,
-/// and a section whose rows are this checkout's alone is refused.
+/// the store holds is still the plain section's, the tracked table has no
+/// `reading` column, which could only say `no reading` there (#2377), and
+/// a section whose rows are this checkout's alone is refused.
 #[test]
 fn tracked_renders_no_reading_whatever_the_store_holds() {
     let root = scratch("tracked");
@@ -111,16 +112,23 @@ fn tracked_renders_no_reading_whatever_the_store_holds() {
     let (ok, live, err) = status(&root, &["--section", "rules"]);
     assert!(ok, "{err}");
     assert!(live.contains(&format!("{row} fail |")), "{live}");
+    assert!(
+        live.starts_with("| rule | adr | predicate | reading |\n"),
+        "{live}"
+    );
     let (ok, tracked, err) = status(&root, &["--section", "rules", "--tracked"]);
     assert!(ok, "{err}");
     assert!(
-        tracked.contains(&format!("{row} no reading |")),
+        tracked.starts_with("| rule | adr | predicate |\n|---|---|---|\n"),
         "{tracked}"
     );
-    assert_eq!(
-        tracked,
-        live.replace(&format!("{row} fail |"), &format!("{row} no reading |"))
-    );
+    assert!(tracked.contains(&format!("{row}\n")), "{tracked}");
+    assert!(!tracked.contains("reading"), "{tracked}");
+    for section in ["locks", "bundle"] {
+        let (ok, out, err) = status(&root, &["--section", section, "--tracked"]);
+        assert!(ok, "{section}: {err}");
+        assert!(!out.contains("reading"), "{section}: {out}");
+    }
 
     for section in ["git", "permits", "phpt"] {
         let (ok, out, err) = status(&root, &["--section", section, "--tracked"]);

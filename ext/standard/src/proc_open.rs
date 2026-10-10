@@ -961,7 +961,7 @@ fn parent_ends(
         };
         let value = Owner::take(req, stream.as_value());
         held.push(stream);
-        opened.set(req, Owner::take(req, Key::Int(index)), value)?;
+        opened.set(req, Owner::index(index), value)?;
     }
     Ok(())
 }

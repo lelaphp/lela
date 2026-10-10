@@ -16,11 +16,10 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRe
 
 use crate::stmt;
 
-/// `pdo_row_t`: the statement read, its owner boxed inside the `sizeof`
-/// php allocates.
+/// `pdo_row_t`: the statement read, an owner of it.
 #[derive(Default)]
 pub(crate) struct Row {
-    stmt: Option<Box<Owner<PhpObject>>>,
+    stmt: Option<Owner<PhpObject>>,
 }
 
 /// `@not-serializable final class PDORow`, as `pdo_stmt.stub.php`
@@ -96,7 +95,7 @@ pub(super) fn lazy(req: &mut Request, object: PhpObject) -> Result<Owner<Value>,
     let row = new_object(req, class)?;
     let held = Owner::take(req, object);
     match row.native_mut::<Row>(req) {
-        Some(r) => r.stmt = Some(Box::new(held)),
+        Some(r) => r.stmt = Some(held),
         None => held.give_up(req),
     }
     stmt::write(req, object, |s| s.lazy = Some(*row));
@@ -106,7 +105,7 @@ pub(super) fn lazy(req: &mut Request, object: PhpObject) -> Result<Owner<Value>,
 /// The statement a row reads.
 fn statement(req: &Request, row: PhpObject) -> Option<PhpObject> {
     row.native::<Row>(req)
-        .and_then(|r| r.stmt.as_deref().map(|held| **held))
+        .and_then(|r| r.stmt.as_deref().copied())
 }
 
 /// `row_read_column_number`: the value of column `column` of the
@@ -162,8 +161,8 @@ impl ObjectHandlers for Handlers {
         let Some(held) = object.native_mut::<Row>(req).and_then(|r| r.stmt.take()) else {
             return;
         };
-        stmt::write(req, **held, |s| s.lazy = None);
-        (*held).give_up(req);
+        stmt::write(req, *held, |s| s.lazy = None);
+        held.give_up(req);
     }
 
     /// `row_prop_read`: `queryString` off the statement, a column by

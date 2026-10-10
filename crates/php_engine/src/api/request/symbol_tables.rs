@@ -874,7 +874,7 @@ impl Request {
         for (name, value) in copied.rows {
             let key = Key::from_string(self, Owner::take(self, name));
             let value = self.dup_value(value, None);
-            let value = Owner::adopt(self, value);
+            let value = Owner::adopt(value);
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -908,7 +908,7 @@ impl Request {
         for (name, value) in copied.rows {
             let key = Owner::take(self, name).into_key();
             let value = self.dup_value(value, None);
-            let value = Owner::adopt(self, value);
+            let value = Owner::adopt(value);
             array.set(self, key, value)?;
         }
         Ok(array)

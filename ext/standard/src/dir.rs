@@ -215,6 +215,7 @@ impl Directory {
         let is_default = req
             .state::<State>()
             .default_dir
+            .as_deref()
             .is_some_and(|default| default.id() == res.id());
         if is_default {
             set_default_dir(req, None);

@@ -1004,7 +1004,7 @@ impl Request {
             }
             crate::api::call::call_method_made(req, &object, b"offsetGet", &[offset])
         });
-        adopted(self, read)
+        adopted(read)
     }
 
     /// `zend_std_write_dimension`: `offsetSet` on an `ArrayAccess`, the
@@ -1157,7 +1157,7 @@ impl Request {
                 let value = crate::api::call::call_method_made(self, &object, b"__toString", &[])?;
                 let value = self.unwrap_reference(value);
                 if value.as_php_string().is_some() {
-                    return Ok(Some(Owner::adopt(self, value)));
+                    return Ok(Some(Owner::adopt(value)));
                 }
                 self.release(value);
                 let class = self.class_name(object.class());
@@ -1244,14 +1244,14 @@ impl Request {
             // its instance, and a lazy object that waits shows its
             // members as they stand, neither initialised for it.
             let info = self.lazy_debug_info(object);
-            return adopted_some(self, info);
+            return adopted_some(info);
         }
         let value = crate::api::call::call_method_made(self, &object, b"__debugInfo", &[])?;
         let value = self.unwrap_reference(value);
         match value.as_array() {
             // The array the method returned, its one owner the caller's,
             // which is php's `*is_temp = 1` over the same table.
-            Some(array) => Ok(Some(Owner::adopt(self, *array))),
+            Some(array) => Ok(Some(Owner::adopt(*array))),
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
                 let class = self.class_name(object.class());
@@ -1262,7 +1262,7 @@ impl Request {
                     ),
                 );
                 let empty = self.array();
-                adopted(self, empty).map(Some)
+                adopted(empty).map(Some)
             }
             None => {
                 self.release(value);
@@ -1589,7 +1589,7 @@ impl Request {
             self.release(new.as_value());
             return Err(thrown);
         }
-        Ok(Owner::adopt(self, new))
+        Ok(Owner::adopt(new))
     }
 
     /// `zend_objects_clone_members`' `ZEND_REF_ADD_TYPE_SOURCE`: a slot

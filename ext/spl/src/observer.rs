@@ -2146,7 +2146,7 @@ fn get_one(
         return out.append(req, value);
     }
     let key = match inf.as_ref() {
-        ValueRef::Int(n) => Owner::take(req, Key::Int(n)),
+        ValueRef::Int(n) => Owner::index(n),
         ValueRef::Str(s) => Owner::take(req, Key::lookup(*s)),
         _ => {
             value.give_up(req);

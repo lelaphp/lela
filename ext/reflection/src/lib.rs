@@ -4476,7 +4476,8 @@ fn reflection_info(req: &mut Request) {
 #[derive(Default)]
 pub(crate) struct ReflectedState {
     ce: Option<ClassId>,
-    object: Option<PhpObject>,
+    /// `intern->obj`, an owner of the object reflected.
+    object: Option<Owner<PhpObject>>,
     /// php's `attribute_reference`, which `ReflectionAttribute` keeps
     /// where the other reflectors keep `intern->ce`.
     attribute: Option<attr::AttributeRef>,
@@ -4491,9 +4492,9 @@ pub(crate) struct ReflectedState {
     /// ([`Reference`]), held on the request's heap at its size and given
     /// back in `free_obj`, `reflection_free_objects_storage`.
     ptr: Option<Emalloc>,
-    /// The reference a `ReflectionReference` holds in `intern->obj`,
-    /// one owner of it.
-    reference: Option<PhpRef>,
+    /// The reference a `ReflectionReference` holds in `intern->obj`, an
+    /// owner of it.
+    reference: Option<Owner<PhpRef>>,
     /// Whether a `ReflectionMethod` reflects a property's hook, which
     /// php's `intern->ptr` holds as the `zend_function` itself and no
     /// method table lists: the reflector's `$name`, `$prop::get` or
@@ -4578,10 +4579,10 @@ impl ObjectHandlers for ReflectorHandlers {
             ptr.free(req);
         }
         if let Some(kept) = kept {
-            req.release(kept.as_value());
+            kept.give_up(req);
         }
         if let Some(reference) = reference {
-            req.release(reference.as_value());
+            reference.give_up(req);
         }
     }
 
@@ -4653,10 +4654,10 @@ impl ObjectHandlers for ReflectorHandlers {
         let Some(reflected) = object.native::<Reflected>(req) else {
             return;
         };
-        if let Some(kept) = reflected.object {
+        if let Some(kept) = &reflected.object {
             visit(kept.as_value());
         }
-        if let Some(reference) = reflected.reference {
+        if let Some(reference) = &reflected.reference {
             visit(reference.as_value());
         }
     }
@@ -4673,20 +4674,16 @@ fn read_only(req: &mut Request, object: PhpObject, name: &[u8]) -> bool {
 /// them, the object one more owner where there is one: what `new` laid
 /// down is overwritten, so nothing the payload held before is lost.
 fn keep(req: &mut Request, this: PhpObject, ce: ClassId, object: Option<PhpObject>) {
-    if let Some(object) = object {
-        req.addref(&object.as_value());
-    }
+    let object = object.map(|object| Owner::take(req, object));
     let released = match this.native_mut::<Reflected>(req) {
         Some(reflected) => {
-            let released = reflected.object.take();
             reflected.ce = Some(ce);
-            reflected.object = object;
-            released
+            std::mem::replace(&mut reflected.object, object)
         }
         None => object,
     };
     if let Some(released) = released {
-        req.release(released.as_value());
+        released.give_up(req);
     }
 }
 
@@ -4695,13 +4692,13 @@ fn keep(req: &mut Request, this: PhpObject, ce: ClassId, object: Option<PhpObjec
 /// one more owner, the class left as it stands, since a closure names
 /// none.
 fn keep_closure(req: &mut Request, this: PhpObject, object: PhpObject) {
-    req.addref(&object.as_value());
+    let object = Owner::take(req, object);
     let released = match this.native_mut::<Reflected>(req) {
         Some(reflected) => reflected.object.replace(object),
         None => Some(object),
     };
     if let Some(released) = released {
-        req.release(released.as_value());
+        released.give_up(req);
     }
 }
 
@@ -4862,7 +4859,8 @@ fn kept_class(req: &Request, this: PhpObject) -> Option<ClassId> {
 
 /// `intern->obj`, the object a `ReflectionObject` was made from.
 fn kept_object(req: &Request, this: PhpObject) -> Option<PhpObject> {
-    this.native::<Reflected>(req).and_then(|kept| kept.object)
+    this.native::<Reflected>(req)
+        .and_then(|kept| kept.object.as_deref().copied())
 }
 
 /// Core's classes and interfaces the reflectors extend, implement and
@@ -8584,11 +8582,10 @@ impl ReflectionReference {
         }
         let class = class_named(req, b"ReflectionReference")?;
         let object = new_object(req, class)?;
-        req.addref(&reference.as_value());
-        if let Some(reflected) = object.native_mut::<Reflected>(req) {
-            reflected.reference = Some(reference);
-        } else {
-            req.release(reference.as_value());
+        let held = Owner::take(req, reference);
+        match object.native_mut::<Reflected>(req) {
+            Some(reflected) => reflected.reference = Some(held),
+            None => held.give_up(req),
         }
         Ok(Some(object.into_instance()))
     }
@@ -8615,7 +8612,7 @@ impl ReflectionReference {
         let reference = this
             .object()
             .native::<Reflected>(req)
-            .and_then(|reflected| reflected.reference);
+            .and_then(|reflected| reflected.reference.as_deref().copied());
         let Some(reference) = reference else {
             return Err(throw(
                 req,

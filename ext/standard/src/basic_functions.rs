@@ -399,7 +399,7 @@ fn getopt(
         let key = if !(name.len() > 1 && name[0] == b'0')
             && let Some(n) = numeric_string(&name).and_then(|v| v.as_int())
         {
-            Owner::take(req, Key::Int(n))
+            Owner::index(n)
         } else {
             PhpString::new(req, &name)?.into_key()
         };

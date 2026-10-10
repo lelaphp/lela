@@ -16,15 +16,15 @@ use php_ext_libxml::ffi::{Library, Node, Save};
 
 use crate::classes::SoapFault;
 use crate::message::{
-    function_to_string, get_function, release_typemap, serialize_function_call, soap_binding,
-    soap_create_typemap, type_to_string,
+    function_to_string, get_function, serialize_function_call, soap_binding, soap_create_typemap,
+    type_to_string,
 };
 use crate::model::{BindingType, Sdl};
 use crate::shared::{
     ClientSlot, add_soap_fault, add_soap_fault_ex, client_slot, client_throws, instance_of,
     is_null, new_sdl_object, sdl_of, set_client_slot,
 };
-use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, raised};
+use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap, raised};
 
 type R<T> = Result<T, Thrown>;
 
@@ -46,7 +46,7 @@ impl php_ext::abi::ObjectHandlers for Handlers {
             .native_mut::<Client>(req)
             .and_then(|c| c.typemap.take());
         if let Some(t) = typemap {
-            release_typemap(req, &t);
+            t.release(req);
         }
         php_ext::abi::Std.free_obj(req, object);
     }
@@ -913,6 +913,29 @@ fn context_options(
     Ok(())
 }
 
+/// The typemap's keys, each under `null`, in the client's `typemap`
+/// slot, as `SoapClient::__construct` records the option it took.
+fn show_typemap(req: &mut Request, this: PhpObject, typemap: &Typemap) -> Res<()> {
+    let mut shown = PhpArray::new(req)?;
+    for (k, _) in typemap.iter() {
+        if let crate::table::Key::Str(name) = k {
+            let key = match PhpString::new(req, name) {
+                Ok(name) => name.into_key(),
+                Err(thrown) => {
+                    shown.give_up(req);
+                    return Err(thrown.into());
+                }
+            };
+            if let Err(thrown) = shown.set(req, key, Owner::null()) {
+                shown.give_up(req);
+                return Err(thrown.into());
+            }
+        }
+    }
+    set_client_slot(req, this, ClientSlot::Typemap, shown.into_value())?;
+    Ok(())
+}
+
 /// `SoapClient::__construct`'s body.
 #[expect(clippy::too_many_lines, reason = "one C function, kept whole")]
 fn construct(
@@ -1029,19 +1052,16 @@ fn construct(
     if let Some(ht) = typemap_ht {
         match soap_create_typemap(req, sdl.as_deref(), ht) {
             Ok(Some(t)) => {
-                let mut shown = PhpArray::new(req)?;
-                for (k, _) in t.iter() {
-                    if let crate::table::Key::Str(name) = k {
-                        let key = PhpString::new(req, name)?.into_key();
-                        shown.set(req, key, Owner::null())?;
-                    }
+                if let Err(thrown) = show_typemap(req, this, &t) {
+                    t.release(req);
+                    return Err(thrown);
                 }
-                set_client_slot(req, this, ClientSlot::Typemap, shown.into_value())?;
-                let old = this
-                    .native_mut::<Client>(req)
-                    .and_then(|c| c.typemap.replace(t));
+                let old = match this.native_mut::<Client>(req) {
+                    Some(c) => c.typemap.replace(t),
+                    None => Some(t),
+                };
                 if let Some(old) = old {
-                    release_typemap(req, &old);
+                    old.release(req);
                 }
             }
             Ok(None) => {}
@@ -1198,7 +1218,9 @@ fn do_soap_call(
             .map(<[u8]>::to_vec)
     });
     let sdl = this_sdl(req, this);
-    let typemap = this.native::<Client>(req).and_then(|c| c.typemap.clone());
+    let typemap = this
+        .native::<Client>(req)
+        .and_then(|c| c.typemap.as_ref().map(Typemap::view));
     // `clear_soap_fault`.
     set_client_slot(req, this, ClientSlot::SoapFault, Owner::null())?;
     let encoding = client_slot(this, ClientSlot::Encoding)

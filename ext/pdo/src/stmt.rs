@@ -31,20 +31,29 @@ use crate::fetch::{self, Target};
 /// `database_object_handle` takes, or, for the statement a failed
 /// `query()` left on the connection, `stmt->dbh` alone, the connection holding
 /// the statement and not the other way round.
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 pub(crate) enum DbLink {
     /// A statement no connection made, which `PHP_STMT_GET_OBJ` refuses.
     #[default]
     None,
-    Owned(PhpObject),
+    Owned(Owner<PhpObject>),
     Held(PhpObject),
 }
 
 impl DbLink {
-    pub(crate) fn object(self) -> Option<PhpObject> {
+    pub(crate) fn object(&self) -> Option<PhpObject> {
         match self {
             DbLink::None => None,
-            DbLink::Owned(dbh) | DbLink::Held(dbh) => Some(dbh),
+            DbLink::Owned(dbh) => Some(**dbh),
+            DbLink::Held(dbh) => Some(*dbh),
+        }
+    }
+
+    /// The statement's owner of its connection given up, where it holds
+    /// one.
+    pub(crate) fn release(self, req: &mut Request) {
+        if let DbLink::Owned(dbh) = self {
+            dbh.give_up(req);
         }
     }
 }
@@ -324,16 +333,14 @@ impl ObjectHandlers for Handlers {
         if let Some(query) = query {
             query.give_up(req);
         }
-        if let DbLink::Owned(dbh) = dbh {
-            req.release(dbh.as_value());
-        }
+        dbh.release(req);
     }
 
     /// `dbstmt_get_gc`: the connection, and what the default fetch style
     /// holds.
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(stmt) = object.native::<Stmt>(req) {
-            if let DbLink::Owned(dbh) = stmt.dbh {
+            if let DbLink::Owned(dbh) = &stmt.dbh {
                 visit(dbh.as_value());
             }
             stmt.target.visit(visit);

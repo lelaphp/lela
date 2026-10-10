@@ -945,7 +945,7 @@ pub(crate) fn mangled_array(
             req.addref(&entry);
             entry
         };
-        let entry = Owner::adopt(req, entry);
+        let entry = Owner::adopt(entry);
         // A declared row's mangled name is no number; a dynamic one is
         // read as a symbol table reads it, so `"1"` is `1`.
         let key = match key {
@@ -5491,7 +5491,7 @@ mod tests {
         };
         // The entries are the test's to hand on, made for the array.
         for (k, v) in entries {
-            let (k, v) = (Owner::adopt(req, k), Owner::adopt(req, v));
+            let (k, v) = (Owner::adopt(k), Owner::adopt(v));
             if a.set(req, k, v).is_err() {
                 break;
             }

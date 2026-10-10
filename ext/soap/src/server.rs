@@ -22,8 +22,8 @@ use php_ext_libxml::ffi::{Kind, Node, Save};
 use crate::classes::{Fault as FaultArgs, SoapFault, SoapHeader};
 use crate::encoding::{Cx, encode_finish, encode_reset_ns, master_to_zval};
 use crate::message::{
-    HeaderCall, get_doc_function, get_function, release_typemap, serialize_response_call,
-    soap_binding, soap_create_typemap,
+    HeaderCall, get_doc_function, get_function, serialize_response_call, soap_binding,
+    soap_create_typemap,
 };
 use crate::model::{
     Function, SOAP_1_1_ACTOR_NEXT, SOAP_1_1_ENC_NAMESPACE, SOAP_1_1_ENV_NAMESPACE,
@@ -33,7 +33,7 @@ use crate::model::{
 use crate::shared::{add_soap_fault_ex, client_throws, instance_of, new_fault};
 use crate::table::Table;
 use crate::xml::{attr_content, get_attribute, get_node, node_is_equal};
-use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap, raised};
+use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, Typemap, TypemapView, raised};
 
 type R<T> = Result<T, Thrown>;
 
@@ -118,7 +118,7 @@ impl Service {
             c.give_up(req);
         }
         if let Some(t) = self.typemap {
-            release_typemap(req, &t);
+            t.release(req);
         }
         for v in self.added_headers.into_iter().flatten() {
             v.give_up(req);
@@ -1306,7 +1306,7 @@ fn handle(req: &mut Request, this: PhpObject, arg: Option<PhpString>) -> Res<()>
         (
             s.version,
             s.sdl.clone(),
-            s.typemap.clone(),
+            s.typemap.as_ref().map(Typemap::view),
             s.encoding.clone(),
             s.class_map.as_deref().copied(),
             s.features,
@@ -1479,7 +1479,7 @@ struct Globals {
     encoding: Option<Vec<u8>>,
     sdl: Option<Arc<Sdl>>,
     class_map: Option<Value>,
-    typemap: Option<Typemap>,
+    typemap: Option<TypemapView>,
     features: i64,
 }
 
@@ -1488,7 +1488,7 @@ fn swap_globals(
     sdl: Option<Arc<Sdl>>,
     encoding: Option<Vec<u8>>,
     class_map: Option<Value>,
-    typemap: Option<Typemap>,
+    typemap: Option<TypemapView>,
     features: i64,
 ) -> Globals {
     let state = req.state::<State>();

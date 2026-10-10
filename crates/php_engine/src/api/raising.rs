@@ -1024,7 +1024,7 @@ pub fn new_throwable(
     message: &str,
 ) -> Result<Owner<Value>, Thrown> {
     let made = new_throwable_made(req, class, message);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`new_throwable`] makes, its one owner not yet named.

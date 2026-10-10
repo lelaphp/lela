@@ -18,6 +18,7 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde_json::{Map, Value, json};
 
+mod conditions;
 pub(crate) mod every;
 mod graph;
 mod invocation;
@@ -68,9 +69,10 @@ fills them once a person has run `computed trust` for this clone (harness-design
 
 /// What a section is rendered against: this checkout, its store and what
 /// its machine holds, or the tree alone, as a tracked region carries it.
-/// Against the tree every reading is `no reading`, so the render is the
-/// same bytes on a full worktree and a fresh clone and only a tracked file
-/// moves it (harness-design.md §5, revision 6; #630).
+/// Against the tree no reading is read, so the render is the same bytes on
+/// a full worktree and a fresh clone and only a tracked file moves it
+/// (harness-design.md §5, revision 6; #630), and a table drops its
+/// `reading` column, which could only say `no reading` (#2377).
 #[derive(Debug, Clone, Copy)]
 pub enum Against<'a> {
     Checkout(&'a Store),
@@ -91,6 +93,14 @@ impl<'a> Against<'a> {
             eprintln!("{note}");
         }
         Ok(files.readings)
+    }
+
+    /// The columns a table leaves out: `reading` against the tree.
+    fn omitted(self) -> &'static [&'static str] {
+        match self {
+            Against::Checkout(_) => &[],
+            Against::Tree => &["reading"],
+        }
     }
 
     /// The checkout's store, for a section [`refuse_under_tracked`] refuses
@@ -227,6 +237,7 @@ pub fn render(
         Section::Oracle => return oracle_section(&manifest.pin, format),
         Section::Corpus => return corpus_section(&manifest.pin, format),
         Section::Invocation => return invocation::render(root, format),
+        Section::Conditions => return conditions::render(root, format),
         Section::Parity => {
             return parity::render(manifest, against.checkout()?, root, format);
         }
@@ -236,10 +247,13 @@ pub fn render(
             serde_json::to_string_pretty(&rows.iter().map(Row::json).collect::<Result<Vec<_>>>()?)?
         }
         Table::Md if rows.is_empty() => format!("{NO_READING}\n"),
-        Table::Md => match settled_rows(section).filter(|_| !uncut) {
-            Some((name, settled)) => folded(columns, rows, name, settled),
-            None => table(columns, &rows),
-        },
+        Table::Md => {
+            let omit = against.omitted();
+            match settled_rows(section).filter(|_| !uncut) {
+                Some((name, settled)) => folded(columns, rows, name, settled, omit),
+                None => table(columns, &rows, omit),
+            }
+        }
     })
 }
 
@@ -316,15 +330,15 @@ fn settled(row: &Row) -> bool {
 /// settled rows left out and naming the command that renders every row,
 /// so the section grows by the rows that need a look and not by the
 /// crates that landed. A section with every row settled is the line alone.
-fn folded(columns: Columns, rows: Vec<Row>, name: &str, what: &str) -> String {
+fn folded(columns: Columns, rows: Vec<Row>, name: &str, what: &str, omit: &[&str]) -> String {
     let (settled, shown): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(settled);
     if settled.is_empty() {
-        return table(columns, &shown);
+        return table(columns, &shown, omit);
     }
     let (mut out, more) = if shown.is_empty() {
         (String::new(), "")
     } else {
-        (table(columns, &shown) + "\n", " more")
+        (table(columns, &shown, omit) + "\n", " more")
     };
     writeln!(
         out,
@@ -409,7 +423,7 @@ pub fn session(
             write!(
                 facts,
                 "\n## permits this session\n\n{}",
-                table(THIS_SESSION, &rows)
+                table(THIS_SESSION, &rows, &[])
             )
             .ok();
         }
@@ -1047,7 +1061,7 @@ fn permits(
         }))?,
         Table::Md if rules.is_empty() && instruments.is_empty() => format!("{NO_READING}\n"),
         Table::Md => {
-            let mut out = table(if uncut { PERMITS_UNCUT } else { PERMITS }, &rules);
+            let mut out = table(if uncut { PERMITS_UNCUT } else { PERMITS }, &rules, &[]);
             writeln!(out).ok();
             let (head, rule) = if window.is_some() {
                 (" silent |", "---|")
@@ -1960,12 +1974,22 @@ const BUNDLE: Columns = (
     },
 );
 
-fn table((head, line): Columns, rows: &[Row]) -> String {
+/// The rows as a Markdown table, less the columns `omit` names.
+fn table((head, line): Columns, rows: &[Row], omit: &[&str]) -> String {
+    let kept = |cells: Vec<String>| -> Vec<String> {
+        cells
+            .into_iter()
+            .zip(head)
+            .filter(|(_, h)| !omit.contains(h))
+            .map(|(c, _)| c)
+            .collect()
+    };
+    let head = kept(head.iter().map(|h| (*h).to_owned()).collect());
     let mut out = String::new();
     writeln!(out, "| {} |", head.join(" | ")).ok();
     writeln!(out, "|{}", "---|".repeat(head.len())).ok();
     for row in rows {
-        writeln!(out, "| {} |", line(row).join(" | ")).ok();
+        writeln!(out, "| {} |", kept(line(row)).join(" | ")).ok();
     }
     out
 }

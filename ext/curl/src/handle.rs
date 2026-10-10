@@ -9,7 +9,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, clear, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Owner, PhpObject, PhpString, TypeTag, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 
 use crate::State;
 use crate::ffi::{Easy, EasyId, Hook};
@@ -66,19 +66,24 @@ pub(crate) enum ReadFrom {
 pub(crate) struct Channel<M> {
     pub(crate) to: M,
     pub(crate) handler: Option<Handler>,
-    pub(crate) stream: Option<Value>,
+    pub(crate) stream: Option<Owner<Value>>,
 }
 
 impl<M: Copy> Channel<M> {
     fn dup(&self, req: &Request) -> Channel<M> {
-        if let Some(stream) = &self.stream {
-            req.addref(stream);
-        }
         Channel {
             to: self.to,
             handler: self.handler.as_ref().map(|handler| dup(req, handler)),
-            stream: self.stream,
+            stream: self
+                .stream
+                .as_deref()
+                .map(|stream| Owner::take(req, *stream)),
         }
+    }
+
+    /// The stream, a view.
+    pub(crate) fn stream(&self) -> Option<Value> {
+        self.stream.as_deref().copied()
     }
 
     fn release(self, req: &mut Request) {
@@ -86,7 +91,7 @@ impl<M: Copy> Channel<M> {
             handler.give_up(req);
         }
         if let Some(stream) = self.stream {
-            req.release(stream);
+            stream.give_up(req);
         }
     }
 }
@@ -103,7 +108,7 @@ pub(crate) struct Curl {
     /// `handlers.write->buf`, what `PHP_CURL_RETURN` kept.
     pub(crate) returned: Vec<u8>,
     /// `handlers.std_err`, the `CURLOPT_STDERR` stream.
-    pub(crate) stderr: Option<Value>,
+    pub(crate) stderr: Option<Owner<Value>>,
     /// The six callables [`Hook`] names.
     hooks: [Option<Handler>; 6],
     /// `header.str`, the last request's headers as `CURLINFO_HEADER_OUT`
@@ -113,11 +118,11 @@ pub(crate) struct Curl {
     pub(crate) err: i64,
     pub(crate) in_callback: bool,
     /// The `CURLOPT_POSTFIELDS` array that held a file, rebuilt by a copy.
-    pub(crate) postfields: Option<Value>,
+    pub(crate) postfields: Option<Owner<PhpArray>>,
     /// `CURLOPT_PRIVATE`.
-    pub(crate) private: Option<Value>,
-    /// The `CurlShareHandle` of `CURLOPT_SHARE`, one owner of it.
-    pub(crate) share: Option<PhpObject>,
+    pub(crate) private: Option<Owner<Value>>,
+    /// The `CurlShareHandle` of `CURLOPT_SHARE`, an owner of it.
+    pub(crate) share: Option<Owner<PhpObject>>,
 }
 
 const fn slot(hook: Hook) -> usize {
@@ -149,14 +154,14 @@ impl Curl {
         for handler in self.hooks.into_iter().flatten() {
             handler.give_up(req);
         }
-        for value in [self.stderr, self.postfields, self.private]
-            .into_iter()
-            .flatten()
-        {
-            req.release(value);
+        for value in [self.stderr, self.private].into_iter().flatten() {
+            value.give_up(req);
+        }
+        if let Some(postfields) = self.postfields {
+            postfields.give_up(req);
         }
         if let Some(share) = self.share {
-            req.release(share.as_value());
+            share.give_up(req);
         }
     }
 }
@@ -242,17 +247,17 @@ impl ObjectHandlers for Handlers {
                 handler.visit(visit);
             }
             if let Some(stream) = stream {
-                visit(*stream);
+                visit(**stream);
             }
         }
         for handler in curl.hooks.iter().flatten() {
             handler.visit(visit);
         }
-        for value in [curl.postfields, curl.stderr, curl.private]
-            .into_iter()
-            .flatten()
-        {
-            visit(value);
+        if let Some(postfields) = &curl.postfields {
+            visit(Value::array(**postfields));
+        }
+        for value in [&curl.stderr, &curl.private].into_iter().flatten() {
+            visit(**value);
         }
     }
 
@@ -342,7 +347,7 @@ fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thro
             return Err(thrown);
         }
     };
-    let postfields = dup.postfields;
+    let postfields = dup.postfields.as_deref().copied();
     if let Some(curl) = copy.native_mut::<Curl>(req) {
         *curl = dup;
         curl.easy = Some(easy);
@@ -350,9 +355,8 @@ fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thro
         let _ = easy.close(req);
         dup.release_values(req);
     }
-    if let Some(postfields) = postfields
-        && let Some(array) = postfields.as_array()
-        && crate::file::build_mime(req, *copy, *array).is_err()
+    if let Some(array) = postfields
+        && crate::file::build_mime(req, *copy, array).is_err()
     {
         return Err(failed(req, copy));
     }
@@ -381,14 +385,14 @@ pub(crate) fn copy_handlers(req: &mut Request, object: PhpObject) -> Result<Curl
         *slot = hook;
     }
     let (private, postfields) = match object.native::<Curl>(req) {
-        Some(from) => (from.private, from.postfields),
+        Some(from) => (
+            from.private.as_deref().copied(),
+            from.postfields.as_deref().copied(),
+        ),
         None => (None, None),
     };
-    for value in [private, postfields].into_iter().flatten() {
-        req.addref(&value);
-    }
-    copy.private = private;
-    copy.postfields = postfields;
+    copy.private = private.map(|private| Owner::take(req, private));
+    copy.postfields = postfields.map(|postfields| Owner::take(req, postfields));
     Ok(copy)
 }
 
@@ -421,8 +425,10 @@ pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool
     let Some(curl) = object.native::<Curl>(req) else {
         return;
     };
-    let gone = |stream: &Option<Value>| {
-        stream.is_some_and(|stream| Stream::from_value(req, &stream).is_none())
+    let gone = |stream: &Option<Owner<Value>>| {
+        stream
+            .as_deref()
+            .is_some_and(|stream| Stream::from_value(req, stream).is_none())
     };
     let stale = [
         gone(&curl.stderr),
@@ -465,7 +471,7 @@ pub(crate) fn verify_handlers(req: &mut Request, object: PhpObject, report: bool
             easy.set_stderr(req, None);
         }
         if let Some(value) = released {
-            req.release(value);
+            value.give_up(req);
         }
     }
 }
@@ -641,7 +647,7 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
     curl.write.to = WriteTo::Stdout;
     curl.header.to = HeaderTo::Ignore;
     curl.read.to = ReadFrom::Direct;
-    let released: Vec<Value> = [
+    let released: Vec<Owner<Value>> = [
         curl.write.stream.take(),
         curl.header.stream.take(),
         curl.read.stream.take(),
@@ -652,7 +658,7 @@ fn reset_handlers(req: &mut Request, object: PhpObject) {
     .collect();
     let hooks: Vec<Handler> = curl.hooks.iter_mut().filter_map(Option::take).collect();
     for value in released {
-        req.release(value);
+        value.give_up(req);
     }
     for handler in hooks {
         handler.give_up(req);
@@ -774,10 +780,10 @@ fn finished(req: &mut Request, object: PhpObject) -> Result<Union<Owner<PhpStrin
     }
     let streams: Vec<Value> = [
         (curl.write.to == WriteTo::File)
-            .then_some(curl.write.stream)
+            .then(|| curl.write.stream())
             .flatten(),
         (curl.header.to == HeaderTo::File)
-            .then_some(curl.header.stream)
+            .then(|| curl.header.stream())
             .flatten(),
     ]
     .into_iter()

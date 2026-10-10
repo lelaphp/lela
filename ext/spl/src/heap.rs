@@ -689,8 +689,12 @@ fn cmp(
     if pending.is_some() {
         return 0;
     }
-    let Ok((queue, min)) = read(req, object, |h| (h.queue, h.min)) else {
-        return 0;
+    let (queue, min) = match read(req, object, |h| (h.queue, h.min)) {
+        Ok(read) => read,
+        Err(thrown) => {
+            *pending = Some(thrown);
+            return 0;
+        }
     };
     let (first, second) = if queue {
         (left.1, right.1)

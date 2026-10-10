@@ -659,28 +659,16 @@ fn openssl_x509_parse(
         let mut purposes = PhpArray::new(req)?;
         for purpose in cert.purposes() {
             let mut row = PhpArray::new(req)?;
-            row.set(
-                req,
-                Owner::take(req, Key::Int(0)),
-                Owner::bool(purpose.fit != 0),
-            )?;
-            row.set(
-                req,
-                Owner::take(req, Key::Int(1)),
-                Owner::bool(purpose.fit_ca != 0),
-            )?;
+            row.set(req, Owner::index(0), Owner::bool(purpose.fit != 0))?;
+            row.set(req, Owner::index(1), Owner::bool(purpose.fit_ca != 0))?;
             let label = if short_names {
                 purpose.short
             } else {
                 purpose.long
             };
             let label = PhpString::new(req, &label)?.into_value();
-            row.set(req, Owner::take(req, Key::Int(2)), label)?;
-            purposes.set(
-                req,
-                Owner::take(req, Key::Int(i64::from(purpose.id))),
-                row.into_value(),
-            )?;
+            row.set(req, Owner::index(2), label)?;
+            purposes.set(req, Owner::index(i64::from(purpose.id)), row.into_value())?;
         }
         put(req, &mut out, b"purposes", purposes.into_value())?;
 

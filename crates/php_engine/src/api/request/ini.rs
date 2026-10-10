@@ -17,7 +17,7 @@ use super::{
 };
 use crate::api::abi::{IniStage, IniVerdict, OnModify};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Key, Owner, PhpString, Value, adopted_some};
+use crate::api::values::{Owner, PhpString, Value, adopted_some};
 use crate::engine::{Configured, ConfiguredKey};
 
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
@@ -863,7 +863,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn cfg_entry(&mut self, name: &[u8]) -> Result<Option<Owner<Value>>, Thrown> {
         let made = self.cfg_entry_made(name);
-        adopted_some(self, made)
+        adopted_some(made)
     }
 
     /// What [`cfg_entry`](Self::cfg_entry) makes, its one owner not yet named.
@@ -884,11 +884,11 @@ impl Request {
                 let mut array = self.array()?;
                 for (key, entry) in rows {
                     let key = match key {
-                        ConfiguredKey::Index(n) => Owner::take(self, Key::Int(*n)),
+                        ConfiguredKey::Index(n) => Owner::index(*n),
                         ConfiguredKey::Name(name) => PhpString::new(self, name)?.into_key(),
                     };
                     let value = self.configured_value(entry)?;
-                    let value = Owner::adopt(self, value);
+                    let value = Owner::adopt(value);
                     array.set(self, key, value)?;
                 }
                 Value::array(array)

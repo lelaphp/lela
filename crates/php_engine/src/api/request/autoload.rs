@@ -182,7 +182,7 @@ impl Request {
         let made = self.autoload_functions_made()?;
         let mut owners = Vec::with_capacity(made.len());
         for value in made {
-            owners.push(Owner::adopt(self, value));
+            owners.push(Owner::adopt(value));
         }
         Ok(owners)
     }
@@ -237,13 +237,13 @@ impl Request {
                 } else {
                     let class = self.class_name(scope);
                     let class = Value::string(self.string(class.as_bytes())?);
-                    Owner::adopt(self, class)
+                    Owner::adopt(class)
                 };
                 let name = self.function_name(function);
                 let mut pair = self.array()?;
                 pair.append(self, first)?;
                 let name = Value::string(self.string(name.as_bytes())?);
-                pair.append(self, Owner::adopt(self, name))?;
+                pair.append(self, Owner::adopt(name))?;
                 Ok(Value::array(pair))
             }
         }

@@ -183,9 +183,10 @@ impl PartialEq for Target {
 /// resumed, a user's `Iterator` served its methods, with what `current()`
 /// answered kept until the walk moves, as `zend_user_iterator` keeps it,
 /// and a class that walks its objects in C walked by its own functions,
-/// in no frame of their own. One owner of the iterator, the holder's,
-/// who names it to the collector and gives it up by its value
-/// ([`Iter::as_value`]).
+/// in no frame of their own. [`iterate`] hands out an [`Owner`] of it,
+/// the holder's, who names it to the collector by its value
+/// ([`Iter::as_value`]) and gives it up with [`Owner::give_up`],
+/// `zend_iterator_dtor`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Iter(PhpObject);
 
@@ -205,14 +206,14 @@ impl Iter {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn value(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         let made = crate::interfaces::current(req, self.0);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// `funcs->get_current_key`, one owner, the caller's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn key(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
         let made = crate::interfaces::key(req, self.0);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// `funcs->move_forward`.
@@ -228,8 +229,7 @@ impl Iter {
         crate::interfaces::invalidate_current(req, self.0);
     }
 
-    /// The iterator as a value: what its holder names to the collector
-    /// and gives up with [`Request::release`], `zend_iterator_dtor`.
+    /// The iterator as a value: what its holder names to the collector.
     #[must_use]
     pub fn as_value(self) -> Value {
         self.0.as_value()
@@ -390,7 +390,7 @@ pub fn call(
     arguments: &[Value],
 ) -> Result<Owner<Value>, Thrown> {
     let made = call_made(req, callable, arguments);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`call`] makes, its one owner not yet named.
@@ -423,7 +423,7 @@ pub fn call_named(
     named: &[(PhpString, Value)],
 ) -> Result<Owner<Value>, Thrown> {
     let made = call_named_made(req, callable, arguments, named);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`call_named`] makes, its one owner not yet named.
@@ -492,7 +492,7 @@ pub fn call_array(
     array: PhpArray,
 ) -> Result<Owner<Value>, Thrown> {
     let made = call_array_made(req, callable, array);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`call_array`] makes, its one owner not yet named.
@@ -957,7 +957,7 @@ pub fn call_method(
     arguments: &[Value],
 ) -> Result<Owner<Value>, Thrown> {
     let made = call_method_made(req, object, method, arguments);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`call_method`] makes, its one owner not yet named.
@@ -1101,7 +1101,7 @@ pub fn read_raw_property(
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
     let made = req.read_raw(*object, name);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// A hooked property's backing value written past its hooks, as the
@@ -1165,7 +1165,7 @@ pub fn instantiate_named(
     named: &[(PhpString, Value)],
 ) -> Result<Owner<PhpObject>, Thrown> {
     let made = instantiate_named_made(req, class, arguments, named);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`instantiate_named`] makes, its one owner not yet named.
@@ -1268,7 +1268,7 @@ pub fn attribute_object(
     file: Option<&[u8]>,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let made = attribute_object_made(req, class, attribute, scope, file);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`attribute_object`] makes, its one owner not yet named.
@@ -1430,7 +1430,7 @@ pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn new_object(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
     let made = new_object_made(req, class);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`new_object`] makes, its one owner not yet named.
@@ -1463,7 +1463,7 @@ pub fn clone_with<T: std::any::Any + Send>(
     payload: T,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let made = clone_with_made(req, object, payload);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`clone_with`] makes, its one owner not yet named.
@@ -1518,7 +1518,7 @@ pub fn internal_iterator(
     object: &PhpObject,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let made = crate::interfaces::internal_iterator(req, *object);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry the
@@ -1767,7 +1767,7 @@ pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown>
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Owner<Value>, Thrown> {
     let made = fetch_constant_made(req, name);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`fetch_constant`] makes, its one owner not yet named.
@@ -1939,7 +1939,7 @@ pub fn class_constant(
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
     let made = req.updated_class_constant(class, name);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:
@@ -2030,7 +2030,7 @@ pub fn eval_const_expr(
     scope: Option<ClassId>,
 ) -> Result<Owner<Value>, Thrown> {
     let made = eval_const_expr_made(req, expr, scope);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`eval_const_expr`] makes, its one owner not yet named.
@@ -2063,7 +2063,7 @@ pub fn eval_declared(
     scope: Option<ClassId>,
 ) -> Result<Owner<Value>, Thrown> {
     let made = eval_declared_made(req, expr, scope);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// What [`eval_declared`] makes, its one owner not yet named.
@@ -3108,7 +3108,8 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
 }
 
 /// `ce->get_iterator(ce, object, 0)` over a `Traversable` object: its
-/// iterator ([`Iter`]), one owner, the caller's. An `IteratorAggregate`
+/// iterator ([`Iter`]), one owner, the caller's, given up as
+/// `zend_iterator_dtor` gives it up. An `IteratorAggregate`
 /// is asked `getIterator()` until it answers an `Iterator`, php's
 /// `Exception` naming the class where it answers anything else; a
 /// finished `Generator` is php's refusal to traverse it.
@@ -3137,8 +3138,10 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
 /// Cannot traverse an already closed generator
 /// current 00
 /// ```
-pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Iter, Thrown> {
-    crate::interfaces::get_iterator(req, *object, false).map(Iter)
+#[cfg_attr(debug_assertions, track_caller)]
+pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Owner<Iter>, Thrown> {
+    let made = crate::interfaces::get_iterator(req, *object, false).map(Iter);
+    adopted(made)
 }
 
 /// `zend_create_fake_closure` over a resolved callable, what
@@ -3167,7 +3170,7 @@ pub fn closure_from_callable(
     callable: &Callable,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let made = crate::classes::fake_closure(req, callable);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// Read a property through the class's `read_property` handler: a
@@ -3214,7 +3217,7 @@ pub fn read_static_prop(
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
     let made = req.static_property(class, name, Some(class), PropertyRead::Warning);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// Address a `static` property of `class` silently — a property of the
@@ -3240,7 +3243,7 @@ pub fn read_class_prop_silent(
     name: &[u8],
 ) -> Result<Option<Owner<Value>>, Thrown> {
     let made = req.static_property_silent(class, name, Some(class));
-    adopted_some(req, made)
+    adopted_some(made)
 }
 
 /// Write a `static` property of `class`,
@@ -3275,7 +3278,7 @@ pub fn new_lazy_ghost(
     options: i64,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let made = req.make_lazy(None, class, initializer, Strategy::Ghost, options);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `zend_object_make_lazy` under `ZEND_LAZY_OBJECT_STRATEGY_PROXY`, what
@@ -3290,7 +3293,7 @@ pub fn new_lazy_proxy(
     options: i64,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let made = req.make_lazy(None, class, factory, Strategy::Proxy, options);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `zend_object_make_lazy(obj, class, ...)` under the ghost strategy,
@@ -3349,13 +3352,14 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 /// `Some`: the declared property `name`, on the object the initialised
 /// proxies lead to, stops waiting for the initializer, holding its
 /// default or `value` written past `__set` and hooks; the object stops
-/// being lazy once no property waits. `value` is the object's from here.
-/// The checks on the property php makes first are the caller's.
+/// being lazy once no property waits. `value` is a sink's, the object's
+/// from here. The checks on the property php makes first are the
+/// caller's.
 pub fn skip_lazy_initialization(
     req: &mut Request,
     object: &PhpObject,
     name: &[u8],
-    value: Option<Value>,
+    value: Option<Owner<Value>>,
 ) -> Result<(), Thrown> {
     req.lazy_skip(*object, name, value)
 }

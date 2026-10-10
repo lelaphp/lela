@@ -59,7 +59,7 @@ fn encode(
             match step {
                 Ok(step) if step.status == Status::StreamEnd => {
                     let out = out.truncate(req, step.written)?;
-                    return Ok(OrFalse::Value(out.finish(req)));
+                    return Ok(OrFalse::Value(out.finish()));
                 }
                 Ok(step) => {
                     out.free(req);

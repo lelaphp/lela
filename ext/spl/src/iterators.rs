@@ -67,8 +67,8 @@ pub(crate) struct DualItState {
     kind: Kind,
     inner: Option<Owner<PhpObject>>,
     /// `inner.iterator`: the iterator the inner object's `get_iterator`
-    /// handed out, which every step walks, one owner.
-    iter: Option<Iter>,
+    /// handed out, which every step walks.
+    iter: Option<Owner<Iter>>,
     data: Option<Owner<Value>>,
     key: Option<Owner<Value>>,
     pos: i64,
@@ -179,7 +179,7 @@ struct RegexIt {
 /// ```
 struct Level {
     iterator: Owner<PhpObject>,
-    sub: Iter,
+    sub: Owner<Iter>,
     state: State,
 }
 
@@ -213,7 +213,7 @@ impl Level {
     fn seen(&self) -> Seen {
         Seen {
             iterator: *self.iterator,
-            sub: self.sub,
+            sub: *self.sub,
             state: self.state,
         }
     }
@@ -221,7 +221,7 @@ impl Level {
     /// `zend_iterator_dtor(sub_iter)` then `zval_ptr_dtor(&zobject)`, the
     /// order the rewind, the destructor and the free give a level up in.
     fn release(self, req: &mut Request) {
-        req.release(self.sub.as_value());
+        self.sub.give_up(req);
         self.iterator.give_up(req);
     }
 }
@@ -2567,7 +2567,7 @@ fn dual_free(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
 
 /// The inner object's iterator, `intern->inner.iterator`.
 fn inner_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Thrown> {
-    dual(req, this, |it| it.iter)
+    dual(req, this, |it| it.iter.as_deref().copied())
 }
 
 /// `intern->inner.iterator = ce->get_iterator(ce, zobject, 0)`: the
@@ -2576,7 +2576,7 @@ fn inner_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Thrown
 fn inner_iterate(req: &mut Request, this: PhpObject, inner: PhpObject) -> Result<(), Thrown> {
     let iter = iterate(req, &inner)?;
     if let Some(old) = dual(req, this, |it| it.iter.replace(iter))? {
-        req.release(old.as_value());
+        old.give_up(req);
     }
     Ok(())
 }
@@ -2825,9 +2825,7 @@ impl ObjectHandlers for DualHandlers {
             for value in values.into_iter().flatten() {
                 value.give_up(req);
             }
-            if let Some(iter) = iter {
-                req.release(iter.as_value());
-            }
+            crate::give_up(req, iter);
             for object in objects.into_iter().flatten() {
                 object.give_up(req);
             }
@@ -2865,7 +2863,7 @@ impl ObjectHandlers for DualHandlers {
             {
                 visit(object.as_value());
             }
-            if let Some(iter) = it.iter {
+            if let Some(iter) = &it.iter {
                 visit(iter.as_value());
             }
             if let Some(cache) = &it.cache {
@@ -3108,9 +3106,7 @@ fn appended(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
 fn append_next_iterator(req: &mut Request, this: PhpObject) -> Result<bool, Thrown> {
     dual_free(req, this)?;
     let (old, old_iter) = dual(req, this, |it| (it.inner.take(), it.iter.take()))?;
-    if let Some(old_iter) = old_iter {
-        req.release(old_iter.as_value());
-    }
+    crate::give_up(req, old_iter);
     crate::give_up(req, old);
     let list = appended(req, this)?;
     if !crate::valid(req, list)? {
@@ -3532,7 +3528,7 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
                         },
                     )?;
                     let level = Level::new(req, held)?;
-                    let sub = level.sub;
+                    let sub = *level.sub;
                     rec(req, this, |it| it.levels.push(level))?;
                     fit_iterators(req, this)?;
                     sub.rewind(req)?;
@@ -3552,7 +3548,7 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
             caught(req, this, thrown)?;
         }
         let popped = rec(req, this, |it| {
-            if it.levels.len() > 1 && it.levels.last().map(|l| l.sub) == Some(sub) {
+            if it.levels.len() > 1 && it.levels.last().map(|l| *l.sub) == Some(sub) {
                 it.levels.pop()
             } else {
                 None
@@ -3560,9 +3556,8 @@ fn rec_forward(req: &mut Request, this: PhpObject) -> Result<(), Thrown> {
         })?;
         if let Some(level) = popped {
             // The object before its iterator, as php's pop gives them up.
-            let sub = level.sub;
             level.iterator.give_up(req);
-            req.release(sub.as_value());
+            level.sub.give_up(req);
             // `while (!EG(exception))`: a sub-iterator's destructor that
             // throws ends the step.
             php_ext::raising::pending(req)?;

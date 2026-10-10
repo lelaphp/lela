@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=89aa4601d46e11164e1559cc6c82e33a782f1d7f61eb8c8976e6e694519e93de out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=41abf027cc5e2fdbbf3837a2822dd5fd143d86c36269919617cc07f3139c091d out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -80,7 +80,7 @@ Where those paragraphs say *suggestion* or *follow-up*, this repository says tic
 
 - `third-engine-design.md` is the design of record, `jit-design.md` the compiled tier, `harness-design.md` the harness: living documents with a ledger on top, cited by section. What a revision says is a person's; typing it is not. Where a ticket carries the sentence a person has settled, landing it with its ledger row is yours, and the commit names the ticket that settled it. A revision nobody has settled stays a question you file. `research/` holds the earlier revisions and the research behind them, read for history only. `docs/adr/` is the list of reversals; read the ADR before touching what it names.
 - Design documents carry no numbers of their own; budgets and interfaces live in `seams.toml`, the oracle in `oracle.toml`. A fact that changes is a region, rendered by `computed run` and held by `computed check`. No tickets, plans or agent scratch files in the repository; keep working material in your scratchpad.
-- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and `php_process` the process-wide mechanisms (`fork`, the signal pool, `LC_CTYPE`), the engine's only `unsafe`; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
+- `crates/php_syntax`, `php_compile` and `php_unit` take source to a unit; `php_heap` is the memory model and the stacks, and `php_process` the process and its file descriptors (`fork`, the signal pool, `LC_CTYPE`, the process identity, the fd calls), each an `unsafe` home the `unsafe.homes` rule names; `php_engine` holds the kernels, dispatch, `execute`, the linker, `serve` and `api`, with `php_jit` the compiled tier behind a feature; `php_ext` is the facade every extension depends on and `php_bundle` the enabled set; `php_proto` is the codecs and `php_sapi` the facade every host depends on.
 - `ext/<name>` is one crate per extension, laid down by `cargo xtask new-ext`; read `ext/AGENTS.md` before touching one. `sapi/<name>` is one crate per host, each its binary (`sapi/cli` builds `php`, `sapi/cgi` `php-cgi`; ADR-0008). `xtask` is the harness and `xtask/fixtures/` its negative controls. `data/` holds the censuses and extraction records the design cites. Most of `crates/` is not created yet; the layout regions below say what exists.
 
 ## Taste
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=8b808bd7b8723991dcb3fb6025fec03fe6bcbcc2937c85d7e3d0f838a628f3c2 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -132,43 +132,43 @@ third-engine-design.md
 | layer | layer.lock | 37 |  | no reading |
 | harness | xtask.lock | 401 |  | no reading |
 
-<!-- /computed in=73ef1a4d9f7737c981fda6463e940928a5a5b6b996e38b26fbc47e4155e09eb5 out=0eda487d28090c7fcdd7aade954e0764b769422caa85535b810a7ecc3797533b -->
+<!-- /computed -->
 <!-- computed exec cmd="cargo xtask status --section rules --format md --tracked" inputs=seams.toml,xtask/src/status.rs name=rules | do not edit; run computed -->
 
-| rule | adr | predicate | reading |
-|---|---|---|---|
-| ext.no-locks | ADR-0005 | deny_types | no reading |
-| unsafe.homes | ADR-0006 | allow | no reading |
-| unsafe.one-op |  | deny_lints | no reading |
-| fork.home |  | deny_pattern | no reading |
-| fork.threads | ADR-0010 | deny_methods | no reading |
-| lints.no-panic |  | deny_lints | no reading |
-| api.no-hot |  | deny_pattern | no reading |
-| ext.no-private |  | deny_pattern | no reading |
-| api.lock-line |  | on | no reading |
-| xtask.lock-line |  | on | no reading |
-| ext.pub-beyond-extension |  | on | no reading |
-| witness.exit-authored |  | deny_pattern | no reading |
-| witness.capture-authored |  | deny_pattern | no reading |
-| witness.coverage |  | check | no reading |
-| vocab.avoid |  | avoid_from | no reading |
-| vocab.harness |  | avoid_from | no reading |
-| generated.committed |  | generated | no reading |
-| git.no-verify |  | deny_argv | no reading |
-| git.no-amend |  | deny_argv | no reading |
-| ticket.close |  | deny_argv | no reading |
-| ticket.close-api |  | deny_pattern | no reading |
-| ticket.reply-unfiled |  | deny_pattern | no reading |
-| lanes.nightly |  | deny_pattern | no reading |
-| lanes.nightly-flags |  | deny_argv | no reading |
-| lanes.builder-subset |  | require_argv | no reading |
-| computed.force |  | deny_pattern | no reading |
-| harness.self |  | deny | no reading |
-| harness.self-shell |  | deny_pattern | no reading |
-| harness.transcript |  | deny_pattern | no reading |
-| divergence.reason |  | check | no reading |
+| rule | adr | predicate |
+|---|---|---|
+| ext.no-locks | ADR-0005 | deny_types |
+| unsafe.homes | ADR-0006 | allow |
+| unsafe.one-op |  | deny_lints |
+| fork.home |  | deny_pattern |
+| fork.threads | ADR-0010 | deny_methods |
+| lints.no-panic |  | deny_lints |
+| api.no-hot |  | deny_pattern |
+| ext.no-private |  | deny_pattern |
+| api.lock-line |  | on |
+| xtask.lock-line |  | on |
+| ext.pub-beyond-extension |  | on |
+| witness.exit-authored |  | deny_pattern |
+| witness.capture-authored |  | deny_pattern |
+| witness.coverage |  | check |
+| vocab.avoid |  | avoid_from |
+| vocab.harness |  | avoid_from |
+| generated.committed |  | generated |
+| git.no-verify |  | deny_argv |
+| git.no-amend |  | deny_argv |
+| ticket.close |  | deny_argv |
+| ticket.close-api |  | deny_pattern |
+| ticket.reply-unfiled |  | deny_pattern |
+| lanes.nightly |  | deny_pattern |
+| lanes.nightly-flags |  | deny_argv |
+| lanes.builder-subset |  | require_argv |
+| computed.force |  | deny_pattern |
+| harness.self |  | deny |
+| harness.self-shell |  | deny_pattern |
+| harness.transcript |  | deny_pattern |
+| divergence.reason |  | check |
 
-<!-- /computed in=d276e31b5e4bc48ceee4f5a331c501f01c2f302eff006414cf9c3f4addd0b443 out=be25d111f0a41da9a2ef28c2c7751b8ec9e73aa6c7c93c97f0a3396365224876 -->
+<!-- /computed in=592576aff78ea50fe925fcd66ccbf4ea5fad9726701f90f2241a7d0b364e917d out=21a36875969905591a5f06f72d0ccc30825fb03343e1859cdb8f5a36f6b45bda -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -207,7 +207,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary was built in
   -h, --help        Print help
 ```
-<!-- /computed in=3832a06c18316940fb7c2687e7324214bc96f762a443f430e5305fa79f78c6df out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
+<!-- /computed in=8971c959d548b8c6f8d577e6d87e9efe4f53a5faba8b9ce3241f24688d9ae2fa out=5e2c15a34f0672a7ededa7599cdfb64d7071067e3ae66c474d5ce40bdf357b53 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

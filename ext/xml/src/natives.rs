@@ -554,25 +554,26 @@ fn xml_parse_into_struct(
     let (Some(data_ref), info_ref) = (values.reference(), index.reference()) else {
         return Ok(OrFalse::False);
     };
-    req.addref(&data_ref.as_value());
-    if let Some(info) = info_ref {
-        req.addref(&info.as_value());
-    }
-    let old = parser_mut(req, object).and_then(|p| {
-        let old = p.into.take();
-        p.into = Some(Collected {
-            data: data_ref,
-            info: info_ref.or_else(|| old.and_then(|o| o.info)),
-        });
-        old
-    });
-    if let Some(old) = old {
-        req.release(old.data.as_value());
-        if info_ref.is_some()
-            && let Some(info) = old.info
-        {
-            req.release(info.as_value());
+    let values_ref = Owner::take(req, data_ref);
+    let index_ref = info_ref.map(|info| Owner::take(req, info));
+    // An `$index` not given keeps the one an earlier call set.
+    let old = match parser_mut(req, object) {
+        Some(p) => {
+            let mut old = p.into.take();
+            let info = index_ref.or_else(|| old.as_mut().and_then(|o| o.info.take()));
+            p.into = Some(Collected {
+                data: values_ref,
+                info,
+            });
+            old
         }
+        None => Some(Collected {
+            data: values_ref,
+            info: index_ref,
+        }),
+    };
+    if let Some(old) = old {
+        old.release(req);
     }
     if let Some(p) = parser_mut(req, object) {
         p.level = 0;

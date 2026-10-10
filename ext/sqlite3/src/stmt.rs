@@ -18,11 +18,11 @@ use crate::conn::{
 use crate::result::{self, Origin, SQLite3Result};
 
 /// `php_sqlite3_stmt` less its `zend_object`: the `SQLite3` it was
-/// prepared on, one owner of it, and its place in that connection's
+/// prepared on, an owner of it, and its place in that connection's
 /// list, `None` before a prepare succeeded.
 #[derive(Default)]
 pub(crate) struct StmtObj {
-    db: Option<PhpObject>,
+    db: Option<Owner<PhpObject>>,
     id: Option<StmtId>,
     params: Vec<Bound>,
 }
@@ -119,7 +119,7 @@ pub(crate) struct Bound {
 /// the call.
 fn held(req: &mut Request, object: PhpObject, need: bool) -> Result<Taken, Thrown> {
     let (db, id) = match object.native::<Box<StmtObj>>(req) {
-        Some(s) => (s.db, s.id),
+        Some(s) => (s.db.as_deref().copied(), s.id),
         None => (None, None),
     };
     let taken = match (db, id) {
@@ -149,10 +149,15 @@ fn with<R>(
     answer
 }
 
-/// The statement's `SQLite3`, one owner the caller took, recorded.
-pub(crate) fn attach(req: &mut Request, object: PhpObject, db: PhpObject) {
-    if let Some(s) = object.native_mut::<Box<StmtObj>>(req) {
-        s.db = Some(db);
+/// The statement's `SQLite3`, an owner the caller took, recorded; the
+/// one a constructor served again replaces is given up.
+pub(crate) fn attach(req: &mut Request, object: PhpObject, db: Owner<PhpObject>) {
+    let old = match object.native_mut::<Box<StmtObj>>(req) {
+        Some(s) => s.db.replace(db),
+        None => Some(db),
+    };
+    if let Some(old) = old {
+        old.give_up(req);
     }
 }
 
@@ -166,7 +171,7 @@ pub(crate) fn set_id(req: &mut Request, object: PhpObject, id: StmtId) {
 /// The `SQLite3` and the place of a `SQLite3Stmt`, where it was prepared.
 pub(crate) fn place(req: &Request, object: PhpObject) -> Option<(PhpObject, StmtId)> {
     let s = object.native::<Box<StmtObj>>(req)?;
-    Some((s.db?, s.id?))
+    Some((s.db.as_deref().copied()?, s.id?))
 }
 
 /// `prepare()` and the constructor: the text prepared on `owner`'s
@@ -184,8 +189,8 @@ pub(crate) fn prepare_on(
         None => instantiate(req, b"SQLite3Stmt")?,
     };
     let object = *made;
-    req.addref(&owner.as_value());
-    attach(req, object, owner);
+    let held = Owner::take(req, owner);
+    attach(req, object, held);
     let (prepared, thrown) = db.prepare(req, sql);
     let stmt = match prepared {
         Ok(stmt) => stmt,
@@ -369,11 +374,11 @@ impl ObjectHandlers for Handlers {
             return;
         };
         release_params(req, s.params);
-        if let (Some(db), Some(id)) = (s.db, s.id) {
+        if let (Some(db), Some(id)) = (s.db.as_deref().copied(), s.id) {
             remove_stmt(req, db, id);
         }
         if let Some(db) = s.db {
-            req.release(db.as_value());
+            db.give_up(req);
         }
     }
 }

@@ -40,14 +40,13 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, Passed, Raw, Refusals};
 use php_ext::attr::{php_class, php_const, php_function};
-use php_ext::call::{clone_with, instantiate, lookup_class};
+use php_ext::call::clone_with;
 use php_ext::raising::{
-    Thrown, arg_count_error, arg_value_error, clear, deprecated, new_throwable, throw, throw_error,
-    throw_value,
+    Thrown, arg_count_error, arg_value_error, deprecated, throw, throw_chained, throw_error,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString};
 
 pub use rng::Rng;
 
@@ -476,54 +475,13 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
 
 /// `zend_throw_exception_ex(NULL, 0, "Invalid serialization data for %s object", ...)`:
 /// php's `Exception`, with what was pending as its `previous`, as
-/// `zend_throw_exception_internal` chains it.
+/// `zend_throw_exception_internal` chains it ([`throw_chained`]).
 fn invalid_data(req: &mut Request, class: &str, pending: Option<Thrown>) -> Thrown {
     let message = format!("Invalid serialization data for {class} object");
-    let previous = match pending {
-        None => None,
-        Some(thrown) => match thrown.exception().copied() {
-            None => return thrown,
-            Some(exception) => {
-                let value = exception.as_value();
-                req.addref(&value);
-                if let Err(fatal) = clear(req, thrown) {
-                    return fatal;
-                }
-                Some(value)
-            }
-        },
-    };
-    let made = match previous {
-        None => new_throwable(req, "Exception", &message),
-        Some(previous) => {
-            let made = exception_with_previous(req, &message, previous);
-            req.release(previous);
-            made
-        }
-    };
-    match made {
-        Ok(value) => {
-            let thrown = throw_value(req, &value);
-            value.give_up(req);
-            thrown
-        }
-        Err(thrown) => thrown,
+    match pending {
+        None => throw(req, "Exception", &message),
+        Some(thrown) => throw_chained(req, thrown, "Exception", &message),
     }
-}
-
-/// `new Exception($message, 0, $previous)`.
-fn exception_with_previous(
-    req: &mut Request,
-    message: &str,
-    previous: Value,
-) -> Result<Owner<Value>, Thrown> {
-    let Some(class) = lookup_class(req, b"Exception")? else {
-        return new_throwable(req, "Exception", message);
-    };
-    let text = PhpString::new(req, message.as_bytes())?;
-    let made = instantiate(req, class, &[Value::string(*text), Value::int(0), previous]);
-    text.give_up(req);
-    made.map(Owner::into_value)
 }
 
 /// The handlers of a seedable engine: `php_random_engine_common_clone_object`,

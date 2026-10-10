@@ -125,7 +125,11 @@ fn array_of(req: &mut Request, val: Owner<Value>) -> Res<Owner<PhpArray>> {
 }
 
 /// A property of an object holding an array, `val` added at its end
-/// (`SEPARATE_ARRAY` and `add_next_index_zval`).
+/// (`SEPARATE_ARRAY` and `add_next_index_zval`): in place where the
+/// property's is the array's one owner, and otherwise to a copy, made
+/// through an owner of the array taken for the write and written back to
+/// the property, which gives up the property's owner of the table it
+/// shared with the class's default or whoever else holds it.
 fn append_to_prop(
     req: &mut Request,
     ret: &Value,
@@ -133,22 +137,18 @@ fn append_to_prop(
     arr: PhpArray,
     val: Owner<Value>,
 ) -> Res<()> {
-    let mut a = arr;
-    a.append(req, val)?;
-    if !a.is_same(arr) {
-        // `SEPARATE_ARRAY(prop)` in the property's slot: the separation
-        // gave up one owner of the shared table, which was the
-        // property's, the view naming none. The property's is taken back
-        // so the write below gives it up once, leaving the class's
-        // default table, or whoever else shares it, its own.
-        req.addref(&Value::array(arr));
-        // The copy the append separated has one owner, this caller's,
-        // which a view's separation cannot name as an owner: it is taken
-        // again for the property and the separation's own given back.
-        let copy = Owner::take(req, Value::array(a));
-        req.release(Value::array(a));
-        set_zval_property(req, ret, name, copy)?;
+    let shared = Value::array(arr);
+    if shared.is_refcounted() && shared.refcount() == 1 {
+        let mut a = arr;
+        a.append(req, val)?;
+        return Ok(());
     }
+    let mut copy = Owner::take(req, arr);
+    if let Err(thrown) = copy.append(req, val) {
+        copy.give_up(req);
+        return Err(thrown.into());
+    }
+    set_zval_property(req, ret, name, copy.into_value())?;
     Ok(())
 }
 

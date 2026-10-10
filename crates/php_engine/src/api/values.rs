@@ -154,7 +154,7 @@ impl PhpString {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         let made = req.string(bytes)?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// `zend_string_init_interned`: the one interned string for these
@@ -187,7 +187,7 @@ impl PhpString {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn existing_interned(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         let made = req.existing_interned(bytes)?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// A string of `len` bytes written in place by `fill`, php's
@@ -204,7 +204,7 @@ impl PhpString {
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<Owner<PhpString>, Thrown> {
         let made = req.string_with(len, fill)?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// A string of `n * m + l` bytes written in place by `fill`, php's
@@ -223,7 +223,7 @@ impl PhpString {
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<Owner<PhpString>, Thrown> {
         let made = req.string_product(n, m, l, fill)?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// The face over a heap string the engine already holds: a constant
@@ -365,7 +365,7 @@ impl Key {
         match php_heap::canonical_int(s.as_bytes()) {
             Some(n) => {
                 s.give_up(req);
-                Owner::take(req, Key::Int(n))
+                Owner::index(n)
             }
             None => s.into_key(),
         }
@@ -431,7 +431,7 @@ impl Key {
 /// # use php_engine::api::request::Request;
 /// # use php_engine::api::values::{Key, Owner, PhpArray, Value};
 /// fn kept(req: &mut Request, into: &mut PhpArray, value: Value) -> Result<(), Thrown> {
-///     let key = Owner::take(req, Key::Int(0));
+///     let key = Owner::index(0);
 ///     into.set(req, key, value)
 /// }
 /// # fn main() {}
@@ -459,7 +459,7 @@ impl PhpArray {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let made = req.array()?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// A new array [`PhpArray::new`] makes and `fill` writes, given up
@@ -490,7 +490,7 @@ impl PhpArray {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn init_size(req: &mut Request, size: u32) -> Result<Owner<PhpArray>, Thrown> {
         let made = req.array_sized(size, true)?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// `RETURN_EMPTY_ARRAY`, `ZVAL_EMPTY_ARRAY`: the process's one
@@ -579,7 +579,7 @@ impl PhpArray {
             Layout::Hash => req.heap_mut().array_mixed(size),
         };
         let made = req.fatal_of(laid).map(PhpArray::of)?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// The face over a heap array the engine already holds.
@@ -848,7 +848,7 @@ impl PhpArray {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn copy(&self, req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         let made = req.array_dup(self.0).map(PhpArray::of)?;
-        Ok(Owner::adopt(req, made))
+        Ok(Owner::adopt(made))
     }
 
     /// The first live element at or past the bucket `position`, with
@@ -1350,7 +1350,7 @@ impl PhpObject {
         payload: T,
     ) -> Result<Owner<PhpObject>, Thrown> {
         let made = req.clone_members_payload(*self, payload);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// What a `Closure` carries, for a closure object: its native
@@ -1886,7 +1886,7 @@ impl PhpObject {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<Owner<PhpRef>, Thrown> {
         let made = req.table_row_ref(*self, key);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// Where the row `key` stands in the object's property table, the
@@ -1935,7 +1935,7 @@ impl PhpObject {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn typed_row_ref(&self, req: &mut Request, key: &Key) -> Result<Owner<PhpRef>, Thrown> {
         let made = req.table_typed_row_ref(*self, key);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// One property by name, without a handler in the way: a view of
@@ -2278,7 +2278,7 @@ impl PhpRef {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request, value: Owner<Value>) -> Result<Owner<PhpRef>, Thrown> {
         let made = req.reference(value.hand_on());
-        adopted(req, made)
+        adopted(made)
     }
 
     /// The value held, `Z_REFVAL`: a view, no owner taken.
@@ -2472,7 +2472,7 @@ impl Resource {
         payload: T,
     ) -> Result<Owner<Resource>, Thrown> {
         let made = req.new_resource(kind, payload);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// [`Resource::new`] with the payload laid inside an allocation of
@@ -2490,7 +2490,7 @@ impl Resource {
     ) -> Result<Owner<Resource>, Thrown> {
         let allocated = req.heap_mut().resource_sized(kind, payload, size);
         let made = req.fatal_of(allocated).map(Resource::of);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// `zend_register_resource(NULL, type)`: a resource of `kind` with no
@@ -2499,7 +2499,7 @@ impl Resource {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn bare(req: &mut Request, kind: ResourceType) -> Result<Owner<Resource>, Thrown> {
         let made = Self::bare_made(req, kind);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// What [`bare`] makes, its one owner not yet named.
@@ -2519,7 +2519,7 @@ impl Resource {
         size: usize,
     ) -> Result<Owner<Resource>, Thrown> {
         let made = Self::persistent_made(req, kind, payload, size);
-        adopted(req, made)
+        adopted(made)
     }
 
     /// What [`persistent`] makes, its one owner not yet named.
@@ -3014,10 +3014,10 @@ mod tests {
         let Ok(mut a) = PhpArray::new(&mut req) else {
             return;
         };
-        let key = Owner::take(&req, Key::Int(5));
+        let key = Owner::index(5);
         assert!(a.set(&mut req, key, Owner::int(1)).is_ok());
         assert!(a.append(&mut req, Owner::int(2)).is_ok());
-        let key = Owner::take(&req, Key::Int(-4));
+        let key = Owner::index(-4);
         assert!(a.set(&mut req, key, Owner::null()).is_ok());
         assert_eq!(a.len(), 3);
         assert_eq!(a.get(&Key::Int(6)), Some(Value::int(2)));
