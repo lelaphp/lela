@@ -286,7 +286,31 @@ pub(crate) fn fetch_object(
 
 /// The row as `made`'s properties: its table in place of the object's
 /// where the class declares no property and no `__set`
-/// (`zend_symtable_to_proptable`), and otherwise each written through
+/// (`zend_symtable_to_proptable`, [`PhpObject::table_from_symtable`]),
+/// so a kept object costs what the row's table costs and nothing beside
+/// it, an integer column name spelt in decimal in a copy:
+///
+/// ```php
+/// class R {}
+/// $m = new mysqli('127.0.0.1', 'root', '', '', 3306);
+/// $r = $m->query("SELECT 'ab' AS col1, 'cd' AS col2, 3 AS col3 UNION ALL SELECT 'ef', 'gh', 4");
+/// $x = memory_get_usage(); $a = $r->fetch_object('R'); echo memory_get_usage() - $x, "\n";
+/// $x = memory_get_usage(); $b = $r->fetch_object(); echo memory_get_usage() - $x, "\n";
+/// $c = $m->query("SELECT 'ab' AS `7`, 'cd' AS col2")->fetch_object('R');
+/// var_dump($c);
+/// ```
+/// ```expect mysql
+/// 480
+/// 480
+/// object(R)#6 (2) {
+///   ["7"]=>
+///   string(2) "ab"
+///   ["col2"]=>
+///   string(2) "cd"
+/// }
+/// ```
+///
+/// Otherwise each column is written through
 /// the class's handler in the object's class's scope, the
 /// `EG(fake_scope)` `zend_merge_properties` sets: a parent's private
 /// property is out of its sight, and the column is a dynamic one. A
@@ -334,54 +358,45 @@ pub(crate) fn fetch_object(
 /// }
 /// ```
 fn set_row(req: &mut Request, made: PhpObject, row: PhpArray) -> Result<(), Thrown> {
-    let plain = declares_nothing(req, made.class());
-    let mut table = PhpArray::new(req)?;
+    if declares_nothing(req, made.class()) {
+        let row = Owner::take(req, row);
+        return made.table_from_symtable(req, row);
+    }
     let mut pending: Option<Thrown> = None;
     // `zend_merge_properties`' `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(properties, key,
-    // value)` (`Z/Zend/zend_API.c:1418`), no owner of the row taken: this native
-    // holds it while a property write serves `__set`. A fatal the write
-    // raises gives the table up.
+    // value)` (`Z/Zend/zend_API.c:1418`) over `zend_symtable_to_proptable`'s
+    // table, no owner of the row taken: this native holds it while a
+    // property write serves `__set`. A column's name is the row's own
+    // string, an integer one spelt in decimal as the conversion spells it.
     let walked = walk::foreach(req, row, Hold::None, |req, row| -> walk::Step {
         let key = row.key().clone();
         let value = row.value().deref();
         let name = match key {
-            Key::Str(name) => PhpString::new(req, name.as_bytes())?,
+            Key::Str(name) => Owner::take(req, name),
             Key::Int(n) => PhpString::new(req, n.to_string().as_bytes())?,
         };
         let value = Owner::take(req, value);
-        if plain {
-            table.set(req, name.into_key(), value)?;
-        } else {
-            let scope = PropertyScope::Of(ClassRef(made.class()));
-            let wrote = match &pending {
-                Some(standing) => while_pending(req, standing, |req| {
-                    made.write_prop_in(req, scope, name, value)
-                })
-                .unwrap_or(Ok(())),
-                None => made.write_prop_in(req, scope, name, value),
-            };
-            let Err(thrown) = wrote else {
-                return Ok(ControlFlow::Continue(()));
-            };
-            if thrown.exception().is_none() {
-                return Err(thrown);
-            }
-            pending = Some(match pending.take() {
-                Some(earlier) => earlier.chain(req, thrown),
-                None => thrown,
-            });
+        let scope = PropertyScope::Of(ClassRef(made.class()));
+        let wrote = match &pending {
+            Some(standing) => while_pending(req, standing, |req| {
+                made.write_prop_in(req, scope, name, value)
+            })
+            .unwrap_or(Ok(())),
+            None => made.write_prop_in(req, scope, name, value),
+        };
+        let Err(thrown) = wrote else {
+            return Ok(ControlFlow::Continue(()));
+        };
+        if thrown.exception().is_none() {
+            return Err(thrown);
         }
+        pending = Some(match pending.take() {
+            Some(earlier) => earlier.chain(req, thrown),
+            None => thrown,
+        });
         Ok(ControlFlow::Continue(()))
     });
-    if let Err(thrown) = walked {
-        table.give_up(req);
-        return Err(thrown);
-    }
-    if plain {
-        made.replace_table(req, table)?;
-    } else {
-        table.give_up(req);
-    }
+    walked?;
     pending.map_or(Ok(()), Err)
 }
 

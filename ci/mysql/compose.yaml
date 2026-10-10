@@ -19,6 +19,14 @@ name: dax-php-mysql
 services:
   mysql:
     image: mysql:8.4
+    # Binary logging off (#2466). MySQL 8.4 writes binlogs by default, and
+    # the two suites grew them to 18 GB in one container's anonymous volume
+    # (22 files of about 1 GB each, 2026-10-09). Nothing in either suite
+    # reads them: no test under ext/mysqli or ext/pdo_mysql names log_bin,
+    # a binlog or SHOW BINARY LOGS (mysqli_get_client_stats lists only the
+    # client's com_binlog_dump counter). A server flag leaves #1345's image,
+    # port, credentials and database as ruled.
+    command: ["mysqld", "--skip-log-bin"]
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
       MYSQL_ROOT_HOST: "%"

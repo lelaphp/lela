@@ -770,8 +770,7 @@ impl Request {
                     };
                     value.as_object().is_some() && value.refcount() == 1
                 });
-                if alone {
-                    let (_, symbol) = self.globals().remove(at);
+                if alone && let Some(symbol) = self.table_remove(crate::exec::TableId::GLOBAL, at) {
                     self.release_symbol(symbol);
                 }
             }

@@ -3445,6 +3445,25 @@ fn permanent_names(
     for name in declared {
         names.intern(&name.0).ok();
     }
+    // `prop_info->name`, the key a protected or a private property's
+    // row is held under, mangled and interned as it is declared.
+    for decl in classes {
+        for property in &decl.properties {
+            if let Some(prefix) = php_compile::mangling(property.visibility, &decl.name.0) {
+                names
+                    .intern(&[prefix.as_slice(), &property.name.0].concat())
+                    .ok();
+            }
+        }
+    }
+    // `php_startup_auto_globals` and the session's `MINIT` register each
+    // auto-global under `zend_string_init_interned`.
+    {
+        use php_unit::AutoGlobal::{Cookie, Env, Files, Get, Post, Request, Server, Session};
+        for global in [Get, Post, Cookie, Server, Env, Request, Files, Session] {
+            names.intern(global.name()).ok();
+        }
+    }
     let keyed = functions
         .iter()
         .map(|decl| &decl.name)

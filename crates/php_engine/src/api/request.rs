@@ -26,7 +26,7 @@ use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpObject, PhpRef, Resource, Value};
+use crate::api::values::{ClassId, PhpObject, PhpRef, PhpString, Resource, Value};
 pub use crate::engine::Standard;
 use crate::engine::{RequestDescription, Shared};
 use crate::exec::{self, Vm};
@@ -503,10 +503,12 @@ pub(crate) enum Symbol {
 #[derive(Debug, Default)]
 pub(crate) struct SymbolTable {
     owner: Option<FrameRef>,
-    entries: Vec<(Vec<u8>, Symbol)>,
-    /// What a rebuilt table holds on the request's heap
-    /// ([`Request::rebuilt_table_bytes`]); `EG(symbol_table)`'s are not
-    /// held.
+    /// Each name with what it holds, the name one owner the table holds:
+    /// a CV's interned name, or the string the program wrote it with.
+    entries: Vec<(PhpString, Symbol)>,
+    /// What the table holds on the request's heap: a rebuilt table's
+    /// ([`Request::rebuilt_table_bytes`]), and `EG(symbol_table)`'s data,
+    /// its `zend_array` being `EG`'s own ([`SymbolTable::global`]).
     bytes: Option<hash_bytes::HashBytes>,
 }
 
@@ -785,7 +787,7 @@ impl Request {
             http_globals: variables::HttpGlobals::default(),
             post: post::Post::default(),
             variables: variables::Variables::default(),
-            tables: vec![SymbolTable::default()],
+            tables: vec![SymbolTable::global()],
             included_files: hash_bytes::IncludedFiles::default(),
             hash_bytes: hash_bytes::HashTables::default(),
             constants: constants::Constants::default(),
