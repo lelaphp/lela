@@ -1,19 +1,35 @@
 //! What the operator sets on the line: where the server listens, the
-//! document root, the request pool and its queue, and the php ini the
-//! engine starts with; and the table of limits (#2337's Implementation
-//! Decisions) at its defaults. The connection side applies the header
-//! timeout, the header count and the head's size from it today; #2341
-//! enforces the rest and makes each overridable.
+//! document root, the request pool and its queue, the php ini the engine
+//! starts with, and the limits (#2337's Implementation Decisions, #2341):
+//! one table of Kestrel's defaults, each overridden by `--limit
+//! <name>=<value>`, and each applied by the connection side, the
+//! connection cap by its accept loop (#2342).
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use php_sapi::ini::Search;
 
-/// The line's grammar, printed with a refusal.
-pub const USAGE: &str = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --listen <addr>:<port> --root <dir> [--threads <n>] [--queue <n>]\n";
+/// The line's grammar, printed with a refusal: the options, then each
+/// limit `--limit` names, from [`LIMITS`].
+#[must_use]
+pub fn usage() -> String {
+    let mut usage = "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --listen <addr>:<port> \
+                     --root <dir> [--threads <n>] [--queue <n>] [--limit <name>=<value>]...\n\
+                     limits, a time being <n>s or <n>ms and a rate <bytes a second>,<grace time> or off:\n"
+        .to_owned();
+    for (name, shape, _) in LIMITS {
+        usage += "  ";
+        usage += name;
+        usage += "=";
+        usage += shape;
+        usage += "\n";
+    }
+    usage
+}
 
 /// The stack of each request thread, php-fpm's main thread's on the
 /// reference machine (#2335): the engine reads the serving thread's
@@ -47,30 +63,72 @@ pub struct Options {
 /// nginx's (research/production-server.r2.md §1.3, §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
-    /// The request line, in bytes: 8 KB.
+    /// The request line, in bytes, past which a request is answered 414:
+    /// 8 KB.
     pub request_line: usize,
-    /// How many header fields a request may carry: 100.
+    /// How many header fields a request may carry, past which it is
+    /// answered 431: 100.
     pub header_count: usize,
-    /// The header block, in bytes: 32 KB.
+    /// The header fields, in bytes, past which a request is answered 431:
+    /// 32 KB.
     pub header_bytes: usize,
-    /// The body, in bytes, apart from php's `post_max_size`: 30,000,000.
+    /// The body, in bytes, past which a request is answered 413, apart
+    /// from php's `post_max_size`: 30,000,000.
     pub body_bytes: u64,
-    /// How long a request's head may take to arrive: 30 s.
+    /// How long a request's head may take from its first byte, past which
+    /// it is answered 408: 30 s.
     pub header_timeout: Duration,
-    /// How long a kept-alive connection may wait for its next request:
-    /// 130 s.
+    /// How long a connection may wait for a request's first byte, from
+    /// its accept or its last response, past which it is closed: 130 s.
     pub keep_alive_idle: Duration,
-    /// The least a client must send or take each second once the grace
-    /// has passed: 240 bytes.
-    pub min_data_rate: u64,
-    /// The grace before [`Limits::min_data_rate`] holds: 5 s.
-    pub min_data_rate_grace: Duration,
+    /// The least a client must send of a body each second once the
+    /// grace has passed, Kestrel's `MinRequestBodyDataRate`, or none.
+    pub min_body_rate: Option<MinDataRate>,
+    /// The least a client must take of a response each second once the
+    /// grace has passed, Kestrel's `MinResponseDataRate`, or none.
+    pub min_response_rate: Option<MinDataRate>,
     /// How many requests one connection may make: 1000, Cowboy's
     /// `max_keepalive`.
     pub requests_per_connection: u32,
     /// How many connections the server holds open at once, past which it
     /// stops accepting and the kernel's queue holds the rest: 10,000.
     pub connections: usize,
+}
+
+/// A minimum data rate, Kestrel's `MinDataRate`: so many bytes a second,
+/// held once a grace has passed: 240 bytes after 5 s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinDataRate {
+    /// The bytes a second a client must at least move.
+    pub bytes_per_second: NonZeroU64,
+    /// How long the server waits before it holds the client to the rate.
+    pub grace: Duration,
+}
+
+impl Default for MinDataRate {
+    /// Kestrel's, which is IIS's `minBytesPerSecond`: 240 bytes a second
+    /// after 5 s.
+    fn default() -> MinDataRate {
+        MinDataRate {
+            bytes_per_second: NonZeroU64::new(240).unwrap_or(NonZeroU64::MIN),
+            grace: Duration::from_secs(5),
+        }
+    }
+}
+
+impl MinDataRate {
+    /// How long `bytes` take at the rate.
+    pub(crate) fn time_for(self, bytes: u64) -> Duration {
+        let nanos = u128::from(bytes) * 1_000_000_000 / u128::from(self.bytes_per_second.get());
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+    }
+
+    /// How long a client may keep the server waiting in all once it has
+    /// moved `bytes`: the grace, or the time those bytes take at the rate
+    /// where that is longer.
+    pub(crate) fn allowed(self, bytes: u64) -> Duration {
+        self.grace.max(self.time_for(bytes))
+    }
 }
 
 impl Default for Limits {
@@ -82,12 +140,116 @@ impl Default for Limits {
             body_bytes: 30_000_000,
             header_timeout: Duration::from_secs(30),
             keep_alive_idle: Duration::from_secs(130),
-            min_data_rate: 240,
-            min_data_rate_grace: Duration::from_secs(5),
+            min_body_rate: Some(MinDataRate::default()),
+            min_response_rate: Some(MinDataRate::default()),
             requests_per_connection: 1000,
             connections: 10_000,
         }
     }
+}
+
+/// How one limit's value is read into the table.
+type SetLimit = fn(&mut Limits, &str) -> Result<(), String>;
+
+/// Each limit as `--limit` names it, the shape of its value, and how the
+/// value is read into the table: the one list the line reads and
+/// [`usage`] prints.
+const LIMITS: &[(&str, &str, SetLimit)] = &[
+    ("request-line", "<bytes>", |l, v| {
+        set(&mut l.request_line, count(v))
+    }),
+    ("header-count", "<n>", |l, v| {
+        set(&mut l.header_count, count(v))
+    }),
+    ("header-bytes", "<bytes>", |l, v| {
+        set(&mut l.header_bytes, count(v))
+    }),
+    ("body-bytes", "<bytes>", |l, v| {
+        set(&mut l.body_bytes, number(v))
+    }),
+    ("header-timeout", "<time>", |l, v| {
+        set(&mut l.header_timeout, time(v))
+    }),
+    ("keep-alive-idle", "<time>", |l, v| {
+        set(&mut l.keep_alive_idle, time(v))
+    }),
+    ("body-data-rate", "<rate>", |l, v| {
+        set(&mut l.min_body_rate, rate(v))
+    }),
+    ("response-data-rate", "<rate>", |l, v| {
+        set(&mut l.min_response_rate, rate(v))
+    }),
+    ("requests-per-connection", "<n>", |l, v| {
+        set(&mut l.requests_per_connection, count(v))
+    }),
+    ("connections", "<n>", |l, v| {
+        set(&mut l.connections, count(v))
+    }),
+];
+
+/// `read` into `field` where it was read.
+fn set<T>(field: &mut T, read: Result<T, String>) -> Result<(), String> {
+    *field = read?;
+    Ok(())
+}
+
+impl Limits {
+    /// One `--limit <name>=<value>` read into the table.
+    fn set(&mut self, entry: &[u8]) -> Result<(), String> {
+        let entry = std::str::from_utf8(entry).map_err(|_| "a --limit is not text".to_owned())?;
+        let (name, value) = entry
+            .split_once('=')
+            .ok_or_else(|| format!("--limit {entry} is not <name>=<value>"))?;
+        let (_, _, set) = LIMITS
+            .iter()
+            .find(|(known, _, _)| *known == name)
+            .ok_or_else(|| format!("--limit {name} is not a limit"))?;
+        set(self, value).map_err(|why| format!("--limit {name}={value}: {why}"))
+    }
+}
+
+/// A number, of bytes or of things.
+fn number<T: std::str::FromStr>(value: &str) -> Result<T, String> {
+    value.parse().map_err(|_| "not a number".to_owned())
+}
+
+/// A number of one or more.
+fn count<T: std::str::FromStr + Default + PartialEq>(value: &str) -> Result<T, String> {
+    at_least_one(number(value)?)
+}
+
+/// `n`, where it is not zero.
+fn at_least_one<T: Default + PartialEq>(n: T) -> Result<T, String> {
+    if n == T::default() {
+        return Err("must be at least 1".to_owned());
+    }
+    Ok(n)
+}
+
+/// A time of more than none, `<n>s` or `<n>ms`.
+fn time(value: &str) -> Result<Duration, String> {
+    let time = if let Some(ms) = value.strip_suffix("ms") {
+        Duration::from_millis(number(ms)?)
+    } else if let Some(s) = value.strip_suffix('s') {
+        Duration::from_secs(number(s)?)
+    } else {
+        return Err("a time is <n>s or <n>ms".to_owned());
+    };
+    at_least_one(time)
+}
+
+/// A minimum data rate, `<bytes a second>,<grace>`, or `off`.
+fn rate(value: &str) -> Result<Option<MinDataRate>, String> {
+    if value == "off" {
+        return Ok(None);
+    }
+    let (bytes, grace) = value
+        .split_once(',')
+        .ok_or("a rate is <bytes a second>,<grace time> or off")?;
+    Ok(Some(MinDataRate {
+        bytes_per_second: NonZeroU64::new(number(bytes)?).ok_or("must be at least 1")?,
+        grace: time(grace)?,
+    }))
 }
 
 impl Options {
@@ -106,6 +268,7 @@ impl Options {
         let mut queue = None;
         let mut ini = Vec::new();
         let mut ini_search = Search::default();
+        let mut limits = Limits::default();
         while let Some(word) = words.next() {
             let mut value = |name: &str| {
                 words
@@ -119,8 +282,11 @@ impl Options {
                 b"-d" => ini.push(php_sapi::ini::define(&value("-d")?)),
                 b"--listen" => listen = Some(read::<SocketAddr>("--listen", &value("--listen")?)?),
                 b"--root" => root = Some(value("--root")?),
-                b"--threads" => threads = Some(count("--threads", &value("--threads")?)?),
-                b"--queue" => queue = Some(count("--queue", &value("--queue")?)?),
+                b"--threads" => {
+                    threads = Some(option_count("--threads", &value("--threads")?)?);
+                }
+                b"--queue" => queue = Some(option_count("--queue", &value("--queue")?)?),
+                b"--limit" => limits.set(&value("--limit")?)?,
                 other => {
                     return Err(format!("unknown option {}", String::from_utf8_lossy(other)));
                 }
@@ -141,7 +307,7 @@ impl Options {
             stack_size: REQUEST_STACK,
             ini,
             ini_search,
-            limits: Limits::default(),
+            limits,
         })
     }
 }
@@ -154,12 +320,9 @@ fn read<T: std::str::FromStr>(name: &str, value: &[u8]) -> Result<T, String> {
         .ok_or_else(|| format!("{name} {} is not read", String::from_utf8_lossy(value)))
 }
 
-/// A count of one or more.
-fn count(name: &str, value: &[u8]) -> Result<usize, String> {
-    match read::<usize>(name, value)? {
-        0 => Err(format!("{name} must be at least 1")),
-        n => Ok(n),
-    }
+/// An option's count of one or more.
+fn option_count(name: &str, value: &[u8]) -> Result<usize, String> {
+    at_least_one(read::<usize>(name, value)?).map_err(|why| format!("{name} {why}"))
 }
 
 #[cfg(test)]
@@ -191,6 +354,104 @@ mod tests {
         assert_eq!(options.stack_size, 8 << 20);
         assert_eq!(options.limits, Limits::default());
         Ok(())
+    }
+
+    #[test]
+    fn each_limit_is_overridden_by_its_name() -> Result<(), String> {
+        let root = std::env::temp_dir();
+        let root = root.to_str().unwrap_or("/");
+        let options = parse(&[
+            "--listen",
+            "127.0.0.1:0",
+            "--root",
+            root,
+            "--limit",
+            "request-line=100",
+            "--limit",
+            "header-count=3",
+            "--limit",
+            "header-bytes=200",
+            "--limit",
+            "body-bytes=10",
+            "--limit",
+            "header-timeout=500ms",
+            "--limit",
+            "keep-alive-idle=2s",
+            "--limit",
+            "body-data-rate=1000,1s",
+            "--limit",
+            "response-data-rate=2000,2s",
+            "--limit",
+            "requests-per-connection=2",
+            "--limit",
+            "connections=1",
+        ])?;
+        assert_eq!(
+            options.limits,
+            Limits {
+                request_line: 100,
+                header_count: 3,
+                header_bytes: 200,
+                body_bytes: 10,
+                header_timeout: Duration::from_millis(500),
+                keep_alive_idle: Duration::from_secs(2),
+                min_body_rate: Some(MinDataRate {
+                    bytes_per_second: NonZeroU64::new(1000).ok_or("1000")?,
+                    grace: Duration::from_secs(1),
+                }),
+                min_response_rate: Some(MinDataRate {
+                    bytes_per_second: NonZeroU64::new(2000).ok_or("2000")?,
+                    grace: Duration::from_secs(2),
+                }),
+                requests_per_connection: 2,
+                connections: 1,
+            }
+        );
+        let off = parse(&[
+            "--listen",
+            "127.0.0.1:0",
+            "--root",
+            root,
+            "--limit",
+            "body-data-rate=off",
+        ])?;
+        assert_eq!(off.limits.min_body_rate, None);
+        assert_eq!(off.limits.min_response_rate, Some(MinDataRate::default()));
+        for (entry, refusal) in [
+            ("nothing=1", "--limit nothing is not a limit"),
+            (
+                "header-count=0",
+                "--limit header-count=0: must be at least 1",
+            ),
+            (
+                "header-timeout=5",
+                "--limit header-timeout=5: a time is <n>s or <n>ms",
+            ),
+            (
+                "body-data-rate=240",
+                "--limit body-data-rate=240: a rate is <bytes a second>,<grace time> or off",
+            ),
+            ("body-bytes", "--limit body-bytes is not <name>=<value>"),
+            (
+                "header-timeout=0ms",
+                "--limit header-timeout=0ms: must be at least 1",
+            ),
+        ] {
+            let refused = parse(&["--listen", "127.0.0.1:0", "--root", root, "--limit", entry]);
+            assert_eq!(refused.err().as_deref(), Some(refusal));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_data_rate_allows_its_grace_or_the_time_its_bytes_take() {
+        let rate = MinDataRate {
+            bytes_per_second: NonZeroU64::new(240).unwrap_or(NonZeroU64::MIN),
+            grace: Duration::from_secs(5),
+        };
+        assert_eq!(rate.allowed(0), Duration::from_secs(5));
+        assert_eq!(rate.allowed(2400), Duration::from_secs(10));
+        assert_eq!(rate.time_for(120), Duration::from_millis(500));
     }
 
     #[test]

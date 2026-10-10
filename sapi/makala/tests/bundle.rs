@@ -71,7 +71,8 @@ fn a_line_without_an_address_is_refused_with_the_usage() {
         String::from_utf8_lossy(&out.stderr),
         format!(
             "makala: no --listen address\n{}",
-            "Usage: makala [-n] [-c <path>] [-d foo[=bar]]... --listen <addr>:<port> --root <dir> [--threads <n>] [--queue <n>]\n"
+            php_sapi_makala::options::usage()
         )
     );
+    assert!(php_sapi_makala::options::usage().contains("\n  body-data-rate=<rate>\n"));
 }

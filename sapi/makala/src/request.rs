@@ -56,29 +56,22 @@ pub(crate) struct Pool {
 
 impl Pool {
     /// `options.request_threads` threads, each with `options.stack_size`
-    /// of stack, serving the requests the returned queue carries; the
-    /// queue holds `options.request_queue` of them before its sender
-    /// waits.
+    /// of stack, each request the returned queue carries served by
+    /// `serve`; the queue holds `options.request_queue` of them before its
+    /// sender waits.
     pub(crate) fn start(
-        engine: &Engine,
         options: &Options,
+        serve: impl Fn(Job) + Clone + Send + 'static,
     ) -> std::io::Result<(mpsc::Sender<Job>, Pool)> {
         let (queue, jobs) = mpsc::channel(options.request_queue);
         let jobs = Arc::new(Mutex::new(jobs));
-        let root = Arc::new(
-            options
-                .document_root
-                .as_os_str()
-                .as_encoded_bytes()
-                .to_vec(),
-        );
         let mut threads = Vec::with_capacity(options.request_threads);
         for n in 0..options.request_threads {
-            let (engine, jobs, root) = (engine.clone(), Arc::clone(&jobs), Arc::clone(&root));
+            let (jobs, serve) = (Arc::clone(&jobs), serve.clone());
             threads.push(php_sapi::host_thread(
                 &format!("makala-request-{n}"),
                 options.stack_size,
-                move || serve_each(&engine, &jobs, &root),
+                move || serve_each(&jobs, &serve),
             )?);
         }
         Ok((queue, Pool { threads }))
@@ -95,8 +88,9 @@ impl Pool {
 /// A request thread: the queue's next request served, until the queue is
 /// closed. A panic is contained at the request's edge (design §5.14,
 /// #2337's M9): the request is dropped whole, its connection answers a
-/// head never sent with a 500, and the thread serves the next.
-fn serve_each(engine: &Engine, jobs: &Mutex<mpsc::Receiver<Job>>, root: &[u8]) {
+/// head never sent with a 500 and cuts a response under way, and the
+/// thread serves the next.
+fn serve_each(jobs: &Mutex<mpsc::Receiver<Job>>, serve: &impl Fn(Job)) {
     loop {
         let next = jobs
             .lock()
@@ -105,10 +99,20 @@ fn serve_each(engine: &Engine, jobs: &Mutex<mpsc::Receiver<Job>>, root: &[u8]) {
         let Some(job) = next else {
             return;
         };
-        if std::panic::catch_unwind(AssertUnwindSafe(|| serve(engine, root, job))).is_err() {
-            crate::log(b"makala: a request panicked; its connection is answered 500");
+        if std::panic::catch_unwind(AssertUnwindSafe(|| serve(job))).is_err() {
+            crate::log(
+                b"makala: a request panicked; its connection is answered 500, or cut where its response was under way",
+            );
         }
     }
+}
+
+/// How the pool serves each request: through its own `Engine::serve` on
+/// `engine`, under the document root.
+pub(crate) fn serving(engine: &Engine, options: &Options) -> impl Fn(Job) + Clone + Send + 'static {
+    let engine = engine.clone();
+    let root: Arc<[u8]> = options.document_root.as_os_str().as_encoded_bytes().into();
+    move |job| serve(&engine, &root, job)
 }
 
 /// One request through its own `Engine::serve`.
@@ -306,17 +310,47 @@ impl Read for Arriving {
 /// reads, each write handed over as the request makes it. A write after
 /// the connection dropped its response, its client gone, is
 /// [`Aborted`], which is when `connection_aborted()` turns true, as php's
-/// does on the write that finds the client gone and not before.
+/// does on the write that finds the client gone and not before. Dropped
+/// with the request, it says the body is whole, unless the request is
+/// unwinding from a panic.
 pub(crate) struct Sink {
     head: Option<oneshot::Sender<ResponseHead>>,
     body: Option<mpsc::Sender<Bytes>>,
+    whole: Option<oneshot::Sender<()>>,
+}
+
+/// A response body as its connection reads it: the pieces the request
+/// writes, and whether it ended whole, which a request that panicked
+/// never says.
+pub(crate) struct Written {
+    /// The body's pieces, closed when the request drops its sink.
+    pub(crate) pieces: mpsc::Receiver<Bytes>,
+    /// Sent when the request drops its sink outside a panic.
+    pub(crate) whole: oneshot::Receiver<()>,
 }
 
 impl Sink {
-    pub(crate) fn new(head: oneshot::Sender<ResponseHead>, body: mpsc::Sender<Bytes>) -> Sink {
+    /// The sink over a response's three channels: its head, its body's
+    /// pieces, and its body's being whole.
+    pub(crate) fn new(
+        head: oneshot::Sender<ResponseHead>,
+        body: mpsc::Sender<Bytes>,
+        whole: oneshot::Sender<()>,
+    ) -> Sink {
         Sink {
             head: Some(head),
             body: Some(body),
+            whole: Some(whole),
+        }
+    }
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {
+        if let Some(whole) = self.whole.take()
+            && !std::thread::panicking()
+        {
+            whole.send(()).ok();
         }
     }
 }
@@ -358,6 +392,148 @@ impl OutputSink for Sink {
         Some(Box::new(Sink {
             head: self.head.take(),
             body: self.body.take(),
+            whole: self.whole.take(),
         }))
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::panic,
+    clippy::disallowed_methods,
+    reason = "a test serves requests that panic on cue, and starts the connection side on a thread of its own (seams.toml rule fork.threads)"
+)]
+mod tests {
+    //! The containment at the request's edge, held over a real socket: the
+    //! connection side as the binary runs it, and a pool of one request
+    //! thread whose serving panics where the request's target says, which
+    //! stands for a defect in the engine without one to call on.
+
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::Condvar;
+    use std::time::Duration;
+
+    use super::*;
+
+    /// Whether the client of `/cut` has read what was written before the
+    /// panic, which the request waits for, so the panic comes with the
+    /// response under way on the wire and not only in hyper's buffer.
+    static READ: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+    /// The connection side on a thread of its own, its requests served by
+    /// one request thread: `/panic` panics before a head, `/cut` after a
+    /// head and a write, and any other target is answered with the
+    /// serving thread's name.
+    fn start() -> SocketAddr {
+        let root = std::env::temp_dir();
+        let argv: Vec<std::ffi::OsString> = [
+            "--listen",
+            "127.0.0.1:0",
+            "--threads",
+            "1",
+            "--root",
+            root.to_str().unwrap_or("/"),
+        ]
+        .iter()
+        .map(Into::into)
+        .collect();
+        let options = Options::parse(&argv).unwrap_or_else(|e| panic!("{e}"));
+        let listener = TcpListener::bind(options.listen).unwrap_or_else(|e| panic!("{e}"));
+        let addr = listener.local_addr().unwrap_or_else(|e| panic!("{e}"));
+        let (queue, pool) = Pool::start(&options, |job: Job| {
+            let Job { head, mut sink, .. } = job;
+            // The request holds its sink as the engine has it hold one,
+            // so a panic unwinds through the sink the request held.
+            let mut sink = sink.held().unwrap_or_else(|| panic!("a sink to hold"));
+            match &head.target[..] {
+                b"/panic" => panic!("a request panicked before its head, on cue"),
+                b"/cut" => {
+                    sink.send_headers(&ResponseHead::default());
+                    sink.write(b"partial").ok();
+                    let (read, seen) = &READ;
+                    let guard = read.lock().unwrap_or_else(PoisonError::into_inner);
+                    drop(
+                        seen.wait_timeout_while(guard, Duration::from_secs(30), |read| !*read)
+                            .unwrap_or_else(PoisonError::into_inner),
+                    );
+                    panic!("a request panicked mid-response, on cue");
+                }
+                _ => {
+                    sink.send_headers(&ResponseHead::default());
+                    let name = std::thread::current().name().unwrap_or("").to_owned();
+                    sink.write(name.as_bytes()).ok();
+                }
+            }
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        std::thread::spawn(move || {
+            let _pool = pool;
+            crate::connection::run(&options, listener, queue).ok();
+        });
+        addr
+    }
+
+    /// What one request on a connection of its own reads back until the
+    /// server closes it.
+    fn exchange(addr: SocketAddr, target: &str) -> String {
+        let mut stream = send(addr, target);
+        let mut read = Vec::new();
+        stream.read_to_end(&mut read).ok();
+        String::from_utf8_lossy(&read).into_owned()
+    }
+
+    /// One request sent on a connection of its own.
+    fn send(addr: SocketAddr, target: &str) -> TcpStream {
+        let mut stream = TcpStream::connect(addr).unwrap_or_else(|e| panic!("{e}"));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap_or_else(|e| panic!("{e}"));
+        write!(
+            stream,
+            "GET {target} HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        stream
+    }
+
+    #[test]
+    fn a_request_that_panics_is_answered_500_and_its_thread_serves_the_next() {
+        let addr = start();
+        let panicked = exchange(addr, "/panic");
+        assert!(
+            panicked.starts_with("HTTP/1.1 500 Internal Server Error\r\n"),
+            "{panicked}"
+        );
+        let next = exchange(addr, "/next");
+        assert!(next.starts_with("HTTP/1.1 200 OK\r\n"), "{next}");
+        assert!(next.contains("makala-request-0"), "{next}");
+    }
+
+    /// A request that panics once its response is under way has its
+    /// connection cut, so the client never reads the body's end and takes
+    /// the response cut short for a whole one.
+    #[test]
+    fn a_request_that_panics_mid_response_is_cut_and_its_thread_serves_the_next() {
+        let addr = start();
+        let mut stream = send(addr, "/cut");
+        let mut read = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !read.windows(7).any(|w| w == b"partial") {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => read.extend_from_slice(&buf[..n]),
+            }
+        }
+        *READ.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        READ.1.notify_all();
+        stream.read_to_end(&mut read).ok();
+        let cut = String::from_utf8_lossy(&read).into_owned();
+        assert!(cut.starts_with("HTTP/1.1 200 OK\r\n"), "{cut}");
+        assert!(cut.contains("partial"), "{cut}");
+        assert!(!cut.ends_with("0\r\n\r\n"), "{cut:?}");
+        let next = exchange(addr, "/next");
+        assert!(next.ends_with("0\r\n\r\n"), "{next:?}");
+        assert!(next.contains("makala-request-0"), "{next}");
     }
 }

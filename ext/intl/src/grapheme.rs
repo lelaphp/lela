@@ -806,7 +806,7 @@ fn grapheme_levenshtein(
     };
     let mut status = Code::ZERO;
     let opened = Collator::open(&ffi::c_string(locale.0.as_bytes()), &mut status);
-    let Some(collator) = opened.filter(|_| !status.is_failure()) else {
+    let Some(collator) = opened else {
         fail(req, status, "Error on ucol_open")?;
         return Ok(OrFalse::False);
     };

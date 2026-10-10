@@ -14,9 +14,8 @@ use php_ext::abi::Passed;
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{Charset, Owner, PhpArray, PhpString};
 
-use crate::string::next_utf8_char;
 use tables::Row;
 
 /// `ENT_HTML_QUOTE_SINGLE` and the rest of `html.h`'s `$flags` bits.
@@ -79,95 +78,20 @@ pub(crate) mod constants {
     pub(crate) const ENT_HTML5: i64 = DOC_HTML5;
 }
 
-/// `enum entity_charset`, in php's order, which the three
-/// `CHARSET_*` classes read.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Charset {
-    Utf8,
-    Iso88591,
-    Cp1252,
-    Iso885915,
-    Cp1251,
-    Iso88595,
-    Cp866,
-    MacRoman,
-    Koi8r,
-    Big5,
-    Gb2312,
-    Big5Hkscs,
-    Sjis,
-    EucJp,
+/// `enc_to_uni_index[charset]` for a single-byte charset php maps to
+/// Unicode.
+fn to_unicode(charset: Charset) -> Option<&'static [u16; 256]> {
+    Some(match charset {
+        Charset::Cp1252 => &tables::TO_UNI_CP1252,
+        Charset::Iso885915 => &tables::TO_UNI_ISO_8859_15,
+        Charset::Cp1251 => &tables::TO_UNI_CP1251,
+        Charset::Iso88595 => &tables::TO_UNI_ISO_8859_5,
+        Charset::Cp866 => &tables::TO_UNI_CP866,
+        Charset::MacRoman => &tables::TO_UNI_MACROMAN,
+        Charset::Koi8r => &tables::TO_UNI_KOI8_R,
+        _ => return None,
+    })
 }
-
-impl Charset {
-    /// `CHARSET_UNICODE_COMPAT`: its code units are code points.
-    fn unicode_compat(self) -> bool {
-        self <= Charset::Iso88591
-    }
-
-    /// `CHARSET_SINGLE_BYTE`.
-    fn single_byte(self) -> bool {
-        self > Charset::Utf8 && self < Charset::Big5
-    }
-
-    /// `CHARSET_PARTIAL_SUPPORT`: read, and escaped with the basic
-    /// entities alone.
-    fn partial(self) -> bool {
-        self >= Charset::Big5
-    }
-
-    /// `enc_to_uni_index[charset]` for a single-byte charset php maps
-    /// to Unicode.
-    fn to_unicode(self) -> Option<&'static [u16; 256]> {
-        Some(match self {
-            Charset::Cp1252 => &tables::TO_UNI_CP1252,
-            Charset::Iso885915 => &tables::TO_UNI_ISO_8859_15,
-            Charset::Cp1251 => &tables::TO_UNI_CP1251,
-            Charset::Iso88595 => &tables::TO_UNI_ISO_8859_5,
-            Charset::Cp866 => &tables::TO_UNI_CP866,
-            Charset::MacRoman => &tables::TO_UNI_MACROMAN,
-            Charset::Koi8r => &tables::TO_UNI_KOI8_R,
-            _ => return None,
-        })
-    }
-}
-
-/// `charset_map`: each name php takes, compared ignoring case.
-const CHARSET_MAP: [(&[u8], Charset); 33] = [
-    (b"ISO-8859-1", Charset::Iso88591),
-    (b"ISO8859-1", Charset::Iso88591),
-    (b"ISO-8859-15", Charset::Iso885915),
-    (b"ISO8859-15", Charset::Iso885915),
-    (b"utf-8", Charset::Utf8),
-    (b"cp1252", Charset::Cp1252),
-    (b"Windows-1252", Charset::Cp1252),
-    (b"1252", Charset::Cp1252),
-    (b"BIG5", Charset::Big5),
-    (b"950", Charset::Big5),
-    (b"GB2312", Charset::Gb2312),
-    (b"936", Charset::Gb2312),
-    (b"BIG5-HKSCS", Charset::Big5Hkscs),
-    (b"Shift_JIS", Charset::Sjis),
-    (b"SJIS", Charset::Sjis),
-    (b"932", Charset::Sjis),
-    (b"SJIS-win", Charset::Sjis),
-    (b"CP932", Charset::Sjis),
-    (b"EUCJP", Charset::EucJp),
-    (b"EUC-JP", Charset::EucJp),
-    (b"eucJP-win", Charset::EucJp),
-    (b"KOI8-R", Charset::Koi8r),
-    (b"koi8-ru", Charset::Koi8r),
-    (b"koi8r", Charset::Koi8r),
-    (b"cp1251", Charset::Cp1251),
-    (b"Windows-1251", Charset::Cp1251),
-    (b"win-1251", Charset::Cp1251),
-    (b"iso8859-5", Charset::Iso88595),
-    (b"iso-8859-5", Charset::Iso88595),
-    (b"cp866", Charset::Cp866),
-    (b"866", Charset::Cp866),
-    (b"ibm866", Charset::Cp866),
-    (b"MacRoman", Charset::MacRoman),
-];
 
 /// `determine_charset(charset_hint, quiet)`: the hint, else
 /// `internal_encoding`, else `default_charset`, looked up in
@@ -189,11 +113,8 @@ fn determine_charset(req: &mut Request, hint: Option<&[u8]>, quiet: bool) -> Cha
     if hint.is_empty() {
         return Charset::Utf8;
     }
-    if let Some((_, charset)) = CHARSET_MAP
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(&hint))
-    {
-        return *charset;
+    if let Some(charset) = Charset::named(&hint) {
+        return charset;
     }
     if !quiet {
         let text = String::from_utf8_lossy(&hint).into_owned();
@@ -204,136 +125,6 @@ fn determine_charset(req: &mut Request, hint: Option<&[u8]>, quiet: bool) -> Cha
         );
     }
     Charset::Utf8
-}
-
-/// `get_next_char(charset, str, str_len, cursor, status)`: the
-/// character at `pos`, or `None` for an ill-formed one, and the offset
-/// after what was read.
-#[allow(clippy::too_many_lines)]
-fn next_char(charset: Charset, s: &[u8], pos: usize) -> (Option<u32>, usize) {
-    let avail = s.len() - pos;
-    let at = |i: usize| u32::from(s.get(pos + i).copied().unwrap_or(0));
-    let c = at(0);
-    let two = || (c << 8) | at(1);
-    match charset {
-        Charset::Utf8 => next_utf8_char(s, pos),
-        Charset::Big5 => {
-            if (0x81..=0xFE).contains(&c) {
-                if avail < 2 {
-                    return (None, pos + 1);
-                }
-                let next = at(1);
-                if (0x40..=0x7E).contains(&next) || (0xA1..=0xFE).contains(&next) {
-                    (Some(two()), pos + 2)
-                } else {
-                    (None, pos + 1)
-                }
-            } else {
-                (Some(c), pos + 1)
-            }
-        }
-        Charset::Big5Hkscs => {
-            if (0x81..=0xFE).contains(&c) {
-                if avail < 2 {
-                    return (None, pos + 1);
-                }
-                let next = at(1);
-                if (0x40..=0x7E).contains(&next) || (0xA1..=0xFE).contains(&next) {
-                    (Some(two()), pos + 2)
-                } else if next != 0x80 && next != 0xFF {
-                    (None, pos + 1)
-                } else {
-                    (None, pos + 2)
-                }
-            } else {
-                (Some(c), pos + 1)
-            }
-        }
-        Charset::Gb2312 => {
-            let lead = |c: u32| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
-            let trail = |c: u32| (0xA1..=0xFE).contains(&c);
-            if (0xA1..=0xFE).contains(&c) {
-                if avail < 2 {
-                    return (None, pos + 1);
-                }
-                let next = at(1);
-                if trail(next) {
-                    (Some(two()), pos + 2)
-                } else if lead(next) {
-                    (None, pos + 1)
-                } else {
-                    (None, pos + 2)
-                }
-            } else if lead(c) {
-                (Some(c), pos + 1)
-            } else {
-                (None, pos + 1)
-            }
-        }
-        Charset::Sjis => {
-            let lead = |c: u32| c != 0x80 && c != 0xA0 && c < 0xFD;
-            let trail = |c: u32| (0x40..0xFD).contains(&c) && c != 0x7F;
-            if (0x81..=0x9F).contains(&c) || (0xE0..=0xFC).contains(&c) {
-                if avail < 2 {
-                    return (None, pos + 1);
-                }
-                let next = at(1);
-                if trail(next) {
-                    (Some(two()), pos + 2)
-                } else if lead(next) {
-                    (None, pos + 1)
-                } else {
-                    (None, pos + 2)
-                }
-            } else if c < 0x80 || (0xA1..=0xDF).contains(&c) {
-                (Some(c), pos + 1)
-            } else {
-                (None, pos + 1)
-            }
-        }
-        Charset::EucJp => {
-            let edge = |next: u32| if next != 0xA0 && next != 0xFF { 1 } else { 2 };
-            if (0xA1..=0xFE).contains(&c) {
-                if avail < 2 {
-                    return (None, pos + 1);
-                }
-                let next = at(1);
-                if (0xA1..=0xFE).contains(&next) {
-                    (Some(two()), pos + 2)
-                } else {
-                    (None, pos + edge(next))
-                }
-            } else if c == 0x8E {
-                if avail < 2 {
-                    return (None, pos + 1);
-                }
-                let next = at(1);
-                if (0xA1..=0xDF).contains(&next) {
-                    (Some(two()), pos + 2)
-                } else {
-                    (None, pos + edge(next))
-                }
-            } else if c == 0x8F {
-                let kanji = |c: u32| (0xA1..=0xFE).contains(&c);
-                if avail < 3 || !kanji(at(1)) || !kanji(at(2)) {
-                    let skip = if avail < 2 || (at(1) != 0xA0 && at(1) != 0xFF) {
-                        1
-                    } else if avail < 3 || (at(2) != 0xA0 && at(2) != 0xFF) {
-                        2
-                    } else {
-                        3
-                    };
-                    return (None, pos + skip);
-                }
-                (Some((c << 16) | (at(1) << 8) | at(2)), pos + 3)
-            } else if c != 0xA0 && c != 0xFF {
-                (Some(c), pos + 1)
-            } else {
-                (None, pos + 1)
-            }
-        }
-        _ => (Some(c), pos + 1),
-    }
 }
 
 /// `unimap_bsearch(table, code, num)`: the byte `table` gives a BMP
@@ -694,7 +485,7 @@ pub fn escape(
     }
     let table = entity_table(all, doctype);
     let to_uni = if all && !charset.unicode_compat() {
-        charset.to_unicode()
+        to_unicode(charset)
     } else {
         None
     };
@@ -708,7 +499,7 @@ pub fn escape(
     let mut cursor = 0usize;
     while cursor < old.len() {
         let before = cursor;
-        let (this_char, next) = next_char(charset, old, cursor);
+        let (this_char, next) = charset.next_char(old, cursor);
         cursor = next;
         let Some(mut this_char) = this_char else {
             if flags & IGNORE_ERRORS != 0 {
@@ -743,7 +534,7 @@ pub fn escape(
                     Some(Row::One(name)) => entity = Some(name),
                     Some(Row::Many(default, pairs)) => {
                         let peek = if cursor < old.len() {
-                            match next_char(charset, old, cursor) {
+                            match charset.next_char(old, cursor) {
                                 (Some(second), after) => Some((second, after)),
                                 (None, _) => None,
                             }
@@ -1147,7 +938,7 @@ fn get_html_translation_table(
             write_row(req, &mut array, row, &key, charset)?;
         }
     } else if all {
-        let to_uni = charset.to_unicode().unwrap_or(&tables::TO_UNI_CP1252);
+        let to_uni = to_unicode(charset).unwrap_or(&tables::TO_UNI_CP1252);
         for byte in 0..=255u8 {
             let cp = u32::from(byte);
             if quote_skipped(cp) {

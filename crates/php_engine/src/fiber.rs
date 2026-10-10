@@ -1947,10 +1947,8 @@ impl Coroutine {
                 if let Some(before) = before {
                     req.raise_under(before);
                 }
-                if !req.executing()
-                    && let Err(fatal) = req.exception_error(crate::api::raising::Level::Error)
-                {
-                    req.end_in(&fatal);
+                if !req.executing() {
+                    req.exception_error(crate::api::raising::Level::Error).ok();
                 }
             }
             Ok(Transfer::Value(value)) => {

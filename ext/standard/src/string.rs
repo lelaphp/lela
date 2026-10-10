@@ -29,7 +29,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Charset, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
@@ -2817,75 +2817,9 @@ fn utf8_decode(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>,
 
 /// `get_next_char(cs_utf_8, ...)` (`Z/ext/standard/html.c:89`), what
 /// `php_next_utf8_char` answers: the code point at `pos` and the offset
-/// after it, or `None` and the offset past the bytes UTR #36's second
-/// strategy takes as the ill-formed sequence: a non-initial byte that
-/// is a lead or encodes a character of its own is left for the next
-/// read.
+/// after it, or `None` and the offset past the ill-formed sequence
+/// ([`Charset::next_char`]).
+#[must_use]
 pub fn next_utf8_char(s: &[u8], pos: usize) -> (Option<u32>, usize) {
-    let avail = s.len() - pos;
-    let lead = |c: u8| c < 0x80 || (0xc2..=0xf4).contains(&c);
-    let trail = |c: u8| (0x80..=0xbf).contains(&c);
-    let b = |i: usize| s.get(pos + i).copied().unwrap_or(0);
-    let c = b(0);
-    if c < 0x80 {
-        return (Some(u32::from(c)), pos + 1);
-    }
-    if c < 0xc2 {
-        return (None, pos + 1);
-    }
-    if c < 0xe0 {
-        if avail < 2 {
-            return (None, pos + 1);
-        }
-        if !trail(b(1)) {
-            return (None, pos + if lead(b(1)) { 1 } else { 2 });
-        }
-        let cp = ((u32::from(c) & 0x1f) << 6) | (u32::from(b(1)) & 0x3f);
-        if cp < 0x80 {
-            return (None, pos + 2);
-        }
-        return (Some(cp), pos + 2);
-    }
-    if c < 0xf0 {
-        if avail < 3 || !trail(b(1)) || !trail(b(2)) {
-            let skip = if avail < 2 || lead(b(1)) {
-                1
-            } else if avail < 3 || lead(b(2)) {
-                2
-            } else {
-                3
-            };
-            return (None, pos + skip);
-        }
-        let cp = ((u32::from(c) & 0x0f) << 12)
-            | ((u32::from(b(1)) & 0x3f) << 6)
-            | (u32::from(b(2)) & 0x3f);
-        if cp < 0x800 || (0xd800..=0xdfff).contains(&cp) {
-            return (None, pos + 3);
-        }
-        return (Some(cp), pos + 3);
-    }
-    if c < 0xf5 {
-        if avail < 4 || !trail(b(1)) || !trail(b(2)) || !trail(b(3)) {
-            let skip = if avail < 2 || lead(b(1)) {
-                1
-            } else if avail < 3 || lead(b(2)) {
-                2
-            } else if avail < 4 || lead(b(3)) {
-                3
-            } else {
-                4
-            };
-            return (None, pos + skip);
-        }
-        let cp = ((u32::from(c) & 0x07) << 18)
-            | ((u32::from(b(1)) & 0x3f) << 12)
-            | ((u32::from(b(2)) & 0x3f) << 6)
-            | (u32::from(b(3)) & 0x3f);
-        if !(0x10000..=0x0010_ffff).contains(&cp) {
-            return (None, pos + 4);
-        }
-        return (Some(cp), pos + 4);
-    }
-    (None, pos + 1)
+    Charset::Utf8.next_char(s, pos)
 }

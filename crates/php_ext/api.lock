@@ -1146,6 +1146,12 @@ test::Engine::unit
 test::Engine::zend_version_info
 test::Entered
 test::LeakSensor
+values::Charset
+values::Charset::named
+values::Charset::next_char
+values::Charset::partial
+values::Charset::single_byte
+values::Charset::unicode_compat
 values::ClassId
 values::ClassId::is_published
 values::ClosureInfo
@@ -1158,6 +1164,7 @@ values::Emalloc::free
 values::Emalloc::is_empty
 values::Emalloc::len
 values::Emalloc::new
+values::Emalloc::printf_buffer
 values::Emalloc::resize
 values::FreshString
 values::FreshString::bytes
