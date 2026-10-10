@@ -4746,7 +4746,7 @@ pub(crate) fn new<T: Tier>(
         let next_is_do_fcall = exec::opline_at(code, at.saturating_add(1))
             .is_some_and(|next| next.opcode == php_unit::Opcode::DoFcall);
         if count == 0 && next_is_do_fcall {
-            return jump_to(at.saturating_add(2));
+            return Ok(advance_over_data(req, frame, at));
         }
     }
     let function = constructor.unwrap_or(Function::PASS);
@@ -11409,7 +11409,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         write_out(req, frame, code, op, &landed);
         req.release(garbage);
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     }
     // The owner the source had of `held` is the cell's now.
     let cell = match req.make_ref(source) {
@@ -11456,7 +11456,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     write_out(req, frame, code, op, &bound);
     req.release(garbage);
     exec::free_operand(req, frame, code, data_type, data_at);
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two
@@ -11755,7 +11755,7 @@ pub(crate) fn assign_obj<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `ASSIGN_OBJ`'s body over an object: the name placed
@@ -12083,7 +12083,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     };
     let Some(info) = placed else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     // `zend_assign_to_typed_prop`'s set-visibility arm, after the value
@@ -12103,7 +12103,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
         Ok(pair) => landed_out(req, frame, code, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// The slot one of the five read-modify-write opcodes over a
@@ -12348,7 +12348,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
@@ -12396,7 +12396,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
         write_out(req, frame, code, op, &cell.get());
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     }
     let stepped = match ty {
         None => stepped,
@@ -12416,7 +12416,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // time: a weak conversion raises a deprecation and php raises it
     // once.
     req.store_static_property(declaring, &name, stepped);
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `zend_binary_assign_op_typed_prop` (`Z/Zend/zend_execute.c:1693`):
@@ -12774,7 +12774,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, code, data_type, data_at);
-        return jump_to(at.saturating_add(2));
+        return Ok(advance_over_data(req, frame, at));
     };
     let Some(source) = write_place(req, frame, code, data_type, data_at) else {
         return Err(Fatal::Error(String::from(
@@ -12846,7 +12846,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             },
         );
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
@@ -14047,7 +14047,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    jump_to(at.saturating_add(2))
+    Ok(advance_over_data(req, frame, at))
 }
 
 /// The operation of a compound assignment over a declared property
@@ -20777,6 +20777,27 @@ fn advance(req: &Request, frame: FrameRef) -> Next {
 /// oplines, the `OP_DATA` after it carrying the value: the opline after
 /// the pair, and the `Threw` edge at this one where a throwable is
 /// pending, which a handler php carries on past a diagnostic leaves.
+/// Every such handler ends here, so what a destructor or a `__set` it
+/// served threw is raised at the pair and never by the opline after it,
+/// which an inline path serves with no pending test of its own:
+///
+/// ```php
+/// class D { function __destruct() { throw new Exception("d"); } }
+/// class S { public static $s = [0]; }
+/// $o = (object)["p" => [0]];
+/// try { var_dump($o->p += [new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { var_dump(S::$s += [new D]); } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { var_dump($o->q = new D, 1); } catch (Exception $e) { echo "never\n"; }
+/// try { $o->q = 2; echo "past\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// caught d
+/// caught d
+/// object(D)#3 (0) {
+/// }
+/// int(1)
+/// caught d
+/// ```
 fn advance_over_data(req: &Request, frame: FrameRef, at: u32) -> Next {
     if req.is_pending() {
         return Stepped::Threw(frame).into();
