@@ -28,12 +28,15 @@ const BUFSIZE: usize = 8192;
 /// `-MAX_WBITS`: a raw deflate stream, no zlib header.
 const RAW_WINDOW: c_int = -15;
 
-/// zlib's allocator as libzip leaves it, `Z_NULL`: `zcalloc`'s
-/// `malloc`, zeroed here since nothing reads it unwritten either way.
+/// zlib's allocator as libzip leaves it, `Z_NULL`: `zcalloc`, which is
+/// `malloc(items * size)` wherever `uInt` is wider than two bytes and
+/// zeroes nothing (zlib's `zutil.c:300-304`, as libz-sys vendors it and
+/// the oracle's 1.2.12 has it). Two `uInt`s multiply inside a 64-bit
+/// `size_t`.
 extern "C" fn alloc(_opaque: *mut c_void, items: c_uint, size: c_uint) -> *mut c_void {
-    // SAFETY: `calloc` takes any count and size and answers null or
-    // memory of its own, which zlib frees through `free`.
-    unsafe { libc::calloc(items as usize, size as usize) }
+    // SAFETY: `malloc` takes any size and answers null or memory of its
+    // own, which zlib frees through `free`.
+    unsafe { libc::malloc(items as usize * size as usize) }
 }
 
 /// `zcfree`, `free` of what [`alloc`] gave.
