@@ -10,7 +10,9 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw, while_pending};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, docref, leave_pending, throw, while_pending,
+};
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -172,21 +174,42 @@ impl ObjectHandlers for Handlers {
     }
 
     /// `php_zip_object_free_storage`: an open archive closed, its changes
-    /// written, and php's warning where that fails.
+    /// written, and php's warning where that fails. What a progress or
+    /// cancel callback threw meanwhile is left pending, for the release
+    /// that freed the object to raise.
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/witness-free-' . getmypid() . '.zip';
+    /// $z = new ZipArchive;
+    /// $z->open($f, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('a.txt', 'hello');
+    /// $z->registerProgressCallback(0.5, function ($r) { echo "progress\n"; throw new Exception("progress"); });
+    /// try { $z = null; echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+    /// @unlink($f);
+    /// ```
+    /// ```expect
+    /// progress
+    /// caught progress
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if let Some((mut archive, id)) = object
             .native_mut::<Intern>(req)
             .and_then(|i| Some((i.za.take()?, i.id)))
         {
-            let (result, _) = close_with_hooks(req, object, &mut archive);
+            let (result, thrown) = close_with_hooks(req, object, &mut archive);
             discarded(req, id);
             if result.is_err() {
                 let text = archive.error.text(req);
-                docref(
-                    req,
-                    Level::Warning,
-                    &format!("Cannot destroy the zip context: {text}"),
-                );
+                let text = format!("Cannot destroy the zip context: {text}");
+                match &thrown {
+                    Some(t) => {
+                        while_pending(req, t, |req| docref(req, Level::Warning, &text));
+                    }
+                    None => docref(req, Level::Warning, &text),
+                }
+            }
+            if let Some(thrown) = thrown {
+                leave_pending(req, thrown);
             }
         }
         let kept = object

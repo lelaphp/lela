@@ -12,7 +12,7 @@
 //! opens, whose path and count they read off it.
 
 use php_ext::abi::{
-    CloneObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers, OrFalse, Passed,
+    CloneObj, DtorObj, ExtensionBuilder, False, Instance, Null, ObjectHandlers, OrFalse, Passed,
     Path as PathArg, Raw, Ref, Refusals, Std, This, Union, Untyped, Variadic,
 };
 use php_ext::attr::php_class;
@@ -2109,10 +2109,13 @@ fn extension(name: &[u8]) -> Vec<u8> {
 }
 
 impl ObjectHandlers for Handlers {
+    /// `spl_filesystem_object_free_storage`: the other handler's `dtor`,
+    /// then `zend_object_std_dtor`, then what the object opened.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if let Some(other) = object.native_mut::<Fs>(req).and_then(|it| it.oth.take()) {
             other.dtor(req);
         }
+        Std.free_obj(req, object);
         let held = object
             .native_mut::<Fs>(req)
             .map(|it| (it.dir.take(), it.stream.take(), it.csv.take()));
@@ -2158,18 +2161,20 @@ impl ObjectHandlers for Handlers {
     /// ```expect
     /// int(0)
     /// ```
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        Std.dtor_obj(req, object);
-        let held = object
-            .native_mut::<Fs>(req)
-            .map(|it| (it.dir.take(), it.stream.take()));
-        for open in held
-            .into_iter()
-            .flat_map(|(dir, stream)| [dir, stream])
-            .flatten()
-        {
-            open.close(req);
-        }
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(|req, object| {
+            DtorObj::Destroy.serve(req, object);
+            let held = object
+                .native_mut::<Fs>(req)
+                .map(|it| (it.dir.take(), it.stream.take()));
+            for open in held
+                .into_iter()
+                .flat_map(|(dir, stream)| [dir, stream])
+                .flatten()
+            {
+                open.close(req);
+            }
+        })
     }
 }
 
@@ -2185,8 +2190,8 @@ impl ObjectHandlers for FileHandlers {
         HANDLERS.free_obj(req, object);
     }
 
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        HANDLERS.dtor_obj(req, object);
+    fn dtor_obj(&self) -> DtorObj {
+        HANDLERS.dtor_obj()
     }
 
     /// `spl_filesystem_object_get_method_check`: every method, the

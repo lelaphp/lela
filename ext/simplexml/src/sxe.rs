@@ -1373,7 +1373,10 @@ impl ObjectHandlers for Handlers {
         96
     }
 
+    /// `sxe_object_free_storage`: `zend_object_std_dtor` first, then what
+    /// the iterator and the property table held.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
         let (current, properties, made) = match sxe_mut(req, object) {
             Some(s) => (s.current.take(), s.properties.take(), s.made.take()),
             None => (None, None, None),

@@ -3616,21 +3616,11 @@ impl ObjectHandlers for RecHandlers {
         REC_REFUSALS
     }
 
-    /// `spl_RecursiveIteratorIterator_free_storage`: what the
-    /// destructor left, the deepest level first.
-    fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        release_levels(req, object);
-        let tree = object
-            .native_mut::<RecIt>(req)
-            .and_then(|it| it.tree.take());
-        if let Some(tree) = tree {
-            tree.release(req);
-        }
-    }
-
-    /// `spl_RecursiveIteratorIterator_dtor`: the class's `__destruct`,
-    /// then every level given up, the deepest first, so a sub-iterator's
-    /// own destructor runs before its parent's.
+    /// `spl_RecursiveIteratorIterator_free_storage`: every level given
+    /// up, the deepest first, while the object's members still stand, so
+    /// a sub-iterator's own destructor runs before its parent's and after
+    /// the class's `__destruct`, which php serves through the standard
+    /// `dtor_obj`; then the members.
     ///
     /// A loop's end cuts the walk back to its root first
     /// (`spl_recursive_it_dtor`).
@@ -3655,9 +3645,27 @@ impl ObjectHandlers for RecHandlers {
     /// dtor 2
     /// end
     /// ```
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        Std.dtor_obj(req, object);
+    ///
+    /// The levels go before the members:
+    ///
+    /// ```php
+    /// class P { function __destruct() { echo "prop\n"; } }
+    /// class A extends RecursiveArrayIterator { function __destruct() { echo "inner\n"; } }
+    /// class R extends RecursiveIteratorIterator { public $p; }
+    /// $o = new R(new A([1])); $o->p = new P; unset($o);
+    /// ```
+    /// ```expect
+    /// inner
+    /// prop
+    /// ```
+    fn free_obj(&self, req: &mut Request, object: PhpObject) {
         release_levels(req, object);
+        let tree = object
+            .native_mut::<RecIt>(req)
+            .and_then(|it| it.tree.take());
+        if let Some(tree) = tree {
+            tree.release(req);
+        }
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {

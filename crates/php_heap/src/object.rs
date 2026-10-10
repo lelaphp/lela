@@ -1073,19 +1073,41 @@ impl Heap {
         }
     }
 
-    /// `free_obj`: `zend_object_std_dtor` (`Z/Zend/zend_objects.c:77`),
-    /// the weak references to the object told first
-    /// (`zend_weakrefs_notify`, [`HeapHooks::weakrefs_notify`]), then
-    /// what the engine keeps aside for a lazy object
-    /// ([`HeapHooks::forget_lazy`]), then the dynamic table and the
-    /// slots, and for an internal class the payload, what it names of
-    /// the heap given back by the engine through
-    /// [`HeapHooks::free_native`] and the rest by its drop.
+    /// `free_obj`: for an internal class, the class's own handler first,
+    /// served through [`HeapHooks::free_native`] with the members still
+    /// standing, then [`Heap::object_std_dtor`], then the payload's drop,
+    /// as php's handlers release what they hold and call
+    /// `zend_object_std_dtor` last (`php_converter_free_object`,
+    /// `Z/ext/intl/converter/converter.c:906-919`). A handler that frees
+    /// the members before its own release, as
+    /// `spl_array_object_free_storage` does, calls
+    /// [`Heap::object_std_dtor`] itself, and the call here finds nothing
+    /// left. An object of no payload is `zend_object_std_dtor` alone.
+    pub(crate) fn object_free(hooks: &mut dyn HeapHooks, o: Obj) {
+        let native = o.has_native();
+        if native {
+            hooks.free_native(o);
+        }
+        Heap::object_std_dtor(hooks, o);
+        if native {
+            o.drop_payload();
+        }
+    }
+
+    /// `zend_object_std_dtor` (`Z/Zend/zend_objects.c:77`): the weak
+    /// references to the object told first (`zend_weakrefs_notify`,
+    /// [`HeapHooks::weakrefs_notify`]), then what the engine keeps aside
+    /// for a lazy object ([`HeapHooks::forget_lazy`]), then the dynamic
+    /// table and the slots. Once is all it does: a second call over the
+    /// same object finds the table gone, each slot `UNDEF`, the object
+    /// eager and no weak reference left to tell, which is what lets a
+    /// class's `free_obj` free the members where php's handler calls it
+    /// and [`Heap::object_free`] call it after regardless.
     ///
     /// The dynamic table is given up as `zend_object_std_dtor` gives it
     /// up, `GC_DELREF` and `zend_array_destroy` at zero and never
     /// `gc_possible_root`: a table still shared is not a root.
-    pub(crate) fn object_free(hooks: &mut dyn HeapHooks, o: Obj) {
+    pub fn object_std_dtor(hooks: &mut dyn HeapHooks, o: Obj) {
         if o.is_weakly_referenced() {
             hooks.weakrefs_notify(o);
         }
@@ -1098,6 +1120,9 @@ impl Heap {
         }
         for i in 0..o.slots() {
             let z = o.slot(i);
+            if z.is_undef() {
+                continue;
+            }
             o.write_slot(i, Zval::UNDEF);
             if let Some(r) = z.as_reference()
                 && r.sources() != 0
@@ -1105,10 +1130,6 @@ impl Heap {
                 hooks.slot_source_gone(o, i, r);
             }
             Heap::release(hooks, z);
-        }
-        if o.has_native() {
-            hooks.free_native(o);
-            o.drop_payload();
         }
     }
 
@@ -1179,6 +1200,9 @@ mod tests {
     struct Recorder {
         heap: Heap,
         log: Vec<(ObjectId, &'static str)>,
+        /// Whether `free_native` frees the members first, as a handler
+        /// that calls `zend_object_std_dtor` before its own release does.
+        members_first: bool,
     }
 
     impl Recorder {
@@ -1186,6 +1210,7 @@ mod tests {
             Recorder {
                 heap: Heap::new(),
                 log: Vec::new(),
+                members_first: false,
             }
         }
     }
@@ -1198,12 +1223,44 @@ mod tests {
             self.log.push((obj.id(), "destruct"));
         }
         fn free_native(&mut self, obj: Obj) {
+            if self.members_first {
+                Heap::object_std_dtor(self, obj);
+            }
             self.log.push((obj.id(), "free_native"));
         }
         fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
+        }
+    }
+
+    /// `free_obj` is served while the members stand, and the members are
+    /// freed after it, as php's handlers call `zend_object_std_dtor` last
+    /// (`php_converter_free_object`); a handler that frees them first, as
+    /// `spl_array_object_free_storage` does, finds nothing left after.
+    #[test]
+    fn free_obj_is_served_before_the_members_unless_it_frees_them() {
+        let _alone = alone();
+        for members_first in [false, true] {
+            let mut r = Recorder::new();
+            r.members_first = members_first;
+            let Ok(outer) = r.heap.object_with(3, 1, 0, 0u8) else {
+                return;
+            };
+            let Ok(inner) = r.heap.object(3, 0, 0) else {
+                return;
+            };
+            outer.write_slot(0, Zval::object(inner));
+            let (o, i) = (outer.id(), inner.id());
+            Heap::release(&mut r, Zval::object(outer));
+            let expected = if members_first {
+                vec![(o, "destruct"), (i, "destruct"), (o, "free_native")]
+            } else {
+                vec![(o, "destruct"), (o, "free_native"), (i, "destruct")]
+            };
+            assert_eq!(r.log, expected, "members first: {members_first}");
+            assert_eq!(r.heap.objects(), 0);
         }
     }
 

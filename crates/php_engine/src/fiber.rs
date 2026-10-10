@@ -45,7 +45,7 @@ use php_compile::StackLimit;
 use php_heap::{Block, FiberStack, Host, StackRefused, Suspensions, Switched};
 use php_macros::php_class;
 
-use crate::api::abi::{Callable, CloneObj, Instance, NamedVariadic, ObjectHandlers, This};
+use crate::api::abi::{Callable, CloneObj, DtorObj, Instance, NamedVariadic, ObjectHandlers, This};
 use crate::api::call::call_named_made;
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::{ObservedChain, Raised, Request};
@@ -390,8 +390,8 @@ struct FiberHandlers;
 
 impl ObjectHandlers for FiberHandlers {
     /// `zend_fiber_object_destroy`: a suspended fiber is torn down.
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        Coroutine::destroy::<ZendFiber>(req, object);
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(Coroutine::destroy::<ZendFiber>)
     }
 
     /// `zend_fiber_object_free`: the callable and `fiber->result` given
@@ -491,14 +491,6 @@ impl ObjectHandlers for FiberHandlers {
 }
 
 static FIBER: FiberHandlers = FiberHandlers;
-
-/// Whether `table` is `Fiber`'s, whose `dtor_obj` is
-/// `zend_fiber_object_destroy` and not `zend_objects_destroy_object`,
-/// so the cycle collector serves it a destructor whatever the class
-/// declares.
-pub(crate) fn serves_destructor(table: &'static dyn ObjectHandlers) -> bool {
-    std::ptr::addr_eq(table, &raw const FIBER)
-}
 
 /// Where a fiber's execution stands, php's `fiber->execute_data`, for
 /// a view of it ([`crate::api::request::Execution`]).

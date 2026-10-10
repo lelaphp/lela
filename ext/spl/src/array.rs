@@ -2015,8 +2015,21 @@ impl ObjectHandlers for Handlers {
         Ok(())
     }
 
+    /// `spl_array_object_free_storage`: the position forgotten, then
+    /// `zend_object_std_dtor`, then the storage given up.
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n, "\n"; } }
+    /// class A extends ArrayObject { public $p; }
+    /// $o = new A([new D('storage')]); $o->p = new D('prop'); unset($o);
+    /// ```
+    /// ```expect
+    /// prop
+    /// storage
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         forget_position(req, object).ok();
+        Std.free_obj(req, object);
         let held = object
             .native_mut::<SplArrayObject>(req)
             .map(|p| std::mem::take(&mut p.storage));

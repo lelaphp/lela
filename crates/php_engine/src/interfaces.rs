@@ -24,8 +24,8 @@ use php_macros::php_class;
 use php_unit::decl::ClassKind;
 
 use crate::api::abi::{
-    ClassIterator, CurrentPlace, ExtensionBuilder, Instance, IteratorElement, ObjectHandlers, This,
-    Untyped,
+    ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, Instance, IteratorElement,
+    ObjectHandlers, This, Untyped,
 };
 use crate::api::raising::{Thrown, throw, throw_error};
 use crate::api::request::Request;
@@ -524,8 +524,8 @@ impl ObjectHandlers for WrapperHandlers {
         }
     }
 
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        let _ = (req, object);
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(|_, _| {})
     }
 
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {

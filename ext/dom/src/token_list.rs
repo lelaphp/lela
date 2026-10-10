@@ -6,7 +6,7 @@
 
 use php_ext::abi::{
     ClassIterator, DimensionRead, Instance, ObjectHandlers, Path, PropertyPlace, PropertyRead,
-    PropertyTest, Raw, Refusals, This, Variadic,
+    PropertyTest, Raw, Refusals, Std, This, Variadic,
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
@@ -634,9 +634,10 @@ impl ObjectHandlers for TokenListHandlers {
         REFUSALS
     }
 
-    /// `dom_token_list_free_obj`: the set's table and strings and the
-    /// cached value given back.
+    /// `dom_token_list_free_obj`: `zend_object_std_dtor`, then the set's
+    /// table and strings and the cached value given back.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
+        Std.free_obj(req, object);
         if let Some(mut set) = taken(req, object) {
             set.release(req);
         }

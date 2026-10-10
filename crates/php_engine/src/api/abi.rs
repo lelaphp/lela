@@ -2160,6 +2160,36 @@ impl From<Owner<PhpArray>> for DebugInfo {
     }
 }
 
+/// What the `dtor_obj` slot holds: `zend_objects_destroy_object`, or a
+/// destructor of the table's own. The difference is php's own test,
+/// `dtor_obj != zend_objects_destroy_object || ce->destructor`, which
+/// `zend_objects_store_del`, the cycle collector and a lazy object's reset
+/// read: an object whose table serves its own is one with a destructor
+/// whatever its class declares, so the collector serves it before it
+/// frees anything and takes what it reaches out of the count
+/// (`GC_DESTRUCTOR_GARBAGE`, `Z/Zend/zend_gc.c`).
+#[derive(Clone, Copy)]
+pub enum DtorObj {
+    /// `zend_objects_destroy_object`: the class's `__destruct`, where it
+    /// declares or inherits one, served on the object, which the store
+    /// holds at one owner meanwhile.
+    Destroy,
+    /// The table's own, as `Fiber`'s `zend_fiber_object_destroy` and
+    /// `IntlIterator`'s `IntlIterator_objects_dtor` are; one that serves
+    /// the class's `__destruct` as well serves [`DtorObj::Destroy`] itself.
+    Own(fn(&mut Request, PhpObject)),
+}
+
+impl DtorObj {
+    /// The slot served on `object`.
+    pub fn serve(self, req: &mut Request, object: PhpObject) {
+        match self {
+            DtorObj::Destroy => req.destruct(object),
+            DtorObj::Own(own) => own(req, object),
+        }
+    }
+}
+
 /// The `clone_obj` slot: a fresh object holding what this one holds,
 /// its one owner the caller's.
 pub type CloneObj = fn(&mut Request, PhpObject) -> Result<Owner<PhpObject>, Thrown>;
@@ -2266,18 +2296,28 @@ pub trait ObjectHandlers: Send + Sync {
     }
 
     /// `free_obj` for the native payload: what the payload names of the
-    /// heap given back before the payload is dropped, with the members
-    /// already freed and the object's bucket already invalid. `Std`
-    /// releases nothing, a class with no payload naming nothing.
+    /// heap given back before the payload is dropped, with the object's
+    /// bucket already invalid and its members still standing, so PHP
+    /// code the release serves reads the object whole, as a subclass's
+    /// `toUCallback` reads it under `ucnv_close`. `Std`'s body is
+    /// `zend_object_std_dtor`: the weak references told and the members
+    /// freed. The members are freed after the slot returns, as php's
+    /// handlers call `zend_object_std_dtor` last; a table whose php
+    /// handler calls it first, as `spl_array_object_free_storage` does,
+    /// calls `Std.free_obj` where php's does, and nothing is left to free
+    /// after. What PHP code the release serves throws is left pending
+    /// with [`crate::api::raising::leave_pending`], for the release that
+    /// freed the object to raise.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let _ = (req, object);
+        req.free_members(object);
     }
 
-    /// `dtor_obj`, `zend_objects_destroy_object`: the class's
-    /// `__destruct` served on the object, which the store holds at one
-    /// owner meanwhile.
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        req.destruct(object);
+    /// `dtor_obj`, [`DtorObj::Destroy`] at `Std`: what the store serves
+    /// before it frees the object, the destructor phase of a collection
+    /// before it frees the garbage, and a lazy object's reset before it
+    /// resets.
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Destroy
     }
 
     /// `clone_obj`, `zend_objects_clone_obj` at `Std`: the members

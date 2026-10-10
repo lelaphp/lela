@@ -26,8 +26,8 @@
 mod natives;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, ObjectHandlers, Path,
-    Refusals, Static, Std, This, Union,
+    Dependency, DependencyKind, DtorObj, Extension, ExtensionBuilder, Instance, ObjectHandlers,
+    Path, Refusals, Static, This, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{instantiate, lookup_class, new_object};
@@ -132,9 +132,27 @@ impl ObjectHandlers for Handlers {
         Refusals::NONE.cloning()
     }
 
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        destroy(req, object);
-        Std.dtor_obj(req, object);
+    /// `xmlwriter_object_dtor`: the emitter freed, which flushes what it
+    /// holds, then the class's `__destruct`. A table's own, so an `XMLWriter`
+    /// the cycle collector finds is destructor garbage and is flushed
+    /// before the collection frees it, as php's `gc_call_destructors`
+    /// serves it.
+    ///
+    /// ```php
+    /// class X extends XMLWriter { public $self; }
+    /// function x() { $w = new X; $w->openUri('php://output'); $w->startDocument(); $w->writeElement('a', 'b'); $w->self = $w; unset($w); echo "collect\n"; var_dump(gc_collect_cycles()); }
+    /// x();
+    /// ```
+    /// ```expect
+    /// collect
+    /// <?xml version="1.0"?>
+    /// <a>b</a>int(1)
+    /// ```
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(|req, object| {
+            destroy(req, object);
+            DtorObj::Destroy.serve(req, object);
+        })
     }
 }
 

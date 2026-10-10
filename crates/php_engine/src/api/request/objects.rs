@@ -13,7 +13,7 @@ use php_heap::{Fatal, Heap, Obj, Zval};
 use php_link::{LinkedClass, Row};
 use php_unit::decl::{ClassDecl, ClassKind, PropertyDecl, Visibility};
 
-use crate::api::abi::{DimensionRead, NativeNew, ObjectHandlers, Std};
+use crate::api::abi::{DimensionRead, DtorObj, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
 use crate::api::values::{
@@ -548,6 +548,18 @@ impl Request {
         // destructor ran may have found it reachable and taken it out of
         // the buffer, and the shutdown collection finds it here.
         self.gc_possible_root(&object.as_value());
+    }
+
+    /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
+    /// the object's table serves a destructor of its own
+    /// ([`DtorObj::Own`]), or its class declares or inherits `__destruct`.
+    /// What `zend_objects_store_del`, the cycle collector and a lazy
+    /// object's reset ask before they serve `dtor_obj`.
+    pub(crate) fn has_destructor(&self, object: PhpObject) -> bool {
+        matches!(
+            self.object_handlers(object.heap()).dtor_obj(),
+            DtorObj::Own(_)
+        ) || self.method_named(object.class(), b"__destruct").is_some()
     }
 
     /// `zend_call_function`'s tail (`Z/Zend/zend_execute_API.c:1069-1076`)

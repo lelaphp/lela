@@ -54,10 +54,14 @@ pub trait HeapHooks {
     /// The object is handed as php hands `dtor_obj` its pointer, still
     /// in the store and held at one owner.
     fn destruct(&mut self, obj: Obj);
-    /// The object's native payload, released through its handler table:
-    /// what the payload names of the heap, given back before the payload
-    /// is dropped. The object's bucket is already invalid, as it is when
-    /// php calls `free_obj`, so it is handed and not looked up.
+    /// The object's native payload, released through its handler table,
+    /// php's `free_obj` of an internal class: what the payload names of
+    /// the heap, given back before the payload is dropped, with the
+    /// members still standing; they are freed after this returns, unless
+    /// the handler freed them first through [`Heap::object_std_dtor`]
+    /// where php's calls `zend_object_std_dtor`. The object's bucket is
+    /// already invalid, as it is when php calls `free_obj`, so it is
+    /// handed and not looked up.
     fn free_native(&mut self, obj: Obj);
     /// The values the object owns, for the cycle collector's traversal.
     fn gc_children(&mut self, obj: Obj, visit: &mut dyn FnMut(Zval));

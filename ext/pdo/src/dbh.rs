@@ -290,9 +290,10 @@ impl ObjectHandlers for Handlers {
         object.rebuild_properties(req)
     }
 
-    /// `pdo_dbh_free_storage`: a transaction still open rolled back, and
-    /// then `dbh_free`: the failed statement given up, the connection
-    /// closed and the constructor arguments released.
+    /// `pdo_dbh_free_storage`: a transaction still open rolled back,
+    /// `zend_object_std_dtor`, and then `dbh_free`: the failed statement
+    /// given up, the connection closed and the constructor arguments
+    /// released.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if object
             .native::<Dbh>(req)
@@ -315,6 +316,7 @@ impl ObjectHandlers for Handlers {
                 }
                 d.query_stmt.take()
             });
+            Std.free_obj(req, object);
             if let Some(stmt) = held.flatten() {
                 stmt.give_up(req);
             }
@@ -329,12 +331,16 @@ impl ObjectHandlers for Handlers {
         let tracked = dbh.in_txn;
         if let Conn::Open(mut conn) = conn {
             let _rolled_back = roll_back_open(req, &mut *conn, tracked);
+            Std.free_obj(req, object);
             if let Some(stmt) = held.0 {
                 stmt.give_up(req);
             }
             conn.close(req);
-        } else if let Some(stmt) = held.0 {
-            stmt.give_up(req);
+        } else {
+            Std.free_obj(req, object);
+            if let Some(stmt) = held.0 {
+                stmt.give_up(req);
+            }
         }
         if let Some(args) = held.1 {
             req.release(Value::array(args));
