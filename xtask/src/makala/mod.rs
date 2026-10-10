@@ -27,6 +27,7 @@
 //! bench workloads committed under `docs/perf/workloads/` (measurement
 //! protocol §11), each a `GET` of its own.
 
+pub(crate) mod bench;
 pub(crate) mod compare;
 pub(crate) mod soak;
 

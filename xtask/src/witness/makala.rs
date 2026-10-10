@@ -370,23 +370,66 @@ pub(crate) fn by_fpm(
     ini: &[String],
     ports: Ports,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let pin = oracle.pin();
-    let recipe = &pin.recipe;
-    let root = dir.canonicalize()?.to_string_lossy().into_owned();
-    let params = mapped(pin.fastcgi()?, http, &root, &recipe.script_name, ports);
-    // The socket in a tree with a short name, since a socket's address
-    // holds no longer path than `SUN_LEN`; and php-fpm's default
-    // `clear_env`, so `$_SERVER` holds nothing of the process's
-    // environment, as makala's holds nothing.
-    let sockets = Tree::new("mkf")?;
-    let mut pool = Pool::start(oracle, host, &sockets, &[], ini, true)?;
-    let timeout = Duration::from_secs(recipe.limits.timeout_s);
-    let stream = pool.connect()?;
-    stream.set_read_timeout(Some(timeout))?;
-    let pairs = params.iter().map(|(n, v)| (n.as_bytes(), v.as_slice()));
-    let answered = round(stream, pairs, Some(&http.body))?;
-    pool.settle(timeout)?;
+    let mut fpm = Fpm::start(oracle, host, dir, http, (ini, ports))?;
+    let answered = fpm.ask()?;
+    fpm.settle()?;
     Ok(answered)
+}
+
+/// A pool of its own of the php-fpm at `host`, kept to hand one request,
+/// `http` to the program in `dir` under the pin's `[fastcgi]` mapping, as
+/// many times as it is asked: what [`by_fpm`] asks once and a bench arm
+/// asks each rep (#2351). Ended when dropped.
+pub(crate) struct Fpm {
+    pool: Pool,
+    params: Vec<(String, Vec<u8>)>,
+    body: Vec<u8>,
+    timeout: Duration,
+    /// The tree the pool's socket stands in, dropped after the pool.
+    _sockets: Tree,
+}
+
+impl Fpm {
+    /// The pool started, under the recipe's ini and `ini` after it, with
+    /// `ports` as each connection's.
+    pub(crate) fn start(
+        oracle: &Oracle<'_>,
+        host: &Path,
+        dir: &Path,
+        http: &Http,
+        (ini, ports): (&[String], Ports),
+    ) -> Result<Fpm> {
+        let pin = oracle.pin();
+        let recipe = &pin.recipe;
+        let root = dir.canonicalize()?.to_string_lossy().into_owned();
+        // The socket in a tree with a short name, since a socket's address
+        // holds no longer path than `SUN_LEN`; and php-fpm's default
+        // `clear_env`, so `$_SERVER` holds nothing of the process's
+        // environment, as makala's holds nothing.
+        let sockets = Tree::new("mkf")?;
+        Ok(Fpm {
+            pool: Pool::start(oracle, host, &sockets, &[], ini, true)?,
+            params: mapped(pin.fastcgi()?, http, &root, &recipe.script_name, ports),
+            body: http.body.clone(),
+            timeout: Duration::from_secs(recipe.limits.timeout_s),
+            _sockets: sockets,
+        })
+    }
+
+    /// The request handed once more: what it wrote on `FCGI_STDOUT` and
+    /// `FCGI_STDERR`.
+    pub(crate) fn ask(&mut self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let stream = self.pool.connect()?;
+        stream.set_read_timeout(Some(self.timeout))?;
+        let pairs = (self.params.iter()).map(|(n, v)| (n.as_bytes(), v.as_slice()));
+        round(stream, pairs, Some(&self.body))
+    }
+
+    /// Once the request last asked has ended in the pool's child, as well
+    /// as its response (`Pool::settle`).
+    fn settle(&mut self) -> Result<()> {
+        self.pool.settle(self.timeout)
+    }
 }
 
 /// The mapping's parameters filled for `http` to the program's file `script`
