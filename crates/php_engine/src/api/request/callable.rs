@@ -837,7 +837,7 @@ impl Request {
     /// class, which then is the receiver, and `__callStatic` otherwise.
     #[allow(clippy::too_many_arguments)] // `zend_is_callable_check_func`'s state, each one fact
     fn callable_via_handler(
-        &self,
+        &mut self,
         calling: ClassId,
         ce_org: Option<ClassId>,
         method: &[u8],
@@ -877,7 +877,15 @@ impl Request {
                     self.method_class(self.method_named(class, b"__call")?),
                 )
             } else {
-                return None;
+                // `get_method(&fcc->object, …)` may answer on the object
+                // its class hands the call to, which then is the receiver.
+                let (function, receiver) = self.callable_on_receiver(object, lowered, method)?;
+                fcc.object = Some(receiver);
+                (
+                    Callee::Function(function),
+                    self.trampoline_of(function).is_some(),
+                    self.method_class(function),
+                )
             };
             // `zend_release_fcall_info_cache`: under a strict class half
             // the method must be one `ce_org` has.
@@ -903,6 +911,32 @@ impl Request {
                 .filter(|this| self.instance_of(this.class(), calling));
         }
         Some((callee, true))
+    }
+
+    /// The rest of `get_method` where the object's own class has no
+    /// method of the name: the object its class hands the call to
+    /// ([`ObjectHandlers::method_receiver`]), and the method found on it
+    /// as a call finds one ([`Request::method_found`]), with the
+    /// object that answered. A throwable the lookup raised is left
+    /// pending, php's `get_method` answering `NULL` with it.
+    ///
+    /// [`ObjectHandlers::method_receiver`]: crate::api::abi::ObjectHandlers::method_receiver
+    fn callable_on_receiver(
+        &mut self,
+        object: PhpObject,
+        lowered: &[u8],
+        written: &[u8],
+    ) -> Option<(Function, PhpObject)> {
+        let inner = self
+            .object_handlers(object.heap())
+            .method_receiver(self, object)?;
+        match self.method_found(inner, lowered, written) {
+            Ok((found, deeper)) => found.map(|function| (function, deeper.unwrap_or(inner))),
+            Err(thrown) => {
+                self.leave_pending(&thrown);
+                None
+            }
+        }
     }
 
     /// The end of `zend_is_callable_check_func` once a callee is found:
