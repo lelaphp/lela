@@ -2,8 +2,9 @@
 //! one row per accepted difference from the oracle, keyed by a witness hash,
 //! a phpt path, a compile-identity path, an extension's name, a trace site
 //! or, for a difference on the wire, which the RFCs judge through a
-//! conformance suite rather than the oracle, a suite's case (#2334). A row's `kind` says which lane reads it and its `cause` whether it
-//! is parity debt, counted against the manifest's day-30 target, or a
+//! conformance suite rather than the oracle, a suite's case (#2334). A
+//! row's `kind` says which lane reads it and its `cause` whether it is
+//! parity debt, counted against the manifest's day-30 target, or a
 //! difference that does not count (#2460, #2462). A row whose one reason
 //! holds for many ids of its kind names them in `covers`, and
 //! [`Registry::row`] answers each of them with the row as it answers the
@@ -40,8 +41,9 @@ pub const FILE: &str = "docs/divergence.toml";
 pub const INSTRUMENT: &str = "divergence-reason";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
-/// `crosscheck:<name>`, `trace:<site>` or `wire:<suite>/<case>`, or `php-ub:<site>` on a row the
-/// file still spells in #2220's shape ([`LEGACY_PHP_UB`]). Only
+/// `crosscheck:<name>`, `trace:<site>` or `wire:<suite>/<case>`, or
+/// `php-ub:<site>` on a row the file still spells in #2220's shape
+/// ([`LEGACY_PHP_UB`]). Only
 /// [`Id::of`] makes one, so an id in hand carries the prefix of the kind it
 /// was decoded under.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
