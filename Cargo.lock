@@ -1435,6 +1435,7 @@ version = "0.0.0"
 dependencies = [
  "aes",
  "bzip2",
+ "cc",
  "crc32fast",
  "flate2",
  "getrandom",

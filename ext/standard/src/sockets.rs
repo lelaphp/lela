@@ -310,6 +310,19 @@ fn assign_error(
 /// fsockopen(): Argument #6 must be -1 or between 0 and %d
 /// pfsockopen(): Argument #6 must be -1 or between 0 and %d
 /// ```
+///
+/// The digits are `PHP_TIMEOUT_ULL_MAX / 1000000`, which the pinned php
+/// does not print; the row's `covers` holds this fence to the engine
+/// alone (#1553, #1556).
+///
+/// ```php
+/// try { fsockopen('127.0.0.1', 1, $code, $message, 1e20); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { pfsockopen('udp://127.0.0.1', 9, $code, $message, 1e20); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// fsockopen(): Argument #6 must be -1 or between 0 and 18446744073709
+/// pfsockopen(): Argument #6 must be -1 or between 0 and 18446744073709
+/// ```
 #[php_function]
 fn fsockopen(
     req: &mut Request,

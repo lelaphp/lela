@@ -40,6 +40,11 @@ sha1 = { workspace = true }
 crc32fast = { workspace = true }
 getrandom = { workspace = true }
 
+# `build.rs` compiles `zlib.h`'s `ZLIB_VERSION` as C, the string libzip's
+# `deflateInit2` hands zlib (#2426).
+[build-dependencies]
+cc = { workspace = true }
+
 # The test face, `php_ext::test`, for tests/ alone (design §4.3 seam 4).
 [dev-dependencies]
 php_ext = { path = "../../crates/php_ext", features = ["test"] }

@@ -536,7 +536,8 @@ fn waited(
             ));
         }
     }
-    let (number, posted) = match ffi::wait_info(&set, timeout) {
+    // The wait lends the request ([`Request::blocking`], #2401).
+    let (number, posted) = match req.blocking(|| ffi::wait_info(&set, timeout)) {
         Ok(taken) => taken,
         Err(nix::errno::Errno::EAGAIN) if timeout.is_some() => return Ok(OrFalse::False),
         Err(errno) => {

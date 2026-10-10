@@ -138,7 +138,9 @@ fn socket_recvmsg(
         conv.report(req);
         return Ok(OrFalse::False);
     }
-    let got = match ffi::recvmsg(fd, room.name, room.size, room.controllen, flags) {
+    // The wait lends the request ([`Request::blocking`], #2401).
+    let received = req.blocking(|| ffi::recvmsg(fd, room.name, room.size, room.controllen, flags));
+    let got = match received {
         Ok(got) => got,
         Err(errno) => {
             let code = errno as i32;

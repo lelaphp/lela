@@ -155,7 +155,10 @@ fn waited(
     let mut word = i32::try_from(to_long(req, &given)?).unwrap_or_default();
     let options = i32::try_from(flags).unwrap_or_default();
     let mut usage = resource_usage.is_given().then(ffi::zeroed_usage);
-    let child = match ffi::wait(pid, &mut word, options, usage.as_mut()) {
+    // The wait lends the request ([`Request::blocking`]), so a callback C
+    // makes from another thread meanwhile is served in it (#2401).
+    let waited = req.blocking(|| ffi::wait(pid, &mut word, options, usage.as_mut()));
+    let child = match waited {
         Ok(child) => child,
         Err(errno) => {
             failed(req, errno);
@@ -257,7 +260,8 @@ pub(crate) fn pcntl_waitid(
 ) -> Result<bool, Thrown> {
     let _ = resource_usage;
     let options = i32::try_from(flags).unwrap_or_default();
-    let posted = match ffi::waitid(idtype, id.unwrap_or(0), options) {
+    let id = id.unwrap_or(0);
+    let posted = match req.blocking(|| ffi::waitid(idtype, id, options)) {
         Ok(posted) => posted,
         Err(errno) => {
             failed(req, errno);

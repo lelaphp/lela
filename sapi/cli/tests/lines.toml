@@ -133,6 +133,20 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "
 [[line.then]]
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "-m"]
 
+# `zend_accel_error`'s time and `opcache_get_status()`'s `last_used` are
+# `asctime(localtime())`, the process's local time as `TZ` names it, not UTC
+# (#2397). The zone is Kathmandu's, 5:45 east of UTC, so the hour and the
+# minute both move; the masks keep the day and the hour and hide the minute
+# and second the two runs are made in, and the pid.
+[[line]]
+name = "opcache-prints-its-times-in-the-local-zone"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_cache_only=1", "/nonexistent/t.php"]
+env = { TZ = "Asia/Kathmandu" }
+files = { "t.php" = "<?php echo opcache_get_status()['scripts'][__FILE__]['last_used'], \"\\n\";\n" }
+mask = [['(?m)^(.{13}):\d\d:\d\d (\d{4}) \(\d+\): ', '$1:MM:SS $2 (<pid>): '], ['(?m)^(.{13}):\d\d:\d\d (\d{4})$', '$1:MM:SS $2']]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "{dir}/t.php"]
+
 [[line]]
 name = "a-failed-preload-ends-the-process-before-the-host-acts"
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.preload={dir}/p.php", "-i"]

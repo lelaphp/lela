@@ -310,20 +310,32 @@ fn process_type(req: &mut Request) -> ResourceType {
 
 /// `waitpid_cached` (`Z/ext/standard/proc_open.c:235`): the status the
 /// resource cached once the child exited, else `waitpid(2)`, whose answer
-/// is cached where it says the child exited.
-fn waitpid_cached(process: &mut Process, options: i32) -> std::io::Result<(i32, i32)> {
+/// is cached where it says the child exited. A wait that blocks lends
+/// the request ([`Request::blocking`]), `proc_close`'s (#2401); the
+/// resource is read before it and written after it, never during.
+fn waitpid_cached(req: &mut Request, res: Resource, options: i32) -> std::io::Result<(i32, i32)> {
+    let Some(process) = res.native::<Process>(req) else {
+        return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+    };
+    let child = process.child;
     if let Some(status) = process.cached {
-        return Ok((process.child, status));
+        return Ok((child, status));
     }
-    let answered = loop {
-        match crate::ffi::waitpid(process.child, options) {
+    let wait = || loop {
+        match crate::ffi::waitpid(child, options) {
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             answered => break answered,
         }
     };
+    let answered = if options & crate::ffi::WNOHANG == 0 {
+        req.blocking(wait)
+    } else {
+        wait()
+    };
     if let Ok((pid, status)) = answered
         && pid > 0
         && exited(status)
+        && let Some(process) = res.native_mut::<Process>(req)
     {
         process.cached = Some(status);
     }
@@ -375,11 +387,8 @@ fn process_dtor(req: &mut Request, res: Resource) -> Result<(), Thrown> {
         }
     }
     let wait = req.state::<State>().proc_open.pclose_wait;
-    let Some(process) = res.native_mut::<Process>(req) else {
-        return Ok(());
-    };
     let options = if wait { 0 } else { crate::ffi::WNOHANG };
-    let ret = match waitpid_cached(process, options) {
+    let ret = match waitpid_cached(req, res, options) {
         Ok((pid, status)) if pid > 0 => {
             if exited(status) {
                 exit_status(status)
@@ -1154,15 +1163,16 @@ fn proc_terminate(
 #[php_function]
 fn proc_get_status(req: &mut Request, process: Resource) -> Result<Owner<PhpArray>, Thrown> {
     let res = process_of(req, process, "proc_get_status")?;
-    let Some(process) = res.native_mut::<Process>(req) else {
+    let (mut running, mut is_signaled, mut is_stopped) = (true, false, false);
+    let (mut exitcode, mut termsig, mut stopsig) = (-1, 0, 0);
+    let waited = waitpid_cached(req, res, crate::ffi::WNOHANG | crate::ffi::WUNTRACED);
+    let Some(process) = res.native::<Process>(req) else {
         return Err(php_ext::raising::fatal(
             req,
             "InternalError: a process resource without its process",
         ));
     };
-    let (mut running, mut is_signaled, mut is_stopped) = (true, false, false);
-    let (mut exitcode, mut termsig, mut stopsig) = (-1, 0, 0);
-    match waitpid_cached(process, crate::ffi::WNOHANG | crate::ffi::WUNTRACED) {
+    match waited {
         Ok((pid, status)) if pid == process.child => {
             if exited(status) {
                 running = false;

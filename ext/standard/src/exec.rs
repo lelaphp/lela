@@ -107,9 +107,11 @@ fn popen(req: &Request, command: &[u8]) -> Option<Child> {
 }
 
 /// `pclose`'s answer as the plain files kind hands it back: the exit
-/// status where the command exited, the raw wait status otherwise.
-fn pclose(mut child: Child) -> i64 {
-    child.wait().map_or(-1, |status| {
+/// status where the command exited, the raw wait status otherwise. The
+/// wait lends the request ([`Request::blocking`]), as every wait of the
+/// command's does.
+fn pclose(req: &mut Request, mut child: Child) -> i64 {
+    req.blocking(|| child.wait()).map_or(-1, |status| {
         i64::from(status.code().unwrap_or_else(|| status.into_raw()))
     })
 }
@@ -148,7 +150,10 @@ enum Mode {
 /// says, the last line with its trailing whitespace taken off as the
 /// answer (the empty string where there was none) and `pclose`'s status;
 /// php's warning and `false` where the shell could not be started. The
-/// pipe is php's plain stream, whose reads clear the stat cache.
+/// pipe is php's plain stream, whose reads clear the stat cache. Each
+/// read and the wait for the child lend the request
+/// ([`Request::blocking`]), so a callback C makes from another thread
+/// meanwhile is served there (#2401).
 fn php_exec(
     req: &mut Request,
     mode: Mode,
@@ -161,7 +166,7 @@ fn php_exec(
         return Ok((Ran::Failed, -1));
     };
     let Some(pipe) = child.stdout.take() else {
-        return Ok((Ran::Failed, pclose(child)));
+        return Ok((Ran::Failed, pclose(req, child)));
     };
     let mut reader = BufReader::new(pipe);
     // `php_stdiop_read`'s `php_clear_stat_cache`, since the command may
@@ -169,18 +174,18 @@ fn php_exec(
     req.clear_stat_cache();
     if mode == Mode::Raw {
         let mut chunk = vec![0u8; 4096];
-        while let Ok(read) = reader.read(&mut chunk) {
+        while let Ok(read) = req.blocking(|| reader.read(&mut chunk)) {
             if read == 0 {
                 break;
             }
             req.write(&chunk[..read]);
         }
-        return Ok((Ran::Raw, pclose(child)));
+        return Ok((Ran::Raw, pclose(req, child)));
     }
     let mut last: Vec<u8> = Vec::new();
     loop {
         let mut line = Vec::new();
-        match reader.read_until(b'\n', &mut line) {
+        match req.blocking(|| reader.read_until(b'\n', &mut line)) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
         }
@@ -199,7 +204,7 @@ fn php_exec(
             Mode::Last | Mode::Raw => last = line,
         }
     }
-    let status = pclose(child);
+    let status = pclose(req, child);
     let answer = PhpString::new(req, strip_trailing_whitespace(&last))?;
     Ok((Ran::Last(answer), status))
 }
@@ -576,9 +581,9 @@ fn shell_exec(
     };
     let mut written = Vec::new();
     if let Some(mut pipe) = child.stdout.take() {
-        pipe.read_to_end(&mut written).ok();
+        req.blocking(|| pipe.read_to_end(&mut written)).ok();
     }
-    pclose(child);
+    pclose(req, child);
     // The pipe is read through php's plain stream, whose reads clear the
     // stat cache (`Z/main/streams/plain_wrapper.c:500`).
     req.clear_stat_cache();
