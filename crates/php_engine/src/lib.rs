@@ -57,6 +57,8 @@ mod preload;
 mod probe;
 mod process_scope;
 mod rfc1867;
+#[cfg(debug_assertions)]
+mod served;
 mod signal;
 mod statement;
 mod supplied;

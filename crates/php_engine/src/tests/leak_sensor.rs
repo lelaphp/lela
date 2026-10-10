@@ -7,13 +7,17 @@
 //! or lifecycle hook allocated it (#1993), and with allocations traced
 //! the line that did. A debug engine is armed unless it is built with
 //! the sensor off (`EngineBuilder::sense_leaks`); each engine here names
-//! the sensor it is built with.
+//! the sensor it is built with. A leak from an extension class's
+//! handler names the extension that declared the class (#2113).
 
 use php_macros::php_function;
+use php_unit::decl::ClassKind;
 
-use crate::api::abi::{Extension, ExtensionBuilder};
+use crate::api::__private::class;
+use crate::api::abi::{CloneObj, Extension, ExtensionBuilder, ObjectHandlers, PropertyRead, Std};
+use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::PhpString;
+use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::engine::{Engine, LeakSensor};
 use crate::test::Capture;
 
@@ -275,4 +279,73 @@ $a = new A; $a['x'] = $s; $a['x'] .= 'd'; echo $a['x'], ' ', $a['y'] ?? 'none', 
         "aaaaa aaaaa\nstdClass aaaaab\nstring(6) \"aaaaab\"\nobject(Closure)#4 (5) {\n  [\"name\"]=>\n  string(31) \"{closure:Standard input code:8}\"\n  [\"file\"]=>\n  string(19) \"Standard input code\"\n  [\"line\"]=>\n  int(8)\n  [\"static\"]=>\n  array(1) {\n    [\"s\"]=>\n    string(6) \"aaaaab\"\n  }\n  [\"parameter\"]=>\n  array(1) {\n    [\"$x\"]=>\n    string(10) \"<required>\"\n  }\n}\naaaaabd none\n"
     );
     assert_eq!(served.exit_code, 0);
+}
+
+/// `Leaky`'s table, faulty on purpose in two slots: `read_property`
+/// makes a string and drops its owner before it reads as `Std` reads,
+/// and the function its `clone_obj` answers does the same before it
+/// copies the members.
+struct LeakyHandlers;
+
+impl ObjectHandlers for LeakyHandlers {
+    fn read_property(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        name: &[u8],
+        read: PropertyRead,
+    ) -> Result<Owner<Value>, Thrown> {
+        if let Ok(made) = PhpString::new(req, b"in read") {
+            let _leaked = made.hand_on();
+        }
+        Std.read_property(req, object, name, read)
+    }
+
+    fn clone_obj(&self) -> Option<CloneObj> {
+        Some(leaky_clone)
+    }
+}
+
+/// The `clone_obj` function `Leaky`'s table answers.
+fn leaky_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
+    if let Ok(made) = PhpString::new(req, b"in copy") {
+        let _leaked = made.hand_on();
+    }
+    req.clone_members(object)
+}
+
+static LEAKY: LeakyHandlers = LeakyHandlers;
+
+fn faulty_class() -> Extension {
+    ExtensionBuilder::default()
+        .class_with(class(b"Leaky", ClassKind::Class), Vec::new(), &LEAKY)
+        .build("leak_class")
+}
+
+/// A block an extension class's handler allocated is named with the
+/// extension that declared the class, though the dispatch loop called
+/// the slot from a user program while Core's code was served (#2113):
+/// the slot that serves code, `read_property`, and the function a slot
+/// answers, the `clone_obj` that `clone` calls.
+#[test]
+fn a_leak_from_an_extension_class_s_handler_names_its_extension() {
+    let engine = Engine::cli_builder()
+        .extensions(&[faulty(), faulty_class()])
+        .sense_leaks(LeakSensor::Armed)
+        .build();
+    for program in [
+        "<?php $o = new Leaky; echo $o->p ?? 1, ' served';\n",
+        "<?php $o = new Leaky; $c = clone $o; echo 1, ' served';\n",
+    ] {
+        let served = engine.serve_capture(program, Capture::default());
+        let stdout = String::from_utf8_lossy(&served.stdout);
+        assert!(
+            stdout.starts_with(&format!("1 served\n{LEAKED}")),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(", allocated by leak_class in Unknown on line 0\n"),
+            "{stdout}"
+        );
+    }
 }

@@ -510,6 +510,14 @@ impl Heap {
         self.mm.set_origin(origin)
     }
 
+    /// The origin a debug build tags what it allocates now with: the
+    /// extension whose code the engine is serving ([`Heap::set_origin`]).
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn origin(&self) -> Origin {
+        self.mm.origin()
+    }
+
     /// A debug build's opt-in tracing: every allocation from here
     /// on keeps the backtrace that made it, and a leak names the frames
     /// that allocated its first block. Each allocation then pays a

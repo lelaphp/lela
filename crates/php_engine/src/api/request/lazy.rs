@@ -1033,7 +1033,9 @@ impl Request {
         }
         let table = self.object_handlers(instance.heap());
         let copy = match table.clone_obj() {
-            Some(clone_obj) => clone_obj(self, instance),
+            Some(clone_obj) => {
+                self.serve_as_table(instance.class(), |req| clone_obj(req, instance))
+            }
             None => Err(self.uncloneable(instance)),
         };
         let copy = match copy {

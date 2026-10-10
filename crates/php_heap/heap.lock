@@ -150,6 +150,7 @@ Heap::object_take_properties
 Heap::object_with
 Heap::objects
 Heap::observe_allocations
+Heap::origin
 Heap::overflow_rendered
 Heap::pin_block
 Heap::proptable_to_symtable

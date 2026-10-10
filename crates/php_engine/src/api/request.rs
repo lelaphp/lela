@@ -50,6 +50,7 @@ pub(crate) use caller::NativeCaller;
 pub(crate) use hooks::HookedRow;
 pub(crate) use objects::placed_of;
 mod calls;
+pub use calls::Supplier;
 mod class_constants;
 pub(crate) use class_constants::ConstantFetch;
 mod class_data;

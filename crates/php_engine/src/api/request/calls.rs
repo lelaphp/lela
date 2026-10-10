@@ -1095,10 +1095,42 @@ impl Request {
         extension: ExtensionId,
         serve: impl FnOnce(&mut Request) -> T,
     ) -> T {
-        #[cfg(debug_assertions)]
-        let outer = self.heap.set_origin(extension.origin());
         #[cfg(not(debug_assertions))]
         let _ = extension;
+        let supplier = Supplier {
+            #[cfg(debug_assertions)]
+            origin: extension.origin(),
+        };
+        self.serve_supplied(supplier, serve)
+    }
+
+    /// The code this request is serving now, for a hook it supplies to
+    /// be served as later ([`Request::serve_supplied`]): what an
+    /// extension registers from its native or lifecycle hook, a stream
+    /// wrapper or a filter, is called from wherever the program reaches
+    /// it, and a debug build tags what it allocates there with the
+    /// extension that supplied it, as it tags the extension's natives
+    /// (#1993, #2113). A release build keeps nothing.
+    #[must_use]
+    pub fn supplier(&self) -> Supplier {
+        Supplier {
+            #[cfg(debug_assertions)]
+            origin: self.heap.origin(),
+        }
+    }
+
+    /// `serve` served as `supplier`'s code: in a debug build, what the
+    /// heap allocates meanwhile is tagged with it, so a leak it leaves
+    /// names it, and the origin standing before is put back after.
+    pub fn serve_supplied<T>(
+        &mut self,
+        supplier: Supplier,
+        serve: impl FnOnce(&mut Request) -> T,
+    ) -> T {
+        #[cfg(debug_assertions)]
+        let outer = self.heap.set_origin(supplier.origin);
+        #[cfg(not(debug_assertions))]
+        let _ = supplier;
         let served = serve(self);
         #[cfg(debug_assertions)]
         self.heap.set_origin(outer);
@@ -1305,4 +1337,14 @@ impl Request {
         self.fibers.unblock_switch();
         out
     }
+}
+
+/// Whose code supplied a hook, as [`Request::supplier`] took it where
+/// the hook was registered, for [`Request::serve_supplied`] to serve the
+/// hook as: the extension a debug build tags what the hook allocates
+/// with, and nothing in a release build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Supplier {
+    #[cfg(debug_assertions)]
+    origin: php_heap::Origin,
 }
