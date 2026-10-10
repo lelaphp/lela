@@ -7769,7 +7769,7 @@ fn verify_ref_array_assignable(req: &mut Request, cell: PhpRef) -> Result<(), Th
         .map(|source| {
             (
                 source.declaring,
-                crate::api::coerce::declared_type_name(&source.ty),
+                php_unit::type_to_string(&source.ty),
                 String::from_utf8_lossy(&source.name).into_owned(),
             )
         });
@@ -7806,7 +7806,7 @@ fn refuse_fetch(
             );
             if promotes && typed.ty.mask() & MAY_BE_ARRAY == 0 {
                 let class = req.class_name(typed.declaring);
-                let ty = crate::api::coerce::declared_type_name(&typed.ty);
+                let ty = php_unit::type_to_string(&typed.ty);
                 return Err(crate::api::raising::throw_error(
                     req,
                     "TypeError",
@@ -20594,7 +20594,7 @@ fn step_through_typed_ref(
             .map(|source| {
                 (
                     source.declaring,
-                    crate::api::coerce::declared_type_name(&source.ty),
+                    php_unit::type_to_string(&source.ty),
                     String::from_utf8_lossy(&source.name).into_owned(),
                 )
             });

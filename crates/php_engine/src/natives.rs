@@ -1593,6 +1593,21 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
 /// }
 /// ```
 ///
+/// ```php
+/// class C { public int|string $a; public iterable $b; public null|int|bool $c; }
+/// var_dump(new C);
+/// ```
+/// ```expect
+/// object(C)#1 (0) {
+///   ["a"]=>
+///   uninitialized(string|int)
+///   ["b"]=>
+///   uninitialized(Traversable|array)
+///   ["c"]=>
+///   uninitialized(int|bool|null)
+/// }
+/// ```
+///
 /// A dynamic property is its own row whatever a parent declared private
 /// under its name:
 ///

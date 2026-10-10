@@ -1381,7 +1381,7 @@ impl Request {
     ) -> Thrown {
         let given = crate::ops::type_name(self, held);
         let class = self.class_name(declaring);
-        let ty = crate::api::coerce::declared_type_name(ty);
+        let ty = php_unit::type_to_string(ty);
         let shown = String::from_utf8_lossy(name).into_owned();
         crate::api::raising::throw_error(
             self,

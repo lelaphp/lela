@@ -1375,8 +1375,8 @@ pub(crate) fn typed_ref_holds(
                 req.release(made);
                 let class = req.class_name(first_at);
                 let two = req.class_name(declaring);
-                let one_declared = crate::api::coerce::declared_type_name(&first_ty);
-                let two_declared = crate::api::coerce::declared_type_name(ty);
+                let one_declared = php_unit::type_to_string(&first_ty);
+                let two_declared = php_unit::type_to_string(ty);
                 let given = type_name(req, &held.undef_as_null());
                 return Err(throw_error(
                     req,
@@ -1416,7 +1416,7 @@ pub(crate) fn incdec_prop_error(
     increment: bool,
 ) -> (Thrown, Value) {
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let (word, edge, limit) = if increment {
         ("increment", "maximal", i64::MAX)
     } else {
@@ -1464,7 +1464,7 @@ fn ref_type_error(
     name: &[u8],
 ) -> Thrown {
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
         req,
@@ -1495,8 +1495,8 @@ fn conflicting_coercion(
     };
     let one_class = req.class_name(*one_at);
     let two_class = req.class_name(*two_at);
-    let one_declared = crate::api::coerce::declared_type_name(one_ty);
-    let two_declared = crate::api::coerce::declared_type_name(two_ty);
+    let one_declared = php_unit::type_to_string(one_ty);
+    let two_declared = php_unit::type_to_string(two_ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
         req,
@@ -1561,7 +1561,7 @@ pub(crate) fn verify_class_constant_type(
         return Ok(coerced);
     }
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let given = match held.as_object() {
         Some(object) => req.class_name(object.class()),
         None => held.type_name().to_string(),
@@ -1590,7 +1590,7 @@ fn property_type_error(
         return Thrown::of(Some(standing));
     }
     let class = req.class_name(declaring);
-    let declared = crate::api::coerce::declared_type_name(ty);
+    let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
     throw_error(
         req,

@@ -5469,7 +5469,7 @@ impl Emit<'_> {
             Type::String => Ok(EnumBacking::String),
             other => Err(self.compile_error(format!(
                 "Enum backing type must be int or string, {} given",
-                type_to_string(&other)
+                php_unit::type_to_string(&other)
             ))),
         }
     }
@@ -11357,7 +11357,7 @@ impl Emit<'_> {
         }
         Err(self.compile_error(format!(
             "Generator return type must be a supertype of Generator, {} given",
-            type_to_string(&ty)
+            php_unit::type_to_string(&ty)
         )))
     }
 
@@ -19513,83 +19513,4 @@ fn generator_compatible(ty: &Type) -> bool {
         }
         _ => false,
     }
-}
-
-/// `zend_type_to_string` (`Z/Zend/zend_compile.c:1429`): the class
-/// names in the order written, then the builtins in php's fixed order,
-/// `mixed` for the whole mask, and `?T` for a single type beside
-/// `null`.
-fn type_to_string(ty: &Type) -> String {
-    fn collect(ty: &Type, names: &mut Vec<String>, mask: &mut Vec<&'static str>) {
-        match ty {
-            Type::Named(name) => names.push(String::from_utf8_lossy(&name.0).into_owned()),
-            Type::SelfClass => names.push(String::from("self")),
-            Type::ParentClass => names.push(String::from("parent")),
-            Type::Iterable => {
-                names.push(String::from("Traversable"));
-                mask.push("array");
-            }
-            Type::Nullable(inner) => {
-                collect(inner, names, mask);
-                mask.push("null");
-            }
-            Type::Union(members) | Type::Intersection(members) => {
-                for member in members {
-                    collect(member, names, mask);
-                }
-            }
-            Type::Mixed => mask.push("mixed"),
-            Type::CalledClass => mask.push("static"),
-            Type::Callable => mask.push("callable"),
-            Type::Object => mask.push("object"),
-            Type::Array => mask.push("array"),
-            Type::String => mask.push("string"),
-            Type::Int => mask.push("int"),
-            Type::Float => mask.push("float"),
-            Type::Bool => mask.push("bool"),
-            Type::False => mask.push("false"),
-            Type::True => mask.push("true"),
-            Type::Void => mask.push("void"),
-            Type::Never => mask.push("never"),
-            Type::Null => mask.push("null"),
-        }
-    }
-    let mut names = Vec::new();
-    let mut mask = Vec::new();
-    collect(ty, &mut names, &mut mask);
-    if mask.contains(&"mixed") {
-        names.push(String::from("mixed"));
-        return names.join("|");
-    }
-    let glue = if matches!(ty, Type::Intersection(_)) {
-        "&"
-    } else {
-        "|"
-    };
-    let mut out = names.join(glue);
-    let order = [
-        "static", "callable", "object", "array", "string", "int", "float", "bool", "false", "true",
-        "void", "never",
-    ];
-    for builtin in order {
-        if !mask.contains(&builtin)
-            || (builtin != "bool" && mask.contains(&"bool") && matches!(builtin, "false" | "true"))
-        {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push('|');
-        }
-        out.push_str(builtin);
-    }
-    if mask.contains(&"null") {
-        if !out.is_empty() && !out.contains('|') && !out.contains('&') {
-            return format!("?{out}");
-        }
-        if !out.is_empty() {
-            out.push('|');
-        }
-        out.push_str("null");
-    }
-    out
 }
