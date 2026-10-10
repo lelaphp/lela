@@ -66,6 +66,13 @@ pub(super) type TraceRow = (
 /// none where the frame is the innermost link.
 pub(super) enum Traced {
     Function(Function),
+    /// A frameless call's native (`ZEND_FRAMELESS_ICALL_*`), whose row
+    /// php lays down off the user frame at the call's opline before that
+    /// frame's own (`Z/Zend/zend_builtin_functions.c:2003`): `function`
+    /// first, then the frame's `file` and `line`, then `args`, a table
+    /// `zend_new_array(8)` and `zend_hash_real_init_mixed` lay down
+    /// whatever the count, where a framed call's are packed.
+    Frameless(Function),
     Include {
         kind: IncludeKind,
         file: Option<Vec<u8>>,
@@ -336,6 +343,20 @@ impl Request {
     /// array(0) interned {
     /// }
     /// ```
+    ///
+    /// A frameless call's row names its function before its file and
+    /// line and holds its arguments in a hash, as php's does, so a throw
+    /// out of one peaks where php's does:
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+    /// pk(function () { $o = new stdClass; try { str_contains($o, 'a'); } catch (TypeError $e) {} });
+    /// try { str_contains(new stdClass, 'a'); } catch (TypeError $e) { echo implode(',', array_keys($e->getTrace()[0])), "\n"; }
+    /// ```
+    /// ```expect
+    /// 3136 32
+    /// function,file,line,args
+    /// ```
     pub(super) fn render_trace(
         &mut self,
         links: Vec<TraceRow>,
@@ -349,13 +370,24 @@ impl Request {
             // `zend_new_array(8)` and `zend_hash_real_init_mixed`: every
             // row is a hash laid down before its first key.
             let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
-            if let Some((file, line)) = site {
-                // `ZVAL_STR_COPY(&tmp, filename)`: the op array's file
-                // name, one more owner of its string.
-                let file = Value::string(self.op_array_string(&file)?);
-                self.set_string_key(&mut row, b"file", Owner::adopt(file))?;
-                self.set_string_key(&mut row, b"line", Owner::adopt(Value::int(line)))?;
+            if let Traced::Frameless(function) = traced {
+                let name = self.declared_name(function);
+                let name = Value::string(self.op_array_string(name.as_bytes())?);
+                self.set_string_key(&mut row, b"function", Owner::adopt(name))?;
+                self.set_site(&mut row, site)?;
+                if !ignore_arguments {
+                    let mut args =
+                        PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
+                    for argument in arguments {
+                        let argument = Owner::take(self, argument.deref());
+                        args.append(self, argument)?;
+                    }
+                    self.set_string_key(&mut row, b"args", Owner::adopt(Value::array(args)))?;
+                }
+                trace.append(self, Owner::adopt(Value::array(row)))?;
+                continue;
             }
+            self.set_site(&mut row, site)?;
             match traced {
                 Traced::Function(function) => {
                     let name = self.declared_name(function);
@@ -408,10 +440,22 @@ impl Request {
                     self.release(Value::array(row));
                     continue;
                 }
+                Traced::Frameless(_) => {}
             }
             trace.append(self, Owner::adopt(Value::array(row)))?;
         }
         Ok(trace)
+    }
+
+    /// A row's `file` and `line` where it has a site: `ZVAL_STR_COPY` of
+    /// the op array's file name, one more owner of its string.
+    fn set_site(&mut self, row: &mut PhpArray, site: Option<(Vec<u8>, i64)>) -> Result<(), Thrown> {
+        if let Some((file, line)) = site {
+            let file = Value::string(self.op_array_string(&file)?);
+            self.set_string_key(row, b"file", Owner::adopt(file))?;
+            self.set_string_key(row, b"line", Owner::adopt(Value::int(line)))?;
+        }
+        Ok(())
     }
 
     /// `debug_backtrace_get_args` over a function's row: the positional
@@ -794,8 +838,13 @@ impl Request {
                 // rows after it.
                 Link::Site(_) | Link::Fake(_) => {}
                 Link::Call(call) => {
+                    let traced = if call.info().frameless() {
+                        Traced::Frameless(call.callee())
+                    } else {
+                        Traced::Function(call.callee())
+                    };
                     rows.push((
-                        Traced::Function(call.callee()),
+                        traced,
                         call.this(),
                         self.closure_scope(call.closure()),
                         call.arguments(),
