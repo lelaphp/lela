@@ -5822,48 +5822,14 @@ impl Emit<'_> {
             out.push(self.attribute(attribute, name, declared_at)?);
         }
         self.line = declared_at;
-        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
-        let delayed = out.iter().any(|attribute| {
-            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
-        });
+        let delayed = attributes::delays_validation(&out);
         let mut dynamic_properties = DynamicProperties::default();
-        for (at, attribute) in out.iter().enumerate() {
-            let Some(known) = internal(attribute) else {
+        for at in 0..out.len() {
+            let held =
+                self.attribute_held(&out, at, attributes::TARGET_CLASS, delayed, self.line)?;
+            let Some(known) = held.and_then(|config| config.core) else {
                 continue;
             };
-            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
-            let targets = known.targets();
-            let on_target = targets & attributes::TARGET_CLASS != 0;
-            if !on_target && !delayed {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!(
-                        "Attribute \"{shown}\" cannot target class (allowed targets: {})",
-                        attributes::target_names(targets)
-                    ),
-                    line: self.line,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
-            if out
-                .iter()
-                .enumerate()
-                .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
-            {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!("Attribute \"{shown}\" must not be repeated"),
-                    line: self.line,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
-            if !on_target {
-                continue;
-            }
             // A validator's refusal under `#[\DelayedTargetValidation]`
             // is kept for `ReflectionAttribute::newInstance` and not
             // raised here.
@@ -6122,8 +6088,8 @@ impl Emit<'_> {
         self.line = declared_at;
         for attribute in written {
             let name = self.class_name(&attribute.name);
-            if let Some(known) = InternalAttribute::named(&name) {
-                let targets = known.targets();
+            if let Some(config) = self.attribute_config(&name) {
+                let targets = config.targets();
                 if targets & target == 0 && targets & promoted != 0 {
                     continue;
                 }
@@ -6131,46 +6097,69 @@ impl Emit<'_> {
             out.push(self.attribute(attribute, name, declared_at)?);
         }
         self.line = declared_at;
-        let internal = |attribute: &Attribute| InternalAttribute::named(&attribute.name.0);
-        let delayed = out.iter().any(|attribute| {
-            internal(attribute) == Some(InternalAttribute::DelayedTargetValidation)
-        });
-        for (at, attribute) in out.iter().enumerate() {
-            let Some(known) = internal(attribute) else {
-                continue;
-            };
-            let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
-            let targets = known.targets();
-            if targets & target == 0 && !delayed {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!(
-                        "Attribute \"{shown}\" cannot target {} (allowed targets: {})",
-                        attributes::target_names(target),
-                        attributes::target_names(targets)
-                    ),
-                    line: declared_at,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
-            if out
+        let delayed = attributes::delays_validation(&out);
+        for at in 0..out.len() {
+            self.attribute_held(&out, at, target, delayed, declared_at)?;
+        }
+        Ok(out)
+    }
+
+    /// `zend_internal_attribute_get` over a resolved name: one of Core's
+    /// attributes, or a class of the bundle declared with `#[Attribute]`.
+    fn attribute_config(&self, name: &[u8]) -> Option<attributes::Config> {
+        attributes::Config::named(name, |name| {
+            self.known_classes.find(name).map(|(_, decl)| decl)
+        })
+    }
+
+    /// `zend_compile_attributes`' second loop over the attribute of
+    /// `out` at `at`: an internal one held to the target it stands on,
+    /// unless `#[\DelayedTargetValidation]` defers that, and to standing
+    /// once, unless its class may repeat. What it is where it stands on
+    /// its target, for its validator.
+    fn attribute_held(
+        &self,
+        out: &[Attribute],
+        at: usize,
+        target: u32,
+        delayed: bool,
+        line: u32,
+    ) -> Result<Option<attributes::Config>, CompileError> {
+        let Some(attribute) = out.get(at) else {
+            return Ok(None);
+        };
+        let Some(config) = self.attribute_config(&attribute.name.0) else {
+            return Ok(None);
+        };
+        let shown = String::from_utf8_lossy(&attribute.name.0).into_owned();
+        let targets = config.targets();
+        let on_target = targets & target != 0;
+        let refused = |message: String| CompileError {
+            level: Level::Error,
+            message,
+            line,
+            raised: Vec::new(),
+            thrown: false,
+            stage: crate::Stage::Compiling,
+        };
+        if !on_target && !delayed {
+            return Err(refused(format!(
+                "Attribute \"{shown}\" cannot target {} (allowed targets: {})",
+                attributes::target_names(target),
+                attributes::target_names(targets)
+            )));
+        }
+        if !config.repeatable()
+            && out
                 .iter()
                 .enumerate()
                 .any(|(other, o)| other != at && o.name.0.eq_ignore_ascii_case(&attribute.name.0))
-            {
-                return Err(CompileError {
-                    level: Level::Error,
-                    message: format!("Attribute \"{shown}\" must not be repeated"),
-                    line: declared_at,
-                    raised: Vec::new(),
-                    thrown: false,
-                    stage: crate::Stage::Compiling,
-                });
-            }
+        {
+            return Err(refused(format!(
+                "Attribute \"{shown}\" must not be repeated"
+            )));
         }
-        Ok(out)
+        Ok(on_target.then_some(config))
     }
 
     /// `zend_compile_prop_decl`, the same one declarator at a time,
