@@ -2676,7 +2676,7 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
                 match crate::api::call::handle_named_arg(
                     offset,
                     &mut call.arguments,
-                    &mut call.extra_named,
+                    call.extra_named.rows_mut(),
                     name,
                 ) {
                     Ok(named) => {
@@ -2993,7 +2993,7 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
     let placed = crate::api::call::handle_named_arg(
         offset,
         &mut call.arguments,
-        &mut call.extra_named,
+        call.extra_named.rows_mut(),
         name,
     );
     Ok(match placed {
@@ -3827,7 +3827,7 @@ pub(crate) fn recv_variadic<T: Tier>(
     let named = req
         .vm()
         .at(frame)
-        .map(|state| state.extra_named.clone())
+        .map(|state| state.extra_named.to_vec())
         .unwrap_or_default();
     // An untyped variadic with no positional extras is php's
     // `ZVAL_ARR(params, EX(extra_named_params))`, the frame's table

@@ -325,37 +325,41 @@ pub(crate) const OP_ARRAY_SIZE: usize = 256;
 /// request's heap, `zend_new_array(0)`'s 56 bytes and the bucket and
 /// hash data `zend_hash_real_init_mixed` lays at eight rows and
 /// `zend_hash_do_resize` doubles, so a frame that carries them, and a
-/// throw it meets, peaks at php's sizes. The rows read as the `Vec`
-/// they are; [`ExtraNamed::lay`] grows the table to hold them.
+/// throw it meets, peaks at php's sizes. The rows read as the slice
+/// they are; [`ExtraNamed::rows_mut`] takes one more and
+/// [`ExtraNamed::lay`] grows the table to hold them. A call or a frame
+/// with none, which is nearly every one, holds one empty word, as php's
+/// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS` bit is clear and the pointer
+/// unread, so pushing and popping it moves and frees nothing.
 #[derive(Default)]
-pub(crate) struct ExtraNamed {
+pub(crate) struct ExtraNamed(Option<Box<Named>>);
+
+/// The rows and the table of an [`ExtraNamed`] that holds any.
+#[derive(Default)]
+struct Named {
     rows: Vec<(PhpString, Value)>,
-    /// The `HashTable` and its data at `nTableSize` rows.
     table: Option<(php_heap::Block, php_heap::Block, usize)>,
 }
 
 impl ExtraNamed {
-    /// These rows with a table laid for them, `zend_handle_named_arg`
-    /// over each in turn.
+    /// `rows` with the table laid to hold them ([`ExtraNamed::lay`]).
     pub(crate) fn laid(
         req: &mut Request,
         rows: Vec<(PhpString, Value)>,
     ) -> Result<ExtraNamed, Thrown> {
-        let mut named = ExtraNamed { rows, table: None };
+        let mut named = ExtraNamed(Some(Box::new(Named { rows, table: None })));
         named.lay(req)?;
         Ok(named)
     }
 
-    /// The table grown to hold the rows: `zend_new_array(0)` and
-    /// `zend_hash_real_init_mixed`'s `HT_SIZE_EX(8, -16)` for the first,
-    /// and the next doubling allocated before the old one is freed, as
-    /// `zend_hash_do_resize` copies, for a row past `nTableSize`. A
-    /// `Bucket` is 32 bytes and each row two hash slots of 4.
+    /// The table on the request's heap grown to hold every row:
+    /// `zend_new_array(0)` and `zend_hash_real_init_mixed` at the first
+    /// row, `zend_hash_do_resize` each time the rows pass its size.
     pub(crate) fn lay(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        if self.rows.is_empty() {
+        let Some(named) = self.0.as_deref_mut().filter(|named| !named.rows.is_empty()) else {
             return Ok(());
-        }
-        let (head, mut data, mut size) = if let Some(table) = self.table.take() {
+        };
+        let (head, mut data, mut size) = if let Some(table) = named.table.take() {
             table
         } else {
             let head = req.heap_mut().block(56);
@@ -363,49 +367,70 @@ impl ExtraNamed {
             let data = req.heap_mut().block(8 * 40);
             (head, req.fatal_of(data)?, 8)
         };
-        while self.rows.len() > size {
+        while named.rows.len() > size {
             size <<= 1;
             let grown = req.heap_mut().block(size * 40);
             let grown = req.fatal_of(grown)?;
             req.heap_mut()
                 .free_block(std::mem::replace(&mut data, grown));
         }
-        self.table = Some((head, data, size));
+        named.table = Some((head, data, size));
         Ok(())
     }
 
-    /// The table alone taken off, the rows left: what `RECV_VARIADIC`
-    /// hands an untyped variadic with no positional extras as its
-    /// array, `ZVAL_ARR(params, EX(extra_named_params))`, which the
-    /// engine's collected array stands for.
+    /// The table alone, its rows left here: what a frame hands on where
+    /// the rows move into a variadic's array and php's table stands until
+    /// the frame is freed.
     pub(crate) fn take_table(&mut self) -> ExtraNamed {
-        ExtraNamed {
-            rows: Vec::new(),
-            table: self.table.take(),
-        }
+        let table = self.0.as_deref_mut().and_then(|named| named.table.take());
+        ExtraNamed(table.map(|table| {
+            Box::new(Named {
+                rows: Vec::new(),
+                table: Some(table),
+            })
+        }))
     }
 
-    /// `zend_array_destroy` of the table: its data, then the 56 bytes;
-    /// the rows handed back for their owners to be given up.
+    /// The rows, to be given up by the caller, the table freed.
     pub(crate) fn free(self, req: &mut Request) -> Vec<(PhpString, Value)> {
-        if let Some((head, data, _)) = self.table {
+        let Some(named) = self.0 else {
+            return Vec::new();
+        };
+        let Named { rows, table } = *named;
+        if let Some((head, data, _)) = table {
             req.heap_mut().free_block(data);
             req.heap_mut().free_block(head);
         }
-        self.rows
+        rows
+    }
+
+    /// The rows moved out, the table left where it stands.
+    pub(crate) fn take_rows(&mut self) -> Vec<(PhpString, Value)> {
+        self.0
+            .as_deref_mut()
+            .map(|named| std::mem::take(&mut named.rows))
+            .unwrap_or_default()
+    }
+
+    /// The rows to add one to.
+    pub(crate) fn rows_mut(&mut self) -> &mut Vec<(PhpString, Value)> {
+        &mut self.0.get_or_insert_with(Box::default).rows
     }
 }
 
 impl std::ops::Deref for ExtraNamed {
-    type Target = Vec<(PhpString, Value)>;
+    type Target = [(PhpString, Value)];
+
     fn deref(&self) -> &Self::Target {
-        &self.rows
+        self.0.as_deref().map_or(&[], |named| named.rows.as_slice())
     }
 }
 
 impl std::ops::DerefMut for ExtraNamed {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.rows
+        self.0
+            .as_deref_mut()
+            .map_or(&mut [], |named| named.rows.as_mut_slice())
     }
 }
 
