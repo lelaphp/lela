@@ -321,9 +321,10 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
         ]
     );
     let uncaught = observed(&events.between("uncaught", "exited"));
-    let ended = unwound(&events.between("uncaught", "exited"));
     assert_eq!(
-        ended.get(..4).unwrap_or_default(),
+        unwound(&events.between("uncaught", "exited"))
+            .get(..4)
+            .unwrap_or_default(),
         [
             end(0, "Exception::__construct", Some("null")),
             end(0, "b", None),
@@ -333,15 +334,36 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     );
     // `zend_exception_error` renders the throwable through its
     // `__toString`, which `zend_call_function` serves after the file has
-    // ended, as `observer_exception_01.phpt` shows it.
-    assert!(
-        matches!(ended.get(4..), Some([Ext(0, End(name, Some(_)))]) if name == "Exception::__toString"),
-        "{ended:?}"
+    // ended, and which reaches `getTraceAsString` through a call of its
+    // own (`Z/Zend/zend_exceptions.c:731-733`), as
+    // `observer_exception_01.phpt` shows it.
+    let file_ended = uncaught.iter().position(|e| *e == end(0, file, None));
+    let to_string = "Exception::__toString";
+    let trace = "Exception::getTraceAsString";
+    assert_eq!(
+        uncaught
+            .get(file_ended.unwrap_or_default() + 1..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| !matches!(e, Ext(_, Error(_))))
+            .map(|e| match e {
+                Ext(n, End(name, Some(_))) => Ext(*n, End(name.clone(), Some(String::new()))),
+                other => other.clone(),
+            })
+            .collect::<Vec<_>>(),
+        [
+            init(0, to_string),
+            begin(0, to_string),
+            init(0, trace),
+            begin(0, trace),
+            end(0, trace, Some("")),
+            end(0, to_string, Some("")),
+        ],
+        "{uncaught:?}"
     );
     let rendered = uncaught
         .iter()
         .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Uncaught Exception: x")));
-    let file_ended = uncaught.iter().position(|e| *e == end(0, file, None));
     assert!(
         file_ended < rendered && rendered.is_some(),
         "the main file ends before the uncaught throwable is rendered: {uncaught:?}"

@@ -7,9 +7,9 @@
 //! stay on the request, since the tier face, the native face and the
 //! loader read them.
 
-use crate::api::call::write_prop;
+use crate::api::call::{Function, write_prop};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{Owner, PhpObject, PhpString, Value};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 
 use super::Request;
 
@@ -370,6 +370,7 @@ impl Request {
         let mut text: Vec<u8> = Vec::new();
         let mut seen: Vec<PhpObject> = Vec::new();
         let mut raised: Option<Thrown> = None;
+        let trace_as_string = self.trace_as_string_of(this);
         let mut at = Some(this);
         while let Some(exception) = at {
             let Some(throwable) = self.class_named(b"Throwable") else {
@@ -410,7 +411,7 @@ impl Request {
             {
                 message.extend_from_slice(b" and defined");
             }
-            let trace = self.trace_string_of(exception);
+            let trace = self.served_trace(trace_as_string, exception, &mut raised);
             let mut rendered = class.into_bytes();
             if !message.is_empty() {
                 rendered.extend_from_slice(b": ");
@@ -418,7 +419,8 @@ impl Request {
             }
             rendered.extend_from_slice(b" in ");
             rendered.extend_from_slice(&file);
-            rendered.extend_from_slice(format!(":{line}\nStack trace:\n{trace}").as_bytes());
+            rendered.extend_from_slice(format!(":{line}\nStack trace:\n").as_bytes());
+            rendered.extend_from_slice(&trace);
             if !text.is_empty() {
                 rendered.extend_from_slice(b"\n\nNext ");
                 rendered.extend_from_slice(&text);
@@ -441,6 +443,55 @@ impl Request {
                 Err(thrown)
             }
             None => Ok(string),
+        }
+    }
+
+    /// `Exception::__toString`'s callee, found once as php finds it
+    /// (`Z/Zend/zend_exceptions.c:705-706`): the final
+    /// `getTraceAsString` of `this`'s base class, `Exception` or
+    /// `Error` (`i_get_exception_base`), which is also the scope it is
+    /// called in.
+    fn trace_as_string_of(&self, this: PhpObject) -> Option<(Function, ClassId)> {
+        let exception = self.class_named(b"Exception")?;
+        let base = if self.instance_of(this.class(), exception) {
+            exception
+        } else {
+            self.class_named(b"Error")?
+        };
+        Some((self.method_named(base, b"gettraceasstring")?, base))
+    }
+
+    /// One throwable's trace as `Exception::__toString` reads it: its
+    /// `getTraceAsString` served through `zend_call_function`
+    /// (`Z/Zend/zend_exceptions.c:731-733`), the call path a native
+    /// calling a native takes, so an observer sees it begun and ended
+    /// inside `__toString`. What is not a non-empty string, a call that
+    /// threw and a call never made because something thrown on the way
+    /// stands, as `zend_call_function` returns at once while
+    /// `EG(exception)` holds one, is `#0 {main}` and a newline.
+    fn served_trace(
+        &mut self,
+        trace_as_string: Option<(Function, ClassId)>,
+        exception: PhpObject,
+        raised: &mut Option<Thrown>,
+    ) -> Vec<u8> {
+        const MAIN: &[u8] = b"#0 {main}\n";
+        let Some((function, base)) = trace_as_string.filter(|_| raised.is_none()) else {
+            return MAIN.to_vec();
+        };
+        match self.serve_method_made(function, Some(exception), base, &[], &[]) {
+            Ok(trace) => {
+                let bytes = trace
+                    .as_str_bytes()
+                    .filter(|bytes| !bytes.is_empty())
+                    .map_or_else(|| MAIN.to_vec(), <[u8]>::to_vec);
+                self.release(trace);
+                bytes
+            }
+            Err(thrown) => {
+                *raised = Some(thrown);
+                MAIN.to_vec()
+            }
         }
     }
 
