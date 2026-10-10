@@ -122,7 +122,7 @@ impl Request {
         let posting = self
             .web()
             .is_some_and(|web| web.content_type.is_some() && web.method == Some(Method::Post));
-        if posting && self.ini_long(b"enable_post_data_reading") != 0 {
+        if posting && self.ini_flag(b"enable_post_data_reading") {
             self.read_post_data(&BodyLimits::default());
         }
     }

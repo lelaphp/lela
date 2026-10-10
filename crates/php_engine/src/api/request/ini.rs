@@ -177,7 +177,7 @@ impl TypedIni {
             }
             b"short_open_tag" => self.short_open_tag = Request::ini_parse_bool(text),
             b"zend.assertions" => self.assertions = Request::ini_parse_bytes(text),
-            b"zend.multibyte" => self.multibyte = ini_truth(Some(text)),
+            b"zend.multibyte" => self.multibyte = Request::ini_parse_bool(text),
             _ => {}
         }
     }
@@ -420,7 +420,7 @@ impl Request {
         } else {
             value
         };
-        if name == b"report_memleaks" && !ini_truth(Some(value)) {
+        if name == b"report_memleaks" && !Request::ini_parse_bool(value) {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
         }
@@ -439,7 +439,8 @@ impl Request {
             b"max_execution_time" => self.arm_timer(),
             b"error_reporting" => self.update_error_reporting(),
             b"zend.enable_gc" => {
-                self.heap.gc_enable(ini_truth(value));
+                self.heap
+                    .gc_enable(value.is_some_and(Request::ini_parse_bool));
             }
             b"display_errors" => self.reset_display_errors_word(),
             _ => {}
@@ -834,15 +835,41 @@ impl Request {
             .collect()
     }
 
-    /// `zend_ini_parse_bool`: `1`, `on`, `yes`, `true` are true.
+    /// `zend_ini_parse_bool` (`Z/Zend/zend_ini.c:563`), the one rule
+    /// every `OnUpdateBool` entry is read by: `on`, `yes` and `true` in
+    /// any case are on, and any other text is on where C's `atoi` reads
+    /// a number other than zero from it, so `abc` and `00` are off and
+    /// `-1`, ` 1` and `1abc` are on.
+    ///
+    /// ```php
+    /// foreach (['abc', '00', '-1', '1abc', ' 1', 'TRUE'] as $v) { ini_set('html_errors', $v); trigger_error($v); }
+    /// ```
+    /// ```expect
+    /// Notice: abc in %s on line 2
+    ///
+    /// Notice: 00 in %s on line 2
+    /// <br />
+    /// <b>Notice</b>:  -1 in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:  1abc in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:   1 in <b>%s</b> on line <b>2</b><br />
+    /// <br />
+    /// <b>Notice</b>:  TRUE in <b>%s</b> on line <b>2</b><br />
+    /// ```
     #[must_use]
     pub fn ini_parse_bool(value: &[u8]) -> bool {
-        let lower = value.to_ascii_lowercase();
-        matches!(lower.as_slice(), b"1" | b"on" | b"yes" | b"true")
-            || lower.iter().all(u8::is_ascii_digit)
-                && String::from_utf8_lossy(&lower)
-                    .parse::<i64>()
-                    .is_ok_and(|n| n != 0)
+        value.eq_ignore_ascii_case(b"true")
+            || value.eq_ignore_ascii_case(b"yes")
+            || value.eq_ignore_ascii_case(b"on")
+            || super::atol(value) != 0
+    }
+
+    /// The entry `name` read as its `OnUpdateBool` reads it, by
+    /// [`Request::ini_parse_bool`]; an entry that holds php's `NULL` or
+    /// is not registered is off.
+    pub(crate) fn ini_flag(&self, name: &[u8]) -> bool {
+        self.ini_get(name).is_some_and(Request::ini_parse_bool)
     }
 
     /// `cfg_get_entry` as `get_cfg_var()` hands it back
@@ -1686,14 +1713,6 @@ impl IniDisplayer {
 enum IniCell {
     Value(String),
     Displayed(String),
-}
-
-/// `zend_ini_parse_bool`: an ini entry read as on or off, where "off",
-/// "no", "false" and "" are off beside "0" and everything else is on.
-pub(crate) fn ini_truth(value: Option<&[u8]>) -> bool {
-    let Some(value) = value else { return false };
-    let text = value.to_ascii_lowercase();
-    !matches!(text.as_slice(), b"" | b"0" | b"off" | b"no" | b"false")
 }
 
 /// `ZEND_ATOL`, which is `atoll` (`Z/Zend/zend_long.h:77`): leading

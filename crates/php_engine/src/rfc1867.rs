@@ -704,7 +704,7 @@ fn parts(
         }
 
         let mut skip_upload = false;
-        if req.ini_long(b"file_uploads") == 0 {
+        if !req.ini_flag(b"file_uploads") {
             skip_upload = true;
         } else if upload_cnt <= 0 {
             skip_upload = true;

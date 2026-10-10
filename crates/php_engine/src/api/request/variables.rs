@@ -151,16 +151,6 @@ impl Request {
         Ok(())
     }
 
-    /// An ini entry read as `OnUpdateBool` reads it.
-    pub(crate) fn ini_flag(&self, name: &[u8]) -> bool {
-        self.ini_get(name).is_some_and(|value| {
-            value.eq_ignore_ascii_case(b"on")
-                || value.eq_ignore_ascii_case(b"yes")
-                || value.eq_ignore_ascii_case(b"true")
-                || atol(value) != 0
-        })
-    }
-
     /// A variable of `EG(symbol_table)` read, `zend_hash_find` there
     /// with an attached name followed to its frame's variable: what the
     /// program's `$GLOBALS[$name]` is now, a view, no owner taken.
@@ -1049,7 +1039,8 @@ impl Request {
                 top.give_up(self);
                 value.give_up(self);
                 unset?;
-                if !self.ini_flag(b"display_errors") {
+                if super::diagnostics::display_errors_mode_of(self.ini_get(b"display_errors")) == 0
+                {
                     docref(
                         self,
                         Level::Warning,

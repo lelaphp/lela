@@ -80,7 +80,7 @@ mod include;
 mod ini;
 pub(crate) mod ini_files;
 pub use ini::IniEntry;
-pub(crate) use ini::{TypedIni, ini_atol, ini_truth};
+pub(crate) use ini::{TypedIni, ini_atol};
 pub use ini_files::IniFiles;
 mod hold;
 mod hooks;
@@ -872,7 +872,7 @@ impl Request {
         self.set_memory_limit();
         // `zend.enable_gc` as the startup ini leaves the collector
         // (`OnUpdateGCEnabled`), and `gc_reset` from `zend_activate`.
-        let enable_gc = ini_truth(self.ini_get(b"zend.enable_gc"));
+        let enable_gc = self.ini_flag(b"zend.enable_gc");
         self.heap.gc_startup(enable_gc);
         self.update_error_reporting();
         self.start_stack_limit();

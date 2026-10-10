@@ -18,7 +18,7 @@ use crate::api::values::{Charset, Key, Owner, PhpArray, PhpString, Value, ValueR
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
-use super::{Phase, Raised, Request, ini_atol, ini_truth, zone};
+use super::{Phase, Raised, Request, ini_atol, zone};
 
 /// A diagnostic's message as `php_error_cb` is handed it.
 #[derive(Clone, Copy)]
@@ -922,8 +922,7 @@ impl Request {
     /// string(1) "1"
     /// ```
     fn fatal_error_backtraces(&self) -> bool {
-        self.ini_get(b"fatal_error_backtraces")
-            .is_some_and(Request::ini_parse_bool)
+        self.ini_flag(b"fatal_error_backtraces")
     }
 
     /// php's `display`, the first branch of `php_error_cb`: a diagnostic
@@ -933,7 +932,7 @@ impl Request {
     /// too. A repeat is dropped whole — not stored, not logged, not
     /// displayed — so the one it repeats stays the last error.
     fn displayed(&self, message: PhpString, file: &[u8], line: u32) -> bool {
-        if !ini_truth(self.ini_get(b"ignore_repeated_errors")) {
+        if !self.ini_flag(b"ignore_repeated_errors") {
             return true;
         }
         let Some(last) = self.diagnostics.last_error else {
@@ -942,7 +941,7 @@ impl Request {
         if last.message.as_bytes() != message.as_bytes() {
             return true;
         }
-        if ini_truth(self.ini_get(b"ignore_repeated_source")) {
+        if self.ini_flag(b"ignore_repeated_source") {
             return false;
         }
         last.line != line || last.file.as_bytes() != file
@@ -968,8 +967,11 @@ impl Request {
     /// "
     /// ```
     fn log_errors(&self) -> bool {
-        let off = |name: &[u8]| self.ini_get(name).is_some_and(|v| !ini_truth(Some(v)));
-        ini_truth(self.ini_get(b"log_errors"))
+        let off = |name: &[u8]| {
+            self.ini_get(name)
+                .is_some_and(|v| !Request::ini_parse_bool(v))
+        };
+        self.ini_flag(b"log_errors")
             || (self.diagnostics.display_direct
                 && (off(b"display_startup_errors")
                     || display_errors_mode_of(self.ini_get(b"display_errors")) == 0))
@@ -978,7 +980,7 @@ impl Request {
     /// `html_errors`, which of php's two display forms a diagnostic
     /// takes: the plain one, or `<br />\n<b>Warning</b>:  …`.
     fn html_errors(&self) -> bool {
-        ini_truth(self.ini_get(b"html_errors"))
+        self.ini_flag(b"html_errors")
     }
 
     /// `determine_charset(NULL, quiet)` (`Z/ext/standard/html.c:364`),
@@ -1002,7 +1004,7 @@ impl Request {
     /// `xmlrpc_errors`, whether a diagnostic takes php's xml fault form
     /// ahead of both of the others.
     fn xmlrpc_errors(&self) -> bool {
-        ini_truth(self.ini_get(b"xmlrpc_errors"))
+        self.ini_flag(b"xmlrpc_errors")
     }
 
     /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
@@ -1035,7 +1037,7 @@ impl Request {
         if starting
             && self
                 .ini_get(b"display_startup_errors")
-                .is_some_and(|value| !ini_truth(Some(value)))
+                .is_some_and(|value| !Request::ini_parse_bool(value))
         {
             return Display::Off;
         }
