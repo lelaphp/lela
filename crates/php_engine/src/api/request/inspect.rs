@@ -10,7 +10,7 @@ use php_heap::{Fatal, FrameRef, VmStack};
 
 use super::{Request, Symbol};
 use crate::api::raising::{Level, Thrown};
-use crate::api::values::{PhpObject, TypeTag, Value};
+use crate::api::values::{PhpObject, PhpString, TypeTag, Value};
 use crate::exec::TableId;
 use crate::tier::{Called, Evaluated, Under};
 
@@ -283,7 +283,7 @@ impl Request {
     /// deleted where it holds none, `zend_detach_symbol_table`'s rule;
     /// the frames they stood in, the lowest first.
     fn unbind_globals(&mut self) -> Vec<FrameRef> {
-        let bound: Vec<(Vec<u8>, FrameRef, u32)> = self
+        let bound: Vec<(PhpString, FrameRef, u32)> = self
             .tables
             .get(TableId::GLOBAL.0 as usize)
             .map(|table| {
@@ -291,20 +291,26 @@ impl Request {
                     .entries
                     .iter()
                     .filter_map(|(name, symbol)| match symbol {
-                        Symbol::Indirect(frame, slot) => Some((name.clone(), *frame, *slot)),
+                        Symbol::Indirect(frame, slot) => Some((*name, *frame, *slot)),
                         Symbol::Value(_) | Symbol::Held(_) => None,
                     })
                     .collect()
             })
             .unwrap_or_default();
+        // Each name held across the walk: a release it serves can delete
+        // another name, and the table's owner of it with it.
+        for (name, _, _) in &bound {
+            self.addref(&Value::string(*name));
+        }
         let mut frames: Vec<FrameRef> = Vec::new();
         for (name, frame, slot) in bound {
             let value = self.take_slot(frame, slot);
             if value.tag() == TypeTag::Undef {
-                self.symbol_del(TableId::GLOBAL, &name);
+                self.symbol_del(TableId::GLOBAL, name.as_bytes());
             } else {
                 self.symbol_update(TableId::GLOBAL, name, value);
             }
+            self.release(Value::string(name));
             if !frames.contains(&frame) {
                 frames.push(frame);
             }

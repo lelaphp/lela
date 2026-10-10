@@ -463,8 +463,9 @@ impl Request {
             }
             let cv = req
                 .frame_var_names(at)
+                .ok()?
                 .iter()
-                .position(|held| held.as_slice() == name)?;
+                .position(|held| held.as_bytes() == name)?;
             Some(req.slot(at, u32::try_from(cv).ok()?))
         })
         .flatten()
@@ -485,7 +486,7 @@ impl Request {
                     .into_iter()
                     .map(|(name, symbol)| {
                         let value = req.symbol_read(table, symbol);
-                        (name, value)
+                        (name.as_bytes().to_vec(), value)
                     })
                     .collect(),
             )

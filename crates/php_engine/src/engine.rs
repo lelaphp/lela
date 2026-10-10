@@ -3456,6 +3456,14 @@ fn permanent_names(
             }
         }
     }
+    // `php_startup_auto_globals` and the session's `MINIT` register each
+    // auto-global under `zend_string_init_interned`.
+    {
+        use php_unit::AutoGlobal::{Cookie, Env, Files, Get, Post, Request, Server, Session};
+        for global in [Get, Post, Cookie, Server, Env, Request, Files, Session] {
+            names.intern(global.name()).ok();
+        }
+    }
     let keyed = functions
         .iter()
         .map(|decl| &decl.name)

@@ -584,12 +584,34 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 }
 
 /// The names php's compile interns into whichever home it compiles
-/// into, an `eval`'s among them: each declared property's name with the
-/// key `zend_declare_typed_property` interns as `prop_info->name`,
-/// mangled for a protected or a private one. An object's table keys a
-/// declared row by that key, so a read that lays the table down makes
-/// no string.
+/// into, an `eval`'s among them: each op array's variables, which
+/// `zend_try_compile_cv` interns (`zval_make_interned_string`) before
+/// `lookup_cv` keeps them in `op_array->vars`, and each declared
+/// property's name with the key `zend_declare_typed_property` interns
+/// as `prop_info->name`, mangled for a protected or a private one. A
+/// symbol table keys a variable by its CV's name and an object's table
+/// a declared row by its key, so neither costs a read anything. An
+/// `eval`'d variable's name is the request's from its compile on:
+///
+/// ```php
+/// $m = memory_get_usage(); eval('$abcd = 1;'); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); eval('$abcd = 2;'); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 32
+/// 0
+/// ```
 pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
+    let bodies = std::iter::once(&unit.main)
+        .chain(unit.functions.iter().map(|(_, body)| body))
+        .chain(unit.dynamic.iter().map(|(_, body)| body))
+        .chain(unit.methods.iter().map(|method| &method.body))
+        .chain(unit.hooks.iter().map(|hook| &hook.body));
+    for body in bodies {
+        for var in &body.vars {
+            strings.intern(&var.0)?;
+        }
+    }
     for class in &unit.classes {
         for property in &class.properties {
             strings.intern(&property.name.0)?;

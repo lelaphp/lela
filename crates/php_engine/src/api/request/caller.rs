@@ -13,7 +13,7 @@ use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::exec;
 
-use super::{Deprecations, Link, Overwrite, Request, Slots, Symbol};
+use super::{Deprecations, Link, Overwrite, Request, Slots};
 
 /// What called the native being served ([`Request::native_caller`]):
 /// a user function's frame and its arguments, a code frame, or another
@@ -96,19 +96,7 @@ impl Request {
     pub fn caller_var(&mut self, name: &[u8]) -> Option<Value> {
         let frame = self.caller_frame()?;
         let table = self.rebuild_symbol_table(frame);
-        let symbol = self
-            .table_mut(table)?
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, symbol)| match symbol {
-                Symbol::Value(value) => Ok(*value),
-                Symbol::Held(cell) => Ok(cell.get()),
-                Symbol::Indirect(frame, at) => Err((*frame, *at)),
-            })?;
-        let value = match symbol {
-            Ok(value) => value,
-            Err((frame, at)) => self.attached(table, frame, at),
-        };
+        let value = self.symbol_value(table, name)?;
         (value.tag() != TypeTag::Undef).then_some(value)
     }
 
@@ -121,8 +109,11 @@ impl Request {
     /// reference as `php_extract_ref_overwrite` does,
     /// [`Overwrite::After`]. A write through a reference the variable
     /// holds is the native's to make. A sink: the variable takes the
-    /// value's owner, given up where no user frame is running.
-    pub fn set_caller_var(&mut self, name: &[u8], value: Owner<Value>, order: Overwrite) {
+    /// value's owner, given up where no user frame is running. `name` is
+    /// the caller's string, `extract`'s the array's key or the prefixed
+    /// name it made, of which a table that adds the name takes an owner,
+    /// as php's `zend_hash_update_ind` takes one of its key.
+    pub fn set_caller_var(&mut self, name: PhpString, value: Owner<Value>, order: Overwrite) {
         let Some(frame) = self.caller_frame() else {
             value.give_up(self);
             return;
@@ -132,7 +123,7 @@ impl Request {
 
     /// [`Request::set_caller_var`]'s write into `frame`'s table, rebuilt
     /// first where the frame has none.
-    fn set_table_var(&mut self, frame: FrameRef, name: &[u8], value: Value, order: Overwrite) {
+    fn set_table_var(&mut self, frame: FrameRef, name: PhpString, value: Value, order: Overwrite) {
         let table = self.rebuild_symbol_table(frame);
         self.symbol_update_ind(table, name, value, order);
     }
@@ -178,18 +169,18 @@ impl Request {
             .at(frame)
             .is_some_and(|state| state.symbol_table.is_some())
         {
-            self.set_table_var(frame, name, value.hand_on(), Overwrite::InPlace);
+            self.set_table_var_named(frame, name, value);
             return true;
         }
         let at = self
             .frame_var_names(frame)
-            .iter()
-            .position(|var| var == name)
+            .ok()
+            .and_then(|names| names.iter().position(|var| var.as_bytes() == name))
             .and_then(|at| u32::try_from(at).ok());
         let slot = |req: &mut Request| req.stack.frame_mut(frame)?.slot_ptr(Slot(at?));
         if slot(self).is_none() {
             if force {
-                self.set_table_var(frame, name, value.hand_on(), Overwrite::InPlace);
+                self.set_table_var_named(frame, name, value);
                 return true;
             }
             value.give_up(self);
@@ -198,6 +189,19 @@ impl Request {
         // php's CV arm: `zval_ptr_dtor(var)` and then `ZVAL_COPY_VALUE`.
         self.overwrite_place(slot, value.hand_on(), Overwrite::InPlace);
         true
+    }
+
+    /// [`Request::set_table_var`] over a name the caller holds as bytes,
+    /// keyed as `zend_hash_str_update` keys it ([`Request::with_name`]);
+    /// the value given up where the key cannot be made.
+    fn set_table_var_named(&mut self, frame: FrameRef, name: &[u8], value: Owner<Value>) {
+        match PhpString::existing_interned(self, name) {
+            Ok(key) => {
+                self.set_table_var(frame, *key, value.hand_on(), Overwrite::InPlace);
+                key.give_up(self);
+            }
+            Err(_) => value.give_up(self),
+        }
     }
 
     /// The innermost user frame, the one a native's variable access

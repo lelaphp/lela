@@ -112,12 +112,13 @@ impl Request {
                 words.append(self, word.into_value())?;
             }
             let count = i64::try_from(self.description.argv.len()).unwrap_or(i64::MAX);
-            self.symbol_update(
-                TableId::GLOBAL,
-                b"argv".to_vec(),
-                words.into_value().hand_on(),
-            );
-            self.symbol_update(TableId::GLOBAL, b"argc".to_vec(), Value::int(count));
+            let words = words.into_value().hand_on();
+            self.with_name(b"argv", |req, name| {
+                req.symbol_update(TableId::GLOBAL, name, words);
+            })?;
+            self.with_name(b"argc", |req, name| {
+                req.symbol_update(TableId::GLOBAL, name, Value::int(count));
+            })?;
         }
         // `php_startup_auto_globals` (`Z/main/php_variables.c:973`): with
         // `auto_globals_jit`, `$_ENV` and `$_REQUEST` are made when named,
@@ -176,7 +177,12 @@ impl Request {
     pub fn global_names(&mut self) -> Vec<Vec<u8>> {
         let table = self.global_table();
         self.table_mut(table)
-            .map(|entries| entries.iter().map(|(name, _)| name.clone()).collect())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|(name, _)| name.as_bytes().to_vec())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -191,7 +197,13 @@ impl Request {
     pub fn set_global(&mut self, name: &[u8], value: Option<Owner<Value>>) {
         let table = self.global_table();
         match value {
-            Some(value) => self.symbol_update_ind(table, name, value.hand_on(), Overwrite::InPlace),
+            Some(value) => match PhpString::existing_interned(self, name) {
+                Ok(key) => {
+                    self.symbol_update_ind(table, *key, value.hand_on(), Overwrite::InPlace);
+                    key.give_up(self);
+                }
+                Err(_) => value.give_up(self),
+            },
             None => self.symbol_unset(table, name),
         }
     }
@@ -414,12 +426,10 @@ impl Request {
             }
             AutoGlobal::Files => match self.http_globals.files {
                 Some(files) => {
-                    self.symbol_update(
-                        TableId::GLOBAL,
-                        global.name().to_vec(),
-                        Value::array(files),
-                    );
                     self.addref(&Value::array(files));
+                    self.with_name(global.name(), |req, name| {
+                        req.symbol_update(TableId::GLOBAL, name, Value::array(files));
+                    })?;
                     return Ok(());
                 }
                 None => PhpArray::new(self)?,
@@ -436,8 +446,9 @@ impl Request {
                 self.release(Value::array(kept));
             }
         }
-        self.symbol_update(TableId::GLOBAL, global.name().to_vec(), value);
-        Ok(())
+        self.with_name(global.name(), |req, name| {
+            req.symbol_update(TableId::GLOBAL, name, value);
+        })
     }
 
     /// The request of the web the host described, where it described one.

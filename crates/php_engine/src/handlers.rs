@@ -1213,12 +1213,12 @@ pub(crate) fn bind_global<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let name = exec::constant(code, ConstIdx(op.op2));
-    let Some(name) = name.as_str_bytes().map(<[u8]>::to_vec) else {
+    let Some(name) = name.as_php_string().copied() else {
         return Err(Fatal::Error(String::from(
             "InternalError: ZEND_BIND_GLOBAL over a name that is no string",
         )));
     };
-    let cell = match req.global_cell(&name) {
+    let cell = match req.global_cell(name) {
         Ok(cell) => cell,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -6081,7 +6081,8 @@ pub(crate) fn unset_var<T: Tier>(
     } else {
         req.rebuild_symbol_table(frame)
     };
-    req.symbol_unset(table, &name);
+    req.symbol_unset(table, name.as_bytes());
+    name.give_up(req);
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     if req.is_pending() {
         return Ok(Stepped::Threw(frame).into());
@@ -6126,7 +6127,6 @@ fn fetch_by_name(
     mode: ByName,
 ) -> Edge {
     let lock = op.extended_value & FETCH_GLOBAL_LOCK != 0;
-    let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
     let out = exec::temporary_slot(code, op.out);
     let name = match fetched_name(req, frame, code, op) {
         Ok(name) => name,
@@ -6138,12 +6138,32 @@ fn fetch_by_name(
             return threw(req, frame, &thrown);
         }
     };
+    // The name is held across the fetch, as php's `tmp_name` is, so
+    // the table that lays it down takes an owner of the string the
+    // program wrote it with.
+    let edge = fetch_named(req, frame, code, op, mode, *name);
+    name.give_up(req);
+    edge
+}
+
+/// [`fetch_by_name`] once its name is read.
+fn fetch_named(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    mode: ByName,
+    name: PhpString,
+) -> Edge {
+    let lock = op.extended_value & FETCH_GLOBAL_LOCK != 0;
+    let global = op.extended_value & (FETCH_GLOBAL | FETCH_GLOBAL_LOCK) != 0;
+    let out = exec::temporary_slot(code, op.out);
     let table = if global {
         req.global_table()
     } else {
         req.rebuild_symbol_table(frame)
     };
-    let shown = String::from_utf8_lossy(&name).into_owned();
+    let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
     let undefined = |req: &mut Request| {
         let scope = if op.extended_value & FETCH_GLOBAL != 0 {
             "global "
@@ -6152,10 +6172,10 @@ fn fetch_by_name(
         };
         crate::api::raising::warning(req, &format!("Undefined {scope}variable ${shown}"));
     };
-    let held = req.symbol_value(table, &name);
+    let held = req.symbol_value(table, name.as_bytes());
     let unset = held.is_none_or(|value| value.tag() == TypeTag::Undef);
     // `zend_fetch_this_var`: `$this` where no bucket names it.
-    if unset && name == b"this" {
+    if unset && name.as_bytes() == b"this" {
         if !lock {
             exec::free_operand(req, frame, code, op.op1_type, op.op1);
         }
@@ -6182,7 +6202,7 @@ fn fetch_by_name(
             if req.is_pending() {
                 None
             } else {
-                let place = match req.symbol_place(table, &name, mode != ByName::Unset) {
+                let place = match req.symbol_place(table, name, mode != ByName::Unset) {
                     Ok(place) => place,
                     Err(thrown) => return threw(req, frame, &thrown),
                 };
@@ -6219,26 +6239,28 @@ fn fetch_by_name(
 /// The name a fetch by name reads: the constant as it stands, a string
 /// as it is, and anything else converted as `zval_try_get_tmp_string`
 /// converts it, a CV nothing wrote warning first
-/// (`ZVAL_UNDEFINED_OP1`).
+/// (`ZVAL_UNDEFINED_OP1`), with one owner for the caller: the string
+/// itself where the operand is one, the conversion's otherwise.
 fn fetched_name(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-) -> Result<Vec<u8>, Thrown> {
-    if op.op1_type == OperandKind::Const {
-        let name = exec::constant(code, ConstIdx(op.op1));
-        return Ok(name.as_str_bytes().unwrap_or_default().to_vec());
+) -> Result<Owner<PhpString>, Thrown> {
+    let held = if op.op1_type == OperandKind::Const {
+        exec::constant(code, ConstIdx(op.op1))
+    } else {
+        exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref()
+    };
+    if let Some(name) = held.as_php_string() {
+        return Ok(Owner::take(req, *name));
     }
-    let held = exec::operand_undef(req, frame, code, op.op1_type, op.op1).deref();
-    if let Some(bytes) = held.as_str_bytes() {
-        return Ok(bytes.to_vec());
+    if op.op1_type == OperandKind::Const {
+        return PhpString::new(req, b"");
     }
     let held = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let text = crate::ops::to_string(req, &held)?;
-    let bytes = text.as_bytes().to_vec();
-    req.release(Value::string(text));
-    Ok(bytes)
+    Ok(Owner::adopt(req, text))
 }
 
 /// `zend_fetch_static_property_address_ex`'s first half
@@ -6287,7 +6309,11 @@ fn static_member(
             return Err(thrown);
         }
     };
-    let name = fetched_name(req, frame, code, op);
+    let name = fetched_name(req, frame, code, op).map(|name| {
+        let bytes = name.as_bytes().to_vec();
+        name.give_up(req);
+        bytes
+    });
     exec::free_operand(req, frame, code, op.op1_type, op.op1);
     Ok((class, name?))
 }

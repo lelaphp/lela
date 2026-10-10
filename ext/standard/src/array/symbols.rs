@@ -53,10 +53,10 @@ fn prefixed(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 /// dtor sees: NULL
 /// int(5)
 /// ```
-fn assign(req: &mut Request, name: &[u8], value: Value) -> Result<(), Thrown> {
+fn assign(req: &mut Request, name: PhpString, value: Value) -> Result<(), Thrown> {
     let value = Owner::take(req, value.deref());
     if let Some(cell) = req
-        .caller_var(name)
+        .caller_var(name.as_bytes())
         .and_then(|held| held.as_php_ref().copied())
     {
         return cell.set(req, value);
@@ -245,7 +245,9 @@ fn extract(
     // after it standing, given up as `zval_ptr_dtor(&array_copy)` (`:2673`).
     walk::foreach(req, array, Hold::Owner(GiveUp::Dtor), |req, row| {
         if let Some(target) = target(req, kind, &prefix, row.key())? {
-            assign(req, &target, *row.value())?;
+            let assigned = assign(req, *target, *row.value());
+            target.give_up(req);
+            assigned?;
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))
@@ -349,9 +351,15 @@ fn extracted_refs(
     // reference holds the table.
     let walked = walk::foreach(req, table, Hold::None, |req, row| {
         if let Some(target) = target(req, kind, prefix, row.key())? {
-            let cell = row.make_ref(req)?;
-            let cell = Owner::take(req, cell.as_value());
-            req.set_caller_var(&target, cell, order);
+            let cell = match row.make_ref(req) {
+                Ok(cell) => Owner::take(req, cell.as_value()),
+                Err(thrown) => {
+                    target.give_up(req);
+                    return Err(thrown);
+                }
+            };
+            req.set_caller_var(*target, cell, order);
+            target.give_up(req);
             count += 1;
         }
         Ok(ControlFlow::<()>::Continue(()))
@@ -448,7 +456,7 @@ fn target(
     kind: i64,
     prefix: &[u8],
     key: &Key,
-) -> Result<Option<Vec<u8>>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let text = match key {
         Key::Str(s) => s.as_bytes().to_vec(),
         Key::Int(n) => n.to_string().into_bytes(),
@@ -520,9 +528,16 @@ fn target(
             }
         }
     };
-    match name {
-        Some(name) if name == b"this" => Err(reassign_this(req)),
-        name => Ok(name),
+    // The variable is named by the key itself where it is the key's
+    // text, as php's `zend_hash_update_ind` keys it by `var_name`, and
+    // by the string `php_prefix_varname` made otherwise.
+    match (name, key) {
+        (None, _) => Ok(None),
+        (Some(name), _) if name == b"this" => Err(reassign_this(req)),
+        (Some(name), Key::Str(s)) if s.as_bytes() == name.as_slice() => {
+            Ok(Some(Owner::take(req, *s)))
+        }
+        (Some(name), _) => PhpString::new(req, &name).map(Some),
     }
 }
 

@@ -2471,15 +2471,18 @@ mod tests {
     /// `zend_mm_init` maps into `real_size` before a request runs a line
     /// (`Z/Zend/zend_alloc.c:2047-2081`), and the oracle answers it too.
     ///
-    /// 312976 is the object store's table, the VM stack's first page,
-    /// the variables `php_hash_environment` and the CLI lay down, and
-    /// what this source's interning costs, and every byte of it but the
-    /// variables' is php's own
+    /// 315536 is the object store's table, the VM stack's first page,
+    /// `EG(symbol_table)`'s data, the variables `php_hash_environment`
+    /// and the CLI lay down, and what this source's interning costs, and
+    /// every byte of it but the variables' is php's own
     /// arithmetic. `init_executor` lays `EG(objects_store)` down
     /// before the request serves a line, 1024 buckets of a pointer each,
     /// 8192 bytes of the request heap (`Z/Zend/zend_execute_API.c:171`,
     /// design §5.4), and `zend_vm_stack_init` the stack's first 262144
-    /// (design §5.6), and so does this engine's request. php interns a request's constant operands
+    /// (design §5.6), and so does this engine's request. The first
+    /// variable laid into `EG(symbol_table)`, which `init_executor`
+    /// initialises at 64 (`Z/Zend/zend_execute_API.c:154`), lays its
+    /// data down, 64 buckets of 32 bytes and 128 hash slots of 4, 2560. php interns a request's constant operands
     /// into `CG(interned_strings)` out of the request heap
     /// (`zend_insert_literal` through `zend_new_interned_string_request`,
     /// `Z/Zend/zend_compile.c:563-582`, `Z/Zend/zend_string.c:227-265`),
@@ -2522,8 +2525,8 @@ mod tests {
         let (flagged, _) = served("<?php var_dump(memory_get_usage(true));");
         let (coerced, _) = served("<?php var_dump(memory_get_usage(1));");
         assert_eq!(
-            unflagged, "int(312976)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            unflagged, "int(315536)\n",
+            "the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
         assert_eq!(flagged, "int(2097152)\n");
         assert_eq!(coerced, flagged, "php's Z_PARAM_BOOL coerces 1 to true");
@@ -2586,8 +2589,9 @@ mod tests {
     ///
     /// **The second number is the oracle's; the first is this engine's
     /// own accounting**, for the reason the pin above states at length.
-    /// 2097152 is php's one 2 MiB chunk. 312976 is the object store's
-    /// 8192, the VM stack's first page of 262144 (an engine with no
+    /// 2097152 is php's one 2 MiB chunk. 315536 is the object store's
+    /// 8192, the VM stack's first page of 262144, `EG(symbol_table)`'s
+    /// data of 2560 (an engine with no
     /// stream layer opens none of the three standard streams `do_cli`
     /// opens, which cost 1200 under the bundle), the 1632 of the variables
     /// `php_hash_environment` and the CLI lay down, and what this source's
@@ -2606,8 +2610,8 @@ mod tests {
         );
         assert_eq!(fatal, None);
         assert_eq!(
-            body, "int(312976)\nint(2097152)\n",
-            "the object store's 8192, the VM stack's first page of 262144, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
+            body, "int(315536)\nint(2097152)\n",
+            "the object store's 8192, the VM stack's first page of 262144, the symbol table's data of 2560, the environment's 1632, the interned table's 40960 and the one string in it, the file's name's 48; an engine with no stream layer opens no standard streams"
         );
     }
 }

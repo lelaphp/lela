@@ -187,7 +187,19 @@ impl IncludedFiles {
 }
 
 impl SymbolTable {
-    /// `nTableSize` of a rebuilt table.
+    /// `EG(symbol_table)` as `init_executor` lays it down,
+    /// `zend_hash_init(&EG(symbol_table), 64, ...)`: embedded in `EG`,
+    /// its data laid down at the first name written, sixty-four buckets
+    /// wide, and grown as php's grows.
+    pub(super) fn global() -> SymbolTable {
+        SymbolTable {
+            owner: None,
+            entries: Vec::new(),
+            bytes: Some(HashBytes::embedded(64)),
+        }
+    }
+
+    /// `nTableSize` of the table.
     pub(super) fn size(&self) -> Option<u32> {
         self.bytes.as_ref().map(|bytes| bytes.size)
     }
@@ -246,6 +258,10 @@ impl Request {
     #[cfg(debug_assertions)]
     pub(super) fn free_hash_tables(&mut self) {
         for bytes in std::mem::take(&mut self.hash_bytes.symtable_cache) {
+            bytes.free(self);
+        }
+        // `EG(symbol_table)`'s data, where no destroy of the table freed it.
+        if let Some(bytes) = self.tables.first_mut().and_then(|table| table.bytes.take()) {
             bytes.free(self);
         }
         let included = std::mem::take(&mut self.included_files);
@@ -322,8 +338,7 @@ impl Request {
     }
 
     /// One bucket appended to `table`'s bytes, or deleted from them,
-    /// the last of the table's where `last` says so; nothing for
-    /// `EG(symbol_table)`, whose bytes are not held. A refusal has
+    /// the last of the table's where `last` says so. A refusal has
     /// ended the request.
     pub(super) fn table_bytes(&mut self, table: TableId, added: bool, last: bool) {
         let at = table.0 as usize;
