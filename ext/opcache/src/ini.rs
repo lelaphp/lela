@@ -8,7 +8,7 @@
 use php_ext::abi::IniStage;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, warning};
-use php_ext::request::Request;
+use php_ext::request::{Request, Zone};
 
 use crate::State;
 
@@ -658,7 +658,7 @@ pub(crate) fn accel_log(req: &mut Request, level: Log, message: &str) {
     }
     let line = format!(
         "{} ({}): {} {message}\n",
-        asctime(crate::now()),
+        asctime(&Zone::of(req), crate::now()),
         std::process::id(),
         level.word()
     );
@@ -676,10 +676,16 @@ pub(crate) fn accel_log(req: &mut Request, level: Log, message: &str) {
     req.write_stderr(line.as_bytes());
 }
 
-/// `asctime(localtime(&at))` less its line ending, the clock read as UTC,
-/// which is the recipe's `TZ`: `Mon Sep 28 16:15:44 2026`, the day
-/// padded to two columns with a space.
-pub(crate) fn asctime(at: i64) -> String {
+/// `asctime(localtime(&at))` less its line ending: `at` in `zone`, the
+/// request's local zone as `localtime` reads `TZ` ([`Zone::of`]), as
+/// `zend_accel_error` and `accelerator_get_scripts` print it (#2397).
+pub(crate) fn asctime(zone: &Zone, at: i64) -> String {
+    shape(at.saturating_add(zone.offset(at)))
+}
+
+/// `asctime`'s shape of a local time: `Mon Sep 28 16:15:44 2026`, the
+/// day padded to two columns with a space.
+fn shape(at: i64) -> String {
     const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -714,11 +720,11 @@ pub(crate) fn asctime(at: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::asctime;
+    use super::shape;
 
     #[test]
-    fn asctime_is_c_s_shape_in_utc() {
-        assert_eq!(asctime(0), "Thu Jan  1 00:00:00 1970");
-        assert_eq!(asctime(1_790_614_522), "Mon Sep 28 16:55:22 2026");
+    fn asctime_s_shape_is_c_s() {
+        assert_eq!(shape(0), "Thu Jan  1 00:00:00 1970");
+        assert_eq!(shape(1_790_614_522), "Mon Sep 28 16:55:22 2026");
     }
 }

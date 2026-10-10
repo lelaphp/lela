@@ -746,9 +746,10 @@ fn preload_statistics(
 fn scripts(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, Thrown> {
     let validated = flag(req, "opcache.validate_timestamps");
     let mut listed = PhpArray::new(req)?;
+    let zone = php_ext::request::Zone::of(req);
     for script in &status.files {
         let path = text(req, &script.path)?;
-        let when = text(req, ini::asctime(script.last_used).as_bytes())?;
+        let when = text(req, ini::asctime(&zone, script.last_used).as_bytes())?;
         let mut rows = vec![
             ("full_path", *path),
             ("hits", int(script.hits)),
