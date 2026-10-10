@@ -769,6 +769,11 @@ fn a_harness_file_a_merge_staged_is_not_put_back() {
         merged,
         "the merge's file stands"
     );
+    let status = git(
+        &root,
+        &["status", "--porcelain", "--", "docs/divergence.toml"],
+    );
+    assert_eq!(status, "M  docs/divergence.toml\n", "still staged");
     let hook: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert!(hook.get("decision").is_none(), "nothing is denied: {out}");
     let said = hook["hookSpecificOutput"]["additionalContext"]
@@ -802,4 +807,41 @@ fn a_call_that_writes_its_own_worktree_s_pin_is_put_back_there() {
         .unwrap()
         .expect("the denial is the worktree's reading");
     assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+}
+
+/// #2597: a record an older build took holds the hook's own checkout
+/// beside the one the call ran in; `--after` compares the call's alone,
+/// so the main checkout's registry, moved since that record, stands.
+#[test]
+fn a_record_an_older_build_took_of_the_hook_s_checkout_is_not_compared() {
+    let root = scratch("linked-older");
+    let (_base, linked) = linked_worktree(&root);
+    let command = format!("cd {} && touch docs/divergence.toml", linked.display());
+    let (code, _, err) = permit(
+        &root,
+        &stdin("PreToolUse", SESSION, "toolu_older", &root, &command),
+        &[],
+    );
+    assert_eq!(code, 0, "{err}");
+    let file = record(&root, SESSION, "toolu_older");
+    let mut taken: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    let mut main = taken["checkouts"][0].clone();
+    main["checkout"] = root.canonicalize().unwrap().to_str().unwrap().into();
+    taken["checkouts"].as_array_mut().unwrap().insert(0, main);
+    std::fs::write(&file, taken.to_string()).unwrap();
+    let merged = format!(
+        "{}\n# a row the person approved\n",
+        read(&root, "docs/divergence.toml")
+    );
+    std::fs::write(root.join("docs/divergence.toml"), &merged).unwrap();
+    shell(&root, &command);
+    let (code, out, err) = permit(
+        &root,
+        &stdin("PostToolUse", SESSION, "toolu_older", &root, &command),
+        &["--after"],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(read(&root, "docs/divergence.toml"), merged);
+    assert!(!out.contains("divergence.toml"), "{out}");
 }

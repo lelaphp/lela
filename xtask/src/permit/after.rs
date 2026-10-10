@@ -20,9 +20,9 @@
 //! leading `cd`, at the top of its worktree ([`operation::ran_in`]), the
 //! resolution `where = "operating"` reads, and not the hook's own: a
 //! subagent's shell starts in the main checkout and `cd`s into its
-//! worktree, and on 2026-10-10 a builder's `--after`, holding the main
-//! checkout, put back a person's approved registry there under another
-//! session's merge, which it never touched (#2597).
+//! worktree, so the hook's checkout is often one the call never touched,
+//! and another session's merge may stand there (#2597). The line's words
+//! are read where its shell stands, the `cwd` moved by that `cd`.
 //!
 //! What it leaves alone, on purpose:
 //!
@@ -80,6 +80,7 @@ use super::audit;
 use super::call::Call;
 use super::kept;
 use super::operation;
+use super::rules::runs_in;
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
@@ -102,6 +103,9 @@ struct Record {
     at: i64,
     /// The call's command, whose words say whether it runs steer.
     command: String,
+    /// The checkout the call ran in ([`held`]), one; a list since a record
+    /// an older build wrote holds the hook's own beside it, which `--after`
+    /// does not compare (#2597).
     checkouts: Vec<Guarded>,
 }
 
@@ -154,8 +158,8 @@ impl Verdict {
 }
 
 /// Before a `Bash` call: the blob id of every tracked file `harness.self`
-/// scopes, in each checkout the call reaches, kept under the session and
-/// the tool-use id. A call that carries neither is not recorded, and one
+/// scopes in the checkout the call runs in ([`held`]), kept under the
+/// session and the tool-use id. A call that carries neither is not recorded, and one
 /// already recorded keeps its first record, which both adapters take
 /// before the call runs.
 pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
@@ -169,7 +173,7 @@ pub(super) fn before(root: &Path, call: &Call) -> Result<()> {
         return Ok(());
     }
     prune(&records(root));
-    let Some(guarded) = guard(&ran_in(root, call))? else {
+    let Some(guarded) = guard(&held(root, call))? else {
         return Ok(());
     };
     let record = Record {
@@ -224,7 +228,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     fs::remove_file(&file).ok();
     let record: Record = serde_json::from_str(&taken)
         .with_context(|| format!("reading the record at {}", file.display()))?;
-    let moved = sort_moved(&record, &call);
+    let moved = sort_moved(&record, &call, &held(root, &call));
     if moved.is_empty() {
         return Ok(());
     }
@@ -246,16 +250,16 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Every file of the record whose blob moved and that steer did not write:
-/// put back where the call's line can write it, kept where it cannot. A
-/// word of the line is read where the call stands, its `cwd`, or the
-/// checkout where the call carries none.
-fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
-    let cwd = call.cwd.as_deref().map(Path::new);
+/// Every file of the record in the checkout `held` whose blob moved and
+/// that steer did not write: put back where the call's line can write it
+/// and no operation in progress staged it, kept otherwise. A word of the
+/// line is read where its shell stands ([`shell_at`]).
+fn sort_moved(record: &Record, call: &Call, held: &Path) -> Vec<Moved> {
     let steering = runs_steer(&record.command);
     let line = argv::Line::read(&record.command);
     let mut moved = Vec::new();
-    for guarded in &record.checkouts {
+    for guarded in record.checkouts.iter().filter(|g| g.checkout == held) {
+        let cwd = shell_at(call, &guarded.checkout, &line);
         for (path, was) in &guarded.blobs {
             let now = on_disk(&guarded.checkout.join(path));
             if now == *was {
@@ -264,7 +268,7 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
             if steering && steered(&guarded.checkout, path, was.as_deref(), record.at) {
                 continue;
             }
-            let place = OnDisk::new(cwd.unwrap_or(&guarded.checkout), &guarded.checkout, path);
+            let place = OnDisk::new(&cwd, &guarded.checkout, path);
             let writes = writes::can_write(&line, &place);
             let approved = writes
                 .then(|| approved(&guarded.checkout, path, was.as_deref(), call))
@@ -275,20 +279,23 @@ fn sort_moved(record: &Record, call: &Call) -> Vec<Moved> {
             let (verdict, said) = if let Some(admission) = &approved {
                 (Verdict::Approved, format!("{path}: {}", admission.said()))
             } else if let Some(operation) = staged {
-                let before = kept::before_the_call(was.as_deref());
-                let said = format!(
-                    "{path}: changed while the call ran, and {operation} in progress in this \
-                     checkout has staged it, so it is kept as it stands for the operation's \
-                     commit; {before}"
+                let why = format!(
+                    "{operation} in progress in this checkout has staged it, so it is kept as \
+                     it stands for the operation's commit"
                 );
-                (Verdict::Kept, said)
+                (
+                    Verdict::Kept,
+                    format!("{path}: {}", kept_words(&why, was.as_deref())),
+                )
             } else if writes {
                 let what = restore(&guarded.checkout, path, was.as_deref(), now.as_deref());
                 (Verdict::PutBack, format!("{} {path}: {what}", guarded.text))
             } else {
+                let why = "its line cannot write it, so it is kept as it stands: a person's \
+                           edit, or a write the line does not show";
                 (
                     Verdict::Kept,
-                    format!("{path}: {}", kept_words(was.as_deref())),
+                    format!("{path}: {}", kept_words(why, was.as_deref())),
                 )
             };
             moved.push(Moved {
@@ -312,11 +319,11 @@ pub(super) fn written(root: &Path, call: &Call, line: &argv::Line) -> (PathBuf, 
     let Ok(Some(guarded)) = guard(&checkout) else {
         return (checkout, Vec::new());
     };
-    let cwd = call.cwd.as_deref().map_or(root, Path::new);
+    let cwd = shell_at(call, root, line);
     let paths = guarded
         .blobs
         .into_keys()
-        .filter(|path| writes::can_write(line, &OnDisk::new(cwd, &checkout, path)))
+        .filter(|path| writes::can_write(line, &OnDisk::new(&cwd, &checkout, path)))
         .collect();
     (checkout, paths)
 }
@@ -337,14 +344,13 @@ fn approved(checkout: &Path, path: &str, was: Option<&str>, call: &Call) -> Opti
         .admits(Path::new(path), before.as_deref(), now.as_deref())
 }
 
-/// What a file the line cannot write says when it moved: kept, why, and
-/// where what it was before stands.
-fn kept_words(was: Option<&str>) -> String {
+/// What a kept file says when it moved: `why` it is kept, and where what
+/// it was before stands.
+fn kept_words(why: &str, was: Option<&str>) -> String {
     let before = kept::before_the_call(was);
     format!(
-        "changed while the call ran, and its line cannot write it, so it is kept as it stands: \
-         a person's edit, or a write the line does not show; {before}; until a person commits \
-         it or restores it to HEAD, `done` lists it as unmet"
+        "changed while the call ran, and {why}; {before}; until a person commits it or \
+         restores it to HEAD, `done` lists it as unmet"
     )
 }
 
@@ -538,9 +544,16 @@ fn runs_steer(command: &str) -> bool {
 /// The one checkout a call is held in: the one it ran in, its workspace
 /// moved by a leading `cd` ([`operation::ran_in`]), and never the hook's
 /// own where the call ran elsewhere (#2597).
-fn ran_in(root: &Path, call: &Call) -> PathBuf {
+fn held(root: &Path, call: &Call) -> PathBuf {
     let line = call.command().map(argv::Line::read);
     operation::ran_in(&call.workspace(root), line.as_ref())
+}
+
+/// Where the line's shell stands, which its words are read against: the
+/// call's `cwd`, or `checkout` where it carries none, moved by a leading
+/// `cd` ([`runs_in`]).
+fn shell_at(call: &Call, checkout: &Path, line: &argv::Line) -> PathBuf {
+    runs_in(call.cwd.as_deref().map_or(checkout, Path::new), Some(line))
 }
 
 /// The rule's text and the blob of every tracked file it scopes and does
