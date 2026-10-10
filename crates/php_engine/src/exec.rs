@@ -404,6 +404,12 @@ impl ExtraNamed {
         rows
     }
 
+    /// Whether a row or a table stands, which is
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`.
+    pub(crate) fn carries_any(&self) -> bool {
+        self.0.is_some()
+    }
+
     /// The rows moved out, the table left where it stands.
     pub(crate) fn take_rows(&mut self) -> Vec<(PhpString, Value)> {
         self.0

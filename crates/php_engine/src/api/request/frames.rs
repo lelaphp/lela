@@ -656,13 +656,14 @@ impl Request {
             .at(frame)
             .and_then(|state| exec::body_of(&state.unit, state.body))
             .map_or(slots, |code| code.num_cvs as usize);
-        for at in 0..slots {
-            let value = self.take_slot(frame, u32::try_from(at).unwrap_or(u32::MAX));
+        let mut from = 0;
+        while let Some((at, value)) = self.take_next_owner(frame, from) {
             if at < cvs {
                 self.release(value);
             } else {
                 self.release_nogc(value);
             }
+            from = at.saturating_add(1);
         }
         self.free_rebuilt_table(frame);
         // A generator's frame leaves its closure to the generator
@@ -691,6 +692,23 @@ impl Request {
                 self.release(closure.as_value());
             }
         }
+    }
+
+    /// The first slot of `frame` from `from` on that holds an owner, and
+    /// what it held, the slot left `UNDEF`: the walk of a frame being
+    /// popped, which gives up each owner in slot order, the frame looked
+    /// up again after each release since the release may serve PHP
+    /// code. A slot that owns nothing is passed over in the same lookup
+    /// and left as it stands, as `i_free_compiled_variables` passes over
+    /// what `Z_REFCOUNTED_P` refuses.
+    fn take_next_owner(&mut self, frame: FrameRef, from: usize) -> Option<(usize, Value)> {
+        let slots = self.stack.frame_mut(frame)?.slots_mut();
+        let (at, cell) = slots
+            .iter_mut()
+            .enumerate()
+            .skip(from)
+            .find(|(_, cell)| cell.is_refcounted())?;
+        Some((at, Value::of_zval(std::mem::replace(cell, Zval::UNDEF))))
     }
 
     /// The value in a slot of `frame`, a view of it: `ZVAL_COPY_VALUE`,
@@ -846,7 +864,13 @@ impl Request {
 
     /// `zend_free_extra_named_params`: each name and value of a call's
     /// or a frame's extra named arguments given up.
+    /// A call or a frame that carries none, nearly every one, is told
+    /// apart where the caller stands and gives up nothing.
+    #[inline]
     pub(crate) fn release_named(&mut self, named: exec::ExtraNamed) {
+        if !named.carries_any() {
+            return;
+        }
         for (name, value) in named.free(self) {
             self.release(Value::string(name));
             self.release(value);
