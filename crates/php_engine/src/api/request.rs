@@ -555,6 +555,32 @@ pub(crate) struct UserFunction {
     /// from the declaration's attributes, decoded where the function is
     /// declared.
     pub(crate) flags: crate::attributes::Flags,
+    /// What every call's frame push reads of the declaration, read off
+    /// it once where the function is declared ([`Arity`]).
+    pub(crate) arity: Arity,
+}
+
+/// `op_array.num_args` and `ZEND_ACC_HAS_TYPE_HINTS`: how many
+/// parameters a declaration has before a variadic, and whether any of
+/// them declares a type, which `i_init_func_execute_data` reads off the
+/// function to place a call's arguments and to choose the `RECV*` it
+/// skips (design §5.6). php's compiler writes both onto the op array;
+/// the engine reads them off the declaration where the function is
+/// declared, so a call reads two fields and walks no parameter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Arity {
+    pub(crate) parameters: u32,
+    pub(crate) typed: bool,
+}
+
+impl Arity {
+    pub(crate) fn of(decl: &FunctionDecl) -> Arity {
+        let declared = decl.parameters.iter().filter(|p| !p.variadic).count();
+        Arity {
+            parameters: u32::try_from(declared).unwrap_or(u32::MAX),
+            typed: decl.parameters.iter().any(|p| p.ty.is_some()),
+        }
+    }
 }
 
 /// A method as its class holds it: the class, `common.scope`, and
@@ -679,7 +705,7 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
             .dynamic
             .get(usize::try_from(at).ok()?)
             .map(|(decl, _)| decl),
-        exec::Body::Main | exec::Body::Method { .. } | exec::Body::Hook { .. } => None,
+        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => None,
     }
 }
 

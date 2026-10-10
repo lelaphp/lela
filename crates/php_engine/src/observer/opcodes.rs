@@ -175,8 +175,11 @@ pub(crate) trait Telling: Copy {
     fn of(req: &Request) -> Self;
 
     /// The loop's home: the observers of `opcode` told of the opline
-    /// `frame` stands at, before its handler runs.
-    fn before(self, req: &mut Request, frame: FrameRef, opcode: Opcode);
+    /// `frame` stands at, `at`, before its handler runs. The loop holds
+    /// the position in its own hand ([`crate::tier::Next`]), so a loop
+    /// that tells writes it to the frame first, where an observer reads
+    /// it.
+    fn before(self, req: &mut Request, frame: FrameRef, at: u32, opcode: Opcode);
 }
 
 /// The loop of an engine where no extension declared an opcode: it
@@ -195,7 +198,7 @@ impl Telling for Untold {
 
     #[inline(always)] // as `of`
     #[allow(clippy::inline_always)]
-    fn before(self, _: &mut Request, _: FrameRef, _: Opcode) {}
+    fn before(self, _: &mut Request, _: FrameRef, _: u32, _: Opcode) {}
 }
 
 /// The loop of an engine where an extension declared an opcode: the
@@ -214,8 +217,9 @@ impl Telling for Declared {
 
     #[inline(always)] // the loop pays a test and a branch, never a call
     #[allow(clippy::inline_always)]
-    fn before(self, req: &mut Request, frame: FrameRef, opcode: Opcode) {
+    fn before(self, req: &mut Request, frame: FrameRef, at: u32, opcode: Opcode) {
         if self.0.contains(opcode) {
+            req.vm_mut().stand(frame, at);
             tell(req, frame, opcode);
         }
     }
@@ -230,7 +234,8 @@ impl Telling for Declared {
 #[inline(always)] // as `Telling::before`
 #[allow(clippy::inline_always)]
 pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {
-    Declared::of(req).before(req, frame, opcode);
+    let at = req.vm().opline(frame);
+    Declared::of(req).before(req, frame, at, opcode);
 }
 
 /// php's `ZEND_USER_OPCODE` handler up to its dispatch: the chain of

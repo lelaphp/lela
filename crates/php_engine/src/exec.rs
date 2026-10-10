@@ -30,22 +30,41 @@ use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 /// one of the unit's functions, the body of a function no name bound
 /// while the file compiled and a `DECLARE_FUNCTION` bound where it
 /// stands ([`Unit::dynamic`]), the body of one of its classes'
-/// methods, or of one of their properties' hooks ([`Unit::hooks`]),
-/// each by index, as `EX(func)` names one `zend_op_array`.
+/// methods ([`Unit::methods`]), or of one of their properties' hooks
+/// ([`Unit::hooks`]), each by its place in the table that holds it, as
+/// `EX(func)` points at one `zend_op_array`: reading the op array is
+/// one index, never a search. A method's or a hook's place is found
+/// once, where its class binds it ([`Body::method`], [`Body::hook`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Body {
     Main,
     Function(u32),
     Dynamic(u32),
-    Method {
-        class: u32,
-        method: u32,
-    },
-    Hook {
-        class: u32,
-        property: u32,
-        kind: HookKind,
-    },
+    Method(u32),
+    Hook(u32),
+}
+
+impl Body {
+    /// The body of method `method` of class `class` of `unit`, by its
+    /// place among the unit's method bodies; none where the class
+    /// declares no body for it.
+    pub(crate) fn method(unit: &Unit, class: u32, method: u32) -> Option<Body> {
+        let at = unit
+            .methods
+            .iter()
+            .position(|m| m.class == class && m.method == method)?;
+        u32::try_from(at).ok().map(Body::Method)
+    }
+
+    /// The body of the `kind` hook of property `property` of class
+    /// `class` of `unit`, by its place among the unit's hook bodies.
+    pub(crate) fn hook(unit: &Unit, class: u32, property: u32, kind: HookKind) -> Option<Body> {
+        let at = unit
+            .hooks
+            .iter()
+            .position(|h| h.class == class && h.property == property && h.kind == kind)?;
+        u32::try_from(at).ok().map(Body::Hook)
+    }
 }
 
 /// Which construct an `INCLUDE_OR_EVAL` is, php's `ZEND_INCLUDE`,
@@ -306,37 +325,41 @@ pub(crate) const OP_ARRAY_SIZE: usize = 256;
 /// request's heap, `zend_new_array(0)`'s 56 bytes and the bucket and
 /// hash data `zend_hash_real_init_mixed` lays at eight rows and
 /// `zend_hash_do_resize` doubles, so a frame that carries them, and a
-/// throw it meets, peaks at php's sizes. The rows read as the `Vec`
-/// they are; [`ExtraNamed::lay`] grows the table to hold them.
+/// throw it meets, peaks at php's sizes. The rows read as the slice
+/// they are; [`ExtraNamed::rows_mut`] takes one more and
+/// [`ExtraNamed::lay`] grows the table to hold them. A call or a frame
+/// with none, which is nearly every one, holds one empty word, as php's
+/// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS` bit is clear and the pointer
+/// unread, so pushing and popping it moves and frees nothing.
 #[derive(Default)]
-pub(crate) struct ExtraNamed {
+pub(crate) struct ExtraNamed(Option<Box<Named>>);
+
+/// The rows and the table of an [`ExtraNamed`] that holds any.
+#[derive(Default)]
+struct Named {
     rows: Vec<(PhpString, Value)>,
-    /// The `HashTable` and its data at `nTableSize` rows.
     table: Option<(php_heap::Block, php_heap::Block, usize)>,
 }
 
 impl ExtraNamed {
-    /// These rows with a table laid for them, `zend_handle_named_arg`
-    /// over each in turn.
+    /// `rows` with the table laid to hold them ([`ExtraNamed::lay`]).
     pub(crate) fn laid(
         req: &mut Request,
         rows: Vec<(PhpString, Value)>,
     ) -> Result<ExtraNamed, Thrown> {
-        let mut named = ExtraNamed { rows, table: None };
+        let mut named = ExtraNamed(Some(Box::new(Named { rows, table: None })));
         named.lay(req)?;
         Ok(named)
     }
 
-    /// The table grown to hold the rows: `zend_new_array(0)` and
-    /// `zend_hash_real_init_mixed`'s `HT_SIZE_EX(8, -16)` for the first,
-    /// and the next doubling allocated before the old one is freed, as
-    /// `zend_hash_do_resize` copies, for a row past `nTableSize`. A
-    /// `Bucket` is 32 bytes and each row two hash slots of 4.
+    /// The table on the request's heap grown to hold every row:
+    /// `zend_new_array(0)` and `zend_hash_real_init_mixed` at the first
+    /// row, `zend_hash_do_resize` each time the rows pass its size.
     pub(crate) fn lay(&mut self, req: &mut Request) -> Result<(), Thrown> {
-        if self.rows.is_empty() {
+        let Some(named) = self.0.as_deref_mut().filter(|named| !named.rows.is_empty()) else {
             return Ok(());
-        }
-        let (head, mut data, mut size) = if let Some(table) = self.table.take() {
+        };
+        let (head, mut data, mut size) = if let Some(table) = named.table.take() {
             table
         } else {
             let head = req.heap_mut().block(56);
@@ -344,49 +367,76 @@ impl ExtraNamed {
             let data = req.heap_mut().block(8 * 40);
             (head, req.fatal_of(data)?, 8)
         };
-        while self.rows.len() > size {
+        while named.rows.len() > size {
             size <<= 1;
             let grown = req.heap_mut().block(size * 40);
             let grown = req.fatal_of(grown)?;
             req.heap_mut()
                 .free_block(std::mem::replace(&mut data, grown));
         }
-        self.table = Some((head, data, size));
+        named.table = Some((head, data, size));
         Ok(())
     }
 
-    /// The table alone taken off, the rows left: what `RECV_VARIADIC`
-    /// hands an untyped variadic with no positional extras as its
-    /// array, `ZVAL_ARR(params, EX(extra_named_params))`, which the
-    /// engine's collected array stands for.
+    /// The table alone, its rows left here: what a frame hands on where
+    /// the rows move into a variadic's array and php's table stands until
+    /// the frame is freed.
     pub(crate) fn take_table(&mut self) -> ExtraNamed {
-        ExtraNamed {
-            rows: Vec::new(),
-            table: self.table.take(),
-        }
+        let table = self.0.as_deref_mut().and_then(|named| named.table.take());
+        ExtraNamed(table.map(|table| {
+            Box::new(Named {
+                rows: Vec::new(),
+                table: Some(table),
+            })
+        }))
     }
 
-    /// `zend_array_destroy` of the table: its data, then the 56 bytes;
-    /// the rows handed back for their owners to be given up.
+    /// The rows, to be given up by the caller, the table freed.
     pub(crate) fn free(self, req: &mut Request) -> Vec<(PhpString, Value)> {
-        if let Some((head, data, _)) = self.table {
+        let Some(named) = self.0 else {
+            return Vec::new();
+        };
+        let Named { rows, table } = *named;
+        if let Some((head, data, _)) = table {
             req.heap_mut().free_block(data);
             req.heap_mut().free_block(head);
         }
-        self.rows
+        rows
+    }
+
+    /// Whether a row or a table stands, which is
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`.
+    pub(crate) fn carries_any(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// The rows moved out, the table left where it stands.
+    pub(crate) fn take_rows(&mut self) -> Vec<(PhpString, Value)> {
+        self.0
+            .as_deref_mut()
+            .map(|named| std::mem::take(&mut named.rows))
+            .unwrap_or_default()
+    }
+
+    /// The rows to add one to.
+    pub(crate) fn rows_mut(&mut self) -> &mut Vec<(PhpString, Value)> {
+        &mut self.0.get_or_insert_with(Box::default).rows
     }
 }
 
 impl std::ops::Deref for ExtraNamed {
-    type Target = Vec<(PhpString, Value)>;
+    type Target = [(PhpString, Value)];
+
     fn deref(&self) -> &Self::Target {
-        &self.rows
+        self.0.as_deref().map_or(&[], |named| named.rows.as_slice())
     }
 }
 
 impl std::ops::DerefMut for ExtraNamed {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.rows
+        self.0
+            .as_deref_mut()
+            .map_or(&mut [], |named| named.rows.as_mut_slice())
     }
 }
 
@@ -510,6 +560,53 @@ pub(crate) struct FrameState {
     /// `execute_data` is one, and a frame pushed later where this one
     /// stood has none or another.
     pub(crate) identity: Cell<Option<crate::api::request::Identity>>,
+}
+
+/// What a push lays down in a frame's state, all of it at once:
+/// `zend_vm_stack_push_call_frame` and `i_init_func_execute_data` for a
+/// function's frame, `i_init_code_execute_data` for a file's. The fields
+/// are [`FrameState`]'s of the same names; [`Activation::of`] is a
+/// file's main op array with nothing carried over, and a push names
+/// what differs from it.
+pub(crate) struct Activation {
+    pub(crate) unit: Arc<Unit>,
+    pub(crate) body: Body,
+    pub(crate) function: Option<Function>,
+    pub(crate) opline: u32,
+    pub(crate) receiver: Option<Receiver>,
+    pub(crate) called_scope: Option<ClassId>,
+    pub(crate) scope: Option<ClassId>,
+    pub(crate) symbol_table: Option<TableId>,
+    pub(crate) closure: Option<PhpObject>,
+    pub(crate) num_args: u32,
+    pub(crate) extra_args: Vec<Value>,
+    pub(crate) extra_named: ExtraNamed,
+    pub(crate) returns_to: Option<(FrameRef, u32)>,
+    pub(crate) caller: Caller,
+}
+
+impl Activation {
+    /// `body` of `unit` at its first opline, with no function, receiver,
+    /// scope, table, closure or argument, returning to no slot, pushed
+    /// from outside the loop.
+    pub(crate) fn of(unit: Arc<Unit>, body: Body) -> Activation {
+        Activation {
+            unit,
+            body,
+            function: None,
+            opline: 0,
+            receiver: None,
+            called_scope: None,
+            scope: None,
+            symbol_table: None,
+            closure: None,
+            num_args: 0,
+            extra_args: Vec::new(),
+            extra_named: ExtraNamed::default(),
+            returns_to: None,
+            caller: Caller::Outside,
+        }
+    }
 }
 
 /// One op array's runtime cache for one request, what
@@ -823,6 +920,12 @@ pub(crate) struct Vm {
     /// The switches standing, `EG(current_execute_data)` moved below the
     /// innermost frame.
     switches: Vec<Switch>,
+    /// The argument lists of calls already served, emptied, each kept
+    /// for the next call to place its arguments in: php places a call's
+    /// arguments in its frame on the VM stack and allocates nothing for
+    /// them, and this keeps a call from asking the system allocator for
+    /// its list ([`Vm::building_call`], [`Vm::keep_arguments`]).
+    spare_arguments: Vec<Vec<Value>>,
     /// How many times a kernel has looked a name up among the linked
     /// functions, the linked classes or a receiver's methods, which is
     /// what a primed cache slot spares: the tests count it across two
@@ -1001,50 +1104,46 @@ impl Vm {
         self.placeholders.pop();
     }
 
-    /// Push one frame's state; its place is the `FrameRef` the VM stack
-    /// gave the frame, and the two are pushed and popped together. The
-    /// slots are the stack's, every one `IS_UNDEF` until an opline
-    /// writes it (`i_init_func_execute_data`), which is what a read of
-    /// a CV warns of.
-    pub(crate) fn push(&mut self, unit: Arc<Unit>) {
-        self.push_body(unit, Body::Main, None, None, None, 0, None, Caller::Outside);
-    }
-
-    /// Push the state of a frame serving `body` of `unit`: the function
-    /// it is, its receiver and called scope, how many arguments the
-    /// call placed, where the caller wants what it returns, and the
-    /// frame whose opline pushed the call
-    /// (`zend_vm_stack_push_call_frame` with `i_init_func_execute_data`'s
-    /// fields filled).
-    #[allow(clippy::too_many_arguments)] // the frame header's fields, each one fact
-    pub(crate) fn push_body(
-        &mut self,
-        unit: Arc<Unit>,
-        body: Body,
-        function: Option<Function>,
-        receiver: Option<Receiver>,
-        called_scope: Option<ClassId>,
-        num_args: u32,
-        returns_to: Option<(FrameRef, u32)>,
-        caller: Caller,
-    ) {
+    /// Push one frame's state, laid down whole from `activation`; its
+    /// place is the `FrameRef` the VM stack gave the frame, and the two
+    /// are pushed and popped together. The slots are the stack's, every
+    /// one `IS_UNDEF` until an opline or a placed argument writes it
+    /// (`i_init_func_execute_data`), which is what a read of a CV warns
+    /// of.
+    pub(crate) fn push(&mut self, activation: Activation) {
+        let Activation {
+            unit,
+            body,
+            function,
+            opline,
+            receiver,
+            called_scope,
+            scope,
+            symbol_table,
+            closure,
+            num_args,
+            extra_args,
+            extra_named,
+            returns_to,
+            caller,
+        } = activation;
         let runtime_cache = body_of(&unit, body).map_or(MapPtr::new(0), runtime_cache_of);
         let calls_below = u32::try_from(self.calls.len()).unwrap_or(u32::MAX);
         self.frames.push(FrameState {
             unit,
             body,
             function,
-            opline: 0,
+            opline,
             returns_to,
             caller,
             receiver,
             called_scope,
-            scope: None,
-            symbol_table: None,
-            closure: None,
+            scope,
+            symbol_table,
+            closure,
             num_args,
-            extra_args: Vec::new(),
-            extra_named: ExtraNamed::default(),
+            extra_args,
+            extra_named,
             calls_below,
             leaving: false,
             at_exception_op: false,
@@ -1224,9 +1323,13 @@ impl Vm {
         }
     }
 
-    /// `ZEND_VM_SET_OPCODE`: the frame stands at `at`, which is where a
-    /// jump leaves it.
-    pub(crate) fn jump(&mut self, frame: FrameRef, at: u32) {
+    /// `EX(opline) = opline`, php's `SAVE_OPLINE()`: the frame's state
+    /// records that it stands at `at`. The loop holds the position of
+    /// the frame it executes in its own hand ([`crate::tier::Next`]) and
+    /// writes it here where something outside the loop can read it; a
+    /// frame the loop is not executing, a caller under a call or a
+    /// generator's, is moved here directly.
+    pub(crate) fn stand(&mut self, frame: FrameRef, at: u32) {
         if let Some(state) = self.at_mut(frame) {
             state.opline = at;
         }
@@ -1243,9 +1346,31 @@ impl Vm {
         self.calls.push(call);
     }
 
-    /// The call the `SEND_*` oplines are placing arguments into.
+    /// The argument list of a call whose arguments have been given up
+    /// or handed on, kept empty for the next call to place its arguments
+    /// in ([`Vm::building_call`]). A list that never held one is nothing
+    /// to keep, and one longer than a call ordinarily passes is let go,
+    /// so a call that spread a large array keeps nothing of it.
+    pub(crate) fn keep_arguments(&mut self, mut arguments: Vec<Value>) {
+        const KEPT: usize = 16;
+        arguments.clear();
+        if (1..=KEPT).contains(&arguments.capacity()) {
+            self.spare_arguments.push(arguments);
+        }
+    }
+
+    /// The call the `SEND_*` oplines are placing arguments into, its
+    /// argument list one an earlier call left ([`Vm::keep_arguments`])
+    /// where it has none yet, so placing a call's first argument asks
+    /// the system allocator for nothing.
     pub(crate) fn building_call(&mut self) -> Option<&mut CallState> {
-        self.calls.last_mut()
+        let call = self.calls.last_mut()?;
+        if call.arguments.capacity() == 0
+            && let Some(spare) = self.spare_arguments.pop()
+        {
+            call.arguments = spare;
+        }
+        Some(call)
     }
 
     /// The callee of the call being built, which a `SEND_*_EX` reads the
@@ -1369,20 +1494,8 @@ pub(crate) fn body_of(unit: &Unit, body: Body) -> Option<&OpArray> {
         Body::Main => Some(&unit.main),
         Body::Function(at) => unit.functions.get(at as usize).map(|(_, code)| code),
         Body::Dynamic(at) => unit.dynamic.get(at as usize).map(|(_, code)| code),
-        Body::Method { class, method } => unit
-            .methods
-            .iter()
-            .find(|m| m.class == class && m.method == method)
-            .map(|m| &m.body),
-        Body::Hook {
-            class,
-            property,
-            kind,
-        } => unit
-            .hooks
-            .iter()
-            .find(|h| h.class == class && h.property == property && h.kind == kind)
-            .map(|h| &h.body),
+        Body::Method(at) => unit.methods.get(at as usize).map(|m| &m.body),
+        Body::Hook(at) => unit.hooks.get(at as usize).map(|h| &h.body),
     }
 }
 
@@ -1990,18 +2103,45 @@ pub(crate) fn skipped_recv(passed: u32, parameters: u32, typed: bool, entry: u32
 /// float(2.5)
 /// string(1) "7"
 /// ```
+#[inline]
 pub(crate) fn parameter_prologue(
     req: &mut Request,
     callee: FrameRef,
-    body: &OpArray,
 ) -> Result<Option<FrameRef>, php_heap::Fatal> {
-    let entry = body.safepoints.first().map_or(0, |at| at.0);
-    while req.vm().opline(callee) < entry {
-        let Some(prologue) = opline_at(body, req.vm().opline(callee)) else {
+    // A frame whose push skipped every `RECV*` stands at its entry
+    // already, which is told where the caller stands, and its op array
+    // is not held for a run of none.
+    let state = req.vm().at(callee);
+    let body = state.and_then(|state| body_of(&state.unit, state.body));
+    let entry = body
+        .and_then(|body| body.safepoints.first())
+        .map_or(0, |at| at.0);
+    if state.is_none_or(|state| state.opline >= entry) {
+        return Ok(None);
+    }
+    prologue_from(req, callee, entry)
+}
+
+/// The `RECV*` oplines of [`parameter_prologue`], up to the entry
+/// safepoint at `entry`.
+#[inline(never)]
+fn prologue_from(
+    req: &mut Request,
+    callee: FrameRef,
+    entry: u32,
+) -> Result<Option<FrameRef>, php_heap::Fatal> {
+    let serving = standing(req, callee)?;
+    let body = serving_code(&serving, callee)?;
+    loop {
+        let at = req.vm().opline(callee);
+        if at >= entry {
+            break;
+        }
+        let Some(prologue) = opline_at(body, at) else {
             break;
         };
         crate::observer::tell_before(req, callee, prologue.opcode);
-        let stepped = match prologue.opcode {
+        let next = match prologue.opcode {
             php_unit::Opcode::Recv => {
                 crate::handlers::recv::<crate::tier::Nop>(req, callee, body, prologue)?
             }
@@ -2018,7 +2158,9 @@ pub(crate) fn parameter_prologue(
                 )));
             }
         };
-        if let crate::tier::Stepped::Threw(at) = stepped {
+        // The frame is not the loop's yet, so where a `RECV` leaves it is
+        // written to its state, which the next one and the activation read.
+        if let crate::tier::Stepped::Threw(at) = crate::tier::settled(req, callee, at, next) {
             return Ok(Some(at));
         }
     }

@@ -767,7 +767,7 @@ impl Request {
                         state.this(),
                         self.closure_scope(state.closure),
                         arguments,
-                        state.extra_named.clone(),
+                        state.extra_named.to_vec(),
                         site.clone(),
                     ));
                     // `fake_frame`: a function served from outside the
@@ -805,7 +805,7 @@ impl Request {
                         call.this(),
                         self.closure_scope(call.closure),
                         call.arguments.clone(),
-                        call.extra_named.clone(),
+                        call.extra_named.to_vec(),
                         site,
                     ));
                 }

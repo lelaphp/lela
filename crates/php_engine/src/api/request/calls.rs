@@ -682,13 +682,7 @@ impl Request {
         // php runs is run, which is where a declared parameter type is
         // checked and a scalar argument coerced, and the entry
         // safepoint is raised after them by the loop below.
-        let serving = self.vm.serving(frame);
-        let raised = match serving.as_ref().and_then(crate::exec::Serving::code) {
-            Some(body) => crate::exec::parameter_prologue(self, frame, body),
-            None => Err(Fatal::Error(String::from(
-                "InternalError: the frame just pushed names a body the unit has not",
-            ))),
-        };
+        let raised = crate::exec::parameter_prologue(self, frame);
         let raised = match self.fatal_of(raised) {
             Ok(raised) => raised,
             Err(thrown) => {

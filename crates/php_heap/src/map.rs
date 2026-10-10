@@ -4,7 +4,7 @@
 //! touch. This is `ZEND_MAP_PTR`, and it is what makes a published unit
 //! `Sync` by construction.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::ptr;
 
@@ -41,10 +41,20 @@ impl<T> MapPtr<T> {
 }
 
 /// One request's per-request state for every published structure it has
-/// touched, indexed by [`MapPtr`].
+/// touched, indexed by [`MapPtr`]. Each touched entry is the `T` behind
+/// one box, beside the `TypeId` of the `T`, so that reading it is a
+/// compare with a constant and no call through the box's table, as php's
+/// `ZEND_MAP_PTR_GET` is one load.
 #[derive(Debug, Default)]
 pub struct MapTable {
-    entries: Vec<Option<Box<dyn std::any::Any + Send>>>,
+    entries: Vec<Option<Entry>>,
+}
+
+/// One touched entry: the `TypeId` of what the box holds, and the box.
+#[derive(Debug)]
+struct Entry {
+    of: TypeId,
+    value: Box<dyn Any + Send>,
 }
 
 impl MapTable {
@@ -65,10 +75,15 @@ impl MapTable {
     /// it, and none where it has not.
     #[must_use]
     pub fn get<T: 'static>(&self, ptr: MapPtr<T>) -> Option<&T> {
-        self.entries
-            .get(ptr.offset() as usize)?
-            .as_ref()?
-            .downcast_ref::<T>()
+        let entry = self.entries.get(ptr.offset() as usize)?.as_ref()?;
+        if entry.of != TypeId::of::<T>() {
+            return None;
+        }
+        let raw = ptr::from_ref::<dyn Any + Send>(entry.value.as_ref()).cast::<T>();
+        // SAFETY: `of` is the `TypeId` of what the box was made over, in
+        // `map`, the one writer, and it is `T`'s, so the cast names the
+        // `T` the box owns; the borrow lives as long as the table's.
+        Some(unsafe { &*raw })
     }
 
     /// The `T` at `ptr`, built by `T::default()` on first touch.
@@ -77,14 +92,17 @@ impl MapTable {
         if self.entries.len() <= at {
             self.entries.resize_with(at + 1, || None);
         }
-        let boxed = match &mut self.entries[at] {
-            Some(boxed) if boxed.is::<T>() => boxed,
-            slot => slot.insert(Box::new(T::default())),
+        let entry = match &mut self.entries[at] {
+            Some(entry) if entry.of == TypeId::of::<T>() => entry,
+            slot => slot.insert(Entry {
+                of: TypeId::of::<T>(),
+                value: Box::new(T::default()),
+            }),
         };
-        let raw = ptr::from_mut::<dyn Any + Send>(boxed.as_mut()).cast::<T>();
-        // SAFETY: the box holds a `T`: the first arm checked it and the
-        // second wrote one, so the cast names the `T` the box owns and the
-        // borrow lives as long as the table's.
+        let raw = ptr::from_mut::<dyn Any + Send>(entry.value.as_mut()).cast::<T>();
+        // SAFETY: the box holds a `T`: the first arm read its `TypeId`
+        // and the second wrote one, so the cast names the `T` the box
+        // owns and the borrow lives as long as the table's.
         unsafe { &mut *raw }
     }
 }

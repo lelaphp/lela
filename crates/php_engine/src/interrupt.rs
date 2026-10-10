@@ -180,10 +180,17 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 /// ```
 ///
 /// The stress below forks a child straight after each `set_time_limit()`
-/// in eight workers at once. A child not gone within five seconds is
-/// hung, and killed; a fork that failed, or a child or a worker that did
-/// not end with status zero, is counted apart, so neither passes as a
-/// child that did not hang.
+/// in eight workers at once, 25 children at a time. A hung child never
+/// ends and a slow one does, so a child is hung once ten seconds pass in
+/// which no child of its 25 ends: each ending starts the ten seconds
+/// again, and the clock is read only after a poll that found nothing to
+/// reap, so a child that ended while its worker was not running is reaped
+/// rather than counted. A hung child is killed. A fork that failed, or a
+/// child or a worker that did not end with status zero, is counted apart,
+/// so neither passes as a child that did not hang. Five seconds from the
+/// batch's last fork, read before the reaping, was once crossed by 73
+/// children of 15000 at a load of 60, and by none of 1,020,000 read
+/// since at loads to 95, the slowest reaped 0.55 s after its fork (#2371).
 ///
 /// ```php
 /// $tally = [];
@@ -199,11 +206,16 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
 ///             if ($child === 0) { exit(0); }
 ///             if ($child < 0) { $otherwise++; } else { $children[$child] = true; }
 ///         }
-///         $deadline = microtime(true) + 5;
-///         while ($children && microtime(true) < $deadline) {
+///         $quiet = microtime(true) + 10;
+///         while ($children) {
 ///             $gone = pcntl_waitpid(-1, $status, WNOHANG);
-///             if ($gone <= 0) { usleep(1000); continue; }
+///             if ($gone <= 0) {
+///                 if (microtime(true) >= $quiet) { break; }
+///                 usleep(1000);
+///                 continue;
+///             }
 ///             unset($children[$gone]);
+///             $quiet = microtime(true) + 10;
 ///             if (!pcntl_wifexited($status) || pcntl_wexitstatus($status) !== 0) { $otherwise++; }
 ///         }
 ///         foreach ($children as $child => $_) {
