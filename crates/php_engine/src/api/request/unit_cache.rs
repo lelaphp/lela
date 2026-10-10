@@ -455,16 +455,16 @@ impl Request {
         let multibyte = bound.as_ref().map(crate::multibyte::Bound::settings);
         let holds = |name: &[u8]| self.class_named(name).is_some();
         let request_classes = php_compile::RequestClasses::new(&holds);
-        let arena = Arc::clone(&self.arena);
-        let (cached, filed, early) = shared.units.file(
+        let (arena, cwd) = (Arc::clone(&self.arena), &self.cwd);
+        let (compiled, filed, early) = shared.units.file(
             &arena.files,
             asked,
-            |source| {
-                shared.publish_file(source, path, &self.cwd, stack, request_classes, multibyte)
-            },
-            |body| shared.publish_kept(body),
+            |source| shared.compile_file(source, path, cwd, stack, request_classes, multibyte),
+            |body| shared.decode_kept(body),
+            |unit| shared.publish_compiled(unit),
             |unit| self.publish_unit(unit),
         );
+        let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
         }

@@ -1406,6 +1406,20 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<Arc<Unit>, CompileError> {
+        self.compile_shared(source, origin, stack)
+            .map(|unit| self.publish_compiled(unit))
+    }
+
+    /// [`Shared::publish`]'s compile alone: the constant strings in the
+    /// engine's table and no map-pointer offset taken, for a caller that
+    /// decides afterwards whether the unit is published
+    /// ([`Shared::publish_compiled`]) or the request's own.
+    fn compile_shared(
+        &self,
+        source: &[u8],
+        origin: Origin<'_>,
+        stack: StackLimit,
+    ) -> Result<Unit, CompileError> {
         let mut strings = match self.strings.lock() {
             Ok(strings) => strings,
             // The table is append-only and every string in it was
@@ -1413,17 +1427,23 @@ impl Shared {
             // ended holding the lock left is consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        let mut unit = compile(
+        compile(
             source,
             origin,
             self.compile_ini(),
             self.declared(),
             stack,
             &mut *strings,
-        )?;
-        drop(strings);
+        )
+    }
+
+    /// `unit` published for every request: each op array given its
+    /// map-pointer offset ([`assign_map_ptrs`]), which only a unit held
+    /// for more than one request takes, as only what opcache persists
+    /// moves `CG(map_ptr_last)`.
+    pub(crate) fn publish_compiled(&self, mut unit: Unit) -> Arc<Unit> {
         assign_map_ptrs(&mut unit, &self.map_ptr_last);
-        Ok(unit.published())
+        unit.published()
     }
 
     /// One source compiled for one request alone, under the request's
@@ -1547,43 +1567,43 @@ impl Shared {
             levels: crate::unit_cache::Levels::Memory,
         };
         let arena = self.arena.current();
-        self.units
-            .file(
-                &arena.files,
-                asked,
-                |source| {
-                    let multibyte = self.unbound();
-                    self.publish_file(
-                        source,
-                        path,
-                        cwd,
-                        stack,
-                        RequestClasses::default(),
-                        multibyte,
-                    )
-                },
-                |_| None,
-                // No request to publish its early-bound classes for, so
-                // a request that loads it binds them as its own.
-                |_| Arc::new([]),
-            )
-            .0
+        let (compiled, _, _) = self.units.file(
+            &arena.files,
+            asked,
+            |source| {
+                let multibyte = self.unbound();
+                self.compile_file(
+                    source,
+                    path,
+                    cwd,
+                    stack,
+                    RequestClasses::default(),
+                    multibyte,
+                )
+            },
+            |_| None,
+            |unit| self.publish_compiled(unit),
+            // No request to publish its early-bound classes for, so
+            // a request that loads it binds them as its own.
+            |_| Arc::new([]),
+        );
+        // With no request to own it, a unit held nowhere is published
+        // all the same.
+        crate::unit_cache::served(compiled, |unit| self.publish_compiled(unit))
     }
 
-    /// A unit the file cache kept, read back from its bytes and published
-    /// as a compiled one is: its strings and constant arrays laid down in
-    /// the engine's table and its op arrays given their map-pointer
-    /// offsets (design §6.3); none where the bytes are no whole unit.
-    pub(crate) fn publish_kept(&self, body: &[u8]) -> Option<Arc<Unit>> {
+    /// A unit the file cache kept, read back from its bytes as a compiled
+    /// one is: its strings and constant arrays laid down in the engine's
+    /// table, and no map-pointer offset taken until it is held
+    /// ([`Shared::publish_compiled`]); none where the bytes are no whole
+    /// unit.
+    pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
         let mut strings = match self.strings.lock() {
             Ok(strings) => strings,
             // As in `publish`: the table is append-only and consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        let mut unit = crate::unit_cache::decode(body, &mut *strings)?;
-        drop(strings);
-        assign_map_ptrs(&mut unit, &self.map_ptr_last);
-        Some(unit.published())
+        crate::unit_cache::decode(body, &mut *strings)
     }
 
     /// `source`, read from the file `path` names, compiled and published
@@ -1598,7 +1618,22 @@ impl Shared {
         request_classes: RequestClasses<'_>,
         multibyte: Option<Multibyte<'_>>,
     ) -> Result<Arc<Unit>, CompileError> {
-        self.publish(
+        self.compile_file(source, path, cwd, stack, request_classes, multibyte)
+            .map(|unit| self.publish_compiled(unit))
+    }
+
+    /// [`Shared::publish_file`]'s compile alone, which the unit cache
+    /// publishes where it holds the unit and hands its request otherwise.
+    pub(crate) fn compile_file(
+        &self,
+        source: &[u8],
+        path: &[u8],
+        cwd: &Path,
+        stack: StackLimit,
+        request_classes: RequestClasses<'_>,
+        multibyte: Option<Multibyte<'_>>,
+    ) -> Result<Unit, CompileError> {
+        self.compile_shared(
             source,
             Origin {
                 filename: path,
@@ -5653,6 +5688,54 @@ mod tests {
         );
         assert_eq!(body, "23012");
         assert_eq!(count(), before, "the engine's count is where it was");
+    }
+
+    /// A file the unit cache compiles inside `opcache.file_update_protection`
+    /// and holds nowhere is the request's alone, as php keeps a file it
+    /// does not persist in process memory: requests that include it move
+    /// the engine's map-pointer count by nothing, where each moved it by
+    /// its op arrays (GH-8646, #2624). The same file held moves it once,
+    /// at the request that held it.
+    #[test]
+    fn a_file_the_cache_holds_nowhere_moves_the_engine_s_map_pointer_count_by_nothing() {
+        use crate::api::abi::{Admission, ExtensionBuilder, Lookup};
+        let dir = std::env::temp_dir().join(format!("engine-map-ptr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        let file = dir.join("declares.inc");
+        std::fs::write(
+            &file,
+            "<?php class GhMapPtr {} function gh_f() {} return 1;",
+        )
+        .ok();
+        let program = format!("<?php echo include '{}';", file.display());
+        let cache = |admission: fn(&mut Request, &[u8]) -> Admission| {
+            let extension = ExtensionBuilder::default().admission(admission).build("t");
+            Engine::cli_builder().extensions(&[extension]).build()
+        };
+        let count = |engine: &Engine| engine.shared.map_ptr_last.load(Ordering::Relaxed);
+        let protected = cache(|_, _| Admission::Held {
+            validation: Validation::Never,
+            lookup: Lookup::Resolved,
+            protection: 3600,
+            file_cache: None,
+        });
+        let before = count(&protected);
+        let bodies: Vec<String> = (0..3).map(|_| served(&protected, &program).0).collect();
+        assert_eq!(bodies, ["1", "1", "1"]);
+        assert_eq!(count(&protected), before, "nothing held, nothing counted");
+        let holding = cache(|_, _| Admission::Held {
+            validation: Validation::Never,
+            lookup: Lookup::Resolved,
+            protection: 0,
+            file_cache: None,
+        });
+        let before = count(&holding);
+        assert_eq!(served(&holding, &program).0, "1");
+        let after_first = count(&holding);
+        assert_eq!(served(&holding, &program).0, "1");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(after_first > before, "the held file took its offsets");
+        assert_eq!(count(&holding), after_first, "and took them once");
     }
 
     /// What the pinned oracle answers for
