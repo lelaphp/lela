@@ -34,8 +34,9 @@ pub(crate) struct State {
     pub(crate) class_map: Option<Value>,
     /// `features`.
     pub(crate) features: i64,
-    /// `typemap`: the typemap the running call converts under.
-    pub(crate) typemap: Option<Typemap>,
+    /// `typemap`: the typemap the running call converts under, the views
+    /// of the one its client or server holds.
+    pub(crate) typemap: Option<TypemapView>,
     /// `cur_uniq_ns`: the last `nsN` prefix made.
     pub(crate) cur_uniq_ns: i64,
     /// `cur_uniq_ref`: the last `refN` id made.
@@ -76,17 +77,50 @@ impl Default for State {
 }
 
 /// One encoder of a typemap, as `soap_create_typemap` makes it: the
-/// encoder it copies, and the program's `to_xml` and `from_xml`, held by
-/// the client or the server the typemap is an option of.
+/// encoder it copies, and the program's `to_xml` and `from_xml`, an
+/// owner of each where the client or the server the typemap is an option
+/// of holds it ([`Typemap`]), a view where the running call reads it
+/// ([`TypemapView`]).
 #[derive(Debug, Clone)]
-pub(crate) struct TypemapEntry {
+pub(crate) struct TypemapEntry<V = Owner<Value>> {
     pub(crate) enc: Encoder,
-    pub(crate) to_xml: Option<Value>,
-    pub(crate) to_zval: Option<Value>,
+    pub(crate) to_xml: Option<V>,
+    pub(crate) to_zval: Option<V>,
 }
 
-/// A typemap, by `ns:type`.
+/// A typemap, by `ns:type`, as its client or server holds it.
 pub(crate) type Typemap = Table<TypemapEntry>;
+
+/// A typemap as the running call reads it.
+pub(crate) type TypemapView = Table<TypemapEntry<Value>>;
+
+impl Typemap {
+    /// The views the running call reads.
+    pub(crate) fn view(&self) -> TypemapView {
+        self.map(|entry| TypemapEntry {
+            enc: entry.enc.clone(),
+            to_xml: entry.to_xml.as_deref().copied(),
+            to_zval: entry.to_zval.as_deref().copied(),
+        })
+    }
+
+    /// The owners the typemap holds given up, `zend_hash_destroy` with
+    /// `delete_encoder` and its `delete_mapping`.
+    pub(crate) fn release(self, req: &mut Request) {
+        for entry in self.into_values() {
+            entry.release(req);
+        }
+    }
+}
+
+impl TypemapEntry {
+    /// `delete_mapping`: the program's `to_xml` and `from_xml` given up.
+    pub(crate) fn release(self, req: &mut Request) {
+        for v in [self.to_xml, self.to_zval].into_iter().flatten() {
+            v.give_up(req);
+        }
+    }
+}
 
 /// What a layer of this crate raises: a program's throwable, or php's
 /// `soap_error` at `E_ERROR`, carried to the native's boundary and raised

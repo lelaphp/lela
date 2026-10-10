@@ -1462,10 +1462,48 @@ pub(crate) fn type_to_string(sdl: &Sdl, t: &Type, buf: &mut Vec<u8>, level: usiz
 
 // ---- the typemap option
 
+/// The encoder a typemap entry copies, `enc` and `new_enc` of
+/// `soap_create_typemap`: the one the description or the defaults name
+/// for `type_ns:type_name`, or `UNKNOWN_TYPE`'s under that name.
+fn typemap_encoder(sdl: Option<&Sdl>, type_name: &[u8], type_ns: Option<&[u8]>) -> model::Encoder {
+    let found = match type_ns {
+        Some(ns) => crate::sdl::get_encoder(sdl, Some(ns), type_name),
+        None => crate::sdl::get_encoder_ex(sdl, type_name),
+    };
+    if let Some(e) = found.and_then(|f| crate::sdl::encoder(sdl, None, f)) {
+        return model::Encoder {
+            details: model::EncodeType {
+                type_: e.details.type_,
+                type_str: e.details.type_str.clone(),
+                ns: e.details.ns.clone(),
+                clark_notation: None,
+                sdl_type: e.details.sdl_type,
+            },
+            to_zval: e.to_zval,
+            to_xml: e.to_xml,
+        };
+    }
+    let unknown = model::builtin(0).map(model::Builtin::encoder);
+    model::Encoder {
+        details: model::EncodeType {
+            type_: model::ty::UNKNOWN_TYPE,
+            type_str: Some(type_name.to_vec()),
+            ns: type_ns.map(<[u8]>::to_vec),
+            clark_notation: None,
+            sdl_type: None,
+        },
+        to_zval: unknown.as_ref().map_or(model::ToZval::Guess, |u| u.to_zval),
+        to_xml: unknown.as_ref().map_or(model::ToXml::Guess, |u| u.to_xml),
+    }
+}
+
 /// `soap_create_typemap`: each `type_name`/`type_ns` entry of the option
 /// over the encoder it names (or `UNKNOWN_TYPE`'s), its `to_xml` and
 /// `from_xml` replaced by the program's, by `ns:type`; none where the
-/// option yields none.
+/// option yields none. An entry under a key already made replaces it,
+/// whose owners are given up as the table's `delete_encoder` gives them
+/// up; where the walk throws, the entries made before are given up,
+/// where php's `return NULL` leaves its table to the request's end.
 pub(crate) fn soap_create_typemap(
     req: &mut Request,
     sdl: Option<&Sdl>,
@@ -1475,7 +1513,7 @@ pub(crate) fn soap_create_typemap(
     // `ZEND_HASH_FOREACH_VAL(ht, tmp)` (`Z/ext/soap/soap.c:814`), no owner
     // of the table taken: the option's array holds it while a `TypeError`
     // reaches the program's handler.
-    walk::foreach(req, ht, Hold::None, |req, row| -> walk::Step {
+    let walked = walk::foreach(req, ht, Hold::None, |req, row| -> walk::Step {
         let tmp = row.value().deref();
         let ValueRef::Array(entry) = tmp.as_ref() else {
             let given = php_ext::coerce::value_name(req, &tmp);
@@ -1515,52 +1553,22 @@ pub(crate) fn soap_create_typemap(
         let Some(type_name) = type_name else {
             return Ok(ControlFlow::Continue(()));
         };
-        let found = match &type_ns {
-            Some(ns) => crate::sdl::get_encoder(sdl, Some(ns), &type_name),
-            None => crate::sdl::get_encoder_ex(sdl, &type_name),
-        };
-        let mut new_enc = if let Some(e) = found.and_then(|f| crate::sdl::encoder(sdl, None, f)) {
-            model::Encoder {
-                details: model::EncodeType {
-                    type_: e.details.type_,
-                    type_str: e.details.type_str.clone(),
-                    ns: e.details.ns.clone(),
-                    clark_notation: None,
-                    sdl_type: e.details.sdl_type,
-                },
-                to_zval: e.to_zval,
-                to_xml: e.to_xml,
-            }
-        } else {
-            let unknown = model::builtin(0).map(model::Builtin::encoder);
-            model::Encoder {
-                details: model::EncodeType {
-                    type_: model::ty::UNKNOWN_TYPE,
-                    type_str: Some(type_name.clone()),
-                    ns: type_ns.clone(),
-                    clark_notation: None,
-                    sdl_type: None,
-                },
-                to_zval: unknown.as_ref().map_or(model::ToZval::Guess, |u| u.to_zval),
-                to_xml: unknown.as_ref().map_or(model::ToXml::Guess, |u| u.to_xml),
-            }
-        };
+        let mut new_enc = typemap_encoder(sdl, &type_name, type_ns.as_deref());
         if to_xml.is_some() {
             new_enc.to_xml = model::ToXml::User;
         }
         if to_zval.is_some() {
             new_enc.to_zval = model::ToZval::User;
         }
-        for v in [to_xml, to_zval].into_iter().flatten() {
-            req.addref(&v);
-        }
+        let to_xml = to_xml.map(|v| Owner::take(req, v));
+        let to_zval = to_zval.map(|v| Owner::take(req, v));
         let mut key = Vec::new();
         if let Some(ns) = &type_ns {
             key.extend_from_slice(ns);
             key.push(b':');
         }
         key.extend_from_slice(&type_name);
-        typemap.get_or_insert_with(Table::new).update_str(
+        let replaced = typemap.get_or_insert_with(Table::new).update_str(
             &key,
             TypemapEntry {
                 enc: new_enc,
@@ -1568,16 +1576,18 @@ pub(crate) fn soap_create_typemap(
                 to_zval,
             },
         );
+        if let Some(replaced) = replaced {
+            replaced.release(req);
+        }
         Ok(ControlFlow::Continue(()))
-    })?;
-    Ok(typemap)
-}
-
-/// The owners a typemap holds given back.
-pub(crate) fn release_typemap(req: &mut Request, typemap: &Typemap) {
-    for entry in typemap.values() {
-        for v in [entry.to_xml, entry.to_zval].into_iter().flatten() {
-            req.release(v);
+    });
+    match walked {
+        Ok(_) => Ok(typemap),
+        Err(thrown) => {
+            if let Some(typemap) = typemap {
+                typemap.release(req);
+            }
+            Err(thrown)
         }
     }
 }

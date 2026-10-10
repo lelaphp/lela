@@ -206,7 +206,7 @@ pub(crate) struct State {
     cache: Vec<(Vec<u8>, Arc<Compiled>)>,
     /// `search_str`, one owner held; `search_pos`; `search_re`;
     /// `search_regs`.
-    search_str: Option<PhpString>,
+    search_str: Option<Owner<PhpString>>,
     search_pos: usize,
     search_re: Option<Arc<Compiled>>,
     search_regs: Option<Region>,
@@ -254,7 +254,7 @@ pub(crate) fn internal_encoding_changed(req: &mut Request, name: &[u8]) {
 /// back.
 pub(crate) fn rshutdown(req: &mut Request) {
     if let Some(s) = state(req).search_str.take() {
-        req.release(Value::string(s));
+        s.give_up(req);
     }
 }
 
@@ -1042,7 +1042,11 @@ fn search(
         }
     }
     let st = state(req);
-    let (re, pos, subject) = (st.search_re.clone(), st.search_pos, st.search_str);
+    let (re, pos, subject) = (
+        st.search_re.clone(),
+        st.search_pos,
+        st.search_str.as_deref().copied(),
+    );
     let Some(re) = re else {
         return Err(throw_error(req, "Error", "No pattern was provided"));
     };
@@ -1188,9 +1192,9 @@ pub(crate) fn mb_ereg_search_init(
             return Ok(false);
         }
     }
-    req.addref(&Value::string(string));
-    if let Some(old) = state(req).search_str.replace(string) {
-        req.release(Value::string(old));
+    let held = Owner::take(req, string);
+    if let Some(old) = state(req).search_str.replace(held) {
+        old.give_up(req);
     }
     let enc = mbctype(req);
     let valid = check(string.as_bytes(), enc.mbfl);
@@ -1221,9 +1225,11 @@ pub(crate) fn mb_ereg_search_getregs(
     req: &mut Request,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     let st = state(req);
-    let (Some(region), Some(subject), Some(re)) =
-        (st.search_regs.take(), st.search_str, st.search_re.clone())
-    else {
+    let (Some(region), Some(subject), Some(re)) = (
+        st.search_regs.take(),
+        st.search_str.as_deref().copied(),
+        st.search_re.clone(),
+    ) else {
         return Ok(OrFalse::False);
     };
     let found = groups(req, &re, &region, subject.as_bytes(), true);
@@ -1260,6 +1266,7 @@ pub(crate) fn mb_ereg_search_getpos(req: &mut Request) -> i64 {
 pub(crate) fn mb_ereg_search_setpos(req: &mut Request, offset: i64) -> Result<bool, Thrown> {
     let len = state(req)
         .search_str
+        .as_deref()
         .map(|s| i64::try_from(s.len()).unwrap_or(i64::MAX));
     let mut position = offset;
     if position < 0

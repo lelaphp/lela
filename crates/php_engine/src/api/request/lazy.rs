@@ -884,13 +884,13 @@ impl Request {
         &mut self,
         object: PhpObject,
         name: &[u8],
-        value: Option<Value>,
+        value: Option<Owner<Value>>,
     ) -> Result<(), Thrown> {
         let object = self.lazy_reader(object);
         let o = object.heap();
         let Some(slot) = self.prop_slot(object.class(), name) else {
             if let Some(value) = value {
-                self.release(value);
+                value.give_up(self);
             }
             return Ok(());
         };
@@ -914,7 +914,13 @@ impl Request {
             }
             Some(value) => {
                 self.lazy_set_waiting(o, slot, false);
-                let key = self.string(name)?;
+                let key = match self.string(name) {
+                    Ok(key) => key,
+                    Err(thrown) => {
+                        value.give_up(self);
+                        return Err(thrown);
+                    }
+                };
                 let written = self.in_declared_scope(object.class(), name, |req| {
                     // `write_property`'s `found` arm over a slot that
                     // holds a value: an initialised readonly property
@@ -923,13 +929,12 @@ impl Request {
                         && let Some(placed) = req.declared_slot(object.class(), name)
                         && let Some(thrown) = req.found_refusal(o, &placed, name)
                     {
-                        req.release(value);
+                        value.give_up(req);
                         req.release(Value::string(key));
                         return Err(thrown);
                     }
-                    // The handler layer's two owners, named for the write.
-                    let (key, value) = (Owner::adopt(key), Owner::adopt(value));
-                    req.write_std_property(object, key, value)
+                    // The handler layer's key, named for the write.
+                    req.write_std_property(object, Owner::adopt(key), value)
                 });
                 if written.is_err()
                     && was_lazy

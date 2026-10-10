@@ -3,7 +3,7 @@
 
 use php_ext_libxml::ffi::Node;
 
-use crate::Typemap;
+use crate::TypemapView;
 use crate::model::{
     EncNs, EncRef, Encoder, SOAP_1_1_ENC_NAMESPACE, SOAP_1_2_ENC_NAMESPACE, Sdl, TypeId,
     XSD_NAMESPACE, builtin, default_by_name,
@@ -87,7 +87,11 @@ pub(crate) fn get_element(sdl: &Sdl, node: Node, type_: &[u8]) -> Option<TypeId>
 /// The `encode` an `encodePtr` names, as the running call reads it: a
 /// default row (copied under the namespace `get_encoder` asked for), the
 /// description's, or the typemap's.
-pub(crate) fn encoder(sdl: Option<&Sdl>, typemap: Option<&Typemap>, r: EncRef) -> Option<Encoder> {
+pub(crate) fn encoder(
+    sdl: Option<&Sdl>,
+    typemap: Option<&TypemapView>,
+    r: EncRef,
+) -> Option<Encoder> {
     match r {
         EncRef::Default(at) => Some(builtin(at)?.encoder()),
         EncRef::DefaultIn(at, ns) => {

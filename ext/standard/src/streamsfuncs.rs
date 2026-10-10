@@ -256,7 +256,7 @@ fn parse_params(req: &mut Request, res: StreamCtx, params: PhpArray) -> Result<(
                 &format!("be an array with valid callbacks as values, {why}"),
             ));
         }
-        req.addref(&callback);
+        let callback = Owner::take(req, callback);
         res.set_notifier(req, Some((callback, fcc)))?;
     }
     if let Some(options) = params.find(b"options") {

@@ -58,7 +58,7 @@ pub(crate) struct Context {
 /// `PHP_STREAM_NOTIFIER_PROGRESS` in its `mask`; the notifier's own
 /// `ecalloc` on the request's heap.
 struct Notifier {
-    callback: Value,
+    callback: Owner<Value>,
     progress: usize,
     progress_max: usize,
     counting: bool,
@@ -71,7 +71,7 @@ impl Notifier {
     /// `user_space_stream_notifier_dtor`, letting the callable go and
     /// `efree`ing its cache, then the notifier `efree`d.
     fn free(self, req: &mut Request) {
-        req.release(self.callback);
+        self.callback.give_up(req);
         self.fcc.free(req);
         self.allocation.free(req);
     }
@@ -330,7 +330,7 @@ impl StreamCtx {
     /// `None` where the `context` has no notifier.
     #[must_use]
     pub fn notifier(self, req: &Request) -> Option<Value> {
-        Some(self.0.native::<Context>(req)?.notifier.as_ref()?.callback)
+        Some(*self.0.native::<Context>(req)?.notifier.as_ref()?.callback)
     }
 
     /// `context->notifier` replaced: the one there freed first,
@@ -342,7 +342,7 @@ impl StreamCtx {
     pub fn set_notifier(
         self,
         req: &mut Request,
-        notifier: Option<(Value, Emalloc)>,
+        notifier: Option<(Owner<Value>, Emalloc)>,
     ) -> Result<(), Thrown> {
         let old = self
             .0
@@ -357,7 +357,7 @@ impl StreamCtx {
         let allocation = match Emalloc::new(req, NOTIFIER_SIZE) {
             Ok(allocation) => allocation,
             Err(thrown) => {
-                req.release(callback);
+                callback.give_up(req);
                 fcc.free(req);
                 return Err(thrown);
             }
@@ -553,9 +553,9 @@ impl StreamCtx {
         let Some(callback) = self.notifier(req) else {
             return Ok(());
         };
-        req.addref(&callback);
-        let called = call_user_notifier(req, &callback, notice);
-        req.release(callback);
+        let held = Owner::take(req, callback);
+        let called = call_user_notifier(req, &held, notice);
+        held.give_up(req);
         called
     }
 }

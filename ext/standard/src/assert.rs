@@ -386,15 +386,14 @@ fn assert(
             Value::int(line),
             Value::null(),
         ];
-        if let Some(text) = described {
-            let text = Value::string(text);
-            req.addref(&text);
-            arguments.push(text);
+        let described = described.map(|text| Owner::take(req, text));
+        if let Some(text) = &described {
+            arguments.push(Value::string(**text));
         }
         let returned =
             to_callable(req, &callback).and_then(|callable| call(req, &callable, &arguments));
-        for argument in arguments {
-            req.release(argument);
+        if let Some(text) = described {
+            text.give_up(req);
         }
         match returned {
             Ok(returned) => returned.give_up(req),

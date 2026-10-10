@@ -39,7 +39,7 @@ enum Held {
 pub(crate) struct VarHash {
     n: i64,
     seen: Vec<(Held, i64)>,
-    owners: Vec<Value>,
+    owners: Vec<Owner<Value>>,
 }
 
 impl VarHash {
@@ -47,7 +47,7 @@ impl VarHash {
     /// up.
     fn destroy(self, req: &mut Request) {
         for owner in self.owners {
-            req.release(owner);
+            owner.give_up(req);
         }
     }
 }
@@ -258,7 +258,7 @@ impl Serializer {
             return *number;
         }
         self.hash.seen.push((held, self.hash.n));
-        req.addref(&recorded);
+        let recorded = Owner::take(req, recorded);
         self.hash.owners.push(recorded);
         0
     }

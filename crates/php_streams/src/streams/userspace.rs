@@ -67,8 +67,11 @@ enum Called {
 fn defer(req: &mut Request, thrown: Thrown) {
     if req.stream_thrown().is_none() {
         *req.stream_thrown() = Some(thrown);
-    } else if let Some(object) = thrown.exception() {
-        req.release(object.as_value());
+    } else {
+        // A second throwable is given up; a fatal or an exit holds none.
+        match crate::api::raising::clear(req, thrown) {
+            Ok(()) | Err(_) => {}
+        }
     }
 }
 

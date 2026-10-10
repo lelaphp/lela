@@ -293,13 +293,13 @@ fn prop_bytes(
 
 /// `ch->postfields` replaced by `array`, one more owner of it.
 fn keep_postfields(req: &mut Request, object: PhpObject, array: PhpArray) {
-    let value = Value::array(array);
-    req.addref(&value);
-    let old = object
-        .native_mut::<Curl>(req)
-        .and_then(|curl| curl.postfields.replace(value));
+    let held = Owner::take(req, array);
+    let old = match object.native_mut::<Curl>(req) {
+        Some(curl) => curl.postfields.replace(held),
+        None => Some(held),
+    };
     if let Some(old) = old {
-        req.release(old);
+        old.give_up(req);
     }
 }
 

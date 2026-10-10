@@ -115,7 +115,7 @@ pub(crate) struct DbhState {
     /// `dbh->def_stmt_ce`, `None` for `PDOStatement`.
     stmt_class: Option<ClassId>,
     /// `dbh->def_stmt_ctor_args`, one owner.
-    stmt_args: Option<PhpArray>,
+    stmt_args: Option<Owner<PhpArray>>,
     /// `dbh->in_txn`.
     in_txn: bool,
     /// `dbh->is_persistent`: the connection is the engine's pool's, lent
@@ -196,7 +196,7 @@ fn persistent_shutdown(req: &mut Request, dbh: &mut DbhState) {
         stmt.give_up(req);
     }
     if let Some(args) = dbh.stmt_args.take() {
-        req.release(Value::array(args));
+        args.give_up(req);
     }
     if let Conn::Open(conn) = &mut dbh.conn {
         conn.persistent_shutdown(req);
@@ -343,7 +343,7 @@ impl ObjectHandlers for Handlers {
             }
         }
         if let Some(args) = held.1 {
-            req.release(Value::array(args));
+            args.give_up(req);
         }
         for copy in copies {
             copy.free(req);
@@ -354,8 +354,8 @@ impl ObjectHandlers for Handlers {
     /// holds.
     fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
         if let Some(dbh) = state(req, object) {
-            if let Some(args) = dbh.stmt_args {
-                visit(Value::array(args));
+            if let Some(args) = &dbh.stmt_args {
+                visit(Value::array(**args));
             }
             if let Conn::Open(conn) = &dbh.conn {
                 conn.gc(visit);
@@ -1080,16 +1080,16 @@ fn set_statement_class(
         return Ok(false);
     }
     let (class, args) = statement_class(req, value, Some(value_arg))?;
-    let old = dbh_mut(req, object, |d| {
-        d.stmt_class = Some(class);
-        std::mem::replace(&mut d.stmt_args, args)
-    })
-    .flatten();
-    if let Some(args) = args {
-        req.addref(&Value::array(args));
-    }
+    let args = args.map(|args| Owner::take(req, args));
+    let old = match state(req, object) {
+        Some(d) => {
+            d.stmt_class = Some(class);
+            std::mem::replace(&mut d.stmt_args, args)
+        }
+        None => args,
+    };
     if let Some(old) = old {
-        req.release(Value::array(old));
+        old.give_up(req);
     }
     Ok(true)
 }
@@ -1231,14 +1231,14 @@ fn instantiate(
     }
     let stmt = new_object(req, class)?;
     let fetch = dbh_ref(req, dbh, |d| d.default_fetch).unwrap_or(4);
-    req.addref(&dbh.as_value());
+    let held = Owner::take(req, dbh);
     let query = Owner::take(req, query);
     if let Some(s) = stmt.native_mut::<Stmt>(req) {
         s.query = Some(query);
         s.default_fetch = i64::from(fetch);
-        s.dbh = DbLink::Owned(dbh);
+        s.dbh = DbLink::Owned(held);
     } else {
-        req.release(dbh.as_value());
+        held.give_up(req);
         query.give_up(req);
     }
     Ok(stmt)
@@ -1772,7 +1772,7 @@ impl PDO {
                 d.error_mode,
                 d.driver.map(Connector::name),
                 d.stmt_class,
-                d.stmt_args,
+                d.stmt_args.as_deref().copied(),
                 d.default_fetch,
                 d.stringify,
             )
@@ -1933,7 +1933,10 @@ impl PDO {
                 let (class, args) = statement_class(req, &value, None)?;
                 (Some(class), args)
             }
-            None => dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None)),
+            None => dbh_ref(req, this, |d| {
+                (d.stmt_class, d.stmt_args.as_deref().copied())
+            })
+            .unwrap_or((None, None)),
         };
         let owner = instantiate(req, this, class, args.is_some(), query)?;
         let stmt = *owner;
@@ -2003,8 +2006,10 @@ impl PDO {
             return Err(argument_error(req, "ValueError", 1, "must not be empty"));
         }
         clear_error(req, this);
-        let (class, args) =
-            dbh_ref(req, this, |d| (d.stmt_class, d.stmt_args)).unwrap_or((None, None));
+        let (class, args) = dbh_ref(req, this, |d| {
+            (d.stmt_class, d.stmt_args.as_deref().copied())
+        })
+        .unwrap_or((None, None));
         let owner = instantiate(req, this, class, args.is_some(), query)?;
         let stmt = *owner;
         crate::stmt::set_active(req, stmt, None);
@@ -2043,10 +2048,12 @@ impl PDO {
                 Ok(OrFalse::Value(owner.into_instance()))
             }
             Err(thrown) => {
-                if let Some(s) = stmt.native_mut::<Stmt>(req) {
-                    s.dbh = DbLink::Held(this);
+                let link = stmt
+                    .native_mut::<Stmt>(req)
+                    .map(|s| std::mem::replace(&mut s.dbh, DbLink::Held(this)));
+                if let Some(link) = link {
+                    link.release(req);
                 }
-                req.release(this.as_value());
                 let old = dbh_mut(req, this, |d| d.query_stmt.replace(owner)).flatten();
                 if let Some(old) = old {
                     old.give_up(req);

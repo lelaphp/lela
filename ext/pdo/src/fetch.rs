@@ -193,17 +193,26 @@ fn verify(
 
 /// `stmt->fetch`: what the default style fetches with, the column of
 /// `FETCH_COLUMN`, the class and constructor arguments of `FETCH_CLASS`
-/// (one owner of the array), or the object of `FETCH_INTO` (one owner).
-#[derive(Clone, Copy, Default)]
+/// (an owner of the array), or the object of `FETCH_INTO` (an owner).
+#[derive(Default)]
 pub(crate) enum Target {
     #[default]
     None,
     Column(i64),
     Class {
         class: ClassId,
-        args: Option<PhpArray>,
+        args: Option<Owner<PhpArray>>,
     },
-    Into(PhpObject),
+    Into(Owner<PhpObject>),
+}
+
+/// What one fetch reads of the statement's [`Target`], views of what it
+/// owns, copied off the statement before the fetch serves PHP code.
+#[derive(Clone, Copy, Default)]
+struct Aim {
+    column: i64,
+    class: Option<(ClassId, Option<PhpArray>)>,
+    into: Option<PhpObject>,
 }
 
 impl Target {
@@ -212,8 +221,8 @@ impl Target {
         match self {
             Target::Class {
                 args: Some(args), ..
-            } => req.release(Value::array(args)),
-            Target::Into(object) => req.release(object.as_value()),
+            } => args.give_up(req),
+            Target::Into(object) => object.give_up(req),
             _ => {}
         }
     }
@@ -223,16 +232,28 @@ impl Target {
         match self {
             Target::Class {
                 args: Some(args), ..
-            } => visit(Value::array(*args)),
+            } => visit(Value::array(**args)),
             Target::Into(object) => visit(object.as_value()),
             _ => {}
         }
     }
 
-    fn column(self) -> i64 {
+    /// The views a fetch reads.
+    fn aim(&self) -> Aim {
         match self {
-            Target::Column(n) => n,
-            _ => 0,
+            Target::None => Aim::default(),
+            Target::Column(column) => Aim {
+                column: *column,
+                ..Aim::default()
+            },
+            Target::Class { class, args } => Aim {
+                class: Some((*class, args.as_deref().copied())),
+                ..Aim::default()
+            },
+            Target::Into(object) => Aim {
+                into: Some(**object),
+                ..Aim::default()
+            },
         }
     }
 }
@@ -463,8 +484,8 @@ fn shaped(
     grouped: bool,
     with: &With,
 ) -> Result<Fetched, Thrown> {
-    let (default, target) =
-        stmt::read(req, object, |s| (s.default_fetch, s.target)).unwrap_or((4, Target::None));
+    let (default, target) = stmt::read(req, object, |s| (s.default_fetch, s.target.aim()))
+        .unwrap_or((4, Aim::default()));
     let mode = Mode::resolve(how, default);
     let flags = mode.flags;
     if !common(req, object, orientation, offset)? {
@@ -476,7 +497,7 @@ fn shaped(
     match kind {
         Kind::Bound => return Ok(Some((Owner::bool(true), None))),
         Kind::Lazy => return crate::row::lazy(req, object).map(|v| Some((v, None))),
-        Kind::Column => return column_row(req, object, flags, target.column(), grouped),
+        Kind::Column => return column_row(req, object, flags, target.column, grouped),
         _ => {}
     }
     let Some(dbh) = stmt::dbh_of(req, object) else {
@@ -498,7 +519,7 @@ fn made(
     object: PhpObject,
     dbh: PhpObject,
     (kind, flags): (Kind, Flags),
-    target: Target,
+    target: Aim,
     grouped: bool,
     with: &With,
 ) -> Result<Fetched, Thrown> {
@@ -521,10 +542,7 @@ fn made(
             Out::Value(new_object(req, std)?.into_value())
         }
         Kind::Class => {
-            let named = with.class.or(match target {
-                Target::Class { class, args } => Some((class, args)),
-                _ => None,
-            });
+            let named = with.class.or(target.class);
             let Some((instance, ce)) = class_object(req, object, dbh, flags, named, &mut next)?
             else {
                 return Ok(None);
@@ -534,7 +552,7 @@ fn made(
             Out::Value(instance)
         }
         Kind::Into => {
-            let Target::Into(into) = target else {
+            let Some(into) = target.into else {
                 return failed(req, "No fetch-into object specified.");
             };
             Out::Value(Owner::take(req, into.as_value()))
@@ -1218,8 +1236,7 @@ pub(super) fn setup_mode(
                     &format!("must be of type object, {shown} given"),
                 ));
             };
-            req.addref(&into.as_value());
-            Target::Into(into)
+            Target::Into(Owner::take(req, into))
         }
         Some(Kind::Func) | None => {
             return Err(argument_error(
@@ -1230,10 +1247,14 @@ pub(super) fn setup_mode(
             ));
         }
     };
-    stmt::write(req, object, |s| {
-        s.target = target;
-        s.default_fetch = mode;
-    });
+    let target = match object.native_mut::<stmt::Stmt>(req) {
+        Some(s) => {
+            s.default_fetch = mode;
+            std::mem::replace(&mut s.target, target)
+        }
+        None => target,
+    };
+    target.release(req);
     Ok(())
 }
 
@@ -1307,8 +1328,7 @@ fn class_target(
                             "must be empty when class provided in argument #2 ($class) does not have a constructor",
                         ));
                     }
-                    req.addref(extra);
-                    ctor_args = Some(*array);
+                    ctor_args = Some(Owner::take(req, *array));
                 }
             }
             _ => {

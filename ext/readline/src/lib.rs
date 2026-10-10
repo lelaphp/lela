@@ -52,19 +52,21 @@ mod constants {
 /// the value it came from.
 struct Kept {
     callable: Callable,
-    value: Value,
+    value: Owner<Value>,
 }
 
 impl Kept {
     /// The callable argument at `position` of the running call.
     fn of(req: &mut Request, callable: Callable, position: u32) -> Kept {
         let value = req.argument(position).unwrap_or_default().deref();
-        req.addref(&value);
-        Kept { callable, value }
+        Kept {
+            callable,
+            value: Owner::take(req, value),
+        }
     }
 
     fn release(self, req: &mut Request) {
-        req.release(self.value);
+        self.value.give_up(req);
     }
 }
 

@@ -273,7 +273,7 @@ fn curl_getinfo(
             Some(header) => PhpString::new(req, &header)?.into_value(),
             None => Owner::bool(false),
         },
-        c::CURLINFO_PRIVATE => match curl(req, handle)?.private {
+        c::CURLINFO_PRIVATE => match curl(req, handle)?.private.as_deref().copied() {
             Some(private) => Owner::take(req, private),
             None => Owner::bool(false),
         },

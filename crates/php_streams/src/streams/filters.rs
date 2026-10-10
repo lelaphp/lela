@@ -39,7 +39,9 @@ const FILTER_WRITE: i64 = 2;
 /// holds one owner.
 pub(crate) struct Attached {
     ops: Box<dyn StreamFilter>,
-    res: Option<Resource>,
+    /// The filter's `stream filter` resource, the chain's owner of it,
+    /// where one was made.
+    res: Option<Owner<Resource>>,
 }
 
 /// The payload of a `stream filter` resource: the stream the filter is
@@ -148,8 +150,11 @@ impl FilterCall {
 pub(super) fn defer(req: &mut Request, thrown: Thrown) {
     if req.stream_thrown().is_none() {
         *req.stream_thrown() = Some(thrown);
-    } else if let Some(object) = thrown.exception() {
-        req.release(object.as_value());
+    } else {
+        // A second throwable is given up; a fatal or an exit holds none.
+        match crate::api::raising::clear(req, thrown) {
+            Ok(()) | Err(_) => {}
+        }
     }
 }
 
@@ -507,7 +512,7 @@ fn release_filter(req: &mut Request, filter: Attached) {
     let Attached { mut ops, res } = filter;
     if let Some(res) = res {
         res.close(req);
-        req.release(res.as_value());
+        res.give_up(req);
     }
     if let Err(thrown) = ops.close(req) {
         defer(req, thrown);
@@ -596,7 +601,10 @@ impl FilterLayer for Request {
         };
         let flushed = self
             .stream_op(stream, |req, s| {
-                let at = s.chain_mut(chain).iter().position(|f| f.res == Some(res))?;
+                let at = s
+                    .chain_mut(chain)
+                    .iter()
+                    .position(|f| f.res.as_deref() == Some(&res))?;
                 Some(s.flush_from(req, chain, at, true))
             })
             .flatten();
@@ -611,7 +619,9 @@ impl FilterLayer for Request {
         let taken = self
             .stream_op(stream, |_, s| {
                 let filters = s.chain_mut(chain);
-                let at = filters.iter().position(|f| f.res == Some(res))?;
+                let at = filters
+                    .iter()
+                    .position(|f| f.res.as_deref() == Some(&res))?;
                 Some(filters.remove(at))
             })
             .flatten();
@@ -729,7 +739,7 @@ impl Stream {
                 chain,
             },
         )?;
-        req.addref(&res.as_value());
+        let mut held = Some(Owner::take(req, *res));
         req.stream_op(self, |_, s| {
             let filters = s.chain_mut(chain);
             let at = if append {
@@ -738,9 +748,12 @@ impl Stream {
                 Some(0)
             };
             if let Some(filter) = at.and_then(|at| filters.get_mut(at)) {
-                filter.res = Some(*res);
+                filter.res = held.take();
             }
         });
+        if let Some(unheld) = held {
+            unheld.give_up(req);
+        }
         match req.stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(Some(res)),

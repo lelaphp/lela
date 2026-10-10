@@ -3352,13 +3352,14 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 /// `Some`: the declared property `name`, on the object the initialised
 /// proxies lead to, stops waiting for the initializer, holding its
 /// default or `value` written past `__set` and hooks; the object stops
-/// being lazy once no property waits. `value` is the object's from here.
-/// The checks on the property php makes first are the caller's.
+/// being lazy once no property waits. `value` is a sink's, the object's
+/// from here. The checks on the property php makes first are the
+/// caller's.
 pub fn skip_lazy_initialization(
     req: &mut Request,
     object: &PhpObject,
     name: &[u8],
-    value: Option<Value>,
+    value: Option<Owner<Value>>,
 ) -> Result<(), Thrown> {
     req.lazy_skip(*object, name, value)
 }
