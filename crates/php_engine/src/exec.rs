@@ -2641,7 +2641,7 @@ mod tests {
     use std::sync::Arc;
 
     use php_heap::FrameRef;
-    use php_unit::{CacheSlot, OpArray, Unit};
+    use php_unit::{CacheSlot, MapPtrOffset, OpArray, Unit};
 
     use super::{Body, CacheAt, Cached, RuntimeCaches, code_of, init_runtime_cache};
     use crate::api::call::Function;
@@ -2743,5 +2743,75 @@ mod tests {
         );
         req.prime(FrameRef(7), CacheSlot(0), Cached::Hit);
         assert_eq!(req.cached(FrameRef(7), CacheSlot(0)), Cached::Unprimed);
+    }
+
+    /// A unit compiled for the request alone takes a number of the
+    /// request's for each op array and none of the engine's offsets, and
+    /// once nothing holds it, the next such unit takes its numbers again,
+    /// over caches emptied as php frees a heap cache with its op array.
+    #[test]
+    fn a_request_only_unit_s_numbers_are_the_request_s_and_handed_out_again() {
+        let one_function = || Unit {
+            main: OpArray {
+                cache_size: 8,
+                ..OpArray::default()
+            },
+            functions: vec![(
+                php_unit::decl::FunctionDecl {
+                    name: php_unit::decl::Name::from("f"),
+                    parameters: Vec::new(),
+                    return_type: None,
+                    returns_by_ref: false,
+                    is_generator: false,
+                    attributes: Vec::new(),
+                    doc_comment: None,
+                    file: php_unit::decl::Name::default(),
+                    line: 0,
+                    end_line: 0,
+                    frameless: Vec::new(),
+                },
+                OpArray {
+                    cache_size: 8,
+                    ..OpArray::default()
+                },
+            )],
+            ..Unit::default()
+        };
+        let mut caches = RuntimeCaches::default();
+        let first = caches.take(one_function());
+        let numbers = |unit: &Unit| {
+            std::iter::once(&unit.main)
+                .chain(unit.functions.iter().map(|(_, code)| code))
+                .map(|code| code.runtime_cache)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            numbers(&first),
+            [MapPtrOffset::Request(0), MapPtrOffset::Request(1)]
+        );
+        init_runtime_cache(&mut caches, code_of(&first), Body::Function(0));
+        let at = CacheAt::of(first.main.runtime_cache);
+        caches.map(at).set(CacheSlot(0), Cached::Hit);
+        let second = caches.take(one_function());
+        assert_eq!(
+            numbers(&second),
+            [MapPtrOffset::Request(2), MapPtrOffset::Request(3)],
+            "a unit still held keeps its numbers"
+        );
+        drop(first);
+        let third = caches.take(one_function());
+        let mut taken = numbers(&third);
+        taken.sort_by_key(|at| match at {
+            MapPtrOffset::Engine(n) | MapPtrOffset::Request(n) => *n,
+        });
+        assert_eq!(
+            taken,
+            [MapPtrOffset::Request(0), MapPtrOffset::Request(1)],
+            "the numbers of a unit nothing holds are handed out again"
+        );
+        assert!(
+            caches.get(at).is_some_and(|cache| cache.slots.is_none()),
+            "over a cache emptied"
+        );
     }
 }

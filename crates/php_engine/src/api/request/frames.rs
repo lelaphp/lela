@@ -327,6 +327,15 @@ impl Request {
         self.shared.loops.resume
     }
 
+    /// A unit compiled for this request alone, a source the host handed
+    /// over, an `eval`'s string or a file no cache keeps, shared from
+    /// here on: its op arrays take runtime caches of the request's own,
+    /// as php gives them caches on the heap, and none of the engine's
+    /// offsets ([`exec::RuntimeCaches::take`]).
+    pub(crate) fn take_unit(&mut self, unit: Unit) -> Arc<Unit> {
+        self.map.take(unit)
+    }
+
     /// Push a frame for `unit`'s op array: its shape on the VM stack and
     /// its engine state, which are pushed and popped together and share a
     /// `FrameRef`. A VM stack whose page the memory limit refuses is

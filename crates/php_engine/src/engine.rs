@@ -891,11 +891,8 @@ pub(crate) struct Shared {
 /// `ZEND_MAP_PTR_NEW` over every op array of `unit`, at its publication:
 /// each takes the next offset the engine has, so a request serving the
 /// unit finds each op array's runtime cache at its own entry
-/// ([`exec::init_runtime_cache`]). A unit compiled for one request,
-/// from source the host handed over, takes its offsets here too: php
-/// gives such an op array a cache on the heap (`ZEND_ACC_HEAP_RT_CACHE`)
-/// and no offset, so its count does not move for it, where this one
-/// does.
+/// ([`exec::init_runtime_cache`]). A unit compiled for one request
+/// alone takes none ([`exec::RuntimeCaches::take`]).
 pub(crate) fn assign_map_ptrs(unit: &mut Unit, map_ptr_last: &AtomicU32) {
     for code in exec::op_arrays_mut(unit) {
         code.runtime_cache =
@@ -1416,15 +1413,17 @@ impl Shared {
             // ended holding the lock left is consistent.
             Err(poisoned) => poisoned.into_inner(),
         };
-        compile(
+        let mut unit = compile(
             source,
             origin,
             self.compile_ini(),
             self.declared(),
             stack,
             &mut *strings,
-            &self.map_ptr_last,
-        )
+        )?;
+        drop(strings);
+        assign_map_ptrs(&mut unit, &self.map_ptr_last);
+        Ok(unit.published())
     }
 
     /// One source compiled for one request alone, under the request's
@@ -1481,19 +1480,11 @@ impl Shared {
                 request_classes,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
             };
-            compile(
-                source,
-                origin,
-                ini,
-                declared,
-                stack,
-                heap,
-                &self.map_ptr_last,
-            )
+            compile(source, origin, ini, declared, stack, heap)
         })?;
         let made = u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX);
         req.keys_made = req.keys_made.saturating_add(made);
-        Ok(unit)
+        Ok(req.take_unit(unit))
     }
 
     /// `zend_call_stack_init` on the calling thread, from the startup
@@ -5129,9 +5120,11 @@ struct CompileIni {
 /// reads as `CG(function_table)` before it serves a call of
 /// `zend_try_compile_special_func`'s table itself, and the classes, which
 /// it reads as `CG(class_table)` to know a method's callee; and `stack`
-/// the calling thread's limit, which the compiler's recursion is held to;
-/// and `map_ptr_last` the engine's count of map pointers, which every op
-/// array of the unit takes one from ([`assign_map_ptrs`]).
+/// the calling thread's limit, which the compiler's recursion is held to.
+/// The unit's op arrays take their runtime caches where it is shared:
+/// offsets of the engine's as it is published ([`assign_map_ptrs`]), or
+/// numbers of the request's it was compiled for
+/// ([`exec::RuntimeCaches::take`]).
 fn compile(
     source: &[u8],
     origin: Origin<'_>,
@@ -5139,8 +5132,7 @@ fn compile(
     declared: Declared<'_>,
     stack: StackLimit,
     strings: &mut dyn Intern,
-    map_ptr_last: &AtomicU32,
-) -> Result<Arc<Unit>, CompileError> {
+) -> Result<Unit, CompileError> {
     let options = php_compile::Options {
         filename: Name(origin.filename.into()),
         kind: origin.kind,
@@ -5161,9 +5153,7 @@ fn compile(
         hooked: declared.hooked,
         extended_info: declared.extended_info,
     };
-    let mut unit = php_compile::compile_source(source, &options, strings)?;
-    assign_map_ptrs(&mut unit, map_ptr_last);
-    Ok(unit.published())
+    php_compile::compile_source(source, &options, strings)
 }
 
 /// What compiling the unit raised, raised now, each through the
@@ -5641,6 +5631,26 @@ mod tests {
             String::from_utf8_lossy(&sink.body).into_owned(),
             observables,
         )
+    }
+
+    /// A unit compiled from source the host handed over is the request's
+    /// alone, and so is every `eval`'s: their op arrays take runtime
+    /// caches of the request's own and no map-pointer offset of the
+    /// engine's, so `CG(map_ptr_last)` moves only for what the engine
+    /// publishes, as php's moves only for what opcache persists, and a
+    /// request that evaluates in a loop grows it by nothing (#528).
+    #[test]
+    fn a_unit_compiled_for_one_request_moves_the_engine_s_map_pointer_count_by_nothing() {
+        let engine = Engine::cli_builder().build();
+        let count = || engine.shared.map_ptr_last.load(Ordering::Relaxed);
+        let before = count();
+        let (body, _) = served(
+            &engine,
+            "<?php function f($s) { return strlen($s); } echo f('ab'), f('abc');\n\
+             for ($i = 0; $i < 3; $i++) { echo eval('return $i;'); }",
+        );
+        assert_eq!(body, "23012");
+        assert_eq!(count(), before, "the engine's count is where it was");
     }
 
     /// What the pinned oracle answers for
@@ -7185,7 +7195,6 @@ mod tests {
                 Declared::default(),
                 StackLimit::UNCHECKED,
                 req.heap_mut(),
-                &engine.shared.map_ptr_last,
             );
             assert!(compiled.is_ok(), "the source compiles");
             assert!(

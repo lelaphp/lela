@@ -4,11 +4,19 @@
 //! heap (`ZEND_MAP_PTR_IS_OFFSET`). An op array of a unit the engine
 //! published takes an offset of the engine's count as it is published
 //! (`ZEND_MAP_PTR_NEW`), and every request that serves it finds the
-//! cache at that entry of its map table. php gives an op array of a
-//! unit compiled for one request alone no offset but a cache allocated
-//! with the op array (`ZEND_ACC_HEAP_RT_CACHE`,
-//! `Z/Zend/zend_execute.c:4516`), which the request's second table is
-//! the home of ([`MapPtrOffset::Request`]).
+//! cache at that entry of its map table. An op array of a unit compiled
+//! for one request alone, from source the host handed over, an `eval`'s
+//! string or a file no cache keeps, takes no offset: php gives it a
+//! cache allocated with the op array and freed with it
+//! (`ZEND_ACC_HEAP_RT_CACHE`, `Z/Zend/zend_execute.c:4516`,
+//! `Z/Zend/zend_opcode.c:559`), so `CG(map_ptr_last)` moves only for
+//! what opcache persists. Here the request hands such an op array a
+//! number of its own when it takes the unit, holds its cache in a
+//! second table beside the map table, and hands the number out again
+//! once nothing holds the unit, so an `eval` in a loop grows neither
+//! the engine's count nor the request's table.
+
+use std::sync::{Arc, Weak};
 
 use php_heap::{MapPtr, MapTable};
 use php_unit::{MapPtrOffset, OpArray, Unit};
@@ -59,11 +67,19 @@ impl Default for CacheAt {
 
 /// Every runtime cache one request reaches: the map table, indexed by
 /// the engine's offsets, and the request's own caches, indexed by the
-/// numbers it hands the op arrays of the units it compiled for itself.
+/// numbers it hands the op arrays of the units it compiled for itself,
+/// with what it needs to hand a number out again.
 #[derive(Debug, Default)]
 pub(crate) struct RuntimeCaches {
     engine: MapTable<RuntimeCache>,
     request: MapTable<RuntimeCache>,
+    /// How many numbers the request has handed out, the next new one.
+    last: u32,
+    /// The numbers of units nothing holds any longer, handed out first.
+    free: Vec<u32>,
+    /// Each request-only unit the request took, and the numbers its op
+    /// arrays hold.
+    held: Vec<(Weak<Unit>, Vec<u32>)>,
 }
 
 impl RuntimeCaches {
@@ -83,6 +99,38 @@ impl RuntimeCaches {
             CacheAt::Engine(ptr) => self.engine.map(ptr),
             CacheAt::Request(ptr) => self.request.map(ptr),
         }
+    }
+
+    /// A unit compiled for this request alone, shared from here on: each
+    /// of its op arrays given a number of the request's, a number of a
+    /// unit nothing holds any longer first, whose cache was emptied as
+    /// the unit was found over, as php frees a heap cache with its op
+    /// array.
+    pub(crate) fn take(&mut self, mut unit: Unit) -> Arc<Unit> {
+        let (free, request) = (&mut self.free, &mut self.request);
+        self.held.retain_mut(|(unit, numbers)| {
+            if unit.strong_count() > 0 {
+                return true;
+            }
+            for &number in numbers.iter() {
+                *request.map(MapPtr::new(number)) = RuntimeCache::default();
+            }
+            free.append(numbers);
+            false
+        });
+        let mut numbers = Vec::new();
+        for code in op_arrays_mut(&mut unit) {
+            let number = self.free.pop().unwrap_or_else(|| {
+                let next = self.last;
+                self.last = self.last.saturating_add(1);
+                next
+            });
+            code.runtime_cache = MapPtrOffset::Request(number);
+            numbers.push(number);
+        }
+        let unit = unit.published();
+        self.held.push((Arc::downgrade(&unit), numbers));
+        unit
     }
 }
 
