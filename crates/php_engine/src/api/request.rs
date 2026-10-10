@@ -117,6 +117,7 @@ pub use resources::{ResourceDtor, Resources};
 mod response;
 #[cfg(debug_assertions)]
 mod sensing;
+pub use crate::output::HttpStatus;
 pub(crate) use response::Sink;
 pub use response::{
     BufferHandler, BufferInit, ContentType, HandlerCall, HandlerOp, HandlerStatus, OutputOp,

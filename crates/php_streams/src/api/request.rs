@@ -271,13 +271,55 @@ pub enum BindTo {
     NotAString,
 }
 
-/// Why `php_stream_xport_create` made no stream: the `errno` the natives
-/// hand back as `$error_code`, `0` where there was none, and the text
-/// they hand back as `$error_message` and print.
+/// Why `php_stream_xport_create` made no stream
+/// (`Z/main/streams/transports.c:52-180`): the step that failed, the
+/// `errno` the natives hand back as `$error_code`, `0` where there was
+/// none, and what php writes into the caller's `error_string`, which the
+/// natives hand back as `$error_message`. The text is `None` where php's
+/// is `NULL`, a step that gave none, as a crypto layer that refuses the
+/// connected socket gives none, which a caller asking for the text tells
+/// apart from an empty one (`errstr == NULL ? "Unknown error" : ...`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XportFailure {
+    pub step: XportStep,
     pub code: i32,
-    pub text: String,
+    pub text: Option<String>,
+}
+
+/// The step of `_php_stream_xport_create` that made no stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XportStep {
+    /// No xport is registered under the name's protocol in `xport_hash`:
+    /// php's `ERR_REPORT`, whose text names the protocol, at most 31 bytes
+    /// of it, in its `Unable to find the socket transport "%s"` sentence.
+    Unregistered,
+    /// `php_stream_xport_connect`, a client's.
+    Connect,
+    /// `php_stream_xport_bind`, a server's.
+    Bind,
+    /// `php_stream_xport_listen`, a server's once bound.
+    Listen,
+}
+
+impl XportFailure {
+    /// The warning `_php_stream_xport_create` raises itself where its
+    /// caller asks for no `error_string`, which the caller raises as
+    /// php's `php_error_docref(NULL, E_WARNING, ...)` does: an
+    /// unregistered xport's text bare (`ERR_REPORT`), and a step's as
+    /// `ERR_RETURN` writes it, `connect() failed: %s`, `bind() failed: %s`
+    /// or `listen() failed: %s`, with `Unspecified error` where the step
+    /// gave no text.
+    #[must_use]
+    pub fn warning(&self) -> String {
+        let text = self.text.as_deref();
+        let step = match self.step {
+            XportStep::Unregistered => return text.unwrap_or_default().to_owned(),
+            XportStep::Connect => "connect",
+            XportStep::Bind => "bind",
+            XportStep::Listen => "listen",
+        };
+        format!("{step}() failed: {}", text.unwrap_or("Unspecified error"))
+    }
 }
 
 impl ResourceView for Stream {
@@ -1587,9 +1629,11 @@ pub trait Streams {
     /// name as written as its `uri`, the `context` as its own and
     /// `default_socket_timeout` as its read timeout; a connected client's
     /// layer is then asked [`Crypto::connected`], and one that refuses
-    /// fails the connect with no text. A failure is its error code and text, which
-    /// the natives print; the `Err` is the memory limit or what the
-    /// layer's factory threw.
+    /// fails the connect with no text. A failure is the step that failed,
+    /// its error code and its text, which a caller that asks php for an
+    /// `error_string` prints in its own words and one that does not
+    /// raises as [`XportFailure::warning`]; the `Err` is the memory limit
+    /// or what the layer's factory threw.
     fn xport_create(
         &mut self,
         name: &[u8],

@@ -14,7 +14,7 @@ use php_ext::coerce::{numeric_string, to_callable};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
 use php_ext::request::{
     Handshake, OwnedStream as _, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx,
-    Streams as _, Xport, XportFailure,
+    Streams as _, Xport,
 };
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 use php_ext_standard::md5::Md5;
@@ -659,6 +659,24 @@ fn default_timeout(req: &Request) -> Option<Duration> {
 /// Error Fetching http headers
 /// bool(true)
 /// ```
+///
+/// The connect asks for no `error_string`, so the warning is
+/// `php_stream_xport_create`'s own ([`XportFailure::warning`]): an
+/// xport no extension registers, as `SOAP_SSL_METHOD_SSLv2` names over
+/// `https`, is php's text bare, with no `connect() failed: ` before
+/// it.
+///
+/// ```php
+/// $c = @new SoapClient(null, ['location' => 'https://127.0.0.1:1/', 'uri' => 'urn:x', 'ssl_method' => SOAP_SSL_METHOD_SSLv2]);
+/// try { $c->f(); } catch (SoapFault $e) { echo $e->getMessage(), "\n"; }
+/// echo error_get_last()['message'], "\n";
+/// ```
+/// ```expect
+/// Could not connect to host
+/// SoapClient::__doRequest(): Unable to find the socket transport "sslv2" - did you forget to enable it when you configured PHP?
+/// ```
+///
+/// [`XportFailure::warning`]: php_ext::request::XportFailure::warning
 fn http_connect(
     req: &mut Request,
     this: PhpObject,
@@ -723,15 +741,9 @@ fn connect(
     };
     let stream = match req.xport_create(&name, xport)? {
         Ok(stream) => stream,
-        // `ERR_RETURN(error_string, error_text, "connect() failed: %s")`
-        // with no `error_string` asked for.
-        Err(XportFailure { text, .. }) => {
-            let text = if text.is_empty() {
-                "Unspecified error"
-            } else {
-                &text
-            };
-            docref(req, Level::Warning, &format!("connect() failed: {text}"));
+        // `php_stream_xport_create` asked for no `error_string`.
+        Err(failed) => {
+            docref(req, Level::Warning, &failed.warning());
             return Ok(None);
         }
     };

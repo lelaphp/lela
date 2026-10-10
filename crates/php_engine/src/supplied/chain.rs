@@ -346,6 +346,18 @@ impl<'a> Beneath<'a, Error> {
     pub fn line(&self) -> u32 {
         self.args.line
     }
+
+    /// Whether `php_error_cb` bails out of the diagnostic once it has
+    /// served it (`Z/main/main.c:1503-1543`): a level of
+    /// `E_FATAL_ERRORS` without php's `E_DONT_BAIL`, which
+    /// `zend_exception_error` sets on the uncaught throwable it renders.
+    /// It is where the `zend_catch` of a link that serves the one beneath
+    /// inside a `zend_try` runs, as soap's error handler puts the
+    /// response's status back there.
+    #[must_use]
+    pub fn bails(&self) -> bool {
+        self.args.level.bit() & crate::exec::E_FATAL_ERRORS != 0 && self.args.bail == Bail::Out
+    }
 }
 
 impl ChainKind for GcCollect {

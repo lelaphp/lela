@@ -832,7 +832,7 @@ fn wrap_http_ex(
             Some(stream)
         }
         Err(XportFailure { text, .. }) => {
-            if !text.is_empty() {
+            if let Some(text) = text {
                 log(req, &text);
             }
             None

@@ -17,6 +17,7 @@ abi::Admission
 abi::AfterLog
 abi::BeginHandler
 abi::Beneath
+abi::Beneath::bails
 abi::Beneath::event
 abi::Beneath::file
 abi::Beneath::level
@@ -588,6 +589,7 @@ request::Handshake
 request::Held
 request::Held::get
 request::HostPath
+request::HttpStatus
 request::InfoRow
 request::IniEntry
 request::IniFiles
@@ -824,6 +826,7 @@ request::Request::periods_elapsed
 request::Request::phpinfo_as_text
 request::Request::precision
 request::Request::preloading
+request::Request::put_back_http_status
 request::Request::raised
 request::Request::realpath
 request::Request::realpath_cache
@@ -882,6 +885,7 @@ request::Request::stop_periodic
 request::Request::stream_thrown
 request::Request::superglobal
 request::Request::suspend_time_limit
+request::Request::take_http_status
 request::Request::take_pending
 request::Request::take_uploaded_file
 request::Request::temp_dir
@@ -1055,6 +1059,8 @@ request::WrapperOp
 request::Xport
 request::XportFactory
 request::XportFailure
+request::XportFailure::warning
+request::XportStep
 request::Zone
 request::Zone::date
 request::Zone::midnight

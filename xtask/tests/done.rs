@@ -194,6 +194,7 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
         &registry,
         &store,
         base,
+        &[],
     )
     .unwrap()
 }
@@ -594,6 +595,74 @@ fn an_unchanged_tree_is_done() {
     let (code, out, _) = xtask(&root, &["done", "--base", "HEAD"], None);
     assert_eq!(code, 0);
     assert!(out.contains("every condition of done is met"), "{out}");
+}
+
+/// CI's `done` while the oracle job is skipped (#2477): the instruments
+/// that job runs are named `--not-run`, so their missing readings are a
+/// note that they did not run, the exit is not red for their absence, and
+/// the head line and the reading say a pass is over what ran and nothing
+/// else. A reading of one that the store does hold is judged as any other.
+#[test]
+fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
+    const ORACLE_JOB: [&str; 4] = ["--not-run", "witness", "--not-run", "crosscheck"];
+    let root = scratch("not-run");
+    write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
+    let store = Store::of_workspace(&root);
+    for (instrument, scope) in asked_of("ext/pcre") {
+        if instrument != "witness" && instrument != "crosscheck" {
+            store.record(&[fresh(&root, instrument, &scope)]).unwrap();
+        }
+    }
+    let (code, out, err) = xtask(&root, &["done", "--base", "HEAD"], None);
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("- witness: no reading for ext/pcre"), "{out}");
+
+    let mut args = vec!["done", "--base", "HEAD"];
+    args.extend(ORACLE_JOB);
+    let (code, out, err) = xtask(&root, &args, None);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(
+        out.contains("every condition of done is met over what ran; witness and crosscheck did not run in this run\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("judged none of the readings it asks for: witness for ext/pcre, crosscheck for ext/pcre, crosscheck for ext/pcre/ri"),
+        "{out}"
+    );
+    let reading = store.read("done", "workspace").unwrap().unwrap();
+    assert_eq!(reading.status, Status::Pass);
+    assert_eq!(reading.numbers["not_run"], 2.into());
+    assert!(
+        reading
+            .message
+            .ends_with("; witness and crosscheck did not run in this run"),
+        "{}",
+        reading.message
+    );
+
+    // A reading the store holds is judged: the lane ran and failed.
+    let mut failed = fresh(&root, "witness", "ext/pcre");
+    failed.status = Status::Fail;
+    failed.message = "1 fence failed".into();
+    store.record(&[failed]).unwrap();
+    let (code, out, _) = xtask(&root, &args, None);
+    assert_eq!(code, 1, "{out}");
+    assert!(
+        out.contains("- witness: ext/pcre fail: 1 fence failed"),
+        "{out}"
+    );
+
+    // With no crate touched the note still says what did not run.
+    let unchanged = scratch("not-run-unchanged");
+    let mut args = vec!["done", "--base", "HEAD"];
+    args.extend(ORACLE_JOB);
+    let (code, out, _) = xtask(&unchanged, &args, None);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("no touched crate is asked for one"), "{out}");
+
+    // What `--not-run` names is an instrument condition 1 knows.
+    let (code, _, err) = xtask(&unchanged, &["done", "--not-run", "oracle"], None);
+    assert_eq!(code, 2, "{err}");
 }
 
 #[test]
@@ -1383,6 +1452,48 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
         step.lines()
             .any(|l| l.contains("cargo xtask done") && !l.contains("--base")),
         "a push passes nothing and gets the merge base with main: {step}"
+    );
+}
+
+/// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
+/// step names as `--not-run` exactly the instruments of condition 1 that
+/// job's steps run, so a lane added there is named here or `done` is red
+/// for its absence (#2477).
+#[test]
+fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
+    let text = read(".github/workflows/harness.yml");
+    let oracle = &text[text.find("\n  oracle:\n").unwrap()..text.find("\n  done:\n").unwrap()];
+    assert!(
+        oracle.contains("    if: ${{ !vars.DAX_BUILD_RUNNER }}\n"),
+        "the oracle job is skipped while the variable is set: {oracle}"
+    );
+    let runs: std::collections::BTreeSet<&str> = oracle
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- run: cargo xtask "))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|i| FRESH.contains(i))
+        .collect();
+    assert_eq!(
+        runs,
+        ["crosscheck", "witness"].into(),
+        "the oracle job's instruments: {oracle}"
+    );
+    let step = &text[text.find("- name: done").unwrap()..];
+    let step = &step[..step.find("\n      - ").unwrap_or(step.len())];
+    assert!(
+        step.contains("ORACLE: ${{ needs.oracle.result }}")
+            && step.contains("if [ \"$ORACLE\" = skipped ]; then"),
+        "the step reads whether the oracle job was skipped: {step}"
+    );
+    let named: std::collections::BTreeSet<&str> = step
+        .split("--not-run ")
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .collect();
+    assert_eq!(named, runs, "{step}");
+    assert!(
+        step.contains("::warning title=the oracle lane did not run::"),
+        "{step}"
     );
 }
 

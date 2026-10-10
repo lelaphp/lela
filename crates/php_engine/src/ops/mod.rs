@@ -20,9 +20,7 @@ use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_pre
 
 use crate::api::abi::{PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
-use crate::api::raising::{
-    Level, Thrown, deprecated, none_pending, raise, throw, throw_error, warning,
-};
+use crate::api::raising::{Level, Thrown, deprecated, none_pending, throw, throw_error, warning};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
@@ -539,7 +537,13 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> bool {
 /// number is not zero for `BcMath\Number`, and whether the element exists
 /// for `SimpleXMLElement`; php's `E_RECOVERABLE_ERROR` and `false` for a
 /// class whose handler refuses the cast, and a throw from the handler left
-/// pending, as php's `EG(exception)`.
+/// pending, as php's `EG(exception)`. The `E_RECOVERABLE_ERROR` is
+/// `zend_error`'s: where no user error handler takes it, `php_error_cb`
+/// bails out of it as of every fatal level, so the request ends there,
+/// the fatal left standing for the caller to leave by as a throw is
+/// left pending; a handler that takes it lets the request go on with
+/// `false`. `ext/zend_test`'s `LongCastableNoOperations`, whose handler
+/// casts to an int alone, is the witness.
 ///
 /// ```php
 /// var_dump((bool) new stdClass, (bool) new BcMath\Number('0.0'), !new BcMath\Number('-1'));
@@ -571,11 +575,10 @@ fn object_is_true(req: &mut Request, object: PhpObject) -> bool {
         }
         Ok(None) => {
             let class = req.class_name(object.class());
-            raise(
-                req,
-                Level::RecoverableError,
-                &format!("Object of class {class} could not be converted to bool"),
-            );
+            let message = format!("Object of class {class} could not be converted to bool");
+            if req.note_error(Level::RecoverableError, &message) {
+                req.bail_out();
+            }
             false
         }
         Err(thrown) => {
