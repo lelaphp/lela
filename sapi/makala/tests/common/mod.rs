@@ -10,7 +10,7 @@
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// A document root of its own for `name`, holding `files`.
@@ -65,6 +65,26 @@ impl Server {
         // a full pipe.
         std::thread::spawn(move || for _ in lines {});
         Server { child, addr }
+    }
+
+    /// SIGTERM sent to the server, as a service manager stops it, through
+    /// `kill(1)`, so the test needs no `unsafe` of its own.
+    pub fn terminate(&self) {
+        let sent = Command::new("kill")
+            .args(["-TERM", &self.child.id().to_string()])
+            .status()
+            .unwrap_or_else(|e| panic!("running kill: {e}"));
+        assert!(sent.success(), "kill -TERM: {sent}");
+    }
+
+    /// How the server ended, where it did within `limit`.
+    pub fn ended_within(&mut self, limit: Duration) -> Option<ExitStatus> {
+        let mut ended = None;
+        eventually(limit, || {
+            ended = self.child.try_wait().ok().flatten();
+            ended.is_some()
+        });
+        ended
     }
 
     pub fn connect(&self) -> TcpStream {

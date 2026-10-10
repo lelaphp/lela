@@ -11,9 +11,11 @@
 //! stock `fastcgi_params` against the pinned php-fpm, is #2334's and
 //! arrives with #2347.
 
+use std::convert::Infallible;
 use std::io::Read;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use hyper::body::Bytes;
@@ -52,6 +54,9 @@ pub(crate) struct Head {
 /// The request threads.
 pub(crate) struct Pool {
     threads: Vec<HostThread>,
+    /// Closed once every thread has ended: each holds a sender, which
+    /// nothing is ever sent on, until it ends.
+    ended: std::sync::mpsc::Receiver<Infallible>,
 }
 
 impl Pool {
@@ -65,23 +70,38 @@ impl Pool {
     ) -> std::io::Result<(mpsc::Sender<Job>, Pool)> {
         let (queue, jobs) = mpsc::channel(options.request_queue);
         let jobs = Arc::new(Mutex::new(jobs));
+        let (alive, ended) = std::sync::mpsc::channel();
         let mut threads = Vec::with_capacity(options.request_threads);
         for n in 0..options.request_threads {
-            let (jobs, serve) = (Arc::clone(&jobs), serve.clone());
+            let (jobs, serve, alive) = (Arc::clone(&jobs), serve.clone(), alive.clone());
             threads.push(php_sapi::host_thread(
                 &format!("makala-request-{n}"),
                 options.stack_size,
-                move || serve_each(&jobs, &serve),
+                move || {
+                    serve_each(&jobs, &serve);
+                    drop(alive);
+                },
             )?);
         }
-        Ok((queue, Pool { threads }))
+        Ok((queue, Pool { threads, ended }))
     }
 
-    /// Every thread joined, once the queue's senders are gone.
-    pub(crate) fn join(self) {
+    /// Every thread joined, once the queue's senders are gone and each
+    /// has ended its request, where that is before `deadline`; whether it
+    /// was. A thread still in a request at the deadline is left to the
+    /// process's end, as php-fpm's master kills a child still serving
+    /// when its `process_control_timeout` has passed.
+    pub(crate) fn join_by(self, deadline: std::time::Instant) -> bool {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match self.ended.recv_timeout(left) {
+            Err(RecvTimeoutError::Disconnected) => {}
+            Err(RecvTimeoutError::Timeout) => return false,
+            Ok(never) => match never {},
+        }
         for thread in self.threads {
             thread.join();
         }
+        true
     }
 }
 
@@ -469,7 +489,9 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
         std::thread::spawn(move || {
             let _pool = pool;
-            crate::connection::run(&options, listener, queue).ok();
+            if let Ok(side) = crate::connection::ConnectionSide::new() {
+                side.run(options.limits, listener, queue).ok();
+            }
         });
         addr
     }

@@ -3,7 +3,8 @@
 //! starts with, and the limits (#2337's Implementation Decisions, #2341):
 //! one table of Kestrel's defaults, each overridden by `--limit
 //! <name>=<value>`, and each applied by the connection side, the
-//! connection cap by its accept loop (#2342).
+//! connection cap by its accept loop (#2342) and the shutdown timeout by
+//! the drain SIGTERM begins (#2344).
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -92,7 +93,12 @@ pub struct Limits {
     pub requests_per_connection: u32,
     /// How many connections the server holds open at once, past which it
     /// stops accepting and the kernel's queue holds the rest: 10,000.
-    pub connections: usize,
+    pub connections: u32,
+    /// How long the drain SIGTERM begins may take before what is still in
+    /// flight is aborted and the process ends: 30 s, the default of
+    /// Kestrel's host since .NET 6 (research/production-server.r2.md
+    /// §1.4).
+    pub shutdown_timeout: Duration,
 }
 
 /// A minimum data rate, Kestrel's `MinDataRate`: so many bytes a second,
@@ -144,6 +150,7 @@ impl Default for Limits {
             min_response_rate: Some(MinDataRate::default()),
             requests_per_connection: 1000,
             connections: 10_000,
+            shutdown_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -184,6 +191,9 @@ const LIMITS: &[(&str, &str, SetLimit)] = &[
     }),
     ("connections", "<n>", |l, v| {
         set(&mut l.connections, count(v))
+    }),
+    ("shutdown-timeout", "<time>", |l, v| {
+        set(&mut l.shutdown_timeout, time(v))
     }),
 ];
 
@@ -385,6 +395,8 @@ mod tests {
             "requests-per-connection=2",
             "--limit",
             "connections=1",
+            "--limit",
+            "shutdown-timeout=3s",
         ])?;
         assert_eq!(
             options.limits,
@@ -405,6 +417,7 @@ mod tests {
                 }),
                 requests_per_connection: 2,
                 connections: 1,
+                shutdown_timeout: Duration::from_secs(3),
             }
         );
         let off = parse(&[

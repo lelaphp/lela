@@ -49,7 +49,11 @@ pub const SERVER_SOFTWARE: &str = concat!("makala/", env!("CARGO_PKG_VERSION"));
 /// The host's `main`: the line read into its [`Options`], one engine of
 /// the bundle's enabled set started, the listening socket bound, the
 /// request threads started, and the connection side run on this thread
-/// for as long as the process serves (the drain that ends it is #2344's).
+/// for as long as the process serves, until the drain SIGTERM begins
+/// has ended (#2344). The engine is the last to end, once the request
+/// threads have: where one is still in a request at the drain's
+/// deadline, the process ends around it, the engine's end not run, as a
+/// php-fpm child killed at its master's timeout ends.
 pub fn main() -> ExitCode {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     let options = match Options::parse(&argv) {
@@ -70,6 +74,13 @@ pub fn main() -> ExitCode {
             return php_sapi::exit_code(1);
         }
     };
+    let side = match connection::ConnectionSide::new() {
+        Ok(side) => side,
+        Err(e) => {
+            say(&format!("makala: cannot start the connection side: {e}\n"));
+            return php_sapi::exit_code(1);
+        }
+    };
     let (queue, pool) = match request::Pool::start(&options, request::serving(&engine, &options)) {
         Ok(started) => started,
         Err(e) => {
@@ -83,15 +94,20 @@ pub fn main() -> ExitCode {
             options.document_root.display()
         ));
     }
-    let ended = connection::run(&options, listener, queue);
-    pool.join();
-    match ended {
-        Ok(()) => php_sapi::exit_code(0),
+    let drained = match side.run(options.limits, listener, queue) {
+        Ok(drained) => drained,
         Err(e) => {
             say(&format!("makala: {e}\n"));
-            php_sapi::exit_code(1)
+            return php_sapi::exit_code(1);
         }
+    };
+    // The engine's end runs as `engine` is dropped, where it is the last
+    // clone: once every request thread is joined, and never while one is
+    // left in a request, which holds a clone of its own.
+    if !(drained.whole && pool.join_by(drained.deadline)) {
+        log(b"makala: the shutdown timeout passed with requests in flight; they were aborted");
     }
+    php_sapi::exit_code(0)
 }
 
 /// One engine of the bundle's enabled set, under the host's name, with the

@@ -25,6 +25,10 @@
 //! cap on connections is the accept loop's (#2342). hyper
 //! answers `100 Continue` when the body is first read, which is after
 //! the head has passed its limits.
+//!
+//! SIGTERM ends the accept loop and begins the drain
+//! ([`serve_until_drained`], #2344),
+//! bounded by [`Limits::shutdown_timeout`].
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -42,10 +46,11 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use php_sapi::ResponseHead;
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::signal::unix::{Signal, SignalKind, signal};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 
 use crate::framing;
-use crate::options::{Limits, Options};
+use crate::options::Limits;
 use crate::request::{Head, Job, Sink, Written};
 use crate::socket::{Socket, Watch};
 
@@ -58,26 +63,116 @@ const RESPONSE_PIECES: usize = 8;
 /// The least hyper's read buffer may hold, which its builder asserts.
 const LEAST_BUFFER: usize = 8192;
 
-/// The connection side, on this thread for as long as the process serves:
-/// every connection accepted on `listener` served on its own task, its
-/// requests put on `queue`. It returns only with what failed: a runtime
-/// or listener that could not start, or the connection slots closed,
-/// which nothing does; the drain that ends it is #2344's.
-///
-/// # Errors
-///
-/// What the runtime or the listener could not start with, or the slots
-/// closed.
-pub(crate) fn run(
-    options: &Options,
+/// The connection side: its runtime, and SIGTERM, which begins the drain.
+pub(crate) struct ConnectionSide {
+    runtime: tokio::runtime::Runtime,
+    terminate: Signal,
+}
+
+/// How the drain ended.
+pub(crate) struct Drained {
+    /// When the shutdown timeout ends, counted from the SIGTERM: what the
+    /// request threads still run then is left to the process's end.
+    pub(crate) deadline: std::time::Instant,
+    /// Whether every connection ended before the deadline; where one did
+    /// not, it was aborted, its socket closed.
+    pub(crate) whole: bool,
+}
+
+impl ConnectionSide {
+    /// The runtime, of one thread, and SIGTERM taken from its default,
+    /// which ends the process at once, before the server says it listens:
+    /// a SIGTERM that comes after that line drains.
+    ///
+    /// # Errors
+    ///
+    /// What the runtime or the signal could not start with.
+    pub(crate) fn new() -> std::io::Result<ConnectionSide> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()?;
+        let terminate = {
+            let _inside = runtime.enter();
+            signal(SignalKind::terminate())?
+        };
+        Ok(ConnectionSide { runtime, terminate })
+    }
+
+    /// The connection side on this thread for as long as the process
+    /// serves: every connection accepted on `listener` served on its own
+    /// task, its requests put on `queue`, until SIGTERM, and then the
+    /// drain ([`serve_until_drained`]). What is left at the deadline is aborted here,
+    /// as the runtime is dropped with every connection's task, which
+    /// closes its socket and the channels its request writes to.
+    ///
+    /// # Errors
+    ///
+    /// What the listener could not start with, or the connection slots
+    /// closed, which nothing does.
+    pub(crate) fn run(
+        self,
+        limits: Limits,
+        listener: std::net::TcpListener,
+        queue: mpsc::Sender<Job>,
+    ) -> std::io::Result<Drained> {
+        let ConnectionSide {
+            runtime,
+            mut terminate,
+        } = self;
+        runtime.block_on(serve_until_drained(limits, listener, queue, &mut terminate))
+    }
+}
+
+/// The accept loop until SIGTERM, then the drain, Ranch's and Kestrel's
+/// (research/production-server.r2.md M8, M10), in the order a supervisor
+/// stops what it started, the last started first: the listener is
+/// closed, so no connection is accepted after the signal and a client
+/// that tries is refused by the kernel; every connection is told to end
+/// ([`drive`]), an idle keep-alive one at once and a busy one once its
+/// response has ended; and the connections are waited for until the
+/// shutdown timeout ([`Limits::shutdown_timeout`]), or a second SIGTERM.
+/// Each connection's task holds a sender of `open` while it runs, so the
+/// channel closed is the connections all ended; the drain is whole then,
+/// and the sockets still lingering after their last responses are given
+/// until the deadline to close. The request threads are the last: with
+/// every connection gone the queue has no sender, and each ends once its
+/// request has ([`crate::request::Pool::join_by`]).
+async fn serve_until_drained(
+    limits: Limits,
     listener: std::net::TcpListener,
     queue: mpsc::Sender<Job>,
-) -> std::io::Result<()> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()?;
-    runtime.block_on(accept(options.limits, listener, queue))
+    terminate: &mut Signal,
+) -> std::io::Result<Drained> {
+    listener.set_nonblocking(true)?;
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let slots = Arc::new(Semaphore::new(
+        usize::try_from(limits.connections)
+            .map_or(Semaphore::MAX_PERMITS, |n| n.min(Semaphore::MAX_PERMITS)),
+    ));
+    let (drain, draining) = watch::channel(false);
+    let (open, mut all_ended) = mpsc::channel::<Infallible>(1);
+    let accepting = accept(&listener, limits, &slots, queue, draining, open);
+    if let Some(failed) = first_of(accepting, terminate.recv()).await {
+        return Err(failed);
+    }
+    let deadline = tokio::time::Instant::now() + limits.shutdown_timeout;
+    drop(listener);
+    drain.send_replace(true);
+    // A second SIGTERM ends the wait at once, as the deadline would.
+    let ended = tokio::time::timeout_at(deadline, all_ended.recv());
+    let whole = matches!(first_of(ended, terminate.recv()).await, Some(Ok(None)));
+    if whole {
+        // Each socket still lingers for its last response, until the
+        // deadline at most; none is cut short where the drain was whole.
+        tokio::time::timeout_at(deadline, slots.acquire_many(limits.connections))
+            .await
+            .ok();
+    }
+    Ok(Drained {
+        deadline: deadline.into_std(),
+        whole,
+    })
 }
 
 /// The accept loop: each connection on a task of its own, its requests
@@ -85,21 +180,23 @@ pub(crate) fn run(
 /// [`Limits::connections`] slots until its socket has lingered and
 /// closed; with none free the loop waits for one before it accepts
 /// again, as Ranch's acceptor sleeps at its cap, and the kernel's listen
-/// queue holds the clients that come meanwhile.
+/// queue holds the clients that come meanwhile. It returns only with the
+/// slots closed, which nothing does; the drain drops it unfinished.
 async fn accept(
+    listener: &tokio::net::TcpListener,
     limits: Limits,
-    listener: std::net::TcpListener,
+    slots: &Arc<Semaphore>,
     queue: mpsc::Sender<Job>,
-) -> std::io::Result<()> {
-    listener.set_nonblocking(true)?;
-    let listener = tokio::net::TcpListener::from_std(listener)?;
-    let local = listener.local_addr()?;
-    let slots = Arc::new(Semaphore::new(
-        limits.connections.min(Semaphore::MAX_PERMITS),
-    ));
+    draining: watch::Receiver<bool>,
+    open: mpsc::Sender<Infallible>,
+) -> std::io::Error {
+    let local = match listener.local_addr() {
+        Ok(local) => local,
+        Err(e) => return e,
+    };
     loop {
-        let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
-            return Err(std::io::Error::other("the connection slots were closed"));
+        let Ok(slot) = Arc::clone(slots).acquire_owned().await else {
+            return std::io::Error::other("the connection slots were closed");
         };
         // A connection that failed before it was accepted, or a process
         // out of descriptors: the next is tried after a pause, so a full
@@ -119,7 +216,7 @@ async fn accept(
             cut: Notify::new(),
         });
         let socket = Socket::new(stream, Arc::clone(&connection.watch), limits, slot);
-        tokio::spawn(drive(connection, socket));
+        tokio::spawn(drive(connection, socket, draining.clone(), open.clone()));
     }
 }
 
@@ -141,8 +238,16 @@ struct Connection {
     cut: Notify,
 }
 
-/// One connection, its requests served until it ends or is cut.
-async fn drive(connection: Arc<Connection>, socket: Socket) {
+/// One connection, its requests served until it ends or is cut, or the
+/// drain ends it: an idle one at once, and one with a request in hand
+/// once that request's response has ended, as hyper's graceful shutdown
+/// of an HTTP/1.1 connection has it.
+async fn drive(
+    connection: Arc<Connection>,
+    socket: Socket,
+    mut draining: watch::Receiver<bool>,
+    _open: mpsc::Sender<Infallible>,
+) {
     let limits = connection.limits;
     let service = {
         let connection = Arc::clone(&connection);
@@ -160,23 +265,39 @@ async fn drive(connection: Arc<Connection>, socket: Socket) {
             .saturating_add(4)
             .max(LEAST_BUFFER),
     );
-    let served = builder.serve_connection(TokioIo::new(socket), service);
+    let mut served = pin!(builder.serve_connection(TokioIo::new(socket), service));
+    let mut cut = pin!(connection.cut.notified());
+    let mut drain = pin!(draining.wait_for(|draining| *draining));
+    let mut shutting_down = false;
     // A connection's end, the client's close among them, is nothing the
     // server acts on until its logs (#2345).
-    first_of(served, connection.cut.notified()).await;
+    std::future::poll_fn(|cx| {
+        if cut.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(());
+        }
+        if !shutting_down && drain.as_mut().poll(cx).is_ready() {
+            served.as_mut().graceful_shutdown();
+            shutting_down = true;
+        }
+        served.as_mut().poll(cx).map(drop)
+    })
+    .await;
 }
 
-/// Whichever of two futures ends first, the other dropped unfinished.
-async fn first_of<A: Future, B: Future>(a: A, b: B) {
+/// The first of two futures to end: `a`'s output, or `None` where `b`
+/// ended first; the other is dropped unfinished.
+async fn first_of<A: Future, B: Future>(a: A, b: B) -> Option<A::Output> {
     let (mut a, mut b) = (pin!(a), pin!(b));
     std::future::poll_fn(|cx| {
-        if a.as_mut().poll(cx).is_ready() || b.as_mut().poll(cx).is_ready() {
-            Poll::Ready(())
+        if let Poll::Ready(output) = a.as_mut().poll(cx) {
+            Poll::Ready(Some(output))
+        } else if b.as_mut().poll(cx).is_ready() {
+            Poll::Ready(None)
         } else {
             Poll::Pending
         }
     })
-    .await;
+    .await
 }
 
 /// One request, the connection's last where it reaches the cap on
