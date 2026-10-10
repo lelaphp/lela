@@ -20,7 +20,7 @@ use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, pending, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, GiveUp, Guarded, Hold, Unwritten};
-use php_ext::values::{Key, Owner, PhpString, RecursionGuard, Value};
+use php_ext::values::{Key, Owner, PhpString, RecursionGuard, SmartStr, Value};
 
 pub(crate) mod debug;
 pub(crate) mod serialize;
@@ -738,6 +738,30 @@ const INDENT: usize = 4;
 ///
 /// )
 /// ```
+///
+/// The string `print_r($v, true)` returns is the `smart_str` php built
+/// it in, `RETURN_STR(zend_print_zval_r_to_str(var, 0))`, whose
+/// `smart_str_0` keeps the buffer's allocation as it stands: 256 bytes
+/// for anything shorter than a page's first fill, a scalar's empty
+/// string among them, and the page past it for more:
+///
+/// ```php
+/// $m = memory_get_usage(); $x = print_r([1], true); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $z = print_r(1, true); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $n = print_r(null, true); echo memory_get_usage() - $m, "\n";
+/// $s = str_repeat('s', 231); $t = str_repeat('t', 232);
+/// $m = memory_get_usage(); $y = print_r($s, true); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $w = print_r($t, true); echo memory_get_usage() - $m, "\n";
+/// $m = memory_get_usage(); $v = print_r(array_fill(0, 30, 1), true); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 256
+/// 256
+/// 256
+/// 256
+/// 4096
+/// 4096
+/// ```
 #[php_function]
 fn print_r(
     req: &mut Request,
@@ -756,10 +780,40 @@ fn print_r(
         return Err(thrown);
     }
     if returned {
-        return PhpString::new(req, &out).map(Union::A);
+        return returned_string(req, &value, &out).map(Union::A);
     }
     req.write(&out);
     Ok(Union::B(True))
+}
+
+/// The rendering as the `smart_str` `zend_print_zval_r_to_buf` appends
+/// it into: a scalar's string in one `smart_str_append`, a table's in
+/// many. What the allocation comes to depends on the length at the end
+/// and on whether the first append was all of it, since each growth is
+/// to the page past the length it is asked at, so a table's rendering is
+/// appended as its first byte and then the rest, which grows the
+/// buffer where php's many appends grow it.
+fn returned_string(
+    req: &mut Request,
+    value: &Value,
+    out: &[u8],
+) -> Result<Owner<PhpString>, Thrown> {
+    let table = matches!(
+        value.deref().tag(),
+        php_ext::values::TypeTag::Array | php_ext::values::TypeTag::Object
+    );
+    let pieces: &[&[u8]] = match out.split_first() {
+        Some((_, rest)) if table && !rest.is_empty() => &[&out[..1], rest],
+        _ => &[out],
+    };
+    let mut buf = SmartStr::default();
+    for piece in pieces {
+        if let Err(thrown) = buf.append(req, piece) {
+            buf.free(req);
+            return Err(thrown);
+        }
+    }
+    buf.finish(req)
 }
 
 /// One value as `zend_print_zval_r_to_buf(buf, expr, indent)` renders

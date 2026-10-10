@@ -4,28 +4,27 @@
 
 use std::ops::Range;
 
-use php_heap::Block;
+use php_heap::FreshStr;
 
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
+use crate::api::values::{Owner, PhpString};
 
-/// `_ZSTR_HEADER_SIZE`: a `zend_string`'s header, which each of the
-/// allocations lays before the bytes.
-const HEADER: usize = 24;
-/// `SMART_STR_OVERHEAD`: the header and the terminator.
-const OVERHEAD: usize = HEADER + 1;
+/// `SMART_STR_OVERHEAD`: a `zend_string`'s header and its terminator.
+const OVERHEAD: usize = 24 + 1;
 /// `SMART_STR_START_LEN`: what the first allocation holds at least.
 const START_LEN: usize = 256 - OVERHEAD;
 /// `SMART_STR_PAGE`: what a larger allocation grows to a multiple of.
 const PAGE: usize = 4096;
 
-/// A `smart_str`: bytes on the request's heap, grown as
-/// `smart_str_erealloc` grows them, to 231 bytes first and then to the
-/// page past what is asked, each allocation a `zend_string`'s header and
-/// terminator beside the bytes, so `memory_get_usage()` and
-/// `memory_limit` see what php's see. Empty holds nothing. The bytes go
-/// back to the heap through [`SmartStr::free`], where php calls
-/// `smart_str_free`; what a holder leaves is the request's end's.
+/// A `smart_str`: a `zend_string` on the request's heap whose
+/// allocation, `a` bytes beside the header and terminator, runs ahead of
+/// what it holds, grown as `smart_str_erealloc` grows it, to 231 bytes
+/// first and then to the page past what is asked, so `memory_get_usage()`
+/// and `memory_limit` see what php's see. Empty holds nothing. The bytes
+/// go back to the heap through [`SmartStr::free`], where php calls
+/// `smart_str_free`, or become the string a native returns through
+/// [`SmartStr::finish`]; what a holder leaves is the request's end's.
 ///
 /// ```php
 /// $m = memory_get_usage();
@@ -38,35 +37,34 @@ const PAGE: usize = 4096;
 /// ```
 #[derive(Debug, Default)]
 pub struct SmartStr {
-    block: Option<Block>,
+    /// The string, as long as its allocation holds, `str->a`.
+    buf: Option<FreshStr>,
+    /// What it holds, `ZSTR_LEN(str->s)`.
     len: usize,
 }
 
 impl SmartStr {
     /// `smart_str_appendl`: `bytes` after what is held, the allocation
-    /// grown first where they do not fit before its terminator; the
+    /// laid down first where there is none and grown where what it would
+    /// hold reaches its size (`smart_str_alloc`), even for no bytes; the
     /// `Err` is the memory limit's fatal.
     pub fn append(&mut self, req: &mut Request, bytes: &[u8]) -> Result<(), Thrown> {
         let len = self.len.saturating_add(bytes.len());
-        let room = self
-            .block
-            .as_ref()
-            .map_or(0, |block| block.len() - OVERHEAD);
-        if self.block.is_none() || len >= room {
-            let grown = if self.block.is_none() && len <= START_LEN {
+        let room = self.buf.as_ref().map_or(0, FreshStr::len);
+        if self.buf.is_none() || len >= room {
+            let grown = if self.buf.is_none() && len <= START_LEN {
                 START_LEN
             } else {
                 len.saturating_add(OVERHEAD).next_multiple_of(PAGE) - OVERHEAD
             };
-            let size = HEADER + grown + 1;
-            let block = match self.block.take() {
-                None => req.heap_mut().block(size),
-                Some(block) => req.heap_mut().block_resize(block, size),
+            let buf = match self.buf.take() {
+                None => req.heap_mut().string_fresh(grown),
+                Some(buf) => req.heap_mut().string_extend(buf, grown),
             };
-            self.block = Some(req.fatal_of(block)?);
+            self.buf = Some(req.fatal_of(buf)?);
         }
-        if let Some(block) = &mut self.block {
-            block.bytes_mut()[HEADER + self.len..HEADER + len].copy_from_slice(bytes);
+        if let Some(buf) = &mut self.buf {
+            buf.bytes_mut()[self.len..len].copy_from_slice(bytes);
         }
         self.len = len;
         Ok(())
@@ -75,9 +73,9 @@ impl SmartStr {
     /// The bytes held.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        self.block
+        self.buf
             .as_ref()
-            .map_or(&[][..], |block| &block.bytes()[HEADER..HEADER + self.len])
+            .map_or(&[][..], |buf| &buf.bytes()[..self.len])
     }
 
     /// The bytes of `range` taken out and those after moved down, the
@@ -85,10 +83,8 @@ impl SmartStr {
     pub fn remove(&mut self, range: Range<usize>) {
         let end = range.end.min(self.len);
         let start = range.start.min(end);
-        if let Some(block) = &mut self.block {
-            block
-                .bytes_mut()
-                .copy_within(HEADER + end..HEADER + self.len, HEADER + start);
+        if let Some(buf) = &mut self.buf {
+            buf.bytes_mut().copy_within(end..self.len, start);
         }
         self.len -= end - start;
     }
@@ -98,10 +94,24 @@ impl SmartStr {
         self.len = 0;
     }
 
+    /// `smart_str_0(&buf)` and `buf.s` handed out, as
+    /// `zend_print_zval_r_to_str` returns it: the string of what is held
+    /// in the allocation as it stands, which `smart_str_extract` would
+    /// trim and this does not, one owner the caller's; the empty string
+    /// where nothing was ever appended.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn finish(mut self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
+        let Some(mut buf) = self.buf.take() else {
+            return PhpString::new(req, b"");
+        };
+        buf.set_len(self.len);
+        Ok(Owner::adopt(req, PhpString::of(buf.finish())))
+    }
+
     /// `smart_str_free`: the allocation back to the heap, nothing held.
     pub fn free(&mut self, req: &mut Request) {
-        if let Some(block) = self.block.take() {
-            req.heap_mut().free_block(block);
+        if let Some(buf) = self.buf.take() {
+            req.heap_mut().release_string(buf.finish());
         }
         self.len = 0;
     }
