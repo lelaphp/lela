@@ -109,12 +109,14 @@ impl Request {
     }
 
     /// The host's `zend_file_handle` of the program the request names,
-    /// opened before `auto_prepend_file` runs, as the host opens it before
-    /// `php_execute_script`, and with no `O_CLOEXEC`, as php's `fopen` and
-    /// `zend_stream_open` open it, so a process the program execs holds
-    /// it ([`ProgramFile`]); not opened where the host hands only its name
-    /// and opcache holds the file, which answers the open without making it.
-    /// An included file is closed once it has compiled, and is not held:
+    /// opened before `auto_prepend_file` is served, as the host opens it
+    /// before `php_execute_script`, and with no `O_CLOEXEC`, as php's
+    /// `fopen` and `zend_stream_open` open it, so a process the program
+    /// execs holds it ([`ProgramFile`]); not opened where the host hands
+    /// its name and opcache holds the file, which answers the open without
+    /// making it, nor where the host hands it unopened, which its compile
+    /// opens ([`ProgramFile::Unopened`]). An included file is closed once
+    /// it has compiled, and is not held:
     ///
     /// ```php
     /// $inc = __DIR__ . '/held.inc'; file_put_contents($inc, '<?php ');
@@ -132,15 +134,14 @@ impl Request {
         let Some(script) = self.description.script_name.clone() else {
             return;
         };
-        let until = match self.description.program_file {
-            // Opened by its compile ([`HandlePath::Kept`]).
+        let program_file = self.description.program_file;
+        let until = match program_file {
+            ProgramFile::Opened => Until::Served,
             ProgramFile::Unopened => return,
+            _ if self.accelerator_holds(&script) => return,
+            ProgramFile::Named => Until::Served,
             ProgramFile::Listed => Until::Ended,
-            ProgramFile::Named | ProgramFile::Opened => Until::Served,
         };
-        if self.description.program_file != ProgramFile::Opened && self.accelerator_holds(&script) {
-            return;
-        }
         self.hold_file(&script, until);
     }
 

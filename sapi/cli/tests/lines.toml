@@ -323,8 +323,10 @@ streams = "files"
 # only once the append file has run (`Z/main/main.c:2650-2656`), so the
 # prepend file is held from its compile through the program and the append
 # file, the append file while it runs, and neither, nor the program's file,
-# from a shutdown function. `-a`'s `readline_shell` destroys the prepend
-# file's once it has run, before the first line.
+# from a shutdown function, nor where the prepend file exits, which
+# `php_execute_script_ex`'s `zend_catch` ends before the destroys. `-a`'s
+# `readline_shell` destroys the prepend file's once it has run, before the
+# first line.
 [[line]]
 name = "the-auto-files-are-held-while-the-program-runs"
 args = ["-n", "-d", "auto_prepend_file={dir}/pre.php", "-d", "auto_append_file={dir}/app.php", "t.php"]
@@ -343,7 +345,9 @@ function listed($at) {
 require_once __DIR__ . '/listed.php';
 listed('prepend');
 register_shutdown_function(fn () => listed('shutdown'));
-''', "t.php" = "<?php listed('program');", "app.php" = "<?php listed('append');" }
+''', "t.php" = "<?php listed('program');", "app.php" = "<?php listed('append');", "exits.php" = "<?php require_once __DIR__ . '/listed.php'; register_shutdown_function(fn () => listed('shutdown after exit')); listed('exiting'); exit(3);" }
+[[line.then]]
+args = ["-n", "-d", "auto_prepend_file={dir}/exits.php", "-d", "auto_append_file={dir}/app.php", "t.php"]
 
 [[line]]
 name = "the-shell-closes-the-prepend-file-before-its-first-line"
