@@ -1450,9 +1450,9 @@ fn switch_into<P: HoldsCoroutine>(
             if matches!(back, Transfer::Fatal) {
                 // `zend_fiber_switch_to` raises the fiber's bailout again
                 // on the resumer, which leaves its own open frames to
-                // `zend_observer_fcall_end_all`; the fatal is rendered,
-                // and the frames still stand.
-                crate::observer::end_all(req);
+                // `zend_observer_fcall_end_all` at the request's shutdown;
+                // the fatal is rendered, and the frames still stand.
+                crate::observer::bailed_out(req);
             }
             Ok(back)
         }

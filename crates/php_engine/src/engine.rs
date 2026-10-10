@@ -4913,8 +4913,10 @@ impl Engine {
     /// runs in: its shutdown functions, its destructors, and every
     /// handler of the buffer stack popped.
     pub(crate) fn shutdown_program(req: &mut Request) {
-        // `php_request_shutdown`'s order (design §5.10): the shutdown
-        // functions first, which is `php_call_shutdown_functions`; then
+        // `php_request_shutdown`'s order (design §5.10): every frame a
+        // fatal left open to an observer ended first,
+        // `zend_observer_fcall_end_all`; the shutdown functions next,
+        // which is `php_call_shutdown_functions`; then
         // the destructors of what is still live, which is
         // `zend_call_destructors`, the symbol table walked in reverse
         // and the object store walked after it; then every output
@@ -4934,6 +4936,7 @@ impl Engine {
         // the step it was raised in and the next is served.
         req.enter_phase(crate::api::request::Phase::Shutdown);
         req.catch_bailout();
+        crate::observer::end_all(req);
         crate::natives::call_shutdown_functions(req);
         req.catch_bailout();
         req.shutdown_destructors();
@@ -5284,26 +5287,24 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &Arc<Unit>, kind: SourceKin
             raised.line,
         );
     }
-    let linked = match req.declare_classes(unit) {
-        Some(linked) if req.declare_functions(unit) => Some(linked),
-        _ => None,
-    };
-    // The observers are told what the load declared where php tells
-    // them: as its compile declares, before the compile's record is
-    // raised, or, where opcache serves the unit, at the load after it
-    // raised the cached file's warnings (`Z/ext/opcache/ZendAccelerator.c:1939-1945`).
-    // A load that ended the request tells nothing.
-    let accelerated = linked.as_ref().is_some_and(|linked| linked.accelerated);
-    if let Some(linked) = linked.as_ref().filter(|_| !accelerated) {
-        crate::observer::declared_at_load(req, unit, linked);
-    }
-    if let Some(recording) = recording {
+    // The observers are told what the load declares as it declares
+    // it, where php tells them: as its compile declares, before the
+    // compile's record is raised, or, where opcache serves the unit, as
+    // its load copies the tables, after it raised the cached file's
+    // warnings (`Z/ext/opcache/ZendAccelerator.c:1939-1945`).
+    let mut load = req.class_load(unit);
+    if load.accelerated()
+        && let Some(recording) = recording
+    {
         req.emit_recorded(recording);
     }
-    if let Some(linked) = linked.as_ref().filter(|_| accelerated) {
-        crate::observer::declared_at_load(req, unit, linked);
+    let declared = req.declare_unit(unit, &mut load);
+    if !load.accelerated()
+        && let Some(recording) = recording
+    {
+        req.emit_recorded(recording);
     }
-    linked.is_some()
+    declared
 }
 
 /// A program in `file` the compiler refused: `php_error_cb` renders it

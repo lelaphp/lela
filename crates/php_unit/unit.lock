@@ -38,6 +38,7 @@ OperandKind
 Opline
 Opline::jump_target
 OplineIdx
+TopLevel
 TryCatch
 Unit
 Unit::dump

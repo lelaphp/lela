@@ -56,12 +56,13 @@
 //! handlers are called in declaration order and end handlers in reverse. A
 //! frame with an end handler is kept on the request's chain of open
 //! frames (`Request::open_observed`, php's `EG(current_observed_frame)`), and is ended
-//! only while it is that chain's innermost, so each is ended once: by its
-//! return, by the unwind that leaves it, or, at a fatal, by
-//! [`end_all`], which ends every one still open from the innermost out
-//! with no value, after the fatal is rendered, as php's
-//! `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`) does at
-//! `php_request_shutdown` (`Z/main/main.c:1970-1972`).
+//! only while it is that chain's innermost, so each is ended once at
+//! most: by its return, by the unwind that leaves it, or by [`end_all`],
+//! php's `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`),
+//! which ends every one still open from the innermost out with no value
+//! at `php_request_shutdown`'s first step (`Z/main/main.c:1970-1972`).
+//! A fatal ends nothing where it bails out: its frames stay on the
+//! chain, kept as they stood ([`bailed_out`]), for that step to end.
 //!
 //! The slot is the request's, never the unit's: a handler added to or
 //! removed from one function while a request is served
@@ -81,7 +82,7 @@
 //! the user's handler and `zend_error_cb`; [`function_declared`] and
 //! [`class_linked`], at each declaration a request makes, told for a
 //! unit's load as php with and without opcache tells them
-//! ([`declared_at_load`]).
+//! ([`function_declared_at_load`], [`class_linked_at_load`]).
 //!
 //! A generator's frame is not begun at its call, as php's
 //! `zend_observer_fcall_begin` skips `ZEND_ACC_GENERATOR`: it is begun
@@ -121,7 +122,7 @@ use php_unit::Unit;
 
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown};
-use crate::api::request::{ChainFrame, FrameView, Request, TimeLimitSuspended};
+use crate::api::request::{ChainFrame, FrameId, FrameView, OpenCall, Request, TimeLimitSuspended};
 use crate::api::values::{ClassId, Owner, PhpObject, Value};
 
 pub(crate) use opcodes::{
@@ -140,6 +141,46 @@ pub(crate) enum Observable {
     Code(FrameRef),
     /// A native's call, served while it stands on the call stack.
     Native(NativeCall),
+}
+
+/// A frame on the open chain as a fatal left it: what its end
+/// handlers read of it once it no longer stands, php's `execute_data`
+/// that `zend_bailout` leaves in place on the VM stack, which
+/// `zend_observer_fcall_end_all` reads at `php_request_shutdown`
+/// (`Z/main/main.c:1970-1972`). Read while the frame stood, as the
+/// fatal left by `zend_bailout` ([`bailed_out`]); its identity tells it from a frame pushed
+/// later at the same place, so a frame below a `zend_try` that caught
+/// the fatal is still ended at its return where it is the innermost
+/// open, as php's `execute_data == EG(current_observed_frame)` ends it.
+#[derive(Debug)]
+pub(crate) struct Left {
+    pub(crate) frame: FrameId,
+    function: Option<Function>,
+    scope: Option<ClassId>,
+    filename: Box<[u8]>,
+    slot: Slot,
+}
+
+impl Left {
+    /// `frame`, standing on the running stack, as a fatal leaves it.
+    pub(crate) fn of(req: &Request, frame: FrameRef) -> Left {
+        let view = req.frame_view(frame);
+        Left {
+            frame: view.id(),
+            function: view.function(),
+            scope: view.function_scope(),
+            filename: view.filename().into(),
+            slot: req.observer_slot(Observable::Code(frame)),
+        }
+    }
+}
+
+/// What one handler is handed: a call that stands, the frame or the
+/// native's call it is, or a frame a fatal left ([`Left`]).
+#[derive(Debug, Clone, Copy)]
+enum Handed<'a> {
+    Standing(Observable),
+    Left(&'a Left),
 }
 
 /// One native's call begun with an end handler: the native, and the
@@ -203,7 +244,7 @@ pub struct ObserverHandlers {
 /// checked each time it is read again.
 pub struct Observed<'a> {
     req: &'a mut Request,
-    at: Observable,
+    at: Handed<'a>,
 }
 
 impl Deref for Observed<'_> {
@@ -227,42 +268,57 @@ impl AsMut<Request> for Observed<'_> {
     }
 }
 
+impl<'a> Observed<'a> {
+    /// A call that stands, handed to a handler.
+    pub(crate) fn standing(req: &'a mut Request, at: Observable) -> Observed<'a> {
+        Observed {
+            req,
+            at: Handed::Standing(at),
+        }
+    }
+}
+
 impl Observed<'_> {
     /// The frame observed, `execute_data`, read for as long as the
     /// handler does not write through the request: what it serves, where
     /// it stands, the frames below it, and its identity to keep. `None`
     /// for a native's call, which serves no op array and stands in no
     /// frame of the loop's: its function is [`Observed::function`], and
-    /// the frame it was called from [`Observed::caller`].
+    /// the frame it was called from [`Observed::caller`]; and `None` for
+    /// a frame a fatal left, ended at the request's shutdown once it no
+    /// longer stands, whose function and file are still read here.
     #[must_use]
     pub fn frame(&self) -> Option<FrameView<'_>> {
         match self.at {
-            Observable::Code(frame) => Some(self.req.frame_view(frame)),
-            Observable::Native(_) => None,
+            Handed::Standing(Observable::Code(frame)) => Some(self.req.frame_view(frame)),
+            Handed::Standing(Observable::Native(_)) | Handed::Left(_) => None,
         }
     }
 
     /// `EX(prev_execute_data)` as far as user code goes: the user frame
     /// below the one observed ([`FrameView::caller`]), and for a native's
     /// call the user frame it stands on, the innermost on the running
-    /// stack, past any native between them.
+    /// stack, past any native between them; none below a frame a fatal
+    /// left.
     #[must_use]
     pub fn caller(&self) -> Option<FrameView<'_>> {
         match self.at {
-            Observable::Code(frame) => self.req.frame_view(frame).caller(),
-            Observable::Native(_) => self.req.innermost_frame_view(),
+            Handed::Standing(Observable::Code(frame)) => self.req.frame_view(frame).caller(),
+            Handed::Standing(Observable::Native(_)) => self.req.innermost_frame_view(),
+            Handed::Left(_) => None,
         }
     }
 
     /// php's `prev_execute_data` walk from the frame observed: the frame
     /// or the native's call itself, then every frame below it, natives'
     /// calls and the frames generators and fibers link in among them
-    /// ([`FrameView::walk`]).
+    /// ([`FrameView::walk`]); nothing from a frame a fatal left.
     #[must_use]
     pub fn walk(&self) -> std::vec::IntoIter<ChainFrame<'_>> {
         match self.at {
-            Observable::Code(frame) => self.req.frame_view(frame).walk(),
-            Observable::Native(call) => self.req.native_walk(call.function),
+            Handed::Standing(Observable::Code(frame)) => self.req.frame_view(frame).walk(),
+            Handed::Standing(Observable::Native(call)) => self.req.native_walk(call.function),
+            Handed::Left(_) => Vec::new().into_iter(),
         }
     }
 
@@ -272,8 +328,9 @@ impl Observed<'_> {
     #[must_use]
     pub fn function(&self) -> Option<Function> {
         match self.at {
-            Observable::Code(frame) => self.req.frame_view(frame).function(),
-            Observable::Native(call) => Some(call.function),
+            Handed::Standing(Observable::Code(frame)) => self.req.frame_view(frame).function(),
+            Handed::Standing(Observable::Native(call)) => Some(call.function),
+            Handed::Left(left) => left.function,
         }
     }
 
@@ -283,8 +340,11 @@ impl Observed<'_> {
     #[must_use]
     pub fn function_scope(&self) -> Option<ClassId> {
         match self.at {
-            Observable::Code(frame) => self.req.frame_view(frame).function_scope(),
-            Observable::Native(call) => self.req.method_class(call.function),
+            Handed::Standing(Observable::Code(frame)) => {
+                self.req.frame_view(frame).function_scope()
+            }
+            Handed::Standing(Observable::Native(call)) => self.req.method_class(call.function),
+            Handed::Left(left) => left.scope,
         }
     }
 
@@ -301,8 +361,9 @@ impl Observed<'_> {
     #[must_use]
     pub fn filename(&self) -> &[u8] {
         match self.at {
-            Observable::Code(frame) => self.req.frame_view(frame).filename(),
-            Observable::Native(_) => &[],
+            Handed::Standing(Observable::Code(frame)) => self.req.frame_view(frame).filename(),
+            Handed::Standing(Observable::Native(_)) => &[],
+            Handed::Left(left) => &left.filename,
         }
     }
 }
@@ -605,7 +666,7 @@ fn begin_prechecked(req: &mut Request, at: Observable) -> bool {
     }
     let mut next = 0;
     while let Some(begin) = req.observer_begin_at(at, next) {
-        begin(&mut Observed { req, at });
+        begin(&mut Observed::standing(req, at));
         next += 1;
     }
     opened
@@ -637,7 +698,7 @@ fn resolve(req: &mut Request, at: Observable) -> Slot {
     let mut begin = Vec::new();
     let mut end = Vec::new();
     for init in shared.supplied.observers.iter() {
-        let handlers = init(&mut Observed { req, at });
+        let handlers = init(&mut Observed::standing(req, at));
         begin.extend(handlers.begin);
         end.extend(handlers.end);
     }
@@ -654,19 +715,23 @@ fn resolve(req: &mut Request, at: Observable) -> Slot {
 /// `zend_observer_fcall_end` (`Z/Zend/zend_observer.h:124-128`): where `frame` is the innermost open one,
 /// it is taken off the chain and its end handlers called in reverse
 /// declaration order; any other frame was not begun with an end
-/// handler, or was ended already. The frame leaves the chain before its
-/// handlers are called, so a fatal inside one does not end it twice.
+/// handler, or was ended already, or stands below a frame a caught
+/// fatal left, which stays the innermost until the request's shutdown
+/// ([`end_all`]). The frame leaves the chain before its handlers are
+/// called, so a fatal inside one does not end it twice. Nothing is
+/// ended while a fatal leaves by `zend_bailout`, whose jump passes over
+/// every `ZEND_OBSERVER_FCALL_END` between the fatal and the `zend_try`
+/// that catches it.
 #[cold]
 #[inline(never)]
 fn end(req: &mut Request, at: Observable, value: Option<&Value>) {
-    if req.close_observed(at) {
-        call_end_handlers(req, at, value);
+    if !req.bailing_out() && req.close_observed(at) {
+        call_end_handlers(req, Handed::Standing(at), value);
     }
 }
 
 /// [`end`] over a native's call begun with an end handler: ended where
-/// it is still the innermost open, which a fatal inside it leaves it
-/// not, [`end_all`] having ended it. The throwable the native left, its
+/// it is still the innermost open and no fatal is leaving it. The throwable the native left, its
 /// own or a stream's, stands in the pending slot while the end handlers
 /// are called, as it stands in `EG(exception)` at php's
 /// `ZEND_OBSERVER_FCALL_END`, so a handler reads it there and a call it
@@ -703,10 +768,18 @@ fn end_native(
 /// `call_end_observers` (`Z/Zend/zend_observer.c:296-311`): the end
 /// handlers of `at`'s slot as it stands when the call is left, which
 /// handlers added or removed since its begin have moved, called in the
-/// order it holds them and read afresh for each, as [`Slot::begin_at`].
-fn call_end_handlers(req: &mut Request, at: Observable, value: Option<&Value>) {
+/// order it holds them and read afresh for each, as [`Slot::begin_at`];
+/// a frame a fatal left is ended by the slot it held then.
+fn call_end_handlers(req: &mut Request, at: Handed<'_>, value: Option<&Value>) {
     let mut next = 0;
-    while let Some(end) = req.observer_end_at(at, next) {
+    loop {
+        let end = match at {
+            Handed::Standing(at) => req.observer_end_at(at, next),
+            Handed::Left(left) => left.slot.end_at(next),
+        };
+        let Some(end) = end else {
+            break;
+        };
         end(&mut Observed { req, at }, value);
         next += 1;
     }
@@ -715,10 +788,10 @@ fn call_end_handlers(req: &mut Request, at: Observable, value: Option<&Value>) {
 /// A serving's loop left, by its entry frame or by a fatal the loop
 /// raised and nothing has rendered yet: a resumed generator's caller and
 /// `php -r`'s pop the frames above the serving's entry before they
-/// render it, which would leave [`end_all`] frames that no longer stand.
-/// With an observer declared, the fatal is rendered here, where they
-/// still do, and the request leaves by `zend_bailout`, so the caller's
-/// own rendering finds it rendered; with none, nothing changes.
+/// render it, which would leave [`bailed_out`] frames that no longer
+/// stand to keep. With an observer declared, the fatal is rendered here,
+/// where they still do, and the request leaves by `zend_bailout`, so the
+/// caller's own rendering finds it rendered; with none, nothing changes.
 #[inline]
 pub(crate) fn loop_left(req: &mut Request, outcome: &Result<(), Fatal>) {
     if let Err(fatal) = outcome
@@ -734,17 +807,43 @@ fn render_where_frames_stand(req: &mut Request, fatal: &Fatal) {
     req.end_in(fatal);
 }
 
-/// `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`): at a fatal, every frame still open
-/// ended with no value, the innermost first, the chain emptied before
-/// the first handler runs. The frames still stand: the request ends
-/// them here, where the fatal is raised and after it is
-/// rendered, rather than at `php_request_shutdown` as php does, because
-/// the serving that catches the fatal pops them on its way out.
+/// A fatal leaving by `zend_bailout`, rendered, its frames still
+/// standing: nothing is ended, as php's jump ends nothing and leaves
+/// `EG(current_observed_frame)` where it stood, and every frame the open
+/// chain holds is kept as it stands now ([`Left`]), since the frames
+/// the fatal leaves are popped on its way out where php's stay on the
+/// VM stack. The `zend_try` that catches the fatal decides the rest:
+/// at the request's top they are ended at its shutdown ([`end_all`]); a
+/// native's, as soap's client stands in one, leaves them the innermost
+/// open, so the frames below it are not ended at their return and are
+/// ended at the shutdown too, unless the fatal left no frame above the
+/// native, which then ends at its return as the frames below it do;
+/// a shutdown function's or a destructor's, after the shutdown's first
+/// step, leaves them open for good; a fiber's ends them at the switch
+/// out of it.
+pub(crate) fn bailed_out(req: &mut Request) {
+    if req.shared.observers != 0 {
+        req.keep_observed();
+    }
+}
+
+/// `zend_observer_fcall_end_all` (`Z/Zend/zend_observer.c:319-329`):
+/// every call still open ended with no value, the innermost first, the
+/// chain emptied before the first handler runs. php calls it at the
+/// first step of `php_request_shutdown` (`Z/main/main.c:1970-1972`),
+/// before the shutdown functions, for the frames a fatal left, and as a
+/// fiber that died of one is switched out of
+/// (`Z/Zend/zend_observer.c:415`, [`fiber_switched`]). A frame the fatal
+/// left that no longer stands is ended as it was kept ([`Left`]).
 pub(crate) fn end_all(req: &mut Request) {
     if req.shared.observers == 0 {
         return;
     }
-    for at in req.take_observed() {
+    for opened in req.take_observed() {
+        let at = match &opened {
+            OpenCall::Call(at) => Handed::Standing(*at),
+            OpenCall::Left(left) => Handed::Left(left),
+        };
         call_end_handlers(req, at, None);
     }
 }
@@ -796,9 +895,10 @@ impl<'a> ErrorNotice<'a> {
     /// ends, `zend_exception_error`'s `E_ERROR`, or a `ParseError`'s or a
     /// `CompileError`'s own level, which php tells with `E_DONT_BAIL` set
     /// in `type` (`Z/Zend/zend_exceptions.c:926`, `:951-953`), so a tool
-    /// tells it from a fatal `zend_error` raised. A pending throwable
-    /// reported as a warning before a fatal is told as the warning
-    /// alone.
+    /// tells it from a fatal `zend_error` raised; and a throwable that
+    /// stood pending as a fatal was raised, which php reports at
+    /// `E_WARNING` with `E_DONT_BAIL` before the fatal
+    /// (`Z/Zend/zend.c:1514`).
     #[must_use]
     pub fn uncaught(&self) -> bool {
         self.uncaught
@@ -880,7 +980,7 @@ fn notify_error(req: &mut Request, notice: ErrorNotice<'_>) {
 /// declaration order. php tells them where `do_bind_function` binds a
 /// `DECLARE_FUNCTION`'s function (`Z/Zend/zend_compile.c:1300`) and
 /// where a file's top-level function is declared as the file loads
-/// ([`declared_at_load`]).
+/// ([`function_declared_at_load`]).
 pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: &[u8]) {
     if !functions_declared_observed(req) {
         return;
@@ -897,7 +997,7 @@ pub(crate) fn function_declared(req: &mut Request, function: Function, lowered: 
 /// `zend_bind_class_in_slot` binds a `DECLARE_CLASS`'s class
 /// (`Z/Zend/zend_compile.c:1326`, `:1332`), where a user class is given
 /// an alias (`Z/Zend/zend_API.c:3635`), and where a file's classes are
-/// linked as it loads ([`declared_at_load`]); an anonymous class's
+/// linked as it loads ([`class_linked_at_load`]); an anonymous class's
 /// `DECLARE_ANON_CLASS` tells none.
 pub(crate) fn class_linked(req: &mut Request, class: ClassId, lowered: &[u8]) {
     if !classes_linked_observed(req) {
@@ -922,102 +1022,41 @@ pub(crate) fn classes_linked_observed(req: &Request) -> bool {
     !req.shared.supplied.classes_linked.is_empty()
 }
 
-/// One notice of a unit's load, by the lowered name it is told under.
-enum LoadNotice {
-    Declared(Vec<u8>),
-    Linked(Vec<u8>),
-}
-
-/// What a unit's load bound before its main op array runs, for the
-/// notices of [`declared_at_load`]: the indices of the classes of
-/// [`Unit::classes`] linked, in the order linked, and whether opcache
-/// served the unit, which orders the notices.
-#[derive(Debug, Default)]
-pub(crate) struct LinkedAtLoad {
-    pub(crate) accelerated: bool,
-    pub(crate) classes: Vec<u32>,
-}
-
-/// The notices of a unit's load, its top-level functions declared and
-/// the classes linked early, in php's order: where opcache serves the
-/// unit, as `zend_accel_load_script` copies the cached file's tables
-/// (`Z/ext/opcache/zend_accelerator_util_funcs.c:392-410`), every
-/// function, then every class linked, then the delayed early bindings,
-/// which `linked` already holds in that order; on a cache hit and on
-/// the miss that compiled the file alike, since opcache compiles with
-/// `ZEND_COMPILE_IGNORE_OBSERVER` and tells them at the load
-/// (`Z/ext/opcache/ZendAccelerator.c:1816`). Where it does not, php
-/// tells each as its compile finishes it (`Z/Zend/zend_compile.c:8627`,
-/// `:9386`, `Z/Zend/zend_inheritance.c:3937-4039`): in source order,
-/// which is the order the declarations end in, since no top-level
-/// declaration holds another. A function and a class that end on one
-/// line are told the function first; php tells first the one written
-/// first. The engine's units are shared and kept like opcache's, so a
-/// unit served again from the engine's cache is told again, as each
+/// The function at `at` of `unit`'s top-level functions told as its
+/// load declares it ([`Request::declare_unit`]), under its lowered name.
+/// The engine's units are shared and kept like opcache's, so a unit
+/// served again from the engine's cache is told again, as each
 /// request's compile or load tells php's observers again.
-pub(crate) fn declared_at_load(req: &mut Request, unit: &Arc<Unit>, linked: &LinkedAtLoad) {
-    if !functions_declared_observed(req) && !classes_linked_observed(req) {
+///
+/// [`Request::declare_unit`]: crate::api::request::Request::declare_unit
+pub(crate) fn function_declared_at_load(req: &mut Request, unit: &Unit, at: usize) {
+    if !functions_declared_observed(req) {
         return;
     }
-    let functions: Vec<(u32, Vec<u8>)> = unit
-        .functions
-        .iter()
-        .enumerate()
-        .filter(|&(at, _)| {
-            let body = crate::exec::Body::Function(u32::try_from(at).unwrap_or(u32::MAX));
-            !req.preloaded_function(unit, body)
-        })
-        .map(|(_, (decl, _))| (decl.end_line, decl.name.0.to_ascii_lowercase()))
-        .collect();
-    let classes: Vec<(u32, Vec<u8>)> = linked
-        .classes
-        .iter()
-        .filter_map(|&at| unit.classes.get(usize::try_from(at).ok()?))
-        .map(|decl| (decl.end_line, decl.name.0.to_ascii_lowercase()))
-        .collect();
-    let mut told: Vec<LoadNotice> = Vec::with_capacity(functions.len() + classes.len());
-    if linked.accelerated {
-        told.extend(
-            functions
-                .into_iter()
-                .map(|(_, name)| LoadNotice::Declared(name)),
-        );
-        told.extend(
-            classes
-                .into_iter()
-                .map(|(_, name)| LoadNotice::Linked(name)),
-        );
-    } else {
-        let mut functions = functions.into_iter().peekable();
-        let mut classes = classes.into_iter().peekable();
-        loop {
-            let function_first = match (functions.peek(), classes.peek()) {
-                (Some(function), Some(class)) => function.0 <= class.0,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
-            };
-            let next = if function_first {
-                functions.next().map(|(_, name)| LoadNotice::Declared(name))
-            } else {
-                classes.next().map(|(_, name)| LoadNotice::Linked(name))
-            };
-            told.extend(next);
-        }
+    let Some((decl, _)) = unit.functions.get(at) else {
+        return;
+    };
+    let name = decl.name.0.to_ascii_lowercase();
+    if let Some(declared) = req.function_named(&name) {
+        function_declared(req, declared, &name);
     }
-    for notice in told {
-        match notice {
-            LoadNotice::Declared(name) => {
-                if let Some(declared) = req.function_named(&name) {
-                    function_declared(req, declared, &name);
-                }
-            }
-            LoadNotice::Linked(name) => {
-                if let Some(class) = req.class_named(&name) {
-                    class_linked(req, class, &name);
-                }
-            }
-        }
+}
+
+/// The class at `at` of `unit` told as its load links it
+/// ([`Request::declare_unit`]), under its lowered name, as
+/// [`function_declared_at_load`].
+///
+/// [`Request::declare_unit`]: crate::api::request::Request::declare_unit
+pub(crate) fn class_linked_at_load(req: &mut Request, unit: &Unit, at: usize) {
+    if !classes_linked_observed(req) {
+        return;
+    }
+    let Some(decl) = unit.classes.get(at) else {
+        return;
+    };
+    let name = decl.name.0.to_ascii_lowercase();
+    if let Some(class) = req.class_named(&name) {
+        class_linked(req, class, &name);
     }
 }
 

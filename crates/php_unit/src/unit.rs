@@ -62,6 +62,12 @@ pub struct Unit {
     /// one name, one in each arm of an `if`, are two keys. A class no key
     /// names was bound early and is bound when the unit loads.
     pub runtime_keys: Vec<(Name, u32)>,
+    /// Every top-level function and class of the file, in the order
+    /// its compile met them: what php's compiler declares, and tells
+    /// the observers of, as `zend_compile_func_decl` and
+    /// `zend_compile_class_decl` finish each (`Z/Zend/zend_compile.c:8627`,
+    /// `:9386`), which no line tells apart where two end on one.
+    pub top_level: Vec<TopLevel>,
     pub constants: Vec<ConstDecl>,
     /// The op array of each method a class of `classes` declares with a
     /// body, php's `ce->function_table` laid beside the declaration
@@ -115,6 +121,14 @@ pub struct Unit {
     /// The cell every closure of the unit's constant expressions reaches
     /// the unit through, bound when the unit is published.
     pub cell: UnitCell,
+}
+
+/// One of [`Unit::top_level`]: a function of [`Unit::functions`] or a
+/// class of [`Unit::classes`], by its index there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopLevel {
+    Function(u32),
+    Class(u32),
 }
 
 impl Unit {

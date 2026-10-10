@@ -12,11 +12,14 @@ use php_macros::php_function;
 use super::test_ext::{
     Event, Events, Phase, Recording, TestExt, fiber_name, observed_name, record, returned_name,
 };
-use crate::api::abi::{Extension, ExtensionBuilder, Observed, ObservedFiber, ObserverHandlers};
+use crate::api::abi::{
+    Beneath, Extension, ExtensionBuilder, Observed, ObservedFiber, ObserverHandlers, chain,
+};
 use crate::api::call::call;
 use crate::api::coerce::callable_checked;
+use crate::api::raising::{Level, Thrown, catch_fatal, leave_pending, throw};
 use crate::api::request::Request;
-use crate::api::values::{PhpString, Value};
+use crate::api::values::{Owner, PhpString, Value};
 use crate::engine::Engine;
 use crate::test::{Capture, Served};
 
@@ -318,9 +321,10 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
         ]
     );
     let uncaught = observed(&events.between("uncaught", "exited"));
-    let ended = unwound(&events.between("uncaught", "exited"));
     assert_eq!(
-        ended.get(..4).unwrap_or_default(),
+        unwound(&events.between("uncaught", "exited"))
+            .get(..4)
+            .unwrap_or_default(),
         [
             end(0, "Exception::__construct", Some("null")),
             end(0, "b", None),
@@ -330,15 +334,36 @@ fn an_unwind_ends_every_frame_it_leaves_once() {
     );
     // `zend_exception_error` renders the throwable through its
     // `__toString`, which `zend_call_function` serves after the file has
-    // ended, as `observer_exception_01.phpt` shows it.
-    assert!(
-        matches!(ended.get(4..), Some([Ext(0, End(name, Some(_)))]) if name == "Exception::__toString"),
-        "{ended:?}"
+    // ended, and which reaches `getTraceAsString` through a call of its
+    // own (`Z/Zend/zend_exceptions.c:731-733`), as
+    // `observer_exception_01.phpt` shows it.
+    let file_ended = uncaught.iter().position(|e| *e == end(0, file, None));
+    let to_string = "Exception::__toString";
+    let trace = "Exception::getTraceAsString";
+    assert_eq!(
+        uncaught
+            .get(file_ended.unwrap_or_default() + 1..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| !matches!(e, Ext(_, Error(_))))
+            .map(|e| match e {
+                Ext(n, End(name, Some(_))) => Ext(*n, End(name.clone(), Some(String::new()))),
+                other => other.clone(),
+            })
+            .collect::<Vec<_>>(),
+        [
+            init(0, to_string),
+            begin(0, to_string),
+            init(0, trace),
+            begin(0, trace),
+            end(0, trace, Some("")),
+            end(0, to_string, Some("")),
+        ],
+        "{uncaught:?}"
     );
     let rendered = uncaught
         .iter()
         .position(|e| matches!(e, Ext(_, Error(m)) if m.starts_with("Uncaught Exception: x")));
-    let file_ended = uncaught.iter().position(|e| *e == end(0, file, None));
     assert!(
         file_ended < rendered && rendered.is_some(),
         "the main file ends before the uncaught throwable is rendered: {uncaught:?}"
@@ -471,6 +496,84 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
         ],
         "every open frame ended once after the fatal: {resumed:?}"
     );
+}
+
+/// A fatal in a shutdown function or in a destructor the shutdown calls
+/// ends none of the frames it leaves open, as php ends them only at
+/// `php_request_shutdown`'s first step, which has passed (#2015); a
+/// fatal in the program before them is ended there, before the
+/// shutdown function runs. php's sequence, read from the oracle's
+/// zend-test variant with `zend_test.observer.observe_all`: the file's
+/// frames ended after the program's fatal, then `sd`, `inner2` and
+/// `trigger_error` begun and the second fatal rendered, and nothing
+/// after it; and a destructor's `inner` and `trigger_error` begun, the
+/// fatal rendered, and nothing after it.
+#[test]
+fn a_fatal_in_the_shutdown_leaves_its_frames_open() {
+    let rec = Recording::start();
+    let engine = Engine::cli_builder()
+        .extensions(&[TestExt::<0>::observing()])
+        .build();
+    let dir = scratch("shutdown_fatal");
+    let file = "file 'main.php'";
+    rec.mark("shutdown function");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { trigger_error('in main', E_USER_ERROR); }\n\
+         function outer() { inner(); }\nfunction sd() { inner2(); }\n\
+         function inner2() { trigger_error('in shutdown', E_USER_ERROR); }\n\
+         function sd2() { echo 'not reached'; }\n\
+         register_shutdown_function('sd');\nregister_shutdown_function('sd2');\nouter();\n",
+    );
+    rec.mark("destructor");
+    serve_main(
+        &engine,
+        &dir,
+        "<?php\nfunction inner() { trigger_error('in destructor', E_USER_ERROR); }\n\
+         class D { function __destruct() { inner(); } }\n$d = new D;\n",
+    );
+    rec.mark("end");
+    let events = rec.events();
+
+    let shutdown = observed(&events.between("shutdown function", "destructor"));
+    let fatal = shutdown
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m == "in main"));
+    assert!(fatal.is_some(), "{shutdown:?}");
+    assert_eq!(
+        shutdown[fatal.unwrap_or_default() + 1..]
+            .iter()
+            .filter(|e| !matches!(e, Ext(_, Error(m)) if m.starts_with("Passing E_USER_ERROR")))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            end(0, "trigger_error", None),
+            end(0, "inner", None),
+            end(0, "outer", None),
+            end(0, file, None),
+            init(0, "sd"),
+            begin(0, "sd"),
+            init(0, "inner2"),
+            begin(0, "inner2"),
+            begin(0, "trigger_error"),
+            Ext(0, Error(String::from("in shutdown"))),
+        ],
+        "{shutdown:?}"
+    );
+
+    let destructor = observed(&events.between("destructor", "end"));
+    let fatal = destructor
+        .iter()
+        .position(|e| matches!(e, Ext(_, Error(m)) if m == "in destructor"));
+    assert_eq!(
+        fatal.map(|at| at + 1),
+        Some(destructor.len()),
+        "nothing is ended after the destructor's fatal: {destructor:?}"
+    );
+    for name in ["D::__destruct", "inner", "trigger_error"] {
+        assert!(destructor.contains(&begin(0, name)), "{destructor:?}");
+    }
 }
 
 /// `frameless_probe(string $string): bool`, frameless for one argument:

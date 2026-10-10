@@ -252,5 +252,5 @@ fn tell(req: &mut Request, frame: FrameRef, opcode: Opcode) {
 /// handed the frame standing at it and the ones beneath.
 pub(crate) fn told(handler: OpcodeHandler, req: &mut Request, beneath: Beneath<'_, chain::Opcode>) {
     let at = Observable::Code(beneath.frame());
-    handler(&mut Observed { req, at }, beneath);
+    handler(&mut Observed::standing(req, at), beneath);
 }

@@ -54,6 +54,7 @@ mod class_constants;
 pub(crate) use class_constants::ConstantFetch;
 mod class_data;
 mod classes;
+use classes::AccelServed;
 mod constants;
 pub(crate) use constants::halt_offset_key;
 mod diagnostics;
@@ -97,7 +98,7 @@ use methods::visibility_string;
 mod objects;
 mod observing;
 mod op_arrays;
-pub(crate) use observing::ObservedChain;
+pub(crate) use observing::{ObservedChain, OpenCall};
 pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
 pub(crate) mod paths;
 pub use paths::RealpathEntry;
@@ -459,8 +460,9 @@ pub struct Request {
     preloading: Option<Preloading>,
     /// The unit opcache last served, `zend_accel_load_script`'s: one it
     /// held or keeps in its file cache, compiled with
-    /// `ZEND_COMPILE_DELAYED_BINDING` ([`Request::declare_classes`]).
-    accel_loaded: Option<Arc<Unit>>,
+    /// `ZEND_COMPILE_DELAYED_BINDING` ([`Request::class_load`]), and
+    /// whether this request's miss compiled it.
+    accel_loaded: Option<(Arc<Unit>, AccelServed)>,
     /// The unit the cache last served from what it holds, beside its
     /// early-bound classes as they were published with it (design §6.3),
     /// which its load declares by one insert each

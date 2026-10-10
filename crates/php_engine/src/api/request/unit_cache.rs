@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use php_compile::SourceKind;
 
-use super::{Request, Unresolved};
+use super::{AccelServed, Request, Unresolved};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
@@ -265,7 +265,7 @@ impl Request {
             return None;
         }
         shared.units.hit(&held, validation, now);
-        self.accel_loaded = held.unit.as_ref().ok().cloned();
+        self.accel_loaded = (held.unit.as_ref().ok().cloned()).map(|unit| (unit, AccelServed::Hit));
         self.early_bound =
             (held.unit.as_ref().ok()).map(|unit| (Arc::clone(unit), Arc::clone(&held.early)));
         if let Ok(unit) = &held.unit {
@@ -468,10 +468,8 @@ impl Request {
         if filed == Filed::Held && matches!(cached, Some(Ok(_))) {
             self.tell_cached(&full);
         }
-        // `zend_accel_load_script` loads what opcache held or kept, not
-        // what it compiled as php without it.
-        let loaded = validation != Validation::EveryHit && filed != Filed::Compiled;
-        self.accel_loaded = cached.clone().and_then(Result::ok).filter(|_| loaded);
+        let served = AccelServed::of(validation, filed);
+        self.accel_loaded = (cached.clone().and_then(Result::ok)).zip(served);
         // The classes its compiler bound early, published as it was held,
         // which its load declares by their numbers.
         self.early_bound = cached
@@ -481,7 +479,7 @@ impl Request {
             .filter(|(_, early)| early.iter().any(Option::is_some));
         // php keeps a link in its inheritance cache only under opcache,
         // whose loaded classes are immutable (`ZEND_ACC_IMMUTABLE`).
-        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, true) = (&cached, filed, loaded) {
+        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, Some(_)) = (&cached, filed, served) {
             self.note_held(unit);
         }
         // The file opened as a stream where php compiles it or resolves
@@ -796,6 +794,21 @@ fn disk<'a>(file_cache: &'a FileCache, build: &'a [u8; crate::unit_cache::BUILD]
         directory: &file_cache.directory,
         read_only: file_cache.read_only,
         build,
+    }
+}
+
+impl AccelServed {
+    /// How `zend_accel_load_script` serves a file
+    /// [`crate::unit_cache::UnitCache::file`] filed: it loads what
+    /// opcache held or kept, compiled by this request where its miss
+    /// held it, and none of what opcache compiled as php without it.
+    fn of(validation: Validation, filed: Filed) -> Option<AccelServed> {
+        match filed {
+            _ if validation == Validation::EveryHit => None,
+            Filed::Compiled => None,
+            Filed::Held => Some(AccelServed::Compiled),
+            Filed::Hit | Filed::Unheld => Some(AccelServed::Hit),
+        }
     }
 }
 

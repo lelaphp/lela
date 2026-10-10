@@ -350,14 +350,18 @@ enum Serves {
 }
 
 impl Serves {
-    /// The frame an observer is handed, or the native's call it is.
+    /// The frame an observer is handed, the native's call it is, or a
+    /// frame a fatal left, read by its function or its file.
     fn of(observed: &Observed<'_>) -> Serves {
         match (observed.frame(), observed.function()) {
             (Some(frame), _) => Serves::frame(observed, &frame),
             (None, Some(function)) => {
                 Serves::function_of(observed, function, observed.function_scope())
             }
-            (None, None) => Serves::File(NO_ACTIVE_FILE.to_vec()),
+            (None, None) => match observed.filename() {
+                [] => Serves::File(NO_ACTIVE_FILE.to_vec()),
+                file => Serves::File(file.to_vec()),
+            },
         }
     }
 
