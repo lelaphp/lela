@@ -5344,7 +5344,12 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileError, file: &
             req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
         }
         (php_compile::Stage::Compiling, true) => {
-            req.end_in_uncaught(refused.level, &refused.message, file, refused.line);
+            req.end_in_uncaught(
+                refused.level,
+                refused.message.as_bytes(),
+                file,
+                refused.line,
+            );
         }
         (php_compile::Stage::Compiling, false) => {
             req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
@@ -5368,9 +5373,7 @@ pub(crate) fn auto_file(req: &mut Request, name: &[u8], entry: Loop) -> bool {
         Ok(_) => true,
         Err(thrown) => {
             req.leave_pending(&thrown);
-            if let Err(fatal) = req.uncaught() {
-                req.end_in(&fatal);
-            }
+            req.uncaught().ok();
             false
         }
     }
@@ -5436,9 +5439,7 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &Arc<Unit>, entry: Loop) -> bo
     if req.is_pending() {
         match req.primary() {
             Primary::Wrapped => {
-                if let Err(fatal) = req.uncaught() {
-                    req.end_in(&fatal);
-                }
+                req.uncaught().ok();
             }
             Primary::Bare => req.keep_uncaught(),
         }

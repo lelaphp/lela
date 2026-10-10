@@ -2444,9 +2444,7 @@ pub(crate) fn call_shutdown_functions(req: &mut Request) {
             Ok(value) => value.give_up(req),
             Err(thrown) => {
                 req.leave_pending(&thrown);
-                if let Err(fatal) = req.uncaught() {
-                    req.end_in(&fatal);
-                }
+                req.uncaught().ok();
                 return;
             }
         }
