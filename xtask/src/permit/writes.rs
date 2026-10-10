@@ -14,7 +14,8 @@
 //! - a program run by its path whose bytes name it (`./tool.sh`).
 //!
 //! A word is the file when, read where the call stands or in a directory
-//! the line `cd`s into, it is that path ([`Place::is`]); a program names it
+//! the line `cd`s or `pushd`s into or a git command's `-C` names, it is
+//! that path ([`Place::is`]); a program names it
 //! when the file's name stands in its text ([`names_file`]). What none of
 //! that shows, a binary that holds the path where no word or file spells
 //! it, the line cannot be read to write, and the sensor keeps the change.
@@ -189,13 +190,19 @@ fn interprets(argv: &Argv) -> bool {
     INTERPRETERS.contains(&program) || program.starts_with("python")
 }
 
-/// The directories the line's `cd` commands move into, as written.
+/// The directories the line's `cd`, `pushd` and git `-C` commands move
+/// into, as written, a variable the line assigned read as its value
+/// ([`Argv::directories`]); a git command's `-C`s joined, each read from
+/// the one before, as git reads them.
 fn directories(line: &Line) -> Vec<String> {
     line.commands()
         .iter()
-        .filter(|argv| argv.runs("cd"))
-        .filter_map(|argv| argv.words().get(1..)?.iter().find(|w| !w.starts_with('-')))
-        .cloned()
+        .filter_map(|argv| {
+            let mut dirs = argv.directories();
+            let first = std::path::PathBuf::from(dirs.next()?);
+            let joined = dirs.fold(first, |dir, to| dir.join(to));
+            Some(joined.to_string_lossy().into_owned())
+        })
         .collect()
 }
 
@@ -254,6 +261,20 @@ mod tests {
         assert!(can("echo `echo x > seams.toml`", "seams.toml"));
         assert!(can(
             "cd docs && echo x >> divergence.toml",
+            "docs/divergence.toml"
+        ));
+        // #2607: a `pushd`, a git `-C` and a `cd` to a variable the line
+        // assigned move where a word is read, as a `cd` does.
+        assert!(can(
+            "pushd docs && echo x >> divergence.toml",
+            "docs/divergence.toml"
+        ));
+        assert!(can(
+            "git -C wt checkout -- docs/divergence.toml",
+            "wt/docs/divergence.toml"
+        ));
+        assert!(can(
+            "W=docs && cd \"$W\" && echo x >> divergence.toml",
             "docs/divergence.toml"
         ));
         assert!(can("sed -i '' -e 's/a/b/' seams.toml", "seams.toml"));

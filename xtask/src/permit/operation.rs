@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use super::argv::{Argv, Line};
 use super::call::Call;
-use super::rules::runs_in;
+use super::rules::{acts_in, command_runs_in, fired_in};
 use crate::reading::{self, Store};
 use crate::{git, track};
 
@@ -166,23 +166,18 @@ struct Starter {
 }
 
 /// The operation standing where a command of `line` that `fires` runs
-/// git, from `root` or the directory its leading `cd` and git's own `-C`
-/// name, when the session making `call` did not start it; `None` where
-/// nothing stands or it is the caller's own. A call with no line is judged
-/// in `root`.
+/// git, from `root` moved by the line's leading `cd` or `pushd` and the
+/// command's own `-C` ([`fired_in`]), when the session making `call` did
+/// not start it; `None` where nothing stands or it is the caller's own. A
+/// call with no line is judged in `root`.
 pub(crate) fn foreign(
     root: &Path,
     line: Option<&Line>,
     call: &Call,
     fires: impl Fn(&Argv) -> bool,
 ) -> Option<Foreign> {
-    let checkouts: Vec<PathBuf> = match line {
-        Some(line) => line
-            .commands()
-            .iter()
-            .filter(|argv| fires(argv))
-            .map(|argv| checkout_of(root, Some(line), argv))
-            .collect(),
+    let checkouts = match line {
+        Some(line) => fired_in(root, line, fires),
         None => vec![root.to_path_buf()],
     };
     let caller = Session::of(call);
@@ -209,7 +204,7 @@ pub(crate) fn foreign(
 pub(crate) fn record(root: &Path, call: &Call, line: &Line) -> Result<()> {
     let mut starting = Vec::new();
     for git in line.commands().iter().filter(|argv| argv.runs("git")) {
-        let checkout = checkout_of(root, Some(line), git);
+        let checkout = command_runs_in(root, Some(line), git);
         let Some(git_dir) = git_dir(&checkout) else {
             continue;
         };
@@ -250,41 +245,18 @@ pub(crate) fn record(root: &Path, call: &Call, line: &Line) -> Result<()> {
     Ok(())
 }
 
-/// The checkout a command of `line` runs in: the call's, moved by a
-/// leading `cd`, then, for git, by each `-C` among the options before its
-/// subcommand, as git reads them; a `-C` after the subcommand is the
-/// subcommand's own (`git commit -C HEAD`).
-fn checkout_of(root: &Path, line: Option<&Line>, argv: &Argv) -> PathBuf {
-    let mut dir = runs_in(root, line);
-    if argv.program() != "git" {
-        return dir;
-    }
-    let mut words = argv.words().iter().skip(1);
-    while let Some(word) = words.next() {
-        match word.as_str() {
-            "-C" => {
-                if let Some(to) = words.next() {
-                    dir = dir.join(to);
-                }
-            }
-            "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
-                words.next();
-            }
-            option if option.starts_with('-') => {}
-            _ => break,
-        }
-    }
-    dir
-}
-
-/// The checkout a call runs in: its `workspace` moved by a leading `cd`
-/// ([`runs_in`]), at the top of its worktree, a linked one's own; the
-/// workspace where the `cd` names no checkout. What `permit --after`
-/// holds, and the one checkout it puts a file back in (#2597). A `git -C`
-/// moves one command and not the call, so it is not read here.
+/// The checkout a call runs in: where it acts ([`acts_in`]), its
+/// `workspace` moved by the line's leading `cd`, `pushd` and `popd`, or
+/// the one directory git's `-C` names where every command past them is
+/// git, at the top of its worktree, a linked one's own; the workspace
+/// where that names no checkout, as it is for a `cd` to a variable the
+/// line did not assign. What `permit --after` holds, and the one
+/// checkout it puts a file back in (#2597, #2607). A line whose commands
+/// run in several checkouts is held where its shell stands, since a
+/// `-C` moves one command and the call is held in one.
 pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
     let top = git::git(
-        &runs_in(workspace, line),
+        &acts_in(workspace, line),
         &["rev-parse", "--show-toplevel"],
         None,
     );
@@ -554,6 +526,61 @@ mod tests {
         let workspace = dir.canonicalize().unwrap();
         assert_eq!(ran_in("touch x"), workspace);
         assert_eq!(ran_in("cd /var/empty/none && touch x"), workspace);
+    }
+
+    /// #2607: a `cd` to a variable the line assigned before it, plainly or
+    /// by `export`, and a `pushd` move the call to the worktree they name,
+    /// and a `popd` returns to where the `pushd` left; git's `-C` does
+    /// where every command past them is git and names one directory. A
+    /// change the line cannot read leaves it where it stood, the
+    /// workspace for the first.
+    #[test]
+    fn a_call_ran_in_the_worktree_an_assigned_cd_a_pushd_or_git_s_c_names() {
+        let dir = repository("operation-ran-in-shapes");
+        let base = Tree::new("operation-ran-in-shapes-linked").unwrap();
+        let linked = base.join("t1");
+        git(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "t1",
+                linked.to_str().unwrap(),
+            ],
+        );
+        std::fs::create_dir(linked.join("sub")).unwrap();
+        let top = linked.canonicalize().unwrap();
+        let workspace = dir.canonicalize().unwrap();
+        let ran_in = |line: &str| super::ran_in(&dir, Some(&Line::read(line)));
+        let at = linked.display();
+        assert_eq!(ran_in(&format!("W={at} && cd \"$W\" && touch x")), top);
+        assert_eq!(ran_in(&format!("W={at}; cd $W/sub; touch x")), top);
+        let exported = format!("export A=1 W={at} && cd \"${{W}}\" && touch x");
+        assert_eq!(ran_in(&exported), top);
+        assert_eq!(ran_in("cd \"$UNSET_BY_THE_LINE\" && touch x"), workspace);
+        assert_eq!(ran_in(&format!("W={at} cd \"$W\" && touch x")), workspace);
+        assert_eq!(ran_in(&format!("pushd {at}/sub && touch x")), top);
+        assert_eq!(ran_in(&format!("pushd {at} && popd && touch x")), workspace);
+        assert_eq!(ran_in("popd && touch x"), workspace);
+        let flagged = format!("git -C {at} checkout -- x && git -C {at} status");
+        assert_eq!(ran_in(&flagged), top);
+        let assigned = format!("export W={at} && git -C \"$W\" checkout -- x");
+        assert_eq!(ran_in(&assigned), top);
+        assert_eq!(ran_in(&format!("cd {at} && git -C sub status")), top);
+        // A `-C` moves its command, not the shell: a line whose other
+        // commands run where the shell stands is held there.
+        let later = format!("touch x && git -C {at} status");
+        assert_eq!(ran_in(&later), workspace);
+        let beside = format!("git -C {at} status && git checkout -- x");
+        assert_eq!(ran_in(&beside), workspace);
+        let after = format!("git -C {at} status && touch x");
+        assert_eq!(ran_in(&after), workspace);
+        // A change the line cannot read leaves it where it stood.
+        assert_eq!(ran_in(&format!("cd {at} && cd \"$UNSET\" && touch x")), top);
+        assert_eq!(ran_in(&format!("cd {at} && popd && touch x")), top);
+        assert_eq!(ran_in(&format!("pushd -n {at} && touch x")), workspace);
     }
 
     /// A rebase's base is `orig-head`, which `HEAD` leaves behind as the
