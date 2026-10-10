@@ -1147,9 +1147,8 @@ pub(crate) fn dba_handlers(
     let mut array = PhpArray::new(req)?;
     for &handler in Handler::ALL {
         if full_info {
-            let name = string(req, handler.name().as_bytes())?;
             let version = string(req, handler.version().as_bytes())?;
-            array.set(req, name.into_key(), version.into_value())?;
+            array.set_str(req, handler.name().as_bytes(), version.into_value())?;
         } else {
             let name = string(req, handler.name().as_bytes())?;
             array.append(req, name.into_value())?;

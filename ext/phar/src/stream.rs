@@ -8,7 +8,7 @@ use php_ext::request::{
     DirListing, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper, Streams as _,
     Whence,
 };
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{Owner, PhpArray};
 
 use crate::archive::{self, ArchiveId, archives, lossy};
 use crate::entry::{self, Dir, EntryData, Target};
@@ -447,8 +447,7 @@ const STAT_NAMES: [&[u8]; 13] = [
 fn stat_array(req: &mut Request, sb: [i64; 13]) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (name, field) in STAT_NAMES.iter().zip(sb) {
-        let key = PhpString::new(req, name)?.into_key();
-        out.set(req, key, Owner::int(field))?;
+        out.set_str(req, name, Owner::int(field))?;
     }
     Ok(out)
 }

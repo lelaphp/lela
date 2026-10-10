@@ -789,59 +789,55 @@ fn iconv_mime_decode_headers(
     let Some(charset) = charset(req, encoding) else {
         return Ok(OrFalse::False);
     };
-    let mut fields: Vec<(Vec<u8>, Field)> = Vec::new();
+    let mut out = PhpArray::new(req)?;
     let mut rest = headers.as_bytes();
     while !rest.is_empty() {
         let (header, next) = match decode(rest, c_str(&charset), mode) {
             Ok((Some(header), next)) => (header, next),
             Ok((None, _)) => break,
-            Err(error) => return failed(req, error, &charset, b"???"),
+            Err(error) => {
+                let answer = failed(req, error, &charset, b"???");
+                out.give_up(req);
+                return answer;
+            }
         };
         if let Some(colon) = header.iter().position(|&b| b == b':') {
             let at = header[colon + 1..]
                 .iter()
                 .position(|&b| b != b' ' && b != b'\t')
                 .map_or(header.len(), |n| colon + 1 + n);
-            let (name, value) = (&header[..colon], header[at..].to_vec());
-            match fields.iter_mut().find(|(seen, _)| seen == name) {
-                Some((_, field)) => field.add(value),
-                None => fields.push((name.to_vec(), Field::One(value))),
-            }
+            add_header(req, &mut out, &header[..colon], &header[at..])?;
         }
         rest = rest.get(next..).unwrap_or_default();
-    }
-    let mut out = PhpArray::new(req)?;
-    for (name, field) in fields {
-        let key = PhpString::new(req, &name)?.into_key();
-        let value = match field {
-            Field::One(value) => PhpString::new(req, &value)?.into_value(),
-            Field::Many(values) => {
-                let mut list = PhpArray::new(req)?;
-                for value in values {
-                    let value = PhpString::new(req, &value)?.into_value();
-                    list.append(req, value)?;
-                }
-                list.into_value()
-            }
-        };
-        out.set(req, key, value)?;
     }
     Ok(OrFalse::Value(out))
 }
 
-/// One name's values in `iconv_mime_decode_headers`' answer: a string,
-/// until the name is seen again and they become an array.
-enum Field {
-    One(Vec<u8>),
-    Many(Vec<Vec<u8>>),
-}
-
-impl Field {
-    /// The name seen again.
-    fn add(&mut self, value: Vec<u8>) {
-        match self {
-            Field::One(first) => *self = Field::Many(vec![std::mem::take(first), value]),
-            Field::Many(values) => values.push(value),
-        }
-    }
+/// One header into `iconv_mime_decode_headers`' answer, as php's loop
+/// adds it: under a name the answer holds as a string key
+/// (`zend_hash_str_find`) the value is appended, the first value made a
+/// list in its place; under any other, `add_assoc_stringl_ex`, whose
+/// symbol-table key makes a numeric name an index, so a numeric name
+/// seen again overwrites the row it left rather than gathering a list.
+fn add_header(
+    req: &mut Request,
+    out: &mut Owner<PhpArray>,
+    name: &[u8],
+    value: &[u8],
+) -> Result<(), Thrown> {
+    let Some(previous) = out.find(name) else {
+        let value = PhpString::new(req, value)?.into_value();
+        return out.set_symtable_str(req, name, value);
+    };
+    let mut list = if let Some(list) = previous.as_array() {
+        *list
+    } else {
+        let mut list = PhpArray::new(req)?;
+        list.append(req, Owner::take(req, previous))?;
+        let made = *list;
+        out.set_str(req, name, list.into_value())?;
+        made
+    };
+    let value = PhpString::new(req, value)?.into_value();
+    list.append(req, value)
 }

@@ -11,10 +11,12 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{Function, new_object};
 use php_ext::coerce::{to_long, value_name};
-use php_ext::raising::{Thrown, arg_type_error, deprecated, pending, throw_chained, throw_error};
+use php_ext::raising::{
+    Thrown, arg_type_error, deprecated, pending, throw_error, throw_error_chained,
+};
 use php_ext::request::Request;
 use php_ext::values::walk;
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
 
 use crate::cdata::{
     CData, Data, Fetch, Place, alloc, as_cdata, free, free_types, hold, hold_types, make, remember,
@@ -807,9 +809,44 @@ fn made_cdata(req: &mut Request, data: Data) -> Result<Owner<Instance<CData>>, T
 }
 
 /// `zend_ffi_load(filename, 0)`: a header's declarations, each failure
-/// thrown as php throws it.
+/// thrown as php throws it. php reads a regular file into `code`,
+/// `emalloc(code_size + 1)`, and frees it at its `cleanup`, so every throw
+/// past the file's checks stands over it; the block here is that buffer,
+/// held across [`load_read`].
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// $h = sprintf('/tmp/ffi-%07d.h', getmypid()); file_put_contents($h, "int x(;\n");
+/// pk(function () use ($h) { try { FFI::load($h); } catch (FFI\Exception $e) {} });
+/// try { FFI::load($h); } catch (FFI\Exception $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// unlink($h);
+/// ```
+/// ```expect
+/// 4720
+/// Failed loading '/tmp/ffi-%d.h' / ')' expected, got ';' at line 1
+/// ```
 fn load(req: &mut Request, filename: &[u8]) -> Result<Owner<Instance<FFI>>, Thrown> {
     let shown = String::from_utf8_lossy(filename).into_owned();
+    let code = match std::fs::metadata(&shown) {
+        Ok(meta) if meta.is_file() => {
+            let len = usize::try_from(meta.len()).unwrap_or(usize::MAX);
+            Some(Emalloc::new(req, len.saturating_add(1))?)
+        }
+        _ => None,
+    };
+    let loaded = load_read(req, filename, &shown);
+    if let Some(code) = code {
+        code.free(req);
+    }
+    loaded
+}
+
+/// [`load`] once its `code` is held.
+fn load_read(
+    req: &mut Request,
+    filename: &[u8],
+    shown: &str,
+) -> Result<Owner<Instance<FFI>>, Thrown> {
     let from = types(req).len();
     let loaded = match crate::preload::load_header(filename, types(req), attr::STORED, None) {
         Ok(loaded) => loaded,
@@ -820,9 +857,12 @@ fn load(req: &mut Request, filename: &[u8]) -> Result<Owner<Instance<FFI>>, Thro
                 Fail::Unreadable => format!("Failed loading '{shown}', cannot read_file"),
                 Fail::BadDefine(what) => format!("Failed loading '{shown}', bad {what} define"),
                 Fail::Twice(what) => format!("Failed loading '{shown}', {what} defined twice"),
+                // `zend_throw_error(zend_ffi_exception_ce, "Failed loading
+                // '%s'", ...)` over the parser's pending throw, its
+                // `zend_vspprintf` buffer standing across the throw.
                 Fail::Parse(message) => {
                     let thrown = parser_error(req, &message);
-                    return Err(throw_chained(
+                    return Err(throw_error_chained(
                         req,
                         thrown,
                         "FFI\\Exception",

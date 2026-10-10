@@ -18,7 +18,7 @@ use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, fatal, leave_pending,
 };
 use php_ext::request::{Receiving, Request, Siginfo, take_signals};
-use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Owner, PhpArray, Value, ValueRef, walk};
 
 use crate::ffi::{self, Disposition, SignalSet};
 use crate::{State, failed};
@@ -408,14 +408,7 @@ fn put(
     key: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, key) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, key, value)
 }
 
 /// `pcntl_sigprocmask(int $mode, array $signals, &$old_signals = null):

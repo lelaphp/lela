@@ -8,7 +8,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object, write_prop};
 use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
 use crate::doc::{NODE, Obj, doc_id, fixed};
 use crate::ffi::{
@@ -96,13 +96,11 @@ fn properties(
         Some(rows) => {
             let mut array = PhpArray::new(req)?;
             for (name, value) in rows {
-                let key = init(req, &name)?;
-                let key = Key::from_string(req, key);
                 let value = match value {
                     Some(value) => string(req, &value)?,
                     None => PhpString::new(req, b"")?.into_value(),
                 };
-                array.set(req, key, value)?;
+                array.set_symtable_str(req, &name, value)?;
             }
             array.into_value()
         }

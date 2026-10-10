@@ -1162,9 +1162,8 @@ pub(crate) fn stats_array(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (name, value) in stats {
-        let key = PhpString::new(req, name.as_bytes())?.into_key();
         let value = string(req, value.to_string().as_bytes())?;
-        out.set(req, key, value)?;
+        out.set_str(req, name.as_bytes(), value)?;
     }
     Ok(out)
 }
@@ -1192,8 +1191,7 @@ pub(crate) fn links_stats(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
     ];
     let mut out = PhpArray::new(req)?;
     for (name, n) in counts {
-        let key = PhpString::new(req, name.as_bytes())?.into_key();
-        out.set(req, key, Owner::int(n))?;
+        out.set_str(req, name.as_bytes(), Owner::int(n))?;
     }
     Ok(out)
 }

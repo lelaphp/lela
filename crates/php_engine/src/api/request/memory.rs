@@ -86,6 +86,14 @@ impl Request {
         self.allocated(allocated)
     }
 
+    /// A string of `bytes` out of this request's heap whatever their
+    /// length, `zend_string_init`, where [`Request::string`] hands out the
+    /// interned string for the empty string and one byte.
+    pub(crate) fn string_init(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string(bytes);
+        self.allocated(allocated)
+    }
+
     /// A string of `len` bytes written in place, what
     /// [`PhpString::filled`] is: `zend_string_alloc`, then the caller's
     /// write into `ZSTR_VAL`.

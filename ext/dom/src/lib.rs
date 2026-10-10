@@ -1088,8 +1088,7 @@ fn prop_rows(
         } else {
             read
         };
-        let key = PhpString::new(req, prop.name)?.into_key();
-        out.set(req, key, shown)?;
+        out.set_str(req, prop.name, shown)?;
     }
     Ok(())
 }

@@ -8076,8 +8076,7 @@ impl ReflectionExtension {
             };
             let object = new_object(req, reflector)?;
             set_name(req, *object, &name)?;
-            let key = PhpString::new(req, &name)?.into_key();
-            functions.set(req, key, object.into_value())?;
+            functions.set_str(req, &name, object.into_value())?;
         }
         Ok(functions)
     }
@@ -8130,8 +8129,7 @@ impl ReflectionExtension {
             let value = constant(req, &name)?.unwrap_or_default();
             // The lookup is a view and the row is the array's:
             // `ZVAL_COPY_OR_DUP`, so the table keeps its own count.
-            let key = PhpString::new(req, &name)?.into_key();
-            constants.set(req, key, Owner::take(req, value))?;
+            constants.set_str(req, &name, Owner::take(req, value))?;
         }
         Ok(constants)
     }
@@ -8170,12 +8168,11 @@ impl ReflectionExtension {
         let extension = this_extension(req, this.object())?;
         let mut entries = PhpArray::new(req)?;
         for entry in req.extension_ini(extension) {
-            let key = PhpString::new(req, &entry.decl.name.0)?.into_key();
             let value = match entry.value {
                 Some(value) => PhpString::new(req, &value)?.into_value(),
                 None => Owner::null(),
             };
-            entries.set(req, key, value)?;
+            entries.set_str(req, &entry.decl.name.0, value)?;
         }
         Ok(entries)
     }
@@ -8207,8 +8204,7 @@ impl ReflectionExtension {
         let mut classes = PhpArray::new(req)?;
         for (class, name) in extension_classes(req, extension) {
             let reflector = reflection_class_factory(req, class)?;
-            let key = PhpString::new(req, &name)?.into_key();
-            classes.set(req, key, reflector.into_value())?;
+            classes.set_str(req, &name, reflector.into_value())?;
         }
         Ok(classes)
     }
@@ -8278,9 +8274,8 @@ impl ReflectionExtension {
                 relation.push(' ');
                 relation.push_str(part);
             }
-            let key = PhpString::new(req, dependency.name.as_bytes())?.into_key();
             let value = PhpString::new(req, relation.as_bytes())?.into_value();
-            dependencies.set(req, key, value)?;
+            dependencies.set_str(req, dependency.name.as_bytes(), value)?;
         }
         Ok(dependencies)
     }

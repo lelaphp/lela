@@ -13,7 +13,7 @@ use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, docref, fatal};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::decode::{
     Arg, CertParam, Origin, c_string, cert_from_param, certs_from_file, check_path, finish,
@@ -422,20 +422,16 @@ pub(crate) fn name_entries(
                 let mut list = PhpArray::new(req)?;
                 list.append(req, first)?;
                 list.append(req, text)?;
-                let label_key = PhpString::new(req, &label)?.into_key();
-                inner.set(req, label_key, list.into_value())?;
+                inner.set_str(req, &label, list.into_value())?;
             }
             Some(_) => text.give_up(req),
             None => {
-                let label = PhpString::new(req, &label)?;
-                let label = Key::from_string(req, label);
-                inner.set(req, label, text)?;
+                inner.set_symtable_str(req, &label, text)?;
             }
         }
     }
     if let (Some(key), Some(fresh)) = (key, fresh) {
-        let key = PhpString::new(req, key)?.into_key();
-        array.set(req, key, fresh.into_value())?;
+        array.set_str(req, key, fresh.into_value())?;
     }
     Ok(())
 }
@@ -679,9 +675,7 @@ fn openssl_x509_parse(
         let mut rows = PhpArray::new(req)?;
         for (name, value) in extensions {
             let value = PhpString::new(req, &value)?.into_value();
-            let name = PhpString::new(req, &name)?;
-            let name = Key::from_string(req, name);
-            rows.set(req, name, value)?;
+            rows.set_symtable_str(req, &name, value)?;
         }
         put(req, &mut out, b"extensions", rows.into_value())?;
         Ok(OrFalse::Value(out))

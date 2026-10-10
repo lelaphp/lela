@@ -10,7 +10,7 @@ use php_ext::abi::{
 };
 use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name, with_string};
-use php_ext::raising::{Level, Thrown, docref, throw_chained, throw_error};
+use php_ext::raising::{Level, Thrown, docref, throw_error, throw_error_chained};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
@@ -669,6 +669,17 @@ fn write_access(
 }
 
 /// `sxe_prop_dim_write`: the node written, or the one made, where any.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// $x = (new ReflectionClass('SimpleXMLElement'))->newInstanceWithoutConstructor();
+/// pk(function () use ($x) { try { $x->a = []; } catch (TypeError $e) {} });
+/// try { $x->a = []; } catch (TypeError $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// 3576
+/// It's not possible to assign a complex type to properties, array given / SimpleXMLElement is not properly initialized
+/// ```
 fn prop_dim_write(
     req: &mut Request,
     object: PhpObject,
@@ -681,10 +692,11 @@ fn prop_dim_write(
     let base = match view.node(req) {
         Ok(base) => base,
         // php's `GET_NODE` leaves its `Error` pending and goes on to the
-        // value, whose `TypeError` then chains it as its previous.
+        // value, whose `TypeError` (`zend_type_error`, its `zend_vspprintf`
+        // buffer standing across the throw) then chains it as its previous.
         Err(uninitialised) => {
             return Err(match value.and_then(|v| complex(req, v, access)) {
-                Some(message) => throw_chained(req, uninitialised, "TypeError", &message),
+                Some(message) => throw_error_chained(req, uninitialised, "TypeError", &message),
                 None => uninitialised,
             });
         }
@@ -994,9 +1006,8 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
             if !attrs.is_empty() {
                 let mut list = PhpArray::new(req)?;
                 for (name, value) in attrs {
-                    let key = PhpString::new(req, &name)?.into_key();
                     let value = string(req, &value)?;
-                    list.set(req, key, value)?;
+                    list.set_str(req, &name, value)?;
                 }
                 add_row(&mut rows, b"@attributes", list.into_value());
             }

@@ -208,8 +208,7 @@ fn usage_into(
         (b"ru_stime.tv_sec", long(usage.ru_stime.tv_sec)),
     ];
     for (name, value) in fields {
-        let key = PhpString::new(req, name)?;
-        array.set(req, key.into_key(), Owner::int(value))?;
+        array.set_str(req, name, Owner::int(value))?;
     }
     Ok(())
 }

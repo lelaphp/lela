@@ -2479,8 +2479,7 @@ fn debug_info(req: &mut Request, this: PhpObject) -> Result<Owner<PhpArray>, Thr
                field: &[u8],
                value: Owner<Value>| {
         let name = [b"\0".as_slice(), class, b"\0", field].concat();
-        let name = PhpString::new(req, &name)?;
-        out.set(req, name.into_key(), value)
+        out.set_str(req, &name, value)
     };
     let value = crate::string_value(req, &path_name)?;
     set(req, &mut out, b"SplFileInfo", b"pathName", value)?;

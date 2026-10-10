@@ -630,10 +630,9 @@ impl Number {
     /// ```
     fn __serialize(req: &mut Request, this: This<Self>) -> Result<Owner<PhpArray>, Thrown> {
         let value = rendered(req, this.object())?;
-        let key = PhpString::new(req, b"value")?;
         let mut array = PhpArray::new(req)?;
         let value = Owner::take(req, Value::string(value));
-        array.set(req, key.into_key(), value)?;
+        array.set_str(req, b"value", value)?;
         Ok(array)
     }
 

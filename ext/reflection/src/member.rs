@@ -1707,8 +1707,7 @@ impl ReflectionProperty {
         let mut hooks = PhpArray::new(req)?;
         for (kind, (scope, decl)) in declared {
             let reflector = hook_reflector(req, scope, &decl)?;
-            let key = php_ext::values::PhpString::new(req, kind.name().as_bytes())?.into_key();
-            hooks.set(req, key, reflector.into_value())?;
+            hooks.set_str(req, kind.name().as_bytes(), reflector.into_value())?;
         }
         Ok(hooks)
     }

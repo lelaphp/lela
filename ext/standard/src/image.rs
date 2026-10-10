@@ -1745,12 +1745,10 @@ fn answer(
     if want_info {
         let mut info = php::PhpArray::new(req)?;
         for segment in &found.segments {
-            let name = php::PhpString::new(req, segment.name().as_bytes())?;
-            if info.contains(&php::Key::Str(*name)) {
-                name.give_up(req);
-            } else {
+            let name = segment.name();
+            if info.find(name.as_bytes()).is_none() {
                 let value = string(req, &segment.bytes)?;
-                info.set(req, name.into_key(), value)?;
+                info.set_str(req, name.as_bytes(), value)?;
             }
         }
         image_info.set(req, Untyped(info.into_value()))?;
@@ -1760,15 +1758,14 @@ fn answer(
     };
     let mut array = php::PhpArray::new(req)?;
     for (key, value) in data.entries() {
-        let key = match key {
-            Key::Index(i) => php::Owner::take(req, php::Key::Int(i)),
-            Key::Name(name) => php::PhpString::new(req, name.as_bytes())?.into_key(),
-        };
         let value = match value {
             Value::Int(n) => php::Owner::take(req, php::Value::int(n)),
             Value::Str(text) => string(req, text.as_bytes())?,
         };
-        array.set(req, key, value)?;
+        match key {
+            Key::Index(i) => array.set(req, php::Owner::index(i), value)?,
+            Key::Name(name) => array.set_str(req, name.as_bytes(), value)?,
+        }
     }
     Ok(OrFalse::Value(array))
 }

@@ -14,7 +14,7 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{self, to_long, value_name, with_string};
 use php_ext::raising::{Thrown, argument_error, arity, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
 use crate::calendar::{self, IntlCalendar};
 use crate::common_date::{
@@ -1098,9 +1098,7 @@ fn parse_text(
             "tm_wday" => value - 1,
             _ => value,
         };
-        let key = PhpString::new(req, key.as_bytes())?;
-        let key = Key::from_string(req, key);
-        table.set(req, key, Owner::int(value))?;
+        table.set_str(req, key.as_bytes(), Owner::int(value))?;
     }
     let mut status = Code::ZERO;
     let dst = udatf.calendar_field(None, &mut status);
@@ -1109,9 +1107,7 @@ fn parse_text(
         table.give_up(req);
         return or_false(Err(stop));
     }
-    let key = PhpString::new(req, b"tm_isdst")?;
-    let key = Key::from_string(req, key);
-    table.set(req, key, Owner::int(i64::from(dst == 1)))?;
+    table.set_str(req, b"tm_isdst", Owner::int(i64::from(dst == 1)))?;
     Ok(OrFalse::Value(Union::B(table)))
 }
 

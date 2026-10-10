@@ -1054,14 +1054,12 @@ fn list_debug_info(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
     for (key, value) in crate::std_properties(req, object)? {
         out.set(req, Owner::take(req, key), Owner::take(req, value))?;
     }
-    let name = PhpString::new(req, b"\0SplDoublyLinkedList\0flags")?;
-    out.set(req, name.into_key(), Owner::int(flags))?;
+    out.set_str(req, b"\0SplDoublyLinkedList\0flags", Owner::int(flags))?;
     let mut list = PhpArray::new(req)?;
     for value in values {
         list.append(req, Owner::take(req, value.deref()))?;
     }
-    let name = PhpString::new(req, b"\0SplDoublyLinkedList\0dllist")?;
-    out.set(req, name.into_key(), list.into_value())?;
+    out.set_str(req, b"\0SplDoublyLinkedList\0dllist", list.into_value())?;
     Ok(out)
 }
 

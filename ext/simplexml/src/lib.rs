@@ -1330,9 +1330,8 @@ fn namespace_array(
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
     for (prefix, href) in found {
-        let key = PhpString::new(req, &prefix)?.into_key();
         let value = sxe::string(req, &href)?;
-        out.set(req, key, value)?;
+        out.set_str(req, &prefix, value)?;
     }
     Ok(out)
 }

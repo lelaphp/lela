@@ -283,14 +283,7 @@ fn set(
     key: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, key) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, key, value)
 }
 
 /// A string of the request's as a value.

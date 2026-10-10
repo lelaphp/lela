@@ -691,11 +691,22 @@ impl PhpArray {
     /// string and its place, its old value released; an absent one is
     /// made only after the table has room for it, so a write that
     /// doubles the table never holds the new key beside the old data and
-    /// the new, as php's never does. That is `add_assoc_*`'s write, which
-    /// `memory_get_peak_usage()` reads, and why a native adds a row under
-    /// a name it has as bytes here, never through a [`PhpString`] key
-    /// made first and handed to [`PhpArray::set`]. The value is the
-    /// array's from here.
+    /// the new, as php's never does. `memory_get_peak_usage()` reads
+    /// that order, which is why a native adds a row under a name it has
+    /// as bytes here, or through [`PhpArray::set_symtable_str`] where
+    /// php's is `add_assoc_*`, never through a [`PhpString`] key made
+    /// first and handed to [`PhpArray::set`]. The value is the array's
+    /// from here.
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+    /// pk(fn () => stat(__FILE__));
+    /// pk(fn () => getrusage());
+    /// ```
+    /// ```expect
+    /// 2072
+    /// 2632
+    /// ```
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn set_str(
         &mut self,
@@ -708,6 +719,50 @@ impl PhpArray {
             return Err(thrown);
         }
         req.array_str_update(self.0, name, value.hand_on())
+    }
+
+    /// Write `value` under the key these bytes name as a symbol table
+    /// reads them, `zend_symtable_str_update`, which is what every
+    /// `add_assoc_*` writes: an integer key where the bytes are a
+    /// canonical decimal integer in range (`ZEND_HANDLE_NUMERIC_STR`),
+    /// as [`Key::from_string`] reads a string, and else
+    /// [`PhpArray::set_str`]'s write, the key made only after the table
+    /// has room. A native adds a row under a name it has as bytes, and
+    /// that may be numeric, here; one whose name cannot be numeric, or
+    /// whose php source is `zend_hash_str_update`, uses `set_str`.
+    ///
+    /// `get_html_translation_table` writes each row so, its key a
+    /// character or two and its table doubling as it fills:
+    ///
+    /// ```php
+    /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+    /// pk(fn () => get_html_translation_table());
+    /// pk(fn () => get_html_translation_table(HTML_ENTITIES));
+    /// pk(fn () => get_html_translation_table(HTML_ENTITIES, ENT_QUOTES | ENT_HTML5));
+    /// var_dump(iconv_mime_decode_headers("7: a\r\n07: b\r\n7: c\r\n"));
+    /// ```
+    /// ```expect
+    /// 696
+    /// 29136
+    /// 192752
+    /// array(2) {
+    ///   [7]=>
+    ///   string(1) "c"
+    ///   ["07"]=>
+    ///   string(1) "b"
+    /// }
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn set_symtable_str(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        value: Owner<Value>,
+    ) -> Result<(), Thrown> {
+        match php_heap::canonical_int(name) {
+            Some(n) => self.set(req, Owner::index(n), value),
+            None => self.set_str(req, name, value),
+        }
     }
 
     /// Lay `value` down at `key` as `zend_hash_add_new` and

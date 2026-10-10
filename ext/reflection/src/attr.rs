@@ -488,8 +488,7 @@ impl ReflectionAttribute {
                 let value = eval_declared(req, &argument.value, kept.scope)?;
                 match &argument.name {
                     Some(name) => {
-                        let key = PhpString::new(req, &name.0)?;
-                        out.set(req, key.into_key(), value)?;
+                        out.set_str(req, &name.0, value)?;
                     }
                     None => out.append(req, value)?,
                 }
@@ -663,7 +662,7 @@ impl ReflectionAttribute {
     /// pk(function () use ($a) { try { $a->newInstance(); } catch (Error $e) {} });
     /// ```
     /// ```expect
-    /// 4856 32
+    /// 4808 32
     /// ```
     fn newInstance(req: &mut Request, this: This<Self>) -> Result<Owner<PhpObject>, Thrown> {
         let kept = this_attribute(req, this.object())?;

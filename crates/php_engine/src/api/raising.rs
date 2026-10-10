@@ -1073,9 +1073,10 @@ pub(crate) fn new_throwable_made(
     message: &str,
 ) -> Result<Value, Thrown> {
     // `zend_throw_exception` makes the message's string before the
-    // object (`zend_string_init`), so it stands across the trace.
+    // object (`zend_string_init`, an allocation for the empty message and
+    // one byte as for any), so it stands across the trace.
     let message = message.split('\0').next().unwrap_or_default();
-    let message = PhpString::new(req, message.as_bytes())?;
+    let message = Owner::adopt(req.string_init(message.as_bytes())?);
     let object = match req.new_object_of(class) {
         Ok(object) => object,
         Err(refused) => {

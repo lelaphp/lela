@@ -317,8 +317,7 @@ fn record_array(req: &mut Request, record: Record) -> Result<Owner<Value>, Throw
                 list.into_value()
             }
         };
-        let k = PhpString::new(req, name.as_bytes())?.into_key();
-        array.set(req, k, value)?;
+        array.set_str(req, name.as_bytes(), value)?;
     }
     Ok(array.into_value())
 }

@@ -477,8 +477,7 @@ fn msg_stat_queue(
         ("msg_lspid", stat.lspid),
         ("msg_lrpid", stat.lrpid),
     ] {
-        let key = PhpString::new(req, key.as_bytes())?.into_key();
-        array.set(req, key, Owner::int(value))?;
+        array.set_str(req, key.as_bytes(), Owner::int(value))?;
     }
     Ok(OrFalse::Value(array))
 }

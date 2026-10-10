@@ -1018,10 +1018,8 @@ impl Statement for Stmt {
         };
         // `add_assoc_str(..., ZSTR_KNOWN(...))`: php's own interned string.
         let native = PhpString::interned(req, native)?;
-        let key = PhpString::new(req, b"native_type")?.into_key();
-        out.set(req, key, Owner::take(req, native).into_value())?;
-        let key = PhpString::new(req, b"pdo_type")?.into_key();
-        out.set(req, key, Owner::int(pdo_type))?;
+        out.set_str(req, b"native_type", Owner::take(req, native).into_value())?;
+        out.set_str(req, b"pdo_type", Owner::int(pdo_type))?;
         set(
             req,
             &mut out,
@@ -1034,8 +1032,7 @@ impl Statement for Stmt {
             b"table",
             self.handle.column_table_name(column).as_deref(),
         )?;
-        let key = PhpString::new(req, b"flags")?.into_key();
-        out.set(req, key, flags.into_value())?;
+        out.set_str(req, b"flags", flags.into_value())?;
         Ok(out)
     }
 
@@ -1065,8 +1062,7 @@ fn set(
         return Ok(());
     };
     let value = string_init(req, value)?;
-    let key = PhpString::new(req, key)?.into_key();
-    out.set(req, key, value)
+    out.set_str(req, key, value)
 }
 
 /// `ZVAL_STRING`'s `zend_string_init`, which `add_assoc_string` and

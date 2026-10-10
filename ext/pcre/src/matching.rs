@@ -201,15 +201,8 @@ fn insert(
     if let Some(name) = name
         && (!unmatched || into.find(name).is_none())
     {
-        let key = match PhpString::new(req, name) {
-            Ok(key) => key.into_key(),
-            Err(thrown) => {
-                value.give_up(req);
-                return Err(thrown);
-            }
-        };
         let named = Owner::take(req, *value);
-        if let Err(thrown) = into.set(req, key, named) {
+        if let Err(thrown) = into.set_str(req, name, named) {
             value.give_up(req);
             return Err(thrown);
         }
@@ -255,9 +248,8 @@ pub(super) fn populate(
         }
     }
     if let Some(mark) = scratch.data.mark() {
-        let key = PhpString::new(req, b"MARK")?.into_key();
         let mark = PhpString::new(req, &mark)?.into_value();
-        into.set(req, key, mark)?;
+        into.set_str(req, b"MARK", mark)?;
     }
     Ok(())
 }
@@ -921,14 +913,12 @@ fn matches_loop(
         for (group, set) in sets.into_iter().enumerate() {
             let value = set.into_value();
             if let Some(name) = pattern.names.get(group).and_then(|n| n.as_deref()) {
-                let key = PhpString::new(req, name)?.into_key();
-                out.set(req, key, Owner::take(req, *value))?;
+                out.set_str(req, name, Owner::take(req, *value))?;
             }
             out.append(req, value)?;
         }
         if let Some(marks) = marks {
-            let key = PhpString::new(req, b"MARK")?.into_key();
-            out.set(req, key, marks.into_value())?;
+            out.set_str(req, b"MARK", marks.into_value())?;
         }
     }
     Ok((Some(matched), out))

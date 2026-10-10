@@ -657,8 +657,7 @@ fn mb_get_info(
                     Union::B(Union::A(text)) => text.into_value(),
                     Union::B(Union::B(n)) => Owner::int(n),
                 };
-                let key = PhpString::new(req, key.as_bytes())?;
-                out.set(req, key.into_key(), value)?;
+                out.set_str(req, key.as_bytes(), value)?;
             }
         }
         return Ok(Some(OrFalse::Value(Union::A(out))));

@@ -275,9 +275,8 @@ pub(super) fn pathinfo(
     }
     let mut array = PhpArray::new(req)?;
     for (name, bytes) in parts {
-        let key = PhpString::new(req, name)?.into_key();
         let value = PhpString::new(req, &bytes)?.into_value();
-        array.set(req, key, value)?;
+        array.set_str(req, name, value)?;
     }
     Ok(Union::A(array))
 }

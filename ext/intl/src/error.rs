@@ -260,8 +260,10 @@ fn raise(
     php_ext::raising::pending(req).err()
 }
 
-/// `zend_throw_exception(IntlException, text)`, chained to what is
-/// pending as `zend_throw_exception_internal` chains it. The message is
+/// `intl_error_set_custom_msg`'s throw, `zend_throw_error_exception`
+/// over the message it made whole (`zend_string_concat3`), so nothing
+/// printed stands across it, chained to what is pending as
+/// `zend_throw_exception_internal` chains it. The message is
 /// php's `char *`, bytes: where they are not UTF-8 they are written over
 /// the empty one the throw laid.
 fn intl_exception(req: &mut Request, pending: Option<Thrown>, text: &[u8]) -> Thrown {

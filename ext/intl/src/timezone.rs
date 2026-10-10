@@ -241,14 +241,7 @@ pub(crate) fn set(
     name: &[u8],
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    table.set(req, key, value)
+    table.set_str(req, name, value)
 }
 
 /// `TimeZone_clone_obj`: the members copied, the zone cloned, and php's

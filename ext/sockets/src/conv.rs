@@ -16,7 +16,7 @@ use php_ext::coerce::{float_to_long, numeric_string, with_string};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{Cast, FdStream, Request, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpObject, Value, ValueRef};
 
 use crate::addr::{c_str, inet_addr, inet6_addr, ntop};
 use crate::ffi::{self, Addr, SUN_PATH, cmsg};
@@ -994,14 +994,7 @@ pub(crate) fn put(
     name: &str,
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name.as_bytes()) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, name.as_bytes(), value)
 }
 
 /// `socket_import_file_descriptor` (`Z/ext/sockets/sockets.c:2542`) over

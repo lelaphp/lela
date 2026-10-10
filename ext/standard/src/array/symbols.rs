@@ -620,12 +620,13 @@ fn compact_var(
     let entry = entry.deref();
     match entry.as_ref() {
         ValueRef::Str(name) => {
+            let name = *name;
             let bytes = name.as_bytes().to_vec();
             if let Some(value) = req.caller_var(&bytes) {
                 let value = value.deref();
                 let value = Owner::take(req, value);
-                let key = PhpString::new(req, &bytes)?;
-                let key = Key::from_string(req, key);
+                // `zend_hash_update` under the name the argument holds.
+                let key = Owner::take(req, Key::Str(name));
                 out.set(req, key, value)?;
             } else if bytes == b"this" {
                 // `zend_get_this_object`: the object the caller runs on,
@@ -633,8 +634,7 @@ fn compact_var(
                 if let Some(object) = req.this_object() {
                     let value = object.as_value();
                     let value = Owner::take(req, value);
-                    let key = PhpString::new(req, &bytes)?;
-                    let key = Key::from_string(req, key);
+                    let key = Owner::take(req, Key::Str(name));
                     out.set(req, key, value)?;
                 }
             } else {

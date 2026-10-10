@@ -868,8 +868,7 @@ fn session_get_cookie_params(req: &mut Request) -> Result<Owner<PhpArray>, Throw
             }
             _ => Owner::bool(ini_bool(req, entry)),
         };
-        let key = PhpString::new(req, key)?.into_key();
-        array.set(req, key, value)?;
+        array.set_str(req, key, value)?;
     }
     Ok(array)
 }

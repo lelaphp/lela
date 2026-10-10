@@ -396,12 +396,10 @@ fn getopt(
     let optind = walk.optind;
     let mut result = PhpArray::new(req)?;
     for (name, values) in found {
-        let key = if !(name.len() > 1 && name[0] == b'0')
-            && let Some(n) = numeric_string(&name).and_then(|v| v.as_int())
-        {
-            Owner::index(n)
+        let index = if name.len() > 1 && name[0] == b'0' {
+            None
         } else {
-            PhpString::new(req, &name)?.into_key()
+            numeric_string(&name).and_then(|v| v.as_int())
         };
         let mut items = Vec::new();
         for value in values {
@@ -419,7 +417,10 @@ fn getopt(
             }
             list.into_value()
         };
-        result.set(req, key, value)?;
+        match index {
+            Some(n) => result.set(req, Owner::index(n), value)?,
+            None => result.set_str(req, &name, value)?,
+        }
     }
     rest_index.set(
         req,
@@ -1366,8 +1367,6 @@ fn ini_get_all(
     }
     let mut all = PhpArray::new(req)?;
     for entry in entries {
-        let key = PhpString::new(req, &entry.decl.name.0)?;
-        let key = Key::from_string(req, key);
         let value = if details {
             let access = (i64::from(entry.decl.user) * INI_USER)
                 | (i64::from(entry.decl.per_dir) * INI_PERDIR)
@@ -1381,14 +1380,13 @@ fn ini_get_all(
                 (b"local_value", ini_value(req, entry.value.as_deref())?),
                 (b"access", Owner::int(access)),
             ] {
-                let name = PhpString::new(req, name)?.into_key();
-                option.set(req, name, value)?;
+                option.set_str(req, name, value)?;
             }
             option.into_value()
         } else {
             ini_value(req, entry.value.as_deref())?
         };
-        all.set(req, key, value)?;
+        all.set_symtable_str(req, &entry.decl.name.0, value)?;
     }
     Ok(OrFalse::Value(all))
 }

@@ -366,8 +366,7 @@ fn iptcparse(req: &mut Request, iptc_block: PhpString) -> Result<OrFalse<Owner<P
             let value = PhpString::new(req, &value)?.into_value();
             list.append(req, value)?;
         }
-        let key = PhpString::new(req, key.as_bytes())?.into_key();
-        array.set(req, key, list.into_value())?;
+        array.set_str(req, key.as_bytes(), list.into_value())?;
     }
     Ok(OrFalse::Value(array))
 }

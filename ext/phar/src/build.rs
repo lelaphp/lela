@@ -973,9 +973,8 @@ fn add_built(
         stream.free(req);
     }
     done(req, owned);
-    let k = PhpString::new(req, key)?.into_key();
     let v = string(req, opened)?;
-    b.ret.set(req, k, v)?;
+    b.ret.set_str(req, key, v)?;
     entry::delref(req, data);
     Ok(true)
 }

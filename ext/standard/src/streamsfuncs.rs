@@ -415,15 +415,13 @@ fn stream_context_get_params(
     let (options, notification) = (res.options(req), res.notifier(req));
     let mut array = PhpArray::new(req)?;
     if let Some(notification) = notification {
-        let key = PhpString::new(req, b"notification")?.into_key();
-        array.set(req, key, Owner::take(req, notification))?;
+        array.set_str(req, b"notification", Owner::take(req, notification))?;
     }
     let options = match options {
         Some(options) => Owner::take(req, Value::array(options)),
         None => PhpArray::new(req)?.into_value(),
     };
-    let key = PhpString::new(req, b"options")?.into_key();
-    array.set(req, key, options)?;
+    array.set_str(req, b"options", options)?;
     Ok(array)
 }
 

@@ -239,14 +239,7 @@ fn set(
     name: &str,
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name.as_bytes()) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, name.as_bytes(), value)
 }
 
 /// `add_assoc_string`.

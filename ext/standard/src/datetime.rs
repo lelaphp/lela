@@ -104,11 +104,9 @@ fn strptime(
         "tm_sec", "tm_min", "tm_hour", "tm_mday", "tm_mon", "tm_year", "tm_wday", "tm_yday",
     ];
     for (name, value) in names.iter().zip(fields) {
-        let key = PhpString::new(req, name.as_bytes())?.into_key();
-        array.set(req, key, Owner::int(i64::from(value)))?;
+        array.set_str(req, name.as_bytes(), Owner::int(i64::from(value)))?;
     }
-    let key = PhpString::new(req, b"unparsed")?.into_key();
     let unparsed = PhpString::new(req, &unparsed)?.into_value();
-    array.set(req, key, unparsed)?;
+    array.set_str(req, b"unparsed", unparsed)?;
     Ok(OrFalse::Value(array))
 }

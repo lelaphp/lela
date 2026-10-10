@@ -7,12 +7,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString};
-
-/// A string key of the request's.
-fn key(req: &mut Request, name: &[u8]) -> Result<Owner<Key>, Thrown> {
-    Ok(PhpString::new(req, name)?.into_key())
-}
+use php_ext::values::{Owner, PhpArray, PhpString};
 
 /// `net_get_interfaces(): array|false`, `PHP_FUNCTION(net_get_interfaces)`
 /// (`Z/ext/standard/net.c:117`): each interface by name with `unicast`,
@@ -70,11 +65,9 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
     let mut names: Vec<(Vec<u8>, bool, Owner<PhpArray>)> = Vec::new();
     for entry in found {
         let mut unicast_entry = PhpArray::new(req)?;
-        let k = key(req, b"flags")?;
-        unicast_entry.set(req, k, Owner::int(i64::from(entry.flags)))?;
+        unicast_entry.set_str(req, b"flags", Owner::int(i64::from(entry.flags)))?;
         if let Some(family) = entry.family {
-            let k = key(req, b"family")?;
-            unicast_entry.set(req, k, Owner::int(family))?;
+            unicast_entry.set_str(req, b"family", Owner::int(family))?;
         }
         let texts: [(&[u8], Option<Vec<u8>>); 4] = [
             (b"address", entry.address),
@@ -84,9 +77,8 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
         ];
         for (name, text) in texts {
             if let Some(text) = text {
-                let k = key(req, name)?;
                 let v = PhpString::new(req, &text)?.into_value();
-                unicast_entry.set(req, k, v)?;
+                unicast_entry.set_str(req, name, v)?;
             }
         }
         let up = entry.flags & IFF_UP != 0;
@@ -101,12 +93,9 @@ fn net_get_interfaces(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thr
     let mut array = PhpArray::new(req)?;
     for (name, up, unicast) in names {
         let mut iface = PhpArray::new(req)?;
-        let k = key(req, b"unicast")?;
-        iface.set(req, k, unicast.into_value())?;
-        let k = key(req, b"up")?;
-        iface.set(req, k, Owner::bool(up))?;
-        let k = key(req, &name)?;
-        array.set(req, k, iface.into_value())?;
+        iface.set_str(req, b"unicast", unicast.into_value())?;
+        iface.set_str(req, b"up", Owner::bool(up))?;
+        array.set_str(req, &name, iface.into_value())?;
     }
     Ok(OrFalse::Value(array))
 }

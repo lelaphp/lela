@@ -427,9 +427,8 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         (b"negative_sign", &lconv.negative_sign),
     ];
     for (name, value) in strings {
-        let key = PhpString::new(req, name)?.into_key();
         let value = PhpString::new(req, value)?.into_value();
-        array.set(req, key, value)?;
+        array.set_str(req, name, value)?;
     }
     let chars: [(&[u8], c_char); 8] = [
         (b"int_frac_digits", lconv.int_frac_digits),
@@ -442,8 +441,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
         (b"n_sign_posn", lconv.n_sign_posn),
     ];
     for (name, value) in chars {
-        let key = PhpString::new(req, name)?.into_key();
-        array.set(req, key, Owner::int(i64::from(value)))?;
+        array.set_str(req, name, Owner::int(i64::from(value)))?;
     }
     for (name, grouping) in [
         (&b"grouping"[..], &lconv.grouping),
@@ -454,8 +452,7 @@ pub(super) fn localeconv(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
             let value = i64::from(c_char::from_ne_bytes([*byte]));
             list.set(req, Owner::index(at), Owner::int(value))?;
         }
-        let key = PhpString::new(req, name)?.into_key();
-        array.set(req, key, list.into_value())?;
+        array.set_str(req, name, list.into_value())?;
     }
     Ok(array)
 }

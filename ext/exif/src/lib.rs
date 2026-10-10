@@ -35,7 +35,7 @@ use php_ext::coerce::to_string;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
 use php_ext::request::{Opening, OwnedStream as _, Request, Stream, Streams as _, Whence};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
 use image::{EncodingNames, Found, Image, Number, Section, Stored, TAG_NONE, c_int};
 use walk::Reader;
@@ -519,13 +519,10 @@ fn add_section(
                 },
             }
         };
-        let key = PhpString::new(req, &entry.name)?;
-        let key = Key::from_string(req, key);
-        target.set(req, key, value)?;
+        target.set_symtable_str(req, &entry.name, value)?;
     }
     if let Some(own) = own {
-        let key = PhpString::new(req, section.name().as_bytes())?.into_key();
-        array.set(req, key, own.into_value())?;
+        array.set_str(req, section.name().as_bytes(), own.into_value())?;
     }
     Ok(())
 }

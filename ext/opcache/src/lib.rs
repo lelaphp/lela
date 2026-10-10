@@ -443,14 +443,7 @@ fn put(
     name: &str,
     value: Owner<Value>,
 ) -> Result<(), Thrown> {
-    let key = match PhpString::new(req, name.as_bytes()) {
-        Ok(key) => key.into_key(),
-        Err(thrown) => {
-            value.give_up(req);
-            return Err(thrown);
-        }
-    };
-    array.set(req, key, value)
+    array.set_str(req, name.as_bytes(), value)
 }
 
 /// A string of the request's as a value.
@@ -765,8 +758,7 @@ fn scripts(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, T
         path.give_up(req);
         when.give_up(req);
         let row = row?;
-        let at = PhpString::new(req, &script.path)?.into_key();
-        listed.set(req, at, row.into_value())?;
+        listed.set_str(req, &script.path, row.into_value())?;
     }
     Ok(listed)
 }

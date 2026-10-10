@@ -168,14 +168,7 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
             for name in P::NAMES {
                 if let Some(value) = P::read(req, object, name, true)? {
                     // The table's row takes the value's owner.
-                    let key = match PhpString::new(req, name.as_bytes()) {
-                        Ok(key) => key.into_key(),
-                        Err(thrown) => {
-                            value.give_up(req);
-                            return Err(thrown);
-                        }
-                    };
-                    table.set(req, key, value)?;
+                    table.set_str(req, name.as_bytes(), value)?;
                 }
             }
             Ok(())
@@ -224,8 +217,7 @@ pub(crate) fn error_list(
             ("sqlstate", crate::string(req, &sqlstate[..state_end])?),
             ("error", crate::string(req, error)?),
         ] {
-            let key = PhpString::new(req, key.as_bytes())?.into_key();
-            row.set(req, key, value)?;
+            row.set_str(req, key.as_bytes(), value)?;
         }
         out.append(req, row.into_value())?;
     }

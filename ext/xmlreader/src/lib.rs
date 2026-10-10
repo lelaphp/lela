@@ -216,14 +216,7 @@ impl ObjectHandlers for Handlers {
                 match p.read(req, object) {
                     Ok(Some(value)) => {
                         // The table's row takes the value's owner.
-                        let key = match PhpString::new(req, name) {
-                            Ok(key) => key.into_key(),
-                            Err(thrown) => {
-                                value.give_up(req);
-                                return Err(thrown);
-                            }
-                        };
-                        table.set(req, key, value)?;
+                        table.set_str(req, name, value)?;
                     }
                     Ok(None) => {}
                     Err(t) => {

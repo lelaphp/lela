@@ -1208,8 +1208,7 @@ fn proc_get_status(req: &mut Request, process: Resource) -> Result<Owner<PhpArra
         (b"stopsig", Value::int(i64::from(stopsig))),
     ];
     for (name, value) in rows {
-        let key = PhpString::new(req, name)?.into_key();
-        out.set(req, key, Owner::take(req, value))?;
+        out.set_str(req, name, Owner::take(req, value))?;
     }
     command.give_up(req);
     Ok(out)
