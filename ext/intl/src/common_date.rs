@@ -236,6 +236,8 @@ pub(crate) fn convert_to_datetimezone(
     argument.give_up(req);
     match made {
         Ok(object) => Ok(Some(object)),
+        // `zend_throw_exception(IntlException_ce_ptr, ...)` over a fixed
+        // string.
         Err(thrown) => {
             let message = "DateTimeZone constructor threw exception";
             Err(throw_chained(req, thrown, "IntlException", message))

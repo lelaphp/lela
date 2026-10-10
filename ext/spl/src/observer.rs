@@ -2120,6 +2120,8 @@ fn get_one(
         }
         Err(thrown) => (false, Some(thrown)),
     };
+    // Both refusals are `zend_throw_exception` over a fixed string, one
+    // per method, which formats nothing.
     let value = if valid {
         crate::method(req, iterator, method.as_bytes()).map_err(|thrown| {
             php_ext::raising::throw_chained(

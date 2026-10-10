@@ -187,7 +187,8 @@ fn held<T>(req: &Request, object: PhpObject, f: impl FnOnce(&Mpz) -> T) -> T {
 }
 
 /// `convert_zstr_to_gmp(num, text, base, 0)` into the object, or php's
-/// "Could not unserialize number" over what the conversion threw.
+/// "Could not unserialize number" over what the conversion threw,
+/// `zend_throw_exception` over a fixed string.
 fn set(req: &mut Request, object: PhpObject, text: Option<&[u8]>, base: i64) -> Result<(), Thrown> {
     let message = "Could not unserialize number";
     let Some(text) = text else {

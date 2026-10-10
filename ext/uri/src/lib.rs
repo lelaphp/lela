@@ -611,6 +611,8 @@ fn unserialize<P: UriParser>(
     let invalid = format!("Invalid serialization data for {} object", P::CLASS);
     if is_set::<P>(req, this) {
         let first = readonly(req, P::CLASS);
+        // `zend_throw_exception_ex`, whose `zend_vstrpprintf` string is
+        // the message itself, so nothing stands across the throw.
         return Err(throw_chained(req, first, "Exception", &invalid));
     }
     let Some(text) = serialized_uri(data) else {

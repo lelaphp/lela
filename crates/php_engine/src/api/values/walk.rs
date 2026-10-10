@@ -52,7 +52,7 @@ use std::ops::ControlFlow;
 use php_heap::{Arr, PropertyTable, Str, TableRow, Zval};
 
 use crate::api::abi::Ref;
-use crate::api::raising::{Thrown, fatal, throw_chained, throw_error};
+use crate::api::raising::{Thrown, fatal, throw_error, throw_error_chained};
 use crate::api::request::Request;
 use crate::api::values::{
     HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
@@ -1199,6 +1199,14 @@ fn registered(req: &mut Request, holder: PhpRef) -> Result<Option<u32>, Thrown> 
 /// holder again before it tests `EG(exception)`, so a holder left holding
 /// no array or object raises the `TypeError` with the throwable as its
 /// `previous`.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// pk(function () { $a = [1, 2]; try { array_walk($a, function ($v) use (&$a) { $a = 1; throw new Exception('w'); }); } catch (TypeError $e) {} });
+/// ```
+/// ```expect
+/// 6096
+/// ```
 fn steps<B>(
     req: &mut Request,
     holder: PhpRef,
@@ -1223,7 +1231,9 @@ fn steps<B>(
         };
         let now = holder.get();
         if thrown.exception().is_some() && now.as_array().is_none() && now.as_object().is_none() {
-            return Err(throw_chained(req, thrown, "TypeError", NO_TABLE));
+            // `zend_type_error`, its `zend_vspprintf` buffer standing
+            // across the throw.
+            return Err(throw_error_chained(req, thrown, "TypeError", NO_TABLE));
         }
         return Err(thrown);
     }

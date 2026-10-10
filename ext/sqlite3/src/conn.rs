@@ -10,7 +10,8 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
-    Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error, while_pending,
+    Level, Thrown, argument_error, docref, fatal, throw, throw_error, throw_error_chained,
+    while_pending,
 };
 use php_ext::request::{Foreign, Request, Resolve, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
@@ -88,6 +89,23 @@ pub(crate) fn not_ready(req: &mut Request, class: &str) -> Thrown {
 /// `php_sqlite3_error` with no throwable pending: a `SQLite3Exception`
 /// with `code` where `exceptions` is on, `E_WARNING` otherwise. With one
 /// pending, [`fail_after`]'s, and the throwable is handed on either way.
+/// php prints the message with `vspprintf` and throws it with
+/// `zend_throw_exception` before it frees the buffer, so the throw is
+/// [`throw_error`]'s, the buffer standing across it:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
+/// $db = new SQLite3(':memory:'); $db->enableExceptions(true);
+/// $db->createFunction('f', function () { throw new Exception('x'); });
+/// pk(function () use ($db) { try { $db->query('SELECT f()'); } catch (Exception $e) {} });
+/// pk(function () use ($db) { try { $db->query('SELECT 1 FROM nowhere'); } catch (Exception $e) {} });
+/// pk(function () use ($db) { try { $db->exec('SELECT 1 FROM nowhere'); } catch (Exception $e) {} });
+/// ```
+/// ```expect
+/// 5040
+/// 2616
+/// 2616
+/// ```
 pub(crate) fn fail(
     req: &mut Request,
     exceptions: bool,
@@ -102,13 +120,15 @@ pub(crate) fn fail(
         docref(req, Level::Warning, message);
         return Ok(());
     }
-    let thrown = throw(req, "SQLite3Exception", message);
+    let thrown = throw_error(req, "SQLite3Exception", message);
     Err(with_code(req, thrown, code))
 }
 
 /// `php_sqlite3_error` with a throwable pending, as php raises it with
 /// `EG(exception)` set: the `SQLite3Exception` chained over it, or the warning
-/// raised while it is pending and the throwable handed on.
+/// raised while it is pending and the throwable handed on. The throw is
+/// [`throw_error_chained`], `vspprintf`'s buffer standing across it as
+/// [`fail`] says.
 pub(crate) fn fail_after(
     req: &mut Request,
     exceptions: bool,
@@ -117,7 +137,7 @@ pub(crate) fn fail_after(
     message: &str,
 ) -> Thrown {
     if exceptions {
-        let thrown = throw_chained(req, pending, "SQLite3Exception", message);
+        let thrown = throw_error_chained(req, pending, "SQLite3Exception", message);
         return with_code(req, thrown, code);
     }
     while_pending(req, &pending, |req| docref(req, Level::Warning, message));
