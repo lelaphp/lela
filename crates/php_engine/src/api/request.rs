@@ -244,7 +244,6 @@ pub struct Request {
     _inside: crate::fork::Inside,
     /// The calls' state ([`calls::Calls`]).
     calls: calls::Calls,
-    heap: Heap,
     /// The VM stack the request runs on and its frames (design §5.6).
     vm: Vm,
     /// What the frames own beyond their headers, every stack's
@@ -464,6 +463,12 @@ pub struct Request {
     /// which its load declares by one insert each
     /// ([`Request::declare_classes`]).
     early_bound: Option<(Arc<Unit>, crate::unit_cache::EarlyBound)>,
+    /// The request's heap, every value of the request a block of it:
+    /// declared last, so it is dropped last, after every field that may
+    /// hold one. A debug build's owner left in an extension's state after
+    /// a fatal reaches its heap through the block it owns as it is
+    /// dropped ([`php_heap::owners`]).
+    heap: Heap,
 }
 
 /// `DEBUG_BACKTRACE_PROVIDE_OBJECT` (`Z/Zend/zend_constants.h`): a

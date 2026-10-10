@@ -8,6 +8,7 @@ layer::Face::host_fds_are_process
 layer::Face::input_bytes
 layer::Face::instantiable
 layer::Face::is_pending
+layer::Face::keep_in_list
 layer::Face::layer_state
 layer::Face::open_temporary_fd
 layer::Face::realpath_file

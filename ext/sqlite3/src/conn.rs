@@ -445,8 +445,8 @@ fn run_query(
     let (db, exceptions) = open_db(req, object)?;
     let stmt_owner = instantiate(req, b"SQLite3Stmt")?;
     let stmt_object = *stmt_owner;
-    req.addref(&object.as_value());
-    stmt::attach(req, stmt_object, object);
+    let held = Owner::take(req, object);
+    stmt::attach(req, stmt_object, held);
     let (prepared, thrown) = db.prepare(req, sql);
     let stmt = match prepared {
         Ok(stmt) => stmt,

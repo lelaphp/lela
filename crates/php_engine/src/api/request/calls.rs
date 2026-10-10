@@ -66,7 +66,7 @@ impl Request {
         extra_named: &[(PhpString, Value)],
     ) -> Result<Owner<Value>, Thrown> {
         let made = self.serve_method_made(function, this, called_scope, arguments, extra_named);
-        adopted(self, made)
+        adopted(made)
     }
 
     /// What [`serve_method`](Self::serve_method) makes, its one owner not yet named.

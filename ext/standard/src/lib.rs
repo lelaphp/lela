@@ -160,8 +160,9 @@ struct State {
     /// `DIRG(default_dir)` (`Z/ext/standard/dir.c:62`): the directory
     /// `opendir` opened last, with the owner php's `GC_ADDREF` takes,
     /// which `readdir`, `rewinddir` and `closedir` read without an
-    /// argument.
-    default_dir: Option<php_ext::values::Resource>,
+    /// argument; given up at `rshutdown`, where php leaves it to the
+    /// list's close, past every destructor either way.
+    default_dir: Option<php_ext::values::Owner<php_ext::values::Resource>>,
     string: string::State,
     uniqid: uniqid::State,
     hrtime: hrtime::State,
@@ -787,7 +788,6 @@ pub fn extension() -> Extension {
         .stream_hooks(STREAM_HOOKS)
         .info(basic_functions::minfo)
         .rshutdown(rshutdown)
-        .post_deactivate(post_deactivate)
         .rinit(rinit)
         .build("standard")
 }
@@ -839,22 +839,15 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `PHP_RSHUTDOWN(basic)`'s share here, in its order: the syslog
-/// closed, `ASSERTG(callback)` given up, the URL rewriter's buffers
-/// freed and `BG(last_http_headers)` given back.
+/// `PHP_RSHUTDOWN(basic)`'s share here, in its order: `DIRG(default_dir)`
+/// given up, the syslog closed, `ASSERTG(callback)` given up, the URL
+/// rewriter's buffers freed and `BG(last_http_headers)` given back.
 fn rshutdown(req: &mut Request) {
+    file::set_default_dir(req, None);
     syslog::close(req);
     assert::rshutdown(req);
     url_scanner::rshutdown(req);
     http_fopen_wrapper::clear_last_headers(req);
-}
-
-/// `FG(default_context)` given up past the request's resources' close:
-/// php keeps no value of it and frees it with the regular list after
-/// `shutdown_executor`, and a stream opened in any extension's
-/// `RSHUTDOWN` or closed by the list's close may still make it.
-fn post_deactivate(req: &mut Request) {
-    php_ext::request::StreamCtx::release_default(req);
 }
 
 /// `standard_deps` (`Z/ext/standard/basic_functions.c:143`): `uri`

@@ -1,31 +1,36 @@
 //! `xtask new-sapi` over the fixture of `xtask/fixtures/new-sapi`
 //! (ADR-0008): the host it lays down has the topology of the CLI and CGI
-//! hosts, passes `budget`, `unsafe-audit` and `api-check` untouched, joins
+//! hosts, passes `budget`, `unsafe-audit`, `api-check` and `clippy`
+//! untouched, the last against the fixture's stand-ins for the facade and
+//! the bundle, which carry the items the template names (#2524), joins
 //! the workspace members, and a second run for the same name refuses, as
 //! one for a name without its row does. The fixture is copied to a scratch
 //! directory first; nothing is generated in place, and the workspace's own
-//! `sapi/` gains no crate.
+//! `sapi/` gains no crate. The stand-ins are held to the real crates: each
+//! public item of one is a public item or a re-export of the workspace's
+//! crate of that name, read from the sources as a lock is (#2544).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::manifest::Manifest;
 use xtask::reading::{Reading, Status};
 use xtask::scratch::Tree;
-use xtask::{api_check, budget, new_sapi, unsafe_audit};
+use xtask::{api_check, budget, clippy, new_sapi, unsafe_audit};
 
 fn workspace() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()
+}
+
+fn fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/new-sapi")
 }
 
 /// A scratch copy of the fixture with one commit, since a reading's stamp
 /// names `HEAD`.
 fn scratch(name: &str) -> Tree {
     let dir = Tree::new(&format!("new-sapi-{name}")).unwrap();
-    copy(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/new-sapi"),
-        &dir,
-    );
+    copy(&fixture(), &dir);
     // The pin is referenced by a path relative to the fixture's place in the tree.
     let seams = std::fs::read_to_string(dir.join("seams.toml")).unwrap();
     let pin = workspace().join("oracle.toml");
@@ -126,6 +131,9 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
     assert!(lib.contains("use php_sapi::{"), "{lib}");
     assert!(!lib.contains("php_engine"), "the facade alone: {lib}");
     assert!(lib.contains("#![forbid(unsafe_code)]"), "{lib}");
+    let main = read(&root, "sapi/demo/src/main.rs");
+    assert!(main.contains("php_sapi_demo::main()"), "{main}");
+    // Both crate roots, the library's and the binary's (#2524).
     for lint in manifest
         .rule("lints.no-panic")
         .unwrap()
@@ -134,13 +142,13 @@ fn the_host_laid_down_has_the_topology_of_the_cli_and_the_cgi() {
         .as_ref()
         .unwrap()
     {
-        assert!(
-            lib.contains(lint),
-            "{lint} is denied from the manifest: {lib}"
-        );
+        for root in [&lib, &main] {
+            assert!(
+                root.contains(lint),
+                "{lint} is denied from the manifest: {root}"
+            );
+        }
     }
-    let main = read(&root, "sapi/demo/src/main.rs");
-    assert!(main.contains("php_sapi_demo::main()"), "{main}");
     // No build script: the build's facts are the engine's own stamp, and
     // the bundle's `configure` switches are handed to it.
     assert!(!root.join("sapi/demo/build.rs").exists());
@@ -177,7 +185,7 @@ fn the_binary_is_named_as_the_line_names_it() {
 }
 
 #[test]
-fn the_host_laid_down_passes_the_three_instruments_untouched() {
+fn the_host_laid_down_passes_the_four_instruments_untouched() {
     let root = scratch("instruments");
     let manifest = Manifest::load(&root).unwrap();
     new_sapi::run(&root, &manifest, "demo", None).unwrap();
@@ -194,6 +202,58 @@ fn the_host_laid_down_passes_the_three_instruments_untouched() {
     assert!(failed(&readings).is_empty(), "{:?}", failed(&readings));
     let demo = of(&readings, "sapi/demo");
     assert_eq!(demo.status, Status::Pass, "{}", demo.message);
+
+    // Every target, warnings denied, and the `deny_lints` rules at both
+    // crate roots: a `let _ =` over an `io::Result` is `let_underscore_drop`.
+    let readings = clippy::run(&root, &manifest, &["sapi/demo".to_owned()]).unwrap();
+    let demo = of(&readings, "sapi/demo");
+    assert_eq!(demo.status, Status::Pass, "{}", demo.message);
+}
+
+/// The public items of the fixture's stand-in for `name` that the
+/// workspace's crate of that name lacks, as lock lines; the sources are
+/// read, nothing is built.
+fn beyond_the_real(fixture: &Path, name: &str) -> Vec<String> {
+    let real =
+        api_check::public_items(&Manifest::load(workspace()).unwrap(), workspace(), name).unwrap();
+    let stand_in =
+        api_check::public_items(&Manifest::load(fixture).unwrap(), fixture, name).unwrap();
+    assert!(
+        !stand_in.is_empty(),
+        "the stand-in for {name} declares nothing"
+    );
+    stand_in.difference(&real).cloned().collect()
+}
+
+#[test]
+fn the_stand_ins_declare_only_what_the_real_facade_and_bundle_declare() {
+    for name in ["php_sapi", "php_bundle"] {
+        let beyond = beyond_the_real(&fixture(), name);
+        assert!(
+            beyond.is_empty(),
+            "{name}: not public in the real crate: {beyond:?}"
+        );
+    }
+
+    // The negative control: an item the real facade lacks, a method of a
+    // type it has, and a function of the bundle it lacks.
+    let root = scratch("stand-ins");
+    for (name, extra) in [
+        (
+            "php_sapi",
+            "pub struct Served;\nimpl Engine {\n    pub fn served(&self) {}\n}\n",
+        ),
+        ("php_bundle", "pub fn registered() {}\n"),
+    ] {
+        let lib = root.join(format!("crates/{name}/src/lib.rs"));
+        let text = std::fs::read_to_string(&lib).unwrap();
+        std::fs::write(&lib, text + extra).unwrap();
+    }
+    assert_eq!(
+        beyond_the_real(&root, "php_sapi"),
+        ["Engine::served", "Served"]
+    );
+    assert_eq!(beyond_the_real(&root, "php_bundle"), ["registered"]);
 }
 
 #[test]

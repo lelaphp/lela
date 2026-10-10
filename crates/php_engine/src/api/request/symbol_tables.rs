@@ -784,7 +784,7 @@ impl Request {
             let key = PhpString::new(self, &name)?;
             let key = Key::from_string(self, key);
             let value = self.dup_value(value, None);
-            let value = Owner::adopt(self, value);
+            let value = Owner::adopt(value);
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -814,7 +814,7 @@ impl Request {
         for (name, value) in rows {
             let key = PhpString::new(self, &name)?.into_key();
             let value = self.dup_value(value, None);
-            let value = Owner::adopt(self, value);
+            let value = Owner::adopt(value);
             array.set(self, key, value)?;
         }
         Ok(array)

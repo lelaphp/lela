@@ -18,7 +18,7 @@
 
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, PhpObject};
+use php_ext::values::Emalloc;
 use php_ext_libxml::ffi::{Kind, Node, NodeObject, Ns, PrivateData};
 
 use crate::document::XMLNS_NS;
@@ -360,17 +360,6 @@ pub(crate) fn of(obj: &mut NodeObject) -> Option<&mut Private> {
     obj.private_data_mut::<Private>()
 }
 
-/// `intern->document->private_data = php_dom_libxml_private_data_header(private)`:
-/// `private` laid down on the document `object` counts, or given up
-/// where it counts none, so no private data is dropped with no request
-/// at hand.
-pub(crate) fn lay_down(req: &mut Request, object: PhpObject, private: Private) {
-    match crate::dom_mut(req, object) {
-        Some(d) if d.obj.has_document() => d.obj.set_private_data(Box::new(private)),
-        _ => private.free(req),
-    }
-}
-
 /// `php_dom_ensure_templated_content`: a template element's contents,
 /// made empty the first time, the element's namespace hooked so the
 /// contents go with it.
@@ -435,4 +424,63 @@ pub(crate) fn ns_is(node: Node, uri: &[u8]) -> bool {
 /// ```
 pub(crate) fn html_in_html_document(node: Node) -> bool {
     node.doc().is_some_and(|d| d.kind() == Kind::HtmlDocument) && ns_is(node, HTML_NS)
+}
+
+/// Private data laid over the data a document holds gives the old data
+/// up with the request at hand (#2132): served armed, a native that lays
+/// a fresh `Private` over a modern document's leaves no block of the
+/// first standing, where a replace that dropped it left its 96-byte
+/// `php_dom_private_data`.
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use php_ext::abi::{Extension, ExtensionBuilder};
+    use php_ext::attr::php_function;
+    use php_ext::raising::Thrown;
+    use php_ext::request::Request;
+    use php_ext::test::{Capture, Engine, LeakSensor};
+    use php_ext::values::Value;
+
+    use super::Private;
+
+    /// `replace_private(object $document): void`: a fresh private data
+    /// laid over the one `$document` holds.
+    #[php_function]
+    fn replace_private(req: &mut Request, document: Value) -> Result<(), Thrown> {
+        let Some(object) = document.as_object().copied() else {
+            return Ok(());
+        };
+        let private = Private::new(req)?;
+        match crate::libxml_half(req, object) {
+            Some(mut obj) => obj.set_private_data(req, Box::new(private)),
+            None => private.free(req),
+        }
+        Ok(())
+    }
+
+    fn replacing() -> Extension {
+        ExtensionBuilder::default()
+            .functions(vec![replace_private::declared()])
+            .build("replacing")
+    }
+
+    #[test]
+    fn a_replaced_private_data_is_given_up() {
+        let engine = Engine::builder()
+            .extensions(&[
+                php_ext_libxml::extension(),
+                php_ext_lexbor::extension(),
+                php_ext_standard::extension(),
+                php_ext_uri::extension(),
+                crate::extension(),
+                replacing(),
+            ])
+            .sense_leaks(LeakSensor::Armed)
+            .build();
+        let served = engine.serve_capture(
+            "<?php $d = Dom\\XMLDocument::createFromString('<r/>'); replace_private($d); replace_private($d); echo $d->documentElement->nodeName, \"\\n\";",
+            Capture::default(),
+        );
+        assert_eq!(served.fatal, None);
+        assert_eq!(String::from_utf8_lossy(&served.stdout), "r\n");
+    }
 }

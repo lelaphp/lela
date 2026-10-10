@@ -109,7 +109,7 @@ pub(crate) fn write(cx: &mut Cx<'_>, object: PhpObject, data: &[u8]) -> usize {
             data.len()
         }
         WriteTo::File => {
-            let stream = curl.write.stream;
+            let stream = curl.write.stream();
             to_stream(cx.req, stream, data)
         }
         WriteTo::Return => {
@@ -128,7 +128,7 @@ pub(crate) fn write_header(cx: &mut Cx<'_>, object: PhpObject, data: &[u8]) -> u
     match curl.header.to {
         HeaderTo::Ignore => data.len(),
         HeaderTo::File => {
-            let stream = curl.header.stream;
+            let stream = curl.header.stream();
             to_stream(cx.req, stream, data)
         }
         HeaderTo::User => user_write(cx, object, true, data),
@@ -142,7 +142,7 @@ pub(crate) fn read(cx: &mut Cx<'_>, object: PhpObject, buffer: &mut [u8]) -> usi
     let Some(curl) = object.native::<Curl>(cx.req) else {
         return 0;
     };
-    let stream = curl.read.stream;
+    let stream = curl.read.stream();
     match curl.read.to {
         ReadFrom::Direct => {
             let Some(stream) = stream.and_then(|value| Stream::from_value(cx.req, &value)) else {

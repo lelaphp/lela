@@ -171,7 +171,6 @@ Heap::resource_unlist
 Heap::resource_with
 Heap::resources
 Heap::sense_leaks
-Heap::sensor
 Heap::separate
 Heap::set_memory_limit
 Heap::set_origin
@@ -290,8 +289,6 @@ Res::resource_type
 ResourceType
 Scalar
 Scalar::is_true
-Sensor
-Sensor::unconsumed
 Slot
 SortEntry
 StackRefused
@@ -386,6 +383,9 @@ double_to_string
 identical
 identical_constants
 numeric_prefix
+owners::consumed
+owners::dropped
+owners::made
 power
 shift_left
 shift_right

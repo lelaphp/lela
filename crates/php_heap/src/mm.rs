@@ -24,6 +24,18 @@
 //! huge block is php's own mapping on a unix, aligned as php aligns it,
 //! because its tail is grown and cut where it stands.
 //!
+//! Miri cannot model that mapping. Its `munmap` is a deallocation of the
+//! whole allocation an `mmap` made, so php's unmapping of the slack
+//! around an aligned block, and of a cut tail, both of which the machine
+//! defines, is to Miri a deallocation of the wrong size, reported as
+//! undefined behaviour at the call. Under Miri a huge block therefore
+//! takes the arm of a platform with no `mmap`: the system allocator,
+//! aligned to a chunk, never grown or cut in place. Miri then sees each
+//! huge block's whole life, a use of one after its free included, and
+//! what it never checks is the mapping itself: the slack trim and the
+//! in-place grow and cut, with the accounting of the in-place arms of
+//! `realloc_huge`, which the native test lane covers.
+//!
 //! Before it declares the limit reached or the system out of memory, php
 //! sweeps: `zend_mm_gc` (`Z/Zend/zend_alloc.c:2101`) counts the free slots
 //! of every bin `run` into the page map word that holds that count,
@@ -101,36 +113,26 @@ pub(crate) fn real_page_size() -> usize {
     *ASKED.get_or_init(machine_page_size)
 }
 
-/// What the machine answers. php asks `sysconf(_SC_PAGESIZE)`, naming a
-/// constant of the platform's headers whose value differs per platform,
-/// which a crate with no dependency cannot name; `getpagesize` is the
-/// same number by another door, specified as `sysconf(_SC_PAGESIZE)`
-/// before POSIX withdrew it and carried still by macOS and by both Linux
-/// libcs. A machine that answers nothing usable leaves php's own default
-/// standing, the `#ifndef REAL_PAGE_SIZE` arm of
+/// What the machine answers: `sysconf(_SC_PAGESIZE)`, as php asks it
+/// (`Z/Zend/zend_alloc.c:3334`). A machine that answers nothing usable
+/// leaves php's own default standing, the `#ifndef REAL_PAGE_SIZE` arm of
 /// `Z/Zend/zend_alloc.c:112`.
 #[cfg(unix)]
 fn machine_page_size() -> usize {
-    // SAFETY: `getpagesize` takes no argument, reads and writes nothing
-    // of ours and answers a plain number.
-    let answered = unsafe { getpagesize() };
+    // SAFETY: `sysconf` takes one name, reads and writes nothing of ours
+    // and answers a plain number.
+    let answered = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     match usize::try_from(answered) {
         Ok(size) if size.is_power_of_two() => size,
         _ => PAGE_SIZE,
     }
 }
 
-/// A platform without `getpagesize` keeps php's default, as php keeps it
-/// where `_SC_PAGESIZE` is not defined (`Z/Zend/zend_alloc.c:112`).
+/// A platform without `_SC_PAGESIZE` keeps php's default, as php keeps it
+/// (`Z/Zend/zend_alloc.c:112`).
 #[cfg(not(unix))]
 fn machine_page_size() -> usize {
     PAGE_SIZE
-}
-
-#[cfg(unix)]
-unsafe extern "C" {
-    /// `getpagesize(2)`.
-    fn getpagesize() -> std::ffi::c_int;
 }
 
 /// `bin_data_size`, the usable bytes of each bin
@@ -259,10 +261,9 @@ pub(crate) struct Mm {
     /// under a pin that still stands.
     retired: Vec<NonNull<u8>>,
     /// A debug build's record of what its sensors found
-    /// ([`crate::sensed`]), shared so the address every chunk's header
-    /// holds stands while the heap moves and while any owner the engine
-    /// made holds a [`crate::sensed::Sensor`] on it, and dropped after
-    /// the chunks are given back and the last of those.
+    /// ([`crate::sensed`]), held apart so the address every chunk's
+    /// header holds stands while the heap moves, and dropped after the
+    /// chunks are given back.
     #[cfg(debug_assertions)]
     sensed: crate::sensed::Sensor,
     /// A debug build's quarantine of each bin's last freed slots
@@ -1402,12 +1403,6 @@ impl Mm {
         self.sensed.take()
     }
 
-    /// A way to this heap's sensed record ([`crate::sensed::Sensor`]).
-    #[cfg(debug_assertions)]
-    pub(crate) fn sensor(&self) -> crate::sensed::Sensor {
-        self.sensed.clone()
-    }
-
     /// Whether a fatal is leaving the request ([`crate::sensed::Record`]).
     #[cfg(debug_assertions)]
     pub(crate) fn fatal_leaving(&self, leaving: bool) {
@@ -1529,7 +1524,7 @@ fn chunk_free(chunk: NonNull<Chunk>, size: usize) {
 /// stands. One the machine hands back off a chunk boundary is given up
 /// and asked for again a chunk wider, and the slack either side of the
 /// aligned block unmapped, php's arithmetic exactly.
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 fn huge_map(size: usize) -> Option<NonNull<u8>> {
     let at = mmap(std::ptr::null_mut(), size)?;
     let at = if at.as_ptr().addr() & (CHUNK_SIZE - 1) == 0 {
@@ -1557,15 +1552,16 @@ fn huge_map(size: usize) -> Option<NonNull<u8>> {
     Some(at)
 }
 
-/// A platform with no `mmap` keeps the huge block on the system
-/// allocator, aligned to a chunk, and never grows or cuts it in place.
-#[cfg(not(unix))]
+/// A platform with no `mmap`, and Miri, whose `munmap` takes a mapping
+/// only whole (the note at the top of this file), keep the huge block on the system
+/// allocator, aligned to a chunk, and never grow or cut it in place.
+#[cfg(any(not(unix), miri))]
 fn huge_map(size: usize) -> Option<NonNull<u8>> {
     chunk_alloc(size).map(NonNull::cast)
 }
 
 /// `zend_mm_chunk_free` over a huge block: its whole mapping goes back.
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 fn huge_unmap(at: NonNull<u8>, size: usize) {
     #[cfg(test)]
     MAPPINGS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -1573,7 +1569,7 @@ fn huge_unmap(at: NonNull<u8>, size: usize) {
 }
 
 /// The system allocator's block goes back, as [`chunk_free`] does.
-#[cfg(not(unix))]
+#[cfg(any(not(unix), miri))]
 fn huge_unmap(at: NonNull<u8>, size: usize) {
     chunk_free(at.cast(), size);
 }
@@ -1584,7 +1580,7 @@ fn huge_unmap(at: NonNull<u8>, size: usize) {
 /// `zend_mm_mmap_fixed`, a mapping hinted at the block's end and given
 /// back when the machine put it anywhere else. `false` is the machine
 /// saying no, and the caller moves the block as php does.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(miri)))]
 fn huge_extend(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
     // SAFETY: `at` is a mapping of `old_size` bytes this heap made, and
     // without `MREMAP_MAYMOVE` the call grows it in place or fails.
@@ -1594,7 +1590,7 @@ fn huge_extend(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
 
 /// `zend_mm_mmap_fixed((char*)addr + old_size, new_size - old_size)`, the
 /// arm of `zend_mm_chunk_extend` for a platform with no `mremap`.
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, not(target_os = "linux"), not(miri)))]
 fn huge_extend(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
     let end = at.as_ptr().wrapping_add(old_size);
     let Some(tail) = mmap(end, new_size - old_size) else {
@@ -1608,21 +1604,21 @@ fn huge_extend(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
 }
 
 /// No platform mapping to grow: the block moves.
-#[cfg(not(unix))]
+#[cfg(any(not(unix), miri))]
 fn huge_extend(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
     false
 }
 
 /// `zend_mm_chunk_truncate` (`Z/Zend/zend_alloc.c:822`): the tail past
 /// `new_size` unmapped, the block standing where it is.
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 fn huge_truncate(at: NonNull<u8>, old_size: usize, new_size: usize) -> bool {
     munmap(at.as_ptr().wrapping_add(new_size), old_size - new_size);
     true
 }
 
 /// No platform mapping to cut: the block moves.
-#[cfg(not(unix))]
+#[cfg(any(not(unix), miri))]
 fn huge_truncate(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
     false
 }
@@ -1630,7 +1626,7 @@ fn huge_truncate(_at: NonNull<u8>, _old_size: usize, _new_size: usize) -> bool {
 /// `zend_mm_mmap` (`Z/Zend/zend_alloc.c:522`), with `hint` php's
 /// `zend_mm_mmap_fixed` address or null: `size` fresh, private,
 /// anonymous bytes, or `None` where the machine refuses them.
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
     // SAFETY: an anonymous private mapping names no file and, without
     // `MAP_FIXED`, replaces nothing already mapped; `hint` is a hint.
@@ -1652,7 +1648,7 @@ fn mmap(hint: *mut u8, size: usize) -> Option<NonNull<u8>> {
 
 /// `zend_mm_munmap`: `size` bytes at `at`, which this heap mapped and
 /// nothing names any more, given back to the machine.
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 fn munmap(at: *mut u8, size: usize) {
     // SAFETY: the range is part of a mapping `mmap` made for this heap,
     // and the caller holds no name into it.
@@ -2020,14 +2016,26 @@ pub(crate) mod freed {
     /// `chunk->heap`. Only a block [`is_freed`] found marked is passed,
     /// and only a slot of a chunk carries the mark.
     pub(crate) fn record(at: NonNull<u8>, sensed: crate::sensed::Sensed) {
+        with_record(at, |record| record.record(sensed));
+    }
+
+    /// `f` handed the record of the heap the block at `at` belongs to,
+    /// reached through the header of its chunk, php's `chunk->heap`. `at`
+    /// is a block of a chunk, never a huge block, which heads a mapping of
+    /// its own, and the chunk is mapped: a block the caller holds an owner
+    /// of, or one [`is_freed`] found marked, whose chunk its heap still
+    /// holds, since a slot is marked only while its chunk is the heap's.
+    pub(crate) fn with_record<R>(
+        at: NonNull<u8>,
+        f: impl FnOnce(&crate::sensed::Record) -> R,
+    ) -> R {
         let chunk = super::chunk_of(at);
-        // SAFETY: the block carries the mark, so it is a slot or a `run`
-        // of a chunk its heap still holds mapped, and that chunk's page
-        // zero is the header `chunk_init` wrote.
+        // SAFETY: the caller's contract: the chunk is one its heap holds
+        // mapped, whose page zero is the header `chunk_init` wrote.
         let record = unsafe { (*chunk.as_ptr()).sensed };
         // SAFETY: the header names the record its heap shares, which the
         // heap lets go of only after it has given every chunk back, so the
         // record stands while the chunk is mapped.
-        unsafe { &*record }.record(sensed);
+        f(unsafe { &*record })
     }
 }

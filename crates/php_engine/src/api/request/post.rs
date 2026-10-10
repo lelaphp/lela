@@ -341,7 +341,7 @@ impl Request {
         limits: &BodyLimits,
     ) -> Result<(Owner<PhpArray>, Owner<PhpArray>), Thrown> {
         let (post, files) = self.parse_body_made(limits)?;
-        Ok((Owner::adopt(self, post), Owner::adopt(self, files)))
+        Ok((Owner::adopt(post), Owner::adopt(files)))
     }
 
     /// What [`parse_body`](Self::parse_body) makes, the two owners not
@@ -455,7 +455,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn input_variables(&mut self, input: super::Input) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.input_variables_made(input);
-        adopted(self, made)
+        adopted(made)
     }
 
     /// What [`input_variables`](Self::input_variables) makes, its one owner not yet named.

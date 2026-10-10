@@ -449,7 +449,7 @@ impl Compat {
     /// number.
     fn add_to_info(&self, req: &mut Request, name: &[u8]) -> Result<(), Thrown> {
         let Some((info, curtag)) = self.parser(req).and_then(|p| {
-            let info = p.into.as_ref()?.info?;
+            let info = p.into.as_ref()?.info.as_deref().copied()?;
             let n = p.curtag;
             Some((info, n))
         }) else {
@@ -474,7 +474,7 @@ impl Compat {
     /// `xml_get_separated_data`: `$values` separated, `None` where it holds
     /// no array.
     fn data(&self, req: &mut Request) -> Result<Option<PhpArray>, Thrown> {
-        let Some(data) = self.parser(req).and_then(|p| Some(p.into.as_ref()?.data)) else {
+        let Some(data) = self.parser(req).and_then(|p| Some(*p.into.as_ref()?.data)) else {
             return Ok(None);
         };
         data.separate_array(req)
@@ -751,18 +751,25 @@ impl Sax for Compat {
 }
 
 /// `$values` and `$index` as `xml_parse_into_struct` keeps them: the
-/// caller's references, one owner each.
-#[derive(Clone, Copy)]
+/// caller's references, an owner of each.
 pub(crate) struct Collected {
-    pub(crate) data: PhpRef,
-    pub(crate) info: Option<PhpRef>,
+    pub(crate) data: Owner<PhpRef>,
+    pub(crate) info: Option<Owner<PhpRef>>,
 }
 
 impl Collected {
     pub(crate) fn release(self, req: &mut Request) {
-        req.release(self.data.as_value());
+        self.data.give_up(req);
         if let Some(info) = self.info {
-            req.release(info.as_value());
+            info.give_up(req);
+        }
+    }
+
+    /// Both references, named to the cycle collector.
+    pub(crate) fn visit(&self, visit: &mut dyn FnMut(Value)) {
+        visit(self.data.as_value());
+        if let Some(info) = &self.info {
+            visit(info.as_value());
         }
     }
 }

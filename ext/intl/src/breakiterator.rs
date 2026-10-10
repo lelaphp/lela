@@ -32,7 +32,8 @@ const DONE: i32 = -1;
 pub(crate) struct BreakObject {
     error: IntlError,
     biter: Option<Breaker>,
-    text: Value,
+    /// `text`, an owner of the string `setText()` was handed.
+    text: Option<Owner<PhpString>>,
 }
 
 impl Carrier for BreakObject {
@@ -342,9 +343,8 @@ impl IntlBreakIterator {
             return Err(arg_value_error(req, 1, tail));
         };
         with(req, object, |_| ())?;
-        req.addref(&object.as_value());
         let walk = Parts {
-            object,
+            object: Some(Owner::take(req, object)),
             key,
             right: 0,
         };
@@ -356,11 +356,9 @@ impl IntlBreakIterator {
         let object = this.object();
         error::reset(req);
         with(req, object, |_| ())?;
-        let text = object
+        Ok(object
             .native::<BreakObject>(req)
-            .map(|o| o.text)
-            .unwrap_or_default();
-        Ok(text.as_php_string().copied())
+            .and_then(|o| o.text.as_deref().copied()))
     }
 
     #[php(tentative)]
@@ -410,11 +408,13 @@ impl IntlBreakIterator {
             return Ok(false);
         }
         error::set_code(req, Code::ZERO);
-        let value = Value::string(text);
-        req.addref(&value);
-        if let Some(o) = object.native_mut::<BreakObject>(req) {
-            let old = std::mem::replace(&mut o.text, value);
-            req.release(old);
+        let held = Owner::take(req, text);
+        let old = match object.native_mut::<BreakObject>(req) {
+            Some(o) => o.text.replace(held),
+            None => Some(held),
+        };
+        if let Some(old) = old {
+            old.give_up(req);
         }
         Ok(true)
     }
@@ -692,7 +692,9 @@ impl Key3 {
 /// `zoi_break_iter_parts`: the break iterator walked, one owner, how the
 /// parts are keyed and the right boundary php keeps beside the index.
 struct Parts {
-    object: PhpObject,
+    /// The break iterator walked, an owner of it until the walk is
+    /// released.
+    object: Option<Owner<PhpObject>>,
     key: Key3,
     right: i64,
 }
@@ -706,7 +708,10 @@ impl Walk for Parts {
         _: PhpObject,
         index: &mut i64,
     ) -> Answer<Option<Owner<Value>>> {
-        let Some(o) = self.object.native_mut::<BreakObject>(req) else {
+        let Some(o) = self
+            .walked()
+            .and_then(|object| object.native_mut::<BreakObject>(req))
+        else {
             return Ok(None);
         };
         let Some(biter) = o.biter.as_mut() else {
@@ -728,7 +733,7 @@ impl Walk for Parts {
             }
             Key3::Sequential => {}
         }
-        let text = o.text.as_str_bytes().unwrap_or_default();
+        let text = o.text.as_deref().map_or(&[][..], PhpString::as_bytes);
         let (from, to) = (
             usize::try_from(cur).unwrap_or(0),
             usize::try_from(next).unwrap_or(0),
@@ -740,8 +745,8 @@ impl Walk for Parts {
     /// `_breakiterator_parts_rewind`: back to the first boundary.
     fn reset(&mut self, req: &mut Request, _: PhpObject) -> Answer<bool> {
         if let Some(biter) = self
-            .object
-            .native_mut::<BreakObject>(req)
+            .walked()
+            .and_then(|object| object.native_mut::<BreakObject>(req))
             .and_then(|o| o.biter.as_mut())
         {
             biter.step(Step::First, 0);
@@ -759,11 +764,20 @@ impl Walk for Parts {
     }
 
     fn data(&self) -> Option<Value> {
-        Some(self.object.as_value())
+        self.walked().map(|object| object.as_value())
     }
 
     fn release(&mut self, req: &mut Request) {
-        req.release(self.object.as_value());
+        if let Some(object) = self.object.take() {
+            object.give_up(req);
+        }
+    }
+}
+
+impl Parts {
+    /// The break iterator walked, while the walk holds it.
+    fn walked(&self) -> Option<PhpObject> {
+        self.object.as_deref().copied()
     }
 }
 
@@ -865,7 +879,11 @@ impl ObjectHandlers for Handlers {
                 biter: Some(b),
                 text,
                 ..
-            }) => (true, *text, b.type_name()),
+            }) => (
+                true,
+                text.as_deref().map_or(Value::null(), |t| Value::string(*t)),
+                b.type_name(),
+            ),
             _ => (false, Value::null(), ""),
         };
         let mut table = PhpArray::new(req)?;
@@ -883,10 +901,12 @@ impl ObjectHandlers for Handlers {
 
     /// `BreakIterator_objects_free`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some(o) = object.native_mut::<BreakObject>(req) {
+        let text = object.native_mut::<BreakObject>(req).and_then(|o| {
             o.biter = None;
-            let text = std::mem::take(&mut o.text);
-            req.release(text);
+            o.text.take()
+        });
+        if let Some(text) = text {
+            text.give_up(req);
         }
     }
 
@@ -931,7 +951,7 @@ fn clone_break(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>>
             biter: Some(b),
             text,
             ..
-        }) => (b.try_clone(), *text),
+        }) => (b.try_clone(), text.as_deref().copied()),
         _ => {
             return Err(throw_error(
                 req,
@@ -943,11 +963,10 @@ fn clone_break(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>>
     let Some(copy) = copy else {
         return Err(throw_error(req, "Error", "Failed to clone BreakIterator"));
     };
-    req.addref(&text);
     let payload = BreakObject {
         error: IntlError::default(),
         biter: Some(copy),
-        text,
+        text: text.map(|text| Owner::take(req, text)),
     };
     clone_with(req, &object, payload)
 }

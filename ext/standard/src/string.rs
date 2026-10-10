@@ -29,7 +29,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::with_string;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
@@ -2345,11 +2345,7 @@ fn count_chars(
             _ => *count == 0,
         };
         if keep {
-            array.set(
-                req,
-                Owner::take(req, Key::Int(long(inx))),
-                Owner::int(long(*count)),
-            )?;
+            array.set(req, Owner::index(long(inx)), Owner::int(long(*count)))?;
         }
     }
     Ok(Union::A(array))
@@ -2580,7 +2576,7 @@ fn str_word_count(
                 }
                 (Some(array), _) => {
                     let word = PhpString::new(req, &s[start..p])?.into_value();
-                    array.set(req, Owner::take(req, Key::Int(long(start))), word)?;
+                    array.set(req, Owner::index(long(start)), word)?;
                 }
                 (None, _) => count += 1,
             }

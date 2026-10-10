@@ -1786,7 +1786,7 @@ impl Request {
         let class = object.class();
         let shown = String::from_utf8_lossy(name).into_owned();
         if let Some(read) = self.read_hooked_arm(object, name, read) {
-            return adopted(self, read);
+            return adopted(read);
         }
         // `ZEND_WRONG_PROPERTY_OFFSET`: the placement found a property
         // the scope may not reach and said so quietly, because a
@@ -1869,14 +1869,14 @@ impl Request {
             let served = self.isset_then_get(object, name, read, issetter, getter);
             held.give_up(self);
             if let Some(served) = served? {
-                return Ok(Owner::adopt(self, served));
+                return Ok(Owner::adopt(served));
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
                 let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
                 self.overloaded_write_notice(class, name, read, &got);
                 let held = self.hold_magic_get(class, name, getter, got);
-                return adopted(self, held);
+                return adopted(held);
             }
             // `zend_wrong_offset`: the guard stands and the placement
             // was a wrong offset, so it is made again, loudly, and the

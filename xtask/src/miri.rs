@@ -12,22 +12,14 @@
 //! with that test and every test already judged skipped, until a run ends
 //! with none in flight. The doctests are not run.
 //!
-//! **What it runs under, said and never chosen silently.** Miri's own
-//! defaults unless `MIRIFLAGS` says otherwise: Stacked Borrows, and
-//! permissive provenance, under which `php_heap`'s pointers carried
-//! through integers (`expose_provenance`, `with_exposed_provenance_mut`)
-//! are allowed with a warning. `-Zmiri-strict-provenance` makes each of
-//! them an unsupported operation, and `-Zmiri-tree-borrows` the other
-//! aliasing model. The reading's message names the model and the
-//! provenance it ran under.
-//!
-//! **What the nightly costs.** The pinned nightly predates the
-//! workspace's Rust ([`FEATURES`]), so the language and library features
-//! the workspace uses that it had not stabilised are turned on by
-//! `-Zcrate-attr`, and `--ignore-rust-version` lets it build a crate whose
-//! `rust-version` is later than itself. A test Miri cannot run at all
-//! carries `#[cfg_attr(miri, ignore = "<why>")]` in its source, the reason
-//! with it.
+//! **What it runs under, said and never chosen silently.** Tree Borrows
+//! ([`MODEL`]) with permissive provenance, as #2415 ruled: `php_heap`'s
+//! pointers carried through integers (`expose_provenance`,
+//! `with_exposed_provenance_mut`) are allowed with a warning. `MIRIFLAGS`
+//! adds to that, and `-Zmiri-strict-provenance` among them makes each such
+//! pointer an unsupported operation. The reading's message names the model
+//! and the provenance it ran under. A test Miri cannot run at all carries
+//! `#[cfg_attr(miri, ignore = "<why>")]` in its source, the reason with it.
 
 use std::path::Path;
 use std::process::Command;
@@ -43,13 +35,15 @@ use crate::sources;
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "miri";
 
-/// The nightly Miri runs on, by rustup's name; CI's job installs the same
-/// one with its `miri` component.
-pub const TOOLCHAIN: &str = "nightly-2025-01-08";
+/// The nightly Miri runs on, by rustup's name: one of the workspace's own
+/// Rust (`rust-toolchain.toml`), so it builds every crate as the stable
+/// compiler does, with no feature turned on and no `rust-version` waived
+/// (#2417). CI's job installs the same one with its `miri` component.
+pub const TOOLCHAIN: &str = "nightly-2026-02-20";
 
-/// The features the workspace uses that [`TOOLCHAIN`] had not stabilised,
-/// turned on in every crate the run builds.
-pub const FEATURES: &str = "let_chains,integer_sign_cast,unsigned_is_multiple_of,trait_upcasting";
+/// The aliasing model every run stands under, ruled on #2415; on
+/// [`TOOLCHAIN`] it takes exposed provenance.
+const MODEL: &str = "-Zmiri-tree-borrows";
 
 /// The crates a run takes when none is named: the memory model, design
 /// §9's.
@@ -78,7 +72,7 @@ pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Read
         if let Err(why) = &installed {
             reading.status = Status::Skip;
             reading.message = format!(
-                "{name}: not run, {why}; `rustup toolchain install {TOOLCHAIN} --profile minimal --component miri` installs it"
+                "{name}: not run, {why}; `rustup toolchain install {TOOLCHAIN} --profile minimal --component miri,rust-src` installs it"
             );
             readings.push(reading);
             continue;
@@ -181,24 +175,18 @@ impl Ended {
 /// Every test of `krate` under Miri, a run again after each one that
 /// ended a run, until a run ends with no test in flight.
 fn suite(root: &Path, krate: &Crate) -> Result<Suite> {
-    let flags = std::env::var("MIRIFLAGS").unwrap_or_default();
+    let extra = std::env::var("MIRIFLAGS").unwrap_or_default();
+    let flags = format!("{MODEL} {extra}");
     let mut suite = Suite {
-        under: under(&flags),
+        under: under(&extra),
         ..Suite::default()
     };
     let mut judged: Vec<String> = Vec::new();
     loop {
         let mut miri = cargo(root);
         miri.args(["miri", "test", "-p", &krate.package()])
-            .args([
-                "--lib",
-                "--tests",
-                "--no-fail-fast",
-                "--ignore-rust-version",
-            ])
-            .args(["--color", "never"])
-            .env("RUSTFLAGS", format!("-Zcrate-attr=feature({FEATURES})"))
-            .env("MIRIFLAGS", &flags)
+            .args(["--lib", "--tests", "--no-fail-fast", "--color", "never"])
+            .env("MIRIFLAGS", flags.trim())
             .args(["--", "--test-threads=1", "--exact"]);
         for name in &judged {
             miri.args(["--skip", name]);
@@ -240,23 +228,20 @@ fn suite(root: &Path, krate: &Crate) -> Result<Suite> {
     }
 }
 
-/// The model and provenance `flags` puts Miri under, as a reading says it.
-fn under(flags: &str) -> String {
-    let words: Vec<&str> = flags.split_whitespace().collect();
-    let model = if words.contains(&"-Zmiri-tree-borrows") {
-        "Tree Borrows"
+/// The model and provenance a run stands under, [`MODEL`] and the `extra`
+/// flags `MIRIFLAGS` adds, as a reading says it.
+fn under(extra: &str) -> String {
+    let provenance = if extra
+        .split_whitespace()
+        .any(|word| word == "-Zmiri-strict-provenance")
+    {
+        "strict"
     } else {
-        "Stacked Borrows"
+        "permissive"
     };
-    let provenance = if words.contains(&"-Zmiri-strict-provenance") {
-        "strict provenance"
-    } else {
-        "permissive provenance"
-    };
-    if flags.trim().is_empty() {
-        format!("{model}, {provenance}, Miri's defaults")
-    } else {
-        format!("{model}, {provenance}, under MIRIFLAGS `{}`", flags.trim())
+    match extra.trim() {
+        "" => format!("Tree Borrows, {provenance} provenance"),
+        more => format!("Tree Borrows, {provenance} provenance, with MIRIFLAGS `{more}`"),
     }
 }
 
@@ -392,17 +377,14 @@ mod tests {
         ));
     }
 
-    /// The reading says what the runs stood under, Miri's defaults or the
-    /// flags, and never leaves the provenance unsaid.
+    /// The reading says what the runs stood under, the lane's model and
+    /// any flags added to it, and never leaves the provenance unsaid.
     #[test]
     fn the_model_and_the_provenance_are_named() {
+        assert_eq!(under(""), "Tree Borrows, permissive provenance");
         assert_eq!(
-            under(""),
-            "Stacked Borrows, permissive provenance, Miri's defaults"
-        );
-        assert_eq!(
-            under("-Zmiri-strict-provenance -Zmiri-tree-borrows"),
-            "Tree Borrows, strict provenance, under MIRIFLAGS `-Zmiri-strict-provenance -Zmiri-tree-borrows`"
+            under(" -Zmiri-strict-provenance "),
+            "Tree Borrows, strict provenance, with MIRIFLAGS `-Zmiri-strict-provenance`"
         );
     }
 }

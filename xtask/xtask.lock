@@ -1,4 +1,5 @@
 api_check::hold
+api_check::public_items
 api_check::run
 bench::Label
 bench::REPS
@@ -136,7 +137,6 @@ manifest::Week
 manifest::Where
 manifest::scope_matches
 miri::CRATES
-miri::FEATURES
 miri::TOOLCHAIN
 miri::run
 new_ext::Laid

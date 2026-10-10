@@ -8,7 +8,7 @@ use php_ext::abi::{OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use crate::constants::{
     PREG_INTERNAL_ERROR, PREG_NO_ERROR, PREG_OFFSET_CAPTURE, PREG_PATTERN_ORDER, PREG_SET_ORDER,
@@ -865,7 +865,7 @@ fn matches_loop(
                                 None => marks.insert(PhpArray::new(req)?),
                             };
                             let mark = PhpString::new(req, &mark)?.into_value();
-                            marks.set(req, Owner::take(req, Key::Int(matched - 1)), mark)?;
+                            marks.set(req, Owner::index(matched - 1), mark)?;
                         }
                         let unset = (ffi::PCRE2_UNSET, ffi::PCRE2_UNSET);
                         for set in sets.iter_mut().skip(n) {

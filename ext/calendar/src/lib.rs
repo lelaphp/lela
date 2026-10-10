@@ -33,7 +33,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, Union};
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Thrown, arg_value_error, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Layout, Owner, PhpArray, PhpString, Value};
 
 use constants::{
     CAL_DOW_LONG, CAL_DOW_SHORT, CAL_FRENCH, CAL_GREGORIAN, CAL_JEWISH, CAL_JULIAN,
@@ -270,7 +270,7 @@ fn calendar_row(req: &mut Request, calendar: Calendar) -> Result<Owner<PhpArray>
         let mut list = PhpArray::sized(req, size, Layout::Packed)?;
         for (at, month) in (1..).zip(names.iter().take(months + 1).skip(1)) {
             let value = string(req, month.as_bytes())?.into_value();
-            list.set(req, Owner::take(req, Key::Int(at)), value)?;
+            list.set(req, Owner::index(at), value)?;
         }
         set(req, &mut row, name, list.into_value())?;
     }
@@ -352,7 +352,7 @@ fn cal_info(
         let mut all = PhpArray::sized(req, 4, Layout::Packed)?;
         for (id, calendar) in (0..).zip(Calendar::ALL) {
             let row = calendar_row(req, calendar)?;
-            all.set(req, Owner::take(req, Key::Int(id)), row.into_value())?;
+            all.set(req, Owner::index(id), row.into_value())?;
         }
         return Ok(all);
     }

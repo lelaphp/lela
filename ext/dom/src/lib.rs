@@ -437,7 +437,10 @@ fn import_simplexml_common(
         && let Some(doc) = node.doc()
     {
         let private = private::Private::new(req)?;
-        private::lay_down(req, *made, private);
+        match libxml_half(req, *made) {
+            Some(mut obj) => obj.set_private_data(req, Box::new(private)),
+            None => private.free(req),
+        }
         modern::convert_to_modern(req, *made, doc);
     }
     Ok(made.into_value())
@@ -1404,11 +1407,11 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
         && n.kind() == Kind::NamespaceDecl
     {
         let parent_obj = match dom(req, object).map(|d| &d.extra) {
-            Some(Extra::NamespaceParent(p)) => Some(***p),
+            Some(Extra::NamespaceParent(p)) => Some(**p),
             _ => None,
         };
         if let Some(p) = parent_obj {
-            payload.extra = Extra::NamespaceParent(Box::new(Owner::take(req, p)));
+            payload.extra = Extra::NamespaceParent(Owner::take(req, p));
         }
         let ns = n.ns();
         if let Some(parent) = n.parent()
@@ -1474,7 +1477,10 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
         copy_document_ref(req, object, *clone);
     }
     if let Some(private) = fresh {
-        private::lay_down(req, *clone, private);
+        match libxml_half(req, *clone) {
+            Some(mut obj) => obj.set_private_data(req, Box::new(private)),
+            None => private.free(req),
+        }
     }
     Ok(clone)
 }

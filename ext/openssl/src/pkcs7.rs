@@ -152,11 +152,7 @@ pub(crate) fn pem_list(
         for (i, pem) in list.into_iter().enumerate() {
             if let Some(pem) = pem {
                 let pem = PhpString::new(req, &pem)?.into_value();
-                out.set(
-                    req,
-                    Owner::take(req, Key::Int(i64::try_from(i).unwrap_or(0))),
-                    pem,
-                )?;
+                out.set(req, Owner::index(i64::try_from(i).unwrap_or(0)), pem)?;
             }
         }
     }

@@ -146,7 +146,7 @@ fn fields(source: &str) -> Result<Vec<Field>> {
 
 /// A field's rustdoc, its lines joined, each without the one space
 /// `///` leaves.
-fn doc(attrs: &[syn::Attribute]) -> String {
+pub(super) fn doc(attrs: &[syn::Attribute]) -> String {
     attrs
         .iter()
         .filter(|a| a.path().is_ident("doc"))

@@ -1866,6 +1866,17 @@ impl Callable {
         self.name.clone()
     }
 
+    /// The callable moved out of `self`, which keeps its value and target
+    /// and an empty name: what an owner of it is made of as the owner is
+    /// consumed, the name's allocation moved with it.
+    pub(crate) fn moved_out(&mut self) -> Callable {
+        Callable {
+            value: self.value,
+            name: std::mem::take(&mut self.name),
+            target: self.target,
+        }
+    }
+
     /// `zend_fcall_info_cache` as `zend_is_callable_ex` filled it: what
     /// the callable resolved to when it was made, which is what serving
     /// it enters. php holds the same three fields for the same span,

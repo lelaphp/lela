@@ -31,7 +31,7 @@ use php_ext::call::read_prop;
 use php_ext::decl::{IniDecl, Name};
 use php_ext::raising::{Thrown, argument_error, throw, throw_error, warning};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 use num::{Num, RaiseError, RaiseModError, Rounding};
 
@@ -387,8 +387,8 @@ fn pair(
     second: Owner<Value>,
 ) -> Result<Owner<PhpArray>, Thrown> {
     let mut array = PhpArray::new(req)?;
-    array.set(req, Owner::take(req, Key::Int(0)), first)?;
-    array.set(req, Owner::take(req, Key::Int(1)), second)?;
+    array.set(req, Owner::index(0), first)?;
+    array.set(req, Owner::index(1), second)?;
     Ok(array)
 }
 
@@ -667,7 +667,6 @@ fn rounding(
         Some(b"PositiveInfinity") => Some(Rounding::Ceiling),
         _ => None,
     };
-    req.release(name);
     rounding.ok_or_else(|| value_error(req, position, "is an unsupported rounding mode"))
 }
 

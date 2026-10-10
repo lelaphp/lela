@@ -1095,7 +1095,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn last_error(&mut self) -> Result<Option<Owner<PhpArray>>, Thrown> {
         let made = self.last_error_made();
-        adopted_some(self, made)
+        adopted_some(made)
     }
 
     /// What [`last_error`](Self::last_error) makes, its one owner not yet named.

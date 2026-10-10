@@ -80,7 +80,7 @@ impl Request {
         name: &[u8],
     ) -> Option<Result<Owner<Value>, Thrown>> {
         let made = self.eval_in_frame_made(frame, code, name)?;
-        Some(adopted(self, made))
+        Some(adopted(made))
     }
 
     /// What [`eval_in_frame`](Self::eval_in_frame) makes, its one owner

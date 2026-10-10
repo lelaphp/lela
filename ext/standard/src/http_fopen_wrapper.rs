@@ -401,8 +401,12 @@ impl Chain {
         if let Err(thrown) = answered {
             if self.thrown.is_none() {
                 self.thrown = Some(thrown);
-            } else if let Some(object) = thrown.exception() {
-                req.release(object.as_value());
+            } else {
+                // A second throwable is given up; a fatal or an exit
+                // holds none.
+                match php_ext::raising::clear(req, thrown) {
+                    Ok(()) | Err(_) => {}
+                }
             }
         }
     }

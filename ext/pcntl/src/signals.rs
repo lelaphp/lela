@@ -34,8 +34,8 @@ const NUMBERS: i64 = 65;
 #[derive(Default)]
 pub(crate) struct Table {
     /// `PCNTL_G(php_signal_table)`: what `pcntl_signal` was handed for
-    /// each number, each value held by one owner of the table's.
-    handlers: BTreeMap<i32, Value>,
+    /// each number, an owner of each the table's.
+    handlers: BTreeMap<i32, Owner<Value>>,
     /// `PCNTL_G(async_signals)`.
     delivery: Delivery,
     /// `PCNTL_G(processing_signal_queue)`: a dispatch is running, so a
@@ -133,14 +133,14 @@ pub(crate) fn pcntl_signal(
             &format!("Error installing signal handler for {number}"),
         ));
     }
-    req.addref(&handler);
+    let handler = Owner::take(req, handler);
     if let Some(previous) = req
         .state::<State>()
         .signals
         .handlers
         .insert(number, handler)
     {
-        req.release(previous);
+        previous.give_up(req);
     }
     Ok(true)
 }
@@ -176,7 +176,12 @@ pub(crate) fn pcntl_signal_get_handler(
         ));
     }
     let number = i32::try_from(signal).unwrap_or(i32::MAX);
-    let held = req.state::<State>().signals.handlers.get(&number).copied();
+    let held = req
+        .state::<State>()
+        .signals
+        .handlers
+        .get(&number)
+        .map(|handler| **handler);
     Ok(Untyped(match held {
         Some(handler) => handler,
         None => Value::int(0),
@@ -291,7 +296,7 @@ fn play(req: &mut Request, taken: &[Siginfo]) -> Result<(), Thrown> {
             .signals
             .handlers
             .get(&posted.number)
-            .copied()
+            .map(|handler| **handler)
         else {
             continue;
         };
@@ -299,9 +304,9 @@ fn play(req: &mut Request, taken: &[Siginfo]) -> Result<(), Thrown> {
             continue;
         }
         // The handler may replace itself; the call holds its own owner.
-        req.addref(&handler);
-        let called = call_handler(req, handler, posted);
-        req.release(handler);
+        let held = Owner::take(req, handler);
+        let called = call_handler(req, *held, posted);
+        held.give_up(req);
         called?;
     }
     Ok(())
@@ -678,7 +683,7 @@ pub(crate) fn rshutdown(req: &mut Request) {
         if handler.as_int() != Some(0) {
             ffi::install(number, Disposition::Default, false, false).ok();
         }
-        req.release(handler);
+        handler.give_up(req);
     }
     drop(take_signals(|number| numbers.contains(&number)));
 }

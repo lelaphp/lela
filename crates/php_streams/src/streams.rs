@@ -434,7 +434,8 @@ pub(crate) struct PhpStream {
 /// tell.
 #[derive(Default)]
 struct Wrapped {
-    context: Option<StreamCtx>,
+    /// `PHP_STREAM_CONTEXT(stream)`, the stream's owner of its `context`.
+    context: Option<Owner<StreamCtx>>,
     closer: Option<Box<dyn Closer>>,
     wrapperdata: Option<Owner<Value>>,
     stat: Option<fn(&mut Request, Stream) -> Option<StatBuf>>,
@@ -726,7 +727,7 @@ impl PhpStream {
 
     /// `PHP_STREAM_CONTEXT(stream)`, whose notifier the stream tells.
     fn context(&self) -> Option<StreamCtx> {
-        self.wrapped.as_ref()?.context
+        self.wrapped.as_ref()?.context.as_deref().copied()
     }
 
     /// `stream->position = 0` and `strlcpy(stream->mode, mode)`, cut to
@@ -1321,7 +1322,7 @@ impl PhpStream {
             if len < max / 2 {
                 out = out.truncate(req, len)?;
             }
-            return Ok(Some(out.finish(req)));
+            return Ok(Some(out.finish()));
         }
         let size = self.stat(req).map_or(0, |sb| sb[7]);
         let mut buflen = if size > 0 {
@@ -1355,7 +1356,7 @@ impl PhpStream {
             out.free(req);
             return Ok(None);
         }
-        Ok(Some(out.truncate(req, len)?.finish(req)))
+        Ok(Some(out.truncate(req, len)?.finish()))
     }
 
     /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the
@@ -1608,7 +1609,7 @@ impl PhpStream {
         }
         // `zend_list_delete(context->res)`, once everything else is gone.
         if let Some(context) = context {
-            req.release(context.resource().as_value());
+            context.give_up(req);
         }
         ret
     }
@@ -4342,28 +4343,31 @@ impl StreamLayer for Request {
     /// kept, which gives its owner up; a socket's crypto layer reads it
     /// from then.
     fn set_stream_context(&mut self, stream: Stream, context: Option<StreamCtx>) {
-        if let Some(context) = context {
-            self.addref(&context.resource().as_value());
-        }
+        let mut held = context.map(|context| Owner::take(self, context));
         let old = self
             .stream_op(stream, |_, s| {
                 if let Some(socket) = s.ops.as_socket() {
                     socket.set_ctx(context);
                 }
-                match context {
+                match held.take() {
                     Some(context) => s.wrapped_mut().context.replace(context),
                     None => s.wrapped.as_mut().and_then(|w| w.context.take()),
                 }
             })
             .flatten();
-        if let Some(old) = old {
-            self.release(old.resource().as_value());
+        for owner in [old, held].into_iter().flatten() {
+            owner.give_up(self);
         }
     }
 
     /// `PHP_STREAM_CONTEXT(stream)`.
     fn stream_context(&self, stream: Stream) -> Option<StreamCtx> {
-        self.stream_ref(stream)?.wrapped.as_ref()?.context
+        self.stream_ref(stream)?
+            .wrapped
+            .as_ref()?
+            .context
+            .as_deref()
+            .copied()
     }
 
     /// What a socket's active crypto layer shows under `crypto`, ahead of
@@ -4561,7 +4565,7 @@ impl StreamLayer for Request {
         if read < len / 2 {
             out = out.truncate(self, read)?;
         }
-        Ok(Some(out.finish(self)))
+        Ok(Some(out.finish()))
     }
 
     fn stream_from_fd(&mut self, fd: OwnedFd, kind: FdStream<'_>) -> Result<Owner<Stream>, Thrown> {

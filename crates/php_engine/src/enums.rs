@@ -167,9 +167,9 @@ fn cases(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let mut out = req.array()?;
     for name in case_names(req, class) {
         let case = req.enum_case(class, &name)?;
-        out.append(req, Owner::adopt(req, case.as_value()))?;
+        out.append(req, Owner::adopt(case.as_value()))?;
     }
-    Ok(Owner::adopt(req, Value::array(out)))
+    Ok(Owner::adopt(Value::array(out)))
 }
 
 /// `BackedEnum::from()`, `zend_enum_from_base` with `try_from` clear:
@@ -194,13 +194,13 @@ fn cases(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// ```
 fn from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let made = by_value(req, false);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// `BackedEnum::tryFrom()`: `null` where `from` raises its `ValueError`.
 fn try_from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let made = by_value(req, true);
-    adopted(req, made)
+    adopted(made)
 }
 
 /// The key `zend_enum_from_base` parses the argument into, one owner

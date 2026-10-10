@@ -1044,7 +1044,7 @@ impl Buffer {
         match self.result {
             Some(mut result) => {
                 result.set_len(self.pos);
-                Ok(result.finish(req))
+                Ok(result.finish())
             }
             None => PhpString::new(req, b""),
         }

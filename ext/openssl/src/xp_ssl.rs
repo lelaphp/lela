@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, callable_name, to_long, truthy, with_string};
-use php_ext::raising::{Level, Thrown, docref, raise, throw_error};
+use php_ext::raising::{Level, Thrown, docref, leave_pending, raise, throw_error};
 use php_ext::request::{
     Crypto, CryptoSocket, Handshake, OwnedStream as _, Readiness, Request, Stream, StreamCtx,
     Streams as _, XportFactory,
@@ -1586,7 +1586,16 @@ fn load_stream_cafile(req: &mut Request, ctx: &Ctx, cafile: &[u8]) -> usize {
     // `php_stream_open_wrapper(cafile, "rb", 0, NULL)`: options 0, so a
     // file that is not there warns only as the line below does.
     let opening = php_ext::request::Opening::default();
-    let Ok(Some(stream)) = req.open_stream_with(cafile, b"rb", opening) else {
+    let opened = match req.open_stream_with(cafile, b"rb", opening) {
+        Ok(opened) => opened,
+        // What a user wrapper threw stays in `EG(exception)`, and php
+        // warns with it standing.
+        Err(thrown) => {
+            leave_pending(req, thrown);
+            None
+        }
+    };
+    let Some(stream) = opened else {
         raise(
             req,
             Level::Warning,

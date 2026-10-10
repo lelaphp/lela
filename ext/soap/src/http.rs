@@ -1609,7 +1609,7 @@ fn store_cookie(
 ) -> R<()> {
     let mut zcookie = PhpArray::new(req)?;
     let value = string(req, &cookie[eqpos + 1..sempos.unwrap_or(cookie.len())])?;
-    zcookie.set(req, Owner::take(req, Key::Int(0)), value)?;
+    zcookie.set(req, Owner::index(0), value)?;
     if let Some(sempos) = sempos {
         let mut options = sempos + 1;
         while options < cookie.len() {
@@ -1621,12 +1621,12 @@ fn store_cookie(
             let end = next.unwrap_or(rest.len());
             if let Some(path) = rest.strip_prefix(b"path=") {
                 let value = string(req, &path[..end - 5])?;
-                zcookie.set(req, Owner::take(req, Key::Int(1)), value)?;
+                zcookie.set(req, Owner::index(1), value)?;
             } else if let Some(domain) = rest.strip_prefix(b"domain=") {
                 let value = string(req, &domain[..end - 7])?;
-                zcookie.set(req, Owner::take(req, Key::Int(2)), value)?;
+                zcookie.set(req, Owner::index(2), value)?;
             } else if rest.starts_with(b"secure") {
-                zcookie.set(req, Owner::take(req, Key::Int(3)), Owner::bool(true))?;
+                zcookie.set(req, Owner::index(3), Owner::bool(true))?;
             }
             match next {
                 Some(next) => options += next + 1,
@@ -1638,12 +1638,12 @@ fn store_cookie(
         let t = cstr(uri.path.as_deref().unwrap_or(b"/"));
         if let Some(c) = t.iter().rposition(|c| *c == b'/') {
             let value = string(req, &t[..c])?;
-            zcookie.set(req, Owner::take(req, Key::Int(1)), value)?;
+            zcookie.set(req, Owner::index(1), value)?;
         }
     }
     if !zcookie.contains(&Key::Int(2)) {
         let value = string(req, host_of(uri))?;
-        zcookie.set(req, Owner::take(req, Key::Int(2)), value)?;
+        zcookie.set(req, Owner::index(2), value)?;
     }
     let name = PhpString::new(req, &cookie[..eqpos])?;
     let name = Key::from_string(req, name);

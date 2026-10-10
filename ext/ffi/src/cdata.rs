@@ -22,7 +22,7 @@ use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{
-    ClosureInfo, Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
+    ClosureInfo, Emalloc, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
 };
 
 use std::num::NonZeroUsize;
@@ -1504,7 +1504,7 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
             } else {
                 to_value(req, None, value, *to, Fetch::Read, true, false, false)?
             };
-            table.set(req, Owner::take(req, Key::Int(0)), shown)?;
+            table.set(req, Owner::index(0), shown)?;
         }
         Kind::Struct(record) => {
             let union = t.attr & attr::UNION != 0;
@@ -1543,7 +1543,7 @@ fn debug_table(req: &mut Request, v: &View) -> Result<Option<Owner<PhpArray>>, T
             let mut ptr = v.ptr;
             for n in 0..*len {
                 let value = to_value(req, None, ptr, *of, Fetch::Read, true, false, false)?;
-                table.set(req, Owner::take(req, Key::Int(n)), value)?;
+                table.set(req, Owner::index(n), value)?;
                 ptr = ptr.wrapping_add(size);
             }
         }

@@ -327,7 +327,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn host_status(&mut self) -> Result<Option<Owner<PhpArray>>, Thrown> {
         let made = self.host_status_made();
-        adopted_some(self, made)
+        adopted_some(made)
     }
 
     /// What [`host_status`](Self::host_status) makes, its one owner not yet named.
@@ -534,7 +534,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn output_buffer_op(&mut self, op: &OutputOp) -> Result<Owner<Value>, Thrown> {
         let made = crate::output::buffer_op(self, op);
-        adopted(self, made)
+        adopted(made)
     }
 
     /// `php_output_handler_started` (`Z/main/output.c:569`): whether a
@@ -570,7 +570,7 @@ impl Request {
         body: impl FnOnce(&mut Request),
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let made = crate::output::captured(self, body);
-        adopted_some(self, made)
+        adopted_some(made)
     }
 
     /// Where the first byte reached the host, `php_output_get_start_filename`
@@ -713,7 +713,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn response_headers(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.response_headers_made();
-        adopted(self, made)
+        adopted(made)
     }
 
     /// What [`response_headers`](Self::response_headers) makes, its one owner not yet named.
@@ -768,7 +768,7 @@ fn host_value(req: &mut Request, value: crate::engine::HostValue) -> Result<PhpA
             }
             None => None,
         };
-        let value = Owner::adopt(req, value);
+        let value = Owner::adopt(value);
         match key {
             Some(key) => array.set(req, key, value)?,
             None => array.append(req, value)?,

@@ -70,9 +70,10 @@ pub(crate) enum Command {
         #[arg(long)]
         uncut: bool,
         /// Render against the tree alone, as a tracked region carries the
-        /// section: every reading `no reading`, so the bytes are the same on
-        /// any checkout; a section whose rows are this checkout's alone is
-        /// refused (harness-design.md §5, revision 6).
+        /// section: no reading is read and a table drops its `reading`
+        /// column, so the bytes are the same on any checkout (#2377); a
+        /// section whose rows are this checkout's alone is refused
+        /// (harness-design.md §5, revision 6).
         #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "every"])]
         tracked: bool,
         /// Every reading of a section that keeps one per scope, in the
@@ -841,9 +842,15 @@ pub enum Section {
     /// The usage readings, the last per scope: the session, the turn it
     /// reached, its tokens and its usd.
     Usage,
-    /// Each rule permit judges: its last finding, denial or note, and the
-    /// denials the log holds per session and in total; then the log per
-    /// instrument, with the candidates for silent (the CI section of §7).
+    /// Each rule permit judges, the manifest's and then the three permit
+    /// owns, which no manifest row names: `computed.region-body`,
+    /// `permit.stale-build` and `permit.unjudged-call`. Each row has its
+    /// last finding, denial or note, the denials the log holds per session
+    /// and in total, and beside `denials` the `handed on` column: the calls
+    /// a stale build handed to the candidate that rebuilds, which judged
+    /// them, so a walk is never counted as a refusal (#118, #125). Then the
+    /// log per instrument, with the candidates for silent (the CI section
+    /// of §7).
     Permits,
     /// The weekly exit bar table: each `[[week]]` of the manifest with
     /// pass, fail or "no reading" from the readings it names.
@@ -886,6 +893,10 @@ pub enum Section {
     /// `.phpt` section adds it or none gives it, and the first sentence
     /// of its rustdoc; harness-design.md §4.3's region (#1319).
     Invocation,
+    /// The conditions of done, each the first rustdoc paragraph of a
+    /// variant of `done::Condition`, read from its source and numbered;
+    /// harness-design.md §4.5's region (#2309).
+    Conditions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

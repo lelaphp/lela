@@ -131,26 +131,15 @@ impl Request {
         self.fatal_of(allocated).map(PhpString::of)
     }
 
-    /// A debug build's way to the heap's sensed record, which an
-    /// [`Owner`](crate::api::values::Owner) carries from where it is
-    /// made ([`php_heap::Sensor`]).
-    #[cfg(debug_assertions)]
-    pub(crate) fn sensor(&self) -> php_heap::Sensor {
-        self.heap.sensor()
-    }
-
     /// One more owner of what `value` holds: `Z_TRY_ADDREF_P`, a refcount
     /// for a string, an array, an object, a resource or a reference of
     /// the request's, nothing for a scalar, an interned string or an
-    /// immutable array. What a native calls where php's body copies a
-    /// value it already holds into a second place (`zend_string_copy`,
-    /// `ZVAL_COPY`): the clone of the `Value` is `ZVAL_COPY_VALUE`, and
-    /// this beside it is the second owner, given up with whatever row or
-    /// property the copy is put in. A native returns an argument as it
-    /// reads it, and the engine takes the owner `RETURN_COPY` takes
-    /// ([`IntoReturn`](crate::api::abi::IntoReturn)).
+    /// immutable array. The engine's own, where php copies a value it
+    /// holds into a second place (`zend_string_copy`, `ZVAL_COPY`); a
+    /// native takes an [`Owner`](crate::api::values::Owner) instead, which
+    /// only the engine names without taking (design §5.1, #2239).
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn addref(&self, value: &Value) {
+    pub(crate) fn addref(&self, value: &Value) {
         self.heap.addref(value.to_zval());
     }
 
@@ -161,7 +150,9 @@ impl Request {
     /// resource's per-type destructor served first through seam 1, and
     /// an interned string or an immutable array never is. The request
     /// is the hooks over itself, so the heap a destructor allocates from
-    /// is this one, handed back for the duration ([`Hooks`]).
+    /// is this one, handed back for the duration ([`Hooks`]). The
+    /// engine's own; a native gives up an
+    /// [`Owner`](crate::api::values::Owner) with its `give_up`.
     /// A value that counts no owner, a scalar, an interned string or an
     /// immutable array, is tested here, where the caller stands, and
     /// gives up nothing, as `zval_ptr_dtor`'s `Z_REFCOUNTED_P` test is
@@ -172,7 +163,7 @@ impl Request {
     #[allow(clippy::needless_pass_by_value)]
     #[cfg_attr(debug_assertions, track_caller)]
     #[inline]
-    pub fn release(&mut self, value: Value) {
+    pub(crate) fn release(&mut self, value: Value) {
         let z = value.to_zval();
         if z.is_refcounted() {
             Heap::release(&mut Hooks(self), z);
@@ -646,7 +637,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn gc_status(&mut self) -> Result<Owner<PhpArray>, Thrown> {
         let made = self.gc_status_made();
-        adopted(self, made)
+        adopted(made)
     }
 
     /// What [`gc_status`](Self::gc_status) makes, its one owner not yet named.

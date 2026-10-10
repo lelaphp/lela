@@ -13,7 +13,7 @@ use std::process::{ChildStdin, Command, Stdio};
 
 use php_ext::call::{autoload, call, lookup_function};
 use php_ext::coerce::to_callable;
-use php_ext::raising::{Level, clear, uncaught_at, warning};
+use php_ext::raising::{Level, clear, leave_pending, uncaught_at, warning};
 use php_ext::request::Request;
 use php_ext::values::{Key, PhpArray, PhpString, Value, walk};
 
@@ -365,8 +365,15 @@ pub(crate) fn completion(req: &mut Request, text: &[u8]) -> Matches {
             }
         }
     } else if let Some(split) = text.windows(2).position(|w| w == b"::") {
-        let Ok(Some(class)) = autoload(req, &text[..split].to_ascii_lowercase()) else {
-            return Matches::None;
+        // `zend_lookup_class`: what an autoloader threw is left in
+        // `EG(exception)`, as php's completion leaves it.
+        let class = match autoload(req, &text[..split].to_ascii_lowercase()) {
+            Ok(Some(class)) => class,
+            Ok(None) => return Matches::None,
+            Err(thrown) => {
+                leave_pending(req, thrown);
+                return Matches::None;
+            }
         };
         let member = text[split + 2..].to_ascii_lowercase();
         let Some(decl) = req.class_decl(class) else {
