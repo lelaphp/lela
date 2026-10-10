@@ -44,26 +44,19 @@ impl Request {
     /// `zend_object_properties_size` counts them, and the memory limit
     /// as the fatal that ends the request.
     pub(crate) fn new_object(&mut self, class: ClassId) -> Result<PhpObject, Thrown> {
-        let slots = self.class_slots(class);
-        let defaults = self.property_defaults(class)?;
+        self.update_class_constants(class)?;
+        let made = self.made(class);
         // `ce->create_object`: a class that declares a native payload
         // lays it down here, with the object, as
         // `zend_object_alloc(sizeof(custom), ce)` does; every other
         // class is `zend_objects_new` (design §5.4).
-        let custom = self.object_custom(class);
-        let allocated = match self.native_new_of(class) {
-            Some(new) => new(&mut self.heap, class.0, slots, custom),
-            None => self.heap.object(class.0, slots, custom),
+        let allocated = match made.create {
+            Some(new) => new(&mut self.heap, class.0, made.slots, made.custom),
+            None => self.heap.object(class.0, made.slots, made.custom),
         };
-        let object = match self.fatal_of(allocated).map(PhpObject::of) {
-            Ok(object) => object,
-            Err(thrown) => {
-                self.release_defaults(defaults);
-                return Err(thrown);
-            }
-        };
-        self.init_properties(object, defaults);
-        self.object_created(object)?;
+        let object = self.fatal_of(allocated).map(PhpObject::of)?;
+        self.init_properties(object);
+        self.object_made(object, made)?;
         Ok(object)
     }
 
@@ -100,17 +93,11 @@ impl Request {
         payload: T,
         custom: usize,
     ) -> Result<PhpObject, Thrown> {
-        let slots = self.class_slots(class);
-        let defaults = self.property_defaults(class)?;
+        self.update_class_constants(class)?;
+        let slots = self.made(class).slots;
         let allocated = self.heap.object_with(class.0, slots, custom, payload);
-        let object = match self.fatal_of(allocated).map(PhpObject::of) {
-            Ok(object) => object,
-            Err(thrown) => {
-                self.release_defaults(defaults);
-                return Err(thrown);
-            }
-        };
-        self.init_properties(object, defaults);
+        let object = self.fatal_of(allocated).map(PhpObject::of)?;
+        self.init_properties(object);
         self.object_created(object)?;
         Ok(object)
     }
@@ -145,31 +132,6 @@ impl Request {
         class: ClassId,
     ) -> Result<Vec<Option<Value>>, Thrown> {
         self.default_properties(class)
-    }
-
-    /// Defaults [`Request::property_defaults`] evaluated for an object
-    /// that was never made, given up.
-    fn release_defaults(&mut self, defaults: Vec<Option<Value>>) {
-        for value in defaults.into_iter().flatten() {
-            self.release(value);
-        }
-    }
-
-    /// The defaults written into the object's slots, each slot's owner
-    /// from here; a typed property with none stays uninitialised.
-    fn init_properties(&mut self, object: PhpObject, defaults: Vec<Option<Value>>) {
-        for (i, value) in defaults.into_iter().enumerate() {
-            let slot = u32::try_from(i).unwrap_or(u32::MAX);
-            // A typed slot with no default is `IS_UNDEF` and
-            // `IS_PROP_UNINIT`, as `object_properties_init` copies it.
-            let Some(value) = value else {
-                object
-                    .heap()
-                    .set_slot_bit(slot, php_heap::PropBit::Uninit, true);
-                continue;
-            };
-            Heap::object_set_slot(&mut Hooks(self), object.heap(), slot, value.into_zval());
-        }
     }
 
     /// `ce->default_properties_table` beside `ce->properties_info_table`
@@ -519,7 +481,7 @@ impl Request {
     /// ```
     pub(crate) fn destruct(&mut self, object: PhpObject) {
         let class = object.class();
-        let Some(destructor) = self.method_named(class, b"__destruct") else {
+        let Some(destructor) = self.destructor(class) else {
             return;
         };
         // `zend_object_is_lazy`: a lazy object's destructor is not
@@ -559,7 +521,7 @@ impl Request {
         matches!(
             self.object_handlers(object.heap()).dtor_obj(),
             DtorObj::Own(_)
-        ) || self.method_named(object.class(), b"__destruct").is_some()
+        ) || self.destructor(object.class()).is_some()
     }
 
     /// `zend_call_function`'s tail (`Z/Zend/zend_execute_API.c:1069-1076`)
@@ -910,7 +872,9 @@ impl Request {
     /// [`Request::handlers_of`] for the object's class, php's
     /// `zobj->handlers`.
     pub(crate) fn object_handlers(&self, o: Obj) -> &'static dyn ObjectHandlers {
-        self.handlers_of(ClassId(o.class()))
+        let class = ClassId(o.class());
+        self.made_ref(class)
+            .map_or_else(|| self.handlers_of(class), |made| made.handlers)
     }
 
     /// `zend_class_implements_interface(ce, zend_ce_arrayaccess)`: the
@@ -1113,9 +1077,14 @@ impl Request {
     /// Call to private P::__construct() from global scope
     /// ```
     pub(crate) fn constructor_of(&mut self, object: PhpObject) -> Result<Option<Function>, Thrown> {
-        let Some(constructor) = self.method_named(object.class(), b"__construct") else {
+        let Some(constructor) = self.constructor(object.class()) else {
             return Ok(None);
         };
+        // `!(constructor->op_array.fn_flags & ZEND_ACC_PUBLIC)` is what
+        // asks the scope.
+        if self.method_visibility(constructor) == Visibility::Public {
+            return Ok(Some(constructor));
+        }
         let scope = self.property_scope();
         if self.method_accessible_from(constructor, scope) {
             return Ok(Some(constructor));

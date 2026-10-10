@@ -4908,7 +4908,7 @@ pub(crate) fn new<T: Tier>(
     // `Z_OBJ_HT_P(result)->get_constructor`: the table's answer, which
     // is `zend_std_get_constructor`'s visibility check for a user class
     // and a refusal for a class php reserves, `Generator`'s.
-    let constructor = match req.handlers_of(class).get_constructor(req, object) {
+    let constructor = match req.made(class).handlers.get_constructor(req, object) {
         Ok(constructor) => constructor,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -5122,7 +5122,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
     let mut uncached = false;
     let function = match op.op2_type {
         OperandKind::Unused => {
-            let Some(constructor) = req.method_named(class, b"__construct") else {
+            let Some(constructor) = req.constructor(class) else {
                 let thrown =
                     crate::api::raising::throw_error(req, "Error", "Cannot call constructor");
                 return threw(req, frame, &thrown);

@@ -755,6 +755,25 @@ pub fn coerce_param(
 /// }
 /// MultipleIterator::attachIterator(): Argument #2 ($info) must be of type string|int|null, array given
 /// ```
+///
+/// A parameter whose type names one class holds its argument to the
+/// class the engine resolved once as it started
+/// (`Request::active_parameter_class`), `zend_parse_arg_object`'s
+/// `instanceof_function` over a class entry, and an argument of another
+/// class goes on to the declared type, which raises the `TypeError`:
+///
+/// ```php
+/// class S extends SplObjectStorage {}
+/// $a = new SplObjectStorage; $s = new S; $s[new stdClass] = 1;
+/// $a->addAll($s); var_dump(count($a));
+/// try { $a->addAll(new ArrayObject); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { Closure::bind(new stdClass, null); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// int(1)
+/// SplObjectStorage::addAll(): Argument #1 ($storage) must be of type SplObjectStorage, ArrayObject given
+/// Closure::bind(): Argument #1 ($closure) must be of type Closure, stdClass given
+/// ```
 pub fn argument(req: &mut Request, position: u32) -> Result<Option<Value>, Thrown> {
     let Some(given) = req
         .argument(position)
@@ -762,6 +781,18 @@ pub fn argument(req: &mut Request, position: u32) -> Result<Option<Value>, Throw
     else {
         return Ok(None);
     };
+    // `Z_PARAM_OBJECT_OF_CLASS` over a class resolved once: an instance
+    // is held by identity, and anything else goes on to the declared
+    // type, which raises what it raises.
+    if let Some(class) = req.active_parameter_class(position) {
+        let value = given.deref();
+        if value
+            .as_object()
+            .is_some_and(|object| req.instance_of(object.class(), class))
+        {
+            return Ok(Some(value));
+        }
+    }
     match req.active_parameter_type(position) {
         Some(ty) => coerce_param(req, &given, &ty, position).map(Some),
         None => Ok(Some(given.deref())),

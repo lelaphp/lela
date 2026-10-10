@@ -787,7 +787,7 @@ impl Request {
             )));
         };
         let found = if strict && lowered == b"__construct" {
-            self.method_named(calling, b"__construct")
+            self.constructor(calling)
                 .map(|function| (Callee::Function(function), false))
         } else {
             match self.callable_method(calling, &lowered, strict, frame, fcc) {

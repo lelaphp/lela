@@ -24,61 +24,165 @@ use super::Request;
 /// to the frame it moved `EG(current_execute_data)` to, so the records
 /// between are on no chain while it stands, as php's
 /// `prev_execute_data` passes them.
+///
+/// The walk is read as php walks `prev_execute_data`, from the
+/// innermost record down and only as far as its reader goes, so a
+/// reader that stops at the first link it needs, the executing scope
+/// among them (`zend_get_executed_scope`), costs what that link costs
+/// whatever the depth of the stack.
 pub(super) fn links_of<'a>(
     req: &'a Request,
     vm: &'a Vm,
     records: std::ops::Range<usize>,
-    expand: &dyn Fn(PhpObject) -> Vec<Link<'a>>,
-) -> Vec<Link<'a>> {
-    let mut links: Vec<Link<'a>> = Vec::new();
-    // Each record walked past, with how many links stood when it was.
-    let mut ends: Vec<(usize, usize)> = Vec::new();
-    // What stands at `at` below the record there: a placeholder, where a
-    // generator's frame stood, and the generators it expands into,
-    // outermost first here; a site; and a switch, which takes back off
-    // the walk every link above the frame it moved to.
-    let placed = |at: usize, links: &mut Vec<Link<'a>>, ends: &[(usize, usize)]| {
+    expand: Expand,
+) -> Links<'a> {
+    let end = records.end.min(vm.depth());
+    Links {
+        req,
+        vm,
+        start: records.start,
+        next: if records.start <= end {
+            Step::Placed(end)
+        } else {
+            Step::Done
+        },
+        expand,
+        pending: Vec::new(),
+    }
+}
+
+/// What a generator's frame on the walk, or a placeholder where one
+/// stood, expands into: the kept frames of the generators it runs
+/// through ([`Request::placeholder_links`]), or nothing, where the
+/// reader put those frames on the stack itself
+/// ([`crate::generator::with_frames`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Expand {
+    Generators,
+    Nothing,
+}
+
+/// [`links_of`]'s walk: the place it reads next, counting down, and the
+/// links of the place it read that it has not handed out yet.
+pub(super) struct Links<'a> {
+    req: &'a Request,
+    vm: &'a Vm,
+    start: usize,
+    next: Step,
+    expand: Expand,
+    /// The links of the last place read, outermost first, handed out
+    /// from the end.
+    pending: Vec<Link<'a>>,
+}
+
+/// One place of a stack's walk: what stands at a place below the
+/// record there ([`Step::Placed`]), placeholders, sites and switches;
+/// or the record itself.
+#[derive(Clone, Copy)]
+enum Step {
+    Placed(usize),
+    Record(usize),
+    Done,
+}
+
+impl<'a> Links<'a> {
+    fn expanded(&self, generator: PhpObject) -> Vec<Link<'a>> {
+        match self.expand {
+            Expand::Generators => self.req.placeholder_links(generator),
+            Expand::Nothing => Vec::new(),
+        }
+    }
+
+    /// What stands at `at` below the record there, outermost first into
+    /// `pending`: a placeholder, where a generator's frame stood, after
+    /// the generators it expands into; then a site.
+    fn place(&mut self, at: usize) {
+        let vm = self.vm;
         for mark in vm.placeholders().iter().filter(|mark| mark.frame == at) {
-            let expanded = expand(mark.generator);
+            let expanded = self.expanded(mark.generator);
             let generators = expanded.len();
-            links.extend(expanded.into_iter().rev());
-            links.push(Link::Fake(generators));
+            self.pending.extend(expanded.into_iter().rev());
+            self.pending.push(Link::Fake(generators));
         }
         for site in vm.sites().iter().filter(|site| site.frame == at) {
-            links.push(Link::Site(site));
+            self.pending.push(Link::Site(site));
         }
-        for switch in vm.switches().iter().filter(|switch| switch.frame == at) {
-            let to = switch.to.0 as usize;
-            if let Some(&(_, standing)) = ends.iter().rev().find(|(frame, _)| *frame == to) {
-                links.truncate(standing);
-            }
-        }
-    };
-    for at in records.clone() {
-        placed(at, &mut links, &ends);
-        let Some(frame) = u32::try_from(at)
-            .ok()
-            .and_then(|at| vm.stack.frame(FrameRef(at)))
-        else {
-            break;
-        };
-        let state = exec::FrameAt { req, frame };
-        let info = state.info();
-        if info.serving_native() && !info.leaving() {
-            links.push(Link::Call(state));
-        } else if info.user() {
-            if let Some(generator) = state.generator() {
-                links.extend(expand(generator).into_iter().rev());
-            }
-            if !info.leaving() {
-                links.push(Link::Frame(Slots::Stack(vm, at), state));
-            }
-        }
-        ends.push((at, links.len()));
     }
-    placed(records.end, &mut links, &ends);
-    links.reverse();
-    links
+
+    /// The frame a switch standing at `at` moved the chain to, where the
+    /// walk reaches it below: the lowest, where several stand there.
+    fn switched(&self, at: usize) -> Option<usize> {
+        self.vm
+            .switches()
+            .iter()
+            .filter(|switch| switch.frame == at)
+            .map(|switch| switch.to.0 as usize)
+            .filter(|to| (self.start..at).contains(to))
+            .min()
+    }
+}
+
+impl<'a> Iterator for Links<'a> {
+    type Item = Link<'a>;
+
+    fn next(&mut self) -> Option<Link<'a>> {
+        loop {
+            if let Some(link) = self.pending.pop() {
+                return Some(link);
+            }
+            match self.next {
+                Step::Done => return None,
+                Step::Placed(at) => {
+                    if let Some(to) = self.switched(at) {
+                        self.next = Step::Record(to);
+                        continue;
+                    }
+                    self.next = match at.checked_sub(1) {
+                        Some(below) if below >= self.start => Step::Record(below),
+                        _ => Step::Done,
+                    };
+                    self.place(at);
+                }
+                Step::Record(at) => {
+                    self.next = Step::Placed(at);
+                    let Some(frame) = u32::try_from(at)
+                        .ok()
+                        .and_then(|at| self.vm.stack.frame(FrameRef(at)))
+                    else {
+                        continue;
+                    };
+                    let state = exec::FrameAt {
+                        req: self.req,
+                        frame,
+                    };
+                    let info = state.info();
+                    if info.serving_native() && !info.leaving() {
+                        return Some(Link::Call(state));
+                    }
+                    if !info.user() {
+                        continue;
+                    }
+                    let link =
+                        (!info.leaving()).then_some(Link::Frame(Slots::Stack(self.vm, at), state));
+                    match state
+                        .generator()
+                        .filter(|_| self.expand == Expand::Generators)
+                    {
+                        None => {
+                            if link.is_some() {
+                                return link;
+                            }
+                        }
+                        Some(generator) => {
+                            let expanded = self.expanded(generator);
+                            self.pending.extend(expanded.into_iter().rev());
+                            self.pending.extend(link);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// One link of php's `prev_execute_data` chain as this engine holds it:

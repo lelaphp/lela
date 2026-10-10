@@ -4,7 +4,7 @@
 //! `generator->execute_data` and `fiber->execute_data`, and the trace
 //! `zend_fetch_debug_backtrace` makes over that execution alone.
 
-use super::{Link, Request, Slots, links_of};
+use super::{Expand, Link, Request, Slots, links_of};
 use crate::api::abi::Callable;
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
@@ -189,9 +189,7 @@ impl Request {
                 return Ok(None);
             };
             let vm = self.stack_of(&standing);
-            let links = links_of(self, vm, 0..vm.depth(), &|root| {
-                self.placeholder_links(root)
-            });
+            let links: Vec<Link> = links_of(self, vm, 0..vm.depth(), Expand::Generators).collect();
             self.trace_rows(&links)
         };
         self.render_trace(rows, options).map(Some)
@@ -320,5 +318,5 @@ fn frames_between<'a>(req: &'a Request, vm: &'a Vm, from: usize, to: usize) -> V
     // The generators a delegation runs through stand on the stack here,
     // put there by the reader ([`generator::with_frames`]), so no
     // placeholder is expanded a second time.
-    links_of(req, vm, from..to.saturating_add(1), &|_| Vec::new())
+    links_of(req, vm, from..to.saturating_add(1), Expand::Nothing).collect()
 }

@@ -45,7 +45,7 @@ use crate::api::call::Function;
 use crate::api::values::{ClassId, Value};
 use crate::exec::{self, FrameAt, Site, Vm};
 
-use super::{Link, OpArrayView, OplineIdx, Request, Slots, links_of};
+use super::{Expand, Link, OpArrayView, OplineIdx, Request, Slots, links_of};
 
 /// A frame kept past the borrow it was read in, php's `execute_data`
 /// as an extension stores it: read again through [`Request::frame_of`],
@@ -568,8 +568,7 @@ impl Request {
         vm: &'a Vm,
         records: Range<usize>,
     ) -> impl Iterator<Item = ChainFrame<'a>> {
-        links_of(self, vm, records, &|root| self.placeholder_links(root))
-            .into_iter()
+        links_of(self, vm, records, Expand::Generators)
             .filter_map(move |link| ChainFrame::of(self, stack, vm, &link))
     }
 

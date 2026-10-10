@@ -804,7 +804,7 @@ impl Request {
             names.len()
         };
         names(real) == names(proxy)
-            && self.method_named(real, b"__destruct") == self.method_named(proxy, b"__destruct")
+            && self.destructor(real) == self.destructor(proxy)
             && self.method_named(real, b"__clone") == self.method_named(proxy, b"__clone")
     }
 
