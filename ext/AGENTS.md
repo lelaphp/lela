@@ -75,8 +75,8 @@ One crate per extension under `ext/` (ADR-0004), laid down by `xtask new-ext <na
 
 <!-- computed exec cmd="cargo xtask status --section bundle --tracked" inputs=../seams.toml,../xtask/src/status.rs name=bundle-order | do not edit; run computed -->
 
-| crate | order | extensions | reading | message |
-|---|---|---|---|---|
-| php_bundle | registration |  | no reading |  |
+| crate | order | extensions | message |
+|---|---|---|---|
+| php_bundle | registration |  |  |
 
-<!-- /computed in=1d84393155784be4f123d52d14be2b1c17ae6ef6287bd778e3688cbc00239ca5 out=58cc83918bab7d79043de737bf76884da1fb3927782cef8fbdd378e4dc8542df -->
+<!-- /computed in=ac7bff281865e91ff14d35acf283d8289aff06584ad3cac31d4c833915f1093c out=91983940b62ed840754cb91c6ed571841ceefb8b8c359d504e95bc1c50cdf1a5 -->

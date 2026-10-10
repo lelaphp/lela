@@ -70,9 +70,10 @@ pub(crate) enum Command {
         #[arg(long)]
         uncut: bool,
         /// Render against the tree alone, as a tracked region carries the
-        /// section: every reading `no reading`, so the bytes are the same on
-        /// any checkout; a section whose rows are this checkout's alone is
-        /// refused (harness-design.md §5, revision 6).
+        /// section: no reading is read and a table drops its `reading`
+        /// column, so the bytes are the same on any checkout (#2377); a
+        /// section whose rows are this checkout's alone is refused
+        /// (harness-design.md §5, revision 6).
         #[arg(long, requires = "section", conflicts_with_all = ["week", "session_id", "every"])]
         tracked: bool,
         /// Every reading of a section that keeps one per scope, in the

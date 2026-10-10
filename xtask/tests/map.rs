@@ -378,11 +378,11 @@ fn every_status_region_renders_the_same_bytes_whatever_the_store_holds() {
         .iter()
         .position(|(_, l)| l.contains(" name=seams "))
         .unwrap();
+    // A tracked table has no `reading` column, which could only say
+    // `no reading` there (#2377).
     assert!(
-        full[seams]
-            .lines()
-            .skip(2)
-            .all(|l| l.ends_with("| no reading |")),
+        full[seams].starts_with("| seam | lock | items | ceiling |\n")
+            && !full[seams].contains("reading"),
         "{}",
         full[seams]
     );
