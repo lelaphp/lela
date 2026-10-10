@@ -18,7 +18,8 @@ use crate::api::values::{Charset, Key, Owner, PhpArray, PhpString, Value, ValueR
 use crate::supplied::Bail;
 use crate::supplied::chain::ErrorArgs;
 
-use super::{Phase, Raised, Request, ini_atol, zone};
+use super::{Phase, Raised, Request, zone};
+use crate::c_number::strtol;
 
 /// A diagnostic's message as `php_error_cb` is handed it.
 #[derive(Clone, Copy)]
@@ -1254,7 +1255,7 @@ impl Request {
     /// its body at (`zend_fiber_execute`), whatever an `@` around the
     /// `start` masked.
     pub(crate) fn ini_error_reporting(&self) -> i64 {
-        self.ini_value(b"error_reporting").map_or(E_ALL, ini_atol)
+        self.ini_value(b"error_reporting").map_or(E_ALL, strtol)
     }
 
     /// `ZEND_FUNCTION(set_error_handler)`
@@ -1550,7 +1551,7 @@ pub(super) fn display_errors_mode_of(value: Option<&[u8]>) -> u8 {
         Some(value) => match value.to_ascii_lowercase().as_slice() {
             b"on" | b"yes" | b"true" | b"stdout" => DISPLAY_ERRORS_STDOUT,
             b"stderr" => DISPLAY_ERRORS_STDERR,
-            _ => display_errors_mode(ini_atol(value)),
+            _ => display_errors_mode(strtol(value)),
         },
     }
 }

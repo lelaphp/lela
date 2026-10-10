@@ -1201,7 +1201,7 @@ impl<H: Host> Parser<'_, '_, H> {
             }
             #[allow(clippy::cast_possible_truncation)]
             IniValue::Double(d) => *d as i32,
-            IniValue::Str(s) => atoi(s),
+            IniValue::Str(s) => crate::c_number::atoi(s),
             IniValue::Bool(b) => i32::from(*b),
             IniValue::Null => 0,
         }
@@ -1428,46 +1428,13 @@ impl<H: Host> Parser<'_, '_, H> {
 fn overflowed(s: &[u8]) -> bool {
     let t = s
         .iter()
-        .filter(|c| !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+        .filter(|c| !crate::c_number::is_space(**c))
         .collect::<Vec<_>>();
     let digits = t
         .strip_prefix(&[&b'-'])
         .or_else(|| t.strip_prefix(&[&b'+']))
         .unwrap_or(&t);
     !digits.is_empty() && digits.iter().all(|c| c.is_ascii_digit())
-}
-
-/// C's `atoi`: leading whitespace, a sign, digits, as `strtol` reads
-/// them and truncated to `int`.
-fn atoi(s: &[u8]) -> i32 {
-    let mut i = s
-        .iter()
-        .take_while(|c| matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
-        .count();
-    let negative = match s.get(i) {
-        Some(b'-') => {
-            i += 1;
-            true
-        }
-        Some(b'+') => {
-            i += 1;
-            false
-        }
-        _ => false,
-    };
-    let mut value: i64 = 0;
-    for &c in s[i.min(s.len())..]
-        .iter()
-        .take_while(|c| c.is_ascii_digit())
-    {
-        value = value.saturating_mul(10).saturating_add(i64::from(c - b'0'));
-    }
-    let value = if negative { -value } else { value };
-    i32::from_ne_bytes(
-        u32::try_from(value & 0xFFFF_FFFF)
-            .unwrap_or(0)
-            .to_ne_bytes(),
-    )
 }
 
 /// `zend_parse_ini_string` and `zend_parse_ini_file`'s common body:

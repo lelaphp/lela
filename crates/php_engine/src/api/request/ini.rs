@@ -18,6 +18,7 @@ use super::{
 use crate::api::abi::{IniStage, IniVerdict, OnModify};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpString, Value, adopted_some};
+use crate::c_number::{atoi, strtol};
 use crate::engine::{Configured, ConfiguredKey};
 
 /// One ini entry as this request sees it, php's `zend_ini_entry` read
@@ -159,21 +160,18 @@ impl TypedIni {
 
     /// The entry `name` holding `value` now, `None` where it holds php's
     /// `NULL`, read as its `OnUpdate*` reads it; an entry not typed here
-    /// changes nothing.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "php's `(int) ZEND_ATOL(...)`, which cuts a value past `int`"
-    )]
+    /// changes nothing. php's `(int) ZEND_ATOL(...)` is C's `atoi`, which
+    /// cuts a value past `int`.
     pub(crate) fn update(&mut self, name: &[u8], value: Option<&[u8]>) {
         let text = value.unwrap_or_default();
         match name {
-            b"precision" => self.precision = ini_atol(text) as i32,
-            b"serialize_precision" => self.serialize_precision = ini_atol(text) as i32,
+            b"precision" => self.precision = atoi(text),
+            b"serialize_precision" => self.serialize_precision = atoi(text),
             b"zend.exception_ignore_args" => {
                 self.exception_ignore_args = Request::ini_parse_bool(text);
             }
             b"zend.exception_string_param_max_len" => {
-                self.exception_string_param_max_len = usize::try_from(ini_atol(text)).unwrap_or(0);
+                self.exception_string_param_max_len = usize::try_from(strtol(text)).unwrap_or(0);
             }
             b"short_open_tag" => self.short_open_tag = Request::ini_parse_bool(text),
             b"zend.assertions" => self.assertions = Request::ini_parse_bytes(text),
@@ -764,7 +762,7 @@ impl Request {
         match name {
             // `OnSetPrecision` and `OnSetSerializePrecision`
             // (`Z/main/main.c:120-141`): nothing below -1.
-            b"precision" | b"serialize_precision" if ini_atol(value) < -1 => IniVerdict::Rejected,
+            b"precision" | b"serialize_precision" if strtol(value) < -1 => IniVerdict::Rejected,
             b"arg_separator.output"
             | b"arg_separator.input"
             | b"extension_dir"
@@ -777,9 +775,7 @@ impl Request {
             {
                 IniVerdict::Rejected
             }
-            b"zend.exception_string_param_max_len"
-                if !(0..=1_000_000).contains(&ini_atol(value)) =>
-            {
+            b"zend.exception_string_param_max_len" if !(0..=1_000_000).contains(&strtol(value)) => {
                 IniVerdict::Rejected
             }
             b"default_charset" | b"default_mimetype"
@@ -838,16 +834,19 @@ impl Request {
     /// `zend_ini_parse_bool` (`Z/Zend/zend_ini.c:563`), the one rule
     /// every `OnUpdateBool` entry is read by: `on`, `yes` and `true` in
     /// any case are on, and any other text is on where C's `atoi` reads
-    /// a number other than zero from it, so `abc` and `00` are off and
-    /// `-1`, ` 1` and `1abc` are on.
+    /// a number other than zero from it, so `abc` and `00` are off,
+    /// `-1`, ` 1` and `1abc` are on, and `4294967296`, whose `int` is
+    /// zero, is off.
     ///
     /// ```php
-    /// foreach (['abc', '00', '-1', '1abc', ' 1', 'TRUE'] as $v) { ini_set('html_errors', $v); trigger_error($v); }
+    /// foreach (['abc', '00', '4294967296', '-1', '1abc', ' 1', 'TRUE'] as $v) { ini_set('html_errors', $v); trigger_error($v); }
     /// ```
     /// ```expect
     /// Notice: abc in %s on line 2
     ///
     /// Notice: 00 in %s on line 2
+    ///
+    /// Notice: 4294967296 in %s on line 2
     /// <br />
     /// <b>Notice</b>:  -1 in <b>%s</b> on line <b>2</b><br />
     /// <br />
@@ -862,7 +861,7 @@ impl Request {
         value.eq_ignore_ascii_case(b"true")
             || value.eq_ignore_ascii_case(b"yes")
             || value.eq_ignore_ascii_case(b"on")
-            || super::atol(value) != 0
+            || atoi(value) != 0
     }
 
     /// The entry `name` read as its `OnUpdateBool` reads it, by
@@ -1713,42 +1712,6 @@ impl IniDisplayer {
 enum IniCell {
     Value(String),
     Displayed(String),
-}
-
-/// `ZEND_ATOL`, which is `atoll` (`Z/Zend/zend_long.h:77`): leading
-/// whitespace skipped, one sign, the digits up to the first byte that is
-/// not one, and zero where there are none; a number past `i64` saturates
-/// as `strtoll` does.
-pub(crate) fn ini_atol(value: &[u8]) -> i64 {
-    let mut bytes = value
-        .iter()
-        .skip_while(|b| b.is_ascii_whitespace())
-        .peekable();
-    let negative = match bytes.peek() {
-        Some(b'-') => {
-            bytes.next();
-            true
-        }
-        Some(b'+') => {
-            bytes.next();
-            false
-        }
-        _ => false,
-    };
-    let mut n: i64 = 0;
-    for digit in bytes.take_while(|b| b.is_ascii_digit()) {
-        let digit = i64::from(digit - b'0');
-        n = if negative {
-            n.checked_mul(10)
-                .and_then(|n| n.checked_sub(digit))
-                .unwrap_or(i64::MIN)
-        } else {
-            n.checked_mul(10)
-                .and_then(|n| n.checked_add(digit))
-                .unwrap_or(i64::MAX)
-        };
-    }
-    n
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ use php_unit::AutoGlobal;
 use super::{Overwrite, Request};
 use crate::api::raising::{Level, Thrown, docref};
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
+use crate::c_number::{is_space, strtol};
 use crate::exec::TableId;
 
 /// Where a variable php registers came from, php's `PARSE_*` as
@@ -949,9 +950,9 @@ impl Request {
         }
     }
 
-    /// An ini entry read as `OnUpdateLong` reads it, C's `atol`.
+    /// An ini entry read as `OnUpdateLong` reads it, C's `atol`, which is [`strtol`].
     pub(crate) fn ini_long(&self, name: &[u8]) -> i64 {
-        atol(self.ini_get(name).unwrap_or_default())
+        strtol(self.ini_get(name).unwrap_or_default())
     }
 
     /// `php_register_variable_ex` into `track`, with `cookie` saying the
@@ -1242,31 +1243,6 @@ fn forbidden(mangled: &[u8], original: &[u8]) -> bool {
     [&b"__Host-"[..], b"__Secure-"]
         .iter()
         .any(|prefix| mangled.starts_with(prefix) && !original.starts_with(prefix))
-}
-
-/// C's `isspace`.
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
-
-/// C's `atol`: leading white space, a sign, the digits that follow, and
-/// zero for none.
-pub(crate) fn atol(bytes: &[u8]) -> i64 {
-    let bytes = &bytes[bytes.iter().take_while(|b| is_space(**b)).count()..];
-    let (negative, digits) = match bytes.first() {
-        Some(b'-') => (true, &bytes[1..]),
-        Some(b'+') => (false, &bytes[1..]),
-        _ => (false, bytes),
-    };
-    let mut value: i64 = 0;
-    for digit in digits.iter().take_while(|b| b.is_ascii_digit()) {
-        value = value.wrapping_mul(10).wrapping_add(i64::from(digit - b'0'));
-    }
-    if negative {
-        value.wrapping_neg()
-    } else {
-        value
-    }
 }
 
 /// `php_url_decode` with `plus`, where `+` is a space, and
