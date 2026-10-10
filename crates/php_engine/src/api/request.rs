@@ -844,7 +844,7 @@ impl HeapHooks for Hooks<'_> {
     /// `dtor_obj`, through the table of the object's class (design §5.4).
     fn destruct(&mut self, obj: Obj) {
         let table = self.0.object_handlers(obj);
-        table.dtor_obj(self.0, PhpObject::of(obj));
+        table.dtor_obj().serve(self.0, PhpObject::of(obj));
     }
 
     /// `free_obj`, through the table: the payload's release is the
@@ -855,13 +855,17 @@ impl HeapHooks for Hooks<'_> {
         self.0.free_beside(PhpObject::of(obj));
     }
 
-    /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`:
-    /// the class declares or inherits `__destruct`, or its handler
-    /// table serves a destructor of its own, which `Fiber`'s and
-    /// `Generator`'s do. A generator the collector finds is destroyed
-    /// before it is freed, its `finally` blocks served, and it is freed
-    /// by the release of what held it, not counted among what the
-    /// collection freed.
+    /// The destructor phase served in the collector's own fiber while
+    /// a fiber runs ([`crate::fiber::gc_destructors_in_fiber`]).
+    fn gc_destructors_in_fiber(&mut self, from: u32, end: u32) -> bool {
+        crate::fiber::gc_destructors_in_fiber(self.0, from, end)
+    }
+
+    /// php's `dtor_obj != zend_objects_destroy_object || ce->destructor`
+    /// ([`Request::has_destructor`]). A generator the collector finds is
+    /// destroyed before it is freed, its `finally` blocks served, and it
+    /// is freed by the release of what held it, not counted among what
+    /// the collection freed.
     ///
     /// ```php
     /// $a = new stdClass; $b = new stdClass; $a->b = $b; $b->a = $a;
@@ -872,17 +876,25 @@ impl HeapHooks for Hooks<'_> {
     /// ```expect
     /// int(2)
     /// ```
-    /// The destructor phase served in the collector's own fiber while
-    /// a fiber runs ([`crate::fiber::gc_destructors_in_fiber`]).
-    fn gc_destructors_in_fiber(&mut self, from: u32, end: u32) -> bool {
-        crate::fiber::gc_destructors_in_fiber(self.0, from, end)
-    }
-
+    ///
+    /// The iterator a `RecursiveIteratorIterator` keeps of its inner
+    /// iterator is php's `zend_object_iterator`, whose table's `dtor_obj`
+    /// is `iter_wrapper_dtor` and not the standard one, so the collector
+    /// serves it first and leaves what it reaches out of the count: the
+    /// cycle through the outer iterator is one value freed, and the rest
+    /// is freed by the release of what held it.
+    ///
+    /// ```php
+    /// class R extends RecursiveIteratorIterator { public $self; }
+    /// function t() { $it = new R(new RecursiveArrayIterator([1])); $it->self = $it; unset($it); var_dump(gc_collect_cycles()); }
+    /// t(); t();
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(1)
+    /// ```
     fn has_destructor(&mut self, obj: Obj) -> bool {
-        let class = ClassId(obj.class());
-        self.0.method_named(class, b"__destruct").is_some()
-            || crate::fiber::serves_destructor(self.0.object_handlers(obj))
-            || crate::generator::is_generator(self.0, PhpObject::of(obj))
+        self.0.has_destructor(PhpObject::of(obj))
     }
 
     /// The live temporaries of every frame of the running execution,

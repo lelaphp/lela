@@ -387,12 +387,12 @@ impl Request {
             }
             if options & SKIP_DESTRUCTOR == 0
                 && !o.destructor_called()
-                && self.method_named(object.class(), b"__destruct").is_some()
+                && self.has_destructor(object)
             {
                 o.set_destructor_called(true);
                 let held = Owner::take(self, object);
                 let table = self.object_handlers(o);
-                table.dtor_obj(self, object);
+                table.dtor_obj().serve(self, object);
                 held.give_up(self);
                 if let Some(pending) = self.take_pending_view() {
                     return Err(Thrown::of(Some(pending)));

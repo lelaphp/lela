@@ -26,8 +26,8 @@
 mod natives;
 
 use php_ext::abi::{
-    Dependency, DependencyKind, Extension, ExtensionBuilder, Instance, ObjectHandlers, Path,
-    Refusals, Static, Std, This, Union,
+    Dependency, DependencyKind, DtorObj, Extension, ExtensionBuilder, Instance, ObjectHandlers,
+    Path, Refusals, Static, This, Union,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{instantiate, lookup_class, new_object};
@@ -132,9 +132,11 @@ impl ObjectHandlers for Handlers {
         Refusals::NONE.cloning()
     }
 
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        destroy(req, object);
-        Std.dtor_obj(req, object);
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(|req, object| {
+            destroy(req, object);
+            DtorObj::Destroy.serve(req, object);
+        })
     }
 }
 

@@ -2160,6 +2160,36 @@ impl From<Owner<PhpArray>> for DebugInfo {
     }
 }
 
+/// What the `dtor_obj` slot holds: `zend_objects_destroy_object`, or a
+/// destructor of the table's own. The difference is php's own test,
+/// `dtor_obj != zend_objects_destroy_object || ce->destructor`, which
+/// `zend_objects_store_del`, the cycle collector and a lazy object's reset
+/// read: an object whose table serves its own is one with a destructor
+/// whatever its class declares, so the collector serves it before it
+/// frees anything and takes what it reaches out of the count
+/// (`GC_DESTRUCTOR_GARBAGE`, `Z/Zend/zend_gc.c`).
+#[derive(Clone, Copy)]
+pub enum DtorObj {
+    /// `zend_objects_destroy_object`: the class's `__destruct`, where it
+    /// declares or inherits one, served on the object, which the store
+    /// holds at one owner meanwhile.
+    Destroy,
+    /// The table's own, as `Fiber`'s `zend_fiber_object_destroy` and
+    /// `IntlIterator`'s `IntlIterator_objects_dtor` are; one that serves
+    /// the class's `__destruct` as well serves [`DtorObj::Destroy`] itself.
+    Own(fn(&mut Request, PhpObject)),
+}
+
+impl DtorObj {
+    /// The slot served on `object`.
+    pub fn serve(self, req: &mut Request, object: PhpObject) {
+        match self {
+            DtorObj::Destroy => req.destruct(object),
+            DtorObj::Own(own) => own(req, object),
+        }
+    }
+}
+
 /// The `clone_obj` slot: a fresh object holding what this one holds,
 /// its one owner the caller's.
 pub type CloneObj = fn(&mut Request, PhpObject) -> Result<Owner<PhpObject>, Thrown>;
@@ -2280,11 +2310,12 @@ pub trait ObjectHandlers: Send + Sync {
         req.free_members(object);
     }
 
-    /// `dtor_obj`, `zend_objects_destroy_object`: the class's
-    /// `__destruct` served on the object, which the store holds at one
-    /// owner meanwhile.
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        req.destruct(object);
+    /// `dtor_obj`, [`DtorObj::Destroy`] at `Std`: what the store serves
+    /// before it frees the object, the destructor phase of a collection
+    /// before it frees the garbage, and a lazy object's reset before it
+    /// resets.
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Destroy
     }
 
     /// `clone_obj`, `zend_objects_clone_obj` at `Std`: the members

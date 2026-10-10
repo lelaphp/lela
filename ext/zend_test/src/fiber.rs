@@ -8,8 +8,8 @@
 //! leaves, is the extension's request state.
 
 use php_ext::abi::{
-    Callable, CloneObj, Coroutine, CoroutineStatus, ExtensionBuilder, HoldsCoroutine, Instance,
-    NamedVariadic, ObjectHandlers, This,
+    Callable, CloneObj, Coroutine, CoroutineStatus, DtorObj, ExtensionBuilder, HoldsCoroutine,
+    Instance, NamedVariadic, ObjectHandlers, This,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_named, new_object};
@@ -403,10 +403,12 @@ impl ObjectHandlers for TestFiberHandlers {
     /// finally
     /// done
     /// ```
-    fn dtor_obj(&self, req: &mut Request, object: PhpObject) {
-        let previous = req.state::<State>().active_fiber.replace(object);
-        Coroutine::destroy::<ZendTestFiber>(req, object);
-        req.state::<State>().active_fiber = previous;
+    fn dtor_obj(&self) -> DtorObj {
+        DtorObj::Own(|req, object| {
+            let previous = req.state::<State>().active_fiber.replace(object);
+            Coroutine::destroy::<ZendTestFiber>(req, object);
+            req.state::<State>().active_fiber = previous;
+        })
     }
 
     /// `zend_test_fiber_object_free`: the callable where the body never
