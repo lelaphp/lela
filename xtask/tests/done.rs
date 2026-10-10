@@ -203,9 +203,13 @@ fn judge_since(root: &Path, base: Option<&str>) -> Verdict {
 /// constructor with the scope's tree now.
 fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
     let manifest = Manifest::load(root).unwrap();
-    let mut reading = match scope.strip_suffix("/ri") {
-        // The `--ri` column's scope maps to no crate; it is stamped over
-        // the crate's tree as `crosscheck` stamps it (#361).
+    let beside = scope
+        .strip_suffix("/ri")
+        .or_else(|| scope.strip_suffix("/release"));
+    let mut reading = match beside {
+        // The `--ri` column's scope and the release lint's map to no
+        // crate; each is stamped over the crate's tree as `crosscheck`
+        // and `clippy` stamp it (#361, #2392).
         Some(name) => {
             let krate = manifest.crate_named(name).unwrap();
             Reading::stamped_over(
@@ -233,14 +237,17 @@ fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
     reading
 }
 
-/// What condition 1 reads for `name`, instrument by scope: every row of
-/// [`ASKED`] at the crate's name, and `crosscheck` at `ext/<name>/ri` too
-/// (`done::scopes_of`, ledger 46, #361).
-fn asked_of(name: &str) -> Vec<(&'static str, String)> {
+/// What condition 1 reads for `name` at `root`, instrument by scope:
+/// every row of [`ASKED`] at the crate's name, and `crosscheck` at
+/// `ext/<name>/ri` too (`done::scopes_of`, ledger 46, #361).
+fn asked_of(root: &Path, name: &str) -> Vec<(&'static str, String)> {
+    let manifest = Manifest::load(root).unwrap();
+    let krate = manifest.crate_named(name).unwrap();
     ASKED
         .into_iter()
         .flat_map(|instrument| {
-            done::scopes_of(instrument, name)
+            done::scopes_of(root, instrument, krate)
+                .unwrap()
                 .into_iter()
                 .map(move |scope| (instrument, scope))
         })
@@ -249,7 +256,7 @@ fn asked_of(name: &str) -> Vec<(&'static str, String)> {
 
 /// A fresh passing reading of everything `name` is asked.
 fn record_asked(store: &Store, root: &Path, name: &str) {
-    for (instrument, scope) in asked_of(name) {
+    for (instrument, scope) in asked_of(root, name) {
         store.record(&[fresh(root, instrument, &scope)]).unwrap();
     }
 }
@@ -318,13 +325,13 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
     let verdict = judge(&root);
     assert_eq!(verdict.crates, ["ext/pcre"]);
     assert_eq!(verdict.changed.len(), 1, "{verdict:#?}");
-    for (instrument, scope) in asked_of("ext/pcre") {
+    for (instrument, scope) in asked_of(&root, "ext/pcre") {
         let line = format!("{instrument}: no reading for {scope}");
         assert!(verdict.unmet.contains(&line), "{line}\n{verdict:#?}");
     }
     assert_eq!(
         verdict.unmet.len(),
-        asked_of("ext/pcre").len(),
+        asked_of(&root, "ext/pcre").len(),
         "{verdict:#?}"
     );
     assert!(verdict.notes.is_empty(), "{verdict:#?}");
@@ -381,11 +388,13 @@ fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_cr
 
     // Fresh readings of everything php_ext is asked, and it is done.
     let store = Store::of_workspace(&root);
+    let manifest = Manifest::load(&root).unwrap();
+    let pcre = manifest.crate_named("ext/pcre").unwrap();
     for instrument in ASKED.into_iter().chain(["port-map"]) {
         store
             .record(&[fresh(&root, instrument, "php_ext")])
             .unwrap();
-        for scope in done::scopes_of(instrument, "ext/pcre") {
+        for scope in done::scopes_of(&root, instrument, pcre).unwrap() {
             store.record(&[fresh(&root, instrument, &scope)]).unwrap();
         }
     }
@@ -608,7 +617,7 @@ fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
     let root = scratch("not-run");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for (instrument, scope) in asked_of("ext/pcre") {
+    for (instrument, scope) in asked_of(&root, "ext/pcre") {
         if instrument != "witness" && instrument != "crosscheck" {
             store.record(&[fresh(&root, instrument, &scope)]).unwrap();
         }
@@ -682,7 +691,7 @@ fn fresh_passing_readings_for_the_touched_crate_pass_and_an_edit_after_them_is_s
     let verdict = judge(&root);
     assert_eq!(
         verdict.unmet.len(),
-        asked_of("ext/pcre").len(),
+        asked_of(&root, "ext/pcre").len(),
         "{verdict:#?}"
     );
     for line in &verdict.unmet {
@@ -732,7 +741,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
     let manifest = Manifest::load(&root).unwrap();
     let krate = manifest.crate_named("ext/pcre").unwrap();
     let store = Store::of_workspace(&root);
-    for (instrument, scope) in asked_of("ext/pcre") {
+    for (instrument, scope) in asked_of(&root, "ext/pcre") {
         let mut reading = if instrument == "phpt" {
             Reading::for_scope(
                 instrument,
@@ -778,7 +787,10 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
         .filter(|l| l.ends_with("is stale; ext/pcre changed since it was taken"))
         .map(|l| l.split(':').next().unwrap())
         .collect();
-    let asked: Vec<&str> = asked_of("ext/pcre").iter().map(|(i, _)| *i).collect();
+    let asked: Vec<&str> = asked_of(&root, "ext/pcre")
+        .iter()
+        .map(|(i, _)| *i)
+        .collect();
     assert_eq!(stale, asked, "{verdict:#?}");
 }
 
@@ -808,7 +820,7 @@ fn a_reading_under_the_recipe_is_stale_once_the_recipe_changes() {
         .map(|l| l.split(':').next().unwrap())
         .collect();
     stale.dedup();
-    let mut under: Vec<&str> = asked_of("ext/pcre")
+    let mut under: Vec<&str> = asked_of(&root, "ext/pcre")
         .iter()
         .map(|(i, _)| *i)
         .filter(|i| UNDER_RECIPE.contains(i))
@@ -823,7 +835,7 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
     let root = scratch("failing");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for (instrument, scope) in asked_of("ext/pcre") {
+    for (instrument, scope) in asked_of(&root, "ext/pcre") {
         let mut reading = fresh(&root, instrument, &scope);
         match instrument {
             "budget" => {
@@ -856,12 +868,17 @@ fn a_failing_or_skipped_reading_is_unmet_with_its_message() {
 /// scope.
 #[test]
 fn a_default_extension_with_a_red_ri_crosscheck_reading_is_unmet_and_with_both_green_is_met() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let scopes = |instrument, name| {
+        let krate = manifest.crate_named(name).unwrap();
+        done::scopes_of(workspace(), instrument, krate).unwrap()
+    };
     assert_eq!(
-        done::scopes_of("crosscheck", "ext/pcre"),
+        scopes("crosscheck", "ext/pcre"),
         ["ext/pcre", "ext/pcre/ri"]
     );
-    assert_eq!(done::scopes_of("clippy", "ext/pcre"), ["ext/pcre"]);
-    assert_eq!(done::scopes_of("crosscheck", "php_ext"), ["php_ext"]);
+    assert_eq!(scopes("clippy", "ext/pcre"), ["ext/pcre"]);
+    assert_eq!(scopes("crosscheck", "php_ext"), ["php_ext"]);
 
     let root = scratch("ri");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
@@ -887,6 +904,40 @@ fn a_default_extension_with_a_red_ri_crosscheck_reading_is_unmet_and_with_both_g
     assert_eq!(
         verdict.unmet,
         ["crosscheck: no reading for ext/pcre/ri"],
+        "{verdict:#?}"
+    );
+}
+
+/// A crate whose library sources name `debug_assertions` is asked for a
+/// second `clippy` reading, the release profile's at `<name>/release`, and
+/// is unmet without it (#2392); a mention in a comment or a string asks
+/// nothing. `php_heap` and `php_engine` carry the split in the tree.
+#[test]
+fn a_crate_whose_sources_name_debug_assertions_is_asked_for_a_release_clippy_reading() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    for name in ["php_heap", "php_engine"] {
+        let krate = manifest.crate_named(name).unwrap();
+        let scopes = done::scopes_of(workspace(), "clippy", krate).unwrap();
+        assert_eq!(scopes, [name.to_owned(), format!("{name}/release")]);
+    }
+
+    let root = scratch("release");
+    let commented = "// debug_assertions\npub fn f() -> &'static str { \"debug_assertions\" }\n";
+    write(&root, "ext/pcre/src/lib.rs", commented);
+    assert!(!asked_of(&root, "ext/pcre").contains(&("clippy", "ext/pcre/release".into())));
+    write(
+        &root,
+        "ext/pcre/src/lib.rs",
+        "#[cfg(debug_assertions)]\npub fn f() {}\n",
+    );
+    let store = Store::of_workspace(&root);
+    record_asked(&store, &root, "ext/pcre");
+    assert!(judge(&root).met(), "{:#?}", judge(&root));
+    std::fs::remove_file(store.path("clippy", "ext/pcre/release").unwrap()).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(
+        verdict.unmet,
+        ["clippy: no reading for ext/pcre/release"],
         "{verdict:#?}"
     );
 }
@@ -1007,7 +1058,7 @@ fn a_kernel_or_native_without_a_witness_is_unmet_from_the_witness_reading() {
     let root = scratch("missing");
     write(&root, "ext/pcre/src/lib.rs", "pub fn preg_match() {}\n");
     let store = Store::of_workspace(&root);
-    for (instrument, scope) in asked_of("ext/pcre") {
+    for (instrument, scope) in asked_of(&root, "ext/pcre") {
         let mut reading = fresh(&root, instrument, &scope);
         if instrument == "witness" {
             reading.count("missing", 2).unwrap();

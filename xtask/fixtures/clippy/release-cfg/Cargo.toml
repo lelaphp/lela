@@ -1,0 +1,11 @@
+# The fixture workspace of #2392: three crates, one whose `debug_assertions`
+# split leaves a lint the release profile alone sees, one that names the
+# word only in a comment and a string, and one whose split is clean.
+[workspace]
+resolver = "3"
+members = ["crates/php_heap", "crates/php_unit", "crates/php_syntax"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
