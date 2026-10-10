@@ -203,5 +203,5 @@ One issue on the tracker, labelled `frontier:chart`, that says where one track i
 _Avoid_: roadmap, board, a track's map (revision 22 settled the word on `AGENTS.md`)
 
 **Divergence**:
-One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path, an extension's name or a trace site, with a kind, the lane that reads it, a cause, whether it is parity debt (`debt` by default; `php-ub`, `by-design` and `oracle-build` are counted apart from the day-30 target), a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
+One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path, an extension's name or a trace site, with a kind (the lane that reads it), a cause (whether it is parity debt: `debt` by default, while `php-ub`, `by-design` and `oracle-build` are counted apart from the day-30 target), a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
 _Avoid_: recorded difference, known disagreement, XFAIL, exception (php's `set_exception_handler`, `restore_exception_handler`; `Thrown::exception`), divergence-table row as a thing apart from the registry
