@@ -1228,7 +1228,9 @@ mod tests {
             }
             self.log.push((obj.id(), "free_native"));
         }
-        fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _obj: Obj, _: &mut dyn FnMut(Zval)) -> crate::GcTable {
+            crate::GcTable::Properties
+        }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)
@@ -1477,7 +1479,9 @@ mod tests {
             obj.addref();
         }
         fn free_native(&mut self, _obj: Obj) {}
-        fn gc_children(&mut self, _obj: Obj, _visit: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _obj: Obj, _: &mut dyn FnMut(Zval)) -> crate::GcTable {
+            crate::GcTable::Properties
+        }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)

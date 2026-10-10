@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use php_ext::abi::{Callable, Instance, ObjectHandlers, OrFalse, Path, Refusals, This, Untyped};
+use php_ext::abi::{
+    Callable, GcTable, Instance, ObjectHandlers, OrFalse, Path, Refusals, This, Untyped,
+};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
@@ -318,9 +320,14 @@ impl ObjectHandlers for Handlers {
 
     /// `php_sqlite3_get_gc`: the authorizer, the functions and the
     /// collations.
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(conn) = object.native::<Conn>(req) else {
-            return;
+            return GcTable::Properties;
         };
         for handler in &conn.closed_handlers {
             handler.visit(visit);
@@ -333,6 +340,7 @@ impl ObjectHandlers for Handlers {
                 registration.visit(visit);
             }
         }
+        GcTable::Properties
     }
 }
 

@@ -8,7 +8,7 @@
 //! [`Handlers::iterator_element`].
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, Instance, IteratorElement, ObjectHandlers, PropertiesFor,
+    CloneObj, DimensionRead, GcTable, Instance, IteratorElement, ObjectHandlers, PropertiesFor,
     PropertyPurpose, Std, This, True, Untyped,
 };
 use php_ext::attr::php_class;
@@ -722,12 +722,18 @@ impl ObjectHandlers for Handlers {
         }
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(a) = object.native::<Row>(req) {
             for value in &a.elements {
                 visit(**value);
             }
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

@@ -3,7 +3,7 @@
 //! expression may call through `php:function`, `php:functionString` and
 //! the names `registerPhpFunctionNS` registered.
 
-use php_ext::abi::{Callable, Instance, Passed, Path, Raw, Refusals, Std, This, Union};
+use php_ext::abi::{Callable, GcTable, Instance, Passed, Path, Raw, Refusals, Std, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, with_string};
@@ -1378,11 +1378,17 @@ impl php_ext::abi::ObjectHandlers for XPathHandlers {
         crate::release_libxml(req, object);
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(d) = dom(req, object)
             && let Extra::XPath(state) = &d.extra
         {
             state.callbacks.visit(visit);
         }
+        GcTable::Properties
     }
 }

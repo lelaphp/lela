@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 
 use php_ext::abi::{
-    CloneObj, DimensionRead, ExtensionBuilder, Instance, ObjectHandlers, Std, This, Union, Untyped,
+    CloneObj, DimensionRead, ExtensionBuilder, GcTable, Instance, ObjectHandlers, Std, This, Union,
+    Untyped,
 };
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_members, new_object};
@@ -1590,13 +1591,19 @@ impl ObjectHandlers for Handlers {
         table.free(req);
     }
 
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         if let Some(s) = object.native::<Storage>(req) {
             for (object, inf) in s.live() {
                 visit(object.as_value());
                 visit(inf);
             }
         }
+        GcTable::Properties
     }
 
     fn clone_obj(&self) -> Option<CloneObj> {

@@ -2640,7 +2640,9 @@ mod tests {
         }
         fn destruct(&mut self, _obj: crate::Obj) {}
         fn free_native(&mut self, _obj: crate::Obj) {}
-        fn gc_children(&mut self, _obj: crate::Obj, _visit: &mut dyn FnMut(Zval)) {}
+        fn gc_children(&mut self, _obj: crate::Obj, _: &mut dyn FnMut(Zval)) -> crate::GcTable {
+            crate::GcTable::Properties
+        }
         fn free_resource(&mut self, _: crate::Res, _: crate::ResourceType) {}
         fn out_of_memory(&mut self, bytes: usize) -> Fatal {
             Fatal::OutOfMemory(bytes)

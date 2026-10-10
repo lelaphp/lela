@@ -26,8 +26,8 @@ mod compat;
 mod natives;
 
 use php_ext::abi::{
-    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, ObjectHandlers, Refusals,
-    Std,
+    Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, GcTable, ObjectHandlers,
+    Refusals, Std,
 };
 use php_ext::call::known_method;
 use php_ext::coerce::{callable_checked, coerce_param};
@@ -344,9 +344,14 @@ impl ObjectHandlers for Handlers {
 
     /// `xml_parser_get_gc`: the object, each callable's owner and the two
     /// references `xml_parse_into_struct` keeps.
-    fn get_gc(&self, req: &mut Request, object: PhpObject, visit: &mut dyn FnMut(Value)) {
+    fn get_gc(
+        &self,
+        req: &mut Request,
+        object: PhpObject,
+        visit: &mut dyn FnMut(Value),
+    ) -> GcTable {
         let Some(p) = object.native::<Parser>(req) else {
-            return;
+            return GcTable::Properties;
         };
         if let Some(o) = &p.object {
             visit(o.as_value());
@@ -357,6 +362,7 @@ impl ObjectHandlers for Handlers {
         if let Some(into) = &p.into {
             into.visit(visit);
         }
+        GcTable::Properties
     }
 
     /// `xml_parser_free_obj`.
