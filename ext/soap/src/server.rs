@@ -286,7 +286,11 @@ fn fatal_fault(
 /// server, or none, every diagnostic is handed on with `display_errors`
 /// off around it, so it is stored and logged but not shown, and a fatal
 /// level is first made a fault whose detail is what the top buffer held,
-/// written as the response once the one beneath has served it.
+/// written as the response once the one beneath has served it. The
+/// status line is taken off before the one beneath serves, and the line
+/// and response code that stood are put back where it bails out, as
+/// php's `zend_catch` puts them back; a diagnostic it does not bail out
+/// of leaves the line gone.
 ///
 /// A function a server serves that raises an engine fatal answers with
 /// the fault, its detail what the function printed, and the request ends
@@ -316,6 +320,33 @@ fn fatal_fault(
 /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>boom</faultstring><detail>partial</detail></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
 ///
 /// boom
+/// ```
+///
+/// So the `500` `php_error_cb` adds for a fatal with nothing displayed
+/// is undone before the fault is written, and a client whose agent is
+/// `Shockwave Flash`, which the fault writes no `500` for, is answered
+/// `200`:
+///
+/// ```php
+/// function f($a) { echo "partial"; trigger_error("boom", E_USER_ERROR); }
+/// $s = new SoapServer(null, ['uri' => 'http://test-uri/']);
+/// $s->addFunction('f');
+/// $s->handle();
+/// ```
+/// ```request
+/// --ENV--
+/// HTTP_USER_AGENT=Shockwave Flash
+/// --POST_RAW--
+/// Content-Type: text/xml
+/// <?xml version="1.0"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://test-uri/"><SOAP-ENV:Body><ns1:f><a>1</a></ns1:f></SOAP-ENV:Body></SOAP-ENV:Envelope>
+/// ```
+/// ```expect exit=255
+/// X-Powered-By: PHP/8.5.9
+/// Content-Length: 295
+/// Content-Type: text/xml; charset=utf-8
+///
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>boom</faultstring><detail>partial</detail></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
 /// ```
 ///
 /// Turned on outside any call, the handler takes every diagnostic of the
@@ -395,7 +426,16 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
         None
     };
     let display = req.set_display_errors(0);
+    // `SG(sapi_headers).http_status_line = NULL` before the `zend_try`,
+    // and the line and code that stood put back in its `zend_catch`, so
+    // the `500` `php_error_cb` adds as it bails out is undone; served and
+    // not bailed out of, the line stays gone.
+    let status = req.take_http_status();
+    let bails = beneath.bails();
     beneath.serve(req);
+    if bails {
+        req.put_back_http_status(status);
+    }
     req.set_display_errors(display);
     if let Some(fault) = fault {
         // What the writing threw stays in `EG(exception)` as the

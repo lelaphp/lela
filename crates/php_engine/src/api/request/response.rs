@@ -12,7 +12,7 @@ use crate::api::abi::Callable;
 use crate::api::raising::Thrown;
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, adopted, adopted_some};
 use crate::engine::{Aborted, OutputSink, ResponseHead};
-use crate::output::Output;
+use crate::output::{HttpStatus, Output};
 
 use super::{Phase, Request};
 
@@ -702,6 +702,24 @@ impl Request {
     /// native's.
     pub fn set_response_code(&mut self, code: i64) {
         self.response.output.set_response_code(code);
+    }
+
+    /// `SG(sapi_headers).http_status_line` and `http_response_code` kept
+    /// as they stand, the status line taken off the response
+    /// (`SG(sapi_headers).http_status_line = NULL`) and the code left,
+    /// for [`put_back_http_status`](Self::put_back_http_status) to put
+    /// back after a step that may move them, as soap's error handler keeps
+    /// them around the handler beneath it.
+    #[must_use]
+    pub fn take_http_status(&mut self) -> HttpStatus {
+        self.response.output.take_status()
+    }
+
+    /// The status line and the response code put back as
+    /// [`take_http_status`](Self::take_http_status) kept them, the status
+    /// line standing now given up.
+    pub fn put_back_http_status(&mut self, status: HttpStatus) {
+        crate::output::put_back_status(self, status);
     }
 
     /// The header list as name and value, what a host's
