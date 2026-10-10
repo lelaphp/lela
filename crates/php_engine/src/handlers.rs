@@ -1693,12 +1693,20 @@ fn init_call(
     lookups: &[ConstIdx],
     named: ConstIdx,
 ) -> Edge {
+    // The name is a string constant of the op array, held by one more
+    // owner for the call, as `zval_get_string` would hold it.
     let named = exec::constant(code, named);
-    let name = match crate::ops::to_string(req, &named) {
-        Ok(name) => name,
-        Err(thrown) => {
-            return threw(req, frame, &thrown);
+    let name = match named.as_php_string() {
+        Some(&name) => {
+            req.addref(&named);
+            name
         }
+        None => match crate::ops::to_string(req, &named) {
+            Ok(name) => name,
+            Err(thrown) => {
+                return threw(req, frame, &thrown);
+            }
+        },
     };
     let slot = CacheSlot(op.out);
     let function = if let Cached::Function(function) = req.cached(frame, slot) {
